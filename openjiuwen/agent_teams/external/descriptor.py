@@ -1,0 +1,148 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Connection descriptor for external agents joining a team.
+
+An external agent process (a third-party CLI such as claudecode / codex,
+or an independent service) needs three things to act as a first-class team
+member: where the team database lives, how to reach the team messager, and
+which member identity it carries. :class:`TeamJoinDescriptor` bundles those
+into one JSON-serialisable payload that the team injects through an
+environment variable at spawn time, or that an operator hands to an
+independent service out of band.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Literal, Mapping
+
+from pydantic import BaseModel, Field, ValidationError
+
+from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
+from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
+from openjiuwen.agent_teams.tools.database.config import DatabaseConfig
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
+
+# Single environment variable carrying the JSON-encoded descriptor.
+TEAM_JOIN_ENV = "OPENJIUWEN_TEAM_JOIN"
+
+
+class TeamJoinDescriptor(BaseModel):
+    """Everything an external agent needs to attach to a running team.
+
+    Attributes:
+        session_id: Session identifier used to build event topics and to
+            isolate per-session dynamic tables. Must match the team's live
+            session.
+        team_name: Target team identifier.
+        member_name: The member identity this external agent serves. The
+            team must already have a registered member row under this name.
+        role: Member role driving op-surface filtering. ``"teammate"``
+            (default) or ``"leader"``.
+        scope: External-access scenario this connection serves — orthogonal
+            to ``role`` (which is a team role).
+            ``"member"`` = a spawned third-party CLI acting as a first-class
+            team member; it gets the native teammate tool set (the real
+            ``view_task`` / ``claim_task`` / ``send_message`` team tools) so it
+            is indistinguishable from an in-process teammate, and its team
+            system prompt is injected directly at spawn time (so the MCP
+            server exposes no extra instructions).
+            ``"operator"`` (default) = an external, non-member interface that
+            operates/controls the team via tools (the broad operator tool set
+            + workflow instructions). The team-member spawn path sets
+            ``"member"``; manually provisioned operator descriptors keep the
+            default.
+        language: Team runtime language (``"cn"`` or ``"en"``) used to render
+            inbound message / task-board text consistently with in-process
+            members.
+        dispatch_mode: How tasks reach members — ``"autonomous"`` or
+            ``"scheduled"``. Orthogonal to both ``role`` and ``scope``. A
+            ``"member"``-scope connection resolves its tool set against this,
+            so an external CLI member gets the same tools as its in-process
+            peers (its system prompt is already rendered per dispatch mode at
+            spawn time). The leader name a scheduled member's ``send_message``
+            targets is not carried here — the backend reads it from the shared
+            ``team_info`` DB row (``TeamBackend.resolve_leader_member_name``).
+        teammate_mode: How teammates execute tasks — ``"build_mode"`` or
+            ``"plan_mode"``. A ``"member"``-scope connection resolves its tool
+            set against this so plan-mode members get ``submit_plan`` when the
+            system prompt asks them to use it.
+        db_config: Team database connection. For cross-process use this must
+            be a file-backed sqlite ``connection_string``; a sqlite
+            ``:memory:`` connection string is single-process only and is
+            intended for tests.
+        transport_config: Messager transport config used by the external
+            client. ``external_publish_url`` is the Gateway relay WebSocket
+            endpoint for standard team events.
+        workspace_config: Shared workspace config. Present for spawned
+            external members when the team workspace is enabled.
+        workspace_path: Absolute shared workspace path resolved by the team
+            host. External clients use this to mount ``workspace_meta``.
+    """
+
+    session_id: str
+    team_name: str
+    member_name: str
+    role: str = "teammate"
+    scope: Literal["operator", "member"] = "operator"
+    language: str = "cn"
+    dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
+    teammate_mode: Literal["build_mode", "plan_mode"] = "build_mode"
+    db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    transport_config: MessagerTransportConfig = Field(default_factory=MessagerTransportConfig)
+    workspace_config: TeamWorkspaceConfig | None = None
+    workspace_path: str | None = None
+
+    def to_json(self) -> str:
+        """Serialise to a compact JSON string."""
+        return self.model_dump_json()
+
+    def to_env(self) -> dict[str, str]:
+        """Return the env mapping a spawned external agent should receive."""
+        return {TEAM_JOIN_ENV: self.to_json()}
+
+    @classmethod
+    def from_json(cls, raw: str) -> "TeamJoinDescriptor":
+        """Parse a descriptor from its JSON string form.
+
+        Raises:
+            BaseError: ``AGENT_TEAM_CONFIG_INVALID`` when the payload is not
+                a valid descriptor.
+        """
+        try:
+            return cls.model_validate_json(raw)
+        except ValidationError as e:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=f"malformed team join descriptor: {e}",
+                cause=e,
+            )
+            raise  # unreachable — raise_error always raises
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "TeamJoinDescriptor":
+        """Load a descriptor from the ``OPENJIUWEN_TEAM_JOIN`` env var.
+
+        Args:
+            env: Optional environment mapping override (defaults to
+                ``os.environ``); injectable for tests.
+
+        Raises:
+            BaseError: ``AGENT_TEAM_CONFIG_INVALID`` when the variable is
+                unset or its value is not a valid descriptor.
+        """
+        source = env if env is not None else os.environ
+        raw = source.get(TEAM_JOIN_ENV)
+        if not raw:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=f"environment variable {TEAM_JOIN_ENV} is not set; cannot join team",
+            )
+        return cls.from_json(raw)
+
+
+__all__ = [
+    "TEAM_JOIN_ENV",
+    "TeamJoinDescriptor",
+]

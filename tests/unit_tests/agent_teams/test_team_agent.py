@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
-from openjiuwen.agent_teams import create_agent_team
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-from openjiuwen.agent_teams.agent.team_rail import TeamRail, TeamSectionName
+from openjiuwen.agent_teams.prompts.sections import TeamSectionName
+from openjiuwen.agent_teams.rails.team_policy_rail import TeamPolicyRail
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
+    LeaderSpec,
+    TeamAgentSpec,
     TransportSpec,
 )
 from openjiuwen.agent_teams.schema.team import (
@@ -28,18 +31,39 @@ def _dummy_agents(**overrides) -> dict[str, DeepAgentSpec]:
     return {"leader": DeepAgentSpec(**defaults)}
 
 
+def _build_leader(
+    agents: dict[str, DeepAgentSpec],
+    *,
+    team_name: str = "agent_team",
+    transport: TransportSpec | None = None,
+    **kwargs: Any,
+) -> TeamAgent:
+    spec = TeamAgentSpec(
+        agents=agents,
+        team_name=team_name,
+        transport=transport,
+        leader=kwargs.get("leader") or LeaderSpec(),
+        predefined_members=kwargs.get("predefined_members") or [],
+        lifecycle=kwargs.get("lifecycle", "temporary"),
+        teammate_mode=kwargs.get("teammate_mode", "build_mode"),
+        spawn_mode=kwargs.get("spawn_mode", "process"),
+        storage=kwargs.get("storage"),
+        worktree=kwargs.get("worktree"),
+        metadata=kwargs.get("metadata") or {},
+    )
+    return spec.build()
+
+
 def test_team_agent_leader_policy() -> None:
-    leader = create_agent_team(
+    leader = _build_leader(
         _dummy_agents(),
         team_name="delivery",
     )
 
     assert leader.role == TeamRole.LEADER
-    # TeamLeader policy is injected by TeamRail as a PromptSection before each
-    # model call, not stored in deep_config.system_prompt (which stays None).
-    team_rail = next(
-        r for r in leader.deep_agent._pending_rails if isinstance(r, TeamRail)
-    )
+    native = leader.harness._native
+    rails = list(native._pending_rails) + list(native._registered_rails)
+    team_rail = next(r for r in rails if isinstance(r, TeamPolicyRail))
     role_section = next(
         s for s in team_rail._static_sections if s.name == TeamSectionName.ROLE
     )
@@ -47,7 +71,7 @@ def test_team_agent_leader_policy() -> None:
 
 
 def test_spawn_payload_contains_member_identity() -> None:
-    leader = create_agent_team(
+    leader = _build_leader(
         _dummy_agents(),
         team_name="delivery",
         transport=TransportSpec(type="pyzmq", params={
@@ -62,7 +86,7 @@ def test_spawn_payload_contains_member_identity() -> None:
         member_name="fe-1",
         display_name="Frontend Expert",
         role_type=TeamRole.TEAMMATE,
-        persona="追求交互质量的前端工程师",
+        desc="追求交互质量的前端工程师",
     ))
 
     payload = leader.build_spawn_payload(
@@ -71,14 +95,14 @@ def test_spawn_payload_contains_member_identity() -> None:
     )
 
     assert payload["coordination"]["role"] == "teammate"
-    assert payload["coordination"]["persona"] == "追求交互质量的前端工程师"
+    assert payload["coordination"]["desc"] == "追求交互质量的前端工程师"
     assert payload["coordination"]["transport"]["node_id"] == "fe-1"
     assert payload["query"] == "Review the design system impact."
 
 
 @pytest.mark.asyncio
 async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
-    leader = create_agent_team(
+    leader = _build_leader(
         _dummy_agents(workspace=None),
         team_name="delivery",
         transport=TransportSpec(type="pyzmq", params={
@@ -93,7 +117,7 @@ async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
         member_name="be-1",
         display_name="Backend Expert",
         role_type=TeamRole.TEAMMATE,
-        persona="严谨的后端架构师",
+        desc="严谨的后端架构师",
     ))
 
     spawn_config = leader.build_spawn_config(ctx)
@@ -120,7 +144,7 @@ def test_runtime_context_roundtrips_with_pydantic_serialization() -> None:
     context = TeamRuntimeContext(
         role=TeamRole.LEADER,
         member_name="leader-1",
-        persona="pm",
+        desc="pm",
         team_spec=TeamSpec(team_name="demo", display_name="demo"),
     )
 
@@ -128,4 +152,4 @@ def test_runtime_context_roundtrips_with_pydantic_serialization() -> None:
 
     assert restored.role == TeamRole.LEADER
     assert restored.member_name == "leader-1"
-    assert restored.persona == "pm"
+    assert restored.desc == "pm"

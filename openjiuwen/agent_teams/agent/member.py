@@ -21,7 +21,7 @@ from openjiuwen.agent_teams.schema.events import (
     MemberStatusChangedEvent,
     TeamTopic,
 )
-from openjiuwen.agent_teams.spawn.context import get_session_id
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -61,7 +61,7 @@ class TeamMember:
             display_name: Optional human-readable display label.
                 Defaults to ``member_name``.
             prompt: Optional startup prompt.
-            desc: Optional persona description.
+            desc: Optional public member description.
         """
         self.member_name = member_name
         self.team_name = team_name
@@ -74,12 +74,12 @@ class TeamMember:
 
     async def status(self) -> MemberStatus:
         """Get current member status"""
-        member_data = await self.db.get_member(self.member_name, self.team_name)
+        member_data = await self.db.member.get_member(self.member_name, self.team_name)
         return MemberStatus(member_data.status) if member_data else None
 
     async def execution_status(self) -> ExecutionStatus:
         """Get current execution status"""
-        member_data = await self.db.get_member(self.member_name, self.team_name)
+        member_data = await self.db.member.get_member(self.member_name, self.team_name)
         return ExecutionStatus(member_data.execution_status) if member_data else None
 
     async def update_status(self, new_status: MemberStatus) -> bool:
@@ -91,6 +91,12 @@ class TeamMember:
         always pulling back to READY at round entry) without polluting
         the event stream.
 
+        When the member row is not registered in the database yet,
+        return ``False`` silently. The handle is constructed eagerly for
+        every role during ``configure()``; a leader's own row only
+        materializes after ``BuildTeamTool`` runs, so status writes
+        before that point are an expected no-op, not an error.
+
         Args:
             new_status: New status
 
@@ -99,9 +105,14 @@ class TeamMember:
         """
 
         old_status = await self.status()
+        if old_status is None:
+            team_logger.debug(
+                f"Member {self.member_name} not registered yet; skipping status update to {new_status.value}"
+            )
+            return False
         if old_status == new_status:
             return True
-        success = await self.db.update_member_status(self.member_name, self.team_name, new_status.value)
+        success = await self.db.member.update_member_status(self.member_name, self.team_name, new_status.value)
 
         if not success:
             team_logger.error(f"Failed to update member status for {self.member_name}: {new_status.value}")
@@ -132,6 +143,10 @@ class TeamMember:
     async def update_execution_status(self, new_status: ExecutionStatus) -> bool:
         """Update execution status with validation
 
+        When the member row is not registered in the database yet,
+        return ``False`` silently -- same expected no-op as
+        ``update_status`` before the team row materializes.
+
         Args:
             new_status: New execution status
 
@@ -140,7 +155,12 @@ class TeamMember:
         """
 
         old_status = await self.execution_status()
-        success = await self.db.update_member_execution_status(
+        if old_status is None:
+            team_logger.debug(
+                f"Member {self.member_name} not registered yet; skipping execution status update to {new_status.value}"
+            )
+            return False
+        success = await self.db.member.update_member_execution_status(
             self.member_name,
             self.team_name,
             new_status.value

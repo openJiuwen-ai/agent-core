@@ -8,7 +8,7 @@ into ``TeamModelConfig``.
 
 from __future__ import annotations
 
-from openjiuwen.agent_teams.agent.model_allocator import (
+from openjiuwen.agent_teams.models.allocator import (
     RoundRobinModelAllocator,
     build_model_allocator,
 )
@@ -32,7 +32,10 @@ def _make_pool(n: int) -> list[ModelPoolEntry]:
 def test_round_robin_allocator_rotates_through_pool():
     pool = _make_pool(3)
     allocator = RoundRobinModelAllocator(pool)
-    names = [allocator.allocate().model_request_config.model_name for _ in range(7)]
+    names = [
+        allocator.allocate().to_team_model_config().model_request_config.model_name
+        for _ in range(7)
+    ]
     assert names == ["m0", "m1", "m2", "m0", "m1", "m2", "m0"]
 
 

@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm.model import Model
 
 from openjiuwen.core.single_agent.rail.base import AgentRail
@@ -19,9 +20,13 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 )
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.schema.agent_mode import AgentMode
+from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.workspace.workspace import (
     Workspace,
 )
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.deep_agent import DeepAgent
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENROUTER_VISION_MODEL = "google/gemini-2.5-pro"
@@ -155,10 +160,14 @@ class DeepAgentConfig:
             engineering configuration. If set, applied
             as the inner ReAct agent's ``ContextEngineConfig``
             when the embedded agent is created.
+        kv_cache_affinity_config: KV cache affinity configuration
+            applied as the inner ReAct agent's
+            ``KVCacheAffinityConfig`` when the embedded agent is created.
         enable_task_loop: Whether to enable the outer
             task loop (P1).
-        enable_async_subagent: Enable async subagent via SessionRail (default False).
-            When True and subagents are configured, SessionRail is mounted instead of SubagentRail.
+        enable_async_subagent: Enable async subagent mode (default False).
+            When True, SubagentRail registers session tools for async subagent spawning;
+            when False, it registers synchronous task tools.
         add_general_purpose_agent: Add general-purpose agent.
             When True, a general-purpose agent is added as sub-agents.
         max_iterations: Maximum ReAct iterations per
@@ -174,12 +183,20 @@ class DeepAgentConfig:
             single task-loop iteration to complete.
             Used by the outer loop's wait_completion().
         enable_plan_mode: Whether to enable plan mode.
+        permissions: Tool permission policy dict (enabled, tools, rules, …); when
+            enabled, DeepAgent mounts PermissionInterruptRail automatically.
+            常见键结构见 :class:`openjiuwen.harness.security.models.PermissionsSection`。
+        permission_host: Optional ToolPermissionHost callbacks (YAML path,
+            workspace, hot-reload snapshot, hosted confirmation).
+        parallel_tool_calls: Whether or not tool calls are executed in parallel
+            (True for parallel, False for sequential)
     """
 
     model: Optional[Model] = None
     card: Optional[AgentCard] = None
     system_prompt: Optional[str] = None
     context_engine_config: Optional[Any] = None
+    kv_cache_affinity_config: Optional[KVCacheAffinityConfig] = None
     enable_task_loop: bool = False
     enable_async_subagent: bool = False
     add_general_purpose_agent: bool = False
@@ -189,6 +206,7 @@ class DeepAgentConfig:
     mcps: Optional[List[McpServerConfig]] = None
     workspace: Optional[Workspace] = None
     skills: Optional[Union[str, List[str]]] = None
+    enable_skill_discovery: bool = False
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
     auto_create_workspace: bool = True
@@ -214,6 +232,17 @@ class DeepAgentConfig:
     # Plan mode config
     default_mode: AgentMode = AgentMode.AUTO
 
+    # Tool permission guardrail (tiered_policy / interrupt confirm)
+    permissions: PermissionsSection | None = None
+    permission_host: Any = None
+
+    # Whether or not the inner ReactAgent executes tool calls in parallel.
+    parallel_tool_calls: bool = True
+
+    # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
+    # Subagents inherit the stricter of their own spec and this value.
+    restrict_to_work_dir: bool = True
+
 
 @dataclass
 class SubAgentConfig:
@@ -236,3 +265,5 @@ class SubAgentConfig:
     factory_name: Optional[str] = None
     factory_kwargs: dict[str, Any] = field(default_factory=dict)
     enable_plan_mode: bool = False
+    parallel_tool_calls: bool = True
+    restrict_to_work_dir: bool = True

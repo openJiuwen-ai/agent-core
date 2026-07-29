@@ -3,16 +3,18 @@
 
 """Unit tests for TeamMessageManager module"""
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.spawn.context import (
+from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -54,14 +56,14 @@ async def message_bus():
 async def team_messaging(db, message_bus):
     """Create TeamMessageManager instance with in-memory database"""
     # First create a team
-    await db.create_team(
+    await db.team.create_team(
         team_name="test_team_123",
         display_name="Test Team",
         leader_member_name="leader"
     )
     # create member
     agent_card = AgentCard(name="TestAgent").model_dump_json()
-    await db.create_member(
+    await db.member.create_member(
         member_name="member1",
         team_name="test_team_123",
         display_name="Member One",
@@ -69,7 +71,7 @@ async def team_messaging(db, message_bus):
         status="busy"
     )
     agent_card = AgentCard(name="TestAgent").model_dump_json()
-    await db.create_member(
+    await db.member.create_member(
         member_name="member2",
         team_name="test_team_123",
         display_name="Member Two",
@@ -82,10 +84,12 @@ async def team_messaging(db, message_bus):
 
 # ==================== Test send_message ====================
 
+
 class TestSendMessage:
     """Test send_message method"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_send_message_success(self, team_messaging):
         """Test successful point-to-point message sending"""
         message_id = await team_messaging.send_message(
@@ -108,6 +112,7 @@ class TestSendMessage:
         assert messages[0].is_read is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_send_message_unicode_content(self, team_messaging):
         """Test sending message with unicode content"""
         message_id = await team_messaging.send_message(
@@ -121,6 +126,7 @@ class TestSendMessage:
         assert messages[0].content == "你好，世界！🎉"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_send_multiple_messages(self, team_messaging):
         """Test sending multiple messages"""
         message_ids = []
@@ -143,10 +149,12 @@ class TestSendMessage:
 
 # ==================== Test broadcast_message ====================
 
+
 class TestBroadcastMessage:
     """Test broadcast_message method"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_broadcast_message_success(self, team_messaging):
         """Test successful broadcast message sending"""
         leader_messaging = TeamMessageManager(team_messaging.team_name, member_name="leader", db=team_messaging.db,
@@ -170,6 +178,7 @@ class TestBroadcastMessage:
         assert broadcasts[0].is_read is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_broadcast_multiple_messages(self, team_messaging):
         """Test sending multiple broadcast messages"""
         senders = ["leader", "member1", "member2"]
@@ -182,8 +191,11 @@ class TestBroadcastMessage:
                 )
                 message_ids.append(message_id)
             else:
-                sender_messaging = TeamMessageManager(team_messaging.team_name, member_name=sender, db=team_messaging.db,
-                                                      messager=message_bus)
+                sender_messaging = TeamMessageManager(
+                    team_messaging.team_name,
+                    member_name=sender,
+                    db=team_messaging.db,
+                    messager=message_bus)
                 message_id = await sender_messaging.broadcast_message(content=f"Announcement from {sender}")
                 message_ids.append(message_id)
 
@@ -198,10 +210,12 @@ class TestBroadcastMessage:
 
 # ==================== Test get_messages ====================
 
+
 class TestGetMessages:
     """Test get_messages method"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_get_messages_all(self, team_messaging):
         """Test getting all direct messages for a member"""
         # Create test messages
@@ -218,6 +232,7 @@ class TestGetMessages:
         assert messages[1].content == "Msg2"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_get_messages_for_member(self, team_messaging):
         """Test getting messages for a specific member"""
         # Create test messages
@@ -233,6 +248,7 @@ class TestGetMessages:
             assert msg.to_member_name == "member2"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_get_messages_unread_only(self, team_messaging):
         """Test getting unread messages only"""
         # Create messages and mark one as read
@@ -248,6 +264,7 @@ class TestGetMessages:
         assert messages[0].is_read is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_messages_empty(self, team_messaging):
         """Test getting messages when no messages exist"""
         messages = await team_messaging.get_messages(
@@ -255,6 +272,7 @@ class TestGetMessages:
         assert len(messages) == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_messages_mixed_broadcast_and_direct(self, team_messaging):
         """Test getting messages when both broadcast and direct messages exist"""
         await team_messaging.send_message("Direct message", "member2")
@@ -269,10 +287,12 @@ class TestGetMessages:
 
 # ==================== Test get_broadcast_messages ====================
 
+
 class TestGetBroadcastMessages:
     """Test get_broadcast_messages method"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_broadcast_messages_all(self, team_messaging):
         """Test getting all broadcast messages"""
         # Create broadcast messages
@@ -288,10 +308,15 @@ class TestGetBroadcastMessages:
             assert msg.to_member_name is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_broadcast_messages_unread_only(self, team_messaging):
         """Test getting unread broadcast messages only"""
-        # Create broadcast messages and mark one as read
+        # Create broadcast messages and mark one as read. The broadcast read
+        # model is a per-member timestamp watermark, so the two broadcasts
+        # must land in distinct milliseconds — otherwise reading the old one
+        # also covers the new one. A short sleep guarantees that ordering.
         msg_id2 = await team_messaging.broadcast_message("Old announcement")
+        await asyncio.sleep(0.002)
         msg_id1 = await team_messaging.broadcast_message("New announcement")
         await team_messaging.mark_message_read(msg_id2, "member2")
 
@@ -302,6 +327,7 @@ class TestGetBroadcastMessages:
         assert messages[0].is_read is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_broadcast_messages_empty(self, team_messaging):
         """Test getting broadcast messages when none exist"""
         # Create direct message only
@@ -311,6 +337,7 @@ class TestGetBroadcastMessages:
         assert len(broadcasts) == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_get_broadcast_messages_filters_correctly(self, team_messaging):
         """Test that get_broadcast_messages correctly filters out direct messages"""
         # Create mixed messages
@@ -329,10 +356,12 @@ class TestGetBroadcastMessages:
 
 # ==================== Test. mark_message_read ====================
 
+
 class TestMarkMessageRead:
     """Test mark_message_read method"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_mark_message_read_success(self, team_messaging):
         """Test successfully marking a message as read"""
         message_id = await team_messaging.send_message("Hello", "member2")
@@ -348,6 +377,7 @@ class TestMarkMessageRead:
         assert messages[0].is_read is True
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_mark_message_read_nonexistent(self, team_messaging):
         """Test marking a nonexistent message as read"""
         result = await team_messaging.mark_message_read(message_id="nonexistent_msg", member_name="member2")
@@ -355,6 +385,7 @@ class TestMarkMessageRead:
         assert result is False
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_mark_message_read_idempotent(self, team_messaging):
         """Test marking already read message is idempotent"""
         message_id = await team_messaging.send_message("Hello", "member2")
@@ -373,6 +404,7 @@ class TestMarkMessageRead:
         assert messages[0].is_read is True
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_mark_broadcast_message_read(self, team_messaging):
         """Test marking a broadcast message as read"""
         message_id = await team_messaging.broadcast_message("Announcement")
@@ -389,12 +421,64 @@ class TestMarkMessageRead:
         assert broadcasts[0].broadcast is True
 
 
+# ==================== Test. mark_messages_read (batch) ====================
+
+
+class TestMarkMessagesReadBatch:
+    """Test the batch mark_messages_read that takes raw message objects."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_batch_collapses_multiple_broadcasts_to_watermark(self, team_messaging, db, message_bus):
+        """Several broadcasts in one batch collapse to the newest watermark.
+
+        Broadcast read state is a per-member watermark (one ``(member, team)``
+        row keyed by the newest read broadcast timestamp). The manager takes
+        raw message objects so it can keep every direct id but reduce the
+        broadcasts to just the newest before hitting the DAO. Passing more
+        than one broadcast id to the DAO in a single transaction re-inserts
+        the same primary key and the commit raises ``UNIQUE constraint
+        failed``; collapsing here keeps that invariant out of every caller.
+        """
+        await team_messaging.broadcast_message("all-1")
+        await team_messaging.broadcast_message("all-2")
+        await team_messaging.send_message("direct hi", "member2")
+
+        reader = TeamMessageManager(
+            team_name="test_team_123",
+            db=db,
+            messager=message_bus,
+            member_name="member2",
+        )
+        directs = await reader.get_messages(to_member_name="member2", unread_only=True)
+        broadcasts = await reader.get_broadcast_messages(member_name="member2", unread_only=True)
+        assert len(directs) == 1
+        assert len(broadcasts) == 2
+
+        # Both broadcasts + the direct in one call must not raise UNIQUE: the
+        # manager forwards one direct id + the single newest broadcast id.
+        marked = await reader.mark_messages_read([*directs, *broadcasts], "member2")
+        assert marked == 2
+
+        # The watermark now covers every broadcast, and the direct is read.
+        assert await reader.get_messages(to_member_name="member2", unread_only=True) == []
+        assert await reader.get_broadcast_messages(member_name="member2", unread_only=True) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_batch_empty_is_noop(self, team_messaging):
+        """An empty batch returns zero without touching the DAO."""
+        assert await team_messaging.mark_messages_read([], "member2") == 0
+
+
 # ==================== Test Integration Scenarios ====================
+
 
 class TestIntegrationScenarios:
     """Test integration scenarios with combined operations"""
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_send_and_get_message_flow(self, team_messaging):
         """Test flow: send message, get message, mark as read"""
         # Send message
@@ -424,6 +508,7 @@ class TestIntegrationScenarios:
         assert len(unread_messages) == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_broadcast_and_get_flow(self, team_messaging):
         """Test flow: broadcast message, get broadcasts, mark as read"""
         # Broadcast message
@@ -447,6 +532,7 @@ class TestIntegrationScenarios:
         assert len(unread_broadcasts) == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_multi_member_messaging_scenario(self, team_messaging):
         """Test a scenario with multiple members sending messages"""
         members = ["member1", "member2", "member3"]
@@ -476,6 +562,7 @@ class TestIntegrationScenarios:
         assert all_broadcasts[0].content == "Welcome to the team!"
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_message_timestamp_ordering(self, team_messaging):
         """Test that messages are returned in timestamp order"""
         # Send messages with expected order
@@ -491,11 +578,12 @@ class TestIntegrationScenarios:
         assert messages[2].message_id == msg3
 
     @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_team_message_isolation(self, db, message_bus):
         """Test that messaging is isolated to a single team"""
         # Create two teams
-        await db.create_team(team_name="team1", display_name="Team 1", leader_member_name="leader1")
-        await db.create_team(team_name="team2", display_name="Team 2", leader_member_name="leader2")
+        await db.team.create_team(team_name="team1", display_name="Team 1", leader_member_name="leader1")
+        await db.team.create_team(team_name="team2", display_name="Team 2", leader_member_name="leader2")
 
         messaging1 = TeamMessageManager(team_name="team1", db=db, messager=message_bus, member_name="leader1")
         messaging2 = TeamMessageManager(team_name="team2", db=db, messager=message_bus, member_name="leader2")
@@ -514,3 +602,177 @@ class TestIntegrationScenarios:
         assert len(team2_messages) == 1
         assert team1_messages[0].content == "Team 1 message"
         assert team2_messages[0].content == "Team 2 message"
+
+
+# ==================== Test has_unread_messages ====================
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_has_unread_messages_direct_unread(team_messaging):
+    """An unread direct message makes the team report unread."""
+    await team_messaging.send_message(content="ping", to_member_name="member2")
+
+    assert await team_messaging.has_unread_messages() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_direct_all_read(team_messaging):
+    """Once every direct message is read the team reports no unread."""
+    message_id = await team_messaging.send_message(content="ping", to_member_name="member2")
+    await team_messaging.mark_message_read(message_id, "member2")
+
+    assert await team_messaging.has_unread_messages() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_broadcast_unread_by_non_sender(team_messaging):
+    """A broadcast not yet read by a non-sender member counts as unread."""
+    await team_messaging.broadcast_message(content="all hands")
+
+    assert await team_messaging.has_unread_messages() is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_broadcast_read_by_all_non_senders(team_messaging):
+    """A broadcast read by every non-sender member is no longer unread.
+
+    The sender (member1) is never counted against its own broadcast, so
+    once member2's watermark covers it the team reports no unread.
+    """
+    message_id = await team_messaging.broadcast_message(content="all hands")
+    await team_messaging.mark_message_read(message_id, "member2")
+
+    assert await team_messaging.has_unread_messages() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_empty(team_messaging):
+    """A team with no messages reports no unread."""
+    assert await team_messaging.has_unread_messages() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_excludes_broadcast(team_messaging):
+    """include_broadcast=False ignores an unread broadcast."""
+    await team_messaging.broadcast_message(content="all hands")
+
+    assert await team_messaging.has_unread_messages() is True
+    assert await team_messaging.has_unread_messages(include_broadcast=False) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_direct_counts_when_broadcast_excluded(team_messaging):
+    """A direct message is unread regardless of the include_broadcast flag."""
+    await team_messaging.send_message(content="ping", to_member_name="member2")
+
+    assert await team_messaging.has_unread_messages() is True
+    assert await team_messaging.has_unread_messages(include_broadcast=False) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_ignores_direct_to_shutdown_member(db, team_messaging):
+    """Direct unread messages to SHUTDOWN members do not block completion."""
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    await db.member.create_member(
+        member_name="member3",
+        team_name="test_team_123",
+        display_name="Member Three",
+        agent_card=agent_card,
+        status=MemberStatus.SHUTDOWN.value,
+    )
+    await team_messaging.send_message(content="shutdown notice", to_member_name="member3")
+
+    assert await team_messaging.has_unread_messages() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_ignores_shutdown_member_broadcast_gap(db, team_messaging):
+    """Broadcast unread state ignores SHUTDOWN members but still gates live members."""
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    await db.member.create_member(
+        member_name="member3",
+        team_name="test_team_123",
+        display_name="Member Three",
+        agent_card=agent_card,
+        status=MemberStatus.READY.value,
+    )
+    await db.member.update_member_status("member2", "test_team_123", MemberStatus.SHUTDOWN_REQUESTED.value)
+    await db.member.update_member_status("member2", "test_team_123", MemberStatus.SHUTDOWN.value)
+
+    message_id = await team_messaging.broadcast_message(content="all hands")
+
+    assert await team_messaging.has_unread_messages() is True
+
+    await team_messaging.mark_message_read(message_id, "member3")
+    assert await team_messaging.has_unread_messages() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_multicast_message_single_batch(db, team_messaging):
+    """multicast_message delivers to every recipient in one batched transaction.
+
+    All rows share the same timestamp (computed once for the batch), which is
+    the observable proxy for "one write / one fsync" instead of N sends.
+    """
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    await db.member.create_member(
+        member_name="member3",
+        team_name="test_team_123",
+        display_name="Member Three",
+        agent_card=agent_card,
+        status="busy",
+    )
+
+    ids = await team_messaging.multicast_message(content="ping all", to_member_names=["member2", "member3"])
+    assert len(ids) == 2
+
+    msgs2 = await team_messaging.get_messages(to_member_name="member2")
+    msgs3 = await team_messaging.get_messages(to_member_name="member3")
+    assert len(msgs2) == 1
+    assert len(msgs3) == 1
+    assert msgs2[0].content == "ping all"
+    assert msgs3[0].content == "ping all"
+    assert msgs2[0].from_member_name == "member1"
+    assert msgs2[0].timestamp == msgs3[0].timestamp
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_multicast_message_empty_is_noop(team_messaging):
+    """An empty recipient list returns no ids and writes nothing."""
+    assert await team_messaging.multicast_message(content="x", to_member_names=[]) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_broadcast_partial_read(db, team_messaging):
+    """A broadcast read by one non-sender but not another is still unread.
+
+    Guards the correlated-EXISTS path: with member3 having no watermark, the
+    query must still find an uncovered (member, broadcast) pair.
+    """
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    await db.member.create_member(
+        member_name="member3",
+        team_name="test_team_123",
+        display_name="Member Three",
+        agent_card=agent_card,
+        status="busy",
+    )
+    message_id = await team_messaging.broadcast_message(content="all hands")
+    await team_messaging.mark_message_read(message_id, "member2")
+
+    assert await team_messaging.has_unread_messages() is True
+
+    await team_messaging.mark_message_read(message_id, "member3")
+    assert await team_messaging.has_unread_messages() is False

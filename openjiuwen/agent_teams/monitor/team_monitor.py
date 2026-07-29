@@ -10,17 +10,25 @@ plus a real-time event stream via an async iterator.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+
 # Avoid hard imports to keep the module self-contained;
 # runtime types are referenced by string or duck-typed.
 from typing import (
-    AsyncIterator,
     TYPE_CHECKING,
+    AsyncIterator,
 )
 
+from openjiuwen.agent_teams.context import (
+    get_session_id,
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.monitor.models import (
     MemberInfo,
     MessageInfo,
     MonitorEvent,
+    MonitorEventType,
     TaskInfo,
     TeamInfo,
 )
@@ -43,35 +51,44 @@ class TeamMonitor:
         await monitor.stop()       # clean up
 
     Attributes:
-        team_id: The team being monitored.
+        team_name: The team being monitored.
         session_id: Current session identifier.
     """
 
     def __init__(
         self,
-        team_id: str,
+        team_name: str,
         session_id: str,
         db: TeamDatabase,
         team_agent: TeamAgent,
+        *,
+        hide_dm: bool = False,
     ) -> None:
         """Initialize the monitor.
 
         Args:
-            team_id: Team identifier.
+            team_name: Team identifier.
             session_id: Session identifier for topic routing.
             db: TeamDatabase instance for state queries.
             team_agent: Leader TeamAgent to register event listener on.
+            hide_dm: When True, drop every non-broadcast message from both
+                ``get_messages`` results and the live event stream (i.e.
+                ``MessageInfo`` rows with ``broadcast=False`` and
+                ``MonitorEventType.MESSAGE`` events). Broadcast traffic is
+                untouched. Defaults to False.
         """
-        self._team_id = team_id
+        self._team_name = team_name
         self._session_id = session_id
         self._db = db
         self._team_agent = team_agent
+        self._hide_dm = hide_dm
         self._event_queue: asyncio.Queue[MonitorEvent | None] = asyncio.Queue()
+        self._workflow_event_queue: asyncio.Queue[EventMessage | None] = asyncio.Queue()
         self._started = False
 
     @property
-    def team_id(self) -> str:
-        return self._team_id
+    def team_name(self) -> str:
+        return self._team_name
 
     @property
     def session_id(self) -> str:
@@ -87,7 +104,7 @@ class TeamMonitor:
             return
         self._team_agent.add_event_listener(self._on_event)
         self._started = True
-        team_logger.info("TeamMonitor started for team {}", self._team_id)
+        team_logger.info("TeamMonitor started for team {}", self._team_name)
 
     async def stop(self) -> None:
         """Stop monitoring, unregister listener, and terminate the event stream."""
@@ -96,7 +113,27 @@ class TeamMonitor:
         self._team_agent.remove_event_listener(self._on_event)
         self._started = False
         self._event_queue.put_nowait(None)
-        team_logger.info("TeamMonitor stopped for team {}", self._team_id)
+        self._workflow_event_queue.put_nowait(None)
+        team_logger.info("TeamMonitor stopped for team {}", self._team_name)
+
+    @contextlib.contextmanager
+    def _bound_session(self):
+        """Bind ``self._session_id`` into the session contextvar for one query.
+
+        Per-session dynamic tables (``team_task_<hash>`` etc.) are looked up
+        through the ``agent_teams.context`` contextvar; callers outside the
+        leader's run loop (CLI, SDK) won't have it set, so we bind it for
+        the duration of every query method to avoid hashing an empty
+        session_id and pointing at non-existent tables.
+        """
+        token = None
+        if self._session_id and get_session_id() != self._session_id:
+            token = set_session_id(self._session_id)
+        try:
+            yield
+        finally:
+            if token is not None:
+                reset_session_id(token)
 
     # ------------------------------------------------------------------
     # Query APIs
@@ -108,7 +145,8 @@ class TeamMonitor:
         Returns:
             TeamInfo or None if the team does not exist.
         """
-        team = await self._db.get_team(self._team_id)
+        with self._bound_session():
+            team = await self._db.team.get_team(self._team_name)
         if team is None:
             return None
         return TeamInfo.from_internal(team)
@@ -122,7 +160,8 @@ class TeamMonitor:
         Returns:
             List of MemberInfo.
         """
-        members = await self._db.get_team_members(self._team_id, status=status)
+        with self._bound_session():
+            members = await self._db.member.get_team_members(self._team_name, status=status)
         return [MemberInfo.from_internal(m) for m in members]
 
     async def get_member(self, member_name: str) -> MemberInfo | None:
@@ -134,7 +173,8 @@ class TeamMonitor:
         Returns:
             MemberInfo or None if not found.
         """
-        member = await self._db.get_member(member_name, self._team_id)
+        with self._bound_session():
+            member = await self._db.member.get_member(member_name, self._team_name)
         if member is None:
             return None
         return MemberInfo.from_internal(member)
@@ -148,35 +188,63 @@ class TeamMonitor:
         Returns:
             List of TaskInfo.
         """
-        tasks = await self._db.get_team_tasks(self._team_id, status=status)
+        with self._bound_session():
+            tasks = await self._db.task.get_team_tasks(self._team_name, status=status)
         return [TaskInfo.from_internal(t) for t in tasks]
+
+    async def get_task(self, task_id: str) -> TaskInfo | None:
+        """Query a single task by ID.
+
+        Args:
+            task_id: Task identifier.
+
+        Returns:
+            TaskInfo or None if not found.
+        """
+        with self._bound_session():
+            task = await self._db.task.get_task(task_id)
+        if task is None:
+            return None
+        return TaskInfo.from_internal(task)
 
     async def get_messages(
         self,
         *,
-        to_member: str | None = None,
-        from_member: str | None = None,
+        to_member_name: str | None = None,
+        from_member_name: str | None = None,
     ) -> list[MessageInfo]:
         """Query mailbox messages.
 
         Without filters, returns all messages for the team.
-        With ``to_member``, returns direct messages to that member.
+        With ``to_member_name``, returns direct messages to that member.
+
+        When ``hide_dm`` is enabled on the monitor, every non-broadcast
+        message is dropped: a per-recipient DM query is forced to ``[]``
+        by construction, and a full-team query reduces to broadcast-only
+        via the underlying ``get_team_messages(broadcast=True)`` filter.
 
         Args:
-            to_member: Filter by recipient member ID.
-            from_member: Filter by sender member ID.
+            to_member_name: Filter by recipient member ID.
+            from_member_name: Filter by sender member ID.
 
         Returns:
             List of MessageInfo.
         """
-        if to_member is not None:
-            rows = await self._db.get_messages(
-                team_name=self._team_id,
-                to_member_name=to_member,
-                from_member_name=from_member,
-            )
-        else:
-            rows = await self._db.get_team_messages(team_name=self._team_id)
+        if self._hide_dm and to_member_name is not None:
+            return []
+        with self._bound_session():
+            if to_member_name is not None:
+                rows = await self._db.message.get_messages(
+                    team_name=self._team_name,
+                    to_member_name=to_member_name,
+                    from_member_name=from_member_name,
+                )
+            else:
+                broadcast_filter = True if self._hide_dm else None
+                rows = await self._db.message.get_team_messages(
+                    team_name=self._team_name,
+                    broadcast=broadcast_filter,
+                )
         return [MessageInfo.from_internal(r) for r in rows]
 
     # ------------------------------------------------------------------
@@ -198,6 +266,21 @@ class TeamMonitor:
                 break
             yield event
 
+    async def workflow_events(self) -> AsyncIterator[object]:
+        """Async iterator that yields raw EventMessage instances for workflow_progress events.
+
+        Blocks until an event is available. Terminates when ``stop()``
+        is called (a ``None`` sentinel is placed in the queue).
+
+        Yields:
+            Raw EventMessage instances whose event_type is ``workflow_progress``.
+        """
+        while True:
+            event = await self._workflow_event_queue.get()
+            if event is None:
+                break
+            yield event
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -207,22 +290,37 @@ class TeamMonitor:
 
         Converts the internal EventMessage into a MonitorEvent and
         enqueues it for the ``events()`` iterator.  Internal events
-        not in MonitorEventType are silently dropped.
+        not in MonitorEventType are silently dropped. When ``hide_dm``
+        is enabled, ``MonitorEventType.MESSAGE`` (DM) events are also
+        dropped while ``BROADCAST`` events pass through.
 
         Args:
             event: Internal EventMessage from the transport.
         """
+        raw_type = event.event_type
+        if raw_type and raw_type.startswith("workflow_"):
+            self._workflow_event_queue.put_nowait(event)
+            return
         monitor_event = MonitorEvent.from_event_message(event)
         if monitor_event is None:
+            return
+        if self._hide_dm and monitor_event.event_type == MonitorEventType.MESSAGE:
             return
         self._event_queue.put_nowait(monitor_event)
 
 
-def create_monitor(team_agent: TeamAgent) -> TeamMonitor:
+def create_monitor(
+    team_agent: TeamAgent,
+    *,
+    hide_dm: bool = False,
+) -> TeamMonitor:
     """Create a TeamMonitor bound to a leader TeamAgent.
 
     Args:
         team_agent: A fully configured leader TeamAgent instance.
+        hide_dm: Forwarded to ``TeamMonitor``; when True, every
+            non-broadcast message is filtered from both query results
+            and the live event stream. Defaults to False.
 
     Returns:
         A new TeamMonitor ready to be started.
@@ -232,7 +330,6 @@ def create_monitor(team_agent: TeamAgent) -> TeamMonitor:
             fully configured.
     """
     from openjiuwen.agent_teams.schema.team import TeamRole
-    from openjiuwen.agent_teams.spawn.context import get_session_id
 
     if team_agent.role != TeamRole.LEADER:
         raise ValueError("TeamMonitor can only be bound to a leader TeamAgent")
@@ -242,8 +339,9 @@ def create_monitor(team_agent: TeamAgent) -> TeamMonitor:
         raise ValueError("TeamAgent has no team backend configured")
 
     return TeamMonitor(
-        team_id=backend.team_name,
+        team_name=backend.team_name,
         session_id=get_session_id(),
         db=backend.db,
         team_agent=team_agent,
+        hide_dm=hide_dm,
     )

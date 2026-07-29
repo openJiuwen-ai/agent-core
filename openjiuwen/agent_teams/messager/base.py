@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Messager transport abstractions and adapters."""
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ class MessagerTransportConfig(BaseModel):
     direct_addr: Optional[str] = None
     pubsub_publish_addr: Optional[str] = None
     pubsub_subscribe_addr: Optional[str] = None
+    external_publish_url: Optional[str] = None
     listen_addrs: list[str] = Field(default_factory=list)
     bootstrap_peers: list[MessagerPeerConfig] = Field(default_factory=list)
     known_peers: list[MessagerPeerConfig] = Field(default_factory=list)

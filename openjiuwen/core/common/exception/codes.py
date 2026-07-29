@@ -400,6 +400,7 @@ class StatusCode(Enum):
     AGENT_TEAM_CREATE_RUNTIME_ERROR = (132001, "agent team_create runtime error, reason: {error_msg}")
     AGENT_TEAM_EXECUTION_ERROR = (132002, "agent team execution error, reason: {error_msg}")
     AGENT_TEAM_AGENT_NOT_FOUND = (132003, "agent team agent not found error, reason: {error_msg}")
+    AGENT_TEAM_CONFIG_INVALID = (132004, "agent team config invalid, reason: {reason}")
 
     # =========================
     # DevTools / AgentBuilder 140000 - 140099
@@ -845,6 +846,7 @@ class StatusCode(Enum):
     TOOL_WEB_SEARCH_ALL_ENGINES_FAILED = (182507, "all web search engines failed, errors='{errors}'")
     TOOL_WEB_API_KEY_NOT_SET = (182508, "web tool api key is not set, key_name='{key_name}'")
     TOOL_SESSION_TOOL_INVOKED = (182509, "session tool invoked failed, error='{reason}'")
+    TOOL_WORKTREE_EXIT_INVALID = (182510, "worktree exit invalid, reason='{reason}'")
 
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")

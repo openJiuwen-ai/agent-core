@@ -50,6 +50,9 @@ class TaskLoopController(Controller):
         is_follow_up: bool = False,
         run_kind: Any = None,
         run_context: Any = None,
+        *,
+        task_id: Optional[str] = None,
+        resume_continuation: bool = False,
     ) -> None:
         """Prepare a round, build InputEvent, publish it.
 
@@ -63,6 +66,16 @@ class TaskLoopController(Controller):
                 follow-up continuation.
             run_kind: Run kind for heartbeat support.
             run_context: Run context for heartbeat support.
+            task_id: Optional caller-supplied task id. When given it is
+                injected into the event metadata so the handler uses it as
+                the scheduler task id, letting the caller later target it via
+                ``task_scheduler.cancel_task``. When None the handler derives
+                a task id as before.
+            resume_continuation: When True this round continues the existing
+                conversation context without appending a new user turn (used by
+                ``NativeHarness.resume`` to pick a paused round back up in
+                place). The flag rides the event metadata down to the inner
+                ReAct loop.
         """
         handler = self._event_handler
         round_id = handler.prepare_round()
@@ -76,6 +89,10 @@ class TaskLoopController(Controller):
             event.metadata["run_kind"] = run_kind
         if run_context is not None:
             event.metadata["run_context"] = run_context
+        if task_id is not None:
+            event.metadata["task_id"] = task_id
+        if resume_continuation:
+            event.metadata["_resume_continuation"] = True
 
         await self.publish_event_async(session, event)
 

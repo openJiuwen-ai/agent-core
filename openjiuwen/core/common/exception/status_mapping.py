@@ -66,6 +66,7 @@ _MANUAL_OVERRIDES_RAW = {
     "TOOL_EXECUTION_ERROR": "ToolError",
     "TOOL_NOT_FOUND_ERROR": "ValidationError",
     "AGENT_TEAM_EXECUTION_ERROR": "AgentError",
+    "AGENT_TEAM_CONFIG_INVALID": "ValidationError",
     "STORE_GRAPH_BACKEND_ALREADY_EXISTS": "ValidationError",
     "STORE_GRAPH_PROTOCOL_NOT_IMPLEMENTED": "ValidationError",
     "STORE_GRAPH_BACKEND_NOT_FOUND": "ValidationError",

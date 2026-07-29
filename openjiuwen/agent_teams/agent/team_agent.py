@@ -1,40 +1,34 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Unified TeamAgent implementation."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import os
-import re
-import traceback
+import time
+from collections.abc import Awaitable, Callable
 from typing import (
+    TYPE_CHECKING,
     Any,
     Dict,
-    List,
     Optional,
-    Tuple,
 )
 
-from openjiuwen.agent_teams.agent.coordinator import (
-    CoordinatorLoop,
-    InnerEventMessage,
-    InnerEventType,
+from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
+from openjiuwen.agent_teams.agent.coordination import (
+    CoordinationKernel,
+    EventBus,
 )
 from openjiuwen.agent_teams.agent.member import TeamMember
-from openjiuwen.agent_teams.agent.policy import role_policy
-from openjiuwen.agent_teams.agent.team_rail import TeamRail
-from openjiuwen.agent_teams.paths import (
-    independent_member_workspace,
-    team_home,
-)
-from openjiuwen.agent_teams.messager import (
-    create_messager,
-    Messager,
-)
+from openjiuwen.agent_teams.agent.member_factory import create_member_handle
+from openjiuwen.agent_teams.agent.recovery_manager import RecoveryManager
+from openjiuwen.agent_teams.agent.session_manager import SessionManager
+from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
+from openjiuwen.agent_teams.agent.state import TeamAgentState
+from openjiuwen.agent_teams.agent.stream_controller import StreamController
+from openjiuwen.agent_teams.interaction.payload import GodViewMessage
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.schema.deep_agent_spec import SysOperationSpec
-from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
@@ -47,321 +41,409 @@ from openjiuwen.agent_teams.schema.team import (
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.foundation.tool.base import Tool
-from openjiuwen.core.runner.runner import Runner
-from openjiuwen.core.runner.spawn.agent_config import (
-    serialize_runner_config,
-    SpawnAgentConfig,
-    SpawnAgentKind,
-)
-from openjiuwen.core.runner.spawn.process_manager import (
-    SpawnConfig,
-    SpawnedProcessHandle,
-)
-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.session.agent_team import Session as AgentTeamSession
+from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
+from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
 from openjiuwen.core.single_agent.base import BaseAgent
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import AgentRail
-from openjiuwen.harness.deep_agent import DeepAgent
-from openjiuwen.harness.prompts import resolve_language as _resolve_language
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
+    from openjiuwen.agent_teams.interaction.payload import DeliverResult, InteractPayload
+    from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
+    from openjiuwen.agent_teams.models.pool import ModelPoolEntry
+    from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.tiny_agent import TinyAgent
+    from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
-def _resolve_team_mode(spec: TeamAgentSpec) -> str:
-    """Return the effective team mode for the given spec.
-
-    Honors an explicit ``spec.team_mode``; otherwise derives from
-    ``predefined_members`` for backwards compatibility.
-    """
-    if spec.team_mode is not None:
-        return spec.team_mode
-    return "predefined" if spec.predefined_members else "default"
-
-
-_MAX_RETRY_ATTEMPTS = 10
-_RETRYABLE_ERROR_CODES = {181001}
-_RETRY_QUERY = "刚才有异常状况，继续执行"
-_TASK_FAILED_PAYLOAD_TYPE = "task_failed"
-_ERROR_CODE_PATTERN = re.compile(r"^\[(\d+)\]")
-
-
-def _detect_task_failed(chunk: Any) -> Optional[Tuple[Optional[int], str]]:
-    """Detect a TASK_FAILED chunk emitted by the task-loop executor.
-
-    The task-loop executor wraps a BaseError into
-    ``ControllerOutputChunk(payload.type='task_failed',
-    data=[TextDataFrame(text='[code] message')])``. BaseError's ``__str__``
-    guarantees the leading ``[code]`` prefix so the error code can be parsed
-    out of the text reliably.
-
-    Args:
-        chunk: Stream chunk produced by ``Runner.run_agent_streaming``.
-
-    Returns:
-        ``(error_code, error_text)`` when the chunk is a TASK_FAILED frame;
-        ``error_code`` is ``None`` if the text lacks the ``[code]`` prefix
-        (treated as non-retryable). Returns ``None`` for non-error chunks.
-    """
-    payload = getattr(chunk, "payload", None)
-    if payload is None:
-        return None
-    if getattr(payload, "type", None) != _TASK_FAILED_PAYLOAD_TYPE:
-        return None
-
-    text = ""
-    data = getattr(payload, "data", None) or []
-    if data:
-        text = getattr(data[0], "text", "") or ""
-
-    code: Optional[int] = None
-    match = _ERROR_CODE_PATTERN.match(text)
-    if match:
-        try:
-            code = int(match.group(1))
-        except ValueError:
-            code = None
-    return code, text
-
-
+# pylint: disable=too-many-public-methods
 class TeamAgent(BaseAgent):
     """One implementation that can act as leader or teammate.
 
     Uses composition: wraps an internal DeepAgent instance instead of
-    inheriting from it.
+    inheriting from it. Delegates to specialized managers for
+    configuration, streaming, spawning, recovery, and session management.
     """
 
     def __init__(self, card):
         super().__init__(card)
-        self._deep_agent: Optional[DeepAgent] = None
-        self._spec: Optional[TeamAgentSpec] = None
-        self._ctx: Optional[TeamRuntimeContext] = None
-        self._coordination_loop: Optional[CoordinatorLoop] = None
-        self._role_policy: str = ""
-        self._messager: Optional[Messager] = None
-        self._subscribed_topics: list[str] = []
-        self._team_backend: Optional[TeamBackend] = None
-        self._task_manager = None
-        self._message_manager = None
-        self._session_id: Optional[str] = None
-        self._team_member: Optional[TeamMember] = None
-        self._stream_queue: Optional[asyncio.Queue] = None
-        self._agent_task: Optional[asyncio.Task] = None
-        # True only while the ``async for`` over ``Runner.run_agent_streaming``
-        # is actively pumping chunks — the exact window where
-        # ``steer``/``follow_up`` are guaranteed to reach the task loop.
-        # ``_agent_task`` alone is too loose: it stays live through pre-stream
-        # status writes (READY→BUSY→STARTING→RUNNING) and the post-stream
-        # finalize tail, neither of which can accept steer events.
-        self._streaming_active: bool = False
-        self._dispatcher = None
-        self._teammate_port_counter: int = 0
-        self._spawned_handles: dict[str, SpawnedProcessHandle] = {}
-        # Strong refs for fire-and-forget teammate-recovery tasks. Health-check
-        # callbacks are invoked synchronously from process_manager, so the
-        # coroutine they schedule has no other owner — without a set here, the
-        # event loop's weak reference lets the GC reap it mid-restart.
-        self._recovery_tasks: set[asyncio.Task] = set()
-        self._member_port_map: dict[str, int] = {}
-        self._first_iter_gate: Optional["FirstIterationGate"] = None
-        self._pending_interrupt_resumes: list[InteractiveInput] = []
-        # Inputs queued during a pre-stream / finalize-tail window —
-        # drained in the ``_run_one_round`` finally so delivery is never
-        # lost to the two races where neither ``steer`` (no controller yet /
-        # already torn down) nor ``_start_agent`` (would overwrite the live
-        # ``_agent_task``) is safe. Public callers should go through
-        # ``deliver_input`` rather than reaching for these paths directly.
-        self._pending_inputs: list[Any] = []
-        self._event_listeners: list = []
-        self._model_allocator: Optional["ModelAllocator"] = None
-        self._workspace_manager: Optional["TeamWorkspaceManager"] = None
-        self._workspace_initialized: bool = False
-        self._worktree_manager: Optional["WorktreeManager"] = None
-        self._team_session: Optional[AgentTeamSession] = None
+        self._configurator = AgentConfigurator(card)
+        self._state = TeamAgentState()
+
+        self._spawn_manager = SpawnManager(
+            state=self._state,
+            configurator=self._configurator,
+            team_agent_getter=lambda: self,
+        )
+        self._recovery_manager = RecoveryManager(
+            configurator=self._configurator,
+            spawn_manager=self._spawn_manager,
+        )
+        self._session_manager = SessionManager(
+            state=self._state,
+            configurator=self._configurator,
+            recovery_manager=self._recovery_manager,
+        )
+        self._stream_controller = StreamController(
+            blueprint_getter=lambda: self._configurator.blueprint,
+            state=self._state,
+            resources=self._configurator.resources,
+            status_updater=self._update_status,
+            execution_updater=self._update_execution,
+            wake_mailbox_callback=self._wake_mailbox_if_interrupt_cleared,
+            request_completion_poll_callback=self._request_completion_poll,
+        )
+        self._coordination = CoordinationKernel(self)
 
     # ------------------------------------------------------------------
-    # Properties
+    # Properties — delegate to configurator
     # ------------------------------------------------------------------
 
     @property
-    def deep_agent(self) -> Optional[DeepAgent]:
-        """Return the internal DeepAgent instance."""
-        return self._deep_agent
+    def blueprint(self):
+        """Return the static assembly blueprint, or None before configure()."""
+        return self._configurator.blueprint
 
     @property
-    def deep_config(self) -> Optional["DeepAgentConfig"]:
-        """Proxy: return the DeepAgent's config."""
-        if self._deep_agent is None:
+    def state(self):
+        """Return the mutable runtime state container."""
+        return self._state
+
+    @property
+    def infra(self):
+        """Return the per-process team infrastructure container."""
+        return self._configurator.infra
+
+    @property
+    def resources(self):
+        """Return the per-instance runtime resources container."""
+        return self._configurator.resources
+
+    @property
+    def tiny_agent_model_resolver(self):
+        """Return the team's model-name resolver used to build tiny agents.
+
+        Maps a ``model_name`` to a ``TeamModelConfig`` against the team model
+        pool (None when no pool is configured). Ephemeral callers pass this to
+        ``openjiuwen.agent_teams.tiny_agent.create_tiny_agent`` (or a preset) so a
+        model name resolves the same way as for team-scoped tiny agents.
+        """
+        return self.infra.tiny_agent_model_resolver
+
+    def get_tiny_agent(self, name: str) -> Optional["TinyAgent"]:
+        """Get-or-create the team-scoped tiny agent declared under ``name``.
+
+        Lazily builds it from ``TeamAgentSpec.tiny_agents[name]`` on first access,
+        caches it on infra (one per name, per process), and reuses it afterwards.
+        Returns None when no tiny agent is declared under ``name``. The cached
+        instance is disposed when the team stops.
+
+        Args:
+            name: Logical key of the tiny agent in ``TeamAgentSpec.tiny_agents``.
+
+        Returns:
+            The cached or newly built :class:`TinyAgent`, or None if undeclared.
+        """
+        infra = self.infra
+        existing = infra.tiny_agents.get(name)
+        if existing is not None:
+            return existing
+        spec = self.spec
+        tiny_spec = spec.tiny_agents.get(name) if spec is not None else None
+        if tiny_spec is None:
             return None
-        return self._deep_agent.deep_config
+        if infra.tiny_agent_model_resolver is None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=f"tiny agent '{name}' needs a team model pool to resolve model '{tiny_spec.model_name}'",
+            )
+        from openjiuwen.agent_teams.tiny_agent import create_tiny_agent
+
+        language = self.blueprint.language if self.blueprint is not None else "cn"
+        agent = create_tiny_agent(
+            system_prompt=tiny_spec.system_prompt,
+            model_name=tiny_spec.model_name,
+            model_resolver=infra.tiny_agent_model_resolver,
+            default_schema=tiny_spec.default_schema,
+            name=tiny_spec.name,
+            language=language,
+            max_iterations=tiny_spec.max_iterations,
+        )
+        infra.tiny_agents[name] = agent
+        return agent
+
+    async def _dispose_tiny_agents(self) -> None:
+        """Dispose every cached team-scoped tiny agent (best-effort, idempotent)."""
+        infra = self.infra
+        for agent in list(infra.tiny_agents.values()):
+            try:
+                await agent.aclose()
+            except Exception:
+                team_logger.debug(
+                    "[{}] tiny agent dispose failed", self._member_name() or "?", exc_info=True
+                )
+        infra.tiny_agents.clear()
+
+    @property
+    def harness(self) -> Optional["MemberRuntime"]:
+        """Return the member runtime driving this agent.
+
+        Default is a ``TeamHarness`` over DeepAgent; an external CLI member
+        carries an ``ExternalCliRuntime``. All round/runtime access goes
+        through this :class:`MemberRuntime` surface — new code should not
+        seek out the DeepAgent instance directly.
+        """
+        return self._configurator.harness
 
     @property
     def spec(self) -> Optional[TeamAgentSpec]:
-        """Return the team agent spec."""
-        return self._spec
+        return self._configurator.spec
 
     @property
     def runtime_context(self) -> Optional[TeamRuntimeContext]:
-        """Return the runtime context."""
-        return self._ctx
+        return self._configurator.ctx
 
     @property
-    def coordination_loop(self) -> Optional[CoordinatorLoop]:
-        """Return the shared coordination loop."""
-        return self._coordination_loop
+    def coordination(self) -> CoordinationKernel:
+        """Return the coordination kernel (event bus + dispatcher + lifecycle)."""
+        return self._coordination
+
+    @property
+    def coordination_loop(self) -> Optional[EventBus]:
+        """Return the underlying event bus.
+
+        Kept as a public accessor for tests and legacy callers; new code
+        should go through ``self.coordination`` instead.
+        """
+        return self._coordination.event_bus
 
     @property
     def role(self) -> TeamRole:
-        """Return the configured team role."""
-        if self._ctx is None:
-            return TeamRole.LEADER
-        return self._ctx.role
+        return self._configurator.role
 
     @property
     def lifecycle(self) -> str:
-        """Return the team lifecycle mode."""
-        if self._spec is None:
-            return "temporary"
-        return self._spec.lifecycle
-
-    @property
-    def role_prompt_policy(self) -> str:
-        """Return the active base role policy."""
-        return self._role_policy
-
-    @property
-    def mailbox_transport(self) -> Optional[Messager]:
-        """Return the configured mailbox transport, if any."""
-        return self._messager
+        return self._configurator.lifecycle
 
     @property
     def team_spec(self) -> Optional[TeamSpec]:
-        """Return the bound team spec."""
-        if self._ctx is None:
-            return None
-        return self._ctx.team_spec
+        return self._configurator.team_spec
 
     @property
     def member_name(self) -> Optional[str]:
-        """Return the current agent's member_name."""
-        return self._member_name()
+        return self._configurator.member_name
 
     @property
     def message_manager(self):
-        """Return the message manager, if configured."""
-        return self._message_manager
+        return self._configurator.message_manager
 
     @property
     def task_manager(self):
-        """Return the task manager, if configured."""
-        return self._task_manager
+        return self._configurator.task_manager
 
     @property
     def team_backend(self) -> Optional[TeamBackend]:
-        """Return the team backend, if configured."""
-        return self._team_backend
+        return self._configurator.team_backend
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """Return the current session ID from the agent_teams contextvar.
+
+        The contextvar is the single source of truth; reading from a cached
+        state field would re-introduce double-bookkeeping bugs that the
+        contextvar-only design was meant to eliminate.
+        """
+        from openjiuwen.agent_teams.context import get_session_id
+
+        return get_session_id() or None
+
+    @property
+    def session_manager(self) -> SessionManager:
+        """Return the session manager."""
+        return self._session_manager
+
+    @property
+    def recovery_manager(self) -> RecoveryManager:
+        """Return the recovery manager."""
+        return self._recovery_manager
+
+    @property
+    def spawn_manager(self) -> SpawnManager:
+        """Return the spawn manager."""
+        return self._spawn_manager
+
+    @property
+    def stream_controller(self) -> StreamController:
+        """Return the stream controller."""
+        return self._stream_controller
+
+    @property
+    def event_listeners(self) -> list:
+        """Return the registered event listeners."""
+        return self._state.event_listeners
+
+    @property
+    def team_member(self) -> Optional[TeamMember]:
+        """Return the TeamMember handle for this agent, if set."""
+        return self._state.team_member
+
+    async def is_shutdown_requested(self) -> bool:
+        """Whether this teammate has been asked to shut down or already has.
+
+        Leaders never carry a TeamMember handle (only teammates and human
+        agents do), so this always returns False for leader agents.
+        Includes ``SHUTDOWN`` itself because ``shutdown_self`` writes the
+        terminal status directly before tearing down the stream — the
+        finalize path must treat that as "already heading out" and not
+        flip the status back to READY through a pause decision.
+        Consumed by ``TeamRuntimeManager.finalize_member``.
+        """
+        member = self._state.team_member
+        if member is None:
+            return False
+        status = await member.status()
+        return status in (MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN)
+
+    @property
+    def pending_user_query(self) -> str:
+        """Return the pending user query string."""
+        return self._state.pending_user_query
+
+    @property
+    def team_name(self) -> Optional[str]:
+        """Return the team name from the runtime context."""
+        return self._configurator.team_name
+
+    async def update_status(self, status: MemberStatus) -> None:
+        """Update the member status in the database."""
+        await self._update_status(status)
+
+    def persist_allocator_state(self) -> None:
+        """Persist the model allocator state to the current session."""
+        self._persist_allocator_state()
+
+    # ------------------------------------------------------------------
+    # Event listeners
+    # ------------------------------------------------------------------
 
     def add_event_listener(self, handler) -> None:
-        """Register an external event listener.
-
-        Listeners receive every EventMessage from the transport,
-        including self-published events, before any filtering.
-
-        Args:
-            handler: Async callable accepting an EventMessage.
-        """
-        self._event_listeners.append(handler)
+        self._state.event_listeners.append(handler)
 
     def remove_event_listener(self, handler) -> None:
-        """Remove a previously registered event listener.
-
-        Args:
-            handler: The handler to remove.
-        """
         try:
-            self._event_listeners.remove(handler)
+            self._state.event_listeners.remove(handler)
         except ValueError:
             pass
 
-    async def has_team_member(self, member_name: str) -> bool:
-        """Check whether a team member exists in the database."""
-        if self._team_backend is None:
-            return False
-        return await self._team_backend.get_member(member_name) is not None
+    async def lookup_human_agent_runtime(self, member_name: str) -> Optional["TeamAgent"]:
+        """Resolve an inprocess-spawned human agent's live ``TeamAgent``.
+
+        Used by ``HumanAgentInbox`` so the leader-side runtime can feed
+        user input directly into the avatar's DeepAgent without going
+        through the message bus. Returns ``None`` for subprocess
+        spawns (cross-process delivery is out of scope for Phase 2)
+        or when the avatar has not been spawned yet.
+        """
+        backend = self._configurator.team_backend
+        if backend is None or not await backend.is_human_agent(member_name):
+            return None
+        return self._spawn_manager.lookup_inprocess_agent(member_name)
+
+    def lookup_bridge_agent_runtime(self, member_name: str) -> Optional["TeamAgent"]:
+        """Resolve an inprocess-spawned bridge agent's live ``TeamAgent``.
+
+        Symmetric to ``lookup_human_agent_runtime``. The coordination
+        message handler uses this when it needs to deliver a composed
+        ``original_body + remote_reply`` payload directly into the
+        bridge avatar's DeepAgent. Returns ``None`` for subprocess
+        spawns or when the avatar has not been spawned yet.
+        """
+        backend = self._configurator.team_backend
+        if backend is None or not backend.is_bridge_agent(member_name):
+            return None
+        return self._spawn_manager.lookup_inprocess_agent(member_name)
 
     def is_agent_ready(self) -> bool:
-        """Whether the agent has been fully initialized."""
-        return self._deep_agent is not None
+        return self._configurator.harness is not None
 
     def is_agent_running(self) -> bool:
-        """Whether the agent is in an active round."""
         return self._is_agent_running()
 
-    def has_in_flight_round(self) -> bool:
-        """Whether ``_agent_task`` is scheduled and not yet finalized.
+    def idle_seconds(self) -> float | None:
+        """Return seconds this member has been continuously idle, or None.
 
-        Looser than ``is_agent_running`` — returns True across the pre-stream
-        status writes, the streaming window, and the finalize tail. Use this
-        to decide whether ``_start_agent`` would be safe (it is not while a
-        round is still in flight). For "can I steer right now?" use
-        ``is_agent_running``.
+        Reads the process-local idle clock stamped by
+        ``StreamController._map_state`` when the runtime settled into IDLE.
+        ``None`` means the member is mid-round (BUSY) or has never settled,
+        which is exactly what callers want: a busy member is by definition
+        not stalled.
         """
+        idle_since = self._state.idle_since
+        if idle_since is None:
+            return None
+        return time.monotonic() - idle_since
+
+    def refresh_idle_baseline(self) -> None:
+        """Re-base the idle clock so a pause window is not counted as idle.
+
+        A member that was already idle when the team paused keeps its
+        ``idle_since`` stamp while the monotonic clock advances across the
+        whole pause — and, being idle, it has no paused round to resume, so
+        it never re-enters IDLE to re-stamp itself. Without this re-base the
+        first poll after resume would see a huge fabricated idle span. A busy
+        member holds ``idle_since is None`` and is left alone; a cold start
+        begins with ``None`` too, making this a no-op there.
+        """
+        if self._state.idle_since is not None:
+            self._state.idle_since = time.monotonic()
+
+    def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()
 
     async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
-        """Guarantee that ``content`` reaches the DeepAgent.
+        # The runtime's single supervisor serialises inputs: send() starts a
+        # round when idle, steers (use_steer) or queues a follow-up when running.
+        # No transition-window race, so no manual branch / pending queue here.
+        harness = self.harness
+        if harness is None:
+            return
+        await harness.send(content, immediate=use_steer)
 
-        Chooses the right path for the current state:
-        - Streaming active → ``steer`` (or ``follow_up`` when ``use_steer``
-          is False) so the content lands in the live task loop.
-        - No round in flight → start a fresh round with ``content`` as the
-          initial message.
-        - Transition window (pre-stream or finalize tail) → append to
-          ``_pending_inputs``; the ``_run_one_round`` finally drains the
-          queue by launching the next round, so delivery is never dropped.
+    def set_background_task_controller(self, controller: Any) -> None:
+        """Attach the embedder's background task controller to this member's brain.
+
+        Forwarded to the runtime (TeamHarness), which keeps it across native
+        rebuilds; the leader's SwarmflowTool reads it to register run handles for
+        external pause/resume. No-op when no runtime is built yet.
         """
-        if self._streaming_active:
-            if use_steer:
-                await self.steer(content)
-            else:
-                await self.follow_up(content)
-            return
-        if self._has_in_flight_round():
-            preview = content if isinstance(content, str) else type(content).__name__
-            team_logger.info(
-                "[{}] queueing input for next round (transition window): {:.60}",
-                self._member_name() or "?", str(preview),
-            )
-            self._pending_inputs.append(content)
-            return
-        await self._start_agent(content)
+        harness = self.harness
+        if harness is not None:
+            harness.set_background_task_controller(controller)
 
     def has_pending_interrupt(self) -> bool:
-        """Whether the current session still has an unresolved tool interrupt."""
-        session = self._deep_agent.loop_session if self._deep_agent else None
-        if session is None:
-            return False
-        return session.get_state(INTERRUPTION_KEY) is not None
+        return self._stream_controller.has_pending_interrupt()
 
     async def start_agent(self, content: str) -> None:
-        """Start a new agent round with the given content."""
         await self._start_agent(content)
 
     async def follow_up(self, content: str) -> None:
-        """Feed content to the currently running agent."""
-        if self._deep_agent is not None:
-            team_logger.debug("[{}] follow_up: {:.120}", self._member_name() or "?", content)
-            await self._deep_agent.follow_up(content)
+        harness = self.harness
+        if harness is not None:
+            await harness.send(content, immediate=False)
 
     async def cancel_agent(self) -> None:
-        """Cancel the running agent task."""
         team_logger.debug("[{}] cancel_agent requested", self._member_name() or "?")
         await self._cancel_agent()
 
     async def destroy_team(self, force: bool = True) -> bool:
-        """Destroy this team's runtime and persisted current-session state."""
+        # Snapshot session_id BEFORE coordination teardown. ``stop_coordination``
+        # triggers ``SessionManager.release_session`` which resets the
+        # contextvar; without the snapshot, ``_remove_self_from_pool`` would
+        # be unable to identify which pool entry it owns and silently leak it.
+        session_id_snapshot = self.session_id
+
         try:
             await self.cancel_agent()
         except Exception as e:
@@ -372,1047 +454,511 @@ class TeamAgent(BaseAgent):
         except Exception as e:
             team_logger.warning("[{}] stop coordination during destroy failed: {}", self._member_name() or "?", e)
 
-        if not self._team_backend:
+        # Drop any pool entry for this team so the next ``run_agent_team*``
+        # call sees a clean slate. ``destroy_team`` is the leader-level
+        # teardown sibling of ``TeamRuntimeManager.stop_team`` / ``delete_team``
+        # — invoked directly on the TeamAgent it must still honor the
+        # "stop_coordination implies pool.remove" invariant. Best-effort:
+        # any failure is logged but does not break the destroy contract.
+        await self._remove_self_from_pool(session_id_snapshot)
+
+        if not self._configurator.team_backend:
             return False
 
-        return await self._team_backend.force_clean_team(shutdown_members=force)
+        return await self._configurator.team_backend.force_clean_team(shutdown_members=force)
 
-    async def pause_polls(self) -> None:
-        """Pause periodic polling in the coordination loop."""
-        if self._coordination_loop:
-            await self._coordination_loop.pause_polls()
+    async def _remove_self_from_pool(self, session_id: Optional[str]) -> None:
+        """Best-effort detach from the process-global team runtime pool.
 
-    async def resume_polls(self) -> None:
-        """Resume periodic polling in the coordination loop."""
-        if self._coordination_loop:
-            await self._coordination_loop.resume_polls()
+        Takes ``session_id`` as an explicit argument because the caller has
+        to snapshot it before coordination teardown resets the contextvar.
+        Reaches into ``GLOBAL_RUNNER`` to find the runtime manager rather
+        than holding a back reference, because pool ownership is a
+        runtime-layer concern that the TeamAgent must not couple to at
+        construction time. Idempotent — a missing pool entry, a manager
+        that was never lazily created, or any access failure all become
+        no-ops with a warning log.
+        """
+        team_name = self._configurator.team_name
+        if not team_name or not session_id:
+            return
+        try:
+            from openjiuwen.core.runner.runner import GLOBAL_RUNNER
+
+            manager = getattr(GLOBAL_RUNNER, "_team_runtime_manager", None)
+            if manager is None:
+                return
+            pool = manager.pool
+            entry = await pool.get(team_name)
+            if entry is None or entry.current_session_id != session_id:
+                return
+            await pool.remove(team_name)
+        except Exception as exc:
+            team_logger.warning(
+                "[{}] destroy_team pool cleanup failed: {}",
+                self._member_name() or "?",
+                exc,
+            )
 
     async def steer(self, content: str) -> None:
-        """Steer instruction into the running agent."""
-        if self._deep_agent is not None:
-            team_logger.debug("[{}] steer: {:.120}", self._member_name() or "?", content)
-            await self._deep_agent.steer(content)
+        harness = self.harness
+        if harness is not None:
+            await harness.send(content, immediate=True)
 
     async def resume_interrupt(self, user_input) -> None:
-        """Resume a pending HITL interrupt with structured input."""
-        if not self._is_valid_interrupt_resume(user_input):
+        if not self._stream_controller.is_valid_interrupt_resume(user_input):
             team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
             return
-        # Use the task-level check here: if a round is still in flight — even
-        # in the pre-stream or finalize tail — queue the resume so the finally
-        # block in ``_run_one_round`` can drain it via
-        # ``_dequeue_valid_interrupt_resume``. A new ``_start_agent`` right
-        # now would overwrite the live ``_agent_task`` reference and orphan it.
-        if self._has_in_flight_round():
-            team_logger.info("[{}] queueing interrupt resume until current round completes", self._member_name() or "?")
-            self._pending_interrupt_resumes.append(user_input)
-            return
-        await self._start_agent(user_input)
+        # The supervisor serialises the resume: send() either starts the resume
+        # round (idle) or steers it into the active one — no pending queue.
+        harness = self.harness
+        if harness is not None:
+            await harness.send(user_input)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract method: configure
     # ------------------------------------------------------------------
 
-    def configure(self, spec: TeamAgentSpec, context: TeamRuntimeContext) -> "TeamAgent":
-        """Satisfy BaseAgent.configure (sync, leader-only path)."""
+    # pylint: disable=arguments-differ
+    def configure(
+        self,
+        spec: TeamAgentSpec,
+        context: TeamRuntimeContext,
+        *,
+        member_runtime: Optional["MemberRuntime"] = None,
+    ) -> "TeamAgent":
         self._setup_infra(spec, context)
-        self._setup_agent(spec, context)
-        return self
-
-    async def configure_team(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> "TeamAgent":
-        """Configure the team agent.
-
-        Team metadata and member roster are no longer pre-fetched
-        here -- ``TeamRail`` reads them from the DB on demand via
-        ``MtimeSectionCache`` so newly spawned members appear in the
-        prompt without recreating the rail.
-        """
-        self._setup_infra(spec, ctx)
-        self._setup_agent(spec, ctx)
+        self._setup_agent(spec, context, member_runtime=member_runtime)
         return self
 
     # ------------------------------------------------------------------
     # Team-specific configuration
     # ------------------------------------------------------------------
 
-    def _resolve_agent_spec(
-        self, spec: TeamAgentSpec, role: TeamRole, member_name: Optional[str] = None
-    ):
-        """Return the DeepAgentSpec for the given member/role, falling back appropriately.
-
-        Lookup order:
-        1. agents[member_name] if member_name exists in agents dict (custom per-member spec)
-        2. agents[role.value] ("teammate" for teammates)
-        3. agents["leader"] as final fallback
-        """
-        if member_name and member_name in spec.agents:
-            return spec.agents[member_name]
-        return spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
-
-    def attach_model_allocator(self, allocator: "ModelAllocator") -> None:
-        """Pre-attach a model allocator built outside ``configure``.
-
-        ``TeamAgentSpec.build()`` constructs the allocator before runtime
-        context assembly so it can pre-allocate the leader's model from
-        the pool. Calling this before ``configure`` lets ``_setup_infra``
-        reuse the same rotation state instead of constructing a fresh
-        instance and double-counting allocations.
-        """
-        self._model_allocator = allocator
-
     def _setup_infra(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> None:
-        """Phase 1: set spec/context, create messager, workspace manager, register team tools."""
-        self._spec = spec
-        self._ctx = ctx
-
-        messager_config = ctx.messager_config
-        member_name = ctx.member_name
-        if member_name and messager_config and messager_config.node_id != member_name:
-            messager_config = messager_config.model_copy(update={"node_id": member_name})
-
-        self._messager = create_messager(messager_config) if messager_config else None
-
-        # Team shared workspace — create manager and ensure directory exists.
-        if spec.workspace and spec.workspace.enabled:
-            self._workspace_manager = self._create_workspace_manager(spec, ctx)
-
-        # Build the allocator only when build() didn't pre-attach one.
-        # The pre-attached path keeps a single rotation state across
-        # leader pre-allocation (in build()) and teammate spawns; the
-        # fallback covers direct ``configure()`` callers (recovery,
-        # tests) that bypass build().
-        if ctx.role == TeamRole.LEADER and self._model_allocator is None:
-            from openjiuwen.agent_teams.agent.model_allocator import (
-                build_model_allocator,
-            )
-
-            self._model_allocator = build_model_allocator(spec, ctx.team_spec)
-
-        self._tool_cards = self._register_team_tools(spec, ctx, self._messager)
-
-    def _create_workspace_manager(
-        self, spec: TeamAgentSpec, ctx: TeamRuntimeContext,
-    ) -> "TeamWorkspaceManager":
-        """Create TeamWorkspaceManager and ensure the workspace directory exists.
-
-        Args:
-            spec: Team agent specification containing workspace config.
-            ctx: Runtime context for resolving team_name.
-
-        Returns:
-            Configured TeamWorkspaceManager instance.
-        """
-        from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
-
-        ws_config = spec.workspace
-        team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
-        ws_path = ws_config.root_path or str(team_home(team_name) / "team-workspace")
-        os.makedirs(ws_path, exist_ok=True)
-        team_logger.info("Team workspace directory ensured at {}", ws_path)
-        return TeamWorkspaceManager(
-            config=ws_config,
-            workspace_path=ws_path,
-            team_name=team_name,
-        )
-
-    def _create_worktree_manager(self, spec: TeamAgentSpec) -> "WorktreeManager":
-        """Create WorktreeManager for worktree isolation.
-
-        Args:
-            spec: Team agent specification containing worktree config.
-
-        Returns:
-            Configured WorktreeManager instance.
-        """
-        from openjiuwen.agent_teams.worktree.manager import WorktreeManager
-
-        ws_root = self._workspace_manager.workspace_path if self._workspace_manager else None
-        return WorktreeManager(
-            config=spec.worktree,
-            workspace_root=ws_root,
+        self._configurator.setup_infra(
+            spec,
+            ctx,
+            on_teammate_created=self._on_teammate_created,
+            on_before_team_cleaned=self._finalize_team_worktrees_before_clean,
+            on_team_cleaned=self._mark_team_cleaned,
+            on_team_built=self._mark_team_built,
         )
 
     def _setup_agent(
         self,
         spec: TeamAgentSpec,
         ctx: TeamRuntimeContext,
+        *,
+        member_runtime: Optional["MemberRuntime"] = None,
     ) -> None:
-        """Phase 2: build prompt, create DeepAgent, set up coordination."""
-        # Lookup agent spec by member_name first, then role fallback chain
-        agent_spec = self._resolve_agent_spec(spec, ctx.role, ctx.member_name)
-        resolved_language = _resolve_language(agent_spec.language)
-        self._role_policy = role_policy(ctx.role, language=resolved_language)
-        member_name = ctx.member_name
-
-        # Resolve workspace: fallback to leader's, adjust stable_base path.
-        # Stable workspace lives under
-        # ``team_home(team_name)/workspaces/{member_name}_workspace``.
-        #
-        # If the member is a predefined independent DeepAgent whose workspace
-        # already exists at ``independent_member_workspace(member_name)``,
-        # create a symlink instead of a new directory so the agent keeps
-        # its identity.
-        ws_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
-        if ws_spec and ws_spec.stable_base:
-            team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
-            base = team_home(team_name) / "workspaces"
-            team_ws_path = base / f"{member_name}_workspace"
-            independent_ws = independent_member_workspace(member_name)
-            if independent_ws.is_dir() and not team_ws_path.exists():
-                base.mkdir(parents=True, exist_ok=True)
-                os.symlink(str(independent_ws), str(team_ws_path), target_is_directory=True)
-            ws_spec = ws_spec.model_copy(update={"root_path": str(team_ws_path)})
-
-        # Record the resolved workspace path so clean_team can remove it.
-        if ws_spec and ws_spec.root_path and self._team_backend:
-            self._team_backend.register_cleanup_path(ws_spec.root_path)
-
-        # Pre-mount the team shared workspace into the agent workspace
-        # BEFORE building the DeepAgent, so the factory's SkillUseRail
-        # can aggregate ``.team/{team_name}/skills`` via
-        # ``Workspace.list_team_links``.
-        if self._workspace_manager and ws_spec and ws_spec.root_path:
-            self._workspace_manager.mount_into_workspace(ws_spec.root_path)
-
-        # Resolve model: member_model (allocated by leader) takes priority.
-        model_config = ctx.member_model or agent_spec.model
-
-        # Merge tools: team management tools + user-defined spec tools.
-        merged_tools = list(self._tool_cards)
-        if agent_spec.tools:
-            merged_tools.extend(agent_spec.tools)
-
-        # Build DeepAgent via DeepAgentSpec.build() with team overrides.
-        # ``system_prompt`` is intentionally left untouched so DeepAgent's
-        # default identity section stays in place; team-specific content
-        # is injected later by ``TeamRail`` as discrete PromptSections.
-        sys_operation_spec = agent_spec.sys_operation or SysOperationSpec(
-            id=f"{self.card.id}.sys_operation",
-            mode=OperationMode.LOCAL,
-            work_config=LocalWorkConfig(shell_allowlist=None),
-        )
-        build_spec = agent_spec.model_copy(update={
-            "card": self.card,
-            "model": model_config,
-            "workspace": ws_spec,
-            "sys_operation": sys_operation_spec,
-            "tools": merged_tools,
-            "enable_task_loop": True,
-        })
-        self._deep_agent = build_spec.build()
-
-        # Decompose team policy into ordered PromptSections via TeamRail.
-        team_workspace_mount: str | None = None
-        team_workspace_path: str | None = None
-        if self._workspace_manager:
-            resolved_team_name = (
-                (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
-            )
-            team_workspace_mount = f".team/{resolved_team_name}/"
-            team_workspace_path = self._workspace_manager.workspace_path
-
-        self._deep_agent.add_rail(
-            TeamRail(
-                role=ctx.role,
-                persona=ctx.persona,
-                member_name=member_name,
-                lifecycle=spec.lifecycle,
-                teammate_mode=spec.teammate_mode,
-                language=resolved_language,
-                predefined_team=bool(spec.predefined_members),
-                base_prompt=agent_spec.system_prompt,
-                team_workspace_mount=team_workspace_mount,
-                team_workspace_path=team_workspace_path,
-                team_backend=self._team_backend,
-            )
+        # The leader-only async ``swarmflow`` tool is wired entirely inside the
+        # NativeHarness async-tool framework (configurator builds the worker-model
+        # resolver and gates the tool on it); TeamAgent no longer participates.
+        self._configurator.setup_agent(
+            spec,
+            ctx,
+            member_runtime=member_runtime,
         )
 
-        from openjiuwen.agent_teams.agent.rails import FirstIterationGate
-        self._first_iter_gate = FirstIterationGate()
-        self._deep_agent.add_rail(self._first_iter_gate)
-
-        # Register the transparent version-control rail. The ``.team/``
-        # symlink is mounted earlier (pre-build) so SkillUseRail can
-        # discover team-shared skills.
-        if self._workspace_manager:
-            from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
-            self._deep_agent.add_rail(
-                TeamWorkspaceRail(self._workspace_manager, member_name or ""),
-            )
-
-        is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
-        if is_coordinated_teammate and self._team_backend and self._messager:
-            from openjiuwen.agent_teams.agent.rails import TeamToolApprovalRail
-            approval_tools = agent_spec.approval_required_tools or []
-            if approval_tools:
-                self._deep_agent.add_rail(
-                    TeamToolApprovalRail(
-                        team_name=ctx.team_spec.team_name,
-                        member_name=member_name or "",
-                        db=self._team_backend.db,
-                        messager=self._messager,
-                        leader_member_name=ctx.team_spec.leader_member_name or "",
-                        tool_names=approval_tools,
-                    )
-                )
-
-        # Platform customizer: inject additional rails & tools (e.g. Claw adapter).
-        if spec.agent_customizer and self._deep_agent:
-            try:
-                spec.agent_customizer(self._deep_agent, member_name, ctx.role.value)
-            except Exception as exc:
-                team_logger.warning(
-                    "[{}] agent_customizer failed: {}", self._member_name() or "?", exc
-                )
-
-        # Teammate: member already exists in DB, create TeamMember now.
-        # Leader: TeamMember is created in _on_teammate_created callback.
-        if ctx.role == TeamRole.TEAMMATE and member_name and self._team_backend:
-            self._team_member = TeamMember(
-                member_name=member_name,
-                team_name=self._team_backend.team_name,
+        # Build the member handle once for every role. ``create_member_handle``
+        # is a pure constructor: it only needs the bound ``team_backend``
+        # (``setup_infra`` wires that up for all roles before this runs) and
+        # never touches the database. The leader's own DB row may not exist
+        # yet at this point -- it only materializes when the leader calls
+        # ``BuildTeamTool`` mid-round -- but ``TeamMember`` tolerates a missing
+        # row, so the handle is created eagerly here just like teammates. This
+        # keeps status / execution transitions flowing to the DB for every
+        # role, including the leader and cold-recovered agents.
+        if ctx.member_name:
+            self._state.team_member = create_member_handle(
+                member_name=ctx.member_name,
+                blueprint=self._configurator.blueprint,
+                infra=self._configurator.infra,
                 agent_card=self.card,
-                db=self._team_backend.db,
-                messager=self._messager,
-                desc=ctx.persona,
             )
 
-        from openjiuwen.agent_teams.agent.dispatcher import EventDispatcher
-        self._dispatcher = EventDispatcher(self)
-        self._coordination_loop = CoordinatorLoop(
-            role=ctx.role,
-            wake_callback=self._dispatcher.dispatch,
-        )
+        self._coordination.setup(role=ctx.role)
+        self._register_team_completion_callbacks()
+        self._register_reliability_local_sink()
 
-    # ------------------------------------------------------------------
-    # Role-based tool registration
-    # ------------------------------------------------------------------
+    def _register_team_completion_callbacks(self) -> None:
+        """Wire optional team-completion callbacks into the coordination layer.
 
-    def _register_team_tools(
+        Runs once, after the DeepAgent is fully built (rails mounted) and the
+        dispatcher exists. Extracts
+        any ``TeamSkillRail`` mounted on the agent and registers its
+        ``notify_team_completed`` hook with the ``TeamCompletionHandler``
+        so a drained task board triggers skill evolution — no per-event
+        rail lookup. No-op when the harness, dispatcher, or rail is absent.
+        """
+        harness = self._configurator.harness
+        dispatcher = self._coordination.dispatcher
+        if harness is None or dispatcher is None:
+            return
+        try:
+            from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillEvolutionRail
+        except ImportError:
+            # ENT may not yet ship team skill-create/evolution rails; skip wiring.
+            return
+
+        for rail_type in (TeamSkillEvolutionRail, TeamSkillCreateRail):
+            for rail in harness.find_rails(rail_type):
+                notify_team_completed = getattr(rail, "notify_team_completed", None)
+                if notify_team_completed is not None:
+                    dispatcher.team_completion.register_completion_callback(notify_team_completed)
+
+    def _register_reliability_local_sink(self) -> None:
+        """Wire the leader's reliability rail to its in-process anomaly sink.
+
+        Leader self-monitoring routes the leader's own anomalies straight to
+        the ReliabilityHandler instead of publishing an event the leader's
+        messager self-filter would drop. Runs after the dispatcher is built,
+        mirroring ``_register_team_completion_callbacks``. No-op when the
+        harness, dispatcher, or reliability handler is absent (reliability
+        disabled, or a non-leader member whose rail has no local reporter).
+        """
+        harness = self._configurator.harness
+        dispatcher = self._coordination.dispatcher
+        if harness is None or dispatcher is None:
+            return
+        handler = getattr(dispatcher, "reliability", None)
+        if handler is None:
+            return
+        from openjiuwen.agent_teams.reliability.rail import ReliabilityRail
+
+        for rail in harness.find_rails(ReliabilityRail):
+            rail.bind_local_sink(handler.handle_local_anomaly)
+
+    def _resolve_agent_spec(
+        self,
+        spec: TeamAgentSpec,
+        role: TeamRole,
+        member_name: Optional[str] = None,
+    ):
+        return self._configurator.resolve_agent_spec(spec, role, member_name)
+
+    def update_model_pool(self, new_pool: "list[ModelPoolEntry]") -> None:
+        self._configurator.update_model_pool(new_pool)
+        if self._configurator.spec is None or self.role != TeamRole.LEADER:
+            return
+        team_session = self._session_manager.team_session
+        if team_session is None:
+            return
+        self._recovery_manager.persist_leader_config(team_session)
+
+    def attach_model_allocator(
+        self,
+        allocator: "ModelAllocator",
+        *,
+        leader_allocation: Optional["Allocation"] = None,
+    ) -> None:
+        self._configurator.attach_model_allocator(allocator, leader_allocation=leader_allocation)
+
+    def restore_allocator_state(self, state: dict) -> None:
+        self._configurator.restore_allocator_state(state)
+
+    def _create_workspace_manager(
         self,
         spec: TeamAgentSpec,
         ctx: TeamRuntimeContext,
-        messager: Messager,
-    ) -> List[ToolCard]:
-        """Register role-appropriate team tools driven by permission sets."""
-        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
-        from openjiuwen.agent_teams.tools.team_tools import create_team_tools
-        from openjiuwen.agent_teams.schema.status import MemberMode
+    ) -> "TeamWorkspaceManager":
+        return self._configurator.create_workspace_manager(spec, ctx)
 
-        team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or "default"
-        db = get_shared_db(ctx.db_config)
-
-        is_leader = ctx.role == TeamRole.LEADER
-        current_member_name = ctx.member_name or (
-            ctx.team_spec.leader_member_name if ctx.team_spec else ""
-        )
-
-        agent_team = TeamBackend(
-            team_name=team_name,
-            member_name=current_member_name,
-            is_leader=is_leader,
-            db=db,
-            messager=messager,
-            teammate_mode=MemberMode(spec.teammate_mode),
-            predefined_members=spec.predefined_members or None,
-            model_config_allocator=self._model_allocator.allocate if self._model_allocator else None,
-            leader_model=ctx.member_model if is_leader else None,
-        )
-        self._team_backend = agent_team
-        self._task_manager = agent_team.task_manager
-        self._message_manager = agent_team.message_manager
-
-        # Record the team shared workspace path (possibly user-customized)
-        # so clean_team removes the real directory, not the default one.
-        if self._workspace_manager:
-            agent_team.register_cleanup_path(self._workspace_manager.workspace_path)
-
-        # Record the team-named parent directory (``team_home``) that
-        # this module uses as the root for ``stable_base`` member
-        # workspaces (see ``_setup_agent``) and the default team shared
-        # workspace (see ``_create_workspace_manager``).  Registering it
-        # also catches teammate workspace dirs the leader never saw
-        # (teammates run in separate processes).
-        agent_team.register_cleanup_path(str(team_home(team_name)))
-
-        exclude = {"spawn_member"} if spec.predefined_members else None
-        lang = (ctx.team_spec.metadata.get("lang") if ctx.team_spec else None) or "cn"
-        team_tools = create_team_tools(
-            role=ctx.role.value,
-            agent_team=agent_team,
-            teammate_mode=spec.teammate_mode,
-            on_teammate_created=self._on_teammate_created,
-            model_config_allocator=self._model_allocator.allocate if self._model_allocator else None,
-            exclude_tools=exclude,
-            lang=lang,
-        )
-        # Workspace metadata tool (lock management, version history).
-        if self._workspace_manager:
-            from openjiuwen.agent_teams.tools.locales import make_translator
-            from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
-
-            ws_t = make_translator(lang)
-            team_tools.append(WorkspaceMetaTool(self._workspace_manager, ws_t))
-
-        # Worktree isolation tools — teammate only.
-        if not is_leader and spec.worktree and spec.worktree.enabled:
-            from openjiuwen.agent_teams.tools.locales import make_translator
-            from openjiuwen.agent_teams.worktree.tools import EnterWorktreeTool, ExitWorktreeTool
-
-            self._worktree_manager = self._create_worktree_manager(spec)
-            wt_t = make_translator(lang)
-            team_tools.append(EnterWorktreeTool(self._worktree_manager, wt_t))
-            team_tools.append(ExitWorktreeTool(self._worktree_manager, wt_t))
-            # Eagerly create session state holder so asyncio.gather
-            # tool calls share the same mutable object.
-            from openjiuwen.agent_teams.worktree.session import init_session_state
-            init_session_state()
-
-        # Only in-process teammates share one global resource manager.
-        if spec.spawn_mode == "inprocess":
-            self._qualify_team_tool_ids(team_tools, team_name=team_name, member_name=current_member_name)
-
-        # Best-effort registration with Runner's
-        # resource manager.  When Runner has not been
-        # bootstrapped (e.g. unit tests) we skip
-        # silently -- the cards are still in
-        # ability_manager for schema generation.
-        try:
-            Runner.resource_mgr.add_tool(team_tools)
-        except Exception:
-            team_logger.debug("Runner.resource_mgr not available, skipping tool registration")
-
-        return [t.card for t in team_tools]
-
-    @staticmethod
-    def _qualify_team_tool_ids(team_tools: list[Tool], *, team_name: str, member_name: str) -> None:
-        """Qualify team tool ids so each member gets distinct resource ids.
-
-        Team tools share public names such as ``send_message`` across leader and
-        teammates, but only in-process mode shares one global
-        ``Runner.resource_mgr``. If the ids stay as ``team.send_message`` and
-        similar, members can resolve another agent's tool instance. Qualifying
-        ids keeps model-facing tool names stable while isolating the backing
-        instances.
-        """
-        team_key = team_name or "default"
-        member_key = member_name or "unknown"
-        for tool in team_tools:
-            if tool.card is None or not tool.card.id:
-                continue
-            qualified_id = f"{tool.card.id}.{team_key}.{member_key}"
-            if tool.card.id != qualified_id:
-                tool.card.id = qualified_id
+    def _create_worktree_manager(self, spec: TeamAgentSpec) -> "WorktreeManager":
+        return self._configurator.create_worktree_manager(spec)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract methods: invoke / stream
     # ------------------------------------------------------------------
 
     async def invoke(self, inputs, session=None):
-        """Execute via CoordinatorLoop-driven rounds.
-
-        Feeds initial query as USER_INPUT event, collects
-        all chunks, returns the last result.
-        """
         team_logger.info("[{}] invoke start, role={}", self._member_name() or "?", self.role.value)
-        self._stream_queue = asyncio.Queue()
-        await self._start_coordination(session)
+        self._stream_controller.stream_queue = asyncio.Queue()
+        # Cache the user query so CoordinationManager can pass it to the
+        # memory pipeline during start(). ``.get`` default does not cover a
+        # present-but-None value, so normalize an empty/None query to "".
+        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
+        self._state.pending_user_query = raw_query
+        routed_payloads = self._initial_leader_route_payloads(raw_query)
+        await self._coordination.start(session)
         try:
-            await self._enqueue_user_input(inputs)
-            await self._enqueue_mailbox_after_first_iteration()
+            if routed_payloads is not None:
+                await self._dispatch_initial_leader_route(routed_payloads)
+            else:
+                # Only drive a first round when there is an actual message.
+                # Spawn / recover / resume with no input must not fabricate a
+                # round; the mailbox poll below delivers only real pending
+                # messages (no-op when the inbox is empty).
+                if raw_query:
+                    await self._coordination.enqueue_user_input(inputs)
+                await self._coordination.enqueue_initial_mailbox_poll()
             last_result = None
             while True:
-                chunk = await self._stream_queue.get()
+                chunk = await self._stream_controller.stream_queue.get()
                 if chunk is None:
                     break
                 last_result = chunk
             return last_result
         finally:
-            await self._finalize_round()
+            await self._coordination.finalize_round()
+
+    async def broadcast(self, content: str) -> "DeliverResult":
+        """Broadcast a user-side announcement; returns the delivery result."""
+        from openjiuwen.agent_teams.interaction import UserInbox
+
+        if self._configurator.team_backend is None:
+            raise RuntimeError("TeamAgent.broadcast requires a configured team backend")
+        return await UserInbox(self._configurator.team_backend.message_manager).broadcast(content)
+
+    async def human_agent_say(
+        self,
+        content: str,
+        to: Optional[str] = None,
+        *,
+        sender: Optional[str] = None,
+    ) -> "DeliverResult":
+        """Speak as a registered human-agent member; returns the delivery result."""
+        from openjiuwen.agent_teams.interaction import HumanAgentInbox
+
+        if self._configurator.team_backend is None:
+            raise RuntimeError("TeamAgent.human_agent_say requires a configured team backend")
+        return await HumanAgentInbox(
+            self._configurator.team_backend,
+            self._configurator.team_backend.message_manager,
+        ).send(content, to=to, sender=sender)
 
     async def stream(self, inputs, session=None, stream_modes=None):
-        """Stream via CoordinatorLoop-driven rounds.
-
-        Feeds initial query as USER_INPUT event, yields
-        chunks from unified queue until sentinel (None).
-        """
         team_logger.info("[{}] stream start, role={}", self._member_name() or "?", self.role.value)
-        self._stream_queue = asyncio.Queue()
-        await self._start_coordination(session)
+        self._stream_controller.stream_queue = asyncio.Queue()
+        # ``.get`` default does not cover a present-but-None value, so
+        # normalize an empty/None query to "".
+        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
+        self._state.pending_user_query = raw_query
+        routed_payloads = self._initial_leader_route_payloads(raw_query)
+
+        await self._coordination.start(session)
         try:
-            await self._enqueue_user_input(inputs)
-            await self._enqueue_mailbox_after_first_iteration()
+            if routed_payloads is not None:
+                await self._dispatch_initial_leader_route(routed_payloads)
+            else:
+                # Only drive a first round when there is an actual message.
+                # Spawn / recover / resume with no input must not fabricate a
+                # round; the mailbox poll below delivers only real pending
+                # messages (no-op when the inbox is empty).
+                if raw_query:
+                    await self._coordination.enqueue_user_input(inputs)
+                await self._coordination.enqueue_initial_mailbox_poll()
             while True:
-                chunk = await self._stream_queue.get()
+                chunk = await self._stream_controller.stream_queue.get()
                 if chunk is None:
                     break
                 yield chunk
         finally:
-            await self._finalize_round()
-
-    async def _finalize_round(self) -> None:
-        """Tear down a finished invoke/stream round.
-
-        Routes by (lifecycle, shutdown_requested):
-        * shutdown requested → fully stop coordination and transition the
-          member to SHUTDOWN, regardless of lifecycle. SHUTDOWN_REQUESTED
-          can only legally transition to SHUTDOWN/ERROR, so the persistent
-          path must NOT push the member back to READY here.
-        * persistent + no shutdown → pause coordination, mark READY.
-        * temporary → fully stop coordination, mark SHUTDOWN.
-        """
-        shutdown_requested = (
-            self._team_member is not None
-            and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED
-        )
-        if self.lifecycle == "persistent" and not shutdown_requested:
-            await self._pause_coordination()
-            if self._team_member:
-                await self._team_member.update_status(MemberStatus.READY)
-        else:
-            await self._stop_coordination()
-            if self._team_member:
-                await self._team_member.update_status(MemberStatus.SHUTDOWN)
-        self._stream_queue = None
+            await self._coordination.finalize_round()
 
     async def interact(self, message: str) -> None:
-        """Inject user input into CoordinatorLoop as USER_INPUT event."""
-        if self._coordination_loop is None:
-            return
-        await self._coordination_loop.enqueue(
-            InnerEventMessage(
-                event_type=InnerEventType.USER_INPUT,
-                payload={"content": message},
-            )
-        )
+        await self._coordination.enqueue_user_input(message)
 
     # ------------------------------------------------------------------
-    # Coordination lifecycle helpers
+    # Coordination lifecycle (delegates to CoordinationManager; kept as
+    # public wrappers because tests drive them by name)
     # ------------------------------------------------------------------
 
-    async def _start_coordination(
-        self,
-        session=None,
-    ) -> None:
-        """Start the coordination loop."""
-        if self._coordination_loop is None:
-            return
-        member_name = self._member_name() or "?"
-        team_logger.info("[{}] coordination starting", member_name)
-        self._session_id = session.get_session_id() if session else None
-        if self._session_id:
-            from openjiuwen.agent_teams.spawn.context import set_session_id
-            set_session_id(self._session_id)
-        from openjiuwen.core.common.logging.utils import set_member_id
-        set_member_id(member_name)
-        if session is not None:
-            if isinstance(session, AgentTeamSession):
-                self._team_session = session
-            else:
-                team_logger.warning(
-                    "[{}] TeamAgent expects AgentTeamSession; got {}. "
-                    "Please invoke via Runner.run_agent_team_streaming.",
-                    member_name,
-                    type(session).__name__,
-                )
-        # Persist leader config to session for full-restart recovery
-        if session and self._spec and self.role == TeamRole.LEADER:
-            self._persist_leader_config(session)
-        # Eagerly initialize the DB so TeamRail's before_model_call probe
-        # functions never hit an uninitialized database.  Must run after
-        # set_session_id() so create_cur_session_tables uses the right names.
-        if self._team_backend:
-            await self._team_backend.db.initialize()
-            await self._team_backend.db.create_cur_session_tables()
-
-        # Leader-startup recovery: if the team is already persisted in the
-        # DB (e.g. a previous run with the same team_name), decide between
-        # finalizing a stalled cleanup and re-launching all teammates.
-        # On a fresh team build, get_team() returns None and this whole
-        # block is a no-op until build_team runs.
-        if self.role == TeamRole.LEADER and self._team_backend:
-            existing = await self._team_backend.db.get_team(self._team_backend.team_name)
-            if existing is not None:
-                non_leader_members = await self._team_backend.list_members()
-                # Stale shutdown: every teammate is already SHUTDOWN, which
-                # only happens when a previous run finished shutdown_member
-                # for everyone but never reached clean_team. Finalize the
-                # cleanup ourselves so the leader doesn't restart corpses
-                # and so the same team_name can be re-built cleanly.
-                if non_leader_members and all(
-                    m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members
-                ):
-                    team_logger.warning(
-                        "[{}] team {} found with all teammates in SHUTDOWN — "
-                        "finalizing prior incomplete cleanup",
-                        self._member_name() or "?",
-                        self._team_backend.team_name,
-                    )
-                    await self._team_backend.clean_team()
-                else:
-                    await self.recover_team()
-
-        # Async workspace initialization (git init + artifact dirs), idempotent.
-        if self._workspace_manager and not self._workspace_initialized:
-            await self._workspace_manager.initialize(
-                remote_url=self._spec.workspace.remote_url if self._spec and self._spec.workspace else None,
-            )
-            self._workspace_initialized = True
-
-        await self._update_status(MemberStatus.READY)
-        if not self._coordination_loop.is_running:
-            await self._coordination_loop.start()
-        if self._messager:
-            team_name = self._team_name()
-            if team_name and not self._subscribed_topics:
-                await self._subscribe_transport(team_name)
-
-    async def _enqueue_mailbox_after_first_iteration(self) -> None:
-        """Wait for agent's first iteration, then enqueue POLL_MAILBOX.
-
-        Skipped for leader — leader has no pre-existing unread messages at startup.
-        """
-        if self.role == TeamRole.LEADER:
-            return
-        if self._first_iter_gate is None or self._coordination_loop is None:
-            return
-        await self._first_iter_gate.wait()
-        await self._coordination_loop.enqueue(
-            InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX),
-        )
-
-    async def _enqueue_user_input(self, inputs: Any) -> None:
-        """Extract query from inputs and enqueue as USER_INPUT event."""
-        query = inputs.get("query", "") if isinstance(inputs, dict) else inputs
-        if self._coordination_loop is None:
-            return
-        await self._coordination_loop.enqueue(
-            InnerEventMessage(
-                event_type=InnerEventType.USER_INPUT,
-                payload={"content": query},
-            )
-        )
-
-    async def _drain_agent_task(self) -> None:
-        """Cancel the in-flight agent round and wait for it to exit.
-
-        Called from the pause/stop paths so an agent task whose stream
-        consumer has already detached (early ``break`` / ``GeneratorExit``)
-        cannot keep producing chunks against a queue that nobody is
-        draining. Clears ``_pending_inputs`` and
-        ``_pending_interrupt_resumes`` first because ``_run_one_round``'s
-        ``finally`` block would otherwise relaunch a fresh round mid
-        teardown.
-        """
-        task = self._agent_task
-        if task is None or task.done():
-            return
-        self._pending_inputs.clear()
-        self._pending_interrupt_resumes.clear()
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+    async def _start_coordination(self, session=None) -> None:
+        await self._coordination.start(session)
 
     async def _pause_coordination(self) -> None:
-        """Pause coordination for persistent teams.
+        await self._coordination.pause()
 
-        Publishes TEAM_STANDBY so teammates pause their polls,
-        then stops the leader's own loop without killing
-        teammate processes.
+    async def pause_coordination(self) -> None:
+        """Pause coordination without tearing down teammate processes."""
+        await self._pause_coordination()
+
+    async def _stop_coordination(
+        self,
+        *,
+        on_quiesced: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        await self._coordination.stop(on_quiesced=on_quiesced)
+
+    async def stop_coordination(
+        self,
+        *,
+        on_quiesced: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Stop coordination and shut down all spawned teammates.
+
+        ``on_quiesced`` is forwarded to the coordination kernel and runs
+        before the kernel and tiny-agent resources are torn down.
         """
-        team_logger.info("[{}] coordination pausing (persistent)", self._member_name() or "?")
-        await self._drain_agent_task()
-        # Signal teammates to pause polls
-        if self._messager and self.role == TeamRole.LEADER:
-            from openjiuwen.agent_teams.schema.events import (
-                EventMessage,
-                TeamStandbyEvent,
-                TeamTopic,
-            )
-            from openjiuwen.agent_teams.spawn.context import get_session_id
-            team_name = self._team_name()
-            if team_name:
-                try:
-                    await self._messager.publish(
-                        topic_id=TeamTopic.TEAM.build(get_session_id(), team_name),
-                        message=EventMessage.from_event(TeamStandbyEvent(team_name=team_name)),
-                    )
-                except Exception as e:
-                    team_logger.error("Failed to publish TEAM_STANDBY: {}", e)
-        await self._unsubscribe_transport()
-        if self._coordination_loop:
-            await self._coordination_loop.stop()
-        self._close_stream()
-        self._team_session = None
-
-    async def _stop_coordination(self) -> None:
-        """Stop the coordination loop, send sentinel, and unsubscribe."""
-        team_logger.info("[{}] coordination stopping", self._member_name() or "?")
-        await self._drain_agent_task()
-        await self._unsubscribe_transport()
-        # Cancel any in-flight teammate-recovery tasks before tearing down
-        # the spawn handles they would operate on. Snapshot the set because
-        # done_callback mutates it.
-        if self._recovery_tasks:
-            pending = list(self._recovery_tasks)
-            for task in pending:
-                if not task.done():
-                    task.cancel()
-            for task in pending:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
-            self._recovery_tasks.clear()
-        # Shut down all spawned teammate processes
-        for mid, handle in list(self._spawned_handles.items()):
-            try:
-                await handle.shutdown()
-            except Exception as e:
-                team_logger.error("Error shutting down teammate {}: {}", mid, e)
-        self._spawned_handles.clear()
-        if self._coordination_loop is None:
-            return
-        await self._coordination_loop.stop()
-        self._close_stream()
-        self._team_session = None
+        await self._stop_coordination(on_quiesced=on_quiesced)
+        await self._dispose_tiny_agents()
 
     def _close_stream(self) -> None:
-        """Send sentinel to signal stream consumers that no more data is coming."""
-        if self._stream_queue is not None:
-            self._stream_queue.put_nowait(None)
+        self._coordination.close_stream()
 
-    async def _subscribe_transport(self, team_name: str) -> None:
-        """Subscribe to all TeamTopic channels on the transport."""
-        if not self._messager or not self._coordination_loop:
-            return
-        from openjiuwen.agent_teams.spawn.context import get_session_id
-        from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
-
-        local_member_name = self._member_name() or ""
-
-        async def _filter_self(event: EventMessage) -> None:
-            for listener in self._event_listeners:
-                try:
-                    await listener(event)
-                except Exception as e:
-                    team_logger.error("Event listener error: {}", e)
-            if local_member_name and event.sender_id == local_member_name:
-                team_logger.debug("ignoring self-published event: {}", event.event_type)
-                return
-            await self._coordination_loop.enqueue(event)
-
-        session_id = get_session_id()
-        await self._messager.register_direct_message_handler(
-            self._coordination_loop.enqueue,
-        )
-        for topic in TeamTopic:
-            topic_str = topic.build(session_id, team_name)
-            await self._messager.subscribe(
-                topic_str,
-                _filter_self,
-            )
-            self._subscribed_topics.append(topic_str)
-
-    async def _unsubscribe_transport(self) -> None:
-        """Unsubscribe from all topics and unregister P2P handler."""
-        if not self._messager:
-            return
-        try:
-            await self._messager.unregister_direct_message_handler()
-        except Exception:
-            team_logger.debug("failed to unregister direct message handler during cleanup")
-        for topic in self._subscribed_topics:
-            try:
-                await self._messager.unsubscribe(topic)
-            except Exception:
-                team_logger.debug("failed to unsubscribe topic {} during cleanup", topic)
-        self._subscribed_topics.clear()
+    @property
+    def _subscribed_topics(self) -> list[str]:
+        return self._coordination.subscribed_topics
 
     def _is_agent_running(self) -> bool:
-        """Return True only while ``Runner.run_agent_streaming`` is pumping.
-
-        Tight window check: matches exactly the span where ``steer`` and
-        ``follow_up`` are guaranteed to reach the outer task loop through
-        ``DeepAgent._loop_controller``. Pre-stream status writes and the
-        post-stream finalize tail deliberately return False — outside the
-        streaming window those calls would either no-op or race.
-        """
-        return self._streaming_active
+        return self._stream_controller.is_agent_running()
 
     def _has_in_flight_round(self) -> bool:
-        """Return True while ``_agent_task`` is scheduled but not yet finalized."""
-        return self._agent_task is not None and not self._agent_task.done()
+        return self._stream_controller.has_in_flight_round()
 
     async def _cancel_agent(self) -> None:
-        """Cancel the running agent task and update execution status."""
-        await self._update_execution(ExecutionStatus.CANCEL_REQUESTED)
-        if self._agent_task and not self._agent_task.done():
-            await self._update_execution(ExecutionStatus.CANCELLING)
-            self._agent_task.cancel()
+        await self._stream_controller.cancel_agent()
 
     async def shutdown_self(self) -> None:
-        """Force-shutdown self in response to TEAM_CLEANED.
-
-        Called when the leader has dissolved the team and the database
-        team/member rows are gone. Cancels any in-flight round and closes
-        the stream so the natural ``stream() → _finalize_round →
-        _stop_coordination`` path tears down the coordination loop and
-        the coroutine exits. DB status writes are best-effort because the
-        backing rows may already have been cascade-deleted.
-        """
         member_name = self._member_name() or "?"
         team_logger.info("[{}] shutdown_self requested", member_name)
-        if self._agent_task and not self._agent_task.done():
-            self._agent_task.cancel()
-        if self._team_member is not None:
+        await self._stream_controller.cooperative_cancel()
+        if self._state.team_member is not None:
             try:
-                await self._team_member.update_status(MemberStatus.SHUTDOWN)
+                await self._state.team_member.update_status(MemberStatus.SHUTDOWN)
             except Exception as e:
                 team_logger.debug(
                     "[{}] post-clean status update failed (expected): {}",
-                    member_name, e,
+                    member_name,
+                    e,
                 )
+        await self._dispose_tiny_agents()
         self._close_stream()
 
-    async def _start_agent(
-        self,
-        initial_message: Any,
-    ) -> None:
-        """Run one round of DeepAgent via Runner in background.
-
-        Chunks are pushed to _stream_queue for the outer
-        stream()/invoke() to yield.
-        """
-        if self._deep_agent is None or self._stream_queue is None:
+    async def finalize_non_contributing_worktrees(self) -> None:
+        """Finalize current-session worktrees that did not contribute commits."""
+        if self.role != TeamRole.LEADER:
             return
-        preview = initial_message if isinstance(initial_message, str) else type(initial_message).__name__
-        team_logger.info("[{}] start_agent: {:.120}", self._member_name() or "?", str(preview))
-        self._agent_task = asyncio.create_task(
-            self._run_one_round(initial_message),
+        await self._spawn_manager.worktree_lifecycle.finalize_non_contributing_member_worktrees()
+
+    async def _finalize_team_worktrees_before_clean(self) -> None:
+        """Finalize current-session teammate worktrees before team DB deletion."""
+        if self.role != TeamRole.LEADER:
+            return
+        await self._spawn_manager.worktree_lifecycle.finalize_all_member_worktrees_for_team_clean()
+
+    async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
+        """Emit a team-completed marker chunk, then close the leader stream.
+
+        Drives the auto-pause path for a completed persistent team: closing
+        the stream makes the Runner's stream loop break on the None sentinel
+        and call ``manager.finalize``, which pauses the team. The marker
+        chunk lets the SDK consumer distinguish a completion-driven end from
+        an error/cancel end. Best-effort and idempotent -- the completion
+        handler's rising-edge guard ensures one call per completion.
+        """
+        team_logger.info(
+            "[{}] concluding completed round: {} member(s), {} task(s)",
+            self._member_name() or "?",
+            member_count,
+            task_count,
+        )
+        self._stream_controller.emit_completion_and_close(member_count, task_count)
+
+    async def _start_agent(self, initial_message: Any) -> None:
+        harness = self.harness
+        if harness is not None:
+            await harness.send(initial_message)
+
+    def _initial_leader_route_payloads(self, raw_query: str) -> list["InteractPayload"] | None:
+        """Parse leader initial input when it uses explicit team routing."""
+        if not raw_query or self.role != TeamRole.LEADER or self.team_backend is None:
+            return None
+
+        from openjiuwen.agent_teams.interaction.router import parse_interact_str
+
+        parsed = parse_interact_str(raw_query)
+        if parsed and any(not isinstance(payload, GodViewMessage) for payload in parsed):
+            return parsed
+        return None
+
+    async def _dispatch_initial_leader_route(self, payloads: list["InteractPayload"]) -> None:
+        """Dispatch a leader-run initial routed input without starting leader LLM."""
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+
+        result = await TeamRuntimeManager.dispatch_payloads(self, payloads)
+        if result.ok:
+            return
+
+        await self._emit_interact_failed(result.reason)
+        self._stream_controller.close_stream()
+
+    async def _emit_interact_failed(self, reason: Optional[str]) -> None:
+        """Emit a stream-visible failure for initial interact routing."""
+        if self._stream_controller.stream_queue is None:
+            return
+        from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
+
+        await self._stream_controller.stream_queue.put(
+            TeamOutputSchema(
+                type="message",
+                index=0,
+                payload={
+                    "event_type": "team.interact.failed",
+                    "reason": reason,
+                },
+                source_member=self._member_name(),
+                role=self.role,
+            )
         )
 
     async def _update_status(self, status: MemberStatus) -> None:
-        """Update member status if this agent belongs to a team."""
-        if self._team_member:
-            await self._team_member.update_status(status)
+        if self._state.team_member:
+            await self._state.team_member.update_status(status)
 
     async def _update_execution(self, status: ExecutionStatus) -> None:
-        """Update member execution status if this agent belongs to a team."""
-        if self._team_member:
-            await self._team_member.update_execution_status(status)
-
-    async def _run_one_round(
-        self,
-        message: Any,
-    ) -> None:
-        """Execute one DeepAgent stream round via Runner."""
-        if self._deep_agent and self._deep_agent.deep_config and self._deep_agent.deep_config.workspace:
-            from openjiuwen.core.sys_operation.cwd import init_cwd
-
-            init_root = self._deep_agent.deep_config.workspace.root_path
-            init_cwd(
-                init_root,
-                workspace=init_root,
-            )
-        # Pull the member back to READY before transitioning to BUSY so a
-        # still-live member that ended its previous round in ERROR can
-        # recover. READY → READY is a no-op at the member layer.
-        await self._update_status(MemberStatus.READY)
-        await self._update_status(MemberStatus.BUSY)
-        try:
-            await self._execute_round(message)
-            # If a shutdown request landed mid-round, leave the status in
-            # SHUTDOWN_REQUESTED — the state machine forbids
-            # SHUTDOWN_REQUESTED → READY, and ``_finalize_round`` will
-            # transition it to SHUTDOWN once the round loop unwinds.
-            if (
-                self._team_member is None
-                or await self._team_member.status() != MemberStatus.SHUTDOWN_REQUESTED
-            ):
-                await self._update_status(MemberStatus.READY)
-        except BaseException as e:
-            team_logger.error("Failed to execute deep agent, {}", e, exc_info=True)
-            await self._update_status(MemberStatus.ERROR)
-        finally:
-            self._agent_task = None
-            next_resume = self._dequeue_valid_interrupt_resume()
-            if next_resume is not None and self._stream_queue is not None:
-                await self._start_agent(next_resume)
-            elif self._pending_inputs and self._stream_queue is not None:
-                # Drain the entire queue into one round. Combining avoids
-                # an O(N) chain of round-restarts when several inputs land
-                # in the same transition window; anything arriving after
-                # the new round begins streaming goes directly through
-                # ``steer`` and never re-enters the queue, so it converges.
-                drained = self._pending_inputs
-                self._pending_inputs = []
-                if len(drained) == 1:
-                    combined = drained[0]
-                else:
-                    combined = "\n\n---\n\n".join(
-                        item if isinstance(item, str) else str(item)
-                        for item in drained
-                    )
-                await self._start_agent(combined)
-            else:
-                await self._wake_mailbox_if_interrupt_cleared()
-                if self._team_member and await self._team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
-                    self._close_stream()
-
-    async def _execute_round(
-        self,
-        message: Any,
-    ) -> None:
-        """Execute the agent invocation via Runner.
-
-        Derives a fresh AgentSession from the team session each round so that
-        pre_run/post_run lifecycle (checkpoint recover/save) fires correctly.
-        Leader uses token-level streaming; teammates use invoke for simpler execution.
-        """
-        await self._update_execution(ExecutionStatus.STARTING)
-        await self._update_execution(ExecutionStatus.RUNNING)
-        try:
-            current_query: Any = message
-            attempt = 0
-            while True:
-                inputs = {"query": current_query}
-                error_seen = False
-                error_code: Optional[int] = None
-                error_text: str = ""
-                self._streaming_active = True
-                try:
-                    async for chunk in Runner.run_agent_streaming(
-                        self._deep_agent, inputs, session=self._session_id
-                    ):
-                        # Once a TASK_FAILED frame is seen, suppress every
-                        # trailing frame (blank answer + END_FRAME) so the
-                        # downstream queue never sees a truncated round.
-                        if error_seen:
-                            continue
-                        detected = _detect_task_failed(chunk)
-                        if detected is not None:
-                            error_seen = True
-                            error_code, error_text = detected
-                            continue
-                        if self._stream_queue is not None:
-                            await self._stream_queue.put(chunk)
-                finally:
-                    self._streaming_active = False
-
-                if not error_seen:
-                    break
-
-                if (
-                    error_code in _RETRYABLE_ERROR_CODES
-                    and attempt < _MAX_RETRY_ATTEMPTS
-                ):
-                    attempt += 1
-                    team_logger.warning(
-                        "DeepAgent round transient error "
-                        "(code=%s, attempt=%d/%d): %s",
-                        error_code,
-                        attempt,
-                        _MAX_RETRY_ATTEMPTS,
-                        error_text,
-                    )
-                    current_query = _RETRY_QUERY
-                    continue
-
-                team_logger.error(
-                    "DeepAgent round failed (code=%s, attempts=%d): %s",
-                    error_code,
-                    attempt,
-                    error_text,
-                )
-                raise build_error(
-                    StatusCode.AGENT_TEAM_EXECUTION_ERROR,
-                    error_msg=(
-                        f"streaming task failed after {attempt} retries, "
-                        f"last error code={error_code}: {error_text}"
-                    ),
-                )
-            await self._update_execution(ExecutionStatus.COMPLETING)
-            await self._update_execution(ExecutionStatus.COMPLETED)
-        except asyncio.CancelledError:
-            await self._update_execution(ExecutionStatus.CANCELLED)
-            raise
-        except asyncio.TimeoutError:
-            await self._update_execution(ExecutionStatus.TIMED_OUT)
-            raise
-        except Exception as e:
-            team_logger.error("DeepAgent round error: %s", e)
-            await self._update_execution(ExecutionStatus.FAILED)
-            raise
-        finally:
-            await self._update_execution(ExecutionStatus.IDLE)
-
-    def _is_valid_interrupt_resume(self, user_input: Any) -> bool:
-        """Return True when the supplied InteractiveInput still targets a pending interrupt."""
-        if not isinstance(user_input, InteractiveInput):
-            return False
-        session = self._deep_agent.loop_session if self._deep_agent else None
-        if session is None:
-            return False
-        state = session.get_state(INTERRUPTION_KEY)
-        if state is None:
-            return False
-        interrupted = getattr(state, "interrupted_tools", {}) or {}
-        pending_ids = set()
-        for entry in interrupted.values():
-            requests = getattr(entry, "interrupt_requests", {}) or {}
-            pending_ids.update(requests.keys())
-        if not pending_ids:
-            return False
-        resume_ids = set(user_input.user_inputs.keys())
-        return bool(resume_ids) and resume_ids.issubset(pending_ids)
-
-    def _dequeue_valid_interrupt_resume(self) -> Optional[InteractiveInput]:
-        """Pop the next still-valid queued interrupt resume input."""
-        while self._pending_interrupt_resumes:
-            candidate = self._pending_interrupt_resumes.pop(0)
-            if self._is_valid_interrupt_resume(candidate):
-                return candidate
-        return None
+        if self._state.team_member:
+            await self._state.team_member.update_execution_status(status)
 
     async def _wake_mailbox_if_interrupt_cleared(self) -> None:
-        """Nudge mailbox processing once an interrupt gate has been cleared."""
-        if self.role != TeamRole.TEAMMATE:
+        await self._coordination.wake_mailbox_if_interrupt_cleared()
+
+    async def _request_completion_poll(self) -> None:
+        """Enqueue a POLL_TASK so the leader re-evaluates team completion now.
+
+        Leader + persistent only: temporary teams conclude via clean_team,
+        and teammates never own the team-level conclusion. Lets a round-end
+        settle trigger the completion check immediately instead of waiting
+        for the next periodic POLL_TASK tick. Best-effort -- an absent or
+        stopped event bus silently drops the enqueue.
+        """
+        if self.role != TeamRole.LEADER or self.lifecycle != "persistent":
             return
-        if self.has_pending_interrupt():
-            return
-        if self._coordination_loop is None:
-            return
-        await self._coordination_loop.enqueue(
-            InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX),
+        from openjiuwen.agent_teams.agent.coordination.event_bus import (
+            InnerEventMessage,
+            InnerEventType,
+        )
+
+        await self._coordination.enqueue(
+            InnerEventMessage(event_type=InnerEventType.POLL_TASK),
         )
 
     def _member_name(self) -> Optional[str]:
-        """Return the current agent's member_name."""
-        return self._ctx.member_name if self._ctx else None
+        return self._configurator.member_name
 
     def _team_name(self) -> Optional[str]:
-        """Return the current team_name."""
-        if self._ctx and self._ctx.team_spec:
-            return self._ctx.team_spec.team_name
-        return None
+        return self._configurator.team_name
 
     # ------------------------------------------------------------------
     # Rail / callback proxies to internal DeepAgent
     # ------------------------------------------------------------------
 
     async def register_rail(self, rail: AgentRail) -> "TeamAgent":
-        """Proxy rail registration to the internal DeepAgent."""
-        if self._deep_agent is not None:
-            await self._deep_agent.register_rail(rail)
+        harness = self._configurator.harness
+        if harness is not None:
+            await harness.register_rail(rail)
         return self
 
     async def unregister_rail(self, rail: AgentRail) -> "TeamAgent":
-        """Proxy rail unregistration to the internal DeepAgent."""
-        if self._deep_agent is not None:
-            await self._deep_agent.unregister_rail(rail)
+        harness = self._configurator.harness
+        if harness is not None:
+            await harness.unregister_rail(rail)
         return self
 
     # ------------------------------------------------------------------
-    # Spawn / clone helpers (unchanged logic)
+    # Spawn / clone helpers
     # ------------------------------------------------------------------
 
     def build_spawn_payload(
@@ -1421,106 +967,26 @@ class TeamAgent(BaseAgent):
         *,
         initial_message: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Build the payload used to bootstrap one teammate."""
-        team_spec = self.team_spec
-        member_transport = self._build_member_messager_config(ctx.member_name)
-        return {
-            "coordination": {
-                "team_name": team_spec.team_name if team_spec else "",
-                "display_name": team_spec.display_name if team_spec else "",
-                "leader_member_name": team_spec.leader_member_name if team_spec else None,
-                "member_name": ctx.member_name,
-                "role": ctx.role.value,
-                "persona": ctx.persona,
-                "transport": (member_transport.model_dump(mode="json") if member_transport is not None else None),
-            },
-            "query": initial_message or "Join the team and wait for your first assignment.",
-        }
+        return self._configurator.build_spawn_payload(ctx, initial_message=initial_message)
 
     def build_member_context(self, member_spec: TeamMemberSpec) -> TeamRuntimeContext:
-        """Build runtime context for one teammate from a predefined member spec."""
-        return TeamRuntimeContext(
-            role=member_spec.role_type,
-            member_name=member_spec.member_name,
-            persona=member_spec.persona,
-            team_spec=self._ctx.team_spec,
-            messager_config=self._build_member_messager_config(member_spec.member_name),
-            db_config=self._ctx.db_config,
-        )
-
-    def _build_member_messager_config(self, member_name: str):
-        if self._ctx is None or self._ctx.messager_config is None:
-            return None
-        leader_cfg = self._ctx.messager_config
-        meta = self._spec.metadata if self._spec else {}
-        base_port = meta.get("teammate_base_port", 16000)
-        port_offset = meta.get("teammate_port_offset", 10)
-
-        # Reuse cached port on restart; assign new port on first spawn
-        mid = member_name
-        if mid in self._member_port_map:
-            port_base = self._member_port_map[mid]
-        else:
-            port_base = base_port + self._teammate_port_counter * port_offset
-            self._teammate_port_counter += 1
-            self._member_port_map[mid] = port_base
-
-        updates: Dict[str, Any] = {
-            "node_id": member_name,
-            "direct_addr": f"tcp://127.0.0.1:{port_base}",
-            "pubsub_publish_addr": leader_cfg.pubsub_publish_addr,
-            "pubsub_subscribe_addr": leader_cfg.pubsub_subscribe_addr,
-        }
-        # Teammates never run the pubsub proxy — only connect to the leader's.
-        metadata = dict(leader_cfg.metadata)
-        metadata.pop("pubsub_bind", None)
-        updates["metadata"] = metadata
-        return leader_cfg.model_copy(update=updates)
+        return self._configurator.build_member_context(member_spec)
 
     def build_spawn_config(self, ctx: TeamRuntimeContext) -> SpawnAgentConfig:
-        """Build JSON-safe spawn config for one teammate process."""
-        context = ctx
-        logging_config = self._build_member_logging_config(ctx.member_name or "", ctx.member_name or "")
-        return SpawnAgentConfig(
-            agent_kind=SpawnAgentKind.TEAM_AGENT,
-            runner_config=serialize_runner_config(Runner.get_config()),
-            logging_config=logging_config,
-            session_id=None,
-            payload={
-                "spec": self._spec.model_dump(mode="json"),
-                "context": context.model_dump(mode="json"),
-            },
-        )
-
-    @staticmethod
-    def _build_member_logging_config(member_name: str, name: str) -> dict[str, Any]:
-        """Build a logging config with member-specific log file paths to avoid overwrites."""
-        from openjiuwen.core.common.logging.log_config import get_log_config_snapshot
-
-        config = get_log_config_snapshot()
-        member_tag = member_name or name
-        sinks = config.get("sinks", {})
-        for sink in sinks.values():
-            target = sink.get("target")
-            if not isinstance(target, str) or target in ("stdout", "stderr"):
-                continue
-            # Insert member tag into file path: ./logs/run/jiuwen.log -> ./logs/run/teammates/{tag}/jiuwen.log
-            parts = target.rsplit("/", 1)
-            if len(parts) == 2:
-                sink["target"] = f"{parts[0]}/teammates/{member_tag}/{parts[1]}"
-            else:
-                sink["target"] = f"teammates/{member_tag}/{target}"
-        return config
+        return self._configurator.build_spawn_config(ctx)
 
     @classmethod
     async def from_spawn_payload(cls, payload: Dict[str, Any]) -> "TeamAgent":
-        """Rebuild a TeamAgent from JSON-safe spawn payload dict."""
-        from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec as _Spec
-        from openjiuwen.agent_teams.schema.team import TeamRuntimeContext as _Ctx
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
-        spec = _Spec.model_validate(payload["spec"])
-        context = _Ctx.model_validate(payload["context"])
+        spec = TeamAgentSpec.model_validate(payload["spec"])
+        context = TeamRuntimeContext.model_validate(payload["context"])
+
+        # Rebuild the provider-based build context from its serializable seed:
+        # ``build_context`` is excluded from JSON and is None after validation,
+        # so without this a spawned member loses every provider-assembled
+        # capability. No-op for the legacy path (no seed).
+        spec.materialize_build_context()
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
         team_name = (context.team_spec.team_name if context.team_spec else None) or spec.team_name
@@ -1528,65 +994,67 @@ class TeamAgent(BaseAgent):
         card = agent_spec.card or AgentCard(
             id=card_id,
             name=context.member_name or "unknown",
-            description=f"Teammate: {context.persona}" if context.persona else "Teammate",
+            description=f"Teammate: {context.desc}" if context.desc else "Teammate",
         )
         agent = cls(card)
-        await agent.configure_team(spec, context)
+        agent.configure(spec, context)
         return agent
-
-    def _init_leader_member(self, member_name: str) -> None:
-        """Initialize TeamMember for the leader after DB registration."""
-        self._team_member = TeamMember(
-            member_name=member_name,
-            team_name=self._team_backend.team_name,
-            agent_card=self.card,
-            db=self._team_backend.db,
-            messager=self._messager,
-            desc=self._ctx.persona,
-        )
 
     async def _on_teammate_created(self, teammate_id: str):
         team_logger.info("[{}] on_teammate_created: {}", self._member_name() or "?", teammate_id)
-        if teammate_id == self._member_name():
-            self._init_leader_member(teammate_id)
-            return
-        ctx = await self._build_context_from_db(teammate_id)
+        ctx = await self._spawn_manager.build_context_from_db(teammate_id)
         if ctx is None:
             return
-        teammate = await self._team_backend.get_member(teammate_id)
+        # No first-start message: a member's DB ``prompt`` is its private
+        # system-prompt addendum (carried on ``ctx.member_prompt``), not a
+        # startup instruction. Members come up subscribed-only and receive
+        # real work from the leader via send_message / task assignment.
         await self.spawn_teammate(
             ctx,
-            initial_message=teammate.prompt if teammate else None,
-            session=self._session_id,
+            initial_message=None,
+            session=self.session_id,
             spawn_config=SpawnConfig(health_check_timeout=30, health_check_interval=50),
         )
 
-    async def _build_context_from_db(self, member_name: str) -> Optional[TeamRuntimeContext]:
-        """Build a TeamRuntimeContext directly from DB record."""
-        teammate = await self._team_backend.get_member(member_name)
-        if teammate is None:
-            team_logger.error("Teammate {} not found in database", member_name)
-            return None
+    async def _mark_team_cleaned(self) -> None:
+        """Latch ``state.team_cleaned`` from the ``clean_team`` success path.
 
-        member_model = self._deserialize_member_model(teammate.model_config_json)
+        Wired into ``TeamBackend`` via
+        ``setup_team_backend(on_team_cleaned=...)``. ``clean_team`` runs
+        synchronously inside the leader's DeepAgent round, so setting the
+        flag here guarantees it is visible before
+        ``StreamController._on_idle_settled`` evaluates terminal
+        conditions — no reliance on the racy ``TeamCleanedEvent``
+        bus handler, which the leader deliberately ignores (see
+        ``coordination/handlers/agent_lifecycle.py::on_cleaned``).
+        """
+        team_logger.info("[{}] clean_team completed; latching team_cleaned", self._member_name() or "?")
+        from openjiuwen.agent_teams.runtime.metadata import TEAM_DB_STATE_CLEANED
 
-        return TeamRuntimeContext(
-            role=TeamRole.TEAMMATE,
-            member_name=teammate.member_name,
-            persona=teammate.desc or "",
-            team_spec=self._ctx.team_spec,
-            messager_config=self._build_member_messager_config(teammate.member_name),
-            db_config=self._ctx.db_config,
-            member_model=member_model,
-        )
+        await self._persist_team_db_state(TEAM_DB_STATE_CLEANED)
+        self._state.team_cleaned = True
 
-    @staticmethod
-    def _deserialize_member_model(json_str: Optional[str]) -> Optional["TeamModelConfig"]:
-        """Deserialize model_config_json from DB."""
-        if not json_str:
-            return None
-        from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
-        return TeamModelConfig.model_validate_json(json_str)
+    async def _mark_team_built(self) -> None:
+        """Persist that the team DB row has been created."""
+        team_logger.info("[{}] build_team completed; latching team DB state", self._member_name() or "?")
+        from openjiuwen.agent_teams.runtime.metadata import TEAM_DB_STATE_CREATED
+
+        self._state.team_cleaned = False
+        await self._persist_team_db_state(TEAM_DB_STATE_CREATED)
+        # F_62: build_team may have chosen scheduled dispatch — arm the
+        # scheduler now, before any teammate spawn or task creation.
+        await self._coordination.notify_team_built()
+
+    async def _persist_team_db_state(self, db_state: str) -> None:
+        """Persist the team DB lifecycle state into the active checkpoint."""
+        team_session = self._session_manager.team_session
+        team_name = self._configurator.team_name
+        if team_session is None or team_name is None:
+            return
+        from openjiuwen.agent_teams.runtime.metadata import merge_team_db_state
+
+        merge_team_db_state(team_session, team_name, db_state)
+        await team_session.flush_checkpoint()
 
     async def spawn_teammate(
         self,
@@ -1596,222 +1064,133 @@ class TeamAgent(BaseAgent):
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
     ):
-        """Spawn one teammate via subprocess or in-process coroutine.
+        return await self._spawn_manager.spawn_teammate(
+            ctx,
+            initial_message=initial_message,
+            session=session,
+            spawn_config=spawn_config,
+        )
 
-        The returned handle is tracked internally and an on_unhealthy
-        callback is registered so the leader can auto-restart the
-        teammate when consecutive health checks fail.
+    async def auto_start_member(self, member_name: str) -> bool:
+        """Start a single UNSTARTED member via TeamBackend.startup_member.
+
+        Best-effort: failure is logged but does not raise.
+        Returns True if the member was started.
         """
-        member_name = ctx.member_name
-        team_logger.info("[{}] spawning teammate: {}", self._member_name() or "?", member_name)
+        backend = self.team_backend
+        if backend is None or not backend.is_leader:
+            return False
+        try:
+            started = await backend.startup_member(member_name, on_created=self._on_teammate_created)
+        except Exception as exc:
+            team_logger.error("auto_start_member({}) failed: {}", member_name, exc)
+            return False
+        if started:
+            team_logger.info("Auto-started member via interact: {}", member_name)
+        return started
 
-        if self._spec and self._spec.spawn_mode == "inprocess":
-            from openjiuwen.agent_teams.spawn.inprocess_spawn import inprocess_spawn
+    async def auto_start_all(self) -> list[str]:
+        """Start all UNSTARTED members via TeamBackend.startup.
 
-            handle = await inprocess_spawn(
-                team_agent=self,
-                ctx=ctx,
-                initial_message=initial_message,
-                session_id=self._session_id or session,
-            )
-        else:
-            handle = await Runner.spawn_agent(
-                self.build_spawn_config(ctx),
-                self.build_spawn_payload(
-                    ctx,
-                    initial_message=initial_message,
-                ),
-                session=session,
-                spawn_config=spawn_config,
-            )
-
-        self._spawned_handles[member_name] = handle
-
-        def _trigger_unhealthy_recovery() -> asyncio.Task:
-            task = asyncio.ensure_future(self._on_teammate_unhealthy(member_name))
-            self._recovery_tasks.add(task)
-            task.add_done_callback(self._recovery_tasks.discard)
-            return task
-
-        handle.on_unhealthy = _trigger_unhealthy_recovery
-        return handle
+        Best-effort: failure is logged but does not raise.
+        Returns list of member names that were started.
+        """
+        backend = self.team_backend
+        if backend is None or not backend.is_leader:
+            return []
+        try:
+            started = await backend.startup(on_created=self._on_teammate_created)
+            if started:
+                team_logger.info("Auto-started members via interact broadcast: {}", started)
+            return started
+        except Exception as exc:
+            team_logger.error("auto_start_all failed: {}", exc)
+            return []
 
     # ------------------------------------------------------------------
     # Fault tolerance: cleanup, restart, recover
     # ------------------------------------------------------------------
 
-    async def _on_teammate_unhealthy(self, member_name: str) -> None:
-        """Handle a teammate whose process has become unhealthy.
-
-        Cleans up the dead process, marks the member as RESTARTING
-        in the database, and attempts to re-spawn.
-        """
-        team_logger.warning("Teammate {} detected as unhealthy, initiating restart", member_name)
-        await self._cleanup_teammate(member_name)
-        if self._team_backend:
-            await self._team_backend.db.update_member_status(member_name, self._team_name(),
-                                                             MemberStatus.RESTARTING.value)
-        await self._restart_teammate(member_name)
-
-    async def _cleanup_teammate(self, member_name: str) -> None:
-        """Clean up resources for a dead/dying teammate process."""
-        handle = self._spawned_handles.pop(member_name, None)
-        if handle is None:
-            return
-        try:
-            await handle.stop_health_check()
-            if handle.is_alive:
-                await handle.force_kill()
-        except Exception as e:
-            team_logger.error("Error cleaning up teammate {}: {}", member_name, e)
-
-    async def _restart_teammate(self, member_name: str, max_retries: int = 3) -> bool:
-        """Restart a teammate process, recovering config from DB.
-
-        Retries with exponential backoff. Publishes MemberRestartedEvent
-        on success; marks ERROR on exhaustion. Any prior spawn handle for
-        ``member_name`` is force-killed first so callers (recover_team,
-        unhealthy detection, leader-startup recovery) can invoke this
-        idempotently without leaking processes.
-        """
-        await self._cleanup_teammate(member_name)
-
-        ctx = await self._build_context_from_db(member_name)
-        if ctx is None:
-            team_logger.error("Cannot recover spawn config for {}", member_name)
-            return False
-
-        teammate = await self._team_backend.get_member(member_name)
-        initial_message = teammate.prompt if teammate else None
-        spawn_config = SpawnConfig(health_check_timeout=30, health_check_interval=50)
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                team_logger.info("Restarting teammate {} (attempt {}/{})", member_name, attempt, max_retries)
-                await self.spawn_teammate(
-                    ctx,
-                    initial_message=initial_message,
-                    spawn_config=spawn_config,
-                )
-                await self._publish_restart_event(member_name, attempt)
-                team_logger.info("Teammate {} restarted successfully", member_name)
-                return True
-            except Exception as e:
-                team_logger.error("Restart attempt {} for {} failed: {}", attempt, member_name, e)
-                if attempt < max_retries:
-                    await asyncio.sleep(2 ** attempt)
-
-        # All retries exhausted
-        if self._team_backend:
-            await self._team_backend.db.update_member_status(member_name, self._team_name(), MemberStatus.ERROR.value)
-        return False
-
-    async def _publish_restart_event(self, member_name: str, restart_count: int) -> None:
-        """Publish MemberRestartedEvent on the team topic."""
-        if not self._messager or not self._team_backend:
-            return
-        from openjiuwen.agent_teams.spawn.context import get_session_id
-        from openjiuwen.agent_teams.schema.events import (
-            EventMessage,
-            MemberRestartedEvent,
-            TeamTopic,
-        )
-        try:
-            await self._messager.publish(
-                topic_id=TeamTopic.TEAM.build(get_session_id(), self._team_backend.team_name),
-                message=EventMessage.from_event(MemberRestartedEvent(
-                    team_name=self._team_backend.team_name,
-                    member_name=member_name,
-                    restart_count=restart_count,
-                )),
-            )
-        except Exception as e:
-            team_logger.error("Failed to publish restart event for {}: {}", member_name, e)
-
     async def resume_for_new_session(self, session) -> None:
-        """Prepare a persistent team for a new session.
+        await self._session_manager.resume_for_new_session(session)
 
-        Switches the session context, creates new dynamic tables for
-        the new session (tasks, messages), and persists leader config.
-        Existing teammate processes and DB member records are retained.
+    async def recover_for_existing_session(self, session) -> None:
+        """Recover an existing session checkpoint on a running TeamAgent.
 
-        Args:
-            session: The new session to attach to.
+        Unlike recover_from_session which constructs a fresh agent, this
+        method reuses the current agent and assumes session.pre_run() has
+        already restored checkpoint state. Used for session switches that
+        should not unwind the entire team.
         """
-        from openjiuwen.agent_teams.spawn.context import set_session_id
-        self._session_id = session.get_session_id()
-        set_session_id(self._session_id)
-        self._team_session = session if isinstance(session, AgentTeamSession) else None
-
-        if self._team_backend:
-            await self._team_backend.db.create_cur_session_tables()
-
-        if self._spec and self.role == TeamRole.LEADER:
-            self._persist_leader_config(session)
+        await self._stop_coordination()
+        await self._session_manager.recover_for_existing_session(session)
 
     async def recover_team(self) -> list[str]:
-        """Re-launch every teammate from database state.
-
-        Called after the leader has been reconstructed (e.g. via
-        ``recover_from_session``) or whenever the leader starts on a
-        team that already exists in the DB. All non-leader members are
-        re-spawned regardless of their last persisted status — any prior
-        process is assumed dead and replaced with a fresh one.
-        """
-        if not self._team_backend:
-            return []
-
-        team_logger.info("[{}] recovering team", self._member_name() or "?")
-        all_members = await self._team_backend.list_members()
-        leader_member_name = self._member_name()
-        restarted: list[str] = []
-
-        for member in all_members:
-            if member.member_name == leader_member_name:
-                continue
-            await self._team_backend.db.update_member_status(
-                member.member_name, self._team_name(), MemberStatus.RESTARTING.value,
-            )
-            if await self._restart_teammate(member.member_name):
-                restarted.append(member.member_name)
-
-        return restarted
+        return await self._recovery_manager.recover_team()
 
     # ------------------------------------------------------------------
     # Leader config persistence / recovery
     # ------------------------------------------------------------------
 
     def _persist_leader_config(self, session) -> None:
-        """Persist leader's spec + context to session state for recovery."""
-        session.update_state({
-            "spec": self._spec.model_dump(mode="json"),
-            "context": self._ctx.model_dump(mode="json"),
-            "team_name": self._team_name(),
-        })
+        self._recovery_manager.persist_leader_config(session)
+
+    def persist_session_manifest(self, session) -> None:
+        """Persist the minimum session manifest needed for recovery and cleanup."""
+        self._recovery_manager.persist_leader_config(session)
+
+    def _persist_allocator_state(self) -> None:
+        self._recovery_manager.persist_allocator_state(self._session_manager.team_session)
 
     @classmethod
-    def recover_from_session(cls, session) -> "TeamAgent":
-        """Recover a leader TeamAgent from a persisted session.
-
-        Used in full-restart scenario: all processes exited, the caller
-        re-creates the leader from session state.
+    def recover_from_session(
+        cls,
+        session,
+        team_name: str,
+        runtime_spec: TeamAgentSpec | None = None,
+    ) -> "TeamAgent":
+        """Reconstruct a leader TeamAgent from a session checkpoint.
 
         Args:
-            session: AgentTeamSession with persisted leader config in state.
+            session: Prepared agent team session whose checkpoint was already
+                restored via ``pre_run``.
+            team_name: Identifies which team's bucket to load. A session can
+                hold state for multiple teams; the caller must specify which.
+            runtime_spec: Optional live spec from the current process. Used to
+                reinject ``build_context`` and ``memory.embedding_config``, which
+                are ``Field(exclude=True)`` and never survive the checkpoint
+                round-trip. When omitted the recovered spec is used as-is
+                (rebuilding context from its seed).
+
+        Raises:
+            ValueError: When the session has no bucket for ``team_name`` or
+                the bucket is missing the leader spec.
         """
-        from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec as _Spec
-        from openjiuwen.agent_teams.schema.team import TeamRuntimeContext as _Ctx
+        from openjiuwen.agent_teams.runtime.metadata import read_team_namespace
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
-        state = session.get_state()
-        spec_data = state.get("spec")
+        bucket = read_team_namespace(session, team_name)
+        if bucket is None:
+            raise ValueError(f"No persisted state for team '{team_name}' in session")
+        spec_data = bucket.get("spec")
         if spec_data is None:
-            raise ValueError("No leader spec found in session state")
-        spec = _Spec.model_validate(spec_data)
-        context = _Ctx.model_validate(state["context"])
+            raise ValueError(f"No leader spec found for team '{team_name}'")
+        spec = TeamAgentSpec.model_validate(spec_data)
+        # build_context is Field(exclude=True) and dropped on the checkpoint
+        # round-trip. Prefer the live runtime spec's context on warm recovery;
+        # otherwise rebuild it from the serializable seed so provider-based
+        # members survive a cold restart. No-op for legacy.
+        if runtime_spec is not None and runtime_spec.build_context is not None:
+            spec.build_context = runtime_spec.build_context
+        # embedding_config is also Field(exclude=True) — reinject from the
+        # live spec so resolve_embedding_config can find it during configure.
+        if runtime_spec is not None and runtime_spec.memory and runtime_spec.memory.embedding_config:
+            if spec.memory:
+                spec.memory.embedding_config = runtime_spec.memory.embedding_config
+        spec.materialize_build_context()
+        context = TeamRuntimeContext.model_validate(bucket["context"])
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
-        team_name = (context.team_spec.team_name if context.team_spec else None) or spec.team_name
         card_id = f"{team_name}_{context.member_name}" if context.member_name else "leader"
         card = agent_spec.card or AgentCard(
             id=card_id,
@@ -1819,6 +1198,20 @@ class TeamAgent(BaseAgent):
         )
         agent = cls(card)
         agent.configure(spec, context)
+        allocator_state = bucket.get("model_allocator_state")
+        if allocator_state:
+            agent.restore_allocator_state(allocator_state)
+        # Inject session_id into the agent_teams contextvar so the immediately
+        # following ``recover_team`` flow (and its restart_teammate -> spawn
+        # chain) can read it via ``get_session_id``. We deliberately do NOT
+        # take a Token here: this is a classmethod and the bind / release
+        # contract is owned by ``SessionManager``; the caller's context is
+        # short-lived (manager._apply_action) and the pool entry that holds
+        # the leader will eventually go through bind_session for proper
+        # Token-managed lifecycle.
+        from openjiuwen.agent_teams.context import set_session_id
+
+        set_session_id(session.get_session_id())
         return agent
 
 

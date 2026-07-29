@@ -24,7 +24,9 @@ share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
+# Only ignore the root distutils/setuptools MANIFEST file — not packages named
+# ``manifest`` (e.g. openjiuwen.agent_teams.harness.manifest).
+/MANIFEST
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

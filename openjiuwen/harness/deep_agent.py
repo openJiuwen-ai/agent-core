@@ -31,7 +31,7 @@ from openjiuwen.core.single_agent.rail.base import (
     RunContext,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.rails import DeepAgentRail
+from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
 )

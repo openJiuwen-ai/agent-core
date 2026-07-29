@@ -9,7 +9,7 @@ import pytest
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.rails import AskUserRail
+from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
 from tests.unit_tests.agent.react_agent.interrupt.test_base import (
     assert_answer_result,
     assert_interrupt_result,

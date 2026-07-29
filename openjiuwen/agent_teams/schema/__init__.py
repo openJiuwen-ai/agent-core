@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Schemas for agent teams."""
 
 from openjiuwen.agent_teams.schema.blueprint import (
@@ -18,8 +20,8 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
     SysOperationSpec,
     VisionModelSpec,
     WorkspaceSpec,
-    register_rail_type,
 )
+from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import (
     TeamLifecycle,
     TeamMemberSpec,
@@ -38,10 +40,10 @@ __all__ = [
     "SubAgentSpec",
     "SysOperationSpec",
     "TeamAgentSpec",
+    "TeamOutputSchema",
     "TransportSpec",
     "VisionModelSpec",
     "WorkspaceSpec",
-    "register_rail_type",
     "register_storage",
     "register_transport",
     "TeamLifecycle",

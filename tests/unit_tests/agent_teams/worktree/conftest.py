@@ -5,7 +5,7 @@ import subprocess
 import pytest
 from unittest.mock import AsyncMock
 
-from openjiuwen.agent_teams.worktree.models import WorktreeConfig
+from openjiuwen.harness.tools.worktree.models import WorktreeConfig
 
 
 @pytest.fixture

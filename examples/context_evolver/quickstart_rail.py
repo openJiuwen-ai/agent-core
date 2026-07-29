@@ -43,7 +43,7 @@ from openjiuwen.extensions.context_evolver import (
     TaskMemoryService,
     AddMemoryRequest,
 )
-from openjiuwen.harness.rails import TaskMemoryRail
+from openjiuwen.harness.rails.task_memory_rail import TaskMemoryRail
 
 # ---------------------------------------------------------------------------
 # Environment variables — edit these if you don't have a .env file

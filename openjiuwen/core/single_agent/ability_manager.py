@@ -409,6 +409,59 @@ class AbilityManager:
 
         return add_single_ability(ability)
 
+    def add_ability(self, card: ToolCard, resource: Any) -> AddAbilityResult:
+        """Register a tool: bind instance in ``Runner.resource_mgr``, then card.
+
+        Same two-step pattern as ``interface_deep`` / ``factory.apply_deep_agent_parts``.
+        """
+        from openjiuwen.core.runner import Runner
+
+        tool_id = getattr(card, "id", None) or getattr(card, "name", None)
+        if tool_id:
+            existing = Runner.resource_mgr.get_tool(tool_id)
+            if existing is not None and existing is not resource:
+                try:
+                    Runner.resource_mgr.remove_tool(tool_id)
+                except Exception as exc:
+                    logger.debug(
+                        "add_ability: remove stale tool id=%s failed: %s",
+                        tool_id,
+                        exc,
+                    )
+        add_result = Runner.resource_mgr.add_tool(resource)
+        if hasattr(add_result, "is_err") and add_result.is_err():
+            logger.warning(
+                "add_ability: resource_mgr.add_tool failed id=%s err=%s",
+                tool_id,
+                add_result.msg() if hasattr(add_result, "msg") else add_result,
+            )
+        return self.add(card)
+
+    def remove_ability(self, name: Union[str, List[str]]) -> None:
+        """Remove tool card(s) and matching resource_mgr instance(s)."""
+        from openjiuwen.core.runner import Runner
+
+        names = name if isinstance(name, list) else [name]
+        for item in names:
+            card = self._tools.get(item)
+            self.remove(item)
+            if card is None:
+                continue
+            tool_id = getattr(card, "id", None) or item
+            try:
+                Runner.resource_mgr.remove_tool(tool_id)
+            except Exception as exc:
+                logger.debug(
+                    "remove_ability: resource_mgr.remove_tool id=%s failed: %s",
+                    tool_id,
+                    exc,
+                )
+
+    def teardown_tools(self) -> None:
+        """Drop all tool cards on this manager and their resource_mgr instances."""
+        for tool_name in list(self._tools.keys()):
+            self.remove_ability(tool_name)
+
     def remove(self, name: Union[str, List[str]]) -> Union[None, Ability, List[Ability]]:
         """Remove an ability by name
 

@@ -1,0 +1,1218 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Task and task-dependency data access object.
+
+The module is organised in two layers:
+
+* Top-level helpers — pure SQL primitives that take an explicit
+  ``session`` and operate on the dynamic per-session task / dependency
+  tables. They have no implicit state and serve as the building blocks
+  for the higher-level ``TaskDao`` methods.
+* ``TaskDao`` class — owns the session factory and exposes the public
+  CRUD / state-machine / graph-mutation surface. Methods are thin
+  transaction shells over the helpers above.
+"""
+
+from typing import Dict, Iterable, List, Optional
+
+from sqlalchemy import case, func, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from openjiuwen.agent_teams.schema.status import (
+    TASK_TRANSITIONS,
+    TaskStatus,
+    is_valid_transition,
+)
+from openjiuwen.agent_teams.schema.task import (
+    GraphMutationResult,
+    NewTaskSpec,
+)
+from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+from openjiuwen.agent_teams.tools.database.graph import (
+    TASK_DEPENDENCY_REJECT_STATUSES,
+    TASK_TERMINAL_STATUSES,
+    detect_cycle_in_adjacency,
+)
+from openjiuwen.agent_teams.tools.models import (
+    TeamTaskBase,
+    TeamTaskDependencyBase,
+    TeamTaskReviewVoteBase,
+    _get_review_vote_model,
+    _get_task_dependency_model,
+    _get_task_model,
+)
+from openjiuwen.core.common.logging import team_logger
+
+
+# ---------------------------------------------------------------------------
+# Internal control-flow signal for graph-mutation step failures.
+#
+# Each helper in the mutation pipeline raises this on a business-rule
+# rejection (duplicate id, missing endpoint, cycle, …). The single try
+# block in ``mutate_dependency_graph`` catches it once and converts
+# ``reason`` to a ``GraphMutationResult.fail``. Keeping this internal
+# avoids tuple-typed ``(data, error)`` returns that obscure the
+# step-by-step pipeline.
+# ---------------------------------------------------------------------------
+
+
+class _MutationFailure(Exception):
+    """Internal signal: a graph-mutation step rejected the request."""
+
+    def __init__(self, reason: str) -> None:
+        """Store the human-readable failure reason."""
+        super().__init__(reason)
+        self.reason = reason
+
+
+# The three owned non-terminal conditions a task can be reset from — the plan
+# gate, execution, and the verify gate. All are valid predecessors of PENDING.
+_RESETTABLE_STATUSES = (
+    TaskStatus.PLANNING.value,
+    TaskStatus.IN_PROGRESS.value,
+    TaskStatus.IN_REVIEW.value,
+)
+
+
+# ---------------------------------------------------------------------------
+# Pure SQL helpers (no instance state).
+# ---------------------------------------------------------------------------
+
+
+async def _refresh_status_in_session(
+    session: AsyncSession,
+    task_ids: Iterable[str],
+    now: int,
+) -> List[TeamTaskBase]:
+    """Recompute PENDING/BLOCKED status for tasks based on unresolved deps."""
+    unique_ids = list({tid for tid in task_ids if tid})
+    if not unique_ids:
+        return []
+
+    team_task_model = _get_task_model()
+    task_dependency_model = _get_task_dependency_model()
+
+    tasks_result = await session.execute(select(team_task_model).where(team_task_model.task_id.in_(unique_ids)))
+    candidates = [
+        t for t in tasks_result.scalars().all() if t.status in (TaskStatus.PENDING.value, TaskStatus.BLOCKED.value)
+    ]
+    if not candidates:
+        return []
+
+    candidate_ids = [t.task_id for t in candidates]
+    unresolved_result = await session.execute(
+        select(
+            task_dependency_model.task_id,
+            func.count().label("unresolved"),
+        )
+        .where(
+            task_dependency_model.task_id.in_(candidate_ids),
+            task_dependency_model.resolved.is_(False),
+        )
+        .group_by(task_dependency_model.task_id)
+    )
+    unresolved_by_task: Dict[str, int] = {row[0]: row[1] for row in unresolved_result.all()}
+
+    refreshed: List[TeamTaskBase] = []
+    for task in candidates:
+        unresolved = unresolved_by_task.get(task.task_id, 0)
+        if task.status == TaskStatus.PENDING.value and unresolved > 0:
+            task.status = TaskStatus.BLOCKED.value
+            task.updated_at = now
+            refreshed.append(task)
+            team_logger.info("Task %s blocked (%d unresolved deps)", task.task_id, unresolved)
+        elif task.status == TaskStatus.BLOCKED.value and unresolved == 0:
+            task.status = TaskStatus.PENDING.value
+            task.updated_at = now
+            refreshed.append(task)
+            team_logger.info("Task %s unblocked (all deps resolved)", task.task_id)
+    return refreshed
+
+
+async def _terminate_task_in_session(
+    session: AsyncSession,
+    task_id: str,
+    new_status: TaskStatus,
+    now: int,
+) -> Optional[tuple[TeamTaskBase, List[TeamTaskBase]]]:
+    """Terminate a task and propagate dependency resolution downstream."""
+    if new_status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
+        raise ValueError(f"_terminate_task_in_session expects a terminal status, got {new_status}")
+
+    team_task_model = _get_task_model()
+    task_dependency_model = _get_task_dependency_model()
+
+    result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+    task = result.scalar_one_or_none()
+    if task is None:
+        team_logger.error("Task %s not found", task_id)
+        return None
+
+    if task.status == new_status.value:
+        team_logger.debug("Task %s already %s", task_id, new_status.value)
+        return task, []
+
+    if not is_valid_transition(TaskStatus(task.status), new_status, TASK_TRANSITIONS):
+        team_logger.error(
+            "Invalid state transition for task %s: %s -> %s",
+            task_id,
+            task.status,
+            new_status.value,
+        )
+        return None
+
+    task.status = new_status.value
+    task.updated_at = now
+    team_logger.info("Task %s %s at %s", task_id, new_status.value, now)
+
+    dep_update_result = await session.execute(
+        update(task_dependency_model)
+        .where(
+            task_dependency_model.depends_on_task_id == task_id,
+            task_dependency_model.resolved.is_(False),
+        )
+        .values(resolved=True)
+    )
+    resolved_count = dep_update_result.rowcount or 0
+    if resolved_count > 0:
+        team_logger.info("Resolved %d dependencies for task %s", resolved_count, task_id)
+
+    downstream_result = await session.execute(
+        select(task_dependency_model.task_id).where(task_dependency_model.depends_on_task_id == task_id).distinct()
+    )
+    downstream_ids = {row[0] for row in downstream_result.all()}
+
+    refreshed = await _refresh_status_in_session(session, downstream_ids, now)
+    return task, refreshed
+
+
+async def _stage_new_tasks(
+    session: AsyncSession,
+    team_name: str,
+    new_tasks: List[NewTaskSpec],
+    now: int,
+) -> None:
+    """Insert new task rows, raising ``_MutationFailure`` on duplicate id."""
+    if not new_tasks:
+        return
+
+    team_task_model = _get_task_model()
+    new_ids = [spec.task_id for spec in new_tasks]
+    existing_result = await session.execute(
+        select(team_task_model.task_id).where(team_task_model.task_id.in_(new_ids))
+    )
+    existing_ids = set(existing_result.scalars().all())
+    if existing_ids:
+        raise _MutationFailure(f"Task id already exists: {', '.join(sorted(existing_ids))}")
+
+    seen_ids: set[str] = set()
+    for spec in new_tasks:
+        if spec.task_id in seen_ids:
+            raise _MutationFailure(f"Duplicate task_id {spec.task_id} in new_tasks")
+        seen_ids.add(spec.task_id)
+        session.add(
+            team_task_model(
+                task_id=spec.task_id,
+                team_name=team_name,
+                title=spec.title,
+                content=spec.content,
+                status=spec.initial_status,
+                assignee=spec.assignee,
+                reviewer=spec.reviewer,
+                max_review_rounds=spec.max_review_rounds,
+                updated_at=now,
+            )
+        )
+    await session.flush()
+
+
+async def _load_endpoints_and_validate(
+    session: AsyncSession,
+    add_edges: List[tuple[str, str]],
+) -> Dict[str, TeamTaskBase]:
+    """Resolve every edge endpoint and reject invalid sources.
+
+    Raises:
+        _MutationFailure: when an endpoint is missing or the edge source
+            is in a status that forbids new dependencies (terminal or
+            already executing — see ``TASK_DEPENDENCY_REJECT_STATUSES``).
+    """
+    if not add_edges:
+        return {}
+
+    team_task_model = _get_task_model()
+    edge_endpoints: set[str] = set()
+    for tid, dep_id in add_edges:
+        edge_endpoints.add(tid)
+        edge_endpoints.add(dep_id)
+
+    endpoint_result = await session.execute(
+        select(team_task_model).where(team_task_model.task_id.in_(list(edge_endpoints)))
+    )
+    endpoint_tasks: Dict[str, TeamTaskBase] = {t.task_id: t for t in endpoint_result.scalars().all()}
+
+    for tid, dep_id in add_edges:
+        if tid not in endpoint_tasks:
+            raise _MutationFailure(f"Task {tid} not found")
+        if dep_id not in endpoint_tasks:
+            raise _MutationFailure(f"Dependency target {dep_id} not found")
+        src_status = endpoint_tasks[tid].status
+        if src_status in TASK_DEPENDENCY_REJECT_STATUSES:
+            raise _MutationFailure(
+                f"Cannot add dependency to {tid} in terminal or executing status: {src_status}"
+            )
+    return endpoint_tasks
+
+
+async def _check_cycle_and_compute_new_edges(
+    session: AsyncSession,
+    team_name: str,
+    add_edges: List[tuple[str, str]],
+) -> set[tuple[str, str]]:
+    """Compute edges to insert, dropping duplicates and rejecting cycles.
+
+    Builds the post-mutation adjacency from existing-edges + add_edges,
+    then runs a single cycle check on the union.
+
+    Raises:
+        _MutationFailure: when applying ``add_edges`` would introduce a
+            cycle.
+    """
+    # No new edges cannot introduce a new cycle — the existing graph is
+    # kept acyclic by this very check on every prior edge insertion.
+    if not add_edges:
+        return set()
+
+    task_dependency_model = _get_task_dependency_model()
+    existing_edges_rows = (
+        await session.execute(
+            select(
+                task_dependency_model.task_id,
+                task_dependency_model.depends_on_task_id,
+            ).where(task_dependency_model.team_name == team_name)
+        )
+    ).all()
+    existing_edge_set: set[tuple[str, str]] = {(row[0], row[1]) for row in existing_edges_rows}
+    adjacency: Dict[str, List[str]] = {}
+    for src, dst in existing_edge_set:
+        adjacency.setdefault(src, []).append(dst)
+
+    new_edge_set: set[tuple[str, str]] = set()
+    for tid, dep_id in add_edges:
+        edge = (tid, dep_id)
+        if edge in existing_edge_set or edge in new_edge_set:
+            continue
+        new_edge_set.add(edge)
+        adjacency.setdefault(tid, []).append(dep_id)
+
+    cycle = detect_cycle_in_adjacency(adjacency)
+    if cycle is not None:
+        raise _MutationFailure(f"Circular dependency detected: {' -> '.join(cycle)}")
+    return new_edge_set
+
+
+async def _apply_new_edges(
+    session: AsyncSession,
+    team_name: str,
+    new_edge_set: set[tuple[str, str]],
+    endpoint_tasks: Dict[str, TeamTaskBase],
+) -> None:
+    """Insert dependency rows for the freshly computed new edges."""
+    if not new_edge_set:
+        return
+
+    task_dependency_model = _get_task_dependency_model()
+    for tid, dep_id in new_edge_set:
+        dep_status = endpoint_tasks[dep_id].status
+        initial_resolved = dep_status in TASK_TERMINAL_STATUSES
+        session.add(
+            task_dependency_model(
+                task_id=tid,
+                depends_on_task_id=dep_id,
+                team_name=team_name,
+                resolved=initial_resolved,
+            )
+        )
+    await session.flush()
+
+
+# ---------------------------------------------------------------------------
+# TaskDao — public surface
+# ---------------------------------------------------------------------------
+
+
+class TaskDao:
+    """Data access object for task and task-dependency tables."""
+
+    def __init__(self, sessions: DbSessions) -> None:
+        """Initialize task DAO with the shared read/write session provider."""
+        self._sessions = sessions
+
+    async def create_task(
+        self,
+        task_id: str,
+        team_name: str,
+        title: str,
+        content: str,
+        status: str,
+    ) -> bool:
+        """Create a new team task."""
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            try:
+                task = team_task_model(
+                    task_id=task_id,
+                    team_name=team_name,
+                    title=title,
+                    content=content,
+                    status=status,
+                    updated_at=get_current_time(),
+                )
+                session.add(task)
+                await session.commit()
+                team_logger.info("Task %s created", task_id)
+                return True
+            except IntegrityError as e:
+                await session.rollback()
+                team_logger.error("Task %s already exists: %s", task_id, e)
+                return False
+
+    async def get_task(self, task_id: str) -> Optional[TeamTaskBase]:
+        """Get task information by ID."""
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            return result.scalar_one_or_none()
+
+    async def get_team_tasks(self, team_name: str, status: Optional[str] = None) -> List[TeamTaskBase]:
+        """Get all tasks for a team, optionally filtered by status."""
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            query = select(team_task_model).where(team_task_model.team_name == team_name)
+            if status:
+                query = query.where(team_task_model.status == status)
+            result = await session.execute(query)
+            return result.scalars().all()
+
+    async def count_tasks_terminality(self, team_name: str) -> tuple[int, int]:
+        """Return ``(total_tasks, non_terminal_tasks)`` for a team in one query.
+
+        Lets a caller decide "is the whole board drained?" (``total > 0 and
+        non_terminal == 0``) with a single aggregate SELECT instead of loading
+        every row and iterating in Python — the ``_maybe_publish_task_list_drained``
+        check runs on every terminal task transition, so an O(N) full scan there
+        is pure waste. ``func.sum`` over a 0/1 ``case`` is used (not the FILTER
+        clause) to stay portable across the SQLite / PostgreSQL / MySQL backends.
+
+        Returns:
+            ``(total, non_terminal)`` — both 0 when the board is empty.
+        """
+        team_task_model = _get_task_model()
+        non_terminal_flag = case(
+            (team_task_model.status.in_(list(TASK_TERMINAL_STATUSES)), 0),
+            else_=1,
+        )
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(
+                    func.count(),
+                    func.coalesce(func.sum(non_terminal_flag), 0),
+                ).where(team_task_model.team_name == team_name)
+            )
+            total, non_terminal = result.one()
+            return int(total), int(non_terminal)
+
+    async def get_tasks_by_assignee(
+        self, team_name: str, assignee_id: str, status: Optional[str] = None
+    ) -> List[TeamTaskBase]:
+        """Get tasks assigned to a specific member, optionally filtered by status."""
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            query = select(team_task_model).where(
+                team_task_model.team_name == team_name,
+                team_task_model.assignee == assignee_id,
+            )
+            if status:
+                query = query.where(team_task_model.status == status)
+            result = await session.execute(query)
+            return result.scalars().all()
+
+    async def get_other_active_task_id(
+        self, team_name: str, member_name: str, exclude_task_id: str
+    ) -> Optional[str]:
+        """Return the task_id of one *active* task held by ``member_name``
+        other than ``exclude_task_id``, or None.
+
+        Existence-style probe for the one-active-task invariant: a member
+        may hold at most one in-flight task at a time. "Active" spans the
+        three non-terminal owned conditions — ``PLANNING`` (plan gate),
+        ``IN_PROGRESS`` (executing), and ``IN_REVIEW`` (verify gate, author
+        stays on the hook). Selects a single ``task_id`` column with
+        ``LIMIT 1`` instead of materializing the member's whole active set.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            query = (
+                select(team_task_model.task_id)
+                .where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.assignee == member_name,
+                    team_task_model.status.in_(
+                        (
+                            TaskStatus.PLANNING.value,
+                            TaskStatus.IN_PROGRESS.value,
+                            TaskStatus.IN_REVIEW.value,
+                        )
+                    ),
+                    team_task_model.task_id != exclude_task_id,
+                )
+                .limit(1)
+            )
+            return (await session.execute(query)).scalar_one_or_none()
+
+    async def start_task(
+        self,
+        task_id: str,
+        member_name: str,
+        *,
+        to_status: TaskStatus = TaskStatus.IN_PROGRESS,
+    ) -> bool:
+        """Atomically move an assigned PENDING task into execution via a CAS.
+
+        Scheduled-dispatch counterpart of ``claim_task``: the assignee was
+        fixed at create time, so this only flips the status once execution
+        begins. The predicate ``WHERE assignee = member AND status = pending``
+        makes PENDING the sole valid predecessor and requires the task to
+        already belong to ``member_name`` — the scheduler starts a task on
+        behalf of its recorded owner, it does not (re)assign here. Mirrors
+        ``claim_task``'s ``to_status`` parameterization: ``IN_PROGRESS`` for a
+        build-mode owner, ``PLANNING`` when the owner runs in plan mode (the
+        scheduled entry into the plan gate, F_59/F_62).
+
+        Returns:
+            True iff the row moved to ``to_status`` (``rowcount == 1``); False
+            when the task is missing, not pending, or not owned by
+            ``member_name``.
+        """
+        team_task_model = _get_task_model()
+        now = get_current_time()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.assignee == member_name,
+                    team_task_model.status == TaskStatus.PENDING.value,
+                )
+                .values(status=to_status.value, updated_at=now)
+            )
+            await session.commit()
+            started = result.rowcount == 1
+            if started:
+                team_logger.info("Task %s started by member %s", task_id, member_name)
+            else:
+                team_logger.debug(
+                    "CAS start for task %s by %s did not apply (rowcount=%s): "
+                    "missing / not pending / not owned by this member",
+                    task_id,
+                    member_name,
+                    result.rowcount,
+                )
+            return started
+
+    async def claim_task(
+        self,
+        task_id: str,
+        member_name: str,
+        *,
+        to_status: TaskStatus = TaskStatus.IN_PROGRESS,
+    ) -> bool:
+        """Atomically claim a PENDING, unassigned task via a single CAS UPDATE.
+
+        Shared persistence step for teammate self-claim (``to_status`` defaults
+        to ``IN_PROGRESS``) and plan reservation (``TeamTaskManager.submit_plan``
+        passes ``to_status=PLANNING``). Callers already validate existence,
+        member, conflict, and the state transition with reads taken *outside*
+        the write lock; this method is only the concurrency arbiter. Expressing
+        the claim as one conditional ``UPDATE`` — ``WHERE assignee IS NULL AND
+        status = pending`` (PENDING is the sole valid predecessor of both
+        targets) — keeps the write-lock critical section to a single statement
+        instead of the old SELECT-then-UPDATE, so the process-wide write lock is
+        held for less time under contention. Only one racing caller can match
+        the row, so exactly one wins.
+
+        Args:
+            task_id: Task to claim.
+            member_name: Member taking ownership.
+            to_status: Target condition — ``IN_PROGRESS`` for a build-mode
+                claim, ``PLANNING`` to reserve for plan submission.
+
+        Returns:
+            True iff this call claimed the row (``rowcount == 1``); False
+            when the task is missing, already assigned, not pending, or a
+            concurrent claim won first.
+        """
+        team_task_model = _get_task_model()
+        now = get_current_time()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.assignee.is_(None),
+                    team_task_model.status == TaskStatus.PENDING.value,
+                )
+                .values(
+                    status=to_status.value,
+                    assignee=member_name,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+            claimed = result.rowcount == 1
+            if claimed:
+                team_logger.info("Task %s claimed by member %s", task_id, member_name)
+            else:
+                team_logger.debug(
+                    "CAS claim for task %s by %s did not apply (rowcount=%s): "
+                    "missing / already assigned / not pending / lost the race",
+                    task_id,
+                    member_name,
+                    result.rowcount,
+                )
+            return claimed
+
+    async def reassign_task(self, task_id: str, from_assignee: str, to_assignee: str) -> bool:
+        """Atomically hand an IN_PROGRESS task from one member to another.
+
+        Single conditional ``UPDATE`` — ``WHERE assignee = from_assignee AND
+        status = in_progress`` — so the task never bounces through PENDING (no
+        spurious TASK_RELEASED, no claimable-pool window an idle teammate
+        could race into). Mirrors ``claim_task``'s CAS discipline: existence /
+        member validation is the caller's job outside the write lock; this
+        method is only the concurrency arbiter.
+
+        Returns:
+            True iff the row was swapped (``rowcount == 1``); False when the
+            task is missing, not IN_PROGRESS, or not held by ``from_assignee``.
+        """
+        team_task_model = _get_task_model()
+        now = get_current_time()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.assignee == from_assignee,
+                    team_task_model.status == TaskStatus.IN_PROGRESS.value,
+                )
+                .values(assignee=to_assignee, updated_at=now)
+            )
+            await session.commit()
+            swapped = result.rowcount == 1
+            if swapped:
+                team_logger.info("Task %s reassigned from %s to %s", task_id, from_assignee, to_assignee)
+            else:
+                team_logger.debug(
+                    "CAS reassign for task %s (%s -> %s) did not apply (rowcount=%s)",
+                    task_id,
+                    from_assignee,
+                    to_assignee,
+                    result.rowcount,
+                )
+            return swapped
+
+    async def reset_task(self, task_id: str) -> Optional[TeamTaskBase]:
+        """Reset an in-flight task back to pending status and clear assignee.
+
+        Accepts the three owned non-terminal conditions — ``PLANNING`` (plan
+        gate), ``IN_PROGRESS`` (executing), and ``IN_REVIEW`` (verify gate);
+        all are valid predecessors of PENDING.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            task = result.scalar_one_or_none()
+            if not task:
+                team_logger.error("Task %s not found", task_id)
+                return None
+
+            if task.status not in _RESETTABLE_STATUSES:
+                team_logger.error(
+                    "Cannot reset task %s with status %s, only planning / in-progress / in-review tasks can be reset",
+                    task_id,
+                    task.status,
+                )
+                return None
+
+            if not is_valid_transition(
+                TaskStatus(task.status),
+                TaskStatus.PENDING,
+                TASK_TRANSITIONS,
+            ):
+                team_logger.error(
+                    "Invalid state transition for task %s: %s -> %s",
+                    task_id,
+                    task.status,
+                    TaskStatus.PENDING.value,
+                )
+                return None
+
+            origin_task_status = task.status
+            task.status = TaskStatus.PENDING.value
+            task.assignee = None
+            task.updated_at = get_current_time()
+            await session.commit()
+            team_logger.info("Task %s reset from %s to PENDING", task_id, origin_task_status)
+
+            return task
+
+    async def submit_for_review(self, task_id: str) -> bool:
+        """Atomically move an IN_PROGRESS task to IN_REVIEW via a CAS UPDATE.
+
+        The verify-gate entry: the author declared the work done and the task
+        carries reviewers, so it enters review instead of completing. A plain
+        status flip — dependencies are *not* resolved here (the task is not
+        done until a reviewer passes it). The author (``assignee``) stays put.
+        ``WHERE status='in_progress'`` makes IN_PROGRESS the sole predecessor.
+        ``review_round`` is bumped in the same statement (F_62): opening a new
+        round is atomic with the flip, so votes recorded against a superseded
+        round can never be confused with the current one.
+
+        Returns:
+            True iff the row moved to IN_REVIEW (``rowcount == 1``); False when
+            the task is missing or not IN_PROGRESS.
+        """
+        team_task_model = _get_task_model()
+        now = get_current_time()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.status == TaskStatus.IN_PROGRESS.value,
+                )
+                .values(
+                    status=TaskStatus.IN_REVIEW.value,
+                    review_round=team_task_model.review_round + 1,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+            submitted = result.rowcount == 1
+            if submitted:
+                team_logger.info("Task %s submitted for review", task_id)
+            else:
+                team_logger.debug(
+                    "CAS submit-for-review for task %s did not apply (rowcount=%s): missing / not in_progress",
+                    task_id,
+                    result.rowcount,
+                )
+            return submitted
+
+    async def revise_task(self, task_id: str) -> bool:
+        """Atomically move an IN_REVIEW task back to IN_PROGRESS (verify fail).
+
+        The verify-gate rework edge: a reviewer failed the task, so it returns
+        to execution for the (still-assigned) author to revise. Plain status
+        flip; ``WHERE status='in_review'`` makes IN_REVIEW the sole predecessor.
+
+        Returns:
+            True iff the row moved to IN_PROGRESS (``rowcount == 1``); False when
+            the task is missing or not IN_REVIEW.
+        """
+        team_task_model = _get_task_model()
+        now = get_current_time()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(
+                    team_task_model.task_id == task_id,
+                    team_task_model.status == TaskStatus.IN_REVIEW.value,
+                )
+                .values(status=TaskStatus.IN_PROGRESS.value, updated_at=now)
+            )
+            await session.commit()
+            revised = result.rowcount == 1
+            if revised:
+                team_logger.info("Task %s sent back for revision (IN_REVIEW -> IN_PROGRESS)", task_id)
+            else:
+                team_logger.debug(
+                    "CAS revise for task %s did not apply (rowcount=%s): missing / not in_review",
+                    task_id,
+                    result.rowcount,
+                )
+            return revised
+
+    async def set_reviewer(self, task_id: str, reviewer: Optional[str]) -> bool:
+        """Set the ``reviewer`` column (JSON member-name list or NULL).
+
+        Leader-driven reviewer (re)assignment via ``update_task``. Independent
+        of status — reviewers can be attached while the task is still pending /
+        in progress; the value is consulted only when the author completes.
+
+        Returns:
+            True iff the row exists and was updated; False when missing.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .values(reviewer=reviewer)
+            )
+            await session.commit()
+            return result.rowcount == 1
+
+    async def set_max_review_rounds(self, task_id: str, max_review_rounds: Optional[int]) -> bool:
+        """Set the per-task review-round ceiling (F_62; NULL means team default).
+
+        Leader-driven via ``update_task``. Independent of status — the value
+        is consulted by the scheduler's judge pass when a review round fails.
+
+        Returns:
+            True iff the row exists and was updated; False when missing.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(team_task_model)
+                .where(team_task_model.task_id == task_id)
+                .values(max_review_rounds=max_review_rounds)
+            )
+            await session.commit()
+            return result.rowcount == 1
+
+    async def insert_review_vote(
+        self,
+        *,
+        team_name: str,
+        task_id: str,
+        review_round: int,
+        reviewer: str,
+        decision: str,
+        feedback: str | None = None,
+    ) -> None:
+        """Append one review-vote fact row (F_62).
+
+        Append-only by design: a reviewer changing their mind inserts a new
+        row and the tally takes each reviewer's latest row, so concurrent
+        votes from different reviewers never contend on a shared row and the
+        voting history stays auditable. No state validation here — the caller
+        (``TeamTaskManager.verify_task``) guards status / reviewer membership
+        outside the write lock.
+
+        Keyword-only: four of the columns are strings, so naming them at the
+        call site is what keeps a vote from being filed against the wrong task.
+        """
+        vote_model = _get_review_vote_model()
+        async with self._sessions.write() as session:
+            session.add(
+                vote_model(
+                    team_name=team_name,
+                    task_id=task_id,
+                    review_round=review_round,
+                    reviewer=reviewer,
+                    decision=decision,
+                    feedback=feedback,
+                    created_at=get_current_time(),
+                )
+            )
+            await session.commit()
+        team_logger.info(
+            "Review vote recorded: task %s round %s reviewer %s decision %s",
+            task_id,
+            review_round,
+            reviewer,
+            decision,
+        )
+
+    async def get_review_votes(self, task_id: str, review_round: int) -> List[TeamTaskReviewVoteBase]:
+        """Return all vote rows of one task's review round, oldest first.
+
+        Ascending ``id`` order lets callers derive "latest vote per reviewer"
+        with a simple dict overwrite pass. Rows of superseded rounds are
+        never read — the round column partitions them out.
+        """
+        vote_model = _get_review_vote_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(vote_model)
+                .where(
+                    vote_model.task_id == task_id,
+                    vote_model.review_round == review_round,
+                )
+                .order_by(vote_model.id.asc())
+            )
+            return list(result.scalars().all())
+
+    async def approve_plan_task(self, task_id: str) -> Optional[TeamTaskBase]:
+        """Approve a task plan for PLAN_MODE members (PLANNING -> IN_PROGRESS).
+
+        "Plan approved" is exactly this ``PLANNING -> IN_PROGRESS`` edge — the
+        task leaves the plan gate and starts executing.
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            task = result.scalar_one_or_none()
+            if not task:
+                team_logger.error("Task %s not found", task_id)
+                return None
+
+            if not is_valid_transition(
+                TaskStatus(task.status),
+                TaskStatus.IN_PROGRESS,
+                TASK_TRANSITIONS,
+            ):
+                team_logger.error(
+                    "Invalid state transition for task %s: %s -> %s",
+                    task_id,
+                    task.status,
+                    TaskStatus.IN_PROGRESS.value,
+                )
+                return None
+
+            task.status = TaskStatus.IN_PROGRESS.value
+            task.updated_at = get_current_time()
+            await session.commit()
+            team_logger.info("Task %s plan approved (PLANNING -> IN_PROGRESS)", task_id)
+
+            return task
+
+    async def update_task_status(self, task_id: str, status: str) -> bool:
+        """Update task status."""
+        team_task_model = _get_task_model()
+        task_dependency_model = _get_task_dependency_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            task = result.scalar_one_or_none()
+            if not task:
+                team_logger.error("Task %s not found", task_id)
+                return False
+
+            if not is_valid_transition(
+                TaskStatus(task.status),
+                TaskStatus(status),
+                TASK_TRANSITIONS,
+            ):
+                team_logger.error(
+                    "Invalid state transition for task %s: %s -> %s",
+                    task_id,
+                    task.status,
+                    status,
+                )
+                return False
+
+            now = get_current_time()
+            task.status = status
+            task.updated_at = now
+
+            if status == TaskStatus.COMPLETED.value:
+                team_logger.info("Task %s completed at %s", task_id, now)
+
+                dep_update_result = await session.execute(
+                    update(task_dependency_model)
+                    .where(
+                        task_dependency_model.depends_on_task_id == task_id,
+                        task_dependency_model.resolved.is_(False),
+                    )
+                    .values(resolved=True)
+                )
+                resolved_count = dep_update_result.rowcount or 0
+                if resolved_count > 0:
+                    team_logger.info("Resolved %d dependencies for task %s", resolved_count, task_id)
+
+            await session.commit()
+            team_logger.info("Task %s status updated to %s", task_id, status)
+            return True
+
+    async def update_task(
+        self,
+        task_id: str,
+        title: Optional[str] = None,
+        content: Optional[str] = None,
+    ) -> bool:
+        """Update task content (title, content, etc.)."""
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            task = result.scalar_one_or_none()
+            if not task:
+                team_logger.error("Task %s not found", task_id)
+                return False
+
+            # IN_REVIEW stays locked: a task submitted for verification is
+            # frozen so the reviewer evaluates against stable content. PLANNING
+            # and IN_PROGRESS are editable — the leader revises a live task and
+            # the assignee is told to re-read via a targeted TASK_UPDATED notice
+            # (see TeamTaskManager.update_task), instead of the old
+            # reset-to-pending + cancel_member.
+            if task.status == TaskStatus.IN_REVIEW.value:
+                team_logger.error(
+                    "Cannot update task %s because it is currently %s",
+                    task_id,
+                    task.status,
+                )
+                return False
+
+            updated = False
+            if title is not None and task.title != title:
+                task.title = title
+                updated = True
+            if content is not None and task.content != content:
+                task.content = content
+                updated = True
+
+            if updated:
+                await session.commit()
+                team_logger.info("Task %s updated", task_id)
+
+            return True
+
+    async def mutate_dependency_graph(
+        self,
+        team_name: str,
+        *,
+        new_tasks: Optional[List[NewTaskSpec]] = None,
+        add_edges: Optional[List[tuple[str, str]]] = None,
+    ) -> GraphMutationResult:
+        """Atomic dependency-graph mutation: insert nodes and/or edges.
+
+        The body is a five-step pipeline kept inside one transaction;
+        each step lives in a top-level helper. Business-rule rejections
+        flow through ``_MutationFailure``, caught once at the bottom.
+        """
+        new_tasks = list(new_tasks or [])
+        add_edges = list(add_edges or [])
+        if not new_tasks and not add_edges:
+            return GraphMutationResult.success()
+
+        async with self._sessions.write() as session:
+            try:
+                now = get_current_time()
+                await _stage_new_tasks(session, team_name, new_tasks, now)
+                endpoint_tasks = await _load_endpoints_and_validate(session, add_edges)
+                new_edge_set = await _check_cycle_and_compute_new_edges(session, team_name, add_edges)
+                await _apply_new_edges(session, team_name, new_edge_set, endpoint_tasks)
+
+                affected_ids: set[str] = {spec.task_id for spec in new_tasks}
+                affected_ids.update(tid for tid, _ in new_edge_set)
+                refreshed = await _refresh_status_in_session(session, affected_ids, now)
+
+                await session.commit()
+
+                if new_tasks:
+                    team_logger.info(
+                        "Created %d task(s); added %d edge(s); refreshed %d task(s)",
+                        len(new_tasks),
+                        len(new_edge_set),
+                        len(refreshed),
+                    )
+                else:
+                    team_logger.info(
+                        "Added %d edge(s); refreshed %d task(s)",
+                        len(new_edge_set),
+                        len(refreshed),
+                    )
+                return GraphMutationResult.success(refreshed_tasks=list(refreshed))
+
+            except _MutationFailure as e:
+                await session.rollback()
+                return GraphMutationResult.fail(e.reason)
+            except IntegrityError as e:
+                await session.rollback()
+                team_logger.error("mutate_dependency_graph integrity error: %s", e)
+                return GraphMutationResult.fail(f"Integrity error: {e}")
+            except Exception as e:
+                await session.rollback()
+                team_logger.error("mutate_dependency_graph unexpected error: %s", e)
+                return GraphMutationResult.fail(f"Unexpected error: {e}")
+
+    async def get_task_dependencies(self, task_id: str) -> List[TeamTaskDependencyBase]:
+        """Get all dependencies for a task."""
+        task_dependency_model = _get_task_dependency_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(task_dependency_model).where(task_dependency_model.task_id == task_id)
+            )
+            rows = result.scalars().all()
+            return rows
+
+    async def get_team_dependencies(self, team_name: str) -> List[TeamTaskDependencyBase]:
+        """Get every dependency edge for a team in a single query.
+
+        Batch counterpart to ``get_task_dependencies`` — lets callers that
+        need dependencies for many tasks (e.g. ``list_tasks_with_deps``)
+        fetch the whole edge set once and group in memory, instead of the
+        N+1 pattern of one ``get_task_dependencies`` per task.
+        """
+        task_dependency_model = _get_task_dependency_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(task_dependency_model).where(task_dependency_model.team_name == team_name)
+            )
+            return result.scalars().all()
+
+    async def get_unresolved_dependencies_count(self, task_id: str) -> int:
+        """Get count of unresolved dependencies for a task."""
+        task_dependency_model = _get_task_dependency_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(task_dependency_model).where(
+                    task_dependency_model.task_id == task_id,
+                    task_dependency_model.resolved.is_(False),
+                )
+            )
+            return len(result.scalars().all())
+
+    async def get_dependent_task_ids(self, depends_on_task_id: str) -> List[str]:
+        """Return the ids of every task that depends on ``depends_on_task_id``.
+
+        The downstream task id IS the ``task_id`` column of each dependency
+        edge, so one ``SELECT task_id`` over the edge table answers this — the
+        previous ``get_tasks_depending_on`` looped a per-edge task SELECT (an
+        N+1 that also loaded whole task rows just to read their id). The sole
+        caller (``get_task_detail``) only needs the ids for its ``blocks`` list.
+        """
+        task_dependency_model = _get_task_dependency_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(task_dependency_model.task_id)
+                .where(task_dependency_model.depends_on_task_id == depends_on_task_id)
+                .distinct()
+            )
+            return [row[0] for row in result.all()]
+
+    async def delete_task(self, task_id: str) -> bool:
+        """Delete a task."""
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+            task = result.scalar_one_or_none()
+            if not task:
+                team_logger.debug("Task %s not found for deletion", task_id)
+                return False
+
+            await session.delete(task)
+            await session.commit()
+            team_logger.info("Task %s deleted", task_id)
+            return True
+
+    async def cancel_task(self, task_id: str) -> Optional[Dict]:
+        """Cancel a task atomically and unblock dependent tasks."""
+        async with self._sessions.write() as session:
+            now = get_current_time()
+            outcome = await _terminate_task_in_session(
+                session,
+                task_id=task_id,
+                new_status=TaskStatus.CANCELLED,
+                now=now,
+            )
+            if outcome is None:
+                return None
+            task, unblocked = outcome
+            await session.commit()
+            return {"task": task, "unblocked_tasks": unblocked}
+
+    async def cancel_all_tasks(
+        self,
+        team_name: str,
+        skip_assignees: Optional[set[str]] = None,
+    ) -> Dict:
+        """Cancel every active task for a team atomically."""
+        team_task_model = _get_task_model()
+        skip_assignees = skip_assignees or set()
+        async with self._sessions.write() as session:
+            skip_statuses = [
+                TaskStatus.CANCELLED.value,
+                TaskStatus.COMPLETED.value,
+            ]
+            result = await session.execute(
+                select(team_task_model.task_id, team_task_model.assignee).where(
+                    team_task_model.team_name == team_name,
+                    ~team_task_model.status.in_(skip_statuses),
+                )
+            )
+            candidates = [(row[0], row[1]) for row in result.all()]
+            if not candidates:
+                team_logger.info("No active tasks to cancel for team %s", team_name)
+                return {"cancelled_tasks": [], "unblocked_tasks": []}
+
+            now = get_current_time()
+            cancelled_tasks: List[TeamTaskBase] = []
+            unblocked_by_id: Dict[str, TeamTaskBase] = {}
+            for task_id, assignee in candidates:
+                if assignee in skip_assignees:
+                    team_logger.debug(
+                        "Skipping task %s: assignee '%s' in skip_assignees",
+                        task_id,
+                        assignee,
+                    )
+                    continue
+                outcome = await _terminate_task_in_session(
+                    session,
+                    task_id=task_id,
+                    new_status=TaskStatus.CANCELLED,
+                    now=now,
+                )
+                if outcome is None:
+                    continue
+                cancelled, refreshed = outcome
+                cancelled_tasks.append(cancelled)
+                for t in refreshed:
+                    unblocked_by_id[t.task_id] = t
+
+            await session.commit()
+            cancelled_ids = {t.task_id for t in cancelled_tasks}
+            unblocked_tasks = [t for tid, t in unblocked_by_id.items() if tid not in cancelled_ids]
+            team_logger.info(
+                "Cancelled %d tasks for team %s; unblocked %d",
+                len(cancelled_tasks),
+                team_name,
+                len(unblocked_tasks),
+            )
+            return {
+                "cancelled_tasks": cancelled_tasks,
+                "unblocked_tasks": unblocked_tasks,
+            }
+
+    async def complete_task(self, task_id: str) -> Optional[Dict]:
+        """Complete a task atomically and unblock dependent tasks."""
+        async with self._sessions.write() as session:
+            now = get_current_time()
+            outcome = await _terminate_task_in_session(
+                session,
+                task_id=task_id,
+                new_status=TaskStatus.COMPLETED,
+                now=now,
+            )
+            if outcome is None:
+                return None
+            task, unblocked = outcome
+            await session.commit()
+            return {"task": task, "unblocked_tasks": unblocked}
+
+    async def _verify_and_fix_blocked_tasks(self, team_name: str) -> List[TeamTaskBase]:
+        """Recovery sweep: re-evaluate every BLOCKED task in the team."""
+        team_task_model = _get_task_model()
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                select(team_task_model.task_id).where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.status == TaskStatus.BLOCKED.value,
+                )
+            )
+            blocked_ids = [row[0] for row in result.all()]
+            if not blocked_ids:
+                return []
+
+            now = get_current_time()
+            refreshed = await _refresh_status_in_session(session, blocked_ids, now)
+            await session.commit()
+            return refreshed
+
+    async def verify_and_fix_task_consistency(self, team_name: str) -> List[TeamTaskBase]:
+        """Verify and fix task consistency for a team."""
+        return await self._verify_and_fix_blocked_tasks(team_name)

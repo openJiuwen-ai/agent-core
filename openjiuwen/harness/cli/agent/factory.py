@@ -30,11 +30,9 @@ from openjiuwen.harness.cli.rails import TokenTrackingRail
 from openjiuwen.harness.cli.rails.tool_tracker import (
     ToolTrackingRail,
 )
-from openjiuwen.harness.rails import (
-    AskUserRail,
-    ConfirmInterruptRail,
-    SkillUseRail,
-)
+from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
+from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 
 logger = logging.getLogger(__name__)
 

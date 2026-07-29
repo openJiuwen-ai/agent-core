@@ -1,14 +1,14 @@
 # coding: utf-8
-"""Tests for CoordinatorLoop lifecycle."""
+"""Tests for EventBus lifecycle."""
 from __future__ import annotations
 
 import asyncio
 
 import pytest
 
-from openjiuwen.agent_teams.agent.coordinator import (
+from openjiuwen.agent_teams.agent.coordination import (
     CoordinationEvent,
-    CoordinatorLoop,
+    EventBus,
     InnerEventMessage,
     InnerEventType,
 )
@@ -22,24 +22,24 @@ from openjiuwen.agent_teams.schema.events import (
 @pytest.mark.asyncio
 async def test_start_stop_sets_running_flag():
     """start() sets is_running, stop() clears it."""
-    loop = CoordinatorLoop(role=TeamRole.LEADER)
-    assert loop.is_running is False
+    bus = EventBus(role=TeamRole.LEADER)
+    assert bus.is_running is False
 
-    await loop.start()
-    assert loop.is_running is True
+    await bus.start()
+    assert bus.is_running is True
 
-    await loop.stop()
-    assert loop.is_running is False
+    await bus.stop()
+    assert bus.is_running is False
 
 
 @pytest.mark.asyncio
 async def test_stop_is_idempotent():
     """Calling stop() twice does not raise."""
-    loop = CoordinatorLoop(role=TeamRole.LEADER)
-    await loop.start()
-    await loop.stop()
-    await loop.stop()
-    assert loop.is_running is False
+    bus = EventBus(role=TeamRole.LEADER)
+    await bus.start()
+    await bus.stop()
+    await bus.stop()
+    assert bus.is_running is False
 
 
 @pytest.mark.asyncio
@@ -50,19 +50,16 @@ async def test_wake_callback_invoked_on_event():
     async def on_wake(event: CoordinationEvent) -> None:
         woke.append(event)
 
-    loop = CoordinatorLoop(
-        role=TeamRole.LEADER,
-        wake_callback=on_wake,
-    )
-    await loop.start()
+    bus = EventBus(role=TeamRole.LEADER)
+    await bus.start(wake_callback=on_wake)
 
     event = EventMessage(
         event_type=TeamEvent.MESSAGE,
         payload={"msg": "hello"},
     )
-    await loop.enqueue(event)
+    await bus.enqueue(event)
     await asyncio.sleep(0.05)
-    await loop.stop()
+    await bus.stop()
 
     assert len(woke) == 1
     assert woke[0].event_type == TeamEvent.MESSAGE
@@ -76,16 +73,15 @@ async def test_poll_timer_fires_periodically():
     async def on_wake(event: CoordinationEvent) -> None:
         woke.append(event)
 
-    loop = CoordinatorLoop(
+    bus = EventBus(
         role=TeamRole.LEADER,
-        wake_callback=on_wake,
         mailbox_poll_interval=0.05,
         task_poll_interval=0.05,
     )
-    await loop.start()
+    await bus.start(wake_callback=on_wake)
 
     await asyncio.sleep(0.15)
-    await loop.stop()
+    await bus.stop()
 
     mailbox_polls = [
         e for e in woke

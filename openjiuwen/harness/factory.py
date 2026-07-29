@@ -1,9 +1,9 @@
-# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Factory function for creating DeepAgent instances."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
 from os import PathLike
@@ -16,13 +16,11 @@ from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.harness.deep_agent import DeepAgent
-from openjiuwen.harness.rails import (
-    SecurityRail,
-    SkillUseRail,
-    SessionRail,
-    SubagentRail,
-    TaskPlanningRail,
-)
+from openjiuwen.harness.rails.security_rail import SecurityRail
+from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
+from openjiuwen.harness.rails.session_rail import SessionRail
+from openjiuwen.harness.rails.subagent_rail import SubagentRail
+from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 from openjiuwen.harness.agent_ras import AgentRASConfig
 from openjiuwen.harness.agent_ras.factory import build_agent_ras_rail
 from openjiuwen.harness.rails.agent_ras_rail import AgentRASRail
@@ -163,6 +161,191 @@ def _inject_general_purpose_subagent(
     return effective_subagents
 
 
+@dataclass
+class DeepAgentParts:
+    """Assembled DeepAgent construction inputs, decoupled from any instance.
+
+    ``resolve_deep_agent_parts`` produces these; ``apply_deep_agent_parts``
+    materializes them onto a target DeepAgent / ``NativeHarness``.
+    """
+
+    config: DeepAgentConfig
+    rails: List[AgentRail]
+    tool_cards: List[ToolCard]
+    tool_instances: List[Tool]
+
+
+def resolve_deep_agent_parts(
+    model: Model,
+    *,
+    card: Optional[AgentCard] = None,
+    system_prompt: Optional[str] = None,
+    tools: Optional[List[Tool | ToolCard]] = None,
+    mcps: Optional[List[McpServerConfig]] = None,
+    subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
+    rails: Optional[List[AgentRail]] = None,
+    enable_task_loop: bool = False,
+    enable_async_subagent: bool = False,
+    add_general_purpose_agent: bool = False,
+    max_iterations: int = 15,
+    workspace: Optional[str | Workspace] = None,
+    skills: Optional[List[str]] = None,
+    backend: Optional[Any] = None,
+    sys_operation: Optional[SysOperation] = None,
+    language: Optional[str] = None,
+    prompt_mode: Optional[str] = None,
+    vision_model_config: Optional[VisionModelConfig] = None,
+    audio_model_config: Optional[AudioModelConfig] = None,
+    enable_read_image_multimodal: bool = True,
+    enable_task_planning: bool = False,
+    restrict_to_work_dir: bool = True,
+    allowed_paths: Optional[List[str]] = None,
+    default_mode: AgentMode = AgentMode.AUTO,
+    parallel_tool_calls: bool = True,
+    **config_kwargs: Any,
+) -> DeepAgentParts:
+    """Assemble DeepAgent config + rails + tools without creating an instance.
+
+    Uses the default rail set (Security / TaskPlanning / SkillUse / Session|Subagent)
+    and does not auto-mount AgentRAS (that stays on ``create_deep_agent``).
+    Extra kwargs are forwarded onto DeepAgentConfig.
+    """
+    if card is None:
+        card = AgentCard(
+            name="deep_agent",
+            description="DeepAgent instance",
+        )
+
+    normalized_tools, tool_instances = _normalize_tools(tools)
+    resolved_language = resolve_language(language)
+
+    effective_subagents = _inject_general_purpose_subagent(
+        subagents,
+        add_general_purpose_agent=add_general_purpose_agent,
+        resolved_language=resolved_language,
+        rails=rails,
+        system_prompt=system_prompt,
+        tools=tools,
+        mcps=mcps,
+        model=model,
+        skills=skills,
+    )
+
+    if not workspace:
+        workspace_obj = Workspace(root_path="./", language=resolved_language)
+    elif isinstance(workspace, (str, PathLike)):
+        workspace_obj = Workspace(root_path=str(workspace), language=resolved_language)
+    else:
+        workspace_obj = workspace
+
+    if not isinstance(sys_operation, SysOperation):
+        sysop_id = f"{card.name}_{card.id}"
+        # Get-or-create: member harness rebuild must not duplicate sysop.
+        sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
+        if sys_operation_obj is None:
+            work_config_kwargs: dict[str, Any] = {"restrict_to_sandbox": restrict_to_work_dir}
+            if allowed_paths is not None:
+                work_config_kwargs["sandbox_root"] = allowed_paths
+            sysop_card = SysOperationCard(
+                id=sysop_id,
+                mode=OperationMode.LOCAL,
+                work_config=LocalWorkConfig(**work_config_kwargs),
+            )
+            add_result = Runner.resource_mgr.add_sys_operation(sysop_card)
+            if add_result.is_err():
+                logger.error(f"add_sys_operation failed: {add_result.msg()}")
+            sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
+    else:
+        sys_operation_obj = sys_operation
+
+    config = DeepAgentConfig(
+        model=model,
+        card=card,
+        system_prompt=system_prompt,
+        enable_task_loop=enable_task_loop,
+        max_iterations=max_iterations,
+        subagents=effective_subagents or None,
+        tools=normalized_tools or None,
+        mcps=mcps,
+        workspace=workspace_obj,
+        skills=skills,
+        backend=backend,
+        sys_operation=sys_operation_obj,
+        language=resolved_language,
+        prompt_mode=prompt_mode,
+        vision_model_config=vision_model_config,
+        audio_model_config=audio_model_config,
+        enable_read_image_multimodal=enable_read_image_multimodal,
+        enable_async_subagent=enable_async_subagent,
+        add_general_purpose_agent=add_general_purpose_agent,
+        default_mode=default_mode,
+        parallel_tool_calls=parallel_tool_calls,
+        restrict_to_work_dir=restrict_to_work_dir,
+    )
+
+    for key, value in config_kwargs.items():
+        if hasattr(config, key):
+            setattr(config, key, value)
+        else:
+            logger.warning(f"Unknown DeepAgentConfig field '{key}', ignored")
+
+    all_rails: List[AgentRail] = list(rails or [])
+    user_provided_rail_types = {type(r) for r in rails} if rails else set()
+
+    def _already_provided(rail_cls: type) -> bool:
+        return any(issubclass(t, rail_cls) for t in user_provided_rail_types)
+
+    def _make_skill_rail() -> SkillUseRail:
+        skills_dirs: list[str] = []
+        skills_base = workspace_obj.get_node_path("skills")
+        if skills_base:
+            skills_dirs.append(str(skills_base))
+        for _team_id, target_path in workspace_obj.list_team_links():
+            skills_dirs.append(str(Path(target_path) / "skills"))
+        return SkillUseRail(
+            skills_dir=skills_dirs,
+            skill_mode="all",
+            enabled_skills=skills,
+        )
+
+    default_rails = [
+        (SecurityRail, True, lambda: SecurityRail()),
+        (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail()),
+        (SkillUseRail, bool(skills) or bool(getattr(config, "enable_skill_discovery", False)), _make_skill_rail),
+        (SessionRail, bool(effective_subagents) and enable_async_subagent, lambda: SessionRail()),
+        (SubagentRail, bool(effective_subagents) and not enable_async_subagent, lambda: SubagentRail()),
+    ]
+    for rail_cls, should_add, make_rail in default_rails:
+        if should_add and not _already_provided(rail_cls):
+            all_rails.append(make_rail())
+
+    return DeepAgentParts(
+        config=config,
+        rails=all_rails,
+        tool_cards=normalized_tools,
+        tool_instances=tool_instances,
+    )
+
+
+def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
+    """Apply resolved :class:`DeepAgentParts` onto a target DeepAgent.
+
+    Tool registration uses ``_register_tool_instances`` +
+    ``ability_manager.add`` (same two-step as ``AbilityManager.add_ability``).
+    """
+    agent.configure(parts.config)
+
+    if parts.tool_instances:
+        _register_tool_instances(parts.tool_instances, tag=parts.config.card.id)
+
+    if parts.tool_cards:
+        for tool_card in parts.tool_cards:
+            agent.ability_manager.add(tool_card)
+
+    for rail_inst in parts.rails:
+        agent.add_rail(rail_inst)
+
+
 def create_deep_agent(
     model: Model,
     *,
@@ -291,10 +474,10 @@ def create_deep_agent(
         if allowed_paths is not None:
             work_config_kwargs["sandbox_root"] = allowed_paths
         sysop_card = SysOperationCard(
-                id=f"{card.name}_{card.id}",
-                mode=OperationMode.LOCAL,
-                work_config=LocalWorkConfig(**work_config_kwargs),
-            )
+            id=f"{card.name}_{card.id}",
+            mode=OperationMode.LOCAL,
+            work_config=LocalWorkConfig(**work_config_kwargs),
+        )
         add_result = Runner.resource_mgr.add_sys_operation(sysop_card)
         if add_result.is_err():
             logger.error(f"add_sys_operation failed: {add_result.msg()}")

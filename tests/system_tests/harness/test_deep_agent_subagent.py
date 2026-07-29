@@ -22,7 +22,8 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.schema.config import SubAgentConfig
-from openjiuwen.harness.subagents import create_code_agent, create_research_agent
+from openjiuwen.harness.subagents.code_agent import create_code_agent
+from openjiuwen.harness.subagents.research_agent import create_research_agent
 
 from tests.system_tests.harness.test_deep_agent_e2e import (
     LoopObserveRail,

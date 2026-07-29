@@ -10,7 +10,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ModelCallInputs,
 )
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-from openjiuwen.harness.rails import (
+from openjiuwen.harness.rails.security.base_security_rail import (
     BaseSecurityRail,
     SecurityCheckContext,
     SecurityReject,

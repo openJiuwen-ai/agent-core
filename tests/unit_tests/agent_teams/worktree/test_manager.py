@@ -1,18 +1,19 @@
 # coding: utf-8
 
-"""Tests for openjiuwen.agent_teams.worktree.manager."""
+"""Tests for openjiuwen.harness.tools.worktree.manager."""
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from openjiuwen.agent_teams.worktree.manager import WorktreeManager
-from openjiuwen.agent_teams.worktree.models import (
+from openjiuwen.harness.tools.worktree.manager import WorktreeManager
+from openjiuwen.harness.tools.worktree.models import (
     WorktreeChangeSummary,
     WorktreeConfig,
     WorktreeCreateResult,
     WorktreeLifecyclePolicy,
 )
-from openjiuwen.agent_teams.worktree.session import get_current_session, set_current_session
+from openjiuwen.harness.tools.worktree.session import get_current_session, set_current_session
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.sys_operation.cwd import CwdState, _cwd_state, init_cwd
 from tests.test_logger import logger
 
@@ -53,21 +54,21 @@ def _clean_session():
 def _make_manager(
     backend: AsyncMock,
     config: WorktreeConfig | None = None,
-    publish_event: AsyncMock | None = None,
+    event_handler: AsyncMock | None = None,
     rails: list | None = None,
 ) -> WorktreeManager:
     return WorktreeManager(
         config=config or WorktreeConfig(enabled=True),
         backend=backend,
-        publish_event=publish_event,
+        event_handler=event_handler,
         rails=rails,
     )
 
 
 class TestEnter:
     @pytest.mark.asyncio
-    @patch("openjiuwen.agent_teams.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.get_current_branch", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.get_current_branch", new_callable=AsyncMock)
     async def test_enter_creates_worktree_and_sets_session(
         self, mock_branch, mock_git_root, mock_backend
     ):
@@ -100,7 +101,7 @@ class TestEnter:
         logger.info("enter rejects invalid slug")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.agent_teams.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
     async def test_enter_not_in_git_repo_raises(self, mock_git_root, mock_backend):
         mock_git_root.return_value = None
 
@@ -110,24 +111,24 @@ class TestEnter:
         logger.info("enter raises RuntimeError outside git repo")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.agent_teams.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.get_current_branch", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.get_current_branch", new_callable=AsyncMock)
     async def test_enter_publishes_event(self, mock_branch, mock_git_root, mock_backend):
         mock_git_root.return_value = "/repo"
         mock_branch.return_value = "main"
 
-        publish = AsyncMock()
-        mgr = _make_manager(mock_backend, publish_event=publish)
+        handler = AsyncMock()
+        mgr = _make_manager(mock_backend, event_handler=handler)
         await mgr.enter("ev-slug", member_name="m1", team_name="t1")
 
-        publish.assert_awaited_once()
+        handler.assert_awaited_once()
         logger.info("enter publishes WorktreeCreatedEvent")
 
 
 class TestExit:
     @pytest.mark.asyncio
-    @patch("openjiuwen.agent_teams.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.get_current_branch", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.get_current_branch", new_callable=AsyncMock)
     async def test_exit_keep(self, mock_branch, mock_git_root, mock_backend):
         mock_git_root.return_value = "/repo"
         mock_branch.return_value = "main"
@@ -142,10 +143,10 @@ class TestExit:
         logger.info("exit(keep) clears session without removal")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.agent_teams.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.get_current_branch", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.status_porcelain", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.count_commits_since", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.get_current_branch", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.status_porcelain", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.count_commits_since", new_callable=AsyncMock)
     async def test_exit_remove(
         self, mock_commits, mock_status, mock_branch, mock_git_root, mock_backend
     ):
@@ -164,10 +165,10 @@ class TestExit:
         logger.info("exit(remove) removes worktree and clears session")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.agent_teams.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.get_current_branch", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.status_porcelain", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.count_commits_since", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.get_current_branch", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.status_porcelain", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.count_commits_since", new_callable=AsyncMock)
     async def test_exit_remove_with_changes_raises(
         self, mock_commits, mock_status, mock_branch, mock_git_root, mock_backend
     ):
@@ -179,15 +180,15 @@ class TestExit:
         mgr = _make_manager(mock_backend)
         await mgr.enter("dirty-slug")
 
-        with pytest.raises(ValueError, match="uncommitted files"):
+        with pytest.raises(BaseError, match="uncommitted files"):
             await mgr.exit("remove")
         logger.info("exit(remove) raises when changes exist and discard_changes=False")
 
     @pytest.mark.asyncio
-    @patch("openjiuwen.agent_teams.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.get_current_branch", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.status_porcelain", new_callable=AsyncMock)
-    @patch("openjiuwen.agent_teams.worktree.manager.count_commits_since", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.get_current_branch", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.status_porcelain", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.count_commits_since", new_callable=AsyncMock)
     async def test_exit_remove_with_changes_discard(
         self, mock_commits, mock_status, mock_branch, mock_git_root, mock_backend
     ):
@@ -207,7 +208,7 @@ class TestExit:
 
 class TestCreateAgentWorktree:
     @pytest.mark.asyncio
-    @patch("openjiuwen.agent_teams.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
     async def test_does_not_modify_context_var(self, mock_git_root, mock_backend):
         mock_git_root.return_value = "/repo"
 
@@ -229,13 +230,13 @@ class TestCreateAgentWorktree:
 class TestMemberSlug:
     def test_format(self, mock_backend):
         mgr = _make_manager(mock_backend)
-        slug = mgr._member_slug("abcdef1234567890")
+        slug = mgr._owner_slug("abcdef1234567890")
         assert slug == "teammate-abcdef12"
-        logger.info("_member_slug truncates to 8 chars: %s", slug)
+        logger.info("_owner_slug truncates to 8 chars: %s", slug)
 
     def test_short_id(self, mock_backend):
         mgr = _make_manager(mock_backend)
-        slug = mgr._member_slug("abc")
+        slug = mgr._owner_slug("abc")
         assert slug == "teammate-abc"
 
 

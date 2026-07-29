@@ -1,10 +1,10 @@
 # coding: utf-8
 
-"""Tests for openjiuwen.agent_teams.worktree.git."""
+"""Tests for openjiuwen.harness.tools.worktree.git."""
 
 import pytest
 
-from openjiuwen.agent_teams.worktree.git import (
+from openjiuwen.harness.tools.worktree.git import (
     GitError,
     GitResult,
     _git_env,

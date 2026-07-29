@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Team shared workspace — per-team lifecycle artifact management."""
 
 from openjiuwen.agent_teams.team_workspace.models import (

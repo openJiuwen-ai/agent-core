@@ -19,7 +19,7 @@ from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails import ConfirmInterruptRail
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from tests.system_tests.agent.react_agent.interrupt.test_base import (
     ReadTool,
     WriteTool,

@@ -3,7 +3,9 @@
 import uuid
 from typing import Any
 
+from openjiuwen.core.foundation.kv_cache.kv_cache_metadata import KVCacheIdentity
 from openjiuwen.core.session import Config
+from openjiuwen.core.session.agent import merge_source_metadata_into_payload
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.internal.agent_team import AgentTeamSession
 from openjiuwen.core.session.stream import (
@@ -20,17 +22,27 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 class Session:
     """AgentTeam Session"""
 
-    def __init__(self, session_id: str = None, envs: dict[str, Any] = None, team_id: str = "agent_team"):
+    def __init__(
+        self,
+        session_id: str = None,
+        envs: dict[str, Any] = None,
+        team_id: str = "agent_team",
+        source_metadata_enabled: bool = True,
+    ):
         if session_id is None:
             session_id = str(uuid.uuid4())
         self._session_id = session_id
         self._team_id = team_id
+        self._source_metadata_enabled = source_metadata_enabled
         config = Config()
         if envs is not None:
             config.set_envs(envs)
         self._inner = AgentTeamSession(session_id=session_id, team_id=team_id, config=config)
         self._pre_run_done = False
         self._post_run_done = False
+
+    def set_source_metadata_enabled(self, enabled: bool) -> None:
+        self._source_metadata_enabled = enabled
 
     def get_session_id(self) -> str:
         return self._session_id
@@ -40,6 +52,13 @@ class Session:
 
     def get_team_id(self) -> str:
         return self._team_id
+
+    def get_cache_identity(self) -> KVCacheIdentity:
+        """Return the root identity shared by this Team session."""
+        return KVCacheIdentity(
+            cache_id=self._session_id,
+            parent_cache_id=self._session_id,
+        )
 
     def get_envs(self):
         return self._inner.config().get_envs()
@@ -75,29 +94,51 @@ class Session:
         await CheckpointerFactory.get_checkpointer().pre_agent_team_execute(self._inner, kwargs.get("inputs"))
         self._pre_run_done = True
 
+    async def commit(self):
+        """Persist the current team session state without closing the stream."""
+        await self._inner.checkpointer().post_agent_team_execute(self._inner)
+
+    async def flush_checkpoint(self):
+        """Persist the current team session state without closing the stream."""
+        await self.commit()
+
     async def post_run(self):
         if self._post_run_done:
             return
         await self.close_stream()
-        await self._inner.checkpointer().post_agent_team_execute(self._inner)
+        await self.commit()
         self._post_run_done = True
 
-    def create_agent_session(self, card: AgentCard | None = None, agent_id: str | None = None) -> AgentSession:
+    def create_agent_session(
+        self,
+        card: AgentCard | None = None,
+        agent_id: str | None = None,
+        *,
+        share_stream_writer: bool = True,
+    ) -> AgentSession:
         if card is None:
             card = AgentCard(id=agent_id or "team_agent", name=agent_id or "team_agent")
-        return create_agent_session(
+        stream_writer_manager = self._inner.stream_writer_manager() if share_stream_writer else None
+        source_metadata = None
+        if self._source_metadata_enabled:
+            source_metadata = {
+                "source_agent_id": card.id,
+                "source_team_id": self._team_id,
+            }
+        child = create_agent_session(
             session_id=self._session_id,
             envs=self.get_envs(),
             card=card,
-            stream_writer_manager=self._inner.stream_writer_manager(),
+            stream_writer_manager=stream_writer_manager,
             close_stream_on_post_run=False,
-            source_metadata={
-                "source_agent_id": card.id,
-                "source_team_id": self._team_id,
-            },
+            source_metadata=source_metadata,
         )
+        child.set_team_cache_scope(team_id=self._team_id, agent_id=card.id)
+        return child
 
     def _tag_stream_payload(self, data: dict | OutputSchema):
+        if not self._source_metadata_enabled:
+            return data
         metadata = {"source_team_id": self._team_id}
         if isinstance(data, dict):
             return {**data, **metadata}
@@ -106,10 +147,7 @@ class Session:
             if isinstance(payload, dict):
                 payload = {**payload, **metadata}
             else:
-                payload = {
-                    "value": payload,
-                    **metadata,
-                }
+                payload = merge_source_metadata_into_payload(payload, metadata)
             return data.model_copy(update={"payload": payload})
         return data
 
@@ -122,7 +160,16 @@ class Session:
         return OutputSchema(type="message", index=0, payload=data)
 
 
-def create_agent_team_session(session_id: str = None, envs: dict[str, Any] = None,
-                              team_id: str = "agent_team") -> Session:
-    """Create AgentTeam Session"""
-    return Session(session_id=session_id, envs=envs, team_id=team_id)
+def create_agent_team_session(
+        session_id: str = None,
+        envs: dict[str, Any] = None,
+        team_id: str = "agent_team",
+        source_metadata_enabled: bool = True,
+) -> Session:
+    """Create AgentTeam Session."""
+    return Session(
+        session_id=session_id,
+        envs=envs,
+        team_id=team_id,
+        source_metadata_enabled=source_metadata_enabled,
+    )

@@ -1,12 +1,12 @@
 # coding: utf-8
 
-"""Tests for openjiuwen.agent_teams.worktree.models."""
+"""Tests for openjiuwen.harness.tools.worktree.models."""
 
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from openjiuwen.agent_teams.worktree.models import (
+from openjiuwen.harness.tools.worktree.models import (
     WorktreeChangeSummary,
     WorktreeConfig,
     WorktreeCreateResult,

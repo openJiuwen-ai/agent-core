@@ -26,7 +26,7 @@ from openjiuwen.core.sys_operation import (
     SysOperationCard,
 )
 from openjiuwen.harness import create_deep_agent, Workspace
-from openjiuwen.harness.rails import MemoryRail
+from openjiuwen.harness.rails.memory_rail import MemoryRail
 
 
 load_dotenv()

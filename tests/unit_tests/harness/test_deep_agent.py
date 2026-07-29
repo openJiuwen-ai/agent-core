@@ -28,18 +28,16 @@ from openjiuwen.harness import create_deep_agent, Workspace
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
-from openjiuwen.harness.subagents import (
-    build_code_agent_config,
-    build_research_agent_config,
-    create_code_agent,
-)
 from openjiuwen.harness.subagents.code_agent import (
     CODE_AGENT_FACTORY_NAME,
     DEFAULT_CODE_AGENT_SYSTEM_PROMPT,
+    build_code_agent_config,
+    create_code_agent,
 )
 from openjiuwen.harness.subagents.research_agent import (
     DEFAULT_RESEARCH_AGENT_SYSTEM_PROMPT,
     RESEARCH_AGENT_FACTORY_NAME,
+    build_research_agent_config,
 )
 from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
 from openjiuwen.harness.task_loop.loop_coordinator import LoopCoordinator
@@ -757,7 +755,7 @@ def test_create_deep_agent_auto_add_skill_rail() -> None:
 
 def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:
     """Test that TaskPlanningRail is not duplicated when manually provided."""
-    from openjiuwen.harness.rails import TaskPlanningRail
+    from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 
     manual_rail = TaskPlanningRail()
     agent = create_deep_agent(
@@ -773,7 +771,7 @@ def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:
 
 def test_create_deep_agent_no_duplicate_skill_rail() -> None:
     """Test that SkillUseRail is not duplicated when manually provided."""
-    from openjiuwen.harness.rails import SkillUseRail
+    from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 
     manual_rail = SkillUseRail(skills_dir="./", skill_mode="all")
     skills = [{"name": "test_skill", "description": "test"}]
@@ -790,7 +788,7 @@ def test_create_deep_agent_no_duplicate_skill_rail() -> None:
 
 def test_create_deep_agent_subclass_skill_rail_not_duplicated() -> None:
     """Subclass of SkillUseRail should suppress the default SkillUseRail fallback."""
-    from openjiuwen.harness.rails import SkillUseRail
+    from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 
     class _CustomSkillRail(SkillUseRail):
         pass
@@ -811,7 +809,7 @@ def test_create_deep_agent_subclass_skill_rail_not_duplicated() -> None:
 
 def test_create_deep_agent_subclass_task_planning_rail_not_duplicated() -> None:
     """Subclass of TaskPlanningRail should suppress the default TaskPlanningRail fallback."""
-    from openjiuwen.harness.rails import TaskPlanningRail
+    from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 
     class _CustomTaskPlanningRail(TaskPlanningRail):
         pass
