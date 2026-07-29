@@ -2199,6 +2199,14 @@ def _external_backend() -> MagicMock:
     backend.team_name = "test-team"
     backend.get_team_updated_at = AsyncMock(return_value=1)
     backend.get_members_max_updated_at = AsyncMock(return_value=1)
+    backend.get_member = AsyncMock(
+        return_value=SimpleNamespace(
+            member_name="claude-1",
+            display_name="Claude One",
+            desc="",
+            role=TeamRole.TEAMMATE.value,
+        )
+    )
     backend.get_team_info = AsyncMock(
         return_value=SimpleNamespace(
             team_name="test-team",

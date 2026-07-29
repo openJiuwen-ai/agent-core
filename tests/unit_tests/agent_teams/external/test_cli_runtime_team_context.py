@@ -121,6 +121,11 @@ class _FakeBackend:
     async def list_members(self):
         return list(self.members)
 
+    async def get_member(self, member_name: str):
+        if member_name == "claude-1":
+            return SimpleNamespace(member_name="claude-1", display_name="Claude One", desc="", role="teammate")
+        return next((m for m in self.members if m.member_name == member_name), None)
+
     def add_member(self, member_name: str, display_name: str) -> None:
         self.members.append(
             SimpleNamespace(member_name=member_name, display_name=display_name, desc="", role="teammate")
@@ -138,6 +143,7 @@ def _make_runtime(backend: _FakeBackend | None = None) -> tuple[_RecordingRuntim
             team_backend=backend,
             member_name="claude-1",
             role=TeamRole.TEAMMATE,
+            display_name="Claude One",
             language="cn",
         ),
     )
@@ -179,6 +185,9 @@ async def test_send_prepends_pending_state_to_the_message():
     assert text.endswith("please review the PR")
     assert "<team-context>" in text
     assert "你的 member_name: claude-1" in text
+    assert "你的 display_name: Claude One" in text
+    # Identity and team info share one <team-context>.
+    assert text.count("<team-context>") == 1
     assert '<team-event kind="roster">' in text
     assert "member_name=dev1" in text
 

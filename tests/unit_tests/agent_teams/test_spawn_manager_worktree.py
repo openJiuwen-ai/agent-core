@@ -116,6 +116,7 @@ def _member(**overrides) -> SimpleNamespace:
         "team_name": "code-team",
         "role": TeamRole.TEAMMATE.value,
         "status": MemberStatus.READY.value,
+        "display_name": "Dev One",
         "desc": "developer",
         "prompt": None,
         "options": None,

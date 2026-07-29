@@ -35,13 +35,27 @@ def _member(name: str, display: str = "", desc: str = "", role: str = "teammate"
 
 
 @pytest.mark.level0
-def test_identity_carries_name_and_private_agreement():
-    body = build_identity_text(member_name="dev1", member_prompt="always write tests", language="cn")
+def test_identity_carries_both_names_and_private_agreement():
+    body = build_identity_text(
+        member_name="dev1",
+        display_name="成员一",
+        member_prompt="always write tests",
+        language="cn",
+    )
     assert body is not None
     assert "# 成员身份" in body
     assert "你的 member_name: dev1" in body
+    assert "你的 display_name: 成员一" in body
     assert "## 私有工作约定" in body
     assert "always write tests" in body
+
+
+@pytest.mark.level0
+def test_identity_without_display_name_drops_that_line():
+    body = build_identity_text(member_name="dev1", language="cn")
+    assert body is not None
+    assert "你的 member_name: dev1" in body
+    assert "display_name" not in body
 
 
 @pytest.mark.level0
@@ -58,10 +72,16 @@ def test_identity_empty_returns_none():
 
 @pytest.mark.level0
 def test_identity_english():
-    body = build_identity_text(member_name="dev1", member_prompt="ship small PRs", language="en")
+    body = build_identity_text(
+        member_name="dev1",
+        display_name="Dev One",
+        member_prompt="ship small PRs",
+        language="en",
+    )
     assert body is not None
     assert "# Member Identity" in body
     assert "Your member_name: dev1" in body
+    assert "Your display_name: Dev One" in body
     assert "## Private Working Agreement" in body
 
 

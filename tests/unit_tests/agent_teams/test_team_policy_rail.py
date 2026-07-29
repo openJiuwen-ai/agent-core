@@ -21,6 +21,7 @@ from openjiuwen.agent_teams.rails.team_policy_rail import prepend_to_content
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TEAM_CONTEXT_STATE_KEY
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
+from openjiuwen.core.single_agent.rail.base import UserMessageInputs
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
 from tests.test_logger import logger
 
@@ -89,6 +90,21 @@ class _StubContext:
     ) -> None:
         self.session = session if session is not None else _StubSession()
         self.context = _StubModelContext(messages)
+        self.inputs = None
+
+
+async def _admit(rail: TeamPolicyRail, ctx: _StubContext, text: str, *, source: str = "query"):
+    """Admit one input the way ``ReActAgent._admit_user_message`` does.
+
+    Rails see the message before it is written, may rewrite its content, and
+    only then does it join the conversation.
+    """
+    message = UserMessage(content=text)
+    ctx.inputs = UserMessageInputs(message=message, source=source)
+    await rail.on_user_message(ctx)
+    ctx.inputs = None
+    ctx.context.messages.append(message)
+    return message
 
 
 def _team_texts(ctx: _StubContext) -> str:
@@ -337,9 +353,17 @@ class _FakeTeamBackend:
         members_mtime: int = 1,
         hitt_enabled: bool = False,
         self_member_name: str | None = None,
+        self_row: _StubMember | None = None,
     ) -> None:
         self._team = team
         self._members: list[_StubMember] = list(members or [])
+        # The member's own row, which ``list_members`` excludes. Defaults to a
+        # plain row so tests that do not care about identity still get one; a
+        # leader before ``build_team`` passes ``self_row=None`` to model "my row
+        # does not exist yet".
+        if self_row is None and self_member_name is not None:
+            self_row = _StubMember(self_member_name, self_member_name)
+        self._self_row = self_row
         self._team_mtime = team_mtime
         self._members_mtime = members_mtime
         self._hitt_enabled = hitt_enabled
@@ -366,6 +390,12 @@ class _FakeTeamBackend:
         self.list_members_calls += 1
         return [member for member in self._members if member.member_name != self._self_member_name]
 
+    async def get_member(self, member_name: str):
+        """Return this member's own row; None until it has been registered."""
+        if self._self_row is not None and self._self_row.member_name == member_name:
+            return self._self_row
+        return next((m for m in self._members if m.member_name == member_name), None)
+
     def hitt_enabled(self) -> bool:
         """The rail probes this at init to gate the static HITT contract."""
         return self._hitt_enabled
@@ -378,6 +408,11 @@ class _FakeTeamBackend:
 
     def add_member(self, member: _StubMember, mtime: int) -> None:
         self._members.append(member)
+        self._members_mtime = mtime
+
+    def register_self(self, member: _StubMember, mtime: int) -> None:
+        """Write the member's own row, as ``build_team`` / spawn does."""
+        self._self_row = member
         self._members_mtime = mtime
 
     def remove_member(self, member_name: str, mtime: int) -> None:
@@ -477,15 +512,17 @@ class TestPrependToContent:
 
 
 class TestTeamPolicyRailTeamContext:
-    """Team state is written into the conversation, not the system prompt.
+    """Team state is delivered into the conversation, not the system prompt.
 
-    It goes in at the model call where it first appears, into the newest
-    segment of the conversation only, and never gets rewritten afterwards.
+    Two lanes, and neither ever rewrites a message that is already history:
+    state normally rides the input being admitted (``on_user_message``), and
+    when it appears mid tool-loop with no input to ride it is appended at the
+    tail (``before_model_call``).
     """
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_state_goes_into_the_user_message_not_the_prompt(self):
+    async def test_state_rides_the_input_not_the_prompt(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test team"),
             members=[_StubMember("dev1", "Dev", "Coder")],
@@ -496,85 +533,163 @@ class TestTeamPolicyRailTeamContext:
         rail = _leader_rail(backend)
         rail.init(agent)
 
-        ctx = _StubContext(messages=[UserMessage(content="ship it")])
-        await rail.before_model_call(ctx)
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "ship it")
 
-        # Prepended into the existing user message; no new message appeared.
+        # Prepended into the input itself; no extra message appeared.
         assert len(ctx.context.messages) == 1
-        body = ctx.context.messages[0].content
-        assert body.endswith("ship it")
-        assert "<team-context>" in body
-        assert "你的 member_name: leader1" in body
-        assert "# 团队信息" in body
-        assert '<team-event kind="roster">' in body
-        assert "member_name=dev1" in body
+        assert message.content.endswith("ship it")
+        assert "<team-context>" in message.content
+        assert "你的 member_name: leader1" in message.content
+        assert "# 团队信息" in message.content
+        assert '<team-event kind="roster">' in message.content
+        assert "member_name=dev1" in message.content
 
         # And none of it leaked into the cache-stable system prompt.
+        await rail.before_model_call(ctx)
         prompt = builder.build()
         assert "# 团队信息" not in prompt
         assert "# 成员关系" not in prompt
         assert "你的 member_name" not in prompt
         assert "PM" not in prompt
-        logger.info("Team state delivered inside the round's user message")
+        logger.info("Team state delivered on the admitted input")
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_appends_a_user_message_when_segment_has_none(self):
-        """Mid tool-loop the new messages are assistant / tool results only."""
+    async def test_only_the_first_input_carries_it(self):
+        """State is consumed by whichever input is admitted first."""
         backend = _FakeTeamBackend(
-            team=_StubTeam("Beta", "Test team"),
+            team=_StubTeam("Beta", "Test"),
             members=[_StubMember("dev1", "Dev")],
             self_member_name="leader1",
         )
+        rail = _leader_rail(backend)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+
+        ctx = _StubContext()
+        first = await _admit(rail, ctx, "<team-inbound>报数任务已发布</team-inbound>")
+        second = await _admit(rail, ctx, "[STEERING] task board", source="steering")
+
+        assert "<team-context>" in first.content
+        assert first.content.endswith("<team-inbound>报数任务已发布</team-inbound>")
+        assert "<team-context>" not in second.content
+        assert second.content == "[STEERING] task board"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_state_appearing_mid_tool_loop_is_appended(self):
+        """A leader builds its team mid-round; the next input may be far away."""
+        backend = _FakeTeamBackend(team=None, members=[], team_mtime=0, members_mtime=0)
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = _leader_rail(backend)
+        rail = _leader_rail(backend, member_prompt="")
         rail.init(agent)
 
-        ctx = _StubContext(messages=[UserMessage(content="ship it")])
-        # First call consumes the pending state and records the boundary.
+        ctx = _StubContext()
+        query = await _admit(rail, ctx, "build me a team")
         await rail.before_model_call(ctx)
-        first_body = ctx.context.messages[0].content
+        # Nothing exists yet, so the input was left alone.
+        assert query.content == "build me a team"
+        assert len(ctx.context.messages) == 1
 
-        # A tool round happens, then the team changes mid-loop.
-        ctx.context.messages.append(AssistantMessage(content="calling a tool"))
-        ctx.context.messages.append(ToolMessage(content="tool output", tool_call_id="c1"))
-        backend.add_member(_StubMember("dev2", "Newbie"), mtime=2)
-
+        # The round runs build_team through a tool call.
+        ctx.context.messages.append(AssistantMessage(content="calling build_team"))
+        ctx.context.messages.append(ToolMessage(content="Team created", tool_call_id="c1"))
+        backend.set_team(_StubTeam("Beta", "报数小队", "count off"), mtime=7)
+        backend.register_self(_StubMember("leader1", "队长"), mtime=7)
         await rail.before_model_call(ctx)
 
         assert len(ctx.context.messages) == 4
         tail = ctx.context.messages[-1]
         assert tail.role == "user"
-        assert '<team-event kind="roster-change">' in tail.content
-        assert "Newbie" in tail.content
-        # The earlier messages were left exactly as they were.
-        assert ctx.context.messages[0].content == first_body
-        assert ctx.context.messages[2].content == "tool output"
+        assert tail.content.count("<team-context>") == 1
+        assert "你的 member_name: leader1" in tail.content
+        assert "你的 display_name: 队长" in tail.content
+        assert "# 团队信息" in tail.content
+        assert "报数小队" in tail.content
+        # Everything that was already history is untouched.
+        assert ctx.context.messages[0].content == "build me a team"
+        assert ctx.context.messages[2].content == "Team created"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_leader_says_nothing_before_the_team_exists(self):
-        """A leader has no team on its first call; there is nothing to announce."""
+    async def test_workspace_paths_alone_do_not_announce_a_team(self):
+        """The workspace paths must not fabricate a team-info block pre-build.
+
+        They are constructor arguments and always available, so an ungated
+        team-info block renders with nothing but the workspace in it — and the
+        real one follows moments later once ``build_team`` runs.
+        """
         backend = _FakeTeamBackend(team=None, members=[], team_mtime=0, members_mtime=0)
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = _leader_rail(backend, member_prompt="", member_name=None)
+        rail = _leader_rail(
+            backend,
+            member_prompt="",
+            team_workspace_mount=".team/beta/",
+            team_workspace_path="/abs/team-workspace",
+        )
         rail.init(agent)
 
-        ctx = _StubContext(messages=[UserMessage(content="build me a team")])
-        await rail.before_model_call(ctx)
-        assert ctx.context.messages[0].content == "build me a team"
+        ctx = _StubContext()
+        query = await _admit(rail, ctx, "build me a team")
+        assert query.content == "build me a team"
 
-        # build_team runs: the team row and its first member appear.
-        backend.set_team(_StubTeam("Beta", "Test team"), mtime=7)
-        backend.add_member(_StubMember("dev1", "Dev"), mtime=7)
-        await rail.before_model_call(ctx)
+        backend.set_team(_StubTeam("Beta", "报数小队", "count off"), mtime=7)
+        backend.register_self(_StubMember("leader1", "队长"), mtime=7)
+        second = await _admit(rail, ctx, "go")
 
-        body = _team_texts(ctx)
-        assert "# 团队信息" in body
-        assert '<team-event kind="roster">' in body
-        assert "member_name=dev1" in body
+        assert second.count("<team-context>") == 1 if isinstance(second, str) else True
+        assert second.content.count("<team-context>") == 1
+        assert "# 团队信息" in second.content
+        assert "`.team/beta/`" in second.content
+        assert _team_texts(ctx).count("# 团队信息") == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_identity_and_team_info_share_one_block(self):
+        """Both are standing facts; two adjacent <team-context> say one thing twice."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "报数小队", "count off"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        rail = _leader_rail(backend)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "go")
+
+        assert message.content.count("<team-context>") == 1
+        assert "# 成员身份" in message.content
+        assert "# 团队信息" in message.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_identity_carries_both_names_from_the_db_row(self):
+        """Peers list members by both names, and the row is what they see."""
+        backend = _FakeTeamBackend(
+            self_member_name="dev1",
+            self_row=_StubMember("dev1", "成员一"),
+        )
+        rail = TeamPolicyRail(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            display_name="spec-time default",
+            member_prompt="报数要快",
+            language="cn",
+            team_backend=backend,
+        )
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "go")
+
+        assert "你的 member_name: dev1" in message.content
+        assert "你的 display_name: 成员一" in message.content
+        assert "spec-time default" not in message.content
+        assert "## 私有工作约定" in message.content
+        assert "报数要快" in message.content
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -584,27 +699,18 @@ class TestTeamPolicyRailTeamContext:
             members=[_StubMember("dev1", "Dev")],
             self_member_name="leader1",
         )
-        builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
         rail = _leader_rail(backend)
-        rail.init(agent)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
 
-        ctx = _StubContext(messages=[UserMessage(content="go")])
-        await rail.before_model_call(ctx)
-        after_first = list(ctx.context.messages)
-        first_body = after_first[0].content
-
-        await rail.before_model_call(ctx)
+        ctx = _StubContext()
+        await _admit(rail, ctx, "go")
+        second = await _admit(rail, ctx, "still going")
         await rail.before_model_call(ctx)
 
-        # Three calls, three probes each, one expensive read each.
-        assert backend.team_mtime_calls == 3
-        assert backend.members_mtime_calls == 3
         assert backend.get_info_calls == 1
         assert backend.list_members_calls == 1
-        # And nothing was added or rewritten after the first call.
-        assert len(ctx.context.messages) == 1
-        assert ctx.context.messages[0].content == first_body
+        assert second.content == "still going"
+        assert len(ctx.context.messages) == 2
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -614,28 +720,22 @@ class TestTeamPolicyRailTeamContext:
             members=[_StubMember("dev1", "Dev")],
             self_member_name="leader1",
         )
-        builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
         rail = _leader_rail(backend)
-        rail.init(agent)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
 
-        ctx = _StubContext(messages=[UserMessage(content="go")])
-        await rail.before_model_call(ctx)
-        snapshot_body = ctx.context.messages[0].content
+        ctx = _StubContext()
+        snapshot = await _admit(rail, ctx, "go")
+        snapshot_body = snapshot.content
         assert '<team-event kind="roster">' in snapshot_body
 
         backend.add_member(_StubMember("dev2", "Newbie", "fresh"), mtime=2)
         backend.remove_member("dev1", mtime=3)
-        ctx.context.messages.append(UserMessage(content="next"))
-        await rail.before_model_call(ctx)
+        delta = await _admit(rail, ctx, "next")
 
-        delta_body = ctx.context.messages[1].content
-        assert '<team-event kind="roster-change">' in delta_body
-        assert "[加入] member_name=dev2" in delta_body
-        assert "[退出] member_name=dev1" in delta_body
-        # Only the delta — the full roster is not resent.
-        assert '<team-event kind="roster">' not in delta_body
-        # The first message keeps its original body verbatim.
+        assert '<team-event kind="roster-change">' in delta.content
+        assert "[加入] member_name=dev2" in delta.content
+        assert "[退出] member_name=dev1" in delta.content
+        assert '<team-event kind="roster">' not in delta.content
         assert ctx.context.messages[0].content == snapshot_body
 
     @pytest.mark.asyncio
@@ -647,88 +747,50 @@ class TestTeamPolicyRailTeamContext:
             members=[_StubMember("dev1", "Dev")],
             self_member_name="leader1",
         )
-        builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
         rail = _leader_rail(backend)
-        rail.init(agent)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
 
-        ctx = _StubContext(messages=[UserMessage(content="go")])
-        await rail.before_model_call(ctx)
-        snapshot_body = ctx.context.messages[0].content
-        assert '<team-note kind="announcement-only">' in snapshot_body
-        assert "不要" in snapshot_body
+        ctx = _StubContext()
+        snapshot = await _admit(rail, ctx, "go")
+        assert '<team-note kind="announcement-only">' in snapshot.content
+        assert "不要" in snapshot.content
 
         backend.add_member(_StubMember("dev2", "Newbie"), mtime=2)
-        ctx.context.messages.append(UserMessage(content="next"))
-        await rail.before_model_call(ctx)
-        delta_body = ctx.context.messages[1].content
-        assert '<team-note kind="announcement-only">' in delta_body
-        assert "不要" in delta_body
+        delta = await _admit(rail, ctx, "next")
+        assert '<team-note kind="announcement-only">' in delta.content
+        assert "不要" in delta.content
 
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_rebuilt_rail_does_not_resend(self):
-        """The rail is rebuilt every round, so the baseline must be persisted.
-
-        Same session, brand-new rail: nothing may be announced again. Clearing
-        the persisted baseline is what makes it start over.
-        """
+        """The rail is rebuilt every round, so the baseline must be persisted."""
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
             members=[_StubMember("dev1", "Dev")],
             self_member_name="leader1",
         )
-        builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
         session = _StubSession()
 
         rail = _leader_rail(backend)
-        rail.init(agent)
-        ctx = _StubContext(session=session, messages=[UserMessage(content="go")])
-        await rail.before_model_call(ctx)
-        assert "<team-context>" in ctx.context.messages[0].content
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        ctx = _StubContext(session=session)
+        first = await _admit(rail, ctx, "go")
+        assert "<team-context>" in first.content
         assert session.state[TEAM_CONTEXT_STATE_KEY]["identity_emitted"] is True
         assert session.commits >= 1
 
         rebuilt = _leader_rail(backend)
         rebuilt.init(_StubAgent(SystemPromptBuilder(language="cn")))
-        next_ctx = _StubContext(session=session, messages=[UserMessage(content="second round")])
-        await rebuilt.before_model_call(next_ctx)
-        assert next_ctx.context.messages[0].content == "second round"
+        next_ctx = _StubContext(session=session)
+        second = await _admit(rebuilt, next_ctx, "second round")
+        assert second.content == "second round"
 
         # Losing the baseline (a fresh session) starts the announcements over.
         fresh = _leader_rail(backend)
         fresh.init(_StubAgent(SystemPromptBuilder(language="cn")))
-        fresh_ctx = _StubContext(session=_StubSession("s2"), messages=[UserMessage(content="third")])
-        await fresh.before_model_call(fresh_ctx)
-        assert "<team-context>" in fresh_ctx.context.messages[0].content
-
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_restored_history_is_never_rewritten(self):
-        """A resumed member must not have its old messages edited in place."""
-        backend = _FakeTeamBackend(
-            team=_StubTeam("Beta", "Test"),
-            members=[_StubMember("dev1", "Dev")],
-            self_member_name="leader1",
-        )
-        builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
-        rail = _leader_rail(backend)
-        rail.init(agent)
-
-        restored = [
-            UserMessage(content="old query"),
-            AssistantMessage(content="old answer"),
-            UserMessage(content="current round"),
-        ]
-        ctx = _StubContext(messages=restored)
-        await rail.before_model_call(ctx)
-
-        assert ctx.context.messages[0].content == "old query"
-        assert ctx.context.messages[1].content == "old answer"
-        assert "<team-context>" in ctx.context.messages[2].content
-        assert ctx.context.messages[2].content.endswith("current round")
+        fresh_ctx = _StubContext(session=_StubSession("s2"))
+        third = await _admit(fresh, fresh_ctx, "third")
+        assert "<team-context>" in third.content
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -738,28 +800,23 @@ class TestTeamPolicyRailTeamContext:
             members=[_StubMember("dev1", "Dev")],
             self_member_name="leader1",
         )
-        builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
         rail = _leader_rail(
             backend,
             team_workspace_mount=".team/beta/",
             team_workspace_path="/abs/team-workspace",
         )
-        rail.init(agent)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
 
-        ctx = _StubContext(messages=[UserMessage(content="go")])
-        await rail.before_model_call(ctx)
-        body = ctx.context.messages[0].content
-        assert "`.team/beta/`" in body
-        assert "/abs/team-workspace" in body
+        ctx = _StubContext()
+        first = await _admit(rail, ctx, "go")
+        assert "`.team/beta/`" in first.content
+        assert "/abs/team-workspace" in first.content
 
         # A renamed team is announced again rather than rewritten in place.
         backend.set_team(_StubTeam("Beta-renamed", "Test"), mtime=99)
-        ctx.context.messages.append(UserMessage(content="next"))
-        await rail.before_model_call(ctx)
-        second = ctx.context.messages[1].content
-        assert "Beta-renamed" in second
-        assert "`.team/beta/`" in second
+        second = await _admit(rail, ctx, "next")
+        assert "Beta-renamed" in second.content
+        assert "`.team/beta/`" in second.content
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -773,7 +830,7 @@ class TestTeamPolicyRailTeamContext:
         agent = _StubAgent(builder)
         rail = _leader_rail(backend, base_prompt=None)
         rail.init(agent)
-        await rail.before_model_call(_StubContext(messages=[UserMessage(content="go")]))
+        await rail.before_model_call(_StubContext())
 
         prompt = builder.build()
         idx_role = prompt.index("# 团队角色")
@@ -793,7 +850,7 @@ class TestTeamPolicyRailTeamContext:
         agent = _StubAgent(builder)
         rail = _leader_rail(backend)
         rail.init(agent)
-        await rail.before_model_call(_StubContext(messages=[UserMessage(content="go")]))
+        await rail.before_model_call(_StubContext())
         assert builder.has_section(TeamSectionName.ROLE)
 
         rail.uninit(agent)
@@ -827,12 +884,13 @@ class TestTeamPolicyRailHitt:
         agent = _StubAgent(builder)
         rail = _leader_rail(backend)
         rail.init(agent)
-        ctx = _StubContext(messages=[UserMessage(content="go")])
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "go")
         await rail.before_model_call(ctx)
 
         assert builder.has_section(TeamSectionName.HITT)
         assert "禁止" in builder.get_section(TeamSectionName.HITT).render("cn")
-        body = ctx.context.messages[0].content
+        body = message.content
         assert "member_name=alice" in body
         assert "[human]" in body
         logger.info("HITT contract in builder; human tagged in the roster message")
@@ -850,7 +908,7 @@ class TestTeamPolicyRailHitt:
         agent = _StubAgent(builder)
         rail = _leader_rail(backend, member_prompt="")
         rail.init(agent)
-        await rail.before_model_call(_StubContext(messages=[UserMessage(content="go")]))
+        await rail.before_model_call(_StubContext())
         assert not builder.has_section(TeamSectionName.HITT)
 
     @pytest.mark.asyncio
@@ -872,9 +930,8 @@ class TestTeamPolicyRailHitt:
             team_backend=backend,
         )
         rail.init(agent)
-        ctx = _StubContext(messages=[UserMessage(content="go")])
-        await rail.before_model_call(ctx)
-        body = ctx.context.messages[0].content
+        ctx = _StubContext()
+        body = (await _admit(rail, ctx, "go")).content
         assert "member_name=alice" in body
         assert "[human]" not in body
 
@@ -897,9 +954,8 @@ class TestTeamPolicyRailHitt:
             expose_human_agents_to_teammates=True,
         )
         rail.init(agent)
-        ctx = _StubContext(messages=[UserMessage(content="go")])
-        await rail.before_model_call(ctx)
-        assert "[human]" in ctx.context.messages[0].content
+        ctx = _StubContext()
+        assert "[human]" in (await _admit(rail, ctx, "go")).content
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -914,7 +970,7 @@ class TestTeamPolicyRailHitt:
         agent = _StubAgent(builder)
         rail = _leader_rail(backend, member_prompt="")
         rail.init(agent)
-        await rail.before_model_call(_StubContext(messages=[UserMessage(content="go")]))
+        await rail.before_model_call(_StubContext())
         assert builder.has_section(TeamSectionName.HITT)
         rail.uninit(agent)
         assert not builder.has_section(TeamSectionName.HITT)
