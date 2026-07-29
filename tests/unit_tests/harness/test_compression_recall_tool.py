@@ -187,11 +187,11 @@ async def test_tool_omits_hint_when_chunks_match(tmp_path):
 @pytest.mark.parametrize(
     ("language", "expected_keywords"),
     [
-        ("cn", ["重试", "同义词", "archive_path", "turns.jsonl", "chunks/"]),
-        ("en", ["retry", "synonyms", "archive_path", "turns.jsonl", "chunks/"]),
+        ("cn", ["已被压缩", "重试", "同义词", "archive_path"]),
+        ("en", ["compressed", "retry", "synonyms", "archive_path"]),
     ],
 )
-def test_prompt_section_guides_retry_and_manual_inspection_on_miss(language, expected_keywords):
+def test_prompt_section_explains_marker_and_guides_retry(language, expected_keywords):
     section = build_compression_recall_section(language)
 
     content = section.content[language]

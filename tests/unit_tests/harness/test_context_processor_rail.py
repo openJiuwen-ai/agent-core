@@ -248,7 +248,7 @@ async def test_init_preset_defaults(tmp_path: Path):
     )
     assert curr.trigger_context_ratio == 0.8
     assert curr.min_target_context_ratio == 0.1
-    assert curr.keep_recent_messages == 3
+    assert curr.keep_recent_messages == 0
     assert curr.enable_recall is False
 
     # RoundLevelCompressor tests (forked)
@@ -257,8 +257,8 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert type(round_lvl).__module__ == (
         "openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor"
     )
-    assert round_lvl.trigger_context_ratio == 0.9
-    assert round_lvl.keep_recent_messages == 6
+    assert round_lvl.trigger_context_ratio == 0.8
+    assert round_lvl.keep_recent_messages == 4
     assert round_lvl.enable_recall is False
 
 

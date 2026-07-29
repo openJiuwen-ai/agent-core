@@ -21,13 +21,20 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     SessionMemoryManager,
 )
-from openjiuwen.core.context_engine.processor.forked import (  # pylint: disable=no-name-in-module
-    CurrentRoundCompressorConfig,
-    DialogueCompressorConfig,
-    MessageSummaryOffloaderConfig,
-    RoundLevelCompressorConfig,
+from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
+    CurrentRoundCompressorConfig as ForkedCurrentRoundCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
+    DialogueCompressorConfig as ForkedDialogueCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor import (
+    RoundLevelCompressorConfig as ForkedRoundLevelCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor import (
     SessionMemoryCompressorConfig,
-    activate,
+)
+from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
+    MessageSummaryOffloaderConfig as ForkedMessageSummaryOffloaderConfig,
 )
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.runner.callback.errors import AbortError
@@ -184,15 +191,16 @@ class ContextProcessorRail(DeepAgentRail):
             model_cfg = ModelRequestConfig.model_copy(model_config)
         else:
             model_cfg = None
+        from openjiuwen.core.context_engine.processor import forked
+
+        forked.activate()
         # The forked chain is the default preset. SessionMemoryCompressor ships
         # disabled: users opt in by overriding it with enabled=True, which also
         # starts the companion SessionMemoryManager (see init()).
         presets: List[Tuple[str, BaseModel]] = [
             (
                 "MessageSummaryOffloader",
-                MessageSummaryOffloaderConfig(
-                    protected_tool_names=["read_file"],
-                ),
+                ForkedMessageSummaryOffloaderConfig(),
             ),
             (
                 "SessionMemoryCompressor",
@@ -204,34 +212,21 @@ class ContextProcessorRail(DeepAgentRail):
             ),
             (
                 "DialogueCompressor",
-                DialogueCompressorConfig(
-                    model=model_cfg,
-                    model_client=model_client_config,
-                ),
+                ForkedDialogueCompressorConfig(model=model_cfg, model_client=model_client_config),
             ),
             (
                 "CurrentRoundCompressor",
-                CurrentRoundCompressorConfig(
-                    keep_recent_messages=3,
-                    model=model_cfg,
-                    model_client=model_client_config,
-                ),
+                ForkedCurrentRoundCompressorConfig(model=model_cfg, model_client=model_client_config),
             ),
             (
                 "RoundLevelCompressor",
-                RoundLevelCompressorConfig(
-                    trigger_context_ratio=0.9,
-                    keep_recent_messages=6,
-                    model=model_cfg,
-                    model_client=model_client_config,
-                ),
+                ForkedRoundLevelCompressorConfig(model=model_cfg, model_client=model_client_config),
             ),
         ]
         return presets
 
     def init(self, agent) -> None:
         """Inject / merge processors into agent.react_agent._config.context_processors."""
-        activate()
         config = getattr(getattr(agent, "react_agent", None), "_config", None)
         if config is None:
             return
