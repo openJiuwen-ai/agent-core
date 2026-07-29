@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from openjiuwen.core.context_engine import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
     DialogueCompressorConfig,
 )
@@ -31,7 +32,7 @@ def _context(tmp_path, session_id: str = "session-1"):
     return context
 
 
-def _make_agent(tmp_path):
+def _make_agent(tmp_path, *, recall_enabled: bool = False):
     tmp_path.mkdir(parents=True, exist_ok=True)
     sysop_card = SysOperationCard(
         id=f"compression_recall_sysop_{tmp_path.name}",
@@ -55,6 +56,9 @@ def _make_agent(tmp_path):
         enable_task_loop=False,
         workspace=Workspace(root_path=str(tmp_path)),
         sys_operation=sys_operation,
+        context_engine_config=ContextEngineConfig(
+            compression_recall_config=CompressionRecallConfig(enabled=recall_enabled),
+        ),
     )
 
 
@@ -90,10 +94,10 @@ async def test_tool_requires_runtime_session_and_recalls_current_session(tmp_pat
 
 @pytest.mark.asyncio
 async def test_rail_registers_tool_only_when_forked_compressor_recall_is_enabled(tmp_path):
-    enabled_agent = _make_agent(tmp_path / "enabled")
+    enabled_agent = _make_agent(tmp_path / "enabled", recall_enabled=True)
     enabled_rail = ContextProcessorRail(
         preset=False,
-        processors=[("DialogueCompressor", DialogueCompressorConfig(enable_recall=True))],
+        processors=[("DialogueCompressor", DialogueCompressorConfig())],
     )
     await enabled_agent.register_rail(enabled_rail)
     await enabled_agent.ensure_initialized()
@@ -105,7 +109,7 @@ async def test_rail_registers_tool_only_when_forked_compressor_recall_is_enabled
     disabled_agent = _make_agent(tmp_path / "disabled")
     disabled_rail = ContextProcessorRail(
         preset=False,
-        processors=[("DialogueCompressor", DialogueCompressorConfig(enable_recall=False))],
+        processors=[("DialogueCompressor", DialogueCompressorConfig())],
     )
     await disabled_agent.register_rail(disabled_rail)
     await disabled_agent.ensure_initialized()

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.core.context_engine import CompressionRecallConfig, ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
     CurrentRoundCompressor,
@@ -35,12 +36,17 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.compress
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 
 
-def _context(tmp_path: Path, session_id: str = "session-1"):
+def _context(
+    tmp_path: Path,
+    session_id: str = "session-1",
+    recall_config: CompressionRecallConfig | None = None,
+):
     context = MagicMock()
     context.workspace_dir.return_value = str(tmp_path)
     context.session_id.return_value = session_id
     context.context_id.return_value = "context-1"
     context.token_counter.return_value = None
+    context.compression_recall_config.return_value = recall_config or CompressionRecallConfig()
     return context
 
 
@@ -53,6 +59,23 @@ def _archive(tmp_path: Path, messages, *, session_id: str = "session-1", precedi
         preceding_messages=list(preceding or []),
         **kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_context_exposes_engine_wide_compression_recall_config():
+    recall_config = CompressionRecallConfig(
+        enabled=True,
+        chunk_size_tokens=1200,
+        chunk_overlap_tokens=120,
+    )
+    engine = ContextEngine(
+        ContextEngineConfig(compression_recall_config=recall_config),
+    )
+
+    context = await engine.create_context()
+
+    assert context.compression_recall_config() == recall_config
+    assert context.compression_recall_config() is not recall_config
 
 
 def test_archive_writes_turn_index_raw_messages_and_readable_chunks(tmp_path):
@@ -246,11 +269,11 @@ def test_recall_rejects_chunk_symlink_escape(tmp_path):
 
 @pytest.mark.asyncio
 async def test_compressor_adds_marker_only_after_archive_succeeds(tmp_path):
-    compressor = DialogueCompressor(DialogueCompressorConfig(enable_recall=True))
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     executor = MagicMock()
     executor.invoke = AsyncMock(return_value=CompressionResult(AssistantMessage(content="compact database state")))
     compressor._compression_executor = executor
-    context = _context(tmp_path)
+    context = _context(tmp_path, recall_config=CompressionRecallConfig(enabled=True))
     messages = [
         UserMessage(content="Historical database task"),
         AssistantMessage(content="database work " * 600),
@@ -276,11 +299,11 @@ async def test_compressor_adds_marker_only_after_archive_succeeds(tmp_path):
 async def test_compressor_continues_without_marker_when_archive_fails(tmp_path):
     blocking_workspace = tmp_path / "workspace-file"
     blocking_workspace.write_text("not a directory", encoding="utf-8")
-    compressor = DialogueCompressor(DialogueCompressorConfig(enable_recall=True))
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     executor = MagicMock()
     executor.invoke = AsyncMock(return_value=CompressionResult(AssistantMessage(content="compact state")))
     compressor._compression_executor = executor
-    context = _context(blocking_workspace)
+    context = _context(blocking_workspace, recall_config=CompressionRecallConfig(enabled=True))
     messages = [
         UserMessage(content="Historical request"),
         AssistantMessage(content="historical work " * 600),
@@ -299,7 +322,7 @@ async def test_compressor_continues_without_marker_when_archive_fails(tmp_path):
     ("compressor", "messages"),
     [
         (
-            DialogueCompressor(DialogueCompressorConfig(enable_recall=True)),
+            DialogueCompressor(DialogueCompressorConfig()),
             [
                 UserMessage(content="Historical dialogue"),
                 AssistantMessage(content="dialogue history " * 600),
@@ -307,14 +330,14 @@ async def test_compressor_continues_without_marker_when_archive_fails(tmp_path):
             ],
         ),
         (
-            CurrentRoundCompressor(CurrentRoundCompressorConfig(enable_recall=True)),
+            CurrentRoundCompressor(CurrentRoundCompressorConfig()),
             [
                 UserMessage(content="Current execution"),
                 AssistantMessage(content="execution trace " * 600),
             ],
         ),
         (
-            RoundLevelCompressor(RoundLevelCompressorConfig(enable_recall=True, keep_recent_messages=1)),
+            RoundLevelCompressor(RoundLevelCompressorConfig(keep_recent_messages=1)),
             [
                 UserMessage(content="Historical round"),
                 AssistantMessage(content="round history " * 600),
@@ -327,7 +350,7 @@ async def test_all_three_forked_compressors_archive_and_emit_marker(tmp_path, co
     executor = MagicMock()
     executor.invoke = AsyncMock(return_value=CompressionResult(AssistantMessage(content="compact state")))
     compressor._compression_executor = executor
-    context = _context(tmp_path)
+    context = _context(tmp_path, recall_config=CompressionRecallConfig(enabled=True))
     window = ContextWindow(system_messages=[], context_messages=messages, tools=[])
 
     event, updated = await compressor.on_get_context_window(context, window)
@@ -438,8 +461,8 @@ def test_archive_splits_turn_exceeding_default_chunk_size(tmp_path):
 
 
 def test_recall_chunk_config_rejects_overlap_not_smaller_than_size():
-    with pytest.raises(ValueError, match="recall_chunk_overlap_tokens"):
-        DialogueCompressorConfig(recall_chunk_size_tokens=1000, recall_chunk_overlap_tokens=1000)
+    with pytest.raises(ValueError, match="chunk_overlap_tokens"):
+        CompressionRecallConfig(chunk_size_tokens=1000, chunk_overlap_tokens=1000)
 
 
 def test_delete_compression_archive_removes_only_matching_archive_dir(tmp_path):
@@ -460,11 +483,11 @@ def test_delete_compression_archive_removes_only_matching_archive_dir(tmp_path):
 
 @pytest.mark.asyncio
 async def test_compressor_rolls_back_archive_when_benefit_check_fails(tmp_path):
-    compressor = DialogueCompressor(DialogueCompressorConfig(enable_recall=True))
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     executor = MagicMock()
     executor.invoke = AsyncMock(return_value=CompressionResult(AssistantMessage(content="bloated summary " * 2000)))
     compressor._compression_executor = executor
-    context = _context(tmp_path)
+    context = _context(tmp_path, recall_config=CompressionRecallConfig(enabled=True))
     messages = [
         UserMessage(content="Historical task"),
         AssistantMessage(content="tiny result"),
@@ -484,7 +507,7 @@ async def test_compressor_rolls_back_archive_when_benefit_check_fails(tmp_path):
 
 @pytest.mark.asyncio
 async def test_compressor_without_recall_compresses_without_archive(tmp_path):
-    compressor = DialogueCompressor(DialogueCompressorConfig(enable_recall=False))
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     executor = MagicMock()
     executor.invoke = AsyncMock(return_value=CompressionResult(AssistantMessage(content="compact state")))
     compressor._compression_executor = executor
@@ -505,17 +528,18 @@ async def test_compressor_without_recall_compresses_without_archive(tmp_path):
 
 @pytest.mark.asyncio
 async def test_compressor_passes_recall_chunk_config_to_archive(tmp_path):
-    compressor = DialogueCompressor(
-        DialogueCompressorConfig(
-            enable_recall=True,
-            recall_chunk_size_tokens=1000,
-            recall_chunk_overlap_tokens=100,
-        )
-    )
+    compressor = DialogueCompressor(DialogueCompressorConfig())
     executor = MagicMock()
     executor.invoke = AsyncMock(return_value=CompressionResult(AssistantMessage(content="compact state")))
     compressor._compression_executor = executor
-    context = _context(tmp_path)
+    context = _context(
+        tmp_path,
+        recall_config=CompressionRecallConfig(
+            enabled=True,
+            chunk_size_tokens=1000,
+            chunk_overlap_tokens=100,
+        ),
+    )
     messages = [
         UserMessage(content="Historical database task"),
         AssistantMessage(content="database work " * 600),

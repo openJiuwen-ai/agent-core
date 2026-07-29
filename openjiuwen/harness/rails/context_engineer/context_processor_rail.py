@@ -21,6 +21,7 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     SessionMemoryManager,
 )
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
     CurrentRoundCompressorConfig as ForkedCurrentRoundCompressorConfig,
 )
@@ -278,15 +279,26 @@ class ContextProcessorRail(DeepAgentRail):
 
         self._all_processors = all_processors
         self._system_prompt_builder = getattr(agent, "system_prompt_builder", None)
-        self._recall_enabled = any(
+        context_engine_config = getattr(config, "context_engine_config", None)
+        recall_config = getattr(context_engine_config, "compression_recall_config", None)
+        supported_compressor_present = any(
             processor_name in {"DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor"}
-            and bool(getattr(processor_config, "enable_recall", False))
-            for processor_name, processor_config in all_processors
+            for processor_name, _ in all_processors
         )
+        recall_requested = isinstance(recall_config, CompressionRecallConfig) and recall_config.enabled
+        self._recall_enabled = recall_requested and supported_compressor_present
+        if isinstance(recall_config, CompressionRecallConfig):
+            logger.info(
+                "compression recall effective config: %s",
+                self._summarize_processor_config(recall_config),
+            )
+        if recall_requested and not supported_compressor_present:
+            logger.warning(
+                "compression recall is enabled but no supported forked compressor is configured"
+            )
         if self._recall_enabled:
             self._protect_compression_recall_tool_results(all_processors)
             self._register_compression_recall_tool(agent)
-        context_engine_config = getattr(config, "context_engine_config", None)
         self._reload_enabled = bool(getattr(context_engine_config, "enable_reload", False))
 
     def _maybe_setup_session_memory_manager(

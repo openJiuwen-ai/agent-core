@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
     CompressionError,
@@ -68,15 +69,24 @@ class PrefixCompactProcessorConfig(BaseModel):
     # effect analysis. Disabled by default; zero overhead when off.
     enable_compression_dump: bool = Field(default=False)
     compression_dump_dir: str | None = Field(default=None)
-    enable_recall: bool = Field(default=False)
-    recall_chunk_size_tokens: int = Field(default=3000, gt=0)
-    recall_chunk_overlap_tokens: int = Field(default=300, gt=0)
 
-    @model_validator(mode="after")
-    def _validate_recall_chunk_tokens(self) -> "PrefixCompactProcessorConfig":
-        if self.recall_chunk_overlap_tokens >= self.recall_chunk_size_tokens:
-            raise ValueError("recall_chunk_overlap_tokens must be smaller than recall_chunk_size_tokens")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_recall_config(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        legacy_fields = {
+            "enable_recall",
+            "recall_chunk_size_tokens",
+            "recall_chunk_overlap_tokens",
+        }
+        configured_fields = sorted(legacy_fields.intersection(value))
+        if configured_fields:
+            raise ValueError(
+                f"{', '.join(configured_fields)} moved to "
+                "ContextEngineConfig.compression_recall_config"
+            )
+        return value
 
 
 def adjust_keep_recent_for_tool_boundaries(messages: list[BaseMessage], keep_recent: int) -> int:
@@ -522,7 +532,9 @@ class PrefixCompactProcessor(ContextProcessor):
         original_messages: list[BaseMessage],
         span: PrefixCompactSpan,
     ) -> Any | None:
-        if not getattr(self.config, "enable_recall", False):
+        get_recall_config = getattr(context, "compression_recall_config", None)
+        recall_config = get_recall_config() if callable(get_recall_config) else None
+        if not isinstance(recall_config, CompressionRecallConfig) or not recall_config.enabled:
             return None
         from openjiuwen.core.context_engine.processor.forked.compressor.recall import (
             archive_compression_messages,
@@ -536,8 +548,8 @@ class PrefixCompactProcessor(ContextProcessor):
                 original_messages=original_messages,
                 messages_to_compress=list(span.messages_to_compress),
                 preceding_messages=list(span.preserved_prefix),
-                chunk_size_tokens=int(getattr(self.config, "recall_chunk_size_tokens", 3000)),
-                chunk_overlap_tokens=int(getattr(self.config, "recall_chunk_overlap_tokens", 300)),
+                chunk_size_tokens=recall_config.chunk_size_tokens,
+                chunk_overlap_tokens=recall_config.chunk_overlap_tokens,
             )
         except Exception as exc:
             logger.warning(
