@@ -537,6 +537,7 @@ class AgentConfigurator:
                 type=TEAM_POLICY,
                 params={
                     "prompt": ctx.prompt or "",
+                    "display_name": ctx.display_name or "",
                     "lifecycle": spec.lifecycle,
                     "teammate_mode": teammate_mode,
                     "team_mode": _resolve_team_mode(spec),

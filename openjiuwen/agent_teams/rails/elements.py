@@ -96,6 +96,7 @@ class TeamToolInput(ConstructionInput):
     role: str = context_field(attr="role", default="leader", description="Team role value.")
     member_name: str = context_field(attr="member_name", default="", description="Member name.")
     language: str = context_field(attr="language", default="cn", description="Resolved language code.")
+    display_name: str = param_field(default="", description="Human-readable member label (own identity).")
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
     dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle (temporary / persistent).")
@@ -159,6 +160,7 @@ class TeamPolicyInput(ConstructionInput):
     role: str = context_field(attr="role", default="leader", description="Team role value.")
     member_name: str = context_field(attr="member_name", default="", description="Member name.")
     language: str = context_field(attr="language", default="cn", description="Resolved language code.")
+    display_name: str = param_field(default="", description="Human-readable member label (own identity).")
     prompt: str = param_field(default="", description="Member-private working agreement (own prompt only).")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle.")
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
@@ -189,6 +191,7 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         role=TeamRole(inp.role),
         member_prompt=inp.prompt,
         member_name=inp.member_name or None,
+        display_name=inp.display_name,
         lifecycle=inp.lifecycle,
         teammate_mode=inp.teammate_mode,
         language=inp.language,

@@ -91,6 +91,7 @@ class TeamContextTracker:
             tests that only care about the static content).
         member_name: This member's semantic identifier.
         role: This member's team role; gates the ``[human]`` roster tag.
+        display_name: This member's human-readable label.
         member_prompt: This member's private working agreement.
         team_workspace_mount: Agent-relative mount of the shared workspace.
         team_workspace_path: Absolute path of the shared workspace.
@@ -105,6 +106,7 @@ class TeamContextTracker:
         team_backend: "TeamBackend | None",
         member_name: str | None,
         role: TeamRole,
+        display_name: str = "",
         member_prompt: str = "",
         team_workspace_mount: str | None = None,
         team_workspace_path: str | None = None,
@@ -114,6 +116,7 @@ class TeamContextTracker:
         self._team_backend = team_backend
         self._member_name = member_name
         self._role = role
+        self._display_name = display_name
         self._member_prompt = member_prompt
         self._team_workspace_mount = team_workspace_mount
         self._team_workspace_path = team_workspace_path
@@ -128,7 +131,7 @@ class TeamContextTracker:
 
         Advances nothing: the caller must call :meth:`commit` once the returned
         text has actually been delivered. When a probe moved but produced no
-        text to say (an empty roster, a team with no metadata yet), the baseline
+        text to say (an empty roster, or a team that does not exist yet), the baseline
         is advanced right here instead -- there is nothing that could fail to
         deliver, and leaving it unadvanced would re-read the DB on every call.
 
@@ -146,12 +149,19 @@ class TeamContextTracker:
         updated = dict(baseline)
         blocks: list[str] = []
 
-        identity_block = self._identity_block(baseline, updated)
-        if identity_block:
-            blocks.append(identity_block)
-        info_block = await self._team_info_block(baseline, updated)
-        if info_block:
-            blocks.append(info_block)
+        # Identity and team info are both standing facts about the team, so when
+        # they surface together they belong in one <team-context> rather than two
+        # adjacent ones saying the same kind of thing.
+        standing: list[str] = []
+        identity_body = await self._identity_body(baseline, updated)
+        if identity_body:
+            standing.append(identity_body)
+        info_body = await self._team_info_body(baseline, updated)
+        if info_body:
+            standing.append(info_body)
+        if standing:
+            blocks.append(render_team_context(body="\n".join(standing)))
+
         roster_block = await self._roster_block(baseline, updated)
         if roster_block:
             blocks.append(roster_block)
@@ -182,32 +192,53 @@ class TeamContextTracker:
     # Channels
     # ------------------------------------------------------------------
 
-    def _identity_block(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:
-        """Render the one-shot identity block, or None when already delivered.
+    async def _identity_body(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:
+        """Render the one-shot identity body, or None when already delivered.
 
         Constant for the lifetime of the member, so it has no probe: the
-        baseline flag alone decides. The flag is set even when the body comes
-        back empty (a member with neither name nor private prompt) -- there will
-        never be anything to say.
+        baseline flag alone decides once it has gone out.
+
+        **Waits for the member's own DB row**, because that row is what
+        ``display_name`` has to come from. The constructor value is only a
+        spec-time default: a leader is registered by ``build_team`` under the
+        label the caller passed *there*, so telling it the spec default would
+        tell it a name the rest of the team does not use. A teammate's row
+        already exists when it spawns, so this gate costs it nothing; a leader
+        is told who it is on the call right after it builds the team, alongside
+        the team info that appears at the same moment.
+
+        Without a backend at all (unit tests that only exercise static content)
+        the constructor values are used as-is.
         """
         if baseline.get(_IDENTITY_EMITTED):
             return None
+        display_name = self._display_name
+        if self._team_backend is not None and self._member_name:
+            member = await self._team_backend.get_member(self._member_name)
+            if member is None:
+                return None
+            display_name = member.display_name or ""
         updated[_IDENTITY_EMITTED] = True
-        body = build_identity_text(
+        return build_identity_text(
             member_name=self._member_name,
+            display_name=display_name,
             member_prompt=self._member_prompt,
             language=self._language,
         )
-        if body is None:
-            return None
-        return render_team_context(body=body)
 
-    async def _team_info_block(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:
+    async def _team_info_body(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:
         """Render team metadata when its ``updated_at`` probe has moved.
 
         Re-announced rather than replaced on change: the previous block stays in
-        history as the fact it was at the time. The probe covers a team that does
-        not exist yet (the leader before ``build_team``), which reads as 0.
+        history as the fact it was at the time.
+
+        **Nothing is announced until the team row exists.** A leader has no team
+        on its first model calls -- ``build_team`` has not run yet -- while the
+        workspace paths are constructor arguments and are always available. Left
+        ungated, that renders a "team info" block with no team in it, and the
+        real one lands moments later: the member is told the same thing twice,
+        the first time wrongly. The probe reads 0 while the row is missing, so it
+        moves on its own once the team is created.
         """
         if self._team_backend is None:
             return None
@@ -216,22 +247,18 @@ class TeamContextTracker:
             return None
         updated[_TEAM_INFO_MTIME] = mtime
         info = await self._team_backend.get_team_info()
-        info_dict: dict[str, Any] | None = None
-        if info is not None:
-            info_dict = {
+        if info is None:
+            return None
+        return build_team_info_text(
+            team_info={
                 "team_name": info.team_name,
                 "display_name": info.display_name,
                 "desc": info.desc or "",
-            }
-        body = build_team_info_text(
-            team_info=info_dict,
+            },
             team_workspace_mount=self._team_workspace_mount,
             team_workspace_path=self._team_workspace_path,
             language=self._language,
         )
-        if body is None:
-            return None
-        return render_team_context(body=body)
 
     async def _roster_block(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:
         """Render a roster snapshot the first time, deltas after that.

@@ -36,6 +36,7 @@ _LABELS: dict[str, dict[str, str]] = {
     "cn": {
         "identity_heading": "# 成员身份",
         "member_name_line": "你的 member_name",
+        "display_name_line": "你的 display_name",
         "private_prompt_heading": "## 私有工作约定",
         "info_heading": "# 团队信息",
         "team_name_label": "team_name（团队唯一标识）",
@@ -56,6 +57,7 @@ _LABELS: dict[str, dict[str, str]] = {
     "en": {
         "identity_heading": "# Member Identity",
         "member_name_line": "Your member_name",
+        "display_name_line": "Your display_name",
         "private_prompt_heading": "## Private Working Agreement",
         "info_heading": "# Team Info",
         "team_name_label": "team_name (unique identifier)",
@@ -172,32 +174,41 @@ def format_member_line(
 def build_identity_text(
     *,
     member_name: str | None,
+    display_name: str | None = None,
     member_prompt: str | None = None,
     language: str = "cn",
 ) -> str | None:
     """Render the member's own identity body.
 
-    Carries everything specific to this one member: its ``member_name`` and its
-    private working agreement (the member-private counterpart to the public
-    ``desc``, never shared into any peer's roster). Both are fixed at spawn time
-    and constant afterwards, so this body is delivered exactly once.
+    Carries everything specific to this one member: the two names it is known
+    by and its private working agreement (the member-private counterpart to the
+    public ``desc``, never shared into any peer's roster). All are fixed at
+    spawn time and constant afterwards, so this body is delivered exactly once.
+
+    ``display_name`` is here because peers' rosters list members by *both*
+    names: without its own label a member cannot tell which roster row is
+    itself, nor refer to itself the way the rest of the team does.
 
     Args:
         member_name: Semantic member identifier.
-        member_prompt: The member's private working agreement; blank (the
-            leader, or a member spawned without one) drops that subsection.
+        display_name: Human-readable label; blank drops that line.
+        member_prompt: The member's private working agreement; blank (a member
+            spawned without one) drops that subsection.
         language: Body language ('cn' or 'en').
 
     Returns:
-        The rendered body, or ``None`` when neither field is set.
+        The rendered body, or ``None`` when no field is set.
     """
     private_prompt = member_prompt.strip() if member_prompt else ""
-    if not member_name and not private_prompt:
+    label = display_name.strip() if display_name else ""
+    if not member_name and not label and not private_prompt:
         return None
     labels = labels_for(language)
     lines = [labels["identity_heading"], ""]
     if member_name:
         lines.append(f"{labels['member_name_line']}: {member_name}")
+    if label:
+        lines.append(f"{labels['display_name_line']}: {label}")
     if private_prompt:
         lines.extend(["", labels["private_prompt_heading"], "", private_prompt])
     return "\n".join(lines) + "\n"

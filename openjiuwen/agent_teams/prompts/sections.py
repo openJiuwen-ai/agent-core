@@ -132,6 +132,7 @@ def _labels_for(language: str) -> dict[str, str]:
 def build_team_identity_section(
     *,
     member_name: str | None,
+    display_name: str | None = None,
     member_prompt: str | None = None,
     language: str = "cn",
 ) -> Optional[PromptSection]:
@@ -152,16 +153,18 @@ def build_team_identity_section(
 
     Args:
         member_name: Semantic member identifier.
-        member_prompt: The member's private working agreement; blank (the
-            leader, or a member spawned without one) drops that subsection.
+        display_name: Human-readable member label.
+        member_prompt: The member's private working agreement; blank (a member
+            spawned without one) drops that subsection.
         language: Prompt language ('cn' or 'en').
 
     Returns:
-        PromptSection carrying the member_name line and, when set, the private
-        working agreement; ``None`` when neither is set.
+        PromptSection carrying the member's names and, when set, the private
+        working agreement; ``None`` when none of them is set.
     """
     body = build_identity_text(
         member_name=member_name,
+        display_name=display_name,
         member_prompt=member_prompt,
         language=language,
     )
@@ -519,6 +522,7 @@ def build_team_static_sections(
     *,
     role: TeamRole,
     member_name: str | None,
+    display_name: str = "",
     member_prompt: str = "",
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
@@ -578,6 +582,7 @@ def build_team_static_sections(
     if include_member_specific:
         identity_section = build_team_identity_section(
             member_name=member_name,
+            display_name=display_name,
             member_prompt=member_prompt,
             language=language,
         )
@@ -634,6 +639,7 @@ def build_team_member_system_prompt(
     *,
     role: TeamRole,
     member_name: str | None,
+    display_name: str = "",
     member_prompt: str = "",
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
@@ -666,6 +672,7 @@ def build_team_member_system_prompt(
     sections = build_team_static_sections(
         role=role,
         member_name=member_name,
+        display_name=display_name,
         member_prompt=member_prompt,
         lifecycle=lifecycle,
         teammate_mode=teammate_mode,

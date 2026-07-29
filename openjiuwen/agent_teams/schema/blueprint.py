@@ -763,6 +763,7 @@ class TeamAgentSpec(BaseModel):
         context = TeamRuntimeContext(
             role=TeamRole.LEADER,
             member_name=self.leader.member_name,
+            display_name=self.leader.display_name,
             desc=self.leader.desc,
             prompt=self.leader.prompt,
             team_spec=team_spec,

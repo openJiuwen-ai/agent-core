@@ -38,18 +38,13 @@ from openjiuwen.agent_teams.prompts import build_team_static_sections
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
+from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
-
-
-def _is_user_message(message: Any) -> bool:
-    """Return True for a user-role message, however it was reconstructed."""
-    return getattr(message, "role", "") == "user"
 
 
 def prepend_to_content(content: Any, text: str) -> Any:
@@ -83,12 +78,14 @@ class TeamPolicyRail(DeepAgentRail):
         the members of a team**: built once at ``__init__`` and re-added to the
         builder on every ``before_model_call`` (cheap dict insert). Neither
         team-state churn nor per-member content ever touches this prefix.
-      * **Conversation history** -- this member's own identity (``member_name``
-        + private working agreement), the team metadata, and the peer roster.
-        These are per-member and/or appear only once the team exists, so they
-        cannot live in the shared prefix; they are written into the member's
-        context by :class:`TeamContextTracker` at the model call where they
-        first appear, and never rewritten afterwards.
+      * **Conversation history** -- this member's own identity, the team
+        metadata, and the peer roster. These are per-member and/or appear only
+        once the team exists, so they cannot live in the shared prefix.
+        :class:`TeamContextTracker` decides what is still unsaid; the rail
+        delivers it either on the input that is being admitted
+        (``on_user_message``, the normal case) or, when state appears mid
+        tool-loop with no input to ride, as a message appended at the tail.
+        Nothing already in the history is ever rewritten.
 
     The state lane used to be a per-round prompt attachment. An attachment
     never invalidates the prefix (it is appended at the tail of the window and
@@ -108,6 +105,7 @@ class TeamPolicyRail(DeepAgentRail):
         role: TeamRole,
         member_prompt: str = "",
         member_name: str | None = None,
+        display_name: str = "",
         lifecycle: str = "temporary",
         teammate_mode: str = "build_mode",
         language: str = "cn",
@@ -136,6 +134,7 @@ class TeamPolicyRail(DeepAgentRail):
             role=role,
             member_prompt=member_prompt,
             member_name=member_name,
+            display_name=display_name,
             lifecycle=lifecycle,
             teammate_mode=teammate_mode,
             team_mode=team_mode,
@@ -148,16 +147,13 @@ class TeamPolicyRail(DeepAgentRail):
             team_backend=team_backend,
             member_name=member_name,
             role=role,
+            display_name=display_name,
             member_prompt=member_prompt,
             team_workspace_mount=team_workspace_mount,
             team_workspace_path=team_workspace_path,
             expose_human_agents_to_teammates=expose_human_agents_to_teammates,
             language=language,
         )
-        # How far into the conversation this rail has already looked. Describes
-        # the live round only, so it is deliberately NOT persisted -- unlike the
-        # tracker's baseline, which must survive the per-round rail rebuild.
-        self._seen_message_count: int | None = None
 
     def init(self, agent: Any) -> None:
         """Cache the agent's shared prompt builder."""
@@ -176,30 +172,49 @@ class TeamPolicyRail(DeepAgentRail):
                 self.system_prompt_builder.remove_section(section.name)
         self.system_prompt_builder = None
 
+    async def on_user_message(self, ctx: AgentCallbackContext) -> None:
+        """Fold pending team state into the input being admitted.
+
+        This is the primary lane, and the reason it is a hook rather than a
+        search through the history: the message is handed over *before* it
+        becomes history, so there is no position to track and nothing that
+        compaction can move out from under us. The state goes to the front of
+        the input, so the member reads who it is and what team it is on before
+        whatever prompted this round.
+        """
+        inputs = getattr(ctx, "inputs", None)
+        message = getattr(inputs, "message", None)
+        session = getattr(ctx, "session", None)
+        if message is None or session is None:
+            return
+        text = await self._tracker.pending_text(session)
+        if not text:
+            return
+        message.content = prepend_to_content(message.content, text)
+        await self._tracker.commit(session)
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject the static sections, then tell the member what is new."""
+        """Inject the static sections, then catch state with no input to ride."""
         if self.system_prompt_builder is None:
             return
 
         for section in self._static_sections:
             self.system_prompt_builder.add_section(section)
 
-        await self._sync_team_context(ctx)
+        await self._announce_unattached_state(ctx)
 
-    async def _sync_team_context(self, ctx: AgentCallbackContext) -> None:
-        """Write any newly-appeared team state into the conversation.
+    async def _announce_unattached_state(self, ctx: AgentCallbackContext) -> None:
+        """Append team state that appeared with no input to ride along with.
 
-        Placement only ever touches the messages added since the previous model
-        call, so everything before them keeps its cached prefix:
+        State usually arrives on an input and rides it (see
+        :meth:`on_user_message`), but it can also appear mid tool-loop: a leader
+        calling ``build_team`` creates the team, its own member row and the
+        roster in the middle of a round, and the next input may be far away. So
+        whatever is still pending at a model call becomes a message of its own.
 
-          * when that segment contains a user message, the text goes to the very
-            front of the oldest one -- the member reads the team state before
-            whatever prompted this call;
-          * mid tool-loop the segment is all assistant / tool-result messages,
-            so the text becomes a new trailing user message of its own.
-
-        The baseline is committed only after placement succeeds; a failure here
-        leaves the state pending and it is re-rendered next call.
+        It is **appended**, never inserted: the tail is the only position that
+        needs no index and cannot be invalidated by compaction rewriting the
+        history behind it.
         """
         context = getattr(ctx, "context", None)
         session = getattr(ctx, "session", None)
@@ -208,39 +223,8 @@ class TeamPolicyRail(DeepAgentRail):
         text = await self._tracker.pending_text(session)
         if not text:
             return
-        messages = context.get_messages()
-        target = self._placement_target(messages)
-        if target is not None:
-            target.content = prepend_to_content(target.content, text)
-        else:
-            await context.add_messages(UserMessage(content=text))
-        self._seen_message_count = len(context.get_messages())
+        await context.add_messages(UserMessage(content=text))
         await self._tracker.commit(session)
-
-    def _placement_target(self, messages: list[BaseMessage]) -> BaseMessage | None:
-        """Return the user message to prepend into, or None to append a new one.
-
-        On the very first call of a rail instance there is no recorded boundary.
-        Restored history must not be touched (rewriting an old message throws
-        away the cache for everything after it), so the boundary starts at the
-        last user message -- the input that triggered this round on a cold start
-        as much as after a resume.
-        """
-        boundary = self._seen_message_count
-        if boundary is None:
-            boundary = self._last_user_message_index(messages)
-        for message in messages[boundary:]:
-            if _is_user_message(message):
-                return message
-        return None
-
-    @staticmethod
-    def _last_user_message_index(messages: list[BaseMessage]) -> int:
-        """Index of the last user message, or 0 when the history has none."""
-        for index in range(len(messages) - 1, -1, -1):
-            if _is_user_message(messages[index]):
-                return index
-        return 0
 
     def _build_static_sections(
         self,
@@ -248,6 +232,7 @@ class TeamPolicyRail(DeepAgentRail):
         role: TeamRole,
         member_prompt: str,
         member_name: str | None,
+        display_name: str,
         lifecycle: str,
         teammate_mode: str,
         team_mode: str,
@@ -260,6 +245,7 @@ class TeamPolicyRail(DeepAgentRail):
             role=role,
             member_prompt=member_prompt,
             member_name=member_name,
+            display_name=display_name,
             lifecycle=lifecycle,
             teammate_mode=teammate_mode,
             team_mode=team_mode,
