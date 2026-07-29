@@ -19,7 +19,12 @@ Usage::
 
 from typing import Any, Dict, List, Optional
 
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryStore, Trajectory
+from openjiuwen.agent_evolving.trajectory import (
+    InMemoryTrajectoryStore,
+    Trajectory,
+    set_trajectory_resource_attributes,
+)
+from openjiuwen.agent_evolving.trajectory.semconv import CASE_ID, OJ_SESSION_ID, TRAJECTORY_SOURCE
 
 
 class TrajectoryCollector:
@@ -41,7 +46,7 @@ class TrajectoryCollector:
         session_id: str = "",
         source: str = "offline",
         case_id: Optional[str] = None,
-    ):
+    ) -> Optional[Trajectory]:
         """Run agent and return a Trajectory object.
 
         Args:
@@ -52,7 +57,7 @@ class TrajectoryCollector:
             case_id: Optional case ID for offline scenarios.
 
         Returns:
-            Trajectory object collected during the run.
+            Trajectory object collected during the run, or None if none was saved.
         """
         if not hasattr(agent, "register_rail"):
             raise ValueError(
@@ -118,9 +123,13 @@ class TrajectoryCollector:
         # InMemoryTrajectoryStore stores in dict, so we get the last saved one
         trajectory = trajectories[-1]
 
-        # Enhance with RL-specific metadata if available
-        trajectory.source = source
-        trajectory.session_id = effective_session_id
-        trajectory.case_id = effective_case_id
+        set_trajectory_resource_attributes(
+            trajectory,
+            {
+                TRAJECTORY_SOURCE: source,
+                OJ_SESSION_ID: effective_session_id,
+                CASE_ID: effective_case_id,
+            },
+        )
 
         return trajectory

@@ -8,9 +8,11 @@ from openjiuwen.agent_teams.worktree.lifecycle import (
     TeammateWorktreeLifecycle,
 )
 from openjiuwen.agent_teams.worktree.naming import build_teammate_worktree_name
+from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
 
 __all__ = [
     "MemberWorktreeInfo",
     "TeammateWorktreeLifecycle",
     "build_teammate_worktree_name",
+    "remove_session_worktrees",
 ]

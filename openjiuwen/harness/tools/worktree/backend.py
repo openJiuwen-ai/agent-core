@@ -18,6 +18,7 @@ from typing import Callable, Protocol, runtime_checkable
 from openjiuwen.harness.tools.worktree.git import (
     GitError,
     branch_delete,
+    create_empty_initial_commit,
     fetch_ref,
     get_current_branch,
     get_default_branch,
@@ -61,7 +62,13 @@ class WorktreeBackend(Protocol):
         """
         ...
 
-    async def remove(self, worktree_path: str, repo_root: str) -> bool:
+    async def remove(
+        self,
+        worktree_path: str,
+        repo_root: str,
+        *,
+        force: bool = False,
+    ) -> bool:
         """Remove a worktree.
 
         Args:
@@ -166,7 +173,13 @@ class GitBackend:
             existed=False,
         )
 
-    async def remove(self, worktree_path: str, repo_root: str) -> bool:
+    async def remove(
+        self,
+        worktree_path: str,
+        repo_root: str,
+        *,
+        force: bool = False,
+    ) -> bool:
         """Remove a worktree and its branch.
 
         Args:
@@ -177,9 +190,9 @@ class GitBackend:
             True if removal succeeded.
         """
         branch = await get_current_branch(worktree_path)
-        ok = await worktree_remove(worktree_path, repo_root=repo_root, force=True)
+        ok = await worktree_remove(worktree_path, repo_root=repo_root, force=force)
         if ok and branch and branch.startswith("worktree-"):
-            await branch_delete(branch, repo_root)
+            await branch_delete(branch, repo_root, force=force)
         return ok
 
     async def exists(self, worktree_path: str) -> bool:
@@ -221,6 +234,12 @@ class GitBackend:
 
         # Last resort: use current HEAD
         sha = await rev_parse("HEAD", repo_root)
+        if sha:
+            return "HEAD", sha
+
+        # Unborn repository: create a real empty base commit so git worktree can
+        # branch from HEAD without consuming staged or untracked user files.
+        sha = await create_empty_initial_commit(repo_root)
         return "HEAD", sha
 
 

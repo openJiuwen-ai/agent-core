@@ -47,6 +47,31 @@ async def test_idle_to_running_to_idle_single_round() -> None:
 
 
 @pytest.mark.asyncio
+async def test_completion_timeout_only_logs_slow_round(caplog: pytest.LogCaptureFixture) -> None:
+    """NativeHarness completion_timeout logs slow rounds without cancelling them."""
+    await Runner.start()
+    try:
+        caplog.set_level("WARNING")
+        harness = NativeHarness(make_spec(completion_timeout=0.01))
+        fake = await start_harness(harness, sleep_seconds=0.05, answer_output="done")
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("slow")
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            await harness.stop()
+            await consumer
+
+        assert fake.cancelled_count == 0
+        assert answer_outputs(collected) == ["done"]
+        assert "slow round" in caplog.text
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_followup_runs_in_fifo_order_after_first_round() -> None:
     """send(immediate=False) while RUNNING buffers; the next round picks it up."""
     await Runner.start()

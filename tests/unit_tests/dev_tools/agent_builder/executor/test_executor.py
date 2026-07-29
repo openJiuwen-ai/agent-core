@@ -93,6 +93,7 @@ class TestCreateCoreModel:
                 "model_provider": "openai",
                 "model_name": "gpt-4",
                 "api_key": "test_key",
+                "api_base": "https://test.api/v1",
                 "temperature": 0.7,
                 "top_p": 0.9,
             }
@@ -112,6 +113,7 @@ class TestCreateCoreModel:
                 "model_provider": "openai",
                 "model_name": "gpt-4",
                 "api_key": "test_key",
+                "api_base": "https://test.api/v1",
                 "temperature": 0.7,
                 "max_tokens": 1000,
                 "top_p": 0.9,

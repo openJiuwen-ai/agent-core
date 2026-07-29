@@ -36,6 +36,7 @@ from openjiuwen.agent_teams.interaction.human_agent_inbox import (
 )
 from openjiuwen.agent_teams.interaction.payload import (
     DeliverResult,
+    ExternalTeamEvent,
     GodViewMessage,
     HumanAgentInboundEvent,
     HumanAgentMessage,
@@ -55,6 +56,7 @@ __all__ = [
     "BridgeAgentNotEnabledError",
     "BridgeProtocolAdapter",
     "DeliverResult",
+    "ExternalTeamEvent",
     "GodViewMessage",
     "HumanAgentInbox",
     "HumanAgentInboundEvent",

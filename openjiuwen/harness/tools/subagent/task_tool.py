@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
-from typing import TYPE_CHECKING, AsyncIterator, List, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 
 
 if TYPE_CHECKING:
@@ -16,8 +17,30 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
+from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.tools.base_tool import ToolOutput
-from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+try:
+    from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
+        browser_agent_log_info,
+    )
+except Exception:  # pragma: no cover - browser runtime is optional here
+    browser_agent_log_info = None
+
+
+def _summarize_task_description(task_description: Any) -> dict[str, Any]:
+    task_text = str(task_description or "")
+    task_hash = ""
+    if task_text:
+        task_hash = hashlib.sha256(
+            task_text.encode("utf-8", errors="ignore")
+        ).hexdigest()[:12]
+
+    return {
+        "redacted": True,
+        "length": len(task_text),
+        "sha256_12": task_hash,
+    }
 
 
 class TaskTool(Tool):
@@ -49,7 +72,7 @@ class TaskTool(Tool):
     @staticmethod
     def _build_sub_session_id(parent_session_id: str, subagent_type: str) -> str:
         normalized_type = str(subagent_type or "").strip()
-        if normalized_type in ("browser_agent", "verification_agent"):
+        if kv_cache_hooks.is_sticky_subagent_type(normalized_type):
             # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
             return f"{parent_session_id}_sub_{normalized_type}"
         return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
@@ -90,6 +113,21 @@ class TaskTool(Tool):
                 reason="Both 'subagent_type' and 'task' are required",
             )
 
+        browser_capabilities: Optional[List[str]] = None
+        if str(subagent_type) == "browser_agent":
+            raw_capabilities = inputs.get("browser_capabilities")
+            if raw_capabilities is None:
+                browser_capabilities = []
+            elif isinstance(raw_capabilities, list) and all(
+                isinstance(capability, str) for capability in raw_capabilities
+            ):
+                browser_capabilities = list(raw_capabilities)
+            else:
+                raise build_error(
+                    StatusCode.TOOL_TASK_TOOL_INVOKED,
+                    reason="'browser_capabilities' must be a list of strings",
+                )
+
         parent_session_id = parent_session.get_session_id()
         sub_session_id = self._build_sub_session_id(parent_session_id, str(subagent_type))
         logger.info(
@@ -98,7 +136,14 @@ class TaskTool(Tool):
         )
 
         try:
-            subagent = self.parent_agent.create_subagent(subagent_type, sub_session_id)
+            if browser_capabilities is None:
+                subagent = self.parent_agent.create_subagent(subagent_type, sub_session_id)
+            else:
+                subagent = self.parent_agent.create_subagent(
+                    subagent_type,
+                    sub_session_id,
+                    browser_capabilities=browser_capabilities,
+                )
         except Exception as exc:
             logger.error(f"[TaskTool] Subagent creation failed: type={subagent_type}, error={exc}")
             raise build_error(
@@ -106,11 +151,35 @@ class TaskTool(Tool):
                 reason=f"Subagent {subagent_type} creation failed: {exc}",
             ) from exc
 
-        logger.info(f"[TaskTool] Invoking subagent with isolated session: {sub_session_id}, query: {task_description}")
+        query_summary = _summarize_task_description(task_description)
+        invoke_log = (
+            "[TaskTool] Invoking subagent with isolated session: %s, "
+            "subagent_type=%s, query_summary=%s"
+        )
+        if str(subagent_type) == "browser_agent" and browser_agent_log_info is not None:
+            browser_agent_log_info(invoke_log, sub_session_id, subagent_type, query_summary)
+        else:
+            logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
+        succeeded = False
         try:
+            affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
+            if affinity_enabled:
+                kv_cache_hooks.prefetch_sticky_subagent(
+                    self.parent_agent,
+                    subagent_type=str(subagent_type),
+                    sub_session_id=sub_session_id,
+                    parent_session_id=parent_session_id,
+                )
             # Invoke subagent with isolated session_id
-            result = await subagent.invoke({"query": task_description, "conversation_id": sub_session_id})
+            subagent_inputs = {
+                "query": task_description,
+                "conversation_id": sub_session_id,
+            }
+            if affinity_enabled:
+                subagent_inputs["parent_session_id"] = parent_session_id
+            result = await subagent.invoke(subagent_inputs)
+            succeeded = True
             output = result.get("output", "")
             return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
         except Exception as e:
@@ -119,6 +188,15 @@ class TaskTool(Tool):
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
                 reason=f"Subagent {subagent_type} execution failed: {e}",
             ) from e
+        finally:
+            if affinity_enabled:
+                await kv_cache_hooks.finish_subagent(
+                    self.parent_agent,
+                    subagent_type=str(subagent_type),
+                    sub_session_id=sub_session_id,
+                    parent_session_id=parent_session_id,
+                    succeeded=succeeded,
+                )
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass
@@ -145,8 +223,8 @@ def create_task_tool(
         name="task_tool",
         tool_id="task_tool",
         language=language,
-        format_args={"available_agents": available_agents},
         agent_id=agent_id,
+        options=ToolCardBuildOptions(format_args={"available_agents": available_agents}),
     )
 
     return [TaskTool(card=card, parent_agent=parent_agent, language=language)]

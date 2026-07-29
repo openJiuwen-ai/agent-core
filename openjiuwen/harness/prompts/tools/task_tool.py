@@ -53,6 +53,10 @@ When using the task_tool, specify a subagent_type parameter to select which \
 subagent type to use. \
 The value must exactly match one of the names listed \
 above under "Available subagent types".
+When subagent_type is "browser_agent", you must also provide \
+browser_capabilities as a list of additional capability categories selected \
+from the browser capability catalog above. Use an empty list for a core-only \
+browser task. Do not provide browser_capabilities for other subagent types.
 
 When NOT to use the task_tool:
 
@@ -119,6 +123,9 @@ task_tool 启动专门的子代理来自主处理复杂任务。每种子代理�
 使用 task_tool 时，请通过 subagent_type 参数选择要使用的子代理类型。\
 使用 task_tool 时，必须显式指定 subagent_type，且其值必须与上方\
 「可用代理类型」列表中的名称完全一致。
+当 subagent_type 为 "browser_agent" 时，还必须指定 browser_capabilities，\
+并从上方浏览器能力目录中选择额外能力类别。仅使用核心浏览器能力时传入\
+空列表；其他子代理类型不要提供 browser_capabilities。
 
 何时不使用 task_tool：
 
@@ -176,13 +183,19 @@ DESCRIPTION: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
     "subagent_type": {
-        "cn": "子代理类型（必填，须与上方可用代理类型名称完全一致，如 general-purpose、explore_agent）",
-        "en": "Required subagent type; must exactly match a name from the available subagent types list "
-              "(e.g. general-purpose, explore_agent)",
+        "cn": "子代理类型（必填，须与上方「可用代理类型」列表中的名称完全一致；"
+              "不要使用列表中未出现的名称）",
+        "en": "Required subagent type; must exactly match a name from the "
+              "\"Available subagent types\" list above. Do not use any name "
+              "that is not listed there.",
     },
     "task_description": {
         "cn": "任务描述（必填，需包含完整上下文）",
         "en": "Required task description with full context for the subagent",
+    },
+    "browser_capabilities": {
+        "cn": "浏览器子代理所需的额外能力类别列表；仅使用核心能力时传入空列表",
+        "en": "Additional capability categories required by browser_agent; use an empty list for core-only tasks",
     },
 }
 
@@ -207,6 +220,11 @@ def get_task_tool_input_params(language: str = "cn") -> Dict[str, Any]:
             "task_description": {
                 "type": "string",
                 "description": p["task_description"].get(language, p["task_description"]["cn"]),
+            },
+            "browser_capabilities": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": p["browser_capabilities"].get(language, p["browser_capabilities"]["cn"]),
             },
         },
         "required": ["subagent_type", "task_description"],

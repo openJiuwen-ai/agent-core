@@ -16,6 +16,11 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
 from openjiuwen.core.context_engine.processor.base import ContextEvent
+from openjiuwen.core.context_engine.processor.budget_guard import (
+    count_messages_tokens,
+    effective_context_budget,
+    truncate_message_content_to_fixed_head_tail_if_over_token_limit,
+)
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 
 # Keywords used to detect "context overflow" errors from LLM responses
@@ -157,7 +162,7 @@ class MessageSummaryOffloaderConfig(BaseModel):
     offload_message_type: list[Literal["user", "assistant", "tool"]] = Field(default=["tool"])
     """Roles eligible for adaptive summary offloading."""
 
-    protected_tool_names: list[str] = Field(default=["reload_original_context_messages"])
+    protected_tool_names: list[str] = Field(default=["read_file"])
     """Tool messages produced by these tools are always kept in full in both modes."""
 
     model: ModelRequestConfig | None = Field(default=None)
@@ -346,7 +351,7 @@ class MessageSummaryOffloader(MessageOffloader):
         extra_fields.pop("content", None)
         offload_handle, offload_path = self._new_offload_handle_and_path(context)
 
-        return await self.offload_messages(
+        offload_message = await self.offload_messages(
             role=message.role,
             content=final_content,
             messages=[message],
@@ -356,6 +361,10 @@ class MessageSummaryOffloader(MessageOffloader):
             **extra_fields,
             **kwargs,
         )
+        if offload_message is None:
+            return message
+        self._truncate_offload_placeholder_preview_if_large(offload_message, context)
+        return offload_message
 
     def _should_offload_message(
             self,
@@ -414,6 +423,40 @@ class MessageSummaryOffloader(MessageOffloader):
             return len(json.dumps(message.content, ensure_ascii=False)) // 3
         except TypeError:
             return len(str(message.content)) // 3
+
+    def _truncate_offload_placeholder_preview_if_large(
+            self,
+            message: BaseMessage,
+            context: ModelContext,
+    ) -> None:
+        if not isinstance(message.content, str):
+            return
+        trigger_token_limit = min(
+            self.config.large_message_threshold,
+            effective_context_budget(context, model_config=self.config.model),
+        )
+        if count_messages_tokens(context, [message]) <= trigger_token_limit:
+            return
+        preserved_suffix = self._extract_offload_marker_suffix(message.content)
+
+        def _count(candidate_content: str) -> int:
+            candidate = message.model_copy(update={"content": candidate_content})
+            return count_messages_tokens(context, [candidate])
+
+        truncated_content = truncate_message_content_to_fixed_head_tail_if_over_token_limit(
+            content=message.content,
+            trigger_token_limit=trigger_token_limit,
+            count_content_tokens=_count,
+            preserved_suffix=preserved_suffix,
+        )
+        message.content = truncated_content
+
+    @staticmethod
+    def _extract_offload_marker_suffix(content: str) -> str:
+        marker_start = content.rfind("[[OFFLOAD:")
+        if marker_start < 0:
+            return ""
+        return content[marker_start:]
 
     def _get_function_call_from_chain(
             self,

@@ -102,4 +102,6 @@ async def trigger(event, **kwargs):
         **kwargs: Additional arguments passed to the trigger call.
     """
     fw = get_callback_framework()
+    if not fw.has_subscribers(event):
+        return
     await fw.trigger(event, **kwargs)

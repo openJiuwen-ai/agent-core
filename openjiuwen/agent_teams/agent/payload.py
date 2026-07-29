@@ -68,7 +68,7 @@ class SpawnPayloadBuilder:
                 "leader_member_name": team_spec.leader_member_name if team_spec else None,
                 "member_name": ctx.member_name,
                 "role": ctx.role.value,
-                "persona": ctx.persona,
+                "desc": ctx.desc,
                 "transport": (member_transport.model_dump(mode="json") if member_transport is not None else None),
             },
             # Empty query means "no first round" — only a genuine first-start
@@ -81,7 +81,8 @@ class SpawnPayloadBuilder:
         return TeamRuntimeContext(
             role=member_spec.role_type,
             member_name=member_spec.member_name,
-            persona=member_spec.persona,
+            desc=member_spec.desc,
+            prompt=member_spec.prompt,
             team_spec=self._ctx.team_spec,
             messager_config=self.build_member_messager_config(member_spec.member_name),
             db_config=self._ctx.db_config,

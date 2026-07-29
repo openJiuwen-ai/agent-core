@@ -16,8 +16,10 @@ Two operating modes:
 """
 
 import asyncio
+import errno
 import os
 import shutil
+import stat
 import subprocess
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -157,11 +159,12 @@ class TeamWorkspaceManager:
     # ── Workspace / worktree mount ─────────────────────────────
 
     def _mount_directory(self, target_path: str, link_path: str) -> None:
-        """Create a directory link, falling back to junctions on Windows.
+        """Create a directory link with OS-specific fallback behavior.
 
         Windows requires elevated privileges or Developer Mode for directory
-        symlinks. When that privilege is unavailable, fall back to a junction
-        so team workspace mounts still work for normal users.
+        symlinks. When that privilege is unavailable, fall back to a junction.
+        On other restricted runtimes where symlink creation is forbidden, fall
+        back to copying the directory so the mount remains usable.
 
         Args:
             target_path: Existing directory to expose.
@@ -170,11 +173,25 @@ class TeamWorkspaceManager:
         try:
             os.symlink(target_path, link_path, target_is_directory=True)
         except OSError as exc:
-            if os.name != "nt" or getattr(exc, "winerror", None) != ERROR_PRIVILEGE_NOT_HELD:
+            if os.name == "nt" and getattr(exc, "winerror", None) == ERROR_PRIVILEGE_NOT_HELD:
+                self._create_windows_junction(target_path, link_path)
+                team_logger.info(
+                    "Symlink privilege unavailable on Windows; mounted %s via junction at %s",
+                    target_path,
+                    link_path,
+                )
+                return
+            if getattr(exc, "errno", None) not in (errno.EACCES, errno.EPERM):
                 raise
-            self._create_windows_junction(target_path, link_path)
+            shutil.copytree(
+                target_path,
+                link_path,
+                symlinks=False,
+                copy_function=shutil.copy2,
+                dirs_exist_ok=False,
+            )
             team_logger.info(
-                "Symlink privilege unavailable on Windows; mounted %s via junction at %s",
+                "Symlink unavailable; mounted %s via copied directory at %s",
                 target_path,
                 link_path,
             )
@@ -193,6 +210,35 @@ class TeamWorkspaceManager:
         if result.returncode != 0:
             error_output = result.stderr.strip() or result.stdout.strip()
             raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
+
+
+    @staticmethod
+    def _is_directory_link(path: str) -> bool:
+        """Return True when ``path`` is a symlink or Windows junction."""
+        if os.path.islink(path):
+            return True
+        if os.name != "nt":
+            return False
+        try:
+            path_stat = os.lstat(path)
+        except OSError:
+            return False
+        file_attributes = getattr(path_stat, "st_file_attributes", 0)
+        return bool(file_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+    @classmethod
+    def _remove_directory_mount(cls, path: str) -> bool:
+        """Remove a symlink, junction, or copied fallback directory."""
+        if os.path.islink(path):
+            os.unlink(path)
+            return True
+        if cls._is_directory_link(path):
+            os.rmdir(path)
+            return True
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+            return True
+        return False
 
     def _is_mounted_to_workspace(self, link_path: str) -> bool:
         try:
@@ -287,11 +333,11 @@ class TeamWorkspaceManager:
         os.makedirs(wt_dir, exist_ok=True)
         link_path = os.path.join(wt_dir, slug)
         if os.path.lexists(link_path):
-            if os.path.islink(link_path):
-                os.unlink(link_path)
+            if self._is_directory_link(link_path):
+                self._remove_directory_mount(link_path)
             else:
                 team_logger.warning(
-                    "Worktree mount path '%s' exists and is not a symlink -- skipping",
+                    "Worktree mount path '%s' exists and is not a managed directory link -- skipping",
                     link_path,
                 )
                 return
@@ -305,8 +351,7 @@ class TeamWorkspaceManager:
             slug: Worktree slug previously passed to ``mount_worktree``.
         """
         link_path = os.path.join(self.workspace_path, ".worktree", slug)
-        if os.path.islink(link_path):
-            os.unlink(link_path)
+        if self._remove_directory_mount(link_path):
             team_logger.debug("Unmounted worktree '%s' from %s", slug, link_path)
 
     def mount_into_worktree(self, worktree_path: str) -> None:

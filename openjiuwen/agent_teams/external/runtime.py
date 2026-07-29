@@ -24,7 +24,7 @@ no-ops (the configurator skips those features for external CLI members).
 Both flavours implement the :class:`MemberRuntime` interaction surface
 (``start`` / ``stop`` / ``outputs`` / ``send`` / ``abort`` / ``pause`` /
 ``subscribe`` / ``state`` / ``session_id``) through the
-shared :class:`_CliRuntimeBase` adapter, which wraps each flavour's single-turn
+shared :class:`CliRuntimeBase` adapter, which wraps each flavour's single-turn
 ``_drive`` async generator: ``send`` starts a turn when IDLE (or steers /
 buffers a follow-up when RUNNING), ``outputs`` exposes the turn's narration
 chunks via a queue-backed iterator, and phase/round events are mapped onto the
@@ -45,6 +45,7 @@ from typing import Any, AsyncIterator, Callable, Optional
 
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter
 from openjiuwen.agent_teams.external.cli_agent.injector import Injector
+from openjiuwen.agent_teams.external.cli_agent.transport.base import ProcessLike, ProcessTransport, StreamReaderLike
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -91,7 +92,7 @@ class _TurnTimeout(Exception):
         self.absolute = absolute
 
 
-async def _read_stderr_tail(stream: Optional[asyncio.StreamReader]) -> str:
+async def _read_stderr_tail(stream: StreamReaderLike | None) -> str:
     """Drain a subprocess stderr to EOF and return its tail.
 
     Draining matters for two reasons: an unread stderr pipe fills its OS
@@ -111,7 +112,7 @@ async def _read_stderr_tail(stream: Optional[asyncio.StreamReader]) -> str:
     return tail.decode("utf-8", errors="replace").strip()
 
 
-async def _terminate(process: Optional[asyncio.subprocess.Process]) -> None:
+async def _terminate(process: ProcessLike | None) -> None:
     """Terminate a subprocess if still running. Idempotent and quiet."""
     if process is None or process.returncode is not None:
         return
@@ -121,7 +122,7 @@ async def _terminate(process: Optional[asyncio.subprocess.Process]) -> None:
         await process.wait()
 
 
-class _CliRuntimeBase(ABC):
+class CliRuntimeBase(ABC):
     """Shared :class:`MemberRuntime` surface for CLI-backed members.
 
     Adapts each flavour's single-turn ``_drive`` async generator into the
@@ -131,9 +132,8 @@ class _CliRuntimeBase(ABC):
     event bus a NativeHarness uses.
     """
 
-    def __init__(self, *, member_name: str, adapter: CliAgentAdapter):
+    def __init__(self, *, member_name: str):
         self._member_name = member_name
-        self._adapter = adapter
         # Lifecycle phase mapped onto the team's HarnessState vocabulary so the
         # StreamController treats a CLI runtime exactly like a NativeHarness.
         self._phase = HarnessState.IDLE
@@ -156,11 +156,11 @@ class _CliRuntimeBase(ABC):
     # ------------------------------------------------------------------
 
     async def start(self, *, team_session: Optional[Any] = None) -> None:
-        """Prepare the runtime for one run cycle (the subprocess owns its session).
+        """Prepare the base CLI runtime for one run cycle.
 
-        ``team_session`` is ignored: a CLI subprocess manages its own session,
-        so cross-cycle state lives in the subprocess, not a shared team session.
-        Resets the output channel + phase so a reused instance starts clean.
+        The base subprocess implementation ignores ``team_session``. Dedicated
+        SDK subclasses may derive a member AgentSession before or after this
+        reset to persist backend-native resume state.
         """
         _ = team_session
         self._output_queue = asyncio.Queue()
@@ -188,6 +188,10 @@ class _CliRuntimeBase(ABC):
         await self.aclose()
         self._output_queue.put_nowait(_END)
         await self._events.unregister_namespace(_EVENT_NAMESPACE)
+
+    async def dispose(self) -> None:
+        """Permanently dispose this CLI-backed runtime."""
+        await self.stop()
 
     @property
     def state(self) -> HarnessState:
@@ -413,7 +417,7 @@ class _CliRuntimeBase(ABC):
         return None
 
 
-class ExternalCliRuntime(_CliRuntimeBase):
+class ExternalCliRuntime(CliRuntimeBase):
     """Streaming runtime: one long-lived CLI subprocess driven via stdin."""
 
     def __init__(
@@ -423,13 +427,16 @@ class ExternalCliRuntime(_CliRuntimeBase):
         adapter: CliAgentAdapter,
         injector: Injector,
         output_lines: AsyncIterator[str],
-        process: Optional[asyncio.subprocess.Process] = None,
+        process: ProcessLike | None = None,
+        transport: ProcessTransport | None = None,
     ):
         """Bind to a launched CLI subprocess's input/output channels."""
-        super().__init__(member_name=member_name, adapter=adapter)
+        super().__init__(member_name=member_name)
+        self._adapter = adapter
         self._injector = injector
         self._output_lines = output_lines
         self._process = process
+        self._transport = transport
         self._abort_requested = False
         self._stderr_task: Optional[asyncio.Task[str]] = None
 
@@ -518,27 +525,31 @@ class ExternalCliRuntime(_CliRuntimeBase):
 
     async def aclose(self) -> None:
         """Close stdin and terminate the long-lived subprocess. Idempotent."""
-        await self._injector.aclose()
-        await _terminate(self._process)
-        if self._stderr_task is not None:
-            if not self._stderr_task.done():
-                self._stderr_task.cancel()
-            stderr_tail = ""
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                stderr_tail = await self._stderr_task
-            self._stderr_task = None
-            returncode = self._process.returncode if self._process is not None else None
-            if returncode not in (0, None) and stderr_tail:
-                team_logger.warning(
-                    "[external-cli] member {} CLI exited with code {} (likely auth/quota/credit "
-                    "exhaustion or a crash). stderr: {}",
-                    self._member_name,
-                    returncode,
-                    stderr_tail,
-                )
+        try:
+            await self._injector.aclose()
+            await _terminate(self._process)
+            if self._stderr_task is not None:
+                if not self._stderr_task.done():
+                    self._stderr_task.cancel()
+                stderr_tail = ""
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    stderr_tail = await self._stderr_task
+                self._stderr_task = None
+                returncode = self._process.returncode if self._process is not None else None
+                if returncode not in (0, None) and stderr_tail:
+                    team_logger.warning(
+                        "[external-cli] member {} CLI exited with code {} (likely auth/quota/credit "
+                        "exhaustion or a crash). stderr: {}",
+                        self._member_name,
+                        returncode,
+                        stderr_tail,
+                    )
+        finally:
+            if self._transport is not None:
+                await self._transport.aclose()
 
 
-class ReinvokeCliRuntime(_CliRuntimeBase):
+class ReinvokeCliRuntime(CliRuntimeBase):
     """One-shot runtime: a fresh CLI subprocess per turn (prompt as argv).
 
     Messages that arrive mid-turn (via steer/follow_up) cannot interrupt a
@@ -579,7 +590,8 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
                 "active" forever by dribbling output just under the inactivity
                 window.
         """
-        super().__init__(member_name=member_name, adapter=adapter)
+        super().__init__(member_name=member_name)
+        self._adapter = adapter
         self._env = env
         self._cwd = cwd
         self._cli_session_id = cli_session_id or uuid.uuid4().hex
@@ -808,4 +820,4 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
         await _terminate(self._current)
 
 
-__all__ = ["ExternalCliRuntime", "ReinvokeCliRuntime"]
+__all__ = ["CliRuntimeBase", "ExternalCliRuntime", "ReinvokeCliRuntime"]

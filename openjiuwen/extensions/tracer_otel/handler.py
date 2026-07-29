@@ -23,6 +23,7 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from openjiuwen.core.common.exception.codes import StatusCode as OJStatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import session_logger
+from openjiuwen.core.graph.pregel import GraphInterrupt
 from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
 from openjiuwen.core.session.tracer.handler import (
     TraceExtAgentHandler,
@@ -86,6 +87,20 @@ def _get_parent_context(state: OtelSpanState | None) -> otel_context.Context | N
     if state is None:
         return None
     return trace.set_span_in_context(state.span)
+
+
+# Workflow component_type (set by TracerWorkflowUtils._get_component_metadata as
+# type(executor).__name__) substring matches for LLM-related components:
+#   - "LLM"             covers LLMComponent and any future LLM-named variants
+#   - "IntentDetection" covers IntentDetectionComponent (compound, internally invokes LLM)
+#   - "Questioner"      covers QuestionerComponent (compound, internally invokes LLM)
+# Substring match avoids needing a registry update when new LLM-named components are added.
+_LLM_SUBSTRINGS: tuple[str, ...] = ("LLM", "IntentDetection", "Questioner")
+
+# Component types that represent tool execution — tagged with
+# gen_ai.operation.name="execute_tool" per OTel GenAI semantic conventions.
+# Substring match on "Tool" covers ToolExecutable and any future Tool-named variants.
+_TOOL_SUBSTRINGS: tuple[str, ...] = ("Tool",)
 
 
 def _serialize(value: Any) -> str:
@@ -610,7 +625,8 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 metadata = {}
             is_workflow_root = "workflow_id" in metadata and "component_id" not in metadata
             component_type = metadata.get("component_type", "")
-            span_kind = SpanKind.CLIENT if "LLM" in component_type else SpanKind.INTERNAL
+            is_llm_component = any(s in component_type for s in _LLM_SUBSTRINGS)
+            span_kind = SpanKind.CLIENT if is_llm_component else SpanKind.INTERNAL
 
             if is_workflow_root:
                 span_name = invoke_id
@@ -632,8 +648,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             if source_ids is not None:
                 otel_span.set_attribute(OJ_SOURCE_IDS, _serialize(source_ids))
             # LLM component: gen_ai attributes
-            if "LLM" in component_type:
+            if is_llm_component:
                 otel_span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
+            elif any(s in component_type for s in _TOOL_SUBSTRINGS):
+                otel_span.set_attribute(GEN_AI_OPERATION_NAME, "execute_tool")
 
             self._set_workflow_attrs(otel_span, metadata, invoke_id)
 
@@ -725,23 +743,41 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     ):
         try:
             if exception is not None:
-                # Mark span as ERROR, flush buffer, end span
+                # Distinguish GraphInterrupt (control-flow signal) from real errors,
+                # mirroring builtin TraceWorkflowHandler.on_invoke:
+                #   - GraphInterrupt -> openjiuwen.status="interrupted", no OTel ERROR,
+                #     no OJ_ERROR / OJ_WORKFLOW_ERROR_MESSAGE (interrupt is not a failure)
+                #   - BaseError      -> openjiuwen.status="error", OJ_ERROR with error_code
+                #   - other Exception -> openjiuwen.status="error", OJ_ERROR with WORKFLOW_EXECUTION_ERROR
                 state = self._span_manager.get(invoke_id)
                 if state is not None:
-                    state.span.set_status(Status(StatusCode.ERROR))
-                    state.span.set_attribute(OJ_WORKFLOW_ERROR_MESSAGE, str(exception))
-                    state.span.set_attribute(OJ_STATUS, NodeStatus.ERROR.value)
-                    # Complete error dict
-                    if isinstance(exception, BaseError):
-                        state.span.set_attribute(
-                            OJ_ERROR, _serialize({"error_code": exception.status.code, "message": exception.message})
-                        )
+                    if isinstance(exception, GraphInterrupt):
+                        state.span.set_attribute(OJ_STATUS, NodeStatus.INTERRUPTED.value)
+                        # Record interrupt payload for debuggability without error semantics
+                        state.span.set_attribute(OJ_WORKFLOW_ERROR_MESSAGE, str(exception))
                     else:
-                        state.span.set_attribute(OJ_ERROR, _serialize({"message": str(exception)}))
-                    # inner_error from on_invoke_data
+                        state.span.set_status(Status(StatusCode.ERROR))
+                        state.span.set_attribute(OJ_WORKFLOW_ERROR_MESSAGE, str(exception))
+                        state.span.set_attribute(OJ_STATUS, NodeStatus.ERROR.value)
+                        if isinstance(exception, BaseError):
+                            state.span.set_attribute(
+                                OJ_ERROR,
+                                _serialize({"error_code": exception.status.code, "message": exception.message}),
+                            )
+                        else:
+                            state.span.set_attribute(
+                                OJ_ERROR,
+                                _serialize(
+                                    {
+                                        "error_code": OJStatusCode.WORKFLOW_EXECUTION_ERROR.code,
+                                        "message": str(exception),
+                                    }
+                                ),
+                            )
+                        state.span.record_exception(exception)
+                    # inner_error from on_invoke_data (applies to both interrupt and error paths)
                     if on_invoke_data and isinstance(on_invoke_data, dict) and "inner_error" in on_invoke_data:
                         state.span.set_attribute(OJ_INNER_ERROR, _serialize(on_invoke_data["inner_error"]))
-                    state.span.record_exception(exception)
 
                 self._flush_buffered_data(invoke_id)
 

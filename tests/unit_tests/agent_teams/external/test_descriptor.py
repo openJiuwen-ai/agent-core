@@ -6,6 +6,7 @@
 import pytest
 
 from openjiuwen.agent_teams.external import TEAM_JOIN_ENV, TeamJoinDescriptor
+from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.agent_teams.tools.database.config import DatabaseConfig, DatabaseType
 from openjiuwen.core.common.exception.errors import BaseError
 
@@ -18,7 +19,10 @@ def test_descriptor_json_roundtrip_preserves_fields():
         member_name="dev-1",
         role="leader",
         language="en",
+        teammate_mode="plan_mode",
         db_config=DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string="/tmp/team.db"),
+        workspace_config=TeamWorkspaceConfig(enabled=True, root_path="/tmp/team-workspace"),
+        workspace_path="/tmp/team-workspace",
     )
 
     restored = TeamJoinDescriptor.from_json(descriptor.to_json())
@@ -28,7 +32,11 @@ def test_descriptor_json_roundtrip_preserves_fields():
     assert restored.member_name == "dev-1"
     assert restored.role == "leader"
     assert restored.language == "en"
+    assert restored.teammate_mode == "plan_mode"
     assert restored.db_config.connection_string == "/tmp/team.db"
+    assert restored.workspace_config is not None
+    assert restored.workspace_config.enabled is True
+    assert restored.workspace_path == "/tmp/team-workspace"
 
 
 @pytest.mark.level0

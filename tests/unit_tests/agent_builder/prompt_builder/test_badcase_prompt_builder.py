@@ -115,7 +115,8 @@ class MockModelClient(BaseModelClient):
 @pytest.mark.asyncio
 async def test_bad_case_prompt_builder():
     builder = BadCasePromptBuilder(
-        ModelRequestConfig(model=""), ModelClientConfig(client_provider="MockModelClient", api_base="", api_key="")
+        ModelRequestConfig(model=""),
+        ModelClientConfig(client_provider="MockModelClient", api_base="", api_key="test-key")
     )
     prompt = "bad_case test prompt"
     information_extraction_cases = [

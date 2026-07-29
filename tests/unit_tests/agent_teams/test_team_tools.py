@@ -13,6 +13,7 @@ from openjiuwen.agent_teams.context import (
     set_session_id,
 )
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import (
     MemberMode,
     MemberStatus,
@@ -25,7 +26,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApprovePlanTool,
@@ -379,7 +380,7 @@ class TestSpawnTools:
         """A cli_agent absent from external_cli_agents is rejected (capability ceiling)."""
         tool = SpawnExternalCliTool(agent_team, t)
         result = await tool.invoke(
-            {"member_name": "cli-2", "display_name": "CLI Two", "desc": "worker", "cli_agent": "claude"}
+            {"member_name": "cli-2", "display_name": "CLI Two", "prompt": "worker", "cli_agent": "claude"}
         )
         assert result.success is False
         assert "not declared" in (result.error or "")
@@ -399,7 +400,7 @@ class TestSpawnTools:
         )
         tool = SpawnExternalCliTool(team, t)
         result = await tool.invoke(
-            {"member_name": "claude-1", "display_name": "Claude One", "desc": "reviewer", "cli_agent": "claude"}
+            {"member_name": "claude-1", "display_name": "Claude One", "prompt": "reviewer", "cli_agent": "claude"}
         )
         assert result.success is True, result.error
         assert result.data["role_type"] == "external_cli"
@@ -569,7 +570,7 @@ class TestApprovePlanTool:
         assert result.success is True
         assert result.error is None
         approved_task = await agent_team.task_manager.get(task.task_id)
-        assert approved_task.status == TaskStatus.PLAN_APPROVED.value
+        assert approved_task.status == TaskStatus.IN_PROGRESS.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -588,7 +589,7 @@ class TestApprovePlanTool:
 
         assert result.success is False
         approved_task = await agent_team.task_manager.get(task.task_id)
-        assert approved_task.status == TaskStatus.CLAIMED.value
+        assert approved_task.status == TaskStatus.PLANNING.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -607,7 +608,7 @@ class TestApprovePlanTool:
 
         assert result.success is True
         rejected_task = await agent_team.task_manager.get(task.task_id)
-        assert rejected_task.status == TaskStatus.CLAIMED.value
+        assert rejected_task.status == TaskStatus.PLANNING.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -691,6 +692,19 @@ class TestListMembersTool:
         assert "member1" in member_ids
         assert "member2" in member_ids
 
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_projects_roster_columns_only(self, agent_team, t, sample_agent_card):
+        """Roster entries carry only name/display_name/status, no heavy columns."""
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+
+        tool = ListMembersTool(agent_team, t)
+        result = await tool.invoke({})
+
+        assert result.success is True
+        member = result.data["members"][0]
+        assert set(member) == {"member_name", "display_name", "status"}
+
 
 # ========== Task Management Tools (V2) ==========
 
@@ -732,8 +746,45 @@ class TestTaskCreateTool:
 
         assert result.success is True
         assert result.data["count"] == 3
-        assert result.data["skipped"] == 0
         assert len(result.data["tasks"]) == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_batch_with_forward_references(self, agent_team, t):
+        """depends_on may reference tasks created later in the same call."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "final", "title": "Final", "content": "c", "depends_on": ["a1", "a2"]},
+                    {"task_id": "a1", "title": "A1", "content": "c"},
+                    {"task_id": "a2", "title": "A2", "content": "c"},
+                ]
+            }
+        )
+
+        assert result.success is True, result.error
+        statuses = {task["task_id"]: task["status"] for task in result.data["tasks"]}
+        assert statuses["final"] == TaskStatus.BLOCKED.value
+        assert statuses["a1"] == TaskStatus.PENDING.value
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_batch_atomic_failure(self, agent_team, t):
+        """A bad reference fails the whole call; nothing is created."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "good", "title": "Good", "content": "c"},
+                    {"task_id": "bad", "title": "Bad", "content": "c", "depends_on": ["ghost"]},
+                ]
+            }
+        )
+
+        assert result.success is False
+        assert "ghost" in result.error
+        assert await agent_team.task_manager.get("good") is None
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -767,6 +818,41 @@ class TestTaskCreateTool:
 
         assert result.success is True
         assert result.data["title"] == "Priority Task"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_create_task_rejects_in_batch_depended_by(self, agent_team, t):
+        """depended_by pointing at a task of the same call is rejected."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "up", "title": "Up", "content": "c"},
+                    {"task_id": "down", "title": "Down", "content": "c", "depended_by": ["up"]},
+                ]
+            }
+        )
+
+        assert result.success is False
+        assert "depends_on" in result.error
+        assert await agent_team.task_manager.get("up") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_create_task_rejects_duplicate_ids_in_call(self, agent_team, t):
+        """Duplicate task_id within one call is rejected at the boundary."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "same", "title": "First", "content": "c"},
+                    {"task_id": "same", "title": "Second", "content": "c"},
+                ]
+            }
+        )
+
+        assert result.success is False
+        assert "same" in result.error
 
 
 class TestUpdateTaskTool:
@@ -827,7 +913,7 @@ class TestUpdateTaskTool:
     async def test_cancel_all_tasks(self, agent_team, t, db):
         """Test cancel all tasks via task_id='*'"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke({"task_id": "*", "status": "cancelled"})
@@ -866,7 +952,9 @@ class TestUpdateTaskTool:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_assign_reassigns_to_new_member(self, agent_team, t, sample_agent_card, db):
-        """Reassigning a claimed task cancels the old owner and binds the new one."""
+        """Reassigning a claimed task moves it to the new member without a
+        member-wide cancel: the former owner is notified via a targeted
+        TASK_REVOKED event, and cancel_member is never called."""
         for member_name in ("dev-1", "dev-2"):
             await db.member.create_member(
                 member_name=member_name,
@@ -877,6 +965,7 @@ class TestUpdateTaskTool:
             )
         task = await agent_team.task_manager.add(title="Task", content="Content")
         await db.task.claim_task(task.task_id, "dev-1")
+        agent_team.cancel_member = AsyncMock()
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke(
@@ -890,6 +979,18 @@ class TestUpdateTaskTool:
         assert "assignee" in result.data["updated_fields"]
         updated = await agent_team.task_manager.get(task.task_id)
         assert updated.assignee == "dev-2"
+
+        # The former owner is not force-cancelled — only the one task moves.
+        agent_team.cancel_member.assert_not_awaited()
+        # A targeted TASK_REVOKED notifies the former assignee (dev-1).
+        revoked = [
+            call.kwargs["message"]
+            for call in agent_team.messager.publish.call_args_list
+            if call.kwargs.get("message") is not None
+            and call.kwargs["message"].event_type == TeamEvent.TASK_REVOKED
+        ]
+        assert len(revoked) == 1
+        assert revoked[0].payload["member_name"] == "dev-1"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1043,7 +1144,7 @@ class TestViewTaskToolV2:
     async def test_invoke_list_tasks_by_status(self, agent_team, t, db):
         """Test list action returns summary with blocked_by, no content"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -1062,7 +1163,7 @@ class TestViewTaskToolV2:
     async def test_invoke_default_action_is_list(self, agent_team, t, db):
         """Test default action is list (returns all tasks, not just pending)"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -1076,7 +1177,7 @@ class TestViewTaskToolV2:
     async def test_invoke_claimable(self, agent_team, t, db):
         """Test claimable action returns only pending tasks"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -1123,7 +1224,7 @@ class TestClaimTaskTool:
 
         assert result.success is True
         assert "status" in result.data["updated_fields"]
-        assert result.data["status_change"]["to"] == "claimed"
+        assert result.data["status_change"]["to"] == "in_progress"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1886,3 +1987,145 @@ async def test_reliability_factory_reuses_injected_components_across_cycles(agen
     # ...wrapping the one reused stateful core.
     assert rail_cycle1._monitor is rail_cycle2._monitor
     assert rail_cycle1._monitor is components.monitor
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_rejects_assign_to_member_with_active_claim(agent_team, t, sample_agent_card, db):
+    """One active claim per member: assigning a second task to a member who
+    already holds a CLAIMED task is refused, leaving both tasks untouched."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task_a = await agent_team.task_manager.add(title="A", content="c")
+    task_b = await agent_team.task_manager.add(title="B", content="c")
+    await db.task.claim_task(task_a.task_id, "dev-1")
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task_b.task_id, "assignee": "dev-1"})
+
+    assert result.success is False
+    assert task_a.task_id in result.error
+    # task_b stays unassigned; task_a still held by dev-1.
+    assert (await agent_team.task_manager.get(task_b.task_id)).assignee is None
+    assert (await agent_team.task_manager.get(task_a.task_id)).assignee == "dev-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claim_task_rejects_second_concurrent_claim(agent_team, t, sample_agent_card, db):
+    """A teammate holding a CLAIMED task cannot claim a second one."""
+    await db.member.create_member(
+        member_name="leader1",
+        team_name="test_team",
+        display_name="leader1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task_a = await agent_team.task_manager.add(title="A", content="c")
+    task_b = await agent_team.task_manager.add(title="B", content="c")
+    await db.task.claim_task(task_a.task_id, "leader1")
+
+    tool = ClaimTaskTool(agent_team.task_manager, t)
+    result = await tool.invoke({"task_id": task_b.task_id, "status": "claimed"})
+
+    assert result.success is False
+    assert task_a.task_id in result.error
+    assert (await agent_team.task_manager.get(task_b.task_id)).status == TaskStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_claimed_task_does_not_cancel_member(agent_team, t, sample_agent_card, db):
+    """Cancelling a claimed task no longer force-cancels its member; the member
+    is steered off via a targeted TASK_CANCELLED event instead."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="Content")
+    await db.task.claim_task(task.task_id, "dev-1")
+    agent_team.cancel_member = AsyncMock()
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "status": "cancelled"})
+
+    assert result.success is True
+    agent_team.cancel_member.assert_not_awaited()
+    cancelled = [
+        call.kwargs["message"]
+        for call in agent_team.messager.publish.call_args_list
+        if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_CANCELLED
+    ]
+    assert any(m.payload["member_name"] == "dev-1" for m in cancelled)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_edit_claimed_task_keeps_claim_without_cancel_member(agent_team, t, sample_agent_card, db):
+    """Editing a claimed task's content keeps it claimed by the same member
+    (no reset, no member-wide cancel); the member is told to re-read via a
+    targeted TASK_UPDATED event."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="old")
+    await db.task.claim_task(task.task_id, "dev-1")
+    agent_team.cancel_member = AsyncMock()
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "content": "new content"})
+
+    assert result.success is True
+    agent_team.cancel_member.assert_not_awaited()
+    updated = await agent_team.task_manager.get(task.task_id)
+    assert updated.status == TaskStatus.IN_PROGRESS.value
+    assert updated.assignee == "dev-1"
+    assert updated.content == "new content"
+    events = [
+        call.kwargs["message"]
+        for call in agent_team.messager.publish.call_args_list
+        if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_UPDATED
+    ]
+    assert any(m.payload["member_name"] == "dev-1" for m in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_edit_human_locked_task_is_refused(agent_team, t, sample_agent_card, db):
+    """A task held by a human still on the team is leader-immutable — editing its
+    content is refused, same lock as cancel / reassign.
+
+    The member is created with a real ``human_agent`` role rather than stubbing
+    the backend probe, so the lock resolves through the DB exactly as it does in
+    production (role + not-departed status).
+    """
+    await db.member.create_member(
+        member_name="human-1",
+        team_name="test_team",
+        display_name="human-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+        role=TeamRole.HUMAN_AGENT.value,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="old")
+    await db.task.claim_task(task.task_id, "human-1")
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "content": "new content"})
+
+    assert result.success is False
+    assert task.task_id in (result.error or "")
+    # Content unchanged since the edit was refused.
+    assert (await agent_team.task_manager.get(task.task_id)).content == "old"

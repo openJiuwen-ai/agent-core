@@ -150,6 +150,7 @@ class MockBackend(AgentBackend):
         fixtures: dict[str, Any] | None = None,
         responder: Callable[[str, dict, dict | None, random.Random], Any] | None = None,
     ) -> None:
+        super().__init__()
         self.fixtures = fixtures or {}
         self.responder = responder
         self._sessions: dict[str, _MockSession] = {}
@@ -157,7 +158,7 @@ class MockBackend(AgentBackend):
     async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
         rng = random.Random(_seed(prompt, opts, schema_json))
         raw = self._pick_raw(prompt, opts, schema_json, rng)
-        return self._result(prompt, opts.get("label"), raw, schema_json, rng)
+        return self._report(self._result(prompt, opts.get("label"), raw, schema_json, rng))
 
     # ------------------------------------------------------------------
     # Stateful sessions (deterministic; a "human" session answers like an agent)
@@ -182,7 +183,7 @@ class MockBackend(AgentBackend):
         # so a multi-turn session does not echo the same synthetic answer.
         rng = random.Random(_seed(prompt, opts, schema_json, history))
         raw = self._pick_raw(prompt, opts, schema_json, rng)
-        result = self._result(prompt, opts.get("label"), raw, schema_json, rng)
+        result = self._report(self._result(prompt, opts.get("label"), raw, schema_json, rng))
         sess = self._sessions.get(session_id)
         if sess is not None:
             sess.turns += 1
@@ -197,6 +198,16 @@ class MockBackend(AgentBackend):
     # ------------------------------------------------------------------
     # Shared synthesis (used by ``run`` and ``send_turn``)
     # ------------------------------------------------------------------
+
+    def _report(self, result: AgentResult) -> AgentResult:
+        """Bill the synthesised call to the ledger (backends are its only writer).
+
+        There is no model here to ask for real usage, so ``_result``'s length
+        estimate is all the mock has — enough to drive ``budget.*`` and the
+        engine's gates deterministically in offline tests.
+        """
+        self.budget.add(result.tokens)
+        return result
 
     def _pick_raw(self, prompt: str, opts: dict, schema_json: dict | None, rng: random.Random) -> Any:
         """Resolve a fixture/responder override, or ``None`` to fall through to synth."""

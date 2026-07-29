@@ -67,6 +67,16 @@ def test_list_tool_empty():
     assert tool.map_result(out) == "No async tasks."
 
 
+def test_list_tool_has_empty_object_schema():
+    """list tool exposes a valid no-argument JSON schema."""
+    t = make_translator("cn")
+    tool = AsyncTasksListTool(_FakeHarness(_runtime()), t)
+    assert tool.card.input_params == {
+        "type": "object",
+        "properties": {},
+    }
+
+
 def test_output_tool_requires_task_id():
     """Missing task_id fails fast with a field error."""
     t = make_translator("cn")

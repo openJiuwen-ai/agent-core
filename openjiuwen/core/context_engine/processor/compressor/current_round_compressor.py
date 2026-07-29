@@ -10,6 +10,7 @@ from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.processor.compressor.util import (
+    build_team_collaboration_reinjected_messages,
     collect_summary_indices,
     count_messages_tokens,
     find_last_completed_api_round_end_idx,
@@ -19,7 +20,7 @@ from openjiuwen.core.context_engine.processor.compressor.util import (
 )
 from openjiuwen.core.foundation.llm import (
     BaseMessage, AssistantMessage, UserMessage,
-    ModelRequestConfig, ModelClientConfig, Model, ToolMessage
+    ModelRequestConfig, ModelClientConfig, Model
 )
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 
@@ -756,8 +757,10 @@ class CurrentRoundCompressor(ContextProcessor):
             )
             if compressed_msg:
                 compact_summary_parts.append(message_to_text(compressed_msg))
+                replacement_messages = [compressed_msg]
+                replacement_messages.extend(build_team_collaboration_reinjected_messages(messages_to_compress))
                 context_messages = ContextUtils.replace_messages(
-                    context_messages, [compressed_msg], start_idx, actual_end_idx
+                    context_messages, replacement_messages, start_idx, actual_end_idx
                 )
                 modified_indices.extend(range(start_idx, actual_end_idx + 1))
                 updated = True

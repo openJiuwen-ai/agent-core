@@ -19,6 +19,7 @@ from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
     ToolCallDetail,
     Trajectory,
+    trajectory_steps,
 )
 from openjiuwen.core.common.logging import logger
 
@@ -298,7 +299,7 @@ class ConversationSignalDetector:
 
     @staticmethod
     def convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
-        """Convert Trajectory.steps to message list format.
+        """Convert trajectory steps (via ``trajectory_steps``) to message list format.
 
         The message format matches what SignalDetector.detect() expects:
         - LLM steps: messages from LLMCallDetail, including tool_calls
@@ -313,7 +314,7 @@ class ConversationSignalDetector:
         messages: List[dict] = []
         tool_call_id_to_name: Dict[str, str] = {}
 
-        for step in trajectory.steps:
+        for step in trajectory_steps(trajectory):
             if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
                 for msg in step.detail.messages:
                     messages.append(msg)

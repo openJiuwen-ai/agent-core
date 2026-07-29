@@ -9,7 +9,7 @@ import asyncio
 import inspect
 import json
 import os
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Optional
 
 import anyio
 
@@ -35,7 +35,6 @@ def _build_dialogue_compressor_config(
         logger.warning("DialogueCompressor disabled: model_name is empty.")
         return None
     return DialogueCompressorConfig(
-        tokens_threshold=50000,
         messages_to_keep=10,
         keep_last_round=True,
         model_client=ModelClientConfig(
@@ -195,6 +194,19 @@ def build_browser_worker_system_prompt(
         "After a successful card probe, call browser_run_code/browser_run_code_unsafe only for a clearly missing "
         "required field or a specific selector-based action; do not repeat broad evaluation "
         "just to re-read the same cards. Prefer selector_hint values from compact probes when they are relevant. "
+        "browser_batch_interact is a standalone runtime helper like browser_probe_interactives and "
+        "browser_probe_cards, not a browser_custom_action wrapper. Use it directly. "
+        "For multi-field forms with several known controls, search flows with autocomplete, dropdown/date-picker " 
+        "flows, filter panels, or any short sequence where two or more next click/type/wait/extract steps are "
+        "already known, call browser_batch_interact before falling back to repeated "
+        "browser_click/browser_type/browser_wait_for turns. "
+        "Do not force browser_batch_interact for a single uncertain click, one simple text field, or a page state "
+        "that still needs inspection. Use selector_hint values from probes as batch step selectors. "
+        "Use autocomplete steps for type-then-choose widgets, and condition-based wait_for_selector/wait_for_text "
+        "steps instead of fixed browser_wait_for sleeps. Do not split click+type+wait, click+wait+click, "
+        "date open+choose, or search submit+result wait into separate ReAct turns unless browser_batch_interact "
+        "failed or the next target is genuinely unknown. "
+        "Keep using browser_fill_form for ordinary visible text fields when that official tool is enough. "
         "Use browser_snapshot only when the compact probes are insufficient, when accessibility structure is needed, "
         "or when you need exact element references required by a Playwright MCP action. "
         "Use browser_run_code_unsafe or browser_run_code only when you already know the exact selector/computation, "
@@ -315,7 +327,17 @@ def build_browser_worker_agent(
     screenshot_subdir: str = "screenshots",
     artifacts_subdir: str = "artifacts",
     tool_result_observer: ToolResultObserver | None = None,
+    allowed_tool_names: Optional[Iterable[str]] = None,
 ) -> ReActAgent:
+    resolved_allowed_tool_names = (
+        None
+        if allowed_tool_names is None
+        else tuple(dict.fromkeys(allowed_tool_names))
+    )
+    logger.info(
+        "Playwright worker received tool allowlist: %s",
+        resolved_allowed_tool_names,
+    )
     screenshot_subdir = (
         (screenshot_subdir or "screenshots").strip().replace("\\", "/").strip("/") or "screenshots"
     )
@@ -357,6 +379,10 @@ def build_browser_worker_agent(
         config.model_config_obj.top_p = worker_top_p
     agent = ReActAgent(card=card).configure(config)
     agent.ability_manager.add(mcp_cfg)
+    if resolved_allowed_tool_names is not None:
+        agent.ability_manager.set_mcp_tool_allowlist(
+            mcp_cfg,
+            resolved_allowed_tool_names,
+        )
     ensure_execute_signature_compat(agent, tool_result_observer=tool_result_observer)
     return agent
-

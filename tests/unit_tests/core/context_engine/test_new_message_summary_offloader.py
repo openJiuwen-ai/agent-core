@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# ruff: noqa: E402
 # pylint: disable=protected-access
 
 import asyncio
@@ -30,7 +31,21 @@ sys.modules.setdefault("openai", openai_module)
 dashscope_module = types.ModuleType("dashscope")
 dashscope_module.MultiModalConversation = type("MultiModalConversation", (), {})
 dashscope_module.VideoSynthesis = type("VideoSynthesis", (), {})
+dashscope_api_entities_module = types.ModuleType("dashscope.api_entities")
+dashscope_response_module = types.ModuleType("dashscope.api_entities.dashscope_response")
+dashscope_response_module.DashScopeAPIResponse = type("DashScopeAPIResponse", (), {})
+dashscope_api_entities_module.dashscope_response = dashscope_response_module
+dashscope_module.api_entities = dashscope_api_entities_module
+dashscope_common_module = types.ModuleType("dashscope.common")
+dashscope_constants_module = types.ModuleType("dashscope.common.constants")
+dashscope_constants_module.REQUEST_TIMEOUT_KEYWORD = "timeout"
+dashscope_common_module.constants = dashscope_constants_module
+dashscope_module.common = dashscope_common_module
 sys.modules.setdefault("dashscope", dashscope_module)
+sys.modules.setdefault("dashscope.api_entities", dashscope_api_entities_module)
+sys.modules.setdefault("dashscope.api_entities.dashscope_response", dashscope_response_module)
+sys.modules.setdefault("dashscope.common", dashscope_common_module)
+sys.modules.setdefault("dashscope.common.constants", dashscope_constants_module)
 
 
 def _mock_is_successful(*args, **kwargs):
@@ -51,6 +66,10 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.processor.budget_guard import (
+    TRUNCATED_BY_BUDGET_MARKER,
+    truncate_message_content_to_fixed_head_tail_if_over_token_limit,
+)
 from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
     TRUNCATED_MARKER,
     MessageSummaryOffloader,
@@ -141,6 +160,84 @@ class TestMessageSummaryOffloader:
         offload_state = context.save_state()["offload_messages"]
         assert processed[0].offload_handle in offload_state
         assert offload_state[processed[0].offload_handle][0].content == tool_message.content
+
+    @staticmethod
+    def test_offload_message_truncates_large_placeholder_preview(adaptive_config, context):
+        adaptive_config.content_max_chars_for_compression = 1000
+        adaptive_config.large_message_threshold = 80
+
+        with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model") as model_cls:
+            model = MagicMock()
+            model.invoke = AsyncMock(
+                return_value=AssistantMessage(
+                    content=json.dumps(
+                        {
+                            "compression_strategy": "abstractive",
+                            "summary": "S" * 500,
+                            "offload_data_explanation": {},
+                        }
+                    )
+                )
+            )
+            model_cls.return_value = model
+            offloader = MessageSummaryOffloader(adaptive_config)
+
+        tool_message = ToolMessage(content="A" * 120, tool_call_id="call_large")
+
+        result = asyncio.run(offloader._offload_message(tool_message, context))
+
+        assert isinstance(result, OffloadMixin)
+        assert TRUNCATED_BY_BUDGET_MARKER in result.content
+        offload_state = context.save_state()["offload_messages"]
+        assert offload_state[result.offload_handle][0].content == tool_message.content
+
+    @staticmethod
+    def test_fixed_preview_truncate_preserves_head_and_tail_without_middle():
+        content = f"{'H' * 90}CENTER_SENTINEL_CENTER{'T' * 90}[[OFFLOAD: handle=test, type=in_memory]]"
+
+        truncated = truncate_message_content_to_fixed_head_tail_if_over_token_limit(
+            content=content,
+            trigger_token_limit=140,
+            count_content_tokens=len,
+            preserved_suffix="[[OFFLOAD: handle=test, type=in_memory]]",
+        )
+
+        assert TRUNCATED_BY_BUDGET_MARKER in truncated
+        assert "H" * 8 in truncated
+        assert "T" * 8 in truncated
+        assert "SENTINEL" not in truncated
+        assert truncated.endswith("[[OFFLOAD: handle=test, type=in_memory]]")
+
+    @staticmethod
+    def test_fixed_preview_truncate_caps_head_and_tail_at_2k_chars():
+        content = f"{'H' * 3000}CENTER_SENTINEL_CENTER{'T' * 3000}"
+
+        truncated = truncate_message_content_to_fixed_head_tail_if_over_token_limit(
+            content=content,
+            trigger_token_limit=100,
+            count_content_tokens=len,
+        )
+
+        assert truncated == (
+            f"{'H' * 2000}\n"
+            f"{TRUNCATED_BY_BUDGET_MARKER}\n"
+            f"{'T' * 2000}"
+        )
+
+    @staticmethod
+    def test_fixed_preview_truncate_uses_plain_middle_truncation_line():
+        truncated = truncate_message_content_to_fixed_head_tail_if_over_token_limit(
+            content="HEAD" + "X" * 5000 + "TAIL",
+            trigger_token_limit=100,
+            count_content_tokens=len,
+            preserved_suffix="[[OFFLOAD: handle=test, type=in_memory]]",
+        )
+
+        assert truncated == (
+            f"HEAD{'X' * 1996}\n"
+            f"{TRUNCATED_BY_BUDGET_MARKER}\n"
+            f"{'X' * 1996}TAIL[[OFFLOAD: handle=test, type=in_memory]]"
+        )
 
     @staticmethod
     @staticmethod

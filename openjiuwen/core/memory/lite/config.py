@@ -17,9 +17,7 @@ class MemorySettings:
     """Memory configuration settings.
 
     Attributes:
-        provider: Embedding provider name.
         model: Embedding model name.
-        fallback: Fallback provider when embedding fails.
         sources: Memory source directories.
         extra_paths: Extra memory file paths.
         chunking: Chunking configuration.
@@ -28,9 +26,7 @@ class MemorySettings:
         sync: Synchronization configuration.
         cache: Cache configuration.
     """
-    provider: str = "openai_compatible"
     model: str = "text-embedding-v3"
-    fallback: str = "mock"
     sources: List[str] = field(default_factory=lambda: ["memory", "sessions"])
     extra_paths: List[str] = field(default_factory=list)
 

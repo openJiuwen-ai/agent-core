@@ -87,10 +87,17 @@ async def test_rollback_to_latest_archives_current_state_and_restores_pair(tmp_p
     assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# Target\n"
     restored_log = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
     assert restored_log["skill_id"] == "skill-a"
+
+    archive_dir = skill_dir / "archive"
+    assert not (archive_dir / "SKILL.v20260102T000000.md").exists()
+    assert not (archive_dir / "evolutions.v20260102T000000.json").exists()
+    assert (archive_dir / "SKILL.v20260101T000000.md").exists()
+    assert (archive_dir / "evolutions.v20260101T000000.json").exists()
+
     current_archives = [
         pair
         for pair in service.list_pairs("skill-a")
-        if pair.version not in {"v20260101T000000", "v20260102T000000"}
+        if pair.version not in {"v20260101T000000"}
     ]
     assert len(current_archives) == 1
     assert current_archives[0].skill_archive.read_text(encoding="utf-8") == "# Current\n"
@@ -114,3 +121,28 @@ def test_prune_removes_old_complete_pairs(tmp_path: Path):
     archive_dir = skill_dir / "archive"
     assert not (archive_dir / "SKILL.v20260101T000000.md").exists()
     assert not (archive_dir / "evolutions.v20260101T000000.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_rollback_to_specific_version_removes_target_pair(tmp_path: Path):
+    root = tmp_path / "skills"
+    skill_dir = _prepare_skill(root, "skill-a", "# Current\n")
+    store = EvolutionStore(str(root))
+    await store.save_evolution_log("skill-a", EvolutionLog.empty("skill-a"), skill_dir=skill_dir)
+    _write_pair(skill_dir, "v20260101T000000", skill_content="# Older\n")
+    _write_pair(skill_dir, "v20260102T000000", skill_content="# Target\n")
+    service = EvolutionArchiveService(store=store)
+
+    restored = await service.rollback_to_pair("skill-a", "v20260101T000000", prune=False)
+
+    assert restored is True
+    assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# Older\n"
+
+    archive_dir = skill_dir / "archive"
+    assert not (archive_dir / "SKILL.v20260101T000000.md").exists()
+    assert not (archive_dir / "evolutions.v20260101T000000.json").exists()
+    assert (archive_dir / "SKILL.v20260102T000000.md").exists()
+    assert (archive_dir / "evolutions.v20260102T000000.json").exists()
+
+    remaining = service.list_pairs("skill-a")
+    assert len(remaining) == 2  # v20260102 + 新归档的 current

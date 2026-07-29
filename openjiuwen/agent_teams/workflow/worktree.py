@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.paths import project_worktree_hash, team_session_worktrees_dir
 from openjiuwen.agent_teams.worktree.lifecycle import MemberWorktreeInfo
 from openjiuwen.agent_teams.worktree.naming import build_teammate_worktree_name
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
@@ -18,9 +20,16 @@ from openjiuwen.harness.tools.worktree.models import WorktreeSession
 class SwarmflowWorkerWorktrees:
     """Create and finalize owner-scoped worktrees for swarmflow workers."""
 
-    def __init__(self, *, team_name: str, build_context: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        team_name: str,
+        build_context: Any = None,
+        session_id: str | None = None,
+    ) -> None:
         self._team_name = team_name
         self._build_context = build_context
+        self._session_id = session_id
         self._active: dict[str, MemberWorktreeInfo] = {}
 
     def get(self, member_name: str) -> MemberWorktreeInfo | None:
@@ -40,24 +49,54 @@ class SwarmflowWorkerWorktrees:
             raise BackendError(
                 "agent(options={'isolation': 'worktree'}) requires a host-provided worktree manager"
             )
+        worktrees_root = self._managed_root()
+        if hasattr(manager, "with_worktrees_dir"):
+            return manager.with_worktrees_dir(worktrees_root)
+        if hasattr(manager, "with_base_dir"):
+            return manager.with_base_dir(worktrees_root)
         return manager
+
+    def _resolved_session_id(self) -> str:
+        return self._session_id or get_session_id() or "default"
+
+    def _managed_root(self) -> str:
+        return str(team_session_worktrees_dir(self._team_name, self._resolved_session_id()))
+
+    def _project_dir(self) -> str | None:
+        project_dir = getattr(self._build_context, "project_dir", None)
+        if isinstance(project_dir, str) and project_dir.strip() and os.path.isdir(project_dir):
+            return os.path.realpath(project_dir)
+        return None
+
+    def _project_hash(self) -> str:
+        project_dir = self._project_dir()
+        if project_dir is None:
+            return "no-project"
+        return project_worktree_hash(project_dir)
 
     async def ensure(self, member_name: str, opts: dict) -> MemberWorktreeInfo | None:
         """Create an owner-scoped worktree for ``agent(options={"isolation": "worktree"})``."""
         if not self.needs_worktree(opts):
             return None
+        manager = self._manager()
+        project_dir = self._project_dir()
+        project_hash = self._project_hash()
         slug = build_teammate_worktree_name(
             team_name=self._team_name,
             member_name=member_name,
+            session_id=self._resolved_session_id(),
+            project_hash=project_hash,
         )
-        manager = self._manager()
-        result = await manager.create_owner_worktree(slug)
+        result = await manager.create_owner_worktree(slug, source_dir=project_dir)
         info = MemberWorktreeInfo(
             worktree_path=result.worktree_path,
             worktree_name=slug,
             worktree_branch=result.worktree_branch,
             head_commit=result.head_commit,
             hook_based=bool(getattr(result, "hook_based", False)),
+            session_id=self._resolved_session_id(),
+            project_hash=project_hash,
+            managed_root=self._managed_root(),
         )
         self._active[member_name] = info
         team_logger.info(

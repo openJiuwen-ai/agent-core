@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from types import SimpleNamespace
 
@@ -42,6 +43,29 @@ def test_mount_into_workspace_uses_symlink(monkeypatch, tmp_path):
 
     expected_link = os.path.join(str(workspace_root), ".team", "team-alpha")
     assert calls == [(manager.workspace_path, expected_link, True)]
+
+
+@pytest.mark.level0
+def test_mount_into_workspace_falls_back_to_copy_on_permission_error(monkeypatch, tmp_path):
+    manager = _make_manager(tmp_path)
+    workspace_root = tmp_path / "agent-workspace"
+    workspace_root.mkdir()
+    source_file = tmp_path / "shared-workspace" / "artifact.txt"
+    source_file.write_text("shared", encoding="utf-8")
+
+    def fake_symlink(*args, **kwargs):
+        error = OSError("permission denied")
+        error.errno = errno.EPERM
+        raise error
+
+    monkeypatch.setattr(os, "symlink", fake_symlink)
+
+    manager.mount_into_workspace(str(workspace_root))
+
+    copied_mount = workspace_root / ".team" / "team-alpha"
+    assert copied_mount.is_dir()
+    assert not copied_mount.is_symlink()
+    assert (copied_mount / "artifact.txt").read_text(encoding="utf-8") == "shared"
 
 
 @pytest.mark.level0
@@ -87,7 +111,7 @@ def test_mount_into_workspace_falls_back_to_junction_on_windows_1314(monkeypatch
         error.winerror = ERROR_PRIVILEGE_NOT_HELD
         raise error
 
-    def fake_run(command, capture_output, text, check):
+    def fake_run(command, capture_output, text, check, shell=False):
         junction_calls.append(
             {
                 "command": command,
@@ -105,14 +129,11 @@ def test_mount_into_workspace_falls_back_to_junction_on_windows_1314(monkeypatch
     manager.mount_into_workspace(str(workspace_root))
 
     expected_link = os.path.join(str(workspace_root), ".team", "team-alpha")
-    assert junction_calls == [
-        {
-            "command": ["cmd", "/c", "mklink", "/J", expected_link, manager.workspace_path],
-            "capture_output": True,
-            "text": True,
-            "check": False,
-        }
-    ]
+    assert len(junction_calls) == 1
+    assert junction_calls[0]["command"][1:] == ["/c", "mklink", "/J", expected_link, manager.workspace_path]
+    assert junction_calls[0]["capture_output"] is True
+    assert junction_calls[0]["text"] is True
+    assert junction_calls[0]["check"] is False
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
 @pytest.mark.level0
@@ -143,7 +164,7 @@ def test_mount_worktree_creates_symlink(tmp_path):
     manager.mount_worktree("wt-alpha", str(target))
 
     link_path = os.path.join(manager.workspace_path, ".worktree", "wt-alpha")
-    assert os.path.islink(link_path)
+    assert TeamWorkspaceManager._is_directory_link(link_path)
     assert os.path.realpath(link_path) == os.path.realpath(str(target))
 
 
@@ -193,8 +214,33 @@ def test_unmount_worktree_removes_symlink(tmp_path):
     manager.unmount_worktree("wt-bye")
 
     link_path = os.path.join(manager.workspace_path, ".worktree", "wt-bye")
-    assert not os.path.lexists(link_path)
+    assert not os.path.exists(link_path) and not os.path.lexists(link_path)
     # Worktree directory itself is left alone.
+    assert target.is_dir()
+
+
+@pytest.mark.level0
+def test_unmount_worktree_removes_copied_directory_fallback(monkeypatch, tmp_path):
+    manager = _make_manager(tmp_path)
+    target = tmp_path / "worktrees" / "wt-copy"
+    target.mkdir(parents=True)
+    (target / "notes.md").write_text("copied", encoding="utf-8")
+
+    def fake_symlink(*args, **kwargs):
+        error = OSError("operation not permitted")
+        error.errno = errno.EPERM
+        raise error
+
+    monkeypatch.setattr(os, "symlink", fake_symlink)
+
+    manager.mount_worktree("wt-copy", str(target))
+    copied_mount = os.path.join(manager.workspace_path, ".worktree", "wt-copy")
+    assert os.path.isdir(copied_mount)
+    assert not os.path.islink(copied_mount)
+
+    manager.unmount_worktree("wt-copy")
+
+    assert not os.path.exists(copied_mount)
     assert target.is_dir()
 
 

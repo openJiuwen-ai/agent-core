@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import Mock, patch
 
-from openjiuwen.harness.prompts import PromptSection
+from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails import AgentModeRail
@@ -345,3 +345,119 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertIn("read_file", visible_tool_names)
         section = rail.system_prompt_builder.added_sections[-1]
         self.assertEqual(section.content["en"], "Static plan note")
+
+    async def test_static_plan_attachment_note_uses_whitelist_without_changing_system_prompt(self) -> None:
+        tools = [
+            _ToolInfo("switch_mode"),
+            _ToolInfo("todo_create"),
+            _ToolInfo("read_file"),
+            _ToolInfo("non_whitelist_tool"),
+        ]
+        rail, ctx, _ = _make_ctx(
+            "noop",
+            mode="plan",
+            tools=tools,
+            rail=AgentModeRail(
+                allow_switch_mode=False,
+                plan_mode_attachment_note="Static attachment plan note",
+            ),
+        )
+
+        await rail.before_model_call(ctx)
+
+        visible_tool_names = [t.name for t in ctx.inputs.tools]
+        self.assertNotIn("switch_mode", visible_tool_names)
+        self.assertNotIn("todo_create", visible_tool_names)
+        self.assertNotIn("non_whitelist_tool", visible_tool_names)
+        self.assertIn("read_file", visible_tool_names)
+        self.assertEqual(rail.system_prompt_builder.added_sections, [])
+        item = await rail.attachment_manager.get_by_id("session.sess1.mode_instructions")
+        self.assertIsNotNone(item)
+        self.assertEqual(item.content, "Static attachment plan note")
+        self.assertEqual(item.source, "agent_core.agent_mode_rail")
+
+    async def test_static_plan_attachment_note_falls_back_to_system_prompt_without_manager(self) -> None:
+        rail, ctx, _ = _make_ctx(
+            "noop",
+            mode="plan",
+            tools=[_ToolInfo("read_file")],
+            rail=AgentModeRail(plan_mode_attachment_note="Fallback plan note"),
+        )
+        rail.attachment_manager = None
+
+        await rail.before_model_call(ctx)
+
+        section = rail.system_prompt_builder.added_sections[-1]
+        self.assertEqual(section.content["en"], "Fallback plan note")
+
+    async def test_static_plan_attachment_note_falls_back_when_session_id_is_missing(self) -> None:
+        rail, ctx, _ = _make_ctx(
+            "noop",
+            mode="plan",
+            tools=[_ToolInfo("read_file")],
+            rail=AgentModeRail(plan_mode_attachment_note="Fallback plan note"),
+        )
+        ctx.session = SimpleNamespace()
+
+        await rail.before_model_call(ctx)
+
+        section = rail.system_prompt_builder.added_sections[-1]
+        self.assertEqual(section.content["en"], "Fallback plan note")
+
+    async def test_static_plan_attachment_note_is_cleared_after_leaving_plan_mode(self) -> None:
+        rail, ctx, agent = _make_ctx(
+            "noop",
+            mode="plan",
+            tools=[_ToolInfo("read_file")],
+            rail=AgentModeRail(plan_mode_attachment_note="Static attachment plan note"),
+        )
+        await rail.before_model_call(ctx)
+        self.assertIsNotNone(await rail.attachment_manager.get_by_id("session.sess1.mode_instructions"))
+
+        agent.load_state.return_value.plan_mode.mode = "auto"
+        await rail.before_model_call(ctx)
+
+        self.assertIsNone(await rail.attachment_manager.get_by_id("session.sess1.mode_instructions"))
+
+    async def test_static_plan_attachment_note_is_isolated_by_session(self) -> None:
+        rail, ctx, _ = _make_ctx(
+            "noop",
+            mode="plan",
+            tools=[_ToolInfo("read_file")],
+            rail=AgentModeRail(plan_mode_attachment_note="Static attachment plan note"),
+        )
+        await rail.before_model_call(ctx)
+
+        ctx.session = SimpleNamespace(session_id="sess2")
+        await rail.before_model_call(ctx)
+
+        self.assertIsNotNone(await rail.attachment_manager.get_by_id("session.sess1.mode_instructions"))
+        self.assertIsNotNone(await rail.attachment_manager.get_by_id("session.sess2.mode_instructions"))
+
+    async def test_static_plan_attachment_note_keeps_system_prompt_stable_across_mode_changes(self) -> None:
+        rail, ctx, agent = _make_ctx(
+            "noop",
+            mode="plan",
+            tools=[_ToolInfo("read_file")],
+            rail=AgentModeRail(plan_mode_attachment_note="Static attachment plan note"),
+        )
+        builder = SystemPromptBuilder(language="en")
+        builder.add_section(PromptSection(name="identity", content={"en": "Stable identity"}, priority=1))
+        rail.system_prompt_builder = builder
+        before_plan = builder.build()
+
+        await rail.before_model_call(ctx)
+        during_plan = builder.build()
+        agent.load_state.return_value.plan_mode.mode = "auto"
+        await rail.before_model_call(ctx)
+        after_plan = builder.build()
+
+        self.assertEqual(before_plan, during_plan)
+        self.assertEqual(during_plan, after_plan)
+
+    def test_system_and_attachment_plan_notes_are_mutually_exclusive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            AgentModeRail(
+                plan_mode_system_note="System note",
+                plan_mode_attachment_note="Attachment note",
+            )

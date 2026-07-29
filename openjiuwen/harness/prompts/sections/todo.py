@@ -37,15 +37,14 @@ Identify the planning need and call todo_create BEFORE starting execution.
   This makes it unambiguous that one task_tool call should be dispatched per sub-item at execution time.
 
 **Task management rules:**
-- Update status in real-time: call todo_modify the moment a task status changes
+- Real-time status update: call todo_modify immediately when a task's status changes
 - Only one task can be in_progress at a time; complete it before starting the next
   - Exception: if an in_progress task needs to process multiple independent sub-items in parallel
     (e.g., reading several documents simultaneously, concurrently searching multiple sources),
     you may issue multiple task_tool calls at once within that task and wait for all to return
     before marking the task completed. This is intra-task parallelism and does not violate the
     "one in_progress at a time" rule.
-- Batch updates: consolidate multiple status changes into a single todo_modify call
-- Cancel tasks that are no longer needed
+- Mark unnecessary tasks as cancelled via todo_modify.
 - Can understand the current task planning progress by calling todo_list.
 
 **Before marking a task completed:**
@@ -77,7 +76,6 @@ TODO_SYSTEM_PROMPT_CN = """
   - 例外：若某个 in_progress 任务内部需要并行处理多个独立子项（如同时阅读多篇文档、并发搜索多个来源），
     可在该任务内一次性发出多个 task_tool 调用，等全部返回后再将任务标记为 completed。
     这属于任务内部的并行执行，不违反"同一时间只有一个 in_progress"原则。
-- 批量更新：将多个状态变更合并为一次 todo_modify 调用
 - 不再需要的任务用 todo_modify 标记为 cancelled
 - 可通过调用 todo_list 了解当前任务规划进展
 

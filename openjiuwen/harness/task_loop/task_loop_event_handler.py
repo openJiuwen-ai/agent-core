@@ -11,6 +11,8 @@ import asyncio
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+import anyio
+
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.controller.modules.event_handler import (
     EventHandler,
@@ -142,13 +144,11 @@ class TaskLoopEventHandler(EventHandler):
             return {"error": "no active round"}
         try:
             if timeout is not None:
-                result = await asyncio.wait_for(
-                    self._current_future,
-                    timeout=timeout,
-                )
+                with anyio.fail_after(timeout):
+                    result = await self._current_future
             else:
                 result = await self._current_future
-        except asyncio.TimeoutError:
+        except TimeoutError:
             result = {"error": "completion_timeout"}
         except asyncio.CancelledError:
             result = {"error": "cancelled"}
@@ -240,6 +240,14 @@ class TaskLoopEventHandler(EventHandler):
             else None
         )
 
+        # Set by NativeHarness.resume: continue the paused round's preserved
+        # context instead of appending a new user turn.
+        resume_continuation = (
+            event.metadata.get("_resume_continuation", False)
+            if event.metadata
+            else False
+        )
+
         coordinator = agent.loop_coordinator
         if coordinator is None:
             logger.warning(
@@ -290,6 +298,7 @@ class TaskLoopEventHandler(EventHandler):
             "run_kind": run_kind,
             "run_context": run_context,
             "is_follow_up": is_follow_up,
+            "_resume_continuation": resume_continuation,
         }
 
         try:

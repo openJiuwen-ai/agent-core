@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-
+from importlib import import_module
+from typing import Any
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.code import CodeTool
 from openjiuwen.harness.tools.cron import (
@@ -137,3 +138,17 @@ __all__ = [
     "WorktreeConfig",
     "WorktreeManager",
 ]
+
+
+_LAZY_SUBMODULES = {
+    "multimodal": "openjiuwen.harness.tools.multimodal",
+    "web": "openjiuwen.harness.tools.web",
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_SUBMODULES:
+        module = import_module(_LAZY_SUBMODULES[name])
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

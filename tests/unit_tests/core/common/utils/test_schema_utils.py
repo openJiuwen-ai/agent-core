@@ -225,3 +225,40 @@ def test_underscore_field_alias_handling():
     instance_with_defaults = model(**{"_id": 456, "name": "Test2"})
     assert instance_with_defaults.private == "secret"
     assert instance_with_defaults.dunder == "dunder_value"
+
+
+def test_python_type_to_json_type_union_int_float():
+    import typing
+
+    assert SchemaUtils._python_type_to_json_type(typing.Union[int, float]) == "number"
+    assert SchemaUtils._python_type_to_json_type(float) == "number"
+    assert SchemaUtils._python_type_to_json_type(int) == "integer"
+
+
+def test_number_schema_roundtrip_preserves_type():
+    number_schema = {
+        "type": "object",
+        "properties": {
+            "value": {"type": "number"},
+        },
+        "required": ["value"],
+    }
+
+    model = SchemaUtils.get_schema_class(number_schema)
+    enhanced = SchemaUtils.get_schema_dict(model)
+
+    assert enhanced["properties"]["value"]["type"] == "number"
+
+
+def test_format_number_schema_preserves_int():
+    number_schema = {
+        "type": "object",
+        "properties": {
+            "value": {"type": "number"},
+        },
+        "required": ["value"],
+    }
+
+    result = SchemaUtils.format_with_schema({"value": 42}, number_schema)
+    assert result["value"] == 42
+    assert isinstance(result["value"], int)

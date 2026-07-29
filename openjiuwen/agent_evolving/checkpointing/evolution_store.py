@@ -31,6 +31,7 @@ from openjiuwen.core.sys_operation import SysOperation
 
 _EVOLUTION_FILENAME = "evolutions.json"
 _TOTAL_WARNING_THRESHOLD = 30
+_SKILL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 _EVOLUTION_INDEX_PATTERN = re.compile(
     r"<!-- evolution-index-start -->.*?<!-- evolution-index-end -->",
     re.DOTALL,
@@ -231,6 +232,9 @@ class EvolutionStore:
             if not resolved_name:
                 logger.warning("[EvolutionStore] install_skill_package: cannot infer skill name")
                 return None
+            if _SKILL_NAME_PATTERN.fullmatch(resolved_name) is None:
+                logger.warning("[EvolutionStore] install_skill_package: rejected unsafe skill name")
+                return None
 
             dest_dir = self.resolve_skill_dir(resolved_name, create=True)
             if dest_dir is None:
@@ -254,6 +258,8 @@ class EvolutionStore:
         subject_kind: Optional[str] = None,
     ) -> Optional[Path]:
         candidates = [base / name for base in self._base_dirs]
+        if create:
+            candidates = [candidate for candidate in candidates if self._is_safe_skill_destination(candidate)]
         if subject_kind is not None:
             normalized_kind = self._normalize_subject_kind(subject_kind)
             for candidate in candidates:
@@ -268,9 +274,17 @@ class EvolutionStore:
         for candidate in candidates:
             if candidate.is_dir():
                 return candidate
-        if create and self._base_dirs:
-            return self._base_dirs[0] / name
+        if create and candidates:
+            return candidates[0]
         return None
+
+    def _is_safe_skill_destination(self, path: Path) -> bool:
+        """Return whether *path* resolves to a strict child of a configured base directory."""
+        try:
+            resolved = path.expanduser().resolve()
+        except (OSError, RuntimeError):
+            return False
+        return any(resolved != base_dir and resolved.is_relative_to(base_dir) for base_dir in self._base_dirs)
 
     def resolve_subject_payload(self, name: str) -> Optional[dict[str, str]]:
         """Resolve a skill-like subject from its on-disk definition."""
@@ -313,8 +327,23 @@ class EvolutionStore:
         md_files = list(skill_dir.glob("*.md"))
         return md_files[0] if md_files else None
 
+    def _validate_file_path(self, path: Path) -> None:
+        """Raise if *path* escapes the configured base directories."""
+        resolved = path.expanduser().resolve()
+        for base_dir in self._base_dirs:
+            if resolved == base_dir or resolved.is_relative_to(base_dir):
+                return
+        raise_error(
+            StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR,
+            error_msg=(
+                f"Path '{path}' is outside the allowed skill base directories. "
+                f"Allowed roots: {[str(d) for d in self._base_dirs]}"
+            ),
+        )
+
     async def read_file_text(self, path: Path) -> str:
         """Read a text file, routing through sys_operation when available."""
+        self._validate_file_path(path)
         try:
             if self.sys_operation is not None:
                 result = await self.sys_operation.fs().read_file(str(path), mode="text", encoding="utf-8")

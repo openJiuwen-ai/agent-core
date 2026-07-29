@@ -582,13 +582,13 @@ class TestIntegration:
                 proxy='http://proxy:8080'
             )
 
-            # Verify OpenAI client was created
+            # Verify OpenAI client was created (defaults: timeout=360, max_retries=1)
             mock_openai.assert_called_once_with(
                 api_key="test-key",
                 base_url="https://api.openai.com/v1",
                 http_client=mock_httpx_instance,
-                timeout=60,
-                max_retries=3
+                timeout=360.0,
+                max_retries=1
             )
 
 

@@ -10,3 +10,4 @@
 | [checkpointer](./openjiuwen.extensions/checkpointer.README.md) | 检查点扩展，例如 Redis。 |
 | [a2a](./openjiuwen.extensions/a2a/README.md) | A2A 协议集成，用于远程客户端和服务端适配器。 |
 | [tracer_otel](./openjiuwen.extensions/tracer_otel.README.md) | OpenTelemetry 链路追踪扩展，将 Agent 与工作流执行事件导出为 OTel span。 |
+| [external_provider](./openjiuwen.extensions/external_provider/README.md) | 外部账户 Provider 抽象与注册表，例如 OpenAI 账户 OAuth 登录。 |

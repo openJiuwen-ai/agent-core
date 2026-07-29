@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 from pathlib import Path
 
 from openjiuwen.agent_teams.paths import independent_member_workspace, team_home
@@ -28,11 +30,22 @@ def ensure_team_member_workspace_link(team_name: str, member_name: str) -> str:
     independent_workspace = independent_member_workspace(member_name)
     if independent_workspace.is_dir() and not workspace_path.exists():
         workspace_path.parent.mkdir(parents=True, exist_ok=True)
-        os.symlink(
-            str(independent_workspace),
-            str(workspace_path),
-            target_is_directory=True,
-        )
+        try:
+            os.symlink(
+                str(independent_workspace),
+                str(workspace_path),
+                target_is_directory=True,
+            )
+        except OSError as exc:
+            if getattr(exc, "errno", None) not in (errno.EACCES, errno.EPERM):
+                raise
+            shutil.copytree(
+                str(independent_workspace),
+                str(workspace_path),
+                symlinks=False,
+                copy_function=shutil.copy2,
+                dirs_exist_ok=False,
+            )
     return str(workspace_path)
 
 

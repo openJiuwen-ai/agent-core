@@ -56,6 +56,7 @@ from openjiuwen.harness.tools.worktree.session import (
     set_current_session,
 )
 from openjiuwen.harness.tools.worktree.slug import (
+    direct_worktree_path_for,
     validate_slug,
     worktree_path_for,
     worktrees_dir,
@@ -98,6 +99,33 @@ class WorktreeManager:
     def backend(self) -> WorktreeBackend:
         """Public accessor for the worktree backend."""
         return self._backend
+
+    def with_base_dir(self, base_dir: str) -> "WorktreeManager":
+        """Return a manager view pinned to an explicit worktree root."""
+        if not base_dir:
+            raise ValueError("base_dir is required")
+        return WorktreeManager(
+            config=self._config.model_copy(update={"base_dir": base_dir}),
+            backend=self._backend,
+            event_handler=self._event_handler,
+            rails=self._rails,
+        )
+
+    def with_worktrees_dir(self, managed_worktrees_dir: str) -> "WorktreeManager":
+        """Return a manager view pinned to an explicit worktrees directory."""
+        if not managed_worktrees_dir:
+            raise ValueError("worktrees_dir is required")
+        return WorktreeManager(
+            config=self._config.model_copy(
+                update={
+                    "base_dir": managed_worktrees_dir,
+                    "base_dir_is_worktrees_dir": True,
+                }
+            ),
+            backend=self._backend,
+            event_handler=self._event_handler,
+            rails=self._rails,
+        )
 
     # -- Session-level worktree (tool calls) ----------------------------------
 
@@ -258,6 +286,7 @@ class WorktreeManager:
             await self._remove_worktree(
                 session.worktree_path,
                 repo_root,
+                force=discard_changes,
             )
 
         set_current_session(None)
@@ -286,7 +315,12 @@ class WorktreeManager:
 
     # -- Owner-scoped worktree (caller-managed isolation) ---------------------
 
-    async def create_owner_worktree(self, slug: str) -> WorktreeCreateResult:
+    async def create_owner_worktree(
+        self,
+        slug: str,
+        *,
+        source_dir: str | None = None,
+    ) -> WorktreeCreateResult:
         """Create a lightweight worktree for a caller-defined owner.
 
         Unlike :meth:`enter`, this does NOT modify the ContextVar session
@@ -297,6 +331,9 @@ class WorktreeManager:
 
         Args:
             slug: Worktree name (validated for safety).
+            source_dir: Optional git working tree/repository directory used to
+                resolve the source repository. When omitted, the current agent
+                CWD is used for backwards compatibility.
 
         Returns:
             WorktreeCreateResult with path and metadata.
@@ -307,7 +344,7 @@ class WorktreeManager:
         """
         validate_slug(slug)
 
-        repo_root = await find_canonical_git_root(get_cwd())
+        repo_root = await find_canonical_git_root(source_dir or get_cwd())
         if not repo_root:
             raise RuntimeError("Cannot create owner worktree: not in a git repository")
 
@@ -327,7 +364,13 @@ class WorktreeManager:
     # Removed in a follow-up once external callers have migrated.
     create_agent_worktree = create_owner_worktree
 
-    async def _remove_worktree(self, wt_path: str, repo_root: str) -> bool:
+    async def _remove_worktree(
+        self,
+        wt_path: str,
+        repo_root: str,
+        *,
+        force: bool = False,
+    ) -> bool:
         """Remove a worktree via backend.
 
         Single choke point so future teardown side-effects (event
@@ -340,7 +383,7 @@ class WorktreeManager:
         Returns:
             True if the backend successfully removed the worktree.
         """
-        return await self._backend.remove(wt_path, repo_root)
+        return await self._backend.remove(wt_path, repo_root, force=force)
 
     # -- Change detection -----------------------------------------------------
 
@@ -599,7 +642,7 @@ class WorktreeManager:
                     agent_logger.warning("Skipping worktree '%s': has uncommitted changes", slug)
                     continue
 
-            if await self._remove_worktree(wt_path, repo_root):
+            if await self._remove_worktree(wt_path, repo_root, force=force):
                 removed.append(wt_path)
                 if self._event_handler:
                     await self._event_handler(
@@ -627,7 +670,13 @@ class WorktreeManager:
         """
         return await self.cleanup_worktrees_by_prefix("teammate-", force=force)
 
-    async def remove_worktree(self, worktree_path: str, repo_root: str) -> bool:
+    async def remove_worktree(
+        self,
+        worktree_path: str,
+        repo_root: str,
+        *,
+        force: bool = False,
+    ) -> bool:
         """Remove a single worktree by path.
 
         Args:
@@ -637,12 +686,11 @@ class WorktreeManager:
         Returns:
             True if the worktree was successfully removed.
         """
-        return await self._remove_worktree(worktree_path, repo_root)
+        return await self._remove_worktree(worktree_path, repo_root, force=force)
 
     # -- Internal helpers -----------------------------------------------------
 
-    @staticmethod
-    def _resolve_target_path(slug: str) -> str:
+    def _resolve_target_path(self, slug: str) -> str:
         """Compute the worktree filesystem path for ``slug``.
 
         Reads the agent workspace from the current ContextVar (set by
@@ -660,6 +708,12 @@ class WorktreeManager:
                 current context.  Worktree creation requires a
                 workspace to be configured on the DeepAgent.
         """
+        if self._config.base_dir:
+            base_dir = os.path.realpath(self._config.base_dir)
+            if self._config.base_dir_is_worktrees_dir:
+                return direct_worktree_path_for(base_dir, slug)
+            return worktree_path_for(base_dir, slug)
+
         workspace = get_workspace()
         if workspace is None:
             raise RuntimeError(

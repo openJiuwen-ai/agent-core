@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord, EvolutionTarget, UsageStats
@@ -104,10 +104,10 @@ class ExperienceTracker:
             self.set_session_presented_records(session, existing + presented_entries)
 
             logger.debug(
-                "[ExperienceTracker] tracked %d presented records for skill=%s",
-                len(presented_entries),
-                skill_name,
-            )
+                 "[ExperienceTracker] tracked %d presented records for skill=%s",
+                 len(presented_entries),
+                 skill_name,
+             )
         except Exception as exc:
             logger.debug("[ExperienceTracker] track presented records failed: %s", exc)
 
@@ -126,12 +126,23 @@ class ExperienceTracker:
         try:
             evo_log = await self._store.load_full_evolution_log(skill_name)
             requested_ids = set(record_ids)
+            existing = self.get_session_presented_records(session)
+            already_queued = {
+                record.id
+                for queued_skill, record, _ in existing
+                if queued_skill == skill_name
+            }
+
             body_records = [
-                record for record in evo_log.entries if record.id in requested_ids and self._is_body_record(record)
+                record
+                for record in evo_log.entries
+                if record.id in requested_ids and self._is_body_record(record)
             ]
             if not body_records:
                 return
 
+            # Every real presentation increments times_presented; only the
+            # pending-eval queue is de-duplicated below.
             updates: Dict[str, Dict[str, Any]] = {}
             now = datetime.now(tz=timezone.utc).isoformat()
             for record in body_records:
@@ -151,14 +162,21 @@ class ExperienceTracker:
 
             await self._store.update_record_scores(skill_name, updates)
 
+            for queued_skill, queued_record, _ in existing:
+                if queued_skill == skill_name and queued_record.id in updates:
+                    queued_record.usage_stats = UsageStats.from_dict(
+                        updates[queued_record.id]["usage_stats"]
+                    )
+
             presented_entries: List[tuple[str, EvolutionRecord, str]] = []
             for record in body_records:
-                if record.id in updates:
-                    record.usage_stats = UsageStats.from_dict(updates[record.id]["usage_stats"])
-                    presented_entries.append((skill_name, record, presentation_snippet))
+                if record.id not in updates or record.id in already_queued:
+                    continue
+                record.usage_stats = UsageStats.from_dict(updates[record.id]["usage_stats"])
+                presented_entries.append((skill_name, record, presentation_snippet))
 
-            existing = self.get_session_presented_records(session)
-            self.set_session_presented_records(session, existing + presented_entries)
+            if presented_entries:
+                self.set_session_presented_records(session, existing + presented_entries)
         except Exception as exc:
             logger.debug("[ExperienceTracker] track explicit presented records failed: %s", exc)
 
@@ -167,11 +185,10 @@ class ExperienceTracker:
         session: Any,
     ) -> List[tuple[str, EvolutionRecord, str]]:
         """Consume records when the evaluation interval is reached."""
-        counter = self.get_session_eval_counter(session)
-        counter += 1
+        counter = self.get_session_eval_counter(session) + 1
         presented_entries: List[tuple[str, EvolutionRecord, str]] = []
         if counter >= self._eval_interval:
-            presented_entries = self.get_session_presented_records(session)
+            presented_entries = list(self.get_session_presented_records(session))
             self.set_session_presented_records(session, [])
             self.set_session_eval_counter(session, 0)
         else:
@@ -181,18 +198,71 @@ class ExperienceTracker:
     async def evaluate_presented(
         self,
         presented_entries: List[tuple[str, EvolutionRecord, str]],
+        *,
+        messages: Optional[List[dict]] = None,
+        build_snippet: Optional[Callable[[List[dict], str], str]] = None,
     ) -> None:
         """Evaluate explicitly presented experiences and update their scores."""
         if not presented_entries:
             return
 
         try:
-            by_skill_snippet: Dict[tuple[str, str], List[EvolutionRecord]] = {}
+            if messages is not None and build_snippet is not None:
+                by_skill_records: Dict[str, List[EvolutionRecord]] = {}
+                seen_ids: Dict[str, Set[str]] = {}
+                for skill_name, record, _ in presented_entries:
+                    seen = seen_ids.setdefault(skill_name, set())
+                    if record.id in seen:
+                        continue
+                    seen.add(record.id)
+                    by_skill_records.setdefault(skill_name, []).append(record)
+
+                by_skill_snippet: Dict[str, str] = {}
+                for skill_name in by_skill_records:
+                    by_skill_snippet[skill_name] = build_snippet(messages, skill_name)
+
+                for skill_name, records in by_skill_records.items():
+                    snippet = by_skill_snippet.get(skill_name, "")
+                    eval_results = await self._scorer.evaluate(snippet, records)
+                    if not eval_results:
+                        continue
+
+                    updates: Dict[str, Dict[str, Any]] = {}
+                    for result in eval_results:
+                        record_id = result.get("record_id")
+                        if not record_id:
+                            continue
+                        for record in records:
+                            if record.id == record_id:
+                                new_score = update_score(record, result)
+                                if record.usage_stats is None:
+                                    record.usage_stats = UsageStats()
+                                updates[record_id] = {
+                                    "score": new_score,
+                                    "usage_stats": record.usage_stats.to_dict(),
+                                }
+                                break
+
+                    if updates:
+                        await self._store.update_record_scores(skill_name, updates)
+                        logger.info(
+                            "[ExperienceTracker] async evaluation updated %d record(s) for skill=%s "
+                            "usage=%s",
+                            len(updates),
+                            skill_name,
+                            {
+                                record_id: payload.get("usage_stats")
+                                for record_id, payload in updates.items()
+                            },
+                        )
+                return
+
+            by_skill_snippet_pairs: Dict[tuple[str, str], List[EvolutionRecord]] = {}
             for skill_name, record, snippet in presented_entries:
                 key = (skill_name, snippet)
-                by_skill_snippet.setdefault(key, []).append(record)
+                by_skill_snippet_pairs.setdefault(key, []).append(record)
 
-            for (skill_name, snippet), records in by_skill_snippet.items():
+            for (skill_name, snippet), records in by_skill_snippet_pairs.items():
                 eval_results = await self._scorer.evaluate(snippet, records)
                 if not eval_results:
                     continue
@@ -216,9 +286,14 @@ class ExperienceTracker:
                 if updates:
                     await self._store.update_record_scores(skill_name, updates)
                     logger.info(
-                        "[ExperienceTracker] async evaluation updated %d record(s) for skill=%s",
+                        "[ExperienceTracker] async evaluation updated %d record(s) for skill=%s "
+                        "usage=%s",
                         len(updates),
                         skill_name,
+                        {
+                            record_id: payload.get("usage_stats")
+                            for record_id, payload in updates.items()
+                        },
                     )
         except Exception as exc:
             logger.warning("[ExperienceTracker] async evaluation failed: %s", exc, exc_info=True)

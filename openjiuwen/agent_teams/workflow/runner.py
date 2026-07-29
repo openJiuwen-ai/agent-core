@@ -17,6 +17,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Callable
 
+import aiofiles
+import aiofiles.os
+
 from openjiuwen.agent_teams import paths
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine import (
@@ -25,7 +28,8 @@ from openjiuwen.agent_teams.workflow.engine import (
     WorkflowProgressEvent,
     run_workflow,
 )
-from openjiuwen.agent_teams.workflow.engine.loader import load_workflow_meta
+from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+from openjiuwen.agent_teams.workflow.engine.loader import extract_workflow_meta, load_workflow_meta
 from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
 from openjiuwen.agent_teams.workflow.schema import WorkflowRun
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -69,6 +73,55 @@ def _resolve_journal_path(script_path: str, team_name: str, session_id: str | No
     return str(journal)
 
 
+async def materialize_swarmflow_script(
+    source: str,
+    *,
+    team_name: str,
+    session_id: str | None,
+) -> str:
+    """Persist an inline swarmflow ``script`` source to disk, return its path.
+
+    Inline sources reuse the whole path-based execution pipeline (importlib
+    module import + ``META``-derived resume journal) by being written to the
+    same per-workflow directory that holds the journal:
+    ``{team_home}/sessions/{session_id}/workflows/{name}/script.py``.
+
+    Writing under the ``META`` name directory (not a random temp file) keeps
+    the path stable across a pause/resume relaunch and colocates the script
+    with its journal, so a re-run of the same-named inline workflow resolves
+    the same journal (content-addressed cache-hit), matching ``script_path``
+    semantics exactly.
+
+    File I/O is async (``aiofiles``) to avoid stalling the shared event loop,
+    matching the engine journal's write path.
+
+    Args:
+        source: The swarmflow script source text.
+        team_name: Team identifier (script / journal namespacing).
+        session_id: Current session id; falls back to ``"default"`` when empty.
+
+    Returns:
+        Absolute path to the written script as a string.
+
+    Raises:
+        BaseError: If the script ``META`` declares no ``name``.
+    """
+    meta = extract_workflow_meta(source)
+    name = meta.get("name")
+    if not name:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="swarmflow script META requires a 'name' to persist its script and journal",
+        )
+    sid = session_id or "default"
+    run_dir = paths.workflow_run_dir(team_name, sid, name)
+    await aiofiles.os.makedirs(run_dir, exist_ok=True)
+    script_file = run_dir / "script.py"
+    async with aiofiles.open(script_file, "w", encoding="utf-8") as f:
+        await f.write(source)
+    return str(script_file)
+
+
 async def run_swarmflow(
     script_path: str,
     *,
@@ -88,6 +141,7 @@ async def run_swarmflow(
     on_backend_ready: Callable[[Any], None] | None = None,
     run_id: str | None = None,
     agent_gate: Any = None,
+    budget: BudgetLedger | None = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
@@ -123,9 +177,17 @@ async def run_swarmflow(
         on_backend_ready: Optional callback invoked with the constructed
             ``TeamWorkerBackend`` before the run starts — the launcher uses it to
             register a control handle (so pause can reach ``abort_sessions``).
+        budget: The leader's shared token ledger. Workers bill their real usage
+            to it and are cut short at their next model call once its ceiling is
+            reached; ``agent()`` then refuses to start another. ``None`` runs
+            unbounded (the ledger still counts, so ``budget.spent()`` works).
 
     Returns:
         Whatever the script's ``run(args)`` returned.
+
+    Raises:
+        BudgetExhausted: If the ledger's ceiling is reached and the script keeps
+            calling ``agent()`` instead of winding down on ``budget.remaining()``.
     """
     def _on_human_prompt(member_name: str, correlation_id: str, prompt: str) -> None:
         """Surface a pending human turn as a progress event (leader narrates it)."""
@@ -138,13 +200,14 @@ async def run_swarmflow(
             )
         )
 
-    def _on_human_replied(member_name: str, correlation_id: str) -> None:
-        """Signal that a pending human turn was answered."""
+    def _on_human_replied(member_name: str, correlation_id: str, answer: str | None) -> None:
+        """Signal that a pending human turn was answered (answer = raw reply)."""
         observer.emit(
             WorkflowProgressEvent(
                 kind=ProgressKind.HUMAN_REPLIED,
                 label=member_name,
                 correlation_id=correlation_id,
+                answer=answer,
             )
         )
 
@@ -175,6 +238,7 @@ async def run_swarmflow(
         journal_path=journal_path,
         abort_event=abort_event,
         agent_gate=agent_gate,
+        budget=budget,
     )
 
 
@@ -199,4 +263,4 @@ async def preprocess_swarmflow(
     return obs.run
 
 
-__all__ = ["run_swarmflow", "preprocess_swarmflow"]
+__all__ = ["run_swarmflow", "preprocess_swarmflow", "materialize_swarmflow_script"]

@@ -207,6 +207,7 @@ class StatusCode(Enum):
     DEEPAGENT_RUNTIME_ERROR = (123023, "deepagent runtime error, reason: {error_msg}")
     DEEPAGENT_TASK_LOOP_NOT_IMPLEMENTED = (123024, "deepagent task loop not implemented, reason: {error_msg}")
     DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND = (123025, "subagent not found, reason: {error_msg}")
+    DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR = (123026, "deepagent load expert harness error, reason: {error_msg}")
 
     # =============================================================================================================
     # 110 Runner / Distributed 110000–110999
@@ -256,6 +257,7 @@ class StatusCode(Enum):
     RESOURCE_CARD_VALUE_INVALID = (110402, "{resource_type} card is invalid, reason='{reason}'")
     RESOURCE_PROVIDER_INVALID = (110403, "{resource_type} provider is invalid, reason='{reason}'")
     RESOURCE_VALUE_INVALID = (110404, "{resource_type} value is invalid, reason='{reason}'")
+    RESOURCE_CONFLICT_INVALID = (110405, "resource conflict, source='{source}', error='{reason}'")
 
     RESOURCE_ADD_ERROR = (110430, "resource add failed, card='{card}', error='{reason}'")
     RESOURCE_GET_ERROR = (
@@ -407,6 +409,8 @@ class StatusCode(Enum):
     AGENT_TEAM_BUSY_INVALID = (132005,
                                "agent team is busy, team='{team_name}', session='{session_id}', reason: {reason}")
     AGENT_TEAM_STATE_INVALID = (132006, "agent team state inconsistent, reason: {reason}")
+    AGENT_TEAM_SSH_CONNECT_ERROR = (132007, "ssh connect failed, host='{host}', reason='{reason}'")
+    AGENT_TEAM_SSH_EXECUTION_ERROR = (132008, "ssh remote execution failed, reason='{reason}'")
 
     # =========================
     # DevTools / AgentBuilder 140000 - 140099

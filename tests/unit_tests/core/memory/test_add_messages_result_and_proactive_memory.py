@@ -119,6 +119,24 @@ def _mock_callback_trigger():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _mock_llm_factory(mock_llm):
+    """Patch LongTermMemory._get_llm_from_config for the whole test body.
+
+    The engine fixture only needs the mock during set_config (to set
+    self._base_llm), but add_messages re-resolves the LLM via
+    _get_scope_llm -> _get_llm_from_config at call time. If the patch is
+    scoped to set_config alone (as before), the call-time resolution slips
+    out of the patch and constructs a real Model that hits the network. This
+    autouse fixture widens the patch to cover the entire test method so the
+    mock stays in effect through add_messages.
+    """
+    with patch.object(
+            LongTermMemory, "_get_llm_from_config", return_value=mock_llm
+    ):
+        yield
+
+
 @pytest.fixture
 def temp_dir():
     """Create a temp directory for ChromaDB / SQLite; cleaned up after test."""
@@ -166,20 +184,18 @@ async def engine(temp_dir, mock_llm):
         embedding_model=embedding,
     )
 
-    # Mock LLM creation so no real API calls happen
-    with patch.object(
-            LongTermMemory, "_get_llm_from_config", return_value=mock_llm
-    ):
-        config = MemoryEngineConfig(
-            default_model_cfg=ModelRequestConfig(model="mock-model", temperature=0.2),
-            default_model_client_cfg=ModelClientConfig(
-                client_id="test",
-                client_provider="OpenAI",
-                api_key="mock-key",
-                api_base="http://localhost",
-            ),
-        )
-        mem.set_config(config)
+    # _get_llm_from_config is patched for the whole test by the
+    # _mock_llm_factory autouse fixture, so no real API calls happen.
+    config = MemoryEngineConfig(
+        default_model_cfg=ModelRequestConfig(model="mock-model", temperature=0.2),
+        default_model_client_cfg=ModelClientConfig(
+            client_id="test",
+            client_provider="OpenAI",
+            api_key="mock-key",
+            api_base="http://localhost",
+        ),
+    )
+    mem.set_config(config)
 
     return mem
 

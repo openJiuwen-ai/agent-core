@@ -28,7 +28,6 @@ from openjiuwen.harness.prompts.sections.context import build_context_section, b
 from openjiuwen.core.foundation.llm.model import init_model
 
 
-
 class _DummyResponse:
     def __init__(self, content: str):
         self.content = content
@@ -59,8 +58,11 @@ def _make_sys_operation(tmp_path: Path):
 
 def _make_agent(sys_operation, workspace):
     model = init_model(
-        provider="OpenAI", model_name="dummy-model", api_key="dummy-key",
-        api_base="https://example.com/v1", verify_ssl=False,
+        provider="OpenAI",
+        model_name="dummy-model",
+        api_key="dummy-key",
+        api_base="https://example.com/v1",
+        verify_ssl=False,
     )
     return create_deep_agent(
         model=model,
@@ -77,10 +79,7 @@ def _make_model_call_context(agent):
     return AgentCallbackContext(
         agent=agent,
         inputs=ModelCallInputs(
-            messages=[
-                SystemMessage(content="You are a test assistant."),
-                {"role": "user", "content": "test"}
-            ]
+            messages=[SystemMessage(content="You are a test assistant."), {"role": "user", "content": "test"}]
         ),
         session=SimpleNamespace(get_session_id=lambda: "sess1"),
         extra={},
@@ -121,6 +120,7 @@ class _MockModelContext:
 # Section Builder Tests
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_build_workspace_section(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
@@ -153,9 +153,7 @@ async def test_build_context_section(tmp_path: Path):
     await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/{date}.md", "# Today")
 
     workspace = Workspace(root_path=str(tmp_path))
-    section_cn = await build_context_section(
-        sys_operation, workspace, "cn", timezone="Asia/Shanghai"
-    )
+    section_cn = await build_context_section(sys_operation, workspace, "cn", timezone="Asia/Shanghai")
     assert section_cn.priority == 80
     cn_content = section_cn.render("cn")
     assert "## AGENT.md - 智能体配置" in cn_content
@@ -172,9 +170,7 @@ async def test_build_context_section(tmp_path: Path):
         sys_operation, workspace, "cn", timezone="Asia/Shanghai"
     )
     assert section_cn_after_memory_write.render("cn") == cn_content
-    section_en = await build_context_section(
-        sys_operation, workspace, "en", timezone="Asia/Shanghai"
-    )
+    section_en = await build_context_section(sys_operation, workspace, "en", timezone="Asia/Shanghai")
     en_content = section_en.render("en")
     assert "## AGENT.md - Agent Configuration" in en_content
     assert "already loaded into context" in en_content
@@ -195,9 +191,7 @@ async def test_build_context_section_includes_stable_daily_memory_guidance_with_
     (tmp_path / "memory" / "daily_memory").mkdir(parents=True, exist_ok=True)
 
     workspace = Workspace(root_path=str(tmp_path))
-    section_cn = await build_context_section(
-        sys_operation, workspace, "cn", timezone="Asia/Shanghai"
-    )
+    section_cn = await build_context_section(sys_operation, workspace, "cn", timezone="Asia/Shanghai")
     cn_content = section_cn.render("cn")
     assert "# Agent Config" in cn_content
     assert "## daily_memory/" not in cn_content
@@ -212,9 +206,7 @@ async def test_build_context_section_never_reads_daily_memory_files(tmp_path: Pa
     await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/2026-04-02.md", "# Yesterday")
 
     workspace = Workspace(root_path=str(tmp_path))
-    section_cn = await build_context_section(
-        sys_operation, workspace, "cn", timezone="Asia/Shanghai"
-    )
+    section_cn = await build_context_section(sys_operation, workspace, "cn", timezone="Asia/Shanghai")
     cn_content = section_cn.render("cn")
     assert "# Agent Config" in cn_content
     assert "# Yesterday" not in cn_content
@@ -246,9 +238,32 @@ async def test_build_context_section_can_exclude_daily_memory(tmp_path: Path):
     assert "memory_search" not in cn_content
 
 
+@pytest.mark.asyncio
+async def test_build_context_section_injects_filled_identity_template(tmp_path: Path):
+    """IDENTITY.md with a filled name should not be skipped as an unfilled template."""
+    sys_operation = _make_sys_operation(tmp_path)
+    identity = """# 身份
+
+_在你们的第一次对话中填写。让它属于你。_
+
+- **名字：** 青团
+- **形态：**
+  _(AI？机器人？精灵？)_
+"""
+    await sys_operation.fs().write_file(f"{tmp_path}/IDENTITY.md", identity)
+
+    workspace = Workspace(root_path=str(tmp_path))
+    section = await build_context_section(sys_operation, workspace, "cn")
+    content = section.render("cn")
+
+    assert "## IDENTITY.md - 身份凭证" in content
+    assert "- **名字：** 青团" in content
+
+
 # =============================================================================
 # build_tools_content Tests
 # =============================================================================
+
 
 def test_build_tools_content():
     """build_tools_content should return correct format per language."""
@@ -358,6 +373,7 @@ async def test_build_context_section_without_tools(tmp_path: Path):
 # before_model_call Integration Tests
 # =============================================================================
 
+
 @pytest.mark.asyncio
 async def test_before_model_call_injects_sections(tmp_path: Path):
     """before_model_call should inject workspace and context sections."""
@@ -365,13 +381,15 @@ async def test_before_model_call_injects_sections(tmp_path: Path):
     card = AgentCard(name="test", description="test")
     workspace = Workspace(root_path=str(tmp_path))
     agent = DeepAgent(card)
-    agent.configure(DeepAgentConfig(
-        model=_DummyModel(),
-        workspace=workspace,
-        sys_operation=sys_operation,
-        auto_create_workspace=True,
-        enable_task_loop=False,
-    ))
+    agent.configure(
+        DeepAgentConfig(
+            model=_DummyModel(),
+            workspace=workspace,
+            sys_operation=sys_operation,
+            auto_create_workspace=True,
+            enable_task_loop=False,
+        )
+    )
     await agent.ensure_initialized()
 
     ctx = _make_model_call_context(agent)
@@ -458,6 +476,30 @@ async def test_before_model_call_keeps_user_in_system_and_skips_daily_memory(tmp
 
 
 @pytest.mark.asyncio
+async def test_before_model_call_injects_filled_identity_in_system(tmp_path: Path):
+    """Filled IDENTITY.md should be injected as system context every model call."""
+    sys_operation = _make_sys_operation(tmp_path)
+    await sys_operation.fs().write_file(
+        f"{tmp_path}/IDENTITY.md",
+        "# 身份\n\n_在你们的第一次对话中填写。让它属于你。_\n\n- **名字：** 青团\n",
+    )
+
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+
+    ctx = _make_model_call_context(agent)
+    rail = ContextAssembleRail()
+    await agent.register_rail(rail)
+    await rail.before_invoke(ctx)
+    await rail.before_model_call(ctx)
+
+    identity_section = agent.system_prompt_builder.get_section("context.identity")
+    assert identity_section is not None
+    assert "- **名字：** 青团" in identity_section.render("cn")
+
+
+@pytest.mark.asyncio
 async def test_before_model_call_normal_turn_replaces_heartbeat_context_attachment(tmp_path: Path):
     """Normal turns should replace context written by heartbeat runs."""
     sys_operation = _make_sys_operation(tmp_path)
@@ -529,10 +571,8 @@ async def test_uninit_removes_sections(tmp_path: Path):
     await agent.ensure_initialized()
 
     builder = agent.system_prompt_builder
-    builder.add_section(await build_workspace_section(
-        sys_operation, workspace, "cn"))
-    builder.add_section(await build_context_section(
-        sys_operation, workspace, "cn", timezone="Asia/Shanghai"))
+    builder.add_section(await build_workspace_section(sys_operation, workspace, "cn"))
+    builder.add_section(await build_context_section(sys_operation, workspace, "cn", timezone="Asia/Shanghai"))
     builder.add_section(PromptSection("context.user", {"cn": "user"}))
     assert builder.has_section("workspace")
     assert builder.has_section("context")
@@ -549,6 +589,7 @@ async def test_uninit_removes_sections(tmp_path: Path):
 # =============================================================================
 # ContextAssembleRail Unit Tests Extension
 # =============================================================================
+
 
 @pytest.mark.asyncio
 async def test_rail_init_captures_system_prompt_builder(tmp_path: Path):
@@ -575,12 +616,14 @@ async def test_rail_init_with_missing_attributes(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
     card = AgentCard(name="test", description="test")
     agent = DeepAgent(card)
-    agent.configure(DeepAgentConfig(
-        model=_DummyModel(),
-        workspace=None,
-        sys_operation=sys_operation,
-        enable_task_loop=False,
-    ))
+    agent.configure(
+        DeepAgentConfig(
+            model=_DummyModel(),
+            workspace=None,
+            sys_operation=sys_operation,
+            enable_task_loop=False,
+        )
+    )
     await agent.ensure_initialized()
 
     # Simulate missing attributes after initialization.
@@ -667,9 +710,7 @@ async def test_before_model_call_adds_tools_section(tmp_path: Path):
     agent = _make_agent(sys_operation, workspace)
     await agent.ensure_initialized()
 
-    agent.ability_manager.add(
-        ToolCard(id="test-tool-1", name="test_tool", description="A test tool")
-    )
+    agent.ability_manager.add(ToolCard(id="test-tool-1", name="test_tool", description="A test tool"))
 
     ctx = _make_model_call_context(agent)
     rail = ContextAssembleRail()

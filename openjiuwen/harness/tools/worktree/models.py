@@ -45,6 +45,14 @@ class WorktreeConfig(BaseModel):
     Default: <workspace-root>/.worktrees/
     """
 
+    base_dir_is_worktrees_dir: bool = False
+    """Treat ``base_dir`` as the worktrees parent itself.
+
+    When false, worktrees live under ``{base_dir}/.worktrees`` for the generic
+    single-agent path. Team-owned worktrees pass true so their session root can
+    be ``sessions/{id}/worktrees/{slug}``.
+    """
+
     sparse_paths: list[str] | None = None
     """Sparse checkout paths for large repos.
     Only these directories are checked out, reducing disk usage.

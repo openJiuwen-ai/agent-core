@@ -13,13 +13,18 @@ from openjiuwen.agent_evolving.trajectory import (
     FileTrajectoryStore,
     InMemoryTrajectoryStore,
     TeamTrajectoryAggregator,
-    Trajectory,
     TrajectoryBuilder,
 )
 from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
     ToolCallDetail,
+    Trajectory,
     TrajectoryStep,
+    set_trajectory_resource_attributes,
+    trajectory_execution_id,
+    trajectory_from_steps,
+    trajectory_meta,
+    trajectory_steps,
 )
 from openjiuwen.agent_evolving.trajectory.aggregator import filter_member_trajectory
 from openjiuwen.agent_evolving.trajectory.aggregator import aggregate_member_trajectories
@@ -72,8 +77,8 @@ class TestTeamTrajectoryAggregatorSingleMember:
             aggregator = TeamTrajectoryAggregator(trajectories_dir=Path(tmp), team_id="team-1")
             result = aggregator.aggregate("session-1")
 
-            assert len(result.combined.steps) == 3
-            assert result.combined.meta.get("member_count") == 1
+            assert len(trajectory_steps(result.combined)) == 3
+            assert trajectory_meta(result.combined).get("member_count") == 1
 
 
 class TestTeamTrajectoryAggregatorMultiMember:
@@ -107,10 +112,10 @@ class TestTeamTrajectoryAggregatorMultiMember:
             aggregator = TeamTrajectoryAggregator(trajectories_dir=Path(tmp), team_id="team-1")
             result = aggregator.aggregate("session-1")
 
-            assert len(result.combined.steps) == 4
-            times = [s.start_time_ms for s in result.combined.steps]
+            assert len(trajectory_steps(result.combined)) == 4
+            times = [s.start_time_ms for s in trajectory_steps(result.combined)]
             assert times == sorted(times)
-            assert result.combined.meta.get("member_count") == 2
+            assert trajectory_meta(result.combined).get("member_count") == 2
 
 
 class TestTeamTrajectoryAggregatorEmpty:
@@ -123,8 +128,8 @@ class TestTeamTrajectoryAggregatorEmpty:
             result = aggregator.aggregate("nonexistent-session")
 
             assert len(result.members) == 0
-            assert len(result.combined.steps) == 0
-            assert result.combined.meta.get("member_count") == 0
+            assert len(trajectory_steps(result.combined)) == 0
+            assert trajectory_meta(result.combined).get("member_count") == 0
 
     def test_empty_dir_does_not_raise(self):
         """Aggregator on empty directory should not raise."""
@@ -146,7 +151,7 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "researcher/llm_main"},
             ),
         ]
-        traj = Trajectory(
+        traj = trajectory_from_steps(
             execution_id="exec-1",
             session_id="sess-1",
             steps=steps,
@@ -155,7 +160,7 @@ class TestFilterMemberTrajectory:
 
         result = filter_member_trajectory(traj)
 
-        assert len(result.steps) == 0
+        assert len(trajectory_steps(result)) == 0
 
     def test_keeps_collaborative_tool_calls(self):
         """Collaborative tool calls should be kept.
@@ -170,12 +175,12 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "claim_task"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = trajectory_from_steps(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
-        assert len(result.steps) == 1
-        assert result.steps[0].detail.tool_name == "claim_task"
+        assert len(trajectory_steps(result)) == 1
+        assert trajectory_steps(result)[0].detail.tool_name == "claim_task"
 
     def test_keeps_cross_member_invoke(self):
         """Steps with cross-member interaction markers should be kept."""
@@ -186,11 +191,11 @@ class TestFilterMemberTrajectory:
                 meta={"invoke_id": "inv-1", "parent_invoke_id": "parent-1"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = trajectory_from_steps(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
-        assert len(result.steps) == 1
+        assert len(trajectory_steps(result)) == 1
 
     def test_filters_internal_file_edit(self):
         """Tools outside the collaboration whitelist should be filtered out."""
@@ -206,11 +211,11 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "python"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = trajectory_from_steps(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
-        assert len(result.steps) == 0
+        assert len(trajectory_steps(result)) == 0
 
     def test_filters_unknown_tool_calls(self):
         """Unknown tools are not collaboration evidence by default."""
@@ -221,11 +226,11 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "custom_debug_tool"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = trajectory_from_steps(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
-        assert len(result.steps) == 0
+        assert len(trajectory_steps(result)) == 0
 
     def test_filters_regular_file_read(self):
         """File access is only kept when it targets skill-related files."""
@@ -241,11 +246,11 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "write_file"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = trajectory_from_steps(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
-        assert len(result.steps) == 0
+        assert len(trajectory_steps(result)) == 0
 
     def test_keeps_skill_file_access(self):
         """read_file/write_file for SKILL.md should be kept."""
@@ -261,11 +266,11 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "write_file"},
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = trajectory_from_steps(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
-        assert len(result.steps) == 2
+        assert len(trajectory_steps(result)) == 2
 
     def test_mixed_steps_keep_only_collaborative(self):
         """Mixed steps should only keep collaborative ones.
@@ -296,22 +301,22 @@ class TestFilterMemberTrajectory:
                 start_time_ms=300,
             ),
         ]
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=steps)
+        traj = trajectory_from_steps(execution_id="e1", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
-        assert len(result.steps) == 2
-        assert result.steps[0].detail.tool_name == "claim_task"
-        assert result.steps[1].detail.tool_name == "view_task"
+        assert len(trajectory_steps(result)) == 2
+        assert trajectory_steps(result)[0].detail.tool_name == "claim_task"
+        assert trajectory_steps(result)[1].detail.tool_name == "view_task"
 
     def test_empty_trajectory_returns_empty(self):
         """Empty trajectory returns empty, preserves execution_id."""
-        traj = Trajectory(execution_id="e1", session_id="s1", steps=[])
+        traj = trajectory_from_steps(execution_id="e1", session_id="s1", steps=[])
 
         result = filter_member_trajectory(traj)
 
-        assert len(result.steps) == 0
-        assert result.execution_id == "e1"
+        assert len(trajectory_steps(result)) == 0
+        assert trajectory_execution_id(result) == "e1"
 
     def test_preserves_original_execution_id(self):
         """Filtering should preserve the original execution_id."""
@@ -322,11 +327,11 @@ class TestFilterMemberTrajectory:
                 meta={"operator_id": "claim_task"},
             ),
         ]
-        traj = Trajectory(execution_id="my-exec-123", session_id="s1", steps=steps)
+        traj = trajectory_from_steps(execution_id="my-exec-123", session_id="s1", steps=steps)
 
         result = filter_member_trajectory(traj)
 
-        assert result.execution_id == "my-exec-123"
+        assert trajectory_execution_id(result) == "my-exec-123"
 
 
 class TestTeamTrajectoryAggregatorWithStore:
@@ -361,7 +366,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             ),
         ]
         store.save(
-            Trajectory(
+            trajectory_from_steps(
                 execution_id="e1",
                 session_id="s1",
                 steps=steps1,
@@ -378,7 +383,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             ),
         ]
         store.save(
-            Trajectory(
+            trajectory_from_steps(
                 execution_id="e2",
                 session_id="s1",
                 steps=steps2,
@@ -391,7 +396,7 @@ class TestTeamTrajectoryAggregatorWithStore:
 
         assert len(result.members) == 2
         # Only collaborative steps: claim_task + view_task + read_file = 3
-        assert len(result.combined.steps) == 3
+        assert len(trajectory_steps(result.combined)) == 3
 
     def test_aggregate_from_store_no_filter(self):
         """Aggregator with filter_collaborative=False keeps all steps."""
@@ -411,7 +416,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             ),
         ]
         store.save(
-            Trajectory(
+            trajectory_from_steps(
                 execution_id="e1",
                 session_id="s1",
                 steps=steps,
@@ -422,7 +427,7 @@ class TestTeamTrajectoryAggregatorWithStore:
         agg = TeamTrajectoryAggregator(store=store, team_id="t1")
         result = agg.aggregate("s1", filter_collaborative=False)
 
-        assert len(result.combined.steps) == 2
+        assert len(trajectory_steps(result.combined)) == 2
 
     def test_aggregate_keeps_full_leader_by_role_and_filters_members(self):
         """Leader keeps full trajectory while teammates keep only collaborative steps."""
@@ -459,7 +464,7 @@ class TestTeamTrajectoryAggregatorWithStore:
         ]
 
         store.save(
-            Trajectory(
+            trajectory_from_steps(
                 execution_id="leader-exec",
                 session_id="s1",
                 steps=leader_steps,
@@ -467,7 +472,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             )
         )
         store.save(
-            Trajectory(
+            trajectory_from_steps(
                 execution_id="member-exec",
                 session_id="s1",
                 steps=member_steps,
@@ -478,12 +483,12 @@ class TestTeamTrajectoryAggregatorWithStore:
         agg = TeamTrajectoryAggregator(store=store, team_id="t1")
         result = agg.aggregate("s1")
 
-        assert len(result.members[leader_id].steps) == 2
-        assert result.members[leader_id].steps[0].kind == "llm"
-        assert len(result.members["researcher"].steps) == 1
-        assert result.members["researcher"].steps[0].detail.tool_name == "read_file"
-        assert len(result.combined.steps) == 3
-        assert [step.kind for step in result.combined.steps] == ["llm", "tool", "tool"]
+        assert len(trajectory_steps(result.members[leader_id])) == 2
+        assert trajectory_steps(result.members[leader_id])[0].kind == "llm"
+        assert len(trajectory_steps(result.members["researcher"])) == 1
+        assert trajectory_steps(result.members["researcher"])[0].detail.tool_name == "read_file"
+        assert len(trajectory_steps(result.combined)) == 3
+        assert [step.kind for step in trajectory_steps(result.combined)] == ["llm", "tool", "tool"]
 
     def test_aggregate_accumulates_multiple_trajectories_for_same_member(self):
         """Multiple trajectories from one member should be merged, not overwritten."""
@@ -491,7 +496,7 @@ class TestTeamTrajectoryAggregatorWithStore:
         leader_id = "jiuwen_team_sess_123_team_leader"
 
         store.save(
-            Trajectory(
+            trajectory_from_steps(
                 execution_id="leader-round-1",
                 session_id="s1",
                 steps=[
@@ -508,7 +513,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             )
         )
         store.save(
-            Trajectory(
+            trajectory_from_steps(
                 execution_id="leader-round-2",
                 session_id="s1",
                 steps=[
@@ -525,7 +530,7 @@ class TestTeamTrajectoryAggregatorWithStore:
         agg = TeamTrajectoryAggregator(store=store, team_id="t1")
         result = agg.aggregate("s1")
 
-        tool_names = [step.detail.tool_name for step in result.members[leader_id].steps]
+        tool_names = [step.detail.tool_name for step in trajectory_steps(result.members[leader_id])]
         assert tool_names == ["skill_tool", "view_task"]
 
     def test_aggregate_deduplicates_cumulative_snapshots_for_same_member(self):
@@ -547,7 +552,7 @@ class TestTeamTrajectoryAggregatorWithStore:
         )
 
         store.save(
-            Trajectory(
+            trajectory_from_steps(
                 execution_id="leader-snapshot-1",
                 session_id="s1",
                 steps=[skill_step],
@@ -555,7 +560,7 @@ class TestTeamTrajectoryAggregatorWithStore:
             )
         )
         store.save(
-            Trajectory(
+            trajectory_from_steps(
                 execution_id="leader-snapshot-2",
                 session_id="s1",
                 steps=[skill_step, view_task_step],
@@ -566,7 +571,7 @@ class TestTeamTrajectoryAggregatorWithStore:
         agg = TeamTrajectoryAggregator(store=store, team_id="t1")
         result = agg.aggregate("s1")
 
-        tool_names = [step.detail.tool_name for step in result.members[leader_id].steps]
+        tool_names = [step.detail.tool_name for step in trajectory_steps(result.members[leader_id])]
         assert tool_names == ["skill_tool", "view_task"]
 
     def test_aggregate_from_empty_store(self):
@@ -575,13 +580,13 @@ class TestTeamTrajectoryAggregatorWithStore:
         agg = TeamTrajectoryAggregator(store=store, team_id="t1")
         result = agg.aggregate("nonexistent")
         assert len(result.members) == 0
-        assert len(result.combined.steps) == 0
+        assert len(trajectory_steps(result.combined)) == 0
 
     def test_backward_compat_trajectories_dir(self):
         """Old API: trajectories_dir=Path should still work."""
         with tempfile.TemporaryDirectory() as tmp:
             store = FileTrajectoryStore(Path(tmp))
-            traj = Trajectory(
+            traj = trajectory_from_steps(
                 execution_id="e1",
                 session_id="s1",
                 steps=[TrajectoryStep(kind="tool", detail=ToolCallDetail(tool_name="claim_task"), start_time_ms=100)],
@@ -602,9 +607,9 @@ class TestTeamTrajectoryAggregatorWithStore:
 
 def test_aggregate_member_trajectories_uses_latest_prefix_snapshot():
     old = _build_member_trajectory("leader", "session-1", step_count=1)
-    old.meta["member_role"] = "leader"
+    set_trajectory_resource_attributes(old, {"member_role": "leader"})
     new = _build_member_trajectory("leader", "session-1", step_count=2)
-    new.meta["member_role"] = "leader"
+    set_trajectory_resource_attributes(new, {"member_role": "leader"})
 
     combined = aggregate_member_trajectories(
         [old, new],
@@ -613,15 +618,14 @@ def test_aggregate_member_trajectories_uses_latest_prefix_snapshot():
         filter_collaborative=True,
     )
 
-    assert len(combined.steps) == 2
-    assert combined.meta["member_count"] == 1
+    assert len(trajectory_steps(combined)) == 2
+    assert trajectory_meta(combined)["member_count"] == 1
 
 
 def test_aggregate_member_trajectories_filters_teammate_internals():
-    teammate = Trajectory(
+    teammate = trajectory_from_steps(
         execution_id="teammate-1",
         session_id="session-1",
-        source="online",
         steps=[
             TrajectoryStep(
                 kind="llm",
@@ -635,6 +639,7 @@ def test_aggregate_member_trajectories_filters_teammate_internals():
                 start_time_ms=2,
             ),
         ],
+        source="online",
         meta={"member_id": "researcher", "member_role": "teammate"},
     )
 
@@ -645,5 +650,5 @@ def test_aggregate_member_trajectories_filters_teammate_internals():
         filter_collaborative=True,
     )
 
-    assert len(combined.steps) == 1
-    assert combined.steps[0].detail.tool_name == "send_message"
+    assert len(trajectory_steps(combined)) == 1
+    assert trajectory_steps(combined)[0].detail.tool_name == "send_message"

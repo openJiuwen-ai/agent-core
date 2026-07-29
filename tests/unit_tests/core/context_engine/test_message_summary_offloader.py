@@ -27,6 +27,13 @@ from tests.unit_tests.core.context_engine._stream_state_helpers import (
 )
 
 
+def assert_offload_saved(context: SessionModelContext, offload_msg: OffloadMixin, expected_content: str) -> None:
+    saved_messages = context.save_state()["offload_messages"].get(offload_msg.offload_handle)
+    assert saved_messages
+    saved_content = "\n".join(str(getattr(message, "content", "")) for message in saved_messages)
+    assert expected_content in saved_content
+
+
 class TestMessageSummaryOffloader:
     """Unit tests for MessageSummaryOffloader"""
 
@@ -155,13 +162,10 @@ class TestMessageSummaryOffloader:
             result = await offloader._offload_message(original_message, context)
             
             # Verify result is a OffloadMixin
-            reload_messages = await context.reloader_tool().invoke(
-                dict(offload_handle=result.offload_handle, offload_type=result.offload_type)
-            )
             assert isinstance(result, OffloadMixin)
             assert result.role == original_message.role
             assert summarized_content in result.content
-            assert original_message.content in reload_messages
+            assert_offload_saved(context, result, original_message.content)
             
             mock_model_instance.invoke.assert_called_once()
             call_args = mock_model_instance.invoke.call_args[0][0]
@@ -189,13 +193,10 @@ class TestMessageSummaryOffloader:
             result = await offloader._offload_message(original_message, context)
             
             # Verify result
-            reload_messages = await context.reloader_tool().invoke(
-                dict(offload_handle=result.offload_handle, offload_type=result.offload_type)
-            )
             assert isinstance(result, OffloadMixin)
             assert result.role == original_message.role
             assert summarized_content in result.content
-            assert original_message.content in reload_messages
+            assert_offload_saved(context, result, original_message.content)
 
             call_args = mock_model_instance.invoke.call_args[0][0]
             assert len(call_args) == 1
@@ -230,12 +231,9 @@ class TestMessageSummaryOffloader:
                 )
                 result = await offloader._offload_message(original_message, context)
 
-                reload_messages = await context.reloader_tool().invoke(
-                    dict(offload_handle=result.offload_handle, offload_type=result.offload_type)
-                )
                 assert result.role == expected_role
                 assert summarized_content in result.content
-                assert original_message.content in reload_messages
+                assert_offload_saved(context, result, original_message.content)
 
     @pytest.mark.asyncio
     async def test_offload_message_empty_content(self, default_config):
@@ -260,11 +258,8 @@ class TestMessageSummaryOffloader:
             )
             result = await offloader._offload_message(original_message, context)
 
-            reload_messages = await context.reloader_tool().invoke(
-                dict(offload_handle=result.offload_handle, offload_type=result.offload_type)
-            )
             assert summarized_content in result.content
-            assert original_message.content in reload_messages
+            assert_offload_saved(context, result, original_message.content)
 
     @pytest.mark.asyncio
     async def test_offload_message_preserves_original_messages(self, default_config):
@@ -288,7 +283,4 @@ class TestMessageSummaryOffloader:
             )
             
             # Verify original messages are stored
-            reload_messages = await context.reloader_tool().invoke(
-                dict(offload_handle=result.offload_handle, offload_type=result.offload_type)
-            )
-            assert "Original message content" in reload_messages, True
+            assert_offload_saved(context, result, "Original message content")

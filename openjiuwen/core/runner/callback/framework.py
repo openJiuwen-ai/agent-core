@@ -16,6 +16,7 @@ from collections import (
     defaultdict,
     deque,
 )
+from functools import lru_cache
 from datetime import datetime
 from typing import (
     Any,
@@ -65,6 +66,15 @@ from openjiuwen.core.runner.callback.models import (
 )
 
 
+@lru_cache(maxsize=4096)
+def _get_signature(func: Callable):
+    """Get the signature of a function, caching the result."""
+    try:
+        return inspect.signature(func)
+    except (ValueError, TypeError):
+        return None
+
+
 def _narrow_call(
     func: Callable,
     args: tuple,
@@ -77,9 +87,8 @@ def _narrow_call(
     Keyword arguments are filtered to declared parameter names (unless it has
     **kwargs).
     """
-    try:
-        sig = inspect.signature(func)
-    except (ValueError, TypeError):
+    sig = _get_signature(func)
+    if sig is None:
         return args, kwargs
 
     has_var_positional = False
@@ -124,16 +133,14 @@ def _inject_session_if_needed(callback, narrowed_args, narrowed_kwargs):
     # Check if session injection is needed
     need_session = False
 
-    try:
-        sig = inspect.signature(callback)
+    sig = _get_signature(callback)
+    if sig is not None:
         # Check if callback has explicit 'session' parameter
         if 'session' in sig.parameters:
             need_session = True
         # Check if callback has **kwargs parameter
         elif any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
             need_session = True
-    except (ValueError, TypeError):
-        need_session = False
 
     # Inject session if needed and not already provided
     if need_session:
@@ -221,6 +228,20 @@ class AsyncCallbackFramework:
     @property
     def callback_filters(self):
         return self._callback_filters
+
+    def has_subscribers(self, event: str) -> bool:
+        """Return True if anything would observe *event* when triggered."""
+        if self._enable_history:
+            return True
+        if self._global_filters:
+            return True
+        if event in self._callbacks and self._callbacks[event]:
+            return True
+        if event in self._filters and self._filters[event]:
+            return True
+        if event in self._hooks and self._hooks[event]:
+            return True
+        return False
 
     # ========== Registration ==========
 

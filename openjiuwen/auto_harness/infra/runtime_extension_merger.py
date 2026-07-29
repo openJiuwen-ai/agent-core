@@ -12,13 +12,35 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from openjiuwen.harness.harness_config.loader import HarnessConfigLoader
-from openjiuwen.harness.harness_config.schema import HarnessConfig
+from openjiuwen.auto_harness.infra.runtime_manifest import (
+    RuntimeHarnessManifest,
+    load_runtime_manifest,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.auto_harness.schema import RuntimeExtensionArtifact
 
 _DEFAULT_MERGED_NAME = "merged_extensions"
+
+
+def _iter_manifest_modules(
+    config: RuntimeHarnessManifest,
+) -> list[tuple[str, str, str | None]]:
+    """Yield ``(kind, module, class_name)`` for package rails/tools entries.
+
+    Mirrors the legacy merger filter: ``type == "package"`` with a non-empty
+    ``module``; ``class`` is optional (kept as declared, may be ``None``).
+    """
+    resources = config.resources
+    if resources is None:
+        return []
+    items: list[tuple[str, str, str | None]] = []
+    for kind, specs in (("rail", resources.rails), ("tool", resources.tools)):
+        for spec in specs:
+            if spec.type != "package" or not spec.module:
+                continue
+            items.append((kind, spec.module, spec.class_name))
+    return items
 
 
 def _build_merged_prefix(merged_name: str) -> str:
@@ -109,23 +131,19 @@ def merge_runtime_extensions(
     source_exts_summary: list[dict[str, str]] = []
     for art in artifacts:
         ext_name = art.extension_name
-        loader = HarnessConfigLoader.load(art.config_path)
-        for spec in (loader.config.resources.rails if loader.config.resources else []) + (
-            loader.config.resources.tools if loader.config.resources else []
-        ):
-            if spec.type != "package" or not spec.module:
-                continue
-            expected_prefix = f"openjiuwen.extensions.harness.{ext_name}"
-            if not (spec.module == expected_prefix or spec.module.startswith(f"{expected_prefix}.")):
+        config = load_runtime_manifest(art.config_path)
+        expected_prefix = f"openjiuwen.extensions.harness.{ext_name}"
+        for _kind, module, _class_name in _iter_manifest_modules(config):
+            if not (module == expected_prefix or module.startswith(f"{expected_prefix}.")):
                 _cleanup(merged_root)
                 raise MergedExtensionError(
                     f"Source extension '{ext_name}' has module "
-                    f"'{spec.module}' not under expected prefix "
+                    f"'{module}' not under expected prefix "
                     f"'{expected_prefix}'"
                 )
         src_summary: dict[str, str] = {"name": ext_name}
-        if loader.config.description:
-            src_summary["description"] = str(loader.config.description)
+        if config.description:
+            src_summary["description"] = str(config.description)
         source_exts_summary.append(src_summary)
 
     # ---- Step 2: create merged directory ----
@@ -547,33 +565,20 @@ def _write_merged_manifest(
     include_skills: bool = False
 
     for art in sorted(artifacts, key=lambda a: a.extension_name):
-        loader = HarnessConfigLoader.load(art.config_path)
-        res = loader.config.resources
-        if res:
-            for spec in res.rails or []:
-                if spec.type != "package" or not spec.module:
-                    continue
-                new_module = _rewrite_manifest_module(art.extension_name, spec.module, rename_map, merged_prefix)
-                merged_rails.append(
-                    {
-                        "type": "package",
-                        "module": new_module,
-                        "class": spec.class_name,
-                    }
-                )
-            for spec in res.tools or []:
-                if spec.type != "package" or not spec.module:
-                    continue
-                new_module = _rewrite_manifest_module(art.extension_name, spec.module, rename_map, merged_prefix)
-                merged_tools.append(
-                    {
-                        "type": "package",
-                        "module": new_module,
-                        "class": spec.class_name,
-                    }
-                )
-            if res.skills:
-                include_skills = True
+        config = load_runtime_manifest(art.config_path)
+        for kind, module, class_name in _iter_manifest_modules(config):
+            new_module = _rewrite_manifest_module(art.extension_name, module, rename_map, merged_prefix)
+            entry = {
+                "type": "package",
+                "module": new_module,
+                "class": class_name,
+            }
+            if kind == "rail":
+                merged_rails.append(entry)
+            else:
+                merged_tools.append(entry)
+        if config.resources and config.resources.skills:
+            include_skills = True
 
     # Deduplicate while preserving order
     seen_rails: set[tuple[str, str]] = set()
@@ -591,7 +596,7 @@ def _write_merged_manifest(
             seen_tools.add(key)
             deduped_tools.append(t)
 
-    schema_version = HarnessConfig.model_fields["schema_version"].get_default()
+    schema_version = RuntimeHarnessManifest.model_fields["schema_version"].get_default()
     manifest_body = _format_merged_harness_config_yaml(
         schema_version=str(schema_version),
         name=merged_name,

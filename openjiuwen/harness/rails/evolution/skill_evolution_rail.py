@@ -37,11 +37,13 @@ from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimi
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     GENERATE_RECORDS_LLM_POLICY,
 )
+from openjiuwen.agent_evolving.prompts.sections import build_evolution_protocol_section
 from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     SignalDetector,
     make_signal_fingerprint,
 )
+from openjiuwen.agent_evolving.tools import create_main_evolution_tools
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
 from openjiuwen.agent_evolving.updater import SingleDimUpdater
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
@@ -51,7 +53,6 @@ from openjiuwen.core.operator.skill_call import SkillExperienceOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind, ToolCallInputs
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.agent_evolving.prompts.sections import build_evolution_protocol_section
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
     build_evolution_progress_event,
@@ -77,49 +78,38 @@ from openjiuwen.harness.rails.evolution.review.subagent import (
 )
 from openjiuwen.harness.rails.evolution.skill_evolution_sharing import SkillEvolutionSharingMixin
 from openjiuwen.harness.rails.subagent import SubagentRail
-from openjiuwen.agent_evolving.tools import create_main_evolution_tools
 
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
 _NON_REGULAR_SKILL_KINDS = {"team-skill", "swarm-skill"}
+_AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG = "auto_skill_evolution_review_followup"
 _FUZZY_REVIEW_PROMPT_CN = (
-    "请检查近期上下文是否有可复用 Skill 经验线索；这不是处理本次错误的请求。\n"
-    "当用户纠正上一轮 agent 的执行步骤、顺序、确认条件或交付流程时，"
-    "先判定为高优先级可复用流程线索；该反馈可作为演进候选，但不表示必然演进。\n"
-    "只有问题可归入已使用或可从近期任务上下文推断的相关 Skill、可归因到 Skill "
-    "指令缺口、改法可复用且非重复时，才算可演进机会。\n"
-    "执行失败本身不作为本次处理对象；\n"
-    "它可作为判断 Skill 是否缺少 precheck、fallback、verification 或排错指引的线索。\n"
-    "当用户用“你应该/应该先/先...再.../确认后再.../不要直接...”等规则化表达，"
-    "且内容是可复用工作流或可复用执行规则，先确认该建议是否要沉淀为相关 "
-    "Skill 经验。\n"
-    "一次性偏好、不可复用、已有经验覆盖或无法归入相关 Skill 场景时，不要询问演进。\n"
-    "没有可演进机会时，不要打扰用户；如果你需要回复本次自检，"
-    "只能说：本次技能演进自检未发现需要更新的 Skill。\n"
-    "有可演进机会时，用一句话询问：这条反馈可以沉淀为以后处理同类任务时的"
-    "流程经验，是否需要我发起 Skill 演进？\n"
-    "用户确认后，才使用 prepare_skill_evolution、evolve_review_task、evolve_skill_experiences。\n"
-    "不要直接编辑 Skill 文件；未确认时不要提交演进变更。"
+    "这是运行时自动插入的 Skill 演进 follow-up，不是用户的新需求。\n"
+    "请参考“技能演进自检”规则，基于当前可见上下文和刚完成的执行过程，判断是否暴露了已使用 Skill 需要更新。"
 )
-_FUZZY_REVIEW_PROMPT_EN = """Check recent context for reusable Skill lessons; this is not a request to handle the
-current error.
-When the user corrects prior-agent execution steps, order, confirmation gates, or delivery flow,
-it is a high-priority reusable workflow clue (not a mandatory evolution signal).
-Treat something as an evolution opportunity only when it is linked to a used or inferable Skill context from recent
-task context, attribution to a Skill-guidance gap, reusable guidance, and no duplicate coverage.
-Use concrete execution failures only as evidence when deciding whether the Skill lacks precheck, fallback,
-verification, or troubleshooting guidance.
-If the user gives reusable rule-style guidance (for example “you should”, “should first”, “do X then Y”,
-“confirm before doing”, or “do not do this directly”) and it is about a reusable workflow or execution
-rule, first confirm whether to distill it as a Skill experience (related Skill).
-Do not ask to evolve for one-off preferences, non-reusable feedback, duplicate coverage, or feedback that cannot
-fit any related Skill context.
-If there is no evolution opportunity, do not bother the user; if you need to respond to this self-check, only say:
-This skill evolution self-check did not find any Skill that needs updating.
-If there is an evolution opportunity, ask this sentence in one line: This feedback can be distilled into a workflow
-lesson for similar future tasks. Should I start Skill evolution?
-Only after user confirmation, use prepare_skill_evolution, evolve_review_task, and evolve_skill_experiences.
-Do not edit Skill files directly, and do not submit evolution changes before confirmation."""
+_FUZZY_REVIEW_PROMPT_EN = (
+    "This is a runtime-inserted Skill evolution follow-up; it is not a new user request.\n"
+    'Refer to the "Skill Evolution Self-Check" rules and, based on the visible context\n'
+    "and the recently completed execution,\n"
+    "decide whether it exposed that a used Skill needs updating."
+)
+_EVAL_SNIPPET_MAX_MESSAGES = 20
+_EVAL_SNIPPET_POST_PRESENT_MAX_CHARS = 800
+
+
+def _normalize_skill_relative_file_path(relative_file_path: str) -> str:
+    """Canonical relative path for the primary skill entry file (``SKILL.md``)."""
+    raw = (relative_file_path or "").strip()
+    if not raw:
+        return "SKILL.md"
+    normalized = raw.replace("\\", "/").removeprefix("./")
+    if "/" in normalized:
+        prefix, base = normalized.rsplit("/", 1)
+    else:
+        prefix, base = "", normalized
+    if "." not in base and base.casefold() == "skill":
+        return f"{prefix}/SKILL.md" if prefix else "SKILL.md"
+    return raw
 
 
 class EvolutionReviewScopeBuilder:
@@ -157,7 +147,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     priority = 80
     _DEFAULT_MEMBER_ROLE = "teammate"
     _SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
+    _SKILL_MD_FILE_READ_TOOLS = frozenset({"read", "read_file", "read_file_stream"})
     _EXPERIENCE_RECORD_HEADING_RE = re.compile(r"#+\s*\[([A-Za-z0-9_-]+)\]")
+    # SKILL.md Evolution Index links look like: evolution/instructions.md#ev_037dea95
+    _EXPERIENCE_INDEX_ID_RE = re.compile(r"(?:#|/)(ev_[A-Za-z0-9_-]+)\b")
     _SUBJECT_LABELS: dict[str, str] = {
         "skill": "skill",
         "swarm-skill": "swarm skill",
@@ -170,7 +163,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         *,
         llm: Model,
         model: str,
-        auto_scan: bool = True,
+        auto_scan: Optional[bool] = None,
+        signal_trigger: Optional[bool] = None,
         auto_save: bool = False,
         review_runtime: EvolutionReviewRuntime,
         language: str = "cn",
@@ -181,13 +175,15 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
-        review_agent_max_iterations: int = 10,
+        two_stage: bool = False,
+        review_agent_max_iterations: int = 25,
         sharing_config: Optional[Dict[str, Any]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
         evolution_trigger: EvolutionTriggerPoint = EvolutionTriggerPoint.AFTER_INVOKE,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,
-        fuzzy_review: bool = True,
+        fuzzy_review: Optional[bool] = None,
+        review_trigger: Optional[bool] = None,
         fuzzy_review_interval: int = 5,
     ) -> None:
         """Initialize SkillEvolutionRail.
@@ -196,7 +192,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             skills_dir: Directory or list of directories containing skill definitions
             llm: LLM client for experience generation
             model: Model name for experience generation
-            auto_scan: Whether to auto-detect evolution signals
+            signal_trigger: Whether to trigger deterministic signal-based evolution.
+            auto_scan: Backward-compatible alias for signal_trigger.
             auto_save: Whether to auto-save generated experiences
             review_runtime: Externally-managed active-review runtime. Required. Shared instances enable
                 cross-rail review state and keep rail-local orchestration stateless.
@@ -206,7 +203,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             sharing_config: Optional cross-user sharing settings (enabled, hub_path, etc.)
             disabled_skills: Optional deny-list of skill names excluded from self-optimization.
                 Supports a single skill name (str) or multiple names (list[str]).
-            fuzzy_review: Whether to periodically enqueue active fuzzy review self-check follow-ups.
+            review_trigger: Whether to periodically enqueue review self-check follow-ups.
+            fuzzy_review: Backward-compatible alias for review_trigger.
             fuzzy_review_interval: Number of non-follow-up task iterations between fuzzy review checks.
         """
         if eval_interval < 1:
@@ -230,6 +228,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             model,
             language,
             generate_records_llm_policy=generate_records_llm_policy,
+            two_stage=two_stage,
         )
         self._scorer = ExperienceScorer(
             llm,
@@ -238,12 +237,13 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             evaluate_llm_policy=evaluate_llm_policy,
             simplify_llm_policy=simplify_llm_policy,
         )
-        self._auto_scan = auto_scan
+        self._signal_trigger = bool(signal_trigger if signal_trigger is not None else auto_scan or False)
         self._processed_signal_keys: set[tuple[str, ...]] = set()
         self._auto_save = auto_save
         # Optimizer path (for _auto_save=False): memory-staged records until user approval
         self._skill_ops: Dict[str, SkillExperienceOperator] = {}  # skill_name -> operator
         self._generate_records_llm_policy = generate_records_llm_policy
+        self._two_stage = two_stage
         self._evaluate_llm_policy = evaluate_llm_policy
         self._simplify_llm_policy = simplify_llm_policy
         self._evolution_total_timeout_secs = evolution_total_timeout_secs
@@ -257,7 +257,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         self._evolution_tools: list[Any] = []
         self._agent: Any | None = None
         self._skip_auto_scan_this_invoke = False
-        self._fuzzy_review = bool(fuzzy_review)
+        self._review_trigger = bool(review_trigger if review_trigger is not None else fuzzy_review or False)
         self._fuzzy_review_interval = fuzzy_review_interval
         self._fuzzy_review_non_followup_count = 0
         self._review_agent_max_iterations = review_agent_max_iterations
@@ -328,6 +328,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         language: str,
         *,
         generate_records_llm_policy: LLMInvokePolicy,
+        two_stage: bool,
     ):
         """Build the optimizer used by the online evolution updater."""
         return SkillExperienceOptimizer(
@@ -335,6 +336,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             model,
             language,
             generate_records_llm_policy=generate_records_llm_policy,
+            two_stage=two_stage,
         )
 
     def _make_experience_manager(self) -> ExperienceManager:
@@ -520,6 +522,11 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         return self._evolution_total_timeout_secs
 
     @property
+    def two_stage(self) -> bool:
+        """Whether experience generation uses the analyzer + formatter pipeline."""
+        return self._two_stage
+
+    @property
     def evolution_config(self) -> Dict[str, Any]:
         """Get the effective evolution configuration."""
         return {
@@ -527,6 +534,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             "evaluate_llm_policy": self.evaluate_llm_policy,
             "simplify_llm_policy": self.simplify_llm_policy,
             "evolution_total_timeout_secs": self.evolution_total_timeout_secs,
+            "two_stage": self.two_stage,
         }
 
     @property
@@ -542,7 +550,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         trigger_point,
         ctx: AgentCallbackContext,
     ) -> bool:
-        if not self._auto_scan:
+        if not self._signal_trigger:
             return False
         if self._is_background_run(ctx):
             return False
@@ -557,7 +565,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
     async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Periodically enqueue a fuzzy active-review self-check follow-up."""
-        if not self._fuzzy_review:
+        if not self._review_trigger:
             return
         if self._task_iteration_followup_blocked(ctx):
             return
@@ -623,7 +631,12 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
     def _build_fuzzy_review_followup_prompt(self) -> str:
         """Build the active fuzzy review self-check follow-up prompt."""
-        return _FUZZY_REVIEW_PROMPT_EN if self._language == "en" else _FUZZY_REVIEW_PROMPT_CN
+        prompt = _FUZZY_REVIEW_PROMPT_EN if self._language == "en" else _FUZZY_REVIEW_PROMPT_CN
+        return self._wrap_fuzzy_review_followup_prompt(prompt)
+
+    @staticmethod
+    def _wrap_fuzzy_review_followup_prompt(prompt: str) -> str:
+        return f"<{_AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG}>\n{prompt}\n</{_AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG}>"
 
     @property
     def auto_save(self) -> bool:
@@ -667,21 +680,39 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
     @property
     def auto_scan(self) -> bool:
-        """Whether auto-scan is enabled."""
-        return self._auto_scan
+        """Backward-compatible alias for signal_trigger."""
+        return self._signal_trigger
 
     @auto_scan.setter
     def auto_scan(self, value: bool) -> None:
-        self._auto_scan = bool(value)
+        self._signal_trigger = bool(value)
+
+    @property
+    def signal_trigger(self) -> bool:
+        """Whether deterministic signal-based evolution is enabled."""
+        return self._signal_trigger
+
+    @signal_trigger.setter
+    def signal_trigger(self, value: bool) -> None:
+        self._signal_trigger = bool(value)
 
     @property
     def fuzzy_review(self) -> bool:
-        """Whether active fuzzy-review follow-ups are enabled."""
-        return self._fuzzy_review
+        """Backward-compatible alias for review_trigger."""
+        return self._review_trigger
 
     @fuzzy_review.setter
     def fuzzy_review(self, value: bool) -> None:
-        self._fuzzy_review = bool(value)
+        self._review_trigger = bool(value)
+
+    @property
+    def review_trigger(self) -> bool:
+        """Whether review self-check follow-ups are enabled."""
+        return self._review_trigger
+
+    @review_trigger.setter
+    def review_trigger(self, value: bool) -> None:
+        self._review_trigger = bool(value)
 
     def set_sys_operation(self, sys_operation: SysOperation) -> None:
         """Set sys_operation for both EvolutionRail and EvolutionStore."""
@@ -706,7 +737,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
         if builder is not None:
             language = str(getattr(builder, "language", "") or self._language)
-            builder.add_section(build_evolution_protocol_section(language, fuzzy_review=self._fuzzy_review))
+            builder.add_section(build_evolution_protocol_section(language))
 
     async def record_presented_experiences(
         self,
@@ -737,31 +768,64 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         )
 
     async def _on_after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Track explicit experience detail reads without modifying tool results.
+        """Track experiences exposed to the agent without modifying tool results.
 
-        SKILL.md reads are index discovery only. BODY experiences are counted
-        as presented only when a detail file under evolution/*.md is read and
-        the returned content includes concrete record headings.
+        Presentation sources (either counts as presented for later scoring):
+        1. Reading a detail file under ``evolution/*.md`` with concrete record headings.
+        2. Reading ``SKILL.md`` / ``skill_tool`` default entry that contains the Evolution
+           Index summaries (agents often follow the summary without opening detail files).
         """
         inputs = ctx.inputs
         if not isinstance(inputs, ToolCallInputs):
             return
+        await self._track_presented_from_tool_call(ctx, inputs)
 
-        skill_name = self._detect_experience_detail_read(inputs)
-        if not skill_name:
+    async def _track_presented_from_tool_call(
+        self,
+        ctx: AgentCallbackContext,
+        inputs: ToolCallInputs,
+    ) -> None:
+        """Record presented experience IDs from detail reads or SKILL.md index reads."""
+        session = ctx.session if hasattr(ctx, "session") else None
+        content = self._extract_tool_content(inputs)
+
+        detail_skill = self._detect_experience_detail_read(inputs)
+        if detail_skill:
+            record_ids = self._extract_presented_record_ids(content)
+            if not record_ids:
+                return
+            await self._experience_tracker.record_presented_records(
+                session=session,
+                skill_name=detail_skill,
+                presentation_snippet="",
+                record_ids=record_ids,
+            )
             return
 
-        content = self._extract_tool_content(inputs)
-        record_ids = self._extract_presented_record_ids(content)
+        index_skill = self._detect_skill_index_read(inputs)
+        if not index_skill:
+            return
+
+        record_ids = self._extract_index_record_ids(content)
         if not record_ids:
             return
-
-        session = ctx.session if hasattr(ctx, "session") else None
         await self._experience_tracker.record_presented_records(
             session=session,
-            skill_name=skill_name,
-            presentation_snippet=content,
+            skill_name=index_skill,
+            presentation_snippet="",
             record_ids=record_ids,
+        )
+
+    async def _evaluate_presented_entries(
+        self,
+        presented_entries: list[tuple[str, Any, str]],
+        messages: list[dict],
+    ) -> None:
+        """Evaluate presented experiences using conversation snippets rebuilt at after_invoke."""
+        await self._experience_tracker.evaluate_presented(
+            presented_entries,
+            messages=messages,
+            build_snippet=self._build_evaluation_snippet,
         )
 
     async def run_evolution(
@@ -776,8 +840,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         In async mode: ctx=None, snapshot contains data captured by _snapshot_for_evolution.
         In sync mode: ctx is active, snapshot=None (backward-compatible).
         """
-        logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._auto_scan)
-        if not self._auto_scan:
+        logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._signal_trigger)
+        if not self._signal_trigger:
             logger.info("[SkillEvolutionRail] auto_scan disabled, skipping")
             return
 
@@ -793,6 +857,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 session = ctx.session if hasattr(ctx, "session") else None
                 presented_entries = self._experience_tracker.consume_eval_state(session)
             else:
+                logger.warning("[SkillEvolutionRail] run_evolution abort: no snapshot and no ctx")
                 return
 
             logger.info("[SkillEvolutionRail] collected %d messages", len(messages))
@@ -806,7 +871,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     "cancelled",
                     "no conversation messages available; cancelling regular skill evolution review",
                 )
-                await self._experience_tracker.evaluate_presented(presented_entries)
+                await self._evaluate_presented_entries(presented_entries, messages)
                 return
 
             all_skill_names = self._evolution_store.list_skill_names()
@@ -869,8 +934,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                         "no skill usage of a regular skill or actionable evolution signal detected; "
                         "cancelling regular skill evolution review"
                     )
+                # Evaluate before emitting terminal "cancelled": host watchers treat
+                # cancelled as cycle end and must not race with scoring.
+                await self._evaluate_presented_entries(presented_entries, messages)
                 self._emit_progress("cancelled", message)
-                await self._experience_tracker.evaluate_presented(presented_entries)
                 return
 
             attributed_signal_count = sum(len(skill_signals) for skill_signals in skill_groups.values())
@@ -890,6 +957,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 )
 
             # Evolve existing skills (when signals are attributed to known skills)
+            deferred_cancelled: List[tuple[str, str]] = []
             for skill_name, skill_signals in skill_groups.items():
                 generated = await self._evolve_skill_with_sharing(
                     skill_name=skill_name,
@@ -901,13 +969,19 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     requires_approval=not self._auto_save,
                 )
                 if not generated:
-                    self._emit_progress(
-                        "cancelled",
-                        f"attributed optimizer signal for '{skill_name}' produced no reusable evolution records",
-                        skill_name=skill_name,
+                    deferred_cancelled.append(
+                        (
+                            skill_name,
+                            f"attributed optimizer signal for '{skill_name}' "
+                            "produced no reusable evolution records",
+                        )
                     )
 
-            await self._experience_tracker.evaluate_presented(presented_entries)
+            # Score presented experiences before any terminal cancelled progress
+            # (host watcher treats cancelled as cycle end).
+            await self._evaluate_presented_entries(presented_entries, messages)
+            for skill_name, message in deferred_cancelled:
+                self._emit_progress("cancelled", message, skill_name=skill_name)
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] auto evolution failed: %s", exc)
 
@@ -1252,7 +1326,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             messages=messages,
             trajectory=trajectory,
             user_query=user_query,
-            metadata={},
+            metadata={"language": self._language},
             source="experience_updater",
         )
 
@@ -1425,6 +1499,30 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             record_ids.append(record_id)
         return record_ids
 
+    @classmethod
+    def _extract_index_record_ids(cls, content: str) -> list[str]:
+        """Extract experience IDs from SKILL.md Evolution Index summaries/links."""
+        if not content:
+            return []
+        section = content
+        start = content.find("<!-- evolution-index-start -->")
+        end = content.find("<!-- evolution-index-end -->")
+        if start != -1 and end != -1 and end > start:
+            section = content[start:end]
+        elif "Evolution Experiences" in content:
+            section_start = content.find("Evolution Experiences")
+            section = content[section_start:]
+
+        seen: set[str] = set()
+        record_ids: list[str] = []
+        for match in cls._EXPERIENCE_INDEX_ID_RE.finditer(section):
+            record_id = match.group(1)
+            if record_id in seen:
+                continue
+            seen.add(record_id)
+            record_ids.append(record_id)
+        return record_ids
+
     @staticmethod
     def _is_experience_detail_relative_path(relative_path: str) -> bool:
         """Return True when a skill-relative path points at a persisted experience detail."""
@@ -1468,6 +1566,29 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             return None
         return self._skill_for_experience_detail_file(file_path)
 
+    def _detect_skill_index_read(self, inputs: ToolCallInputs) -> Optional[str]:
+        """Return skill name when the tool call loads SKILL.md (Evolution Index)."""
+        tool_name = str(inputs.tool_name or "")
+        args = self._extract_tool_args(inputs.tool_args)
+
+        if tool_name == "skill_tool":
+            skill_name = str(args.get("skill_name", "") or "").strip()
+            relative_path = str(args.get("relative_file_path") or "SKILL.md").strip()
+            if skill_name and self._is_skill_md_path(relative_path):
+                return skill_name
+            return None
+
+        if not self._is_skill_md_file_read_tool(tool_name):
+            return None
+
+        file_path = str(args.get("file_path", "") or "").strip()
+        if not file_path:
+            return None
+        matched = self._SKILL_MD_RE.search(file_path)
+        if not matched:
+            return None
+        return matched.group(1)
+
     def _skill_for_experience_detail_file(self, file_path: str) -> Optional[str]:
         try:
             read_path = Path(file_path).expanduser().resolve()
@@ -1493,6 +1614,80 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         return None
 
     @classmethod
+    def _parse_tool_args_dict(cls, arguments: Any) -> dict[str, Any]:
+        return cls._extract_tool_args(arguments)
+
+    @classmethod
+    def _is_skill_md_path(cls, relative_path: str) -> bool:
+        normalized = _normalize_skill_relative_file_path(relative_path)
+        norm = normalized.replace("\\", "/").removeprefix("./").lower()
+        return norm == "skill.md" or norm.endswith("/skill.md")
+
+    @classmethod
+    def _find_skill_load_anchor(cls, messages: List[dict], skill_name: str) -> int:
+        """Return the index of the last SKILL.md load for *skill_name*, or -1."""
+        anchor = -1
+        for index, msg in enumerate(messages):
+            role = msg.get("role", "")
+            if role != "assistant":
+                continue
+            for tool_call in msg.get("tool_calls", []) or []:
+                tool = str(tool_call.get("name") or "").lower()
+                arguments = tool_call.get("arguments", "")
+                if tool == "skill_tool":
+                    args = cls._parse_tool_args_dict(arguments)
+                    if str(args.get("skill_name") or "").strip() != skill_name:
+                        continue
+                    rel = _normalize_skill_relative_file_path(str(args.get("relative_file_path") or ""))
+                    if cls._is_skill_md_path(rel):
+                        anchor = index
+                elif cls._is_skill_md_file_read_tool(tool):
+                    file_path = cls._extract_file_path(arguments)
+                    matched = cls._SKILL_MD_RE.search(file_path)
+                    if matched and matched.group(1) == skill_name:
+                        anchor = index
+        return anchor
+
+    @classmethod
+    def _is_skill_md_file_read_tool(cls, tool_name: str) -> bool:
+        """True for known filesystem read tools that may load SKILL.md by path."""
+        return tool_name.lower() in cls._SKILL_MD_FILE_READ_TOOLS
+
+    @classmethod
+    def _format_messages_snippet(
+        cls,
+        messages: List[dict],
+        *,
+        start: int = 0,
+        max_messages: int = _EVAL_SNIPPET_MAX_MESSAGES,
+        max_content_chars: int = _EVAL_SNIPPET_POST_PRESENT_MAX_CHARS,
+    ) -> str:
+        """Format conversation messages into a scorer-friendly snippet."""
+        lines: List[str] = []
+        window = messages[start:][-max_messages:]
+        for msg in window:
+            role = msg.get("role", "unknown")
+            content = str(msg.get("content") or "")[:max_content_chars]
+            if content:
+                lines.append(f"[{role}] {content}")
+            if role == "assistant":
+                for tool_call in msg.get("tool_calls", []) or []:
+                    tool = str(tool_call.get("name") or "")
+                    args = str(tool_call.get("arguments") or "")[:max_content_chars]
+                    if tool:
+                        lines.append(f"[assistant/tool_call] {tool} {args}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _build_evaluation_snippet(cls, messages: List[dict], skill_name: str) -> str:
+        """Build post-presentation snippet: from last SKILL.md load through turn end."""
+        if not messages:
+            return ""
+        anchor = cls._find_skill_load_anchor(messages, skill_name)
+        start = anchor if anchor >= 0 else max(0, len(messages) - _EVAL_SNIPPET_MAX_MESSAGES)
+        return cls._format_messages_snippet(messages, start=start)
+
+    @classmethod
     def _parse_messages(cls, messages: List[Any]) -> List[dict]:
         return cls._normalize_callback_messages(messages)
 
@@ -1502,7 +1697,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         ctx: AgentCallbackContext,
     ) -> Optional[dict]:
         """Phase 1: Collect messages while ctx is alive."""
-        if not self._auto_scan:
+        if not self._signal_trigger:
             return None
 
         snapshot = await super()._snapshot_for_evolution(trajectory, ctx)

@@ -301,7 +301,7 @@ def _make_leader(tiny_agents: dict[str, TinyAgentSpec]) -> TeamAgent:
     """Configure a minimal leader TeamAgent carrying declared tiny agents."""
     team_spec = TeamSpec(team_name="t", display_name="t", leader_member_name="leader")
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="t", tiny_agents=tiny_agents)
-    ctx = TeamRuntimeContext(role=TeamRole.LEADER, member_name="leader", persona="lead", team_spec=team_spec)
+    ctx = TeamRuntimeContext(role=TeamRole.LEADER, member_name="leader", desc="lead", team_spec=team_spec)
     agent = TeamAgent(AgentCard(id="leader", name="leader", description="t")).configure(spec, ctx)
     # Stub the resolver so a model_name resolves without a configured pool.
     agent.infra.tiny_agent_model_resolver = _model_resolver

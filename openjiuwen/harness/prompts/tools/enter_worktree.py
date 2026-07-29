@@ -35,7 +35,7 @@ DESCRIPTION: Dict[str, str] = {
         "Create or resume an isolated git worktree and switch the current session into it.\n\n"
         "## When to Use\n\n"
         "- Use this tool only when the user explicitly asks to work in a worktree\n"
-        "- The user says \"worktree\" (for example: start a worktree, work in a worktree,"
+        '- The user says "worktree" (for example: start a worktree, work in a worktree,'
         " create a worktree, use a worktree)\n\n"
         "## When NOT to Use\n\n"
         "- Only need to create or switch branches -- use git commands\n"
@@ -81,10 +81,11 @@ PARAMS_NAME: Dict[str, str] = {
     ),
 }
 
-_WORKTREE_NAME_PATTERN = (
-    r"^(?=.{1,64}$)(?!(?:.*(?:^|/)\.{1,2}(?:/|$)))"
-    r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
-)
+# Responses backends may reject regex lookaround. ``maxLength`` enforces the
+# total length, while this segment pattern excludes only "." and ".." without
+# weakening the execution-time ``validate_slug`` safety check.
+_WORKTREE_SEGMENT_PATTERN = r"(?:[A-Za-z0-9._-]*[A-Za-z0-9_-][A-Za-z0-9._-]*|\.{3,})"
+_WORKTREE_NAME_PATTERN = rf"^{_WORKTREE_SEGMENT_PATTERN}(?:/{_WORKTREE_SEGMENT_PATTERN})*$"
 
 
 def get_enter_worktree_input_params(language: str = "cn") -> Dict[str, Any]:

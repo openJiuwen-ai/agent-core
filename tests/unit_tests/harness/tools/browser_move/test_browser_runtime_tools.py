@@ -12,12 +12,13 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime_tools import (
+    BrowserBatchInteractTool,
     BrowserCancelTool,
     BrowserClearCancelTool,
     BrowserCustomActionTool,
     BrowserListActionsTool,
-    BrowserProbeInteractivesTool,
     BrowserProbeCardsTool,
+    BrowserProbeInteractivesTool,
     BrowserRuntimeHealthTool,
     build_browser_runtime_tools,
 )
@@ -45,9 +46,9 @@ def _make_runtime() -> BrowserAgentRuntime:
     )
 
 
-def test_build_browser_runtime_tools_returns_five_helper_tools_by_default() -> None:
+def test_build_browser_runtime_tools_returns_helper_tools_by_default() -> None:
     tools = build_browser_runtime_tools(_make_runtime())
-    assert len(tools) == 7
+    assert len(tools) == 8
 
 
 def test_each_tool_is_tool_subclass() -> None:
@@ -65,22 +66,33 @@ def test_default_helper_tool_names() -> None:
     assert names == [
         "browser_cancel_run",
         "browser_clear_cancel",
-        "browser_custom_action",
-        "browser_list_custom_actions",
         "browser_probe_interactives",
         "browser_probe_cards",
+        "browser_batch_interact",
+        "browser_custom_action",
+        "browser_list_custom_actions",
         "browser_runtime_health",
     ]
 
 
 def test_helper_tool_classes() -> None:
-    cancel, clear_cancel, custom_action, list_actions, probe_interactives, probe_cards, health = build_browser_runtime_tools(_make_runtime())
+    (
+        cancel,
+        clear_cancel,
+        probe_interactives,
+        probe_cards,
+        batch_interact,
+        custom_action,
+        list_actions,
+        health,
+    ) = build_browser_runtime_tools(_make_runtime())
     assert isinstance(cancel, BrowserCancelTool)
     assert isinstance(clear_cancel, BrowserClearCancelTool)
-    assert isinstance(custom_action, BrowserCustomActionTool)
-    assert isinstance(list_actions, BrowserListActionsTool)
     assert isinstance(probe_interactives, BrowserProbeInteractivesTool)
     assert isinstance(probe_cards, BrowserProbeCardsTool)
+    assert isinstance(batch_interact, BrowserBatchInteractTool)
+    assert isinstance(custom_action, BrowserCustomActionTool)
+    assert isinstance(list_actions, BrowserListActionsTool)
     assert isinstance(health, BrowserRuntimeHealthTool)
 
 
@@ -246,3 +258,73 @@ def test_runtime_health_tool_uses_runtime_api() -> None:
     runtime.runtime_health.assert_called_once()
     assert result.success is True
     assert result.data["started"] is False
+
+def test_batch_interact_tool_uses_runtime_api_for_realistic_form_flow() -> None:
+    runtime = _make_runtime()
+    runtime.batch_interact = AsyncMock(
+        return_value={
+            "ok": True,
+            "steps": [
+                {"index": 0, "op": "fill", "ok": True},
+                {"index": 1, "op": "autocomplete", "ok": True},
+                {"index": 2, "op": "select_option", "ok": True},
+            ],
+            "error": None,
+        }
+    )
+    tool = BrowserBatchInteractTool(runtime)
+    steps = [
+        {"op": "fill", "label": "First name", "value": "John"},
+        {
+            "op": "autocomplete",
+            "placeholder": "From",
+            "value": "Singapore",
+            "choose_text": "Singapore (SIN)",
+        },
+        {"op": "select_option", "label": "Nationality", "option_text": "Singapore"},
+    ]
+
+    result = _run(
+        tool.invoke(
+            {
+                "steps": steps,
+                "timeout_ms": 3000,
+                "wait_after_each_ms": 50,
+                "continue_on_error": False,
+                "global_timeout_ms": 15000,
+                "session_id": "sess-batch",
+                "request_id": "req-batch",
+            }
+        )
+    )
+
+    runtime.batch_interact.assert_called_once_with(
+        steps=steps,
+        timeout_ms=3000,
+        wait_after_each_ms=50,
+        continue_on_error=False,
+        global_timeout_ms=15000,
+        session_id="sess-batch",
+        request_id="req-batch",
+    )
+    assert result.success is True
+    assert result.data["steps"][1]["op"] == "autocomplete"
+
+
+def test_batch_interact_tool_reports_runtime_error() -> None:
+    runtime = _make_runtime()
+    runtime.batch_interact = AsyncMock(
+        return_value={
+            "ok": False,
+            "error": "browser_code_executor_not_ready",
+            "steps_requested": 1,
+        }
+    )
+    tool = BrowserBatchInteractTool(runtime)
+
+    result = _run(tool.invoke({"steps": [{"op": "click", "text": "Search"}]}))
+
+    assert result.success is False
+    assert result.error == "browser_code_executor_not_ready"
+    assert result.data["steps_requested"] == 1
+

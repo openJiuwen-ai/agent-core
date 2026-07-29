@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -199,13 +201,22 @@ class Workspace:
         return link_dir
 
     def _create_directory_link(self, target_path: str, link_path: Path) -> None:
-        """Create a directory link, falling back to a junction on Windows."""
+        """Create a directory link, with junction/copy fallbacks as needed."""
         try:
             os.symlink(target_path, str(link_path), target_is_directory=True)
         except OSError as exc:
-            if sys.platform != "win32" or getattr(exc, "winerror", None) != ERROR_PRIVILEGE_NOT_HELD:
+            if sys.platform == "win32" and getattr(exc, "winerror", None) == ERROR_PRIVILEGE_NOT_HELD:
+                self._create_windows_junction(target_path, str(link_path))
+                return
+            if getattr(exc, "errno", None) not in (errno.EACCES, errno.EPERM):
                 raise
-            self._create_windows_junction(target_path, str(link_path))
+            shutil.copytree(
+                target_path,
+                str(link_path),
+                symlinks=False,
+                copy_function=shutil.copy2,
+                dirs_exist_ok=False,
+            )
 
     @staticmethod
     def _create_windows_junction(target_path: str, link_path: str) -> None:
@@ -227,13 +238,17 @@ class Workspace:
             raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
 
     def _remove_directory_link(self, link: Path) -> bool:
-        """Remove a directory symlink or junction."""
+        """Remove a directory symlink, junction, or copied fallback directory."""
         if link.is_symlink():
             link.unlink()
             return True
 
         if self._is_directory_link(link):
             link.rmdir()
+            return True
+
+        if link.is_dir():
+            shutil.rmtree(link)
             return True
 
         return False

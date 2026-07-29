@@ -268,6 +268,8 @@ class _RunnerImpl(_TeamRunnerMixin):
         """Start the runner and its associated components, such as message queue."""
         result = True
         logger.info("Begin to start runner", event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
+        from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
+        ReadWriteLockManager.start()
         await self._ensure_root_task_group()
 
         try:
@@ -318,7 +320,10 @@ class _RunnerImpl(_TeamRunnerMixin):
                                  event_type=LogEventType.RUNNER_START, runner_id=self._runner_id)
                 return result
         except Exception:
-            await self._close_root_task_group()
+            try:
+                await ReadWriteLockManager.stop()
+            finally:
+                await self._close_root_task_group()
             raise
 
     async def stop(self):
@@ -345,7 +350,11 @@ class _RunnerImpl(_TeamRunnerMixin):
             return False
         finally:
             await self._resource_manager.release()
-            await self._close_root_task_group()
+            try:
+                from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
+                await ReadWriteLockManager.stop()
+            finally:
+                await self._close_root_task_group()
 
     async def run_workflow(self,
                            workflow: str | Workflow,

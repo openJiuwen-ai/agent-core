@@ -119,12 +119,44 @@ async def test_start_http_request_end_in_workflow():
         # Create session context
         context = create_workflow_session()
 
-        # Invoke the workflow with a test URL
-        result = await flow.invoke(inputs={"query": "https://httpbin.org/get?test=value"}, session=context)
+        class _MockConnector:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        async def _fake_iter_chunked(size):
+            yield b'{"args":{"test":"value"},"url":"https://example.com/get?test=value"}'
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.reason = "OK"
+        mock_response.url = "https://example.com/get?test=value"
+        mock_response.headers = {"content-type": "application/json"}
+        mock_response.content.iter_chunked = _fake_iter_chunked
+
+        mock_request_ctx = MagicMock()
+        mock_request_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_request_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.request = MagicMock(return_value=mock_request_ctx)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        # Invoke the workflow with a mocked HTTP request
+        with patch(
+            "openjiuwen.core.workflow.components.tool.http.http_request_component.aiohttp.TCPConnector",
+            _MockConnector,
+        ), patch(
+            "openjiuwen.core.workflow.components.tool.http.http_request_component.aiohttp.ClientSession",
+            return_value=mock_session,
+        ):
+            result = await flow.invoke(inputs={"query": "https://example.com/get?test=value"}, session=context)
         logger.info(f"Workflow invoke result: {result}")
 
         # Basic assertions to verify the workflow ran successfully
         assert result is not None
+        mock_session.request.assert_called_once()
+        assert mock_session.request.call_args.kwargs["url"] == "https://example.com/get?test=value"
         logger.info("✓ Start -> HTTPRequest -> End workflow executed successfully!")
     finally:
         # Restore original environment variable value

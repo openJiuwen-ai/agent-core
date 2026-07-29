@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import yaml
 
@@ -16,15 +16,12 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.skills import (
-    build_all_mode_skill_attachment,
     build_all_mode_skill_prompt,
     build_skill_line,
     build_skill_lines,
     build_skills_section,
 )
-from openjiuwen.harness.prompts.prompt_attachment_manager import (
-    PromptAttachmentKind,
-)
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool, ListSkillTool, SkillTool
@@ -39,6 +36,9 @@ class SkillUseRail(DeepAgentRail):
     SKILL_MODE_ALL = "all"
     SKILL_MODE_AUTO_LIST = "auto_list"
     _VALID_SKILL_MODES = {SKILL_MODE_ALL, SKILL_MODE_AUTO_LIST}
+    _SESSION_STATE_KEY = "skill_use"
+    _SESSION_STATE_SCHEMA_VERSION = 1
+    _RUNTIME_ATTACHMENT_SECTION = "skills.runtime_changes"
 
     def __init__(
         self,
@@ -262,7 +262,7 @@ class SkillUseRail(DeepAgentRail):
         tools.append(
             SkillTool(
                 operation=self.sys_operation,
-                get_skills=lambda: self.skills,
+                get_skills=lambda session=None: self.get_skills_for_session(session),
                 language=lang,
                 agent_id=agent_id,
                 multimodal_skill_mode=self.multimodal_skill_mode,
@@ -287,7 +287,7 @@ class SkillUseRail(DeepAgentRail):
         if self.skill_mode == self.SKILL_MODE_AUTO_LIST:
             tools.append(
                 ListSkillTool(
-                    get_skills=lambda: self.skills,
+                    get_skills=lambda session=None: self.get_skills_for_session(session),
                     list_skill_model=self.list_skill_model,
                     language=lang,
                     agent_id=agent_id,
@@ -353,7 +353,6 @@ class SkillUseRail(DeepAgentRail):
 
         self._owned_tool_names.clear()
         self._owned_tool_ids.clear()
-        self.attachment_manager = None
 
     async def refresh_skill_prompt(self, ctx: AgentCallbackContext) -> None:
         """Regenerate the skills system prompt"""
@@ -365,12 +364,18 @@ class SkillUseRail(DeepAgentRail):
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Prepare skills before invoke."""
         await self.refresh_skill_prompt(ctx)
+        self._ensure_session_baseline(ctx)
 
-    async def _fetch_evolution_texts(self) -> None:
+    async def _fetch_evolution_texts(self, skills: Optional[List[Skill]] = None) -> None:
         """Fetch and cache evolution experience texts from EvolutionStore."""
         if self.evolution_store is None:
             return
-        for skill in self.skills:
+        skills = self.skills if skills is None else skills
+        seen_names: Set[str] = set()
+        for skill in skills:
+            if skill.name in seen_names:
+                continue
+            seen_names.add(skill.name)
             try:
                 text = await self.evolution_store.format_desc_experience_text(skill.name)
                 self._evolution_texts[skill.name] = text
@@ -402,13 +407,25 @@ class SkillUseRail(DeepAgentRail):
             return
 
         await self._refresh_skill_prompt_if_changed(ctx)
-        skills_section = self._build_skills_section()
+        # Evolution records can change without changing the Skill.md snapshot.
+        # Refresh them independently so the attachment always contains the
+        # latest experience while the system prompt remains stable.
+        # Some task-loop paths may enter model call without BEFORE_INVOKE.
+        # Establish the durable baseline at the first point where skills are used.
+        self._ensure_session_baseline(ctx)
+        session_state = self._load_session_state(getattr(ctx, "session", None))
+        baseline_skills = (
+            self._get_session_baseline(ctx)
+            if session_state is not None
+            else list(self.skills)
+        )
+        await self._fetch_evolution_texts([*baseline_skills, *self.skills])
+        skills_section = self._build_skills_section(baseline_skills)
         if skills_section is not None:
             self.system_prompt_builder.add_section(skills_section)
-            await self._sync_all_mode_skill_attachment(ctx)
         else:
             self.system_prompt_builder.remove_section(SectionName.SKILLS)
-            await self._clear_all_mode_skill_attachment(ctx)
+        await self._update_runtime_skill_attachment(ctx, baseline_skills)
 
     async def _refresh_skill_prompt_if_changed(self, ctx: AgentCallbackContext) -> None:
         """Refresh skills when visible skill directories or SKILL.md mtimes changed."""
@@ -440,23 +457,212 @@ class SkillUseRail(DeepAgentRail):
 
         return tuple(entries)
 
-    def _build_skills_section(self):
-        """Build PromptSection from current skills."""
+    def _build_skills_section(self, skills: Optional[List[Skill]] = None):
+        """Build the stable system prompt section from session baseline skills."""
+        skills = self.skills if skills is None else skills
         if self.skill_mode == self.SKILL_MODE_ALL:
+            body_lines: List[str] = []
+            for idx, skill in enumerate(skills):
+                body_lines.append(
+                    build_skill_line(
+                        index=idx,
+                        skill_name=skill.name,
+                        description=skill.description,
+                        # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
+                    )
+                )
             return build_skills_section(
+                skill_lines=build_skill_lines(body_lines),
                 language=self.system_prompt_builder.language,
                 mode="all",
-                has_skills=bool(self.skills),
             )
         else:
             return build_skills_section(
+                skill_lines="",
                 language=self.system_prompt_builder.language,
                 mode="auto_list",
             )
 
-    def _build_all_mode_skill_lines(self) -> str:
-        """Build dynamic skill list text for all mode."""
+    def get_skills_for_session(self, session: Any = None) -> List[Skill]:
+        """Return the current skill view for a tool invocation.
+
+        The persisted baseline is included even if the directory was changed after
+        the session started. Newly discovered skills remain available as runtime
+        additions for the current session.
+        """
+        baseline = self._load_session_baseline(session)
+        if self._load_session_state(session) is None:
+            return list(self.skills)
+
+        merged = list(baseline)
+        known_names = {skill.name for skill in merged}
+        merged.extend(skill for skill in self.skills if skill.name not in known_names)
+        return merged
+
+    def _get_session_baseline(self, ctx: AgentCallbackContext) -> List[Skill]:
+        return self._load_session_baseline(getattr(ctx, "session", None))
+
+    def _ensure_session_baseline(self, ctx: AgentCallbackContext) -> None:
+        session = getattr(ctx, "session", None)
+        if session is None:
+            return
+        if self._load_session_state(session) is not None:
+            return
+        self._save_session_baseline(session, self.skills)
+
+    def _load_session_baseline(self, session: Any) -> List[Skill]:
+        state = self._load_session_state(session)
+        if state is None:
+            return []
+        baseline = state.get("baseline_skills", [])
+        if not isinstance(baseline, list):
+            logger.warning("[SkillUseRail] invalid persisted baseline_skills; ignoring it")
+            return []
+
+        skills: List[Skill] = []
+        for item in baseline:
+            if not isinstance(item, dict) or not item.get("name") or not item.get("directory"):
+                continue
+            skills.append(
+                Skill(
+                    name=str(item["name"]),
+                    description=str(item.get("description") or ""),
+                    directory=Path(str(item["directory"])),
+                )
+            )
+        return skills
+
+    def _load_session_state(self, session: Any) -> Optional[dict]:
+        if session is None or not callable(getattr(session, "get_state", None)):
+            return None
+        state = session.get_state(self._SESSION_STATE_KEY)
+        if not isinstance(state, dict):
+            return None
+        if state.get("schema_version") != self._SESSION_STATE_SCHEMA_VERSION:
+            logger.warning("[SkillUseRail] unsupported persisted state schema; ignoring it")
+            return None
+        return state
+
+    def _save_session_baseline(self, session: Any, skills: List[Skill]) -> None:
+        if not callable(getattr(session, "update_state", None)):
+            return
+        session.update_state(
+            {
+                self._SESSION_STATE_KEY: {
+                    "schema_version": self._SESSION_STATE_SCHEMA_VERSION,
+                    "baseline_skills": [
+                        {
+                            "name": skill.name,
+                            "description": skill.description,
+                            "directory": str(skill.directory),
+                        }
+                        for skill in skills
+                    ],
+                }
+            }
+        )
+
+    async def _update_runtime_skill_attachment(
+        self,
+        ctx: AgentCallbackContext,
+        baseline_skills: List[Skill],
+    ) -> None:
+        manager = self.attachment_manager
+        if manager is None:
+            return
+        baseline_by_name = {skill.name: skill for skill in baseline_skills}
+        current_by_name = {skill.name: skill for skill in self.skills}
+        additions = [skill for skill in self.skills if skill.name not in baseline_by_name]
+        removals = [skill for skill in baseline_skills if skill.name not in current_by_name]
+        writer = manager.bind_context(ctx)
+        if not writer.session_id:
+            return
+        content = self._build_runtime_skill_change_content(
+            additions,
+            removals,
+            baseline_skills,
+        )
+        if not content:
+            await writer.clear_section(self._RUNTIME_ATTACHMENT_SECTION)
+            return
+
+        await writer.add_section(
+            section=self._RUNTIME_ATTACHMENT_SECTION,
+            content=content,
+            kind=PromptAttachmentKind.SKILL,
+            source="skill_use_rail",
+        )
+
+    def _build_runtime_skill_change_content(
+        self,
+        additions: List[Skill],
+        removals: List[Skill],
+        baseline_skills: List[Skill],
+    ) -> str:
+        """Render Skill changes and evolution experience in one attachment."""
+        language = getattr(self.system_prompt_builder, "language", "cn")
+        is_english = str(language).lower().startswith("en")
+        evolution_skills: List[Skill] = []
+        seen_names: Set[str] = set()
+        for skill in [*baseline_skills, *additions]:
+            if skill.name in seen_names:
+                continue
+            if self._evolution_texts.get(skill.name, "").strip():
+                evolution_skills.append(skill)
+                seen_names.add(skill.name)
+
+        if not additions and not removals and not evolution_skills:
+            return ""
+
+        if is_english:
+            lines = [
+                "Skill environment status update. Invoke relevant skills only when needed for the current task.",
+            ]
+            if additions:
+                lines.append("Newly available skills:")
+                lines.extend(
+                    build_skill_line(
+                        index=index,
+                        skill_name=skill.name,
+                        description=skill.description,
+                    )
+                    for index, skill in enumerate(additions)
+                )
+            if removals:
+                lines.append("Unavailable skills (removed from the environment):")
+                lines.extend(f"- {skill.name}" for skill in removals)
+            if evolution_skills:
+                lines.append("Skill evolution experience reference:")
+                for skill in evolution_skills:
+                    lines.append(f"[Skill: {skill.name}]")
+                    lines.append(self._evolution_texts[skill.name].strip())
+            return "\n".join(lines)
+
+        lines = ["Skill 环境状态更新。请根据当前任务需要，按需调用相关 Skill。"]
+        if additions:
+            lines.append("新增可用 Skill：")
+            lines.extend(
+                build_skill_line(
+                    index=index,
+                    skill_name=skill.name,
+                    description=skill.description,
+                )
+                for index, skill in enumerate(additions)
+            )
+        if removals:
+            lines.append("已移除、当前不可用的 Skill：")
+            lines.extend(f"- {skill.name}" for skill in removals)
+        if evolution_skills:
+            lines.append("Skill 演进经验参考：")
+            for skill in evolution_skills:
+                lines.append(f"[Skill: {skill.name}]")
+                lines.append(self._evolution_texts[skill.name].strip())
+        return "\n".join(lines)
+
+    def _build_all_mode_prompt(self) -> str:
+        """Build skill prompt for all mode."""
         body_lines: List[str] = []
+
         for idx, skill in enumerate(self.skills):
             body_lines.append(
                 build_skill_line(
@@ -466,48 +672,8 @@ class SkillUseRail(DeepAgentRail):
                     # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                 )
             )
-        return build_skill_lines(body_lines)
 
-    async def _sync_all_mode_skill_attachment(self, ctx: AgentCallbackContext) -> None:
-        """Put dynamic all-mode skill lines into prompt attachment."""
-        if self.skill_mode != self.SKILL_MODE_ALL:
-            await self._clear_all_mode_skill_attachment(ctx)
-            return
-        if self.attachment_manager is None:
-            return
-        language = self.system_prompt_builder.language
-        content = build_all_mode_skill_attachment(
-            self._build_all_mode_skill_lines(),
-            language=language,
-        )
-        writer = self.attachment_manager.bind_context(ctx)
-        try:
-            if content:
-                await writer.add_section(
-                    section=SectionName.SKILLS,
-                    content=content,
-                    kind=PromptAttachmentKind.SKILL,
-                    source="agent_core.skill_use_rail",
-                    priority=40,
-                    content_kind="text/markdown",
-                )
-            else:
-                await writer.clear_section(SectionName.SKILLS)
-        except ValueError as exc:
-            logger.warning("[SkillUseRail] skip skills prompt attachment: %s", exc)
-
-    async def _clear_all_mode_skill_attachment(self, ctx: AgentCallbackContext) -> None:
-        if self.attachment_manager is None:
-            return
-        writer = self.attachment_manager.bind_context(ctx)
-        try:
-            await writer.clear_section(SectionName.SKILLS)
-        except ValueError:
-            return
-
-    def _build_all_mode_prompt(self) -> str:
-        """Build skill prompt for all mode."""
-        return build_all_mode_skill_prompt(language=self.system_prompt_builder.language)
+        return build_all_mode_skill_prompt(build_skill_lines(body_lines), language=self.system_prompt_builder.language)
 
     @staticmethod
     def _normalize_name_list(raw: Optional[Union[str, List[str]]]) -> List[str]:

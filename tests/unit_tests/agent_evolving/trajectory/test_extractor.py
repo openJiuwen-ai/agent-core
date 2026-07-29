@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from openjiuwen.agent_evolving.trajectory import TrajectoryExtractor
-from openjiuwen.agent_evolving.trajectory.types import LLMCallDetail, ToolCallDetail
+from openjiuwen.agent_evolving.trajectory.types import (
+    LLMCallDetail,
+    ToolCallDetail,
+    trajectory_case_id,
+    trajectory_steps,
+)
 
 
 def make_span(
@@ -63,8 +68,8 @@ class TestTrajectoryExtractor:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert result.case_id == "case1"
-        assert result.steps == []
+        assert trajectory_case_id(result) == "case1"
+        assert trajectory_steps(result) == []
         assert not hasattr(result, "trace_id")
         assert not hasattr(result, "edges")
 
@@ -77,8 +82,8 @@ class TestTrajectoryExtractor:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert result.case_id == "case1"
-        assert result.steps == []
+        assert trajectory_case_id(result) == "case1"
+        assert trajectory_steps(result) == []
 
     @staticmethod
     def test_extract_llm_span():
@@ -89,8 +94,9 @@ class TestTrajectoryExtractor:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert len(result.steps) == 1
-        step = result.steps[0]
+        steps = trajectory_steps(result)
+        assert len(steps) == 1
+        step = steps[0]
         assert step.kind == "llm"
         assert step.meta.get("operator_id") == "test_op"
 
@@ -103,8 +109,9 @@ class TestTrajectoryExtractor:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert len(result.steps) == 1
-        assert result.steps[0].kind == "tool"
+        steps = trajectory_steps(result)
+        assert len(steps) == 1
+        assert steps[0].kind == "tool"
 
     @staticmethod
     def test_extract_with_error():
@@ -115,8 +122,12 @@ class TestTrajectoryExtractor:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert len(result.steps) == 1
-        assert result.steps[0].error == "Test error"
+        steps = trajectory_steps(result)
+        assert len(steps) == 1
+        # String span errors are stored on OTLP attributes; step projection
+        # surfaces a status-backed error dict for failed spans.
+        assert steps[0].error is not None
+        assert steps[0].meta["attributes"].get("openjiuwen.error") == "Test error"
 
     @staticmethod
     def test_extract_nested_inputs_outputs():
@@ -138,8 +149,9 @@ class TestTrajectoryExtractor:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert len(result.steps) == 1
-        step = result.steps[0]
+        steps = trajectory_steps(result)
+        assert len(steps) == 1
+        step = steps[0]
         assert step.detail is not None
         assert isinstance(step.detail, LLMCallDetail)
         assert step.detail.messages == [{"role": "user", "content": "nested"}]
@@ -155,8 +167,9 @@ class TestTrajectoryExtractor:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert len(result.steps) == 1
-        assert result.steps[0].meta.get("operator_id") == "llm_call_1"
+        steps = trajectory_steps(result)
+        assert len(steps) == 1
+        assert steps[0].meta.get("operator_id") == "llm_call_1"
 
     @staticmethod
     def test_extract_tool_span_with_detail():
@@ -173,8 +186,9 @@ class TestTrajectoryExtractor:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert len(result.steps) == 1
-        step = result.steps[0]
+        steps = trajectory_steps(result)
+        assert len(steps) == 1
+        step = steps[0]
         assert step.kind == "tool"
         assert step.detail is not None
         assert isinstance(step.detail, ToolCallDetail)
@@ -184,7 +198,7 @@ class TestTrajectoryExtractor:
 
     @staticmethod
     def test_extract_llm_span_with_meta_backup():
-        """Non-LLM/Tool steps have I/O in meta as backup."""
+        """Non-LLM/Tool steps keep I/O in OTLP legacy step meta."""
         extractor = TrajectoryExtractor()
         span = make_span(
             invoke_type="memory",
@@ -196,11 +210,20 @@ class TestTrajectoryExtractor:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert len(result.steps) == 1
-        step = result.steps[0]
-        assert step.kind == "memory"
-        assert step.meta.get("inputs") == {"key": "value"}
-        assert step.meta.get("outputs") == {"result": "data"}
+        # Memory spans are retained in OTLP but are outside the llm/tool
+        # step projection returned by trajectory_steps().
+        assert trajectory_steps(result) == []
+        spans = result.otlp_trace["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        assert len(spans) == 1
+        attrs = {
+            item["key"]: item["value"]
+            for item in spans[0]["attributes"]
+        }
+        assert attrs["openjiuwen.trajectory.step.kind"]["stringValue"] == "memory"
+        legacy_meta = attrs["openjiuwen.legacy.step.meta"]["kvlistValue"]["values"]
+        meta = {item["key"]: item["value"] for item in legacy_meta}
+        assert meta["inputs"]["kvlistValue"]["values"][0]["value"]["stringValue"] == "value"
+        assert meta["outputs"]["kvlistValue"]["values"][0]["value"]["stringValue"] == "data"
 
 
 class TestDtToMs:
@@ -217,9 +240,10 @@ class TestDtToMs:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert len(result.steps) == 1
-        assert result.steps[0].start_time_ms is None
-        assert result.steps[0].end_time_ms is None
+        steps = trajectory_steps(result)
+        assert len(steps) == 1
+        assert steps[0].start_time_ms is None
+        assert steps[0].end_time_ms is None
 
     @staticmethod
     def test_dt_to_ms_valid_datetime():
@@ -232,6 +256,7 @@ class TestDtToMs:
 
         result = extractor.extract(session, case_id="case1")
 
-        assert len(result.steps) == 1
+        steps = trajectory_steps(result)
+        assert len(steps) == 1
         expected = int(dt.timestamp() * 1000)
-        assert result.steps[0].start_time_ms == expected
+        assert steps[0].start_time_ms == expected

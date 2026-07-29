@@ -39,7 +39,6 @@ class TestModelContext:
         dialogue_round: int = None,
         max_context_message_num: Optional[int] = None,
         enable_reload: bool = False,
-        enable_kv_cache_release: bool = False,
         processors: Optional[List] = None,
         token_counter=None,
     ) -> ModelContext:
@@ -48,7 +47,6 @@ class TestModelContext:
             default_window_round_num=dialogue_round,
             max_context_message_num=max_context_message_num,
             enable_reload=enable_reload,
-            enable_kv_cache_release=enable_kv_cache_release,
         )
         context_engine = ContextEngine(config)
         session = None
@@ -702,13 +700,10 @@ class TestModelContext:
 
     # ---------- enable_reload ----------
     @pytest.mark.asyncio
-    async def test_enable_reload_adds_reloader_prompt(self):
-        from openjiuwen.core.context_engine.context.context import _RELOADER_SYSTEM_PROMPT
-
+    async def test_enable_reload_does_not_add_reloader_prompt_in_context_window(self):
         context = await self.create_context(enable_reload=True)
         window = await context.get_context_window()
-        assert len(window.system_messages) == 1
-        assert window.system_messages[0].content == _RELOADER_SYSTEM_PROMPT
+        assert window.system_messages == []
 
     @pytest.mark.asyncio
     async def test_enable_reload_false_no_reloader_prompt(self):
@@ -718,28 +713,11 @@ class TestModelContext:
 
     @pytest.mark.asyncio
     async def test_enable_reload_with_custom_system_messages(self):
-        from openjiuwen.core.context_engine.context.context import _RELOADER_SYSTEM_PROMPT
-
         context = await self.create_context(enable_reload=True)
         sys_msgs = [SystemMessage(content="custom sys")]
         window = await context.get_context_window(system_messages=sys_msgs)
-        assert len(window.system_messages) == 2
+        assert len(window.system_messages) == 1
         assert window.system_messages[0].content == "custom sys"
-        assert window.system_messages[1].content == _RELOADER_SYSTEM_PROMPT
-
-    # ---------- enable_kv_cache_release ----------
-    @pytest.mark.asyncio
-    async def test_enable_kv_cache_release_creates_manager(self):
-        context = await self.create_context(enable_kv_cache_release=True)
-        assert getattr(context, "_kv_cache_manager") is not None
-
-    @pytest.mark.asyncio
-    async def test_enable_kv_cache_release_calls_release_on_get_window(self):
-        context = await self.create_context(enable_kv_cache_release=True)
-        with patch.object(getattr(context, "_kv_cache_manager"), "release", new_callable=AsyncMock) as mock_release:
-            await context.get_context_window()
-            await context.get_context_window()
-            assert mock_release.call_count >= 1
 
     # ---------- token_counter ----------
     @pytest.mark.asyncio
@@ -805,31 +783,6 @@ class TestModelContext:
             assert len(ctx) == 1
             assert ctx.get_messages()[0].content == "msg"
 
-    # ---------- reloader_tool ----------
-    @pytest.mark.asyncio
-    async def test_reloader_tool_offload_then_reload_returns_content(self):
-        context = await self.create_context()
-        msgs = [UserMessage(content="secret"), AssistantMessage(content="reply")]
-        context.offload_messages("handle-1", msgs)
-        tool = context.reloader_tool()
-        result = await tool.invoke(dict(offload_handle="handle-1", offload_type="in_memory"))
-        assert "handle-1" in result
-        assert "secret" in result or "reply" in result
-
-    @pytest.mark.asyncio
-    async def test_reloader_tool_nonexistent_returns_failure_message(self):
-        context = await self.create_context()
-        tool = context.reloader_tool()
-        result = await tool.invoke(dict(offload_handle="nonexistent", offload_type="in_memory"))
-        assert "Failed to reload" in result
-        assert "nonexistent" in result
-
-    @pytest.mark.asyncio
-    async def test_reloader_tool_card_id_contains_session_and_context(self):
-        context = await self.create_context()
-        tool = context.reloader_tool()
-        assert "default_session_id" in tool.card.id or "test_context" in tool.card.id
-
     # ---------- offload_messages ----------
     @pytest.mark.asyncio
     async def test_offload_messages_save_state_includes_offload(self):
@@ -869,9 +822,8 @@ class TestModelContext:
             }
         }
         context.load_state(state)
-        tool = context.reloader_tool()
-        result = await tool.invoke(dict(offload_handle="h1", offload_type="in_memory"))
-        assert "offloaded" in result
+        saved = context.save_state()
+        assert saved["offload_messages"]["h1"] == offload_msgs
 
     @pytest.mark.asyncio
     async def test_load_state_empty_state_clears_buffer(self):

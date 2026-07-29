@@ -6,7 +6,6 @@ from typing import Any, Union, Optional, Callable
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.utils import update_dict, get_by_schema
 
 
@@ -26,7 +25,7 @@ Transformer = Callable[[ReadableStateLike], Any]
 class RecoverableStateLike(ABC):
 
     @abstractmethod
-    def get_state(self) -> dict:
+    def get_state(self, **kwargs) -> dict:
         pass
 
     @abstractmethod
@@ -47,6 +46,10 @@ class StateLike(ReadableStateLike, RecoverableStateLike):
 class CommitStateLike(StateLike):
     @abstractmethod
     def update_by_id(self, node_id: str, data: dict) -> None:
+        pass
+
+    @abstractmethod
+    def update_by_id_and_commit(self, node_id: str, data: dict) -> None:
         pass
 
     @abstractmethod
@@ -119,9 +122,11 @@ class InMemoryStateLike(StateLike):
         return transformer(self._state)
 
     def update(self, data: dict) -> None:
-        update_dict(deepcopy(data), self._state)
+        update_dict(data, self._state)
 
-    def get_state(self) -> dict:
+    def get_state(self, **kwargs) -> dict:
+        if kwargs.get("copied", True) is False:
+            return self._state
         return deepcopy(self._state)
 
     def set_state(self, state: dict) -> None:
@@ -143,6 +148,15 @@ class InMemoryCommitState(CommitStateLike):
         if node_id not in self._updates:
             self._updates[node_id] = []
         self._updates[node_id].append(deepcopy(data))
+
+    def update_by_id_and_commit(self, node_id: str, data: dict) -> None:
+        # Update state directly without staging in _updates, skipping the enqueue deepcopy.
+        # Isolation is guaranteed by expand_nested_structure inside update() (it rebuilds
+        # dict/list containers and deepcopies mutable non-container leaves), so data never
+        # shares mutable references with the committed state. Not rollback-able by design.
+        if node_id is None:
+            raise build_error(StatusCode.ERROR, msg="can not update state by none node_id")
+        self._state.update(data)
 
     def commit(self, node_id: str = None) -> None:
         if node_id is None:
@@ -177,8 +191,8 @@ class InMemoryCommitState(CommitStateLike):
         if updates:
             self._updates = updates
 
-    def get_state(self) -> dict:
-        return self._state.get_state()
+    def get_state(self, **kwargs) -> dict:
+        return self._state.get_state(**kwargs)
 
     def set_state(self, state: dict) -> None:
         self._state.set_state(state)

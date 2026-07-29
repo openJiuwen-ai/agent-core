@@ -14,8 +14,8 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-06-17 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）。其余条目见 `docs/features/` |
+| 最近一次修订日期 | 2026-07-28 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -259,8 +259,13 @@ session checkpoint 全局状态根上有一个 `teams` namespace：
 |---|---|---|---|
 | `member_name` | `str` | `"team_leader"` | leader 在 team 中的成员名 |
 | `display_name` | `str` | `"Team Leader"` | UI 展示名 |
-| `persona` | `str` | `t("blueprint.default_persona")` | 默认人设文本 |
+| `desc` | `str` | `t("blueprint.default_desc")` | 公开描述（仅进他人花名册 / `list_members`） |
+| `prompt` | `str` | `""` | 私有系统提示词（仅进自己 prompt；leader build 时定死） |
 | `model_name` | `Optional[str]` | `None` | 池模式下指定从哪一组 / 哪一条路由取 endpoint；`round_robin` 忽略 |
+
+`LeaderSpec` / `TeamMemberSpec` / `BridgeMemberSpec` 共享基类 `MemberSpecBase`
+（`member_name` / `display_name` / `desc` / `prompt` / `model_name`），公开 `desc` 与私有
+`prompt` 的二分定义一次。
 
 #### `TeamAgentSpec`
 
@@ -412,6 +417,12 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 `build() -> Workspace`。`stable_base` 的路径重写**不在 `build()` 内部完成**，由
 `agent_configurator` 在装配过程中完成。
 
+**workspace ≠ cwd**（见 [[F_69]]）：`WorkspaceSpec` 只描述"这个 agent 的产物目录"。
+shell 执行点与相对路径基准是 `DeepAgentSpec.cwd`，项目身份锚点是
+`DeepAgentSpec.project_root`，两者都缺省为 workspace 根（单 agent 下三者同值）。
+team 成员由 `agent_configurator` 把 cwd 指向项目目录或隔离 worktree，workspace 保持
+成员私有——**不要**再通过改写 `root_path` 来搬动成员的工作目录。
+
 #### 其余叶子 Spec
 
 - `VisionModelSpec` / `AudioModelSpec`：pydantic 镜像对应 dataclass，`build()`
@@ -445,8 +456,8 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 | `member_name` | `str` | required |
 | `display_name` | `str` | required |
 | `role_type` | `TeamRole` | `TEAMMATE` |
-| `persona` | `str` | required |
-| `prompt_hint` | `Optional[str]` | `None` |
+| `desc` | `str` | `""` |
+| `prompt` | `str` | `""` |
 | `model_name` | `Optional[str]` | `None` |
 
 仅用于 `TeamAgentSpec.predefined_members`；不是运行时载体，spawn / restart 路径
@@ -458,10 +469,11 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 |---|---|---|
 | `role` | `TeamRole` | `LEADER` |
 | `member_name` | `Optional[str]` | `None` |
-| `persona` | `str` | `""` |
+| `desc` | `str` | `""` |
+| `prompt` | `str` | `""` |
 | `team_spec` | `Optional[TeamSpec]` | `None` |
 | `messager_config` | `Optional[MessagerTransportConfig]` | `None` |
-| `db_config` | `DatabaseConfig \| MemoryDatabaseConfig` | `DatabaseConfig()` |
+| `db_config` | `DatabaseConfig` | `DatabaseConfig()` |
 | `member_model` | `Optional[TeamModelConfig]` | `None` |
 | `worktree_path` | `Optional[str]` | `None` |
 | `permissions_override` | `Optional[dict[str, str]]` | `None` | Per-member permission narrowing from `spawn_teammate.permissions`；flat `{tool_name: level_string}` dict，由 `narrow_permissions` 收紧基础配置 |
@@ -618,9 +630,10 @@ team（如直接 streaming 的单 agent）。`role` 用 `TeamRole`（`str` 枚�
 | 字段 | 类型 |
 |---|---|
 | `content` | `str` |
+| `reviewer` | `list[str]`（verify 闸的验证者，见 `TaskStatus` 状态机段） |
 | `blocks` | `list[str]` |
 
-`updated_at` 已在 `TaskSummary` 定义；其语义随 `status` 漂移 —— claimed 时是 claim 时刻，
+`updated_at` 已在 `TaskSummary` 定义；其语义随 `status` 漂移 —— in_progress 时是开始执行时刻，
 completed 时是完成时刻。
 
 #### `TaskListResult`
@@ -696,19 +709,110 @@ TIMED_OUT         -> IDLE
 
 ### `TaskStatus` 状态机
 
+**条件命名**：状态名描述任务此刻的"处境"，转换名描述"事件"。单张 `TASK_TRANSITIONS`
+超集覆盖两种调度模式与两个可选闸。两模式的执行态统一为 `IN_PROGRESS`——自主模式成员
+自领（`claim`）与调度模式调度器开始（`start`）是**进入同一个 `IN_PROGRESS` 的两条转换**，
+模式差异属于转换而非状态；"已指派未开始"仍用 `PENDING(assignee)` 表达。`PLANNING` 是
+执行前的 plan 闸，`IN_REVIEW` 是执行后的 verify 闸，两闸同构、可选、各带返工回环。
+
 合法转移（来自 `TASK_TRANSITIONS`）：
 
 ```
-PENDING        -> CLAIMED | BLOCKED | CANCELLED
-CLAIMED        -> PLAN_APPROVED | COMPLETED | CANCELLED | BLOCKED | PENDING
-PLAN_APPROVED  -> COMPLETED | PENDING | CANCELLED
-BLOCKED        -> PENDING | CANCELLED
-COMPLETED      -> (terminal)
-CANCELLED      -> (terminal)
+PENDING      -> PLANNING | IN_PROGRESS | BLOCKED | CANCELLED
+BLOCKED      -> PENDING | CANCELLED
+PLANNING     -> PLANNING | IN_PROGRESS | PENDING | BLOCKED | CANCELLED   # 提交/驳回回环；approve 进 IN_PROGRESS
+IN_PROGRESS  -> IN_REVIEW | COMPLETED | PENDING | BLOCKED | CANCELLED    # 有 reviewer 进 IN_REVIEW，无则直通 COMPLETED
+IN_REVIEW    -> COMPLETED | IN_PROGRESS | PENDING | CANCELLED            # verify pass→COMPLETED，fail→IN_PROGRESS 返工
+COMPLETED    -> (terminal)
+CANCELLED    -> (terminal)
 ```
 
-`PLAN_APPROVED` 仅对 `MemberMode.PLAN_MODE` 成员激活；`BUILD_MODE` 走
-`CLAIMED → COMPLETED` 直通路径。
+- **plan 闸**（`PLANNING`，仅 `MemberMode.PLAN_MODE`）：成员 `submit_plan` 把 `PENDING`
+  预留进 `PLANNING`（或对已属自己的任务记录计划），leader `approve_plan` 走
+  `PLANNING → IN_PROGRESS`——"计划批准"就是这条边（旧 `PLAN_APPROVED` 状态已消解为它）。
+  驳回保持 `PLANNING`。`assign` 感知 mode：指派 plan_mode 成员落 `PLANNING`、build_mode 落
+  `IN_PROGRESS`。`BUILD_MODE` 走 `PENDING → IN_PROGRESS → COMPLETED` 直通。
+- **verify 闸**（`IN_REVIEW`）：任务配了 `reviewer`（`TeamTaskBase.reviewer`，JSON member 名
+  列表）时，成员"做完"经 `complete()` 分流落 `IN_REVIEW` 交验证（发 `TASK_SUBMITTED_FOR_REVIEW`，
+  同一 UPDATE 里 `review_round += 1` 原子开新验证轮）。裁决按**生效分发模式**二分（F_62）：
+  自主模式 reviewer 用 `verify_task(decision)` 首裁即决——pass→`COMPLETED`（解依赖，发
+  `TASK_VERIFIED`）/ fail→`IN_PROGRESS`（返工，author 全程持有，发 `TASK_REVISION_REQUESTED`
+  带 feedback）；调度模式 `verify_task` 只向 `team_review_vote_*` 追加一票（发
+  `TASK_REVIEW_VOTE`），判定与翻转由 leader 调度器经 `settle_review` 完成（见 `S_22`）。
+  守卫两模式相同：任务须 `IN_REVIEW`、caller ∈ reviewer 且 ≠ author。`reviewer` 由 leader 经
+  `create_task` / `update_task` 指派，可多个；`max_review_rounds` 列（NULL → 团队默认）是
+  验证返工轮数上限，超限后调度器升级 leader 而不再自动打回。
+- **一成员至多一个活跃任务**：`get_other_active_task_id` 的活跃集 =
+  `{PLANNING, IN_PROGRESS, IN_REVIEW}`，两模式统一。调度成员可持有多个 `PENDING(assignee)`
+  排队，但同一时刻至多一个活跃任务。
+- 调度模式的开工由 `TeamTaskManager.start_task(task_id)` 经 DAO CAS
+  `WHERE assignee=? AND status='pending'` 落库（目标态镜像 `assign` 的成员 mode 感知：
+  build → `IN_PROGRESS`、plan → `PLANNING`，DAO `start_task(to_status=...)` 参数化），并发
+  `TaskStartedEvent`。调用方是 `agent/scheduling/TeamScheduler`（F_62，见 `S_22`）。
+- `PLANNING` / `IN_PROGRESS` / `IN_REVIEW`（与终态一起）在 `TASK_DEPENDENCY_REJECT_STATUSES`
+  里：已在推进的任务不可再被加前置依赖。编辑锁只锁 `IN_REVIEW`（验证期内容冻结）。
+- 见 F_59（取代 F_58 的 `STARTED`）、F_62（投票 + 调度 runtime）。
+
+### 评审投票数据面（F_62）
+
+- **动态票表 `team_review_vote_{session}`**（`TeamTaskReviewVoteBase`，
+  `models._get_review_vote_model`；表名刻意避开 `team_task_` 前缀以免被任务表迁移扫描误判）：
+  `id`（自增 PK）、`team_name`（FK）、`task_id`、`review_round`、`reviewer`、`decision`
+  （pass/fail）、`feedback`（可空）、`created_at`。复合索引 `(task_id, review_round)`。
+  **追加写**：改票 = 再插一行，tally 取每 reviewer 最新一票（`get_review_votes` 按 `id` 升序）；
+  旧轮票由 `review_round` 分区自然作废，全量留痕可审计。
+- **任务行新列**：`review_round INT NOT NULL DEFAULT 0`（`submit_for_review` CAS 原子自增）、
+  `max_review_rounds INT NULL`（per-task 轮数上限）。迁移在
+  `engine._ensure_dynamic_table_indexes`（ALTER ADD COLUMN，幂等）。
+- **`team_info` 新列**：`dispatch_mode TEXT NOT NULL DEFAULT 'autonomous'` 与
+  `enable_task_verification BOOLEAN NOT NULL DEFAULT 0`——build_team 选定的**实例级生效值**，
+  冷恢复回填 `TeamBackend`。静态表迁移 `engine._ensure_team_info_capability_columns`。
+- **spec 配置**（`TeamAgentSpec`，仅 leader 侧消费）：`verify_vote_threshold: float = 2/3`
+  （(0,1]）、`default_max_review_rounds: int = 3`（≥1）、`review_stall_timeout: int = 1800`
+  （秒，>0）、`enable_task_verification: bool = False`（提示词开关）；`dispatch_mode` 语义
+  升级为能力上限。校验在 `_validate_review_settings`。
+- **新事件** `TASK_REVIEW_VOTE`（`TaskReviewVoteEvent`）：`member_name`=author、`reviewer`=
+  投票人、`decision`、`review_round`、`pass_count`/`fail_count`/`reviewer_count` 票数快照。
+
+### 自主停滞阈值（F_65）
+
+- **spec 配置**（`TeamAgentSpec`，仅自主模式消费，调度模式忽略）：
+  `stale_claim_idle_timeout: int = 600`（秒，>0——成员 idle 超此值且名下有该推的任务即自催，
+  连续 3 个窗口无效则由该成员自报 leader。"该推的任务" = 持有的 `{PLANNING, IN_PROGRESS}`，
+  一个活跃任务都没有时回落到名下最早的一个 `PENDING(assignee=self)`，见 F_69）、
+  `stale_pending_idle_timeout: int = 600`（秒，>0——leader idle 超此值、且存在无 assignee
+  的 `PENDING`、且 roster 里有非 leader 成员 READY，三者同时成立才自催）。
+  校验在独立的 `_validate_stall_settings`（与 `_validate_review_settings` 分开：前者管停滞
+  窗口，后者管验证闸旋钮）。
+- **无新表 / 无新列**：停滞计时刻意**不落库**。它是运行时内存态
+  `TeamAgentState.idle_since`（`time.monotonic()`，进程本地、不持久化）——持久时间戳
+  （`task.updated_at`）在 pause 期间冻结而墙钟继续走，用它度量停滞必然在
+  pause→resume 后报出假停滞。理由与不变量见 `S_03` 不变量 20 与
+  `F_65_runtime-idle-clock-stall-nudge.md`。
+
+### 消息投递载荷 `meta`（F_63）
+
+消息表 `TeamMessageBase` 新列 **`meta TEXT NULL`**（JSON 对象），承载框架模板消息的
+**投递载荷**。迁移 `engine._ensure_message_meta_column`（ALTER ADD COLUMN，幂等；旧行读
+NULL = 普通消息，行为不变）。
+
+形状：`{"template": <prompts/<lang>/<key>.md 基名>, "refs": {"task": id, "member": name},
+"params": {<标量>}}`。
+
+三条铁律（防 meta 腐化成垃圾抽屉）：
+
+1. **meta 是模板消息的单一事实**：该行 `content` 恒为空串，系统中不存在需要与 meta 保持
+   一致的第二份表述。展开失败时投递点**从 meta 现场合成** fallback 行（模板 key + task_id），
+   不预存副本。推论：**所有消息消费路径必须容忍「content 空 + meta 在」的行**——不得有
+   `if not content: skip` 式防御。
+2. **framework-only 投递载荷**：meta 只决定"这条消息如何被渲染/投递"，永不承载业务事实
+   （任务真相在任务表、票在票表）。`send_message` 工具面不暴露 meta，只有框架（调度器交接）
+   写它。凡是表能答的走 `refs` 投递时现查，`params` 只放表答不出的瞬时值（如某轮 fail
+   feedback 聚合、解析后的轮数上限）。
+3. **与 `protocol` 正交**：`protocol="json"` 维持"机器旁路控制报文"语义（tool approval
+   fallback，绕过 LLM 渲染直喂中断恢复）；模板消息是普通 `"plain"` 的 LLM 正文。
+
+占位符与命名空间白名单见 `S_22`「消息面」段与 `message_template.py`。
 
 ### Session checkpoint per-team namespace
 

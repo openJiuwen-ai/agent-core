@@ -5,22 +5,31 @@
 import os
 from abc import ABC, abstractmethod
 from typing import List, Optional
-from openjiuwen.core.common.logging import memory_logger as logger
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 
 
 class EmbeddingProvider(ABC):
     """Base class for embedding providers."""
-    
+
     id: str = "base"
     model: str = "base"
     dims: int = 0
-    
+
+    @property
+    def config_fingerprint(self) -> str:
+        """Stable fingerprint of the configuration that affects embedding vectors.
+
+        Used to detect config changes (base_url / api_key / model) and to key
+        the embedding cache. Subclasses should override to incorporate the
+        fields that actually influence the produced vectors.
+        """
+        return f"{self.id}:{self.model}"
+
     @abstractmethod
     async def embed_query(self, text: str) -> List[float]:
         """Generate embedding for a query."""
         pass
-    
+
     @abstractmethod
     async def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for multiple documents."""
@@ -29,9 +38,9 @@ class EmbeddingProvider(ABC):
 
 class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
     """OpenAI-compatible embedding provider (supports DashScope, OpenAI, etc.)."""
-    
+
     id: str = "openai_compatible"
-    
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -40,13 +49,44 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
     ):
         self.api_key = api_key
         self.model = model
-        self.base_url = base_url
-        
-        if self.base_url and self.base_url.endswith("/embeddings"):
-            self.base_url = self.base_url.rsplit("/embeddings", 1)[0]
-        
+        self.base_url = self.normalize_base_url(base_url)
         self.dims = 1024
         self._client = None
+
+    @staticmethod
+    def normalize_base_url(base_url: Optional[str]) -> Optional[str]:
+        """Normalize base_url so equivalent endpoints share one form.
+
+        - strip whitespace
+        - drop a trailing "/embeddings" (the request path appends it back)
+        - drop a trailing slash
+        e.g. "https://x.com/embeddings" and "https://x.com/" both -> "https://x.com"
+        """
+        if not base_url:
+            return base_url
+        url = base_url.strip()
+        # collapse any number of trailing slashes BEFORE the /embeddings
+        # suffix check, so "https://x.com/embeddings/" also normalizes
+        # (otherwise endswith("/embeddings") misses the trailing slash).
+        while url.endswith("/"):
+            url = url[:-1]
+        if url.endswith("/embeddings"):
+            url = url.rsplit("/embeddings", 1)[0]
+        return url
+
+    @property
+    def config_fingerprint(self) -> str:
+        """Fingerprint covering all fields that affect embedding vectors.
+
+        Includes normalized base_url and a truncated sha256 of api_key (never
+        store the raw key). Changing endpoint / key / model yields a different
+        fingerprint, which:
+          - makes _should_full_reindex detect the change, and
+          - isolates embedding_cache entries per (base_url, api_key, model).
+        """
+        import hashlib
+        api_key_hash = hashlib.sha256((self.api_key or "").encode()).hexdigest()[:16]
+        return f"{self.id}:{self.model or ''}:{self.base_url or ''}:{api_key_hash}"
     
     def _get_client(self):
         """Get or create HTTP client."""
@@ -98,72 +138,42 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
         return embeddings
 
 
-class MockEmbeddingProvider(EmbeddingProvider):
-    """Mock embedding provider for testing."""
-    
-    id: str = "mock"
-    model: str = "mock"
-    dims: int = 128
-    
-    async def embed_query(self, text: str) -> List[float]:
-        """Generate mock embedding."""
-        import hashlib
-        import random
-        h = hashlib.md5(text.encode()).hexdigest()
-        random.seed(h)
-        return [random.uniform(-1, 1) for _ in range(128)]
-    
-    async def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Generate mock embeddings."""
-        return [await self.embed_query(t) for t in texts]
-
-
 async def create_embedding_provider(
-    provider: str = "auto",
     model: Optional[str] = None,
-    fallback: str = "mock",
     embedding_config=None,
 ) -> EmbeddingProvider:
     """Create embedding provider based on configuration.
 
-    Priority order for configuration:
-    1. embedding_config parameter (EmbeddingConfig instance)
-    2. Environment variables (EMBED_API_KEY, EMBED_MODEL, EMBED_BASE_URL)
-
     Args:
-        provider: Provider name (openai_compatible, auto, mock)
         model: Model name
-        fallback: Fallback provider if auto-detection fails
-        embedding_config: Optional EmbeddingConfig instance with api_key, base_url, model_name
-    
+        embedding_config: EmbeddingConfig instance with api_key, base_url, model_name
+
     Returns:
         Embedding provider instance
+
+    Raises:
+        ValueError: If embedding_config is missing or has no api_key.
     """
-    if provider == "mock":
-        return MockEmbeddingProvider()
-    
-    if embedding_config is not None:
-        api_key = embedding_config.api_key
-        base_url = embedding_config.base_url
-        model_name = embedding_config.model_name
-    else:
-        logger.error("Embedding provider not configured.")
-        return
-    
-    if api_key:
-        return OpenAICompatibleEmbeddingProvider(
-            api_key=api_key,
-            model=model_name,
-            base_url=base_url
+    if embedding_config is None:
+        raise ValueError(
+            "Embedding provider not configured. "
+            "Provide embedding_config parameter."
         )
-    
-    if fallback == "mock":
-        logger.warning("Embedding API key not found, using mock provider")
-        return MockEmbeddingProvider()
-    
-    raise ValueError(
-        "Embedding API key not configured. "
-        "Set EMBED_API_KEY environment variable or provide embedding_config parameter."
+
+    api_key = embedding_config.api_key
+    base_url = embedding_config.base_url
+    model_name = embedding_config.model_name
+
+    if not api_key:
+        raise ValueError(
+            "Embedding API key not configured. "
+            "Set EMBEDDING_API_KEY environment variable or provide embedding_config parameter."
+        )
+
+    return OpenAICompatibleEmbeddingProvider(
+        api_key=api_key,
+        model=model_name,
+        base_url=base_url
     )
 
 

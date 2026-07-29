@@ -40,14 +40,17 @@ from openjiuwen.agent_evolving.signal import (
 )
 from openjiuwen.agent_evolving.trajectory import (
     InMemoryTrajectoryRegistry,
-    MemberTrajectorySnapshot,
-    TrajectoryBuilder,
-)
-from openjiuwen.agent_evolving.trajectory.types import (
     LLMCallDetail,
+    MemberTrajectorySnapshot,
     ToolCallDetail,
     Trajectory,
+    TrajectoryBuilder,
     TrajectoryStep,
+    trajectory_execution_id,
+    trajectory_from_steps,
+    trajectory_meta,
+    trajectory_session_id,
+    trajectory_steps,
 )
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -64,6 +67,8 @@ from openjiuwen.harness.rails.evolution.contracts import (
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionTriggerPoint
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import (
+    _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN,
+    _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN,
     infer_team_skill_from_trajectory,
     is_completed_team_task_view,
 )
@@ -77,6 +82,21 @@ from openjiuwen.harness.rails.skills.team_skill_rail import (
 
 def _team_review_runtime() -> EvolutionReviewRuntime:
     return EvolutionReviewRuntime()
+
+
+def test_team_completion_followup_prompts_are_short_and_reference_standing_rules():
+    assert "运行时自动插入的 Team/Swarm Skill 演进 follow-up" in _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN
+    assert "请参考“团队 Skill 演进自检”规则" in _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN
+    assert "常驻提示词" not in _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN
+    assert "最多追加两句" not in _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN
+    assert "不要提及自检、无需演进" not in _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN
+    assert "prepare_skill_evolution" not in _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN
+    assert "runtime-inserted Team/Swarm Skill evolution follow-up" in _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN
+    assert 'Refer to the "Team Skill Evolution Self-Check" rules' in _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN
+    assert "standing" not in _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN
+    assert "at most two short sentences" not in _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN
+    assert "do not mention self-checks" not in _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN
+    assert "prepare_skill_evolution" not in _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN
 
 
 @pytest.mark.asyncio
@@ -98,8 +118,22 @@ async def test_team_evolution_protocol_section_handles_confirmation_followup(tmp
 
     section = builder.get_section(SectionName.EVOLUTION_TEAM_PROTOCOL)
     assert section is not None
-    assert "prepare_skill_evolution →" in section.content["cn"]
-    assert "最小必要澄清" in section.content["cn"]
+    assert "## 团队 Skill 演进自检" in section.content["cn"]
+    for heading in (
+        "### 判断场景",
+        "#### 应考虑演进",
+        "#### 不应演进",
+        "### 用户意图信号",
+        "### 回复与确认规则",
+        "#### 最终回复",
+        "#### 用户确认",
+        "#### 工具执行",
+    ):
+        assert heading in section.content["cn"]
+    assert "#### 运行时 follow-up" not in section.content["cn"]
+    assert "不要因为创建确认调用" not in section.content["cn"]
+    assert "无法抽象成团队协议、角色协作、共享上下文、交接校验或结果验收更新" in section.content["cn"]
+    assert "prepare_skill_evolution" in section.content["cn"]
 
 
 @pytest.fixture(autouse=True)
@@ -304,11 +338,11 @@ def build_patch_trajectory(skill_name: str = "deep-research-to-ppt") -> Trajecto
             ),
         )
     )
-    return Trajectory(
+    return trajectory_from_steps(
         execution_id="test-patch-001",
         steps=steps,
-        source="online",
         session_id="test-session-2",
+        source="online",
     )
 
 
@@ -336,11 +370,11 @@ def _build_team_store_trajectory(
     meta = {"member_id": member_id}
     if member_role is not None:
         meta["member_role"] = member_role
-    return Trajectory(
+    return trajectory_from_steps(
         execution_id=f"exec-{member_id}",
         session_id=session_id,
-        source="online",
         steps=steps,
+        source="online",
         meta=meta,
     )
 
@@ -381,7 +415,7 @@ def _publish_member_snapshot(
 
 
 def _tool_names(trajectory: Trajectory) -> list[str]:
-    return [step.detail.tool_name for step in trajectory.steps if step.detail is not None]
+    return [step.detail.tool_name for step in trajectory_steps(trajectory) if step.detail is not None]
 
 
 def _capture_trajectory_signals(rail: TeamSkillRail, captured: dict[str, Any]) -> None:
@@ -517,7 +551,7 @@ def test_team_rail_init_registers_review_agent_with_default_max_iterations(tmp_p
         for config in agent.deep_config.subagents
         if getattr(config.agent_card, "name", None) == "evolution_reviewer"
     )
-    assert getattr(configured, "max_iterations", None) == 20
+    assert getattr(configured, "max_iterations", None) == 40
 
 
 def test_team_rail_init_registers_review_agent_with_custom_max_iterations(tmp_path):
@@ -567,6 +601,7 @@ async def test_patch_path():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
+            auto_scan=True,
             auto_save=False,
             async_evolution=False,
         )
@@ -606,6 +641,7 @@ async def test_run_evolution_passes_rule_signals_to_consumer():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
+            auto_scan=True,
             auto_save=False,
             async_evolution=False,
         )
@@ -655,7 +691,7 @@ async def test_run_evolution_passes_rule_signals_to_consumer():
         assert captured["skill"] == "deep-research-to-ppt"
         assert captured["signal"].signal_type == "execution_failure"
         assert get_signal_source(captured["signal"]) == "passive_conversation"
-        assert captured["detector_trajectory"].session_id == "test-session-2"
+        assert trajectory_session_id(captured["detector_trajectory"]) == "test-session-2"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -711,7 +747,12 @@ async def test_stage_evolution_from_signals_does_not_hardcode_workflow_signal_se
 
         result = await rail._stage_evolution_from_signals(
             "team-skill-a",
-            trajectory=Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory=trajectory_from_steps(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             signals=[
                 make_evolution_signal(
                     signal_type="trajectory_issue",
@@ -725,7 +766,7 @@ async def test_stage_evolution_from_signals_does_not_hardcode_workflow_signal_se
         )
 
         bind_kwargs = rail._online_updater.bind.call_args.kwargs
-        assert bind_kwargs["online_contexts"]["team-skill-a"].trajectory.session_id == "s1"
+        assert trajectory_session_id(bind_kwargs["online_contexts"]["team-skill-a"].trajectory) == "s1"
         passed_signals = rail._online_updater.process.await_args.args[1]
         assert len(passed_signals) == 1
         assert passed_signals[0].section == ""
@@ -752,6 +793,7 @@ async def test_async_snapshot_messages_are_preserved_for_team_evolution():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
+            auto_scan=True,
             auto_save=False,
             async_evolution=True,
         )
@@ -860,13 +902,16 @@ def test_auto_scan_and_auto_save_properties():
         )
 
         assert rail.auto_scan is False
+        assert rail.signal_trigger is False
         assert rail.auto_save is True
         assert rail.completion_followup_enabled is False
+        assert rail.review_trigger is False
 
         rail.auto_scan = True
         rail.auto_save = False
 
         assert rail.auto_scan is True
+        assert rail.signal_trigger is True
         assert rail.completion_followup_enabled is False
         assert rail.auto_save is False
 
@@ -874,6 +919,79 @@ def test_auto_scan_and_auto_save_properties():
 
         assert rail.auto_scan is True
         assert rail.completion_followup_enabled is True
+        assert rail.review_trigger is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_team_signal_and_review_trigger_constructor_aliases():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            signal_trigger=False,
+            review_trigger=True,
+            async_evolution=False,
+        )
+
+        assert rail.auto_scan is False
+        assert rail.completion_followup_enabled is True
+
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            auto_scan=False,
+            signal_trigger=False,
+            completion_followup_enabled=True,
+            review_trigger=True,
+            async_evolution=False,
+        )
+
+        assert rail.signal_trigger is False
+        assert rail.review_trigger is True
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_team_signal_and_review_trigger_defaults_off():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            async_evolution=False,
+        )
+
+        assert rail.signal_trigger is False
+        assert rail.auto_scan is False
+        assert rail.review_trigger is False
+        assert rail.completion_followup_enabled is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_team_signal_and_review_trigger_constructor_prefers_new_names():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            auto_scan=True,
+            signal_trigger=False,
+            completion_followup_enabled=True,
+            review_trigger=False,
+            async_evolution=False,
+        )
+
+        assert rail.signal_trigger is False
+        assert rail.auto_scan is False
+        assert rail.review_trigger is False
+        assert rail.completion_followup_enabled is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -904,7 +1022,27 @@ async def test_team_skill_evolution_disables_fuzzy_review_by_default():
         await rail._on_after_task_iteration(ctx)
 
         controller.enqueue_follow_up.assert_not_called()
-        assert rail._fuzzy_review is False
+        assert rail._review_trigger is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_team_completion_followup_prompt_is_tagged():
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            completion_followup_enabled=True,
+            async_evolution=False,
+        )
+
+        prompt = rail._build_team_completion_followup_prompt()
+
+        assert prompt.startswith("<auto_team_skill_evolution_review_followup>")
+        assert prompt.endswith("</auto_team_skill_evolution_review_followup>")
+        assert "团队 Skill 演进自检" in prompt
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -946,6 +1084,7 @@ async def test_notify_team_completed_without_view_task():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
+            auto_scan=True,
             async_evolution=False,
         )
 
@@ -973,6 +1112,7 @@ async def test_notify_team_completed_repeated_mark_keeps_same_session():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
+            auto_scan=True,
             async_evolution=False,
         )
 
@@ -997,6 +1137,7 @@ async def test_notify_team_completed_mark_survives_next_before_invoke():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
+            auto_scan=True,
             async_evolution=False,
         )
         rail.run_evolution = AsyncMock()
@@ -1031,6 +1172,7 @@ async def test_notify_team_completed_mark_does_not_leak_to_new_session():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
+            auto_scan=True,
             async_evolution=False,
         )
         rail.run_evolution = AsyncMock()
@@ -1474,13 +1616,18 @@ async def test_auto_scan_false_disables_notify_team_completed():
 async def test_run_evolution_returns_immediately_when_auto_scan_disabled():
     with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
         rail = TeamSkillRail.__new__(TeamSkillRail)
-        rail._auto_scan = False
+        rail._signal_trigger = False
         rail._trajectory_source = MagicMock()
         rail._detect_used_team_skill = Mock(return_value="research-team")
         rail._emit_progress = MagicMock()
 
         await rail.run_evolution(
-            Trajectory(execution_id="exec-1", session_id="sess-1", source="online", steps=[]),
+            trajectory_from_steps(
+                execution_id="exec-1",
+                session_id="sess-1",
+                steps=[],
+                source="online",
+            ),
             _MockCtx(),
         )
 
@@ -1527,7 +1674,7 @@ async def test_team_record_presented_experiences_delegates_to_tracker():
 async def test_team_snapshot_consumes_experience_tracker_state():
     with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
         rail = TeamSkillRail.__new__(TeamSkillRail)
-        rail._auto_scan = True
+        rail._signal_trigger = True
         rail._subject_kind_value = "swarm-skill"
         rail._experience_tracker = Mock()
         record = _make_record("team-skill-a")
@@ -1539,7 +1686,12 @@ async def test_team_snapshot_consumes_experience_tracker_state():
             session=SimpleNamespace(),
             context=_MsgContext(messages=[{"role": "user", "content": "hello"}]),
         )
-        trajectory = Trajectory(execution_id="exec-1", session_id="test-session", source="online", steps=[])
+        trajectory = trajectory_from_steps(
+            execution_id="exec-1",
+            session_id="test-session",
+            steps=[],
+            source="online",
+        )
 
         snapshot = await rail._snapshot_for_evolution(trajectory, ctx)
 
@@ -1558,6 +1710,7 @@ async def test_view_task_completion_marks_round_and_triggers_once_after_invoke()
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
+            auto_scan=True,
             auto_save=False,
             async_evolution=False,
         )
@@ -1626,7 +1779,7 @@ async def test_team_after_tool_call_records_skill_tool_evolution_detail_read(tmp
     rail._experience_tracker.record_presented_records.assert_awaited_once_with(
         session=session,
         skill_name="team-skill-a",
-        presentation_snippet="### [ev_body] Coordinate reviewers",
+        presentation_snippet="",
         record_ids=["ev_body"],
     )
 
@@ -1663,7 +1816,7 @@ async def test_team_after_tool_call_records_read_file_evolution_detail_read(tmp_
     rail._experience_tracker.record_presented_records.assert_awaited_once_with(
         session=session,
         skill_name="team-skill-a",
-        presentation_snippet="### [ev_body] Coordinate reviewers",
+        presentation_snippet="",
         record_ids=["ev_body"],
     )
 
@@ -1704,7 +1857,7 @@ async def test_team_auto_scan_false_still_records_evolution_detail_read(tmp_path
     rail._experience_tracker.record_presented_records.assert_awaited_once_with(
         session=session,
         skill_name="team-skill-a",
-        presentation_snippet="### [ev_body] Coordinate reviewers",
+        presentation_snippet="",
         record_ids=["ev_body"],
     )
 
@@ -1713,25 +1866,36 @@ async def test_team_auto_scan_false_still_records_evolution_detail_read(tmp_path
 async def test_team_run_evolution_evaluates_presented_entries_when_no_skill_detected():
     with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
         rail = TeamSkillRail.__new__(TeamSkillRail)
-        rail._auto_scan = True
+        rail._signal_trigger = True
         rail._pending_host_events = []
         rail._trajectory_source = None
         rail._detect_used_team_skill = Mock(return_value=None)
         rail._experience_tracker = Mock()
-        rail._experience_tracker.evaluate_presented = AsyncMock()
+        rail._evaluate_presented_entries = AsyncMock()
         record = _make_record("team-skill-a")
         presented_entries = [("team-skill-a", record, "snippet")]
+        messages = [{"role": "user", "content": "hello"}]
 
         await rail.run_evolution(
-            Trajectory(execution_id="exec-1", session_id="sess-1", source="online", steps=[]),
+            trajectory_from_steps(
+                execution_id="exec-1",
+                session_id="sess-1",
+                steps=[],
+                source="online",
+            ),
             snapshot={
-                "trajectory": Trajectory(execution_id="exec-1", session_id="sess-1", source="online", steps=[]),
-                "messages": [{"role": "user", "content": "hello"}],
+                "trajectory": trajectory_from_steps(
+                    execution_id="exec-1",
+                    session_id="sess-1",
+                    steps=[],
+                    source="online",
+                ),
+                "messages": messages,
                 "presented_entries": presented_entries,
             },
         )
 
-        rail._experience_tracker.evaluate_presented.assert_awaited_once_with(presented_entries)
+        rail._evaluate_presented_entries.assert_awaited_once_with(presented_entries, messages)
         events = _progress_events(await rail.drain_pending_host_events())
         stages = [event.payload["evolution_meta"]["stage"] for event in events]
         contents = [event.payload["content"] for event in events]
@@ -1750,7 +1914,12 @@ async def test_team_handle_evolution_from_signals_emits_no_records_outcome():
 
         result = await rail._handle_evolution_from_signals_with_result(
             skill_name="team-skill-a",
-            trajectory=Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory=trajectory_from_steps(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             signals=[
                 make_evolution_signal(
                     signal_type="trajectory_issue",
@@ -1796,7 +1965,12 @@ async def test_team_handle_evolution_emits_persistence_failed_without_auto_appro
 
         result = await rail._handle_evolution_from_signals_with_result(
             skill_name="team-skill-a",
-            trajectory=Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory=trajectory_from_steps(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             signals=[
                 make_evolution_signal(
                     signal_type="trajectory_issue",
@@ -1824,7 +1998,7 @@ async def test_team_handle_evolution_emits_persistence_failed_without_auto_appro
 async def test_team_run_evolution_does_not_report_persistence_failed_as_ready():
     with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
         rail = TeamSkillRail.__new__(TeamSkillRail)
-        rail._auto_scan = True
+        rail._signal_trigger = True
         rail._auto_save = True
         rail._pending_host_events = []
         rail._trajectory_source = None
@@ -1855,7 +2029,12 @@ async def test_team_run_evolution_does_not_report_persistence_failed_as_ready():
         )
 
         await rail.run_evolution(
-            Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory_from_steps(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             snapshot={"messages": [], "presented_entries": []},
         )
 
@@ -1889,11 +2068,12 @@ async def test_notify_team_completed_allows_new_invoke_after_async_evolution():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
+            auto_scan=True,
             auto_save=False,
             async_evolution=True,
         )
         rail._builder = TrajectoryBuilder(session_id="test-session", source="online")
-        for step in build_patch_trajectory("deep-research-to-ppt").steps:
+        for step in trajectory_steps(build_patch_trajectory("deep-research-to-ppt")):
             rail._builder.record_step(step)
 
         result1 = await rail.notify_team_completed(ctx=None)
@@ -1902,7 +2082,7 @@ async def test_notify_team_completed_allows_new_invoke_after_async_evolution():
         await rail.after_invoke(_MockCtx(inputs=InvokeInputs(query="round 1", conversation_id="test-session")))
         events1 = await rail.drain_pending_approval_events(wait=True, timeout=5.0)
         await rail.before_invoke(_MockCtx(inputs=InvokeInputs(query="round 2", conversation_id="test-session")))
-        for step in build_patch_trajectory("deep-research-to-ppt").steps:
+        for step in trajectory_steps(build_patch_trajectory("deep-research-to-ppt")):
             rail._builder.record_step(step)
         result3 = await rail.notify_team_completed(ctx=None)
         await rail.after_invoke(_MockCtx(inputs=InvokeInputs(query="round 2", conversation_id="test-session")))
@@ -1940,11 +2120,12 @@ async def test_async_evolution_failure_is_buffered_and_visible():
             skills_dir=str(tmp),
             llm=FailingLLM(),
             model="mock-model",
+            auto_scan=True,
             auto_save=False,
             async_evolution=True,
         )
         rail._builder = TrajectoryBuilder(session_id="test-session", source="online")
-        for step in build_patch_trajectory("deep-research-to-ppt").steps:
+        for step in trajectory_steps(build_patch_trajectory("deep-research-to-ppt")):
             rail._builder.record_step(step)
 
         result = await rail.notify_team_completed(ctx=None)
@@ -1998,6 +2179,7 @@ async def test_run_evolution_uses_trajectory_source():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
+            auto_scan=True,
             auto_save=False,
             async_evolution=False,
             team_id="team-a",
@@ -2006,20 +2188,102 @@ async def test_run_evolution_uses_trajectory_source():
         captured: dict[str, Any] = {}
         _capture_trajectory_signals(rail, captured)
 
-        trajectory = Trajectory(
+        trajectory = trajectory_from_steps(
             execution_id="test-001",
             session_id="session-1",
-            source="online",
             steps=[],
+            source="online",
         )
         ctx = _MockCtx()
 
         await rail.run_evolution(trajectory, ctx)
 
         used_trajectory = captured["trajectory"]
-        assert used_trajectory.execution_id == "team-team-a"
-        assert used_trajectory.meta["member_count"] == 2
+        assert trajectory_execution_id(used_trajectory) == "team-team-a"
+        assert trajectory_meta(used_trajectory)["member_count"] == 2
         assert _tool_names(used_trajectory) == ["spawn_member", "read_file", "view_task"]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_aggregate_team_trajectory_accepts_legacy_source_signature():
+    """Older trajectory sources without filter_collaborative should fall back cleanly."""
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+
+    class _LegacyTrajectorySource:
+        def __init__(self, trajectory: Trajectory) -> None:
+            self.trajectory = trajectory
+            self.calls: list[dict[str, Any]] = []
+
+        def get_trajectory(self, *, team_id: str, session_id: str) -> Trajectory:
+            self.calls.append({"team_id": team_id, "session_id": session_id})
+            return self.trajectory
+
+    try:
+        team_trajectory = trajectory_from_steps(
+            execution_id="team-team-a",
+            session_id="session-legacy-source",
+            steps=[
+                _build_member_step("view_task", {}, start_time_ms=100),
+            ],
+            source="online",
+            meta={"member_count": 1},
+        )
+        source = _LegacyTrajectorySource(team_trajectory)
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            auto_save=False,
+            async_evolution=False,
+            team_id="team-a",
+            trajectory_source=source,
+        )
+        fallback = trajectory_from_steps(
+            execution_id="fallback",
+            session_id="session-legacy-source",
+            steps=[],
+            source="online",
+        )
+
+        result = rail._aggregate_team_trajectory(fallback)
+
+        assert result is team_trajectory
+        assert source.calls == [{"team_id": "team-a", "session_id": "session-legacy-source"}]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_with_trajectory_source_and_trace_does_not_shadow_source_name():
+    """Configured team trajectory source should not shadow base trace source naming."""
+    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
+    try:
+        source = InMemoryTrajectoryRegistry()
+        rail = TeamSkillRail(
+            skills_dir=str(tmp),
+            llm=MockLLM(),
+            model="mock-model",
+            auto_save=False,
+            async_evolution=False,
+            team_id="team-a",
+            trajectory_source=source,
+        )
+        rail._evolution_trigger = EvolutionTriggerPoint.NONE
+        rail._builder = TrajectoryBuilder(session_id="session-1", source="online")
+        ctx = _MockCtx(
+            inputs=InvokeInputs(query="round 1", conversation_id="session-1"),
+            session=SimpleNamespace(
+                tracer=lambda: SimpleNamespace(
+                    tracer_agent_span_manager=SimpleNamespace(_trace_id="trace-1")
+                )
+            ),
+        )
+
+        await rail.after_invoke(ctx)
+
+        assert rail._trajectory_source is source
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2055,6 +2319,7 @@ async def test_run_evolution_filters_non_collaborative_steps():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
+            auto_scan=True,
             auto_save=False,
             async_evolution=False,
             team_id="team-a",
@@ -2063,18 +2328,18 @@ async def test_run_evolution_filters_non_collaborative_steps():
         captured: dict[str, Any] = {}
         _capture_trajectory_signals(rail, captured)
 
-        trajectory = Trajectory(
+        trajectory = trajectory_from_steps(
             execution_id="test-002",
             session_id="session-1",
-            source="online",
             steps=[],
+            source="online",
         )
         ctx = _MockCtx()
 
         await rail.run_evolution(trajectory, ctx)
 
         used_trajectory = captured["trajectory"]
-        assert [step.kind for step in used_trajectory.steps] == ["tool", "tool", "tool"]
+        assert [step.kind for step in trajectory_steps(used_trajectory)] == ["tool", "tool", "tool"]
         assert _tool_names(used_trajectory) == ["spawn_member", "read_file", "view_task"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2130,6 +2395,7 @@ async def test_run_evolution_keeps_full_leader_trajectory():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
+            auto_scan=True,
             auto_save=False,
             async_evolution=False,
             team_id="team-a",
@@ -2139,18 +2405,18 @@ async def test_run_evolution_keeps_full_leader_trajectory():
         captured: dict[str, Any] = {}
         _capture_trajectory_signals(rail, captured)
 
-        trajectory = Trajectory(
+        trajectory = trajectory_from_steps(
             execution_id="test-003",
             session_id="session-1",
-            source="online",
             steps=[],
+            source="online",
         )
 
         await rail.run_evolution(trajectory, _MockCtx())
 
         used_trajectory = captured["trajectory"]
-        assert [step.kind for step in used_trajectory.steps] == ["llm", "tool", "tool"]
-        assert used_trajectory.steps[0].meta["operator_id"] == "leader/llm_main"
+        assert [step.kind for step in trajectory_steps(used_trajectory)] == ["llm", "tool", "tool"]
+        assert trajectory_steps(used_trajectory)[0].meta["operator_id"] == "leader/llm_main"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2185,10 +2451,9 @@ def test_detect_used_team_skill_prefers_skill_tool_and_filters_non_team_skill():
             async_evolution=False,
         )
 
-        trajectory = Trajectory(
+        trajectory = trajectory_from_steps(
             execution_id="detect-001",
             session_id="session-1",
-            source="online",
             steps=[
                 TrajectoryStep(
                     kind="tool",
@@ -2205,16 +2470,16 @@ def test_detect_used_team_skill_prefers_skill_tool_and_filters_non_team_skill():
                     ),
                 ),
             ],
+            source="online",
         )
 
         result = rail._detect_used_team_skill(trajectory)
 
         assert result == "deep-research-to-ppt"
 
-        swarm_trajectory = Trajectory(
+        swarm_trajectory = trajectory_from_steps(
             execution_id="detect-001-swarm",
             session_id="session-1",
-            source="online",
             steps=[
                 TrajectoryStep(
                     kind="tool",
@@ -2224,6 +2489,7 @@ def test_detect_used_team_skill_prefers_skill_tool_and_filters_non_team_skill():
                     ),
                 ),
             ],
+            source="online",
         )
 
         assert rail._detect_used_team_skill(swarm_trajectory) == "swarm-research"
@@ -2255,10 +2521,9 @@ def test_detect_used_team_skill_excludes_disabled_skills():
             disabled_skills=["team-skill-a"],
         )
 
-        trajectory = Trajectory(
+        trajectory = trajectory_from_steps(
             execution_id="detect-disabled",
             session_id="session-1",
-            source="online",
             steps=[
                 TrajectoryStep(
                     kind="tool",
@@ -2275,6 +2540,7 @@ def test_detect_used_team_skill_excludes_disabled_skills():
                     ),
                 ),
             ],
+            source="online",
         )
 
         result = rail._detect_used_team_skill(trajectory)
@@ -2301,10 +2567,9 @@ def test_detect_used_team_skill_returns_none_when_all_disabled():
             disabled_skills=["team-skill-x"],
         )
 
-        trajectory = Trajectory(
+        trajectory = trajectory_from_steps(
             execution_id="detect-all-disabled",
             session_id="session-1",
-            source="online",
             steps=[
                 TrajectoryStep(
                     kind="tool",
@@ -2314,6 +2579,7 @@ def test_detect_used_team_skill_returns_none_when_all_disabled():
                     ),
                 ),
             ],
+            source="online",
         )
 
         result = rail._detect_used_team_skill(trajectory)
@@ -2367,10 +2633,9 @@ def test_team_task_completion_helper_covers_terminal_and_non_terminal_text(resul
 
 
 def test_infer_team_skill_from_trajectory_helper_handles_multi_skill_and_no_match():
-    trajectory = Trajectory(
+    trajectory = trajectory_from_steps(
         execution_id="detect-helper",
         session_id="session-1",
-        source="online",
         steps=[
             TrajectoryStep(
                 kind="tool",
@@ -2387,6 +2652,7 @@ def test_infer_team_skill_from_trajectory_helper_handles_multi_skill_and_no_matc
                 ),
             ),
         ],
+        source="online",
     )
 
     assert infer_team_skill_from_trajectory(trajectory, {"team-a", "team-b"}) == "team-a"
@@ -2417,10 +2683,9 @@ def test_detect_used_team_skill_prefers_skills_path_over_legacy_skill_md():
             async_evolution=False,
         )
 
-        trajectory = Trajectory(
+        trajectory = trajectory_from_steps(
             execution_id="detect-002",
             session_id="session-1",
-            source="online",
             steps=[
                 TrajectoryStep(
                     kind="tool",
@@ -2437,6 +2702,7 @@ def test_detect_used_team_skill_prefers_skills_path_over_legacy_skill_md():
                     ),
                 ),
             ],
+            source="online",
         )
 
         result = rail._detect_used_team_skill(trajectory)
@@ -2594,7 +2860,12 @@ async def test_run_evolution_uses_rule_signals_without_user_intent_merge():
         rail._pending_host_events = []
 
         await rail.run_evolution(
-            Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory_from_steps(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             snapshot={"messages": [{"role": "user", "content": "please improve"}]},
         )
 
@@ -2622,7 +2893,12 @@ async def test_run_evolution_cancels_when_no_rule_signals():
         rail._experience_tracker.evaluate_presented = AsyncMock()
 
         await rail.run_evolution(
-            Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory_from_steps(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             snapshot={"messages": [{"role": "user", "content": "please improve"}]},
         )
 
@@ -3004,7 +3280,12 @@ async def test_run_evolution_uses_team_signal_consumer():
         rail._handle_evolution_from_signals_with_result = AsyncMock(side_effect=_consume_signal_with_result)
 
         await rail.run_evolution(
-            Trajectory(execution_id="exec-1", session_id="sess-1", source="online", steps=[]),
+            trajectory_from_steps(
+                execution_id="exec-1",
+                session_id="sess-1",
+                steps=[],
+                source="online",
+            ),
             _MockCtx(),
         )
 
@@ -3103,7 +3384,12 @@ async def test_stage_evolution_from_signals_rejects_legacy_excerpt_arguments():
         await TeamSkillRail._stage_evolution_from_signals(  # type: ignore[misc]
             rail,
             "team-skill-a",
-            trajectory=Trajectory(execution_id="e1", session_id="s1", source="online", steps=[]),
+            trajectory=trajectory_from_steps(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
             excerpt="legacy",
             auto_approve=False,
         )

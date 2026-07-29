@@ -1,7 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-import asyncio
 import uuid
 from types import SimpleNamespace
 from typing import (
@@ -18,6 +17,11 @@ import pytest
 
 from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+from openjiuwen.agent_teams.context import (
+    get_session_id,
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     TeamAgentSpec,
@@ -123,7 +127,7 @@ class FakeTeamAgent:
                 "context": {
                     "role": "leader",
                     "member_name": "leader",
-                    "persona": "leader",
+                    "desc": "leader",
                     "team_spec": {
                         "team_name": self.team_name,
                         "display_name": self.team_name,
@@ -889,7 +893,6 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
         card=leader_card,
         spec=TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="persistent_team"),
         ctx=ctx,
-        role_policy="",
         language="en",
     )
 
@@ -897,7 +900,7 @@ async def test_team_agent_resume_for_new_session_rebinds_only_live_teammates():
     fake_backend = SimpleNamespace(
         team_name="persistent_team",
         db=fake_db,
-        list_members=AsyncMock(
+        list_member_roster=AsyncMock(
             return_value=[
                 SimpleNamespace(member_name="leader", status="ready"),
                 SimpleNamespace(member_name="worker_busy", status="busy"),
@@ -950,7 +953,6 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
         card=leader_card,
         spec=TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="persistent_team"),
         ctx=ctx,
-        role_policy="",
         language="en",
     )
 
@@ -958,7 +960,7 @@ async def test_team_agent_recover_for_existing_session_rebinds_live_teammates():
     fake_backend = SimpleNamespace(
         team_name="persistent_team",
         db=fake_db,
-        list_members=AsyncMock(
+        list_member_roster=AsyncMock(
             return_value=[
                 SimpleNamespace(member_name="leader", status="ready"),
                 SimpleNamespace(member_name="worker_busy", status="busy"),
@@ -1016,7 +1018,7 @@ def test_team_agent_recover_from_session_restores_session_id():
             "context": {
                 "role": "leader",
                 "member_name": "leader",
-                "persona": "leader",
+                "desc": "leader",
                 "team_spec": {
                     "team_name": "persistent_team",
                     "display_name": "persistent_team",
@@ -1058,7 +1060,7 @@ def test_team_agent_recover_from_session_builds_leader_member_handle():
             "context": {
                 "role": "leader",
                 "member_name": "leader",
-                "persona": "leader",
+                "desc": "leader",
                 "team_spec": {
                     "team_name": "persistent_team",
                     "display_name": "persistent_team",
@@ -1459,18 +1461,37 @@ class TestTeamRuntimeManagerStopTeam:
         fake_agent = FakeTeamAgent(team_name, stream_label="team.chunk")
         await _activate_pool_entry(manager, team_name, session_id, fake_agent)
 
-        with patch("openjiuwen.agent_teams.runtime.manager.create_monitor", return_value="monitor") as mocked:
-            assert await manager.get_monitor(team_name=team_name, session_id=session_id) == "monitor"
-            mocked.assert_called_once_with(fake_agent, hide_dm=False)
+        observed_session_ids = []
 
-        with patch("openjiuwen.agent_teams.runtime.manager.create_monitor", return_value="dm_hidden") as mocked:
-            assert (
-                await manager.get_monitor(team_name=team_name, session_id=session_id, hide_dm=True) == "dm_hidden"
-            )
-            mocked.assert_called_once_with(fake_agent, hide_dm=True)
+        def _create_monitor(_agent, *, hide_dm=False):
+            observed_session_ids.append(get_session_id())
+            return "dm_hidden" if hide_dm else "monitor"
+
+        caller_token = set_session_id("caller-session")
+        try:
+            with patch(
+                "openjiuwen.agent_teams.runtime.manager.create_monitor",
+                side_effect=_create_monitor,
+            ) as mocked:
+                assert await manager.get_monitor(team_name=team_name, session_id=session_id) == "monitor"
+                mocked.assert_called_once_with(fake_agent, hide_dm=False)
+                assert get_session_id() == "caller-session"
+
+            with patch(
+                "openjiuwen.agent_teams.runtime.manager.create_monitor",
+                side_effect=_create_monitor,
+            ) as mocked:
+                assert (
+                    await manager.get_monitor(team_name=team_name, session_id=session_id, hide_dm=True) == "dm_hidden"
+                )
+                mocked.assert_called_once_with(fake_agent, hide_dm=True)
+                assert get_session_id() == "caller-session"
+        finally:
+            reset_session_id(caller_token)
 
         assert await manager.get_monitor(team_name=team_name, session_id="other") is None
         assert await manager.get_monitor(team_name="missing", session_id=session_id) is None
+        assert observed_session_ids == [session_id, session_id]
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -1876,12 +1897,19 @@ class TestRunnerReleaseAutoDispatch:
         fake_db.initialize = AsyncMock()
         fake_db.drop_session_tables_by_id = AsyncMock(return_value=["team_task_xxx"])
 
-        with patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db):
+        with (
+            patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db),
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.remove_session_worktrees",
+                new_callable=AsyncMock,
+            ) as remove_worktrees,
+        ):
             await Runner.release(session_id)
 
         # Should have called drop_session_tables_by_id (team cleanup)
         fake_db.initialize.assert_awaited_once()
         fake_db.drop_session_tables_by_id.assert_awaited_once_with(session_id)
+        remove_worktrees.assert_awaited_once_with("auto_team", session_id)
 
         # Checkpoint should be released
         assert await isolated_checkpointer.session_exists(session_id) is False
@@ -1920,10 +1948,22 @@ class TestRunnerReleaseAutoDispatch:
         fake_db.initialize = AsyncMock()
         fake_db.drop_session_tables_by_id = AsyncMock(return_value=["team_task_xxx"])
 
-        with patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db):
+        with (
+            patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db),
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.remove_session_worktrees",
+                new_callable=AsyncMock,
+            ) as remove_worktrees,
+        ):
             await Runner.release(session_id)
 
         fake_db.drop_session_tables_by_id.assert_awaited_once_with(session_id)
+        remove_worktrees.assert_has_awaits(
+            [
+                call("first_team", session_id),
+                call("second_team", session_id),
+            ]
+        )
         assert await isolated_checkpointer.session_exists(session_id) is False
 
         await Runner.stop()
