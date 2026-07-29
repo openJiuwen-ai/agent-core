@@ -32,6 +32,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         self._transport = transport
         self._client: Any | None = None
         self._abort_requested = False
+        self._tool_names_by_id: dict[str, str] = {}
 
     async def start(self, *, team_session: Any | None = None) -> None:
         """Start the SDK client and initialize Claude's streaming protocol."""
@@ -50,13 +51,14 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         query = inputs.get("query")
         text = query if isinstance(query, str) else str(query)
         self._abort_requested = False
+        self._tool_names_by_id.clear()
         await client.query(text)
         chunk_index = 0
         async for message in client.receive_response():
             if self._abort_requested:
                 team_logger.debug("[{}] claude sdk turn aborted", self._member_name)
                 return
-            for chunk in _iter_sdk_chunks(message, chunk_index):
+            for chunk in _iter_sdk_chunks(message, chunk_index, self._tool_names_by_id):
                 team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
                 yield chunk
                 chunk_index = chunk.index + 1
@@ -126,19 +128,27 @@ async def _empty_prompt() -> AsyncIterator[dict[str, Any]]:
     yield {}  # type: ignore[unreachable]
 
 
-def _iter_sdk_chunks(message: Any, start_index: int) -> list[OutputSchema]:
+def _iter_sdk_chunks(
+    message: Any,
+    start_index: int,
+    tool_names_by_id: dict[str, str],
+) -> list[OutputSchema]:
     """Convert one Claude SDK message into native team stream chunks."""
     sdk = load_claude_sdk()
     if isinstance(message, sdk.AssistantMessage):
-        return _assistant_chunks(message.content, start_index)
+        return _assistant_chunks(message.content, start_index, tool_names_by_id)
     if isinstance(message, sdk.UserMessage):
-        return _user_chunks(message, start_index)
+        return _user_chunks(message, start_index, tool_names_by_id)
     if isinstance(message, sdk.SystemMessage) or isinstance(message, sdk.ResultMessage):
         return []
     return []
 
 
-def _assistant_chunks(content: Any, start_index: int) -> list[OutputSchema]:
+def _assistant_chunks(
+    content: Any,
+    start_index: int,
+    tool_names_by_id: dict[str, str],
+) -> list[OutputSchema]:
     """Convert assistant content blocks into stream chunks."""
     if not isinstance(content, list):
         return []
@@ -155,6 +165,8 @@ def _assistant_chunks(content: Any, start_index: int) -> list[OutputSchema]:
                 chunks.append(_text_chunk("llm_reasoning", block.thinking, index))
                 index += 1
         elif isinstance(block, sdk.ToolUseBlock):
+            if block.id:
+                tool_names_by_id[block.id] = block.name
             chunks.append(
                 OutputSchema(
                     type="tool_call",
@@ -170,29 +182,38 @@ def _assistant_chunks(content: Any, start_index: int) -> list[OutputSchema]:
     return chunks
 
 
-def _user_chunks(message: Any, start_index: int) -> list[OutputSchema]:
+def _user_chunks(
+    message: Any,
+    start_index: int,
+    tool_names_by_id: dict[str, str],
+) -> list[OutputSchema]:
     """Convert user-side tool results into stream chunks without replaying text."""
     chunks: list[OutputSchema] = []
     index = start_index
-    content_chunks = _tool_result_content_chunks(message.content, index)
+    content_chunks = _tool_result_content_chunks(message.content, index, tool_names_by_id)
     chunks.extend(content_chunks)
     index += len(content_chunks)
     if not content_chunks and message.tool_use_result is not None:
+        tool_call_id = message.parent_tool_use_id or ""
         chunks.append(
             OutputSchema(
                 type="tool_result",
                 index=index,
                 payload={
-                    "tool_name": "",
+                    "tool_name": _pop_tool_name(tool_names_by_id, tool_call_id),
                     "result": _normalize_tool_result(message.tool_use_result),
-                    "tool_call_id": message.parent_tool_use_id or "",
+                    "tool_call_id": tool_call_id,
                 },
             ),
         )
     return chunks
 
 
-def _tool_result_content_chunks(content: Any, start_index: int) -> list[OutputSchema]:
+def _tool_result_content_chunks(
+    content: Any,
+    start_index: int,
+    tool_names_by_id: dict[str, str],
+) -> list[OutputSchema]:
     """Convert tool result content blocks into stream chunks."""
     if not isinstance(content, list):
         return []
@@ -206,7 +227,7 @@ def _tool_result_content_chunks(content: Any, start_index: int) -> list[OutputSc
                     type="tool_result",
                     index=index,
                     payload={
-                        "tool_name": "",
+                        "tool_name": _pop_tool_name(tool_names_by_id, block.tool_use_id),
                         "result": _normalize_tool_result(block.content),
                         "tool_call_id": block.tool_use_id,
                     },
@@ -214,6 +235,13 @@ def _tool_result_content_chunks(content: Any, start_index: int) -> list[OutputSc
             )
             index += 1
     return chunks
+
+
+def _pop_tool_name(tool_names_by_id: dict[str, str], tool_call_id: str) -> str:
+    """Return and forget the tool name matched by a Claude tool-use id."""
+    if not tool_call_id:
+        return ""
+    return tool_names_by_id.pop(tool_call_id, "")
 
 
 def _text_chunk(chunk_type: str, content: str, index: int) -> OutputSchema:

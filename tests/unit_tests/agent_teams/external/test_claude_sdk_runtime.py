@@ -349,7 +349,7 @@ async def test_claude_sdk_runtime_emits_native_team_chunks(fake_claude_sdk):
         "tool_call_id": "toolu_1",
     }
     assert chunks[3].payload == {
-        "tool_name": "",
+        "tool_name": "Read",
         "result": "file body",
         "tool_call_id": "toolu_1",
     }
@@ -364,26 +364,29 @@ async def test_claude_sdk_runtime_emits_native_team_chunks(fake_claude_sdk):
 def test_claude_sdk_runtime_skips_duplicate_tool_result_payload(fake_claude_sdk: Any) -> None:
     from openjiuwen.agent_teams.external.cli_agent.claude.runtime import _iter_sdk_chunks
 
+    tool_names_by_id = {"toolu_1": "Read"}
     message = _FakeClaudeSdk.UserMessage(
         content=[_FakeClaudeSdk.ToolResultBlock(tool_use_id="toolu_1", content="visible result")],
         parent_tool_use_id="toolu_1",
         tool_use_result={"duplicated": True},
     )
 
-    chunks = _iter_sdk_chunks(message, 0)
+    chunks = _iter_sdk_chunks(message, 0, tool_names_by_id)
 
     assert len(chunks) == 1
     assert chunks[0].payload == {
-        "tool_name": "",
+        "tool_name": "Read",
         "result": "visible result",
         "tool_call_id": "toolu_1",
     }
+    assert tool_names_by_id == {}
 
 
 @pytest.mark.level0
 def test_claude_sdk_runtime_joins_text_tool_result_blocks(fake_claude_sdk: Any) -> None:
     from openjiuwen.agent_teams.external.cli_agent.claude.runtime import _iter_sdk_chunks
 
+    tool_names_by_id = {"toolu_1": "Read"}
     message = _FakeClaudeSdk.UserMessage(
         content=[
             _FakeClaudeSdk.ToolResultBlock(
@@ -396,13 +399,14 @@ def test_claude_sdk_runtime_joins_text_tool_result_blocks(fake_claude_sdk: Any) 
         ],
     )
 
-    chunks = _iter_sdk_chunks(message, 0)
+    chunks = _iter_sdk_chunks(message, 0, tool_names_by_id)
 
     assert chunks[0].payload == {
-        "tool_name": "",
+        "tool_name": "Read",
         "result": "first\nsecond",
         "tool_call_id": "toolu_1",
     }
+    assert tool_names_by_id == {}
 
 
 @pytest.mark.asyncio
