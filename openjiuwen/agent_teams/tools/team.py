@@ -390,6 +390,11 @@ class TeamBackend:
         if isolation is not None and isolation != "worktree":
             return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
 
+        if not await self.db.team.team_exists(self.team_name):
+            return MemberOpResult.fail(
+                f"Team {self.team_name} does not exist; call build_team first"
+            )
+
         from openjiuwen.agent_teams.tools.member_options import build_member_options
 
         options = build_member_options(

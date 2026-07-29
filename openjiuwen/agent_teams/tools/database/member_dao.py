@@ -101,7 +101,10 @@ class MemberDao:
                 return True
             except IntegrityError:
                 await session.rollback()
-                team_logger.error("Member %s already exists", member_name)
+                team_logger.error(
+                    "Failed to create member %s in team %s (duplicate name or missing team)",
+                    member_name, team_name,
+                )
                 return False
 
     async def is_human_agent(self, team_name: str, member_name: str) -> bool:
