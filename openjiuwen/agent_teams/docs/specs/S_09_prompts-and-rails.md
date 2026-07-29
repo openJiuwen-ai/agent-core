@@ -59,12 +59,17 @@
 
 13. **团队状态走对话历史，不走 attachment，也不进系统提示词（[[F_70]]）**：成员自身身份、团队元数据、成员名册由 `team_context.TeamContextTracker` 在**数据第一次出现以及此后每次变化**时插入一条消息，正文由 `prompts/messages.py` 渲染、`inbound_render` 包成 `<team-context>` / `<team-event kind="roster"|"roster-change">`。五条硬约束：
     - **只插入，不删除、不重写**。名册变化只发增量（joined / left / changed），不重发全量；`team_info` 变更追加新的一条，旧那条留在历史里作为当时的事实。
-    - **落位只碰"上次模型调用之后新增的那段消息"**：该段里有 user message 就插进**最旧的一条**的正文最前面，没有（tool-loop 中途）就在末尾**新增一条 user message** 承载。绝不改写更早的历史——改一条旧消息会让它之后的 KV cache 全部作废。
+    - **落位有两条通道，且都不按位置定位**（[[F_70]] D1c）。**禁止**任何"记住上次看到哪条消息、下次从它之后找起"的方案——无论用下标还是消息 id 锚：上下文压缩会重写整段历史，下标之后已不是同一条消息，而消息 id 锚被压缩抹掉后只能退化，等于给一条本可以不存在的路径养一套失效处理。
+      - **主通道 `on_user_message`**：core 的 `AgentCallbackEvent.ON_USER_MESSAGE` 在每条被消费的输入（新一轮 query / follow-up / steering / resume）**写进对话之前**触发，rail 就地改 `ctx.inputs.message.content`，把待发内容拼到正文最前面。这是能把一条输入当作"输入"来处理的唯一时刻；写进去之后它就是普通历史，会被压缩搬动。
+      - **兜底 `before_model_call`**：只**追加**一条独立 user message，不定位。state 也可能在一轮的 tool-loop 中途出现（leader 的 `build_team` 在中途建队、写自己的 member 行和名册），此时没有输入可搭车，而下一条输入可能很久才来。尾部是唯一不需要定位、也不受"压缩重写了它前面的历史"影响的位置。
+      - 两条通道共用同一个 tracker，谁先拿到 pending 就谁投递；**已在历史里的消息永远不改写**——改一条旧消息会让它之后的 KV cache 全部作废。
+    - **同一次投递里产生的 `<team-context>` 正文合并成一个标签**：身份与团队元数据都是"关于团队的既成事实"，各包一个标签是把同一类东西说两遍。分别在不同调用上产生时自然是两条消息，不合并。
+    - **身份带 `member_name` + `display_name` + 私有工作约定，且 `display_name` 读自己那行 member 行**：名册每行都以两个名字标识成员，少了 `display_name` 成员认不出哪一行是自己；而构造期的值只是 spec 默认（leader 的真实标签由 `build_team(leader_display_name=...)` 写入 DB），所以身份通道**等自己那行存在**才发——teammate 在 spawn 时就有行，leader 则在建队后那次调用上拿到。公开 `desc` 仍然不进自己的身份（见不变量 18a）。
     - **投递进度基线必须持久化在成员自己的 child `AgentSession`**（state key `team_prompt_context`，字段 `identity_emitted` / `team_info_mtime` / `roster_mtime` / `roster`）。`TeamPolicyRail` **每一轮都会被重建**（round 结束 native 进 TERMINATED，下次 start 重新 `RailSpec.build`），基线留内存等于每轮重发；pause/resume、stop→start 只是更严重的版本。该 state 与成员的对话历史存在同一个 agent-session 桶里，由同一次 `AgentStorage.save` 落盘，故两者不会漂移。
     - **先投递、后 `commit`**：`pending_text()` 只渲染不推进，`commit()` 由调用方在投递成功后调用；反过来写会在投递失败时永久丢掉一条公告。tracker **不持锁**——一个成员的 rail 钩子、CLI `send` 与事件补偿都在同一条协程上。
     - **名册消息必带 `<team-note kind="announcement-only">`**（文案 `i18n.team_context.roster_announcement_note`）：否则成员看到"有人加入"就会礼节性寒暄，白烧一轮 LLM + 一轮邮箱投递并连锁触发对方。
 
-14. **探针语义**：`team_info` 用 `get_team_updated_at()`，名册用 `get_members_max_updated_at()`（状态变化不 bump，只有名册变动才 bump）；`identity` 恒定、无探针，靠基线里的一次性标志。探针推进但渲染为空时，基线在 `pending_text` 内部直接推进并落盘——没有东西会投递失败，不推进只会让每次调用重复读 DB。新增状态通道必须提供单调递增的探针；缺少探针的内容不应走这条路径。`MtimeSectionCache`（`prompts/section_cache.py`）作为通用原语保留，当前团队侧无使用者。
+14. **探针语义**：`team_info` 用 `get_team_updated_at()`，名册用 `get_members_max_updated_at()`（状态变化不 bump，只有名册变动才 bump）；`identity` 恒定、无探针，靠基线里的一次性标志。**`team_info` 在团队行不存在时（leader 跑 `build_team` 之前，探针读 0）什么都不发**——工作区路径是 rail 构造参数、恒有值，不加这道闸就会渲染出一个「没有团队的团队信息」块，而真正完整的那条紧随其后，等于把同一件事说两遍、第一遍还是错的。名册同理只在有 peer 时才发：`list_members` 排除调用者本人，故 `build_team` 只写了 leader 自己那行时名册为空，不产出消息。探针推进但渲染为空时，基线在 `pending_text` 内部直接推进并落盘——没有东西会投递失败，不推进只会让每次调用重复读 DB。新增状态通道必须提供单调递增的探针；缺少探针的内容不应走这条路径。`MtimeSectionCache`（`prompts/section_cache.py`）作为通用原语保留，当前团队侧无使用者。
 
 ### Rail 注入契约
 
@@ -336,6 +341,7 @@ class TeamPolicyRail(DeepAgentRail):
 
     def init(self, agent: Any) -> None: ...
     def uninit(self, agent: Any) -> None: ...
+    async def on_user_message(self, ctx: AgentCallbackContext) -> None: ...
     async def before_model_call(self, ctx: AgentCallbackContext) -> None: ...
 
 
@@ -345,8 +351,7 @@ def prepend_to_content(content: Any, text: str) -> Any: ...
 ```
 
 - `__init__` 中一次性 build **全部**团队静态 section（role / HITT 契约 [gate `team_backend.hitt_enabled()`] / bridge 自契约 [仅 BRIDGE_AGENT] / workflow / dispatch / lifecycle / extra + inbound 说明），并构造 `TeamContextTracker`。HITT 契约 gate 用 sync 的 `hitt_enabled()`（而非 live 名册），所以 HITT 一开即 present、无需等 spawn 人类。
-- `before_model_call` 是该 rail 的唯一写入点：先把所有 static section 写回 builder，再 `_sync_team_context(ctx)` 把 tracker 的待发文本按不变量 13 的落位规则写进 `ctx.context`，投递成功后 `commit`。**它不碰 builder**——所有 builder section 都是静态的。`ctx.context` / `ctx.session` 缺席时整体跳过。
-- `_seen_message_count`（进程内、不持久化）标记"上次看到哪"；首次调用取历史里最后一条 user message 的下标，保证恢复出来的旧历史不被改写。
+- 该 rail 有两个写入点，见不变量 13：`on_user_message` 把 tracker 的待发文本拼进正在被消费的那条输入；`before_model_call` 先把所有 static section 写回 builder，再把**仍然**待发的内容作为一条独立 user message **追加**到尾部（tool-loop 中途出现、无输入可搭车的情况）。两者都在投递成功后 `commit`；`ctx.context` / `ctx.session` / `ctx.inputs.message` 缺席时相应跳过。**rail 不持有任何位置状态**。
 - `uninit` 删 `_static_sections` 里每个 section（HITT 契约 / bridge 自契约都在其中）；写进对话的团队状态是成员自己的历史，不由 rail 清理。
 
 ### `rails/first_iteration_gate.py`
@@ -470,7 +475,6 @@ class TeamPermissionRail(PermissionInterruptRail):
 | `_member_name` | `str \| None` | 日志与 tracker 身份 |
 | `_static_sections` | `list[PromptSection]` | 构造期产出的不变内容（已剔除 `None`），含 inbound 说明 section |
 | `_tracker` | `TeamContextTracker` | 团队状态的待发判定 + 基线读写 |
-| `_seen_message_count` | `int \| None` | 本轮已看到的消息数；**进程内、不持久化**（描述活的对话进度，不是累积知识）|
 | `system_prompt_builder` | `SystemPromptBuilder \| None` | `init` 时绑定，`uninit` 时解绑 |
 
 ### `TeamContextTracker` 持久化基线（成员 child AgentSession，key `team_prompt_context`）

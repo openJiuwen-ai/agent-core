@@ -4,8 +4,8 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-07-29 |
-| 范围 | 新增 `team_context.py`（`TeamContextTracker` + session 基线）、`prompts/messages.py`（三种消息正文 + `diff_roster`）；`prompts/sections.py`（删 `build_team_info_section` / `build_team_members_section` / `build_team_attachment_notice_section` + `TeamSectionName.INFO`/`MEMBERS`/`ATTACHMENT_NOTICE` + `include_attachment_notice` 参数，`build_team_identity_section` 改为包装 `build_identity_text`）；`prompts/__init__.py`；`inbound_render.py`（`render_team_context`）；`i18n.py`（`team_context.roster_announcement_note` cn/en）；`rails/team_policy_rail.py`（attachment 通道整体删除，改写历史落位 + `prepend_to_content`）；`external/runtime.py`（`CliRuntimeBase` 统一 member session + `send` 主钩子 + `announce_team_context` 补偿钩子 + `_send_raw` 下沉）；`external/cli_agent/{spawn,claude/runtime,codex/runtime}.py`；`spawn/external_cli_spawn.py`；`agent/coordination/handlers/member.py`（删三份重复实现）；模板 `prompts/{cn,en}/inbound_tags.md`、`teammate_policy_external.md`、`tools/locales/descs/{cn,en}/list_members.md`；删 `prompts/{cn,en}/attachment_notice.md` |
-| 测试基线 | `tests/unit_tests/agent_teams/` 2222 passed / 16 skipped（F_68 基线 2175 / 16）；`tests/unit_tests/harness/prompts` + `test_prompt_attachment_manager.py` 73 passed |
+| 范围 | **core**：`single_agent/rail/base.py` 新增 `AgentCallbackEvent.ON_USER_MESSAGE` + `UserMessageInputs` + `AgentRail.on_user_message`（`rail/__init__.py` 同步导出）、`single_agent/agents/react_agent.py` 三处输入准入收敛为 `_admit_user_message` 并触发该事件；新增 `schema/team.py` 的 `TeamRuntimeContext.display_name`（leader 经 `blueprint`、teammate 经 `spawn_manager` / `payload` 填充）；新增 `team_context.py`（`TeamContextTracker` + session 基线）、`prompts/messages.py`（三种消息正文 + `diff_roster`）；`prompts/sections.py`（删 `build_team_info_section` / `build_team_members_section` / `build_team_attachment_notice_section` + `TeamSectionName.INFO`/`MEMBERS`/`ATTACHMENT_NOTICE` + `include_attachment_notice` 参数，`build_team_identity_section` 改为包装 `build_identity_text`）；`prompts/__init__.py`；`inbound_render.py`（`render_team_context`）；`i18n.py`（`team_context.roster_announcement_note` cn/en）；`rails/team_policy_rail.py`（attachment 通道整体删除，改写历史落位 + `prepend_to_content`）；`external/runtime.py`（`CliRuntimeBase` 统一 member session + `send` 主钩子 + `announce_team_context` 补偿钩子 + `_send_raw` 下沉）；`external/cli_agent/{spawn,claude/runtime,codex/runtime}.py`；`spawn/external_cli_spawn.py`；`agent/coordination/handlers/member.py`（删三份重复实现）；模板 `prompts/{cn,en}/inbound_tags.md`、`teammate_policy_external.md`、`tools/locales/descs/{cn,en}/list_members.md`；删 `prompts/{cn,en}/attachment_notice.md` |
+| 测试基线 | `tests/unit_tests/{agent_teams,core/single_agent,harness}/` 4650 passed / 31 skipped |
 | Refs | #751 |
 
 ## 背景
@@ -91,8 +91,83 @@ if text:
 原来 `team_info` 走 `MtimeSectionCache`、`team_members` 走 rail 内手写探针的不对称，随着两者
 收进同一套"探针 + 持久化基线 + diff"一并消失。`prompts/section_cache.py` 作为通用原语保留。
 
-**探针推进但渲染为空**（名册里只剩自己、team 行还没有可读字段）时，基线在 `pending_text`
-内部直接推进并落盘——没有东西会投递失败，不推进只会让每次调用重复读一遍 DB。
+**探针推进但没有东西可说**（名册里只剩自己、或团队行还不存在，见 D1a）时，基线在
+`pending_text` 内部直接推进并落盘——没有东西会投递失败，不推进只会让每次调用重复读一遍 DB。
+
+### D1a：团队行不存在时不发 `team_info`（落地后修的首个 bug）
+
+原则一说"数据产生的时刻"，但第一版把这句话交给了渲染函数去判断——而
+`build_team_info_text` 只要**任一**字段非空就出正文，`team_workspace_mount` /
+`team_workspace_path` 又是 rail 构造参数、恒有值。结果 leader 首轮就收到一条只有工作区路径、
+没有 team_name / display_name / 团队目标的"团队信息"，`build_team` 成功后再收一条完整的：
+同一件事说两遍，第一遍还是错的。
+
+修法是把闸门放回 tracker：`_team_info_block` 拿到 `get_team_info()` 为 `None` 就直接返回，
+只推进探针（团队行缺失时探针读 0，创建后自然变），不产出任何块。渲染函数保持通用——它不知道
+"为什么" info 是空的，那是 tracker 的职责。
+
+名册侧同一类问题不存在但值得记一笔：`list_members` 按设计排除调用者本人，所以 `build_team`
+只写了 leader 自己那行时名册为空、不产出消息，要等 `spawn_teammate` 才有内容——这是正确行为，
+不是漏发。
+
+漏网的原因也记下来：`test_leader_says_nothing_before_the_team_exists` 当时没给 rail 配工作区
+路径，而生产里一直有，于是那条断言在"三个字段都空"的场景下空跑通过。补的回归用例
+`test_workspace_paths_alone_do_not_announce_a_team` 显式配上路径，撤掉修复即挂。
+
+### D1b：身份带两个名字，且与团队信息合并成一个 `<team-context>`
+
+同一批落地后暴露的另外两处：
+
+- **身份只有 `member_name`**。但 peer 的名册每行都是
+  `member_name=X display_name=Y`——成员认不出哪一行是自己，也没法用团队其他人称呼它的方式
+  称呼自己。`build_identity_text` 因此补 `display_name`。公开 `desc` **仍然不进**自己的身份
+  （S_09 不变量 18a：它只属于别人的名册）。
+
+  **`display_name` 必须读自己那行 member 行，不能用构造期的值**：leader 的构造期值来自
+  `LeaderSpec.display_name`（spec 默认，如 `Team Leader`），而真正写进 DB 的是
+  `build_team(leader_display_name=...)` 当场传的那个（如「队长」）——拿构造期值等于告诉
+  leader 一个团队里没人用的名字。所以 identity 通道**等自己那行存在**才发：teammate 的行在
+  spawn 时就有，门槛为零；leader 则在建队后的那次调用上拿到身份，正好与同一刻出现的团队
+  信息合并成一个 `<team-context>`。构造期的 `TeamRuntimeContext.display_name` 退化为无
+  backend 时（纯静态单测）的兜底。
+- **两个相邻的 `<team-context>`**。身份和团队信息都是"关于团队的既成事实"，同一次投递里
+  各包一个标签等于把同一类东西说两遍。改为同一批渲染出的正文合并进一个 `<team-context>`；
+  它们在**不同**调用上产生时（leader 的身份在首轮、团队信息在建队那轮）自然还是两条消息，
+  这无法也不该合并。
+
+### D1c：落位不再靠下标——新增 `ON_USER_MESSAGE` 钩子，在消息进入对话之前处理它
+
+按下标定位本轮起点这条路走不通：**上下文压缩会重写 / 丢弃消息，保存下来的下标随后指向别的
+东西**，最坏情况是把团队上下文插到压缩摘要前面。而且要插的本来就只有"原始输入"（新一轮
+query / follow-up / steer 进来的消息），不是历史里任意一条 user message。
+
+所以在 core 侧新增一个事件：`AgentCallbackEvent.ON_USER_MESSAGE`
+（`UserMessageInputs{message, source}`，`source` ∈ `query` / `steering` / `resume`）。
+`ReActAgent` 把三处 `add_messages(UserMessage(...))` 收敛成一个
+`_admit_user_message(...)`：先构造消息 → `ctx.fire(ON_USER_MESSAGE)` 让 rail 就地改
+`message.content` → 再写进对话。**这是 rail 能把一条输入当作"输入"来处理的唯一时刻**；写进去
+之后它就是普通历史，会被压缩搬动，按位置找它不再安全。
+
+`TeamPolicyRail` 因此变成两条通道，都不碰任何既有消息：
+
+- **`on_user_message`（主通道）**：待发内容拼到这条输入正文最前面。零下标、免疫压缩。
+- **`before_model_call`（兜底）**：只**追加**，不定位。state 也可能在一轮的 tool loop 中途
+  出现——leader 的 `build_team` 正是在中途建队、写自己的 member 行和名册，而下一条输入可能
+  很久才来；这时把待发内容作为一条独立消息追加到尾部。尾部是唯一不需要下标、也不会被
+  "压缩重写了它前面的历史"影响的位置。
+
+`_seen_message_count` / `_placement_target` / `_round_start_index` 全部删除。
+
+<details>
+<summary>被替换掉的三版中间方案（记下来以免后人重走）</summary>
+
+1. **"历史里最后一条 user message"**：一轮攒了广播 + steering 两条输入时会落进 steering 那条。
+2. **"最后一条 assistant 之后"**：修好了上一条，但仍然按下标定位，压缩一来就失效。
+3. **消息 id 锚点**（`metadata[CONTEXT_MESSAGE_ID_KEY]`）：不再依赖下标，但锚点被压缩抹掉后
+   只能退化成"取空段"——等于为一条本来可以不存在的路径养一套失效处理。钩子从根上消掉了
+   "事后再去找那条消息"这件事。
+
+</details>
 
 ### D2：基线写在成员自己的 child AgentSession
 
@@ -112,19 +187,14 @@ if text:
 `identity_emitted` / `team_info_mtime` / `roster_mtime` / `roster`。`roster` 必须存——增量
 diff 要有 old 才算得出。
 
-### D3：进程内成员——rail 在 `before_model_call` 落位
+### D3：进程内成员——两个写入点，rail 不持有任何位置状态
 
 - attachment 通道全部代码删除（`attachment_manager` 字段、`_ATTACHMENT_SOURCE`、
   `_upsert_or_clear`、`_identity_section`、`_info_cache`、`_members_cached_mtime` 手写探针）。
-- 落位只用两件事，**`openjiuwen/core/` 一行不动**：就地改一条已在缓冲区里的 `UserMessage`
-  的 `content`（`BaseMessage` 是可变 pydantic 模型，`get_messages()` 返回列表浅拷贝、消息
-  对象是同一引用），或 `await ctx.context.add_messages(UserMessage(...))` 追加到尾部。
+- 写入点见 D1c：`on_user_message` 拼进正在被消费的输入，`before_model_call` 把仍然待发的内容
+  追加成一条独立消息。rail 里**没有任何字段记录"上次看到哪"**。
 - `content` 是 `str | list[str | dict]`，两种形态都要能接前缀，所以 `prepend_to_content`
   是模块级公开函数（可单测）：`list` 且首元素不是 str 时插一个新块，不硬塞进别人的结构里。
-- **"本次新增消息"的边界**由 rail 内**进程内** `_seen_message_count` 决定（它描述"本轮活的
-  对话推进到哪"，不是累积知识，故不持久化）：首次 `before_model_call` 取"当前历史里最后一条
-  user message 的下标"，冷启动落在首条 query 上、热恢复落在本轮触发消息上，**绝不去改恢复
-  出来的旧历史**（改旧消息会把它之后的缓存全作废）。
 
 ### D4：外部 CLI 成员——同一个 tracker，两个入口，一条投递路径
 
@@ -196,12 +266,21 @@ attachment 给出"，`tools/locales/descs/*/list_members.md` 的"名册在
 
 ## 验证
 
-- `test_team_policy_rail.py` 重写动态段落（46 passed）：有 user message 时插正文最前且不新增
+- `test_team_policy_rail.py` 重写动态段落（51 passed）：有 user message 时插正文最前且不新增
   消息；只有 tool result 时末尾新增一条 user message；leader 建队前什么都不插、建队那次才
   插；探针不变的后续调用零产出且只付探针成本；名册变化只发增量且旧消息逐字不变；
   **同一 session 上重建 rail 一条都不插**（本次核心回归），清掉基线才重新发；恢复出来的旧
   历史不被改写；公告 note 在快照与增量上都在，含 cn 的 load-bearing 措辞"不要"。
-  另加 `prepend_to_content` 的 str / list / 结构化首块 / 不改原列表四个用例。
+  另加 `prepend_to_content` 的 str / list / 结构化首块 / 不改原列表四个用例，以及落地后修复的
+  回归：`test_workspace_paths_alone_do_not_announce_a_team`（D1a，配上工作区路径后建队
+  前不发团队信息、建队后只发一条完整的；撤掉修复即挂）、
+  `test_identity_and_team_info_share_one_block` + `test_identity_carries_both_names`（D1b）、
+  `test_only_the_first_input_carries_it`（D1c，广播 + steering 两条输入时上下文落在先被消费
+  的那条上）、`test_state_appearing_mid_tool_loop_is_appended`（D1c 兜底，leader 建队后追加
+  一条独立消息且既有历史逐字不变）。
+- 新增 `tests/unit_tests/core/single_agent/rail/test_on_user_message.py`（6 passed）：事件→方法
+  映射、只有 override 的 rail 才注册回调、rail 就地改写 `message.content`、三种 `source`
+  取值。
 - 新增 `prompts/test_team_messages.py`（24 passed）：三种正文的 cn/en、空值返回 `None`、
   workspace mount 与 path-only 两种形态、`diff_roster` 的 joined / left / changed / 空 diff /
   只改 status 不算变更、`mark_humans` 门控、`render_team_context` 转义。
@@ -211,7 +290,7 @@ attachment 给出"，`tools/locales/descs/*/list_members.md` 的"名册在
   名册变化发增量、公告 note、**投递失败基线不推进且下次仍会重发**、
   **同一 session 换新 runtime 不重发**。
 - `test_team_agent_coordination.py` 的外部成员段落改为断言 runtime 收到的消息（6 passed）。
-- 全套件 `tests/unit_tests/agent_teams/`：**2222 passed / 16 skipped**（F_68 基线 2175 / 16）。
+- `tests/unit_tests/agent_teams/` + `core/single_agent` + `harness`：**4650 passed / 31 skipped**。
 - `tests/unit_tests/harness/prompts` + `test_prompt_attachment_manager.py`：73 passed
   （通用 attachment 通道未受影响）。
 
