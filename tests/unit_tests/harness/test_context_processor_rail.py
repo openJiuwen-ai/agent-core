@@ -201,7 +201,7 @@ async def test_init_processors_merge(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_init_preset_defaults(tmp_path: Path):
-    """Preset processors should use the forked configs with recall enabled."""
+    """Preset processors should use the forked configs with recall disabled by default."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace, enable_reload=True)
@@ -222,7 +222,7 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert off.ttl_seconds == 300
     assert off.ttl_context_occupancy_ratio == 0.5
     assert off.ttl_message_threshold_ratio == 0.05
-    assert off.protected_tool_names == ["read_file", "recall_compressed_context"]
+    assert off.protected_tool_names == ["read_file"]
 
     # SessionMemoryCompressor ships in the default chain but disabled
     mem = procs.get("SessionMemoryCompressor")
@@ -237,7 +237,7 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert "messages_to_keep" not in type(comp).model_fields
     assert comp.trigger_context_ratio == 0.8
     assert comp.min_target_context_ratio == 0.1
-    assert comp.enable_recall is True
+    assert comp.enable_recall is False
     assert comp.model is not None
 
     # CurrentRoundCompressor tests (forked)
@@ -249,7 +249,7 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert curr.trigger_context_ratio == 0.8
     assert curr.min_target_context_ratio == 0.1
     assert curr.keep_recent_messages == 3
-    assert curr.enable_recall is True
+    assert curr.enable_recall is False
 
     # RoundLevelCompressor tests (forked)
     round_lvl = procs.get("RoundLevelCompressor")
@@ -259,16 +259,19 @@ async def test_init_preset_defaults(tmp_path: Path):
     )
     assert round_lvl.trigger_context_ratio == 0.9
     assert round_lvl.keep_recent_messages == 6
-    assert round_lvl.enable_recall is True
+    assert round_lvl.enable_recall is False
 
 
 @pytest.mark.asyncio
 async def test_preset_enables_compression_recall(tmp_path: Path):
-    """Preset mode should enable recall, register the tool, and protect its results."""
+    """Enabling recall via override should register the tool and protect its results."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace)
-    rail = ContextProcessorRail(preset=True)
+    rail = ContextProcessorRail(
+        preset=True,
+        processors=[("DialogueCompressor", {"enable_recall": True})],
+    )
     await agent.register_rail(rail)
     await agent.ensure_initialized()
 
@@ -279,6 +282,24 @@ async def test_preset_enables_compression_recall(tmp_path: Path):
     procs = dict(agent.react_config.context_processors)
     off = procs.get("MessageSummaryOffloader")
     assert "recall_compressed_context" in off.protected_tool_names
+
+
+@pytest.mark.asyncio
+async def test_preset_disables_compression_recall_by_default(tmp_path: Path):
+    """Default preset should keep recall off and not register the tool."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    assert rail._recall_enabled is False
+    assert agent.ability_manager.get("recall_compressed_context") is None
+
+    procs = dict(agent.react_config.context_processors)
+    off = procs.get("MessageSummaryOffloader")
+    assert "recall_compressed_context" not in off.protected_tool_names
 
 
 @pytest.mark.asyncio

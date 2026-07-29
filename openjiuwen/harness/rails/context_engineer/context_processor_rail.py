@@ -205,7 +205,6 @@ class ContextProcessorRail(DeepAgentRail):
             (
                 "DialogueCompressor",
                 DialogueCompressorConfig(
-                    enable_recall=True,
                     model=model_cfg,
                     model_client=model_client_config,
                 ),
@@ -214,7 +213,6 @@ class ContextProcessorRail(DeepAgentRail):
                 "CurrentRoundCompressor",
                 CurrentRoundCompressorConfig(
                     keep_recent_messages=3,
-                    enable_recall=True,
                     model=model_cfg,
                     model_client=model_client_config,
                 ),
@@ -224,7 +222,6 @@ class ContextProcessorRail(DeepAgentRail):
                 RoundLevelCompressorConfig(
                     trigger_context_ratio=0.9,
                     keep_recent_messages=6,
-                    enable_recall=True,
                     model=model_cfg,
                     model_client=model_client_config,
                 ),
