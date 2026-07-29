@@ -1,6 +1,6 @@
 # coding: utf-8
 
-"""Tests for TeamPolicyRail and its section builders."""
+"""Tests for TeamPolicyRail: static sections plus team-state delivery."""
 
 from __future__ import annotations
 
@@ -8,43 +8,93 @@ import pytest
 
 from openjiuwen.agent_teams.prompts import (
     TeamSectionName,
-    build_team_attachment_notice_section,
     build_team_extra_section,
     build_team_identity_section,
-    build_team_info_section,
     build_team_lifecycle_section,
     build_team_member_system_prompt,
-    build_team_members_section,
     build_team_role_section,
     build_team_static_sections,
     build_team_workflow_section,
 )
 from openjiuwen.agent_teams.rails import TeamPolicyRail
+from openjiuwen.agent_teams.rails.team_policy_rail import prepend_to_content
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.team_context import TEAM_CONTEXT_STATE_KEY
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
-from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from tests.test_logger import logger
 
-# Session id the dynamic-attachment tests bind their context to.
+# Session id the team-context tests bind their context to.
 _SESSION_ID = "s1"
 
 
 class _StubSession:
-    """Minimal session exposing the id the attachment writer resolves."""
+    """Session stand-in exposing the id + the per-member state bucket.
 
-    def __init__(self, session_id: str) -> None:
+    The delivery baseline lives in this bucket in production, keyed by the
+    member's ``agent_id``; here a plain dict is enough to prove the rail writes
+    it and reads it back on a rebuild.
+    """
+
+    def __init__(self, session_id: str = _SESSION_ID) -> None:
         self._session_id = session_id
+        self.state: dict = {}
+        self.commits = 0
 
     def get_session_id(self) -> str:
         """Return the bound session id."""
         return self._session_id
 
+    def get_state(self, key: str | None = None):
+        """Read one key out of the session state."""
+        if key is None:
+            return dict(self.state)
+        return self.state.get(key)
+
+    def update_state(self, data: dict) -> None:
+        """Shallow-merge into the session state."""
+        self.state.update(data)
+
+    async def commit(self) -> None:
+        """Record that the state was flushed."""
+        self.commits += 1
+
+
+class _StubModelContext:
+    """ModelContext stand-in holding a plain message list."""
+
+    def __init__(self, messages: list | None = None) -> None:
+        self.messages = list(messages or [])
+
+    def get_messages(self, size: int | None = None, with_history: bool = True) -> list:
+        """Return the live message list (same objects, as the real one does)."""
+        return list(self.messages)
+
+    async def add_messages(self, message) -> list:
+        """Append one message or a list of them to the tail."""
+        if isinstance(message, list):
+            self.messages.extend(message)
+        else:
+            self.messages.append(message)
+        return self.messages
+
 
 class _StubContext:
-    """Minimal AgentCallbackContext stand-in carrying a resolvable session."""
+    """Minimal AgentCallbackContext stand-in with a session + model context."""
 
-    def __init__(self, session_id: str = _SESSION_ID) -> None:
-        self.session = _StubSession(session_id)
+    def __init__(
+        self,
+        session: _StubSession | None = None,
+        messages: list | None = None,
+    ) -> None:
+        self.session = session if session is not None else _StubSession()
+        self.context = _StubModelContext(messages)
+
+
+def _team_texts(ctx: _StubContext) -> str:
+    """Join every message body so tests can assert on delivered team state."""
+    return "\n".join(str(message.content) for message in ctx.context.messages)
+
 
 # ---------------------------------------------------------------------------
 # Section builders
@@ -78,12 +128,9 @@ class TestTeamRoleSection:
     @pytest.mark.level0
     def test_role_section_carries_no_member_name(self):
         # The member's own name is the only per-member value; it lives in the
-        # team_identity attachment so the role section stays byte-identical
-        # across every member sharing a role (shared prompt-prefix cache).
-        section = build_team_role_section(
-            role=TeamRole.LEADER,
-            language="cn",
-        )
+        # identity content, so the role section stays byte-identical for every
+        # member sharing a role (shared prompt-prefix cache).
+        section = build_team_role_section(role=TeamRole.TEAMMATE, language="cn")
         content = section.render("cn")
         assert "你的 member_name" not in content
 
@@ -95,7 +142,6 @@ class TestTeamIdentitySection:
         assert section is not None
         assert section.name == TeamSectionName.IDENTITY
         assert section.priority == 10
-
         content = section.render("cn")
         assert "# 成员身份" in content
         assert "你的 member_name: dev1" in content
@@ -103,7 +149,6 @@ class TestTeamIdentitySection:
     @pytest.mark.level0
     def test_identity_section_without_any_member_content(self):
         assert build_team_identity_section(member_name=None, language="cn") is None
-        assert build_team_identity_section(member_name="", member_prompt="", language="cn") is None
 
 
 class TestTeamWorkflowSection:
@@ -115,10 +160,11 @@ class TestTeamWorkflowSection:
             language="cn",
         )
         assert section is not None
+        assert section.name == TeamSectionName.WORKFLOW
         assert section.priority == 13
         content = section.render("cn")
         assert "# 工作流程" in content
-        assert "spawn_teammate" in content
+        assert "build_team" in content
 
     @pytest.mark.level0
     def test_leader_workflow_predefined(self):
@@ -127,6 +173,7 @@ class TestTeamWorkflowSection:
             team_mode="predefined",
             language="cn",
         )
+        assert section is not None
         content = section.render("cn")
         assert "预定义团队模式" in content
 
@@ -140,16 +187,17 @@ class TestTeamWorkflowSection:
         assert section is not None
         content = section.render("cn")
         assert "混合团队模式" in content
-        assert "spawn_teammate" in content
 
     @pytest.mark.level0
     def test_teammate_returns_none(self):
-        section = build_team_workflow_section(
-            role=TeamRole.TEAMMATE,
-            team_mode="default",
-            language="cn",
+        assert (
+            build_team_workflow_section(
+                role=TeamRole.TEAMMATE,
+                team_mode="default",
+                language="cn",
+            )
+            is None
         )
-        assert section is None
 
 
 class TestTeamLifecycleSection:
@@ -161,10 +209,11 @@ class TestTeamLifecycleSection:
             language="cn",
         )
         assert section is not None
+        assert section.name == TeamSectionName.LIFECYCLE
         assert section.priority == 14
         content = section.render("cn")
         assert "# 团队生命周期" in content
-        assert "shutdown_member" in content
+        assert "clean_team" in content
 
     @pytest.mark.level0
     def test_leader_persistent(self):
@@ -173,184 +222,82 @@ class TestTeamLifecycleSection:
             lifecycle="persistent",
             language="cn",
         )
+        assert section is not None
         content = section.render("cn")
-        # persistent template has different content
-        assert "# 团队生命周期" in content
+        assert "长期团队" in content
 
     @pytest.mark.level0
     def test_teammate_returns_none(self):
-        section = build_team_lifecycle_section(
-            role=TeamRole.TEAMMATE,
-            lifecycle="temporary",
-            language="cn",
+        assert (
+            build_team_lifecycle_section(
+                role=TeamRole.TEAMMATE,
+                lifecycle="temporary",
+                language="cn",
+            )
+            is None
         )
-        assert section is None
 
 
 class TestTeamPrivatePromptInIdentity:
-    """The private working agreement rides inside the identity section.
+    """The private working agreement is a subsection of the identity content.
 
-    Both are per-member and share one lifetime, so they travel as a single
-    ``team_identity`` attachment rather than two.
+    It shares a lifecycle with ``member_name`` (fixed at spawn, constant after,
+    different between members) and the same delivery lane, so it is one piece
+    of content rather than two.
     """
 
     @pytest.mark.level0
     def test_private_prompt_nested_under_identity(self):
         section = build_team_identity_section(
             member_name="dev1",
-            member_prompt="Ship small PRs",
+            member_prompt="always write tests",
             language="cn",
         )
         assert section is not None
-        assert section.name == TeamSectionName.IDENTITY
         content = section.render("cn")
+        assert "# 成员身份" in content
         assert "你的 member_name: dev1" in content
         assert "## 私有工作约定" in content
-        assert "Ship small PRs" in content
+        assert "always write tests" in content
 
-    @pytest.mark.level1
+    @pytest.mark.level0
     def test_empty_private_prompt_drops_only_that_subsection(self):
-        for member_prompt in ("", None, "   "):
-            section = build_team_identity_section(
-                member_name="dev1",
-                member_prompt=member_prompt,
-                language="cn",
-            )
-            assert section is not None
-            content = section.render("cn")
-            assert "你的 member_name: dev1" in content
-            assert "私有工作约定" not in content
+        section = build_team_identity_section(
+            member_name="dev1",
+            member_prompt="   ",
+            language="cn",
+        )
+        assert section is not None
+        content = section.render("cn")
+        assert "你的 member_name: dev1" in content
+        assert "## 私有工作约定" not in content
 
 
 class TestTeamExtraSection:
-    @pytest.mark.level1
+    @pytest.mark.level0
     def test_with_base_prompt(self):
-        section = build_team_extra_section(base_prompt="Be careful", language="cn")
+        section = build_team_extra_section(base_prompt="Be concise", language="cn")
         assert section is not None
+        assert section.name == TeamSectionName.EXTRA
         assert section.priority == 17
-        content = section.render("cn")
-        assert "Be careful" in content
+        assert "Be concise" in section.render("cn")
 
-    @pytest.mark.level1
+    @pytest.mark.level0
     def test_empty_returns_none(self):
         assert build_team_extra_section(base_prompt=None, language="cn") is None
         assert build_team_extra_section(base_prompt="   ", language="cn") is None
 
 
-class TestTeamInfoSection:
-    @pytest.mark.level1
-    def test_full_info(self):
-        section = build_team_info_section(
-            team_info={"team_name": "AlphaTeam", "desc": "Build a thing"},
-            language="cn",
-        )
-        assert section is not None
-        assert section.priority == 65
-        content = section.render("cn")
-        assert "# 团队信息" in content
-        assert "AlphaTeam" in content
-        assert "Build a thing" in content
-
-    @pytest.mark.level1
-    def test_empty_returns_none(self):
-        assert build_team_info_section(team_info=None, language="cn") is None
-        assert build_team_info_section(team_info={}, language="cn") is None
-        assert (
-            build_team_info_section(
-                team_info={"unrelated": "value"},
-                language="cn",
-            )
-            is None
-        )
-
-    @pytest.mark.level1
-    def test_team_workspace_mount_appended(self):
-        section = build_team_info_section(
-            team_info={"team_name": "AlphaTeam", "desc": "Build a thing"},
-            team_workspace_mount=".team/alpha/",
-            team_workspace_path="/abs/team-workspace",
-            language="cn",
-        )
-        assert section is not None
-        content = section.render("cn")
-        assert "团队共享工作空间" in content
-        assert "`.team/alpha/`" in content
-        assert "`/abs/team-workspace`" in content
-
-    @pytest.mark.level1
-    def test_team_workspace_only(self):
-        # Workspace info alone (no name/desc) is still enough to emit the
-        # section, so the LLM sees the shared workspace hint.
-        section = build_team_info_section(
-            team_info=None,
-            team_workspace_mount=".team/solo/",
-            language="en",
-        )
-        assert section is not None
-        content = section.render("en")
-        assert "Team Shared Workspace" in content
-        assert "`.team/solo/`" in content
-
-
-class TestTeamMembersSection:
-    @pytest.mark.level1
-    def test_excludes_self(self):
-        section = build_team_members_section(
-            team_members=[
-                {"member_name": "leader1", "display_name": "Leader", "desc": "PM"},
-                {"member_name": "dev1", "display_name": "Dev", "desc": "Coder"},
-            ],
-            self_member_name="leader1",
-            language="cn",
-        )
-        assert section is not None
-        assert section.priority == 66
-        content = section.render("cn")
-        assert "# 成员关系" in content
-        assert "Dev" in content
-        assert "Leader" not in content
-
-    @pytest.mark.level1
-    def test_no_peers_returns_none(self):
-        section = build_team_members_section(
-            team_members=[{"member_name": "self", "display_name": "Me"}],
-            self_member_name="self",
-            language="cn",
-        )
-        assert section is None
-
-    @pytest.mark.level1
-    def test_empty_returns_none(self):
-        assert (
-            build_team_members_section(
-                team_members=None,
-                self_member_name="x",
-                language="cn",
-            )
-            is None
-        )
-
-
 # ---------------------------------------------------------------------------
-# TeamPolicyRail
+# Rail
 # ---------------------------------------------------------------------------
 
 
 class _StubAgent:
-    """Minimal stand-in exposing the builder + prompt attachment manager.
+    """Minimal stand-in exposing the shared system prompt builder."""
 
-    Dynamic team-state sections now land in the attachment manager rather
-    than the system prompt builder, so the stub agent provides a real
-    :class:`PromptAttachmentManager` for the dynamic-section tests to read.
-    """
-
-    def __init__(
-        self,
-        builder: SystemPromptBuilder,
-        attachment_manager: PromptAttachmentManager | None = None,
-    ) -> None:
+    def __init__(self, builder: SystemPromptBuilder) -> None:
         self.system_prompt_builder = builder
-        self.prompt_attachment_manager = attachment_manager
 
 
 class _StubMember:
@@ -375,10 +322,11 @@ class _StubTeam:
 class _FakeTeamBackend:
     """In-memory TeamBackend that tracks call counts.
 
-    Mirrors the four TeamBackend methods that ``TeamPolicyRail`` consumes:
-    ``get_team_updated_at``, ``get_members_max_updated_at``,
-    ``get_team_info``, ``list_members``.  Lets tests assert that the
-    cache short-circuits expensive calls when the mtime probe is stable.
+    Mirrors the four TeamBackend methods the team-context tracker consumes:
+    ``get_team_updated_at``, ``get_members_max_updated_at``, ``get_team_info``,
+    ``list_members``. Lets tests assert the probes short-circuit the expensive
+    reads while nothing has changed. ``list_members`` excludes the caller, as
+    the real backend does.
     """
 
     def __init__(
@@ -387,15 +335,15 @@ class _FakeTeamBackend:
         members: list[_StubMember] | None = None,
         team_mtime: int = 1,
         members_mtime: int = 1,
-        human_agents: list[str] | None = None,
         hitt_enabled: bool = False,
+        self_member_name: str | None = None,
     ) -> None:
         self._team = team
         self._members: list[_StubMember] = list(members or [])
         self._team_mtime = team_mtime
         self._members_mtime = members_mtime
-        self._human_agents: list[str] = list(human_agents or [])
         self._hitt_enabled = hitt_enabled
+        self._self_member_name = self_member_name
 
         self.team_mtime_calls = 0
         self.members_mtime_calls = 0
@@ -416,19 +364,11 @@ class _FakeTeamBackend:
 
     async def list_members(self):
         self.list_members_calls += 1
-        return list(self._members)
+        return [member for member in self._members if member.member_name != self._self_member_name]
 
     def hitt_enabled(self) -> bool:
-        """TeamPolicyRail probes this at init to gate the static HITT contract."""
+        """The rail probes this at init to gate the static HITT contract."""
         return self._hitt_enabled
-
-    async def human_agent_names(self) -> frozenset[str]:
-        """TeamPolicyRail queries DB for the roster (empty unless injected)."""
-        return frozenset(self._human_agents)
-
-    def bridge_agent_names(self) -> frozenset[str]:
-        """TeamPolicyRail snapshots the bridge roster too; empty for fakes."""
-        return frozenset()
 
     # -- Mutators used by tests ----------------------------------------------
 
@@ -440,10 +380,28 @@ class _FakeTeamBackend:
         self._members.append(member)
         self._members_mtime = mtime
 
+    def remove_member(self, member_name: str, mtime: int) -> None:
+        self._members = [m for m in self._members if m.member_name != member_name]
+        self._members_mtime = mtime
+
+
+def _leader_rail(backend: _FakeTeamBackend | None = None, **overrides) -> TeamPolicyRail:
+    """Build a leader rail with the defaults most tests want."""
+    kwargs = {
+        "role": TeamRole.LEADER,
+        "member_prompt": "PM",
+        "member_name": "leader1",
+        "lifecycle": "temporary",
+        "language": "cn",
+        "team_backend": backend,
+    }
+    kwargs.update(overrides)
+    return TeamPolicyRail(**kwargs)
+
 
 class TestTeamPolicyRailStaticSections:
-    """Static-only behaviour (team_backend is None) -- the rail still
-    registers role/workflow/lifecycle/private-prompt/extra without touching DB."""
+    """Static-only behaviour (team_backend is None): the rail still registers
+    role / workflow / lifecycle / extra without touching the DB."""
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -451,17 +409,9 @@ class TestTeamPolicyRailStaticSections:
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
 
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_prompt="PM Expert",
-            member_name="leader1",
-            lifecycle="temporary",
-            language="cn",
-            team_mode="default",
-            base_prompt="Stay sharp",
-        )
+        rail = _leader_rail(base_prompt="Stay sharp")
         rail.init(agent)
-        await rail.before_model_call(None)
+        await rail.before_model_call(_StubContext())
 
         sections = builder.get_all_sections()
         for name in (
@@ -471,10 +421,7 @@ class TestTeamPolicyRailStaticSections:
             TeamSectionName.EXTRA,
         ):
             assert name in sections
-        # Without a backend the dynamic sections are skipped entirely.
-        assert TeamSectionName.INFO not in sections
-        assert TeamSectionName.MEMBERS not in sections
-        # The per-member section never enters the builder; it is an attachment.
+        # The per-member content never enters the builder.
         assert TeamSectionName.IDENTITY not in sections
 
     @pytest.mark.asyncio
@@ -489,11 +436,10 @@ class TestTeamPolicyRailStaticSections:
             member_name="dev1",
             lifecycle="temporary",
             language="cn",
-            team_mode="default",
             base_prompt=None,
         )
         rail.init(agent)
-        await rail.before_model_call(None)
+        await rail.before_model_call(_StubContext())
 
         sections = builder.get_all_sections()
         assert TeamSectionName.WORKFLOW not in sections
@@ -503,277 +449,352 @@ class TestTeamPolicyRailStaticSections:
         assert TeamSectionName.IDENTITY not in sections
 
 
-async def _attachment_content(
-    manager: PromptAttachmentManager,
-    section: str,
-    *,
-    session_id: str = _SESSION_ID,
-) -> str | None:
-    """Return the content of one dynamic section attachment, or None."""
-    items = await manager.list_by_filter(session_id=session_id, section=section)
-    if not items:
-        return None
-    return items[0].content
+class TestPrependToContent:
+    """Message bodies come in two shapes and both have to accept a prefix."""
+
+    @pytest.mark.level0
+    def test_string_content(self):
+        assert prepend_to_content("hello", "CTX") == "CTX\n\nhello"
+
+    @pytest.mark.level0
+    def test_empty_string_content(self):
+        assert prepend_to_content("", "CTX") == "CTX"
+
+    @pytest.mark.level0
+    def test_list_content_with_leading_text_block(self):
+        assert prepend_to_content(["hello", {"type": "image"}], "CTX") == ["CTX\n\nhello", {"type": "image"}]
+
+    @pytest.mark.level0
+    def test_list_content_with_leading_structured_block(self):
+        blocks = [{"type": "image"}, "hello"]
+        assert prepend_to_content(blocks, "CTX") == ["CTX", {"type": "image"}, "hello"]
+
+    @pytest.mark.level0
+    def test_original_list_is_not_mutated(self):
+        blocks = ["hello"]
+        prepend_to_content(blocks, "CTX")
+        assert blocks == ["hello"]
 
 
-class TestTeamPolicyRailDynamicSections:
-    """Dynamic behaviour driven by the injected ``_FakeTeamBackend``.
+class TestTeamPolicyRailTeamContext:
+    """Team state is written into the conversation, not the system prompt.
 
-    The two dynamic sections (team_info / team_members) do not live in the
-    system prompt builder; the rail pushes them to the DeepAgent's
-    :class:`PromptAttachmentManager` so the system-prompt prefix stays
-    cache-stable. These tests assert the dynamic sections are absent from the
-    builder and present in the attachment manager, while keeping the original
-    cache hit / miss / mtime intents intact.
+    It goes in at the model call where it first appears, into the newest
+    segment of the conversation only, and never gets rewritten afterwards.
     """
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_first_call_loads_from_db(self):
+    async def test_state_goes_into_the_user_message_not_the_prompt(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test team"),
-            members=[
-                _StubMember("leader1", "Leader", "PM"),
-                _StubMember("dev1", "Dev", "Coder"),
-            ],
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_prompt="PM",
-            member_name="leader1",
-            lifecycle="temporary",
-            language="cn",
-            team_backend=backend,
-        )
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend)
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
 
-        # Dynamic sections are no longer in the builder.
-        assert not builder.has_section(TeamSectionName.INFO)
-        assert not builder.has_section(TeamSectionName.MEMBERS)
-        # They live in the attachment manager instead.
-        info = await _attachment_content(manager, TeamSectionName.INFO)
-        members = await _attachment_content(manager, TeamSectionName.MEMBERS)
-        assert info is not None
-        assert members is not None
-        assert backend.get_info_calls == 1
-        assert backend.list_members_calls == 1
-        # The members section excluded the leader (self exclusion).
-        assert "Dev" in members
-        assert "Leader" not in members
-        logger.info("First call pushed info + members to attachment manager")
+        ctx = _StubContext(messages=[UserMessage(content="ship it")])
+        await rail.before_model_call(ctx)
+
+        # Prepended into the existing user message; no new message appeared.
+        assert len(ctx.context.messages) == 1
+        body = ctx.context.messages[0].content
+        assert body.endswith("ship it")
+        assert "<team-context>" in body
+        assert "你的 member_name: leader1" in body
+        assert "# 团队信息" in body
+        assert '<team-event kind="roster">' in body
+        assert "member_name=dev1" in body
+
+        # And none of it leaked into the cache-stable system prompt.
+        prompt = builder.build()
+        assert "# 团队信息" not in prompt
+        assert "# 成员关系" not in prompt
+        assert "你的 member_name" not in prompt
+        assert "PM" not in prompt
+        logger.info("Team state delivered inside the round's user message")
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_cache_hit_skips_full_query(self):
+    async def test_appends_a_user_message_when_segment_has_none(self):
+        """Mid tool-loop the new messages are assistant / tool results only."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend)
+        rail.init(agent)
+
+        ctx = _StubContext(messages=[UserMessage(content="ship it")])
+        # First call consumes the pending state and records the boundary.
+        await rail.before_model_call(ctx)
+        first_body = ctx.context.messages[0].content
+
+        # A tool round happens, then the team changes mid-loop.
+        ctx.context.messages.append(AssistantMessage(content="calling a tool"))
+        ctx.context.messages.append(ToolMessage(content="tool output", tool_call_id="c1"))
+        backend.add_member(_StubMember("dev2", "Newbie"), mtime=2)
+
+        await rail.before_model_call(ctx)
+
+        assert len(ctx.context.messages) == 4
+        tail = ctx.context.messages[-1]
+        assert tail.role == "user"
+        assert '<team-event kind="roster-change">' in tail.content
+        assert "Newbie" in tail.content
+        # The earlier messages were left exactly as they were.
+        assert ctx.context.messages[0].content == first_body
+        assert ctx.context.messages[2].content == "tool output"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_leader_says_nothing_before_the_team_exists(self):
+        """A leader has no team on its first call; there is nothing to announce."""
+        backend = _FakeTeamBackend(team=None, members=[], team_mtime=0, members_mtime=0)
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend, member_prompt="", member_name=None)
+        rail.init(agent)
+
+        ctx = _StubContext(messages=[UserMessage(content="build me a team")])
+        await rail.before_model_call(ctx)
+        assert ctx.context.messages[0].content == "build me a team"
+
+        # build_team runs: the team row and its first member appear.
+        backend.set_team(_StubTeam("Beta", "Test team"), mtime=7)
+        backend.add_member(_StubMember("dev1", "Dev"), mtime=7)
+        await rail.before_model_call(ctx)
+
+        body = _team_texts(ctx)
+        assert "# 团队信息" in body
+        assert '<team-event kind="roster">' in body
+        assert "member_name=dev1" in body
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_unchanged_probes_deliver_nothing(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
             members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_prompt="PM",
-            member_name="leader1",
-            lifecycle="temporary",
-            language="cn",
-            team_backend=backend,
-        )
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend)
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
-        await rail.before_model_call(_StubContext())
-        await rail.before_model_call(_StubContext())
 
-        # Three model calls, three probes each, but only one full fetch.
+        ctx = _StubContext(messages=[UserMessage(content="go")])
+        await rail.before_model_call(ctx)
+        after_first = list(ctx.context.messages)
+        first_body = after_first[0].content
+
+        await rail.before_model_call(ctx)
+        await rail.before_model_call(ctx)
+
+        # Three calls, three probes each, one expensive read each.
         assert backend.team_mtime_calls == 3
         assert backend.members_mtime_calls == 3
         assert backend.get_info_calls == 1
         assert backend.list_members_calls == 1
-        logger.info("Cache hit skipped 2 expensive fetches")
+        # And nothing was added or rewritten after the first call.
+        assert len(ctx.context.messages) == 1
+        assert ctx.context.messages[0].content == first_body
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_cache_miss_when_member_added(self):
+    async def test_roster_change_is_a_delta_and_leaves_history_alone(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
             members=[_StubMember("dev1", "Dev")],
-            members_mtime=1,
+            self_member_name="leader1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_prompt="PM",
-            member_name="leader1",
-            lifecycle="temporary",
-            language="cn",
-            team_backend=backend,
-        )
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend)
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
-        first_render = await _attachment_content(manager, TeamSectionName.MEMBERS)
-        assert first_render is not None
-        assert "Dev" in first_render
-        assert "Newbie" not in first_render
 
-        # Simulate spawn_member: add a row and bump mtime.
+        ctx = _StubContext(messages=[UserMessage(content="go")])
+        await rail.before_model_call(ctx)
+        snapshot_body = ctx.context.messages[0].content
+        assert '<team-event kind="roster">' in snapshot_body
+
         backend.add_member(_StubMember("dev2", "Newbie", "fresh"), mtime=2)
-        await rail.before_model_call(_StubContext())
+        backend.remove_member("dev1", mtime=3)
+        ctx.context.messages.append(UserMessage(content="next"))
+        await rail.before_model_call(ctx)
 
-        second_render = await _attachment_content(manager, TeamSectionName.MEMBERS)
-        assert second_render is not None
-        assert "Newbie" in second_render
-        assert backend.list_members_calls == 2
-        logger.info("Member roster bump triggered refetch")
+        delta_body = ctx.context.messages[1].content
+        assert '<team-event kind="roster-change">' in delta_body
+        assert "[加入] member_name=dev2" in delta_body
+        assert "[退出] member_name=dev1" in delta_body
+        # Only the delta — the full roster is not resent.
+        assert '<team-event kind="roster">' not in delta_body
+        # The first message keeps its original body verbatim.
+        assert ctx.context.messages[0].content == snapshot_body
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_status_update_does_not_refetch(self):
-        """Status changes don't bump mtime (per design), so the cache holds."""
+    async def test_roster_messages_carry_the_announcement_note(self):
+        """Without it members greet every new peer and burn a round each way."""
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
             members=[_StubMember("dev1", "Dev")],
-            members_mtime=42,
+            self_member_name="leader1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_prompt="PM",
-            member_name="leader1",
-            lifecycle="temporary",
-            language="cn",
-            team_backend=backend,
-        )
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend)
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
-        # mtime stays at 42 -- a real status update would not bump it.
-        await rail.before_model_call(_StubContext())
-        assert backend.list_members_calls == 1
+
+        ctx = _StubContext(messages=[UserMessage(content="go")])
+        await rail.before_model_call(ctx)
+        snapshot_body = ctx.context.messages[0].content
+        assert '<team-note kind="announcement-only">' in snapshot_body
+        assert "不要" in snapshot_body
+
+        backend.add_member(_StubMember("dev2", "Newbie"), mtime=2)
+        ctx.context.messages.append(UserMessage(content="next"))
+        await rail.before_model_call(ctx)
+        delta_body = ctx.context.messages[1].content
+        assert '<team-note kind="announcement-only">' in delta_body
+        assert "不要" in delta_body
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_team_workspace_mount_preserved_after_refresh(self):
+    async def test_rebuilt_rail_does_not_resend(self):
+        """The rail is rebuilt every round, so the baseline must be persisted.
+
+        Same session, brand-new rail: nothing may be announced again. Clearing
+        the persisted baseline is what makes it start over.
+        """
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
             members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_prompt="PM",
-            member_name="leader1",
-            lifecycle="temporary",
-            language="cn",
-            team_backend=backend,
+        agent = _StubAgent(builder)
+        session = _StubSession()
+
+        rail = _leader_rail(backend)
+        rail.init(agent)
+        ctx = _StubContext(session=session, messages=[UserMessage(content="go")])
+        await rail.before_model_call(ctx)
+        assert "<team-context>" in ctx.context.messages[0].content
+        assert session.state[TEAM_CONTEXT_STATE_KEY]["identity_emitted"] is True
+        assert session.commits >= 1
+
+        rebuilt = _leader_rail(backend)
+        rebuilt.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        next_ctx = _StubContext(session=session, messages=[UserMessage(content="second round")])
+        await rebuilt.before_model_call(next_ctx)
+        assert next_ctx.context.messages[0].content == "second round"
+
+        # Losing the baseline (a fresh session) starts the announcements over.
+        fresh = _leader_rail(backend)
+        fresh.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        fresh_ctx = _StubContext(session=_StubSession("s2"), messages=[UserMessage(content="third")])
+        await fresh.before_model_call(fresh_ctx)
+        assert "<team-context>" in fresh_ctx.context.messages[0].content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_restored_history_is_never_rewritten(self):
+        """A resumed member must not have its old messages edited in place."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend)
+        rail.init(agent)
+
+        restored = [
+            UserMessage(content="old query"),
+            AssistantMessage(content="old answer"),
+            UserMessage(content="current round"),
+        ]
+        ctx = _StubContext(messages=restored)
+        await rail.before_model_call(ctx)
+
+        assert ctx.context.messages[0].content == "old query"
+        assert ctx.context.messages[1].content == "old answer"
+        assert "<team-context>" in ctx.context.messages[2].content
+        assert ctx.context.messages[2].content.endswith("current round")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_team_workspace_paths_ride_the_team_info_block(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = _leader_rail(
+            backend,
             team_workspace_mount=".team/beta/",
             team_workspace_path="/abs/team-workspace",
         )
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
-        first = await _attachment_content(manager, TeamSectionName.INFO)
-        assert first is not None
-        assert "`.team/beta/`" in first
 
-        # Trigger a roster refresh (members mtime bump).  The info section
-        # is independent but should keep the workspace mount on rebuild too.
+        ctx = _StubContext(messages=[UserMessage(content="go")])
+        await rail.before_model_call(ctx)
+        body = ctx.context.messages[0].content
+        assert "`.team/beta/`" in body
+        assert "/abs/team-workspace" in body
+
+        # A renamed team is announced again rather than rewritten in place.
         backend.set_team(_StubTeam("Beta-renamed", "Test"), mtime=99)
-        await rail.before_model_call(_StubContext())
-        second = await _attachment_content(manager, TeamSectionName.INFO)
-        assert second is not None
-        assert "`.team/beta/`" in second
+        ctx.context.messages.append(UserMessage(content="next"))
+        await rail.before_model_call(ctx)
+        second = ctx.context.messages[1].content
         assert "Beta-renamed" in second
+        assert "`.team/beta/`" in second
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_static_sections_in_builder_dynamic_in_attachments(self):
-        """Static sections stay in the cache-stable builder prefix.
-
-        Replaces the old prompt-ordering test: dynamic sections no longer
-        appear in ``builder.build()``, so the relevant invariant is now
-        "statics in the builder, dynamics only in attachments".
-        """
+    async def test_static_sections_stay_in_the_builder(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("T1", "D"),
             members=[_StubMember("dev1", "D")],
+            self_member_name="leader1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_prompt="PM",
-            member_name="leader1",
-            lifecycle="temporary",
-            language="cn",
-            base_prompt=None,
-            team_backend=backend,
-        )
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend, base_prompt=None)
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
+        await rail.before_model_call(_StubContext(messages=[UserMessage(content="go")]))
 
         prompt = builder.build()
-        # Static sections render into the system prompt, ordered by priority.
         idx_role = prompt.index("# 团队角色")
         idx_workflow = prompt.index("# 工作流程")
         idx_lifecycle = prompt.index("# 团队生命周期")
         assert idx_role < idx_workflow < idx_lifecycle
-        # Dynamic sections do not leak into the system prompt anymore, and
-        # neither do the per-member ones (shared prefix cache).
-        assert "# 团队信息" not in prompt
-        assert "# 成员关系" not in prompt
-        assert "# 成员身份" not in prompt
-        assert "你的 member_name" not in prompt
-        # (the attachment notice mentions the private agreement by name, so
-        # match the heading, not the bare phrase)
-        assert "## 私有工作约定" not in prompt
-        assert "PM" not in prompt
-        # But are present as attachments.
-        assert await _attachment_content(manager, TeamSectionName.INFO) is not None
-        assert await _attachment_content(manager, TeamSectionName.MEMBERS) is not None
-        identity = await _attachment_content(manager, TeamSectionName.IDENTITY)
-        assert identity is not None
-        assert "你的 member_name: leader1" in identity
-        # The private working agreement rides inside the same attachment.
-        assert "## 私有工作约定" in identity
-        assert "PM" in identity
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_uninit_removes_static_sections_only(self):
-        """uninit strips static builder sections; dynamics never were there."""
+    async def test_uninit_removes_static_sections(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("T", "D"),
             members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_prompt="PM",
-            member_name="leader1",
-            lifecycle="temporary",
-            language="cn",
-            team_backend=backend,
-        )
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend)
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
-        # Static sections registered in the builder; dynamics not in builder.
+        await rail.before_model_call(_StubContext(messages=[UserMessage(content="go")]))
         assert builder.has_section(TeamSectionName.ROLE)
-        assert not builder.has_section(TeamSectionName.INFO)
-        assert not builder.has_section(TeamSectionName.MEMBERS)
-        # Dynamics live in the attachment manager.
-        assert await _attachment_content(manager, TeamSectionName.INFO) is not None
 
         rail.uninit(agent)
         for name in (
@@ -787,8 +808,7 @@ class TestTeamPolicyRailDynamicSections:
 
 class TestTeamPolicyRailHitt:
     """HITT contract is a static builder section gated on ``hitt_enabled``; the
-    human roster is folded into the ``team_members`` attachment as a ``[human]``
-    tag (there is no separate ``team_hitt_roster``).
+    human roster is folded into the roster message as a ``[human]`` tag.
 
     The tag is gated on the viewer: LEADER / HUMAN_AGENT always, TEAMMATE only
     when ``expose_human_agents_to_teammates`` is set (F_18 privacy default).
@@ -796,38 +816,26 @@ class TestTeamPolicyRailHitt:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_contract_in_builder_and_human_tagged_in_members(self):
+    async def test_contract_in_builder_and_human_tagged_in_roster(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
-            members=[
-                _StubMember("leader1", "Leader"),
-                _StubMember("alice", "Alice", role="human_agent"),
-            ],
+            members=[_StubMember("alice", "Alice", role="human_agent")],
             hitt_enabled=True,
+            self_member_name="leader1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_prompt="PM",
-            member_name="leader1",
-            lifecycle="temporary",
-            language="cn",
-            team_backend=backend,
-        )
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend)
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
+        ctx = _StubContext(messages=[UserMessage(content="go")])
+        await rail.before_model_call(ctx)
 
-        # HITT contract (rules) rides the cache-stable builder prefix.
         assert builder.has_section(TeamSectionName.HITT)
         assert "禁止" in builder.get_section(TeamSectionName.HITT).render("cn")
-        # No separate hitt roster; the human is tagged [human] in team_members.
-        members = await _attachment_content(manager, TeamSectionName.MEMBERS)
-        assert members is not None
-        assert "member_name=alice" in members
-        assert "[human]" in members
-        logger.info("HITT contract in builder; human tagged in team_members")
+        body = ctx.context.messages[0].content
+        assert "member_name=alice" in body
+        assert "[human]" in body
+        logger.info("HITT contract in builder; human tagged in the roster message")
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -836,18 +844,13 @@ class TestTeamPolicyRailHitt:
             team=_StubTeam("Beta", "Test"),
             members=[_StubMember("dev1", "Dev")],
             hitt_enabled=False,
+            self_member_name="leader1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_name="leader1",
-            language="cn",
-            team_backend=backend,
-        )
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend, member_prompt="")
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
+        await rail.before_model_call(_StubContext(messages=[UserMessage(content="go")]))
         assert not builder.has_section(TeamSectionName.HITT)
 
     @pytest.mark.asyncio
@@ -856,15 +859,12 @@ class TestTeamPolicyRailHitt:
         """Default teammate (expose=False) sees no ``[human]`` tag (F_18)."""
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
-            members=[
-                _StubMember("dev1", "Dev"),
-                _StubMember("alice", "Alice", role="human_agent"),
-            ],
+            members=[_StubMember("alice", "Alice", role="human_agent")],
             hitt_enabled=True,
+            self_member_name="dev1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
+        agent = _StubAgent(builder)
         rail = TeamPolicyRail(
             role=TeamRole.TEAMMATE,
             member_name="dev1",
@@ -872,26 +872,23 @@ class TestTeamPolicyRailHitt:
             team_backend=backend,
         )
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
-        members = await _attachment_content(manager, TeamSectionName.MEMBERS)
-        assert members is not None
-        assert "member_name=alice" in members
-        assert "[human]" not in members
+        ctx = _StubContext(messages=[UserMessage(content="go")])
+        await rail.before_model_call(ctx)
+        body = ctx.context.messages[0].content
+        assert "member_name=alice" in body
+        assert "[human]" not in body
 
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_teammate_expose_shows_human_tag(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
-            members=[
-                _StubMember("dev1", "Dev"),
-                _StubMember("alice", "Alice", role="human_agent"),
-            ],
+            members=[_StubMember("alice", "Alice", role="human_agent")],
             hitt_enabled=True,
+            self_member_name="dev1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
+        agent = _StubAgent(builder)
         rail = TeamPolicyRail(
             role=TeamRole.TEAMMATE,
             member_name="dev1",
@@ -900,82 +897,79 @@ class TestTeamPolicyRailHitt:
             expose_human_agents_to_teammates=True,
         )
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
-        members = await _attachment_content(manager, TeamSectionName.MEMBERS)
-        assert members is not None
-        assert "[human]" in members
+        ctx = _StubContext(messages=[UserMessage(content="go")])
+        await rail.before_model_call(ctx)
+        assert "[human]" in ctx.context.messages[0].content
 
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_uninit_strips_hitt_contract_from_builder(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
-            members=[_StubMember("leader1", "Leader")],
+            members=[],
             hitt_enabled=True,
+            self_member_name="leader1",
         )
         builder = SystemPromptBuilder(language="cn")
-        manager = PromptAttachmentManager()
-        agent = _StubAgent(builder, manager)
-        rail = TeamPolicyRail(
-            role=TeamRole.LEADER,
-            member_name="leader1",
-            language="cn",
-            team_backend=backend,
-        )
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend, member_prompt="")
         rail.init(agent)
-        await rail.before_model_call(_StubContext())
+        await rail.before_model_call(_StubContext(messages=[UserMessage(content="go")]))
         assert builder.has_section(TeamSectionName.HITT)
         rail.uninit(agent)
         assert not builder.has_section(TeamSectionName.HITT)
 
 
 class TestTagNoticeInclusion:
-    """inbound_tags is universal; attachment_notice is in-process only (F_51).
+    """Every member — in-process or external CLI — reads the same XML tags.
 
-    Every team member reads inbound messages / events as <team-inbound> /
-    <team-event> XML, so the inbound-tag notice is always built. Only the
-    in-process DeepAgent (with a PromptAttachmentManager) sees prompt
-    attachments, so the attachment notice is gated behind
-    include_attachment_notice.
+    Team state now travels as ``<team-context>`` / ``<team-event>`` inside the
+    conversation for both, so the notice is unconditional and there is no
+    separate attachment notice left to gate.
     """
 
     @pytest.mark.level1
-    def test_static_sections_default_omit_attachment_notice(self):
+    def test_static_sections_always_include_inbound_tags(self):
         secs = build_team_static_sections(role=TeamRole.LEADER, member_name="l", language="cn")
         names = {s.name for s in secs}
         assert TeamSectionName.INBOUND_TAGS in names
-        assert TeamSectionName.ATTACHMENT_NOTICE not in names
 
     @pytest.mark.level1
-    def test_static_sections_include_attachment_notice_when_flagged(self):
-        secs = build_team_static_sections(
-            role=TeamRole.LEADER,
-            member_name="l",
-            language="cn",
-            include_attachment_notice=True,
-        )
-        names = {s.name for s in secs}
-        assert TeamSectionName.INBOUND_TAGS in names
-        assert TeamSectionName.ATTACHMENT_NOTICE in names
+    def test_inbound_tags_document_every_team_state_tag(self):
+        # Every tag the member can receive must be named in the notice,
+        # otherwise the LLM meets an XML element nothing introduced.
+        secs = build_team_static_sections(role=TeamRole.LEADER, member_name="l", language="cn")
+        section = next(s for s in secs if s.name == TeamSectionName.INBOUND_TAGS)
+        for language in ("cn", "en"):
+            content = section.render(language)
+            assert "<team-context>" in content
+            assert "roster-change" in content
 
     @pytest.mark.level1
-    def test_external_cli_prompt_has_inbound_tags_and_attachment_notice(self):
-        # build_team_member_system_prompt is the external CLI path: it must carry
-        # both inbound-tag notice and attachment notice because external CLI
-        # receives rendered team context through runtime input.
+    def test_external_cli_prompt_has_inbound_tags(self):
         prompt = build_team_member_system_prompt(role=TeamRole.LEADER, member_name="l", language="cn")
         assert "team-inbound" in prompt
-        assert "prompt-attachment" in prompt
+        assert "prompt-attachment" not in prompt
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_rail_static_sections_include_the_notice(self):
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = TeamPolicyRail(role=TeamRole.LEADER, member_name="l", language="cn")
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+        assert TeamSectionName.INBOUND_TAGS in builder.get_all_sections()
 
 
 class TestMemberSpecificInclusion:
     """The per-member section is inlined only for external CLI members.
 
     ``team_identity`` (member_name + private working agreement) differs between
-    members, so in-process members receive it as a prompt attachment (see
-    ``TeamPolicyRail``) and every member of a team shares one cacheable
-    system-prompt prefix. An external CLI prompt is a standalone per-member
-    snapshot with no attachment channel at startup, so it inlines it.
+    members, so in-process members receive it as a conversation message and the
+    whole team shares one cacheable system-prompt prefix. An external CLI prompt
+    is a standalone per-member snapshot with no conversation at launch, so it
+    inlines it.
     """
 
     @pytest.mark.level1
@@ -1011,26 +1005,3 @@ class TestMemberSpecificInclusion:
         )
         assert "你的 member_name: dev1" in prompt
         assert "ship small PRs" in prompt
-
-    @pytest.mark.level1
-    def test_attachment_notice_documents_every_type(self):
-        # Every attachment type the member can receive must be named in the
-        # notice, otherwise the LLM meets an undocumented <prompt-attachment>.
-        section = build_team_attachment_notice_section(language="cn")
-        for language in ("cn", "en"):
-            content = section.render(language)
-            assert TeamSectionName.IDENTITY in content
-            assert TeamSectionName.MEMBERS in content
-            assert TeamSectionName.INFO in content
-
-    @pytest.mark.asyncio
-    @pytest.mark.level1
-    async def test_rail_static_sections_include_both_notices(self):
-        builder = SystemPromptBuilder(language="cn")
-        agent = _StubAgent(builder)
-        rail = TeamPolicyRail(role=TeamRole.LEADER, member_name="l", language="cn")
-        rail.init(agent)
-        await rail.before_model_call(None)
-        names = builder.get_all_sections().keys()
-        assert TeamSectionName.INBOUND_TAGS in names
-        assert TeamSectionName.ATTACHMENT_NOTICE in names
