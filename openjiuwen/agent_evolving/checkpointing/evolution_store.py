@@ -52,6 +52,40 @@ _EVOLUTION_INDEX_PATTERN = re.compile(
 )
 
 
+def _debug_evolution_log(
+    location: str,
+    message: str,
+    data: dict,
+    hypothesis_id: str,
+    *,
+    run_id: str = "investigate",
+) -> None:
+    # #region agent log
+    import json as _json
+    import time as _time
+
+    try:
+        with open("debug-919c7e.log", "a", encoding="utf-8") as _f:
+            _f.write(
+                _json.dumps(
+                    {
+                        "sessionId": "919c7e",
+                        "timestamp": int(_time.time() * 1000),
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "hypothesisId": hypothesis_id,
+                        "runId": run_id,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
+
+
 class EvolutionStore:
     """Store and load evolution records for skill directories."""
 
@@ -399,6 +433,16 @@ class EvolutionStore:
 
     async def render_evolution_markdown(self, name: str) -> None:
         """Render all evolution entries to human-readable Markdown files."""
+        # #region agent log
+        import traceback as _tb
+
+        _debug_evolution_log(
+            "evolution_store.py:render_evolution_markdown",
+            "render_evolution_markdown_enter",
+            {"skill_name": name, "caller_stack": _tb.format_stack()[-6:-1]},
+            "H2",
+        )
+        # #endregion
         skill_dir = self._resolve_skill_dir(name)
         if skill_dir is None:
             return
@@ -428,6 +472,14 @@ class EvolutionStore:
             await self._render_script_index(scripts_dir, script_entries)
 
         await self._update_skill_md_index(skill_dir, active_entries)
+        # #region agent log
+        _debug_evolution_log(
+            "evolution_store.py:render_evolution_markdown",
+            "render_evolution_markdown_index_updated",
+            {"skill_name": name, "active_entry_count": len(active_entries)},
+            "H2",
+        )
+        # #endregion
         logger.info("[EvolutionStore] rendered markdown for skill '%s' (%d entries)", name, len(active_entries))
 
     async def _render_section_file(
@@ -554,6 +606,14 @@ class EvolutionStore:
             content = content.rstrip() + "\n\n" + index_block + "\n"
 
         await self._write_file_text(skill_md_path, content)
+
+    @classmethod
+    def strip_evolution_index_block(cls, content: str) -> str:
+        """Remove auto-generated evolution index block from SKILL.md text."""
+        if not content:
+            return content
+        stripped = _EVOLUTION_INDEX_PATTERN.sub("", content)
+        return stripped.rstrip() + "\n"
 
     @staticmethod
     def _section_filename(section: str) -> str:
@@ -1397,6 +1457,19 @@ version: v1.0.0
         content = await self._read_file_text(archive_path)
         if not content:
             return False
+        # #region agent log
+        _entry_count = 0
+        try:
+            _entry_count = len(json.loads(content).get("entries") or [])
+        except Exception:
+            pass
+        _debug_evolution_log(
+            "evolution_store.py:restore_evolution_log_from_archive",
+            "restore_evolution_log_from_archive",
+            {"skill_name": name, "archive_name": archive_name, "entry_count": _entry_count},
+            "H3",
+        )
+        # #endregion
         await self._write_file_text(skill_dir / _EVOLUTION_FILENAME, content)
         return True
 
@@ -1408,6 +1481,19 @@ version: v1.0.0
         md_path = self._find_skill_md(skill_dir)
         if md_path is None:
             md_path = skill_dir / "SKILL.md"
+        # #region agent log
+        _debug_evolution_log(
+            "evolution_store.py:write_skill_content",
+            "write_skill_content",
+            {
+                "skill_name": name,
+                "md_path": str(md_path),
+                "content_has_index": bool(_EVOLUTION_INDEX_PATTERN.search(content)),
+                "content_len": len(content),
+            },
+            "H4",
+        )
+        # #endregion
         try:
             await self._write_file_text(md_path, content)
             logger.info("[EvolutionStore] wrote SKILL.md for skill='%s'", name)
