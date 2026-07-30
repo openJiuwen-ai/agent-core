@@ -19,15 +19,15 @@ from openjiuwen.core.context_engine.qa_artifact.store import resolve_sys_operati
 from openjiuwen.core.foundation.llm import BaseMessage, Model, ModelClientConfig, ModelRequestConfig, UserMessage
 
 
-class _CatalogOffloadConfig(BaseModel):
+class CatalogOffloadConfig(BaseModel):
     pass
 
 
-class _CatalogOffloadProcessor(ContextProcessor):
+class CatalogOffloadProcessor(ContextProcessor):
     """Minimal processor shell to reuse filesystem offload_messages (§4.3)."""
 
     def __init__(self) -> None:
-        super().__init__(_CatalogOffloadConfig())
+        super().__init__(CatalogOffloadConfig())
 
     def load_state(self, state: dict[str, Any]) -> None:
         _ = state
@@ -36,7 +36,7 @@ class _CatalogOffloadProcessor(ContextProcessor):
         return {}
 
 
-def _filesystem_handle_from_message(message: Any) -> str | None:
+def filesystem_handle_from_message(message: Any) -> str | None:
     handle = getattr(message, "offload_handle", None)
     if not handle:
         return None
@@ -59,7 +59,7 @@ class CatalogBuilder:
         session_memory_config: Any | None = None,
     ):
         self._config = config
-        self._offloader = _CatalogOffloadProcessor()
+        self._offloader = CatalogOffloadProcessor()
         self._model: Model | None = None
         if session_memory_config is not None:
             model = getattr(session_memory_config, "model", None)
@@ -189,7 +189,7 @@ class CatalogBuilder:
 
     async def _offload_unit(self, ctx: Any, unit: list[BaseMessage]) -> str | None:
         for message in unit:
-            handle = _filesystem_handle_from_message(message)
+            handle = filesystem_handle_from_message(message)
             if handle:
                 return handle
 
@@ -218,7 +218,7 @@ class CatalogBuilder:
         )
         if offload_message is None:
             return None
-        handle = _filesystem_handle_from_message(offload_message)
+        handle = filesystem_handle_from_message(offload_message)
         if handle is None and getattr(offload_message, "offload_handle", None):
             logger.warning(
                 "[CatalogBuilder] filesystem offload fell back to in_memory; omitting catalog handle",

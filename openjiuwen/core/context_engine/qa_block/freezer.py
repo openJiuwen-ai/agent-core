@@ -31,7 +31,12 @@ from openjiuwen.core.context_engine.qa_block.registry import (
     merge_registry_block,
     save_registry,
 )
-from openjiuwen.core.context_engine.qa_block.schema import L0Store, QABlockEntry, QABlockRegistry
+from openjiuwen.core.context_engine.qa_block.schema import (
+    L0Store,
+    L1_TRUNCATED_PENDING_PREFIX,
+    QABlockEntry,
+    QABlockRegistry,
+)
 from openjiuwen.core.context_engine.qa_block.store import QABlockStore
 from openjiuwen.core.context_engine.qa_block.summarizer import QABlockSummarizer
 from openjiuwen.core.foundation.llm import BaseMessage
@@ -189,6 +194,12 @@ class QABlockFreezer:
         had_compact = had_full_compact_in_messages(native_messages)
         l0_mode: Literal["delta", "compact_summary_tail"] = "compact_summary_tail" if had_compact else "delta"
 
+        # P0-3-A: truncated commit L1 must not be treated as the only recoverable truth.
+        pin_chars = self._config.recovery_pin_user_chars
+        recovery_required = bool(had_compact or (pin_chars > 0 and len(user_query or "") >= pin_chars))
+        if recovery_required and not (l1_text or "").startswith(L1_TRUNCATED_PENDING_PREFIX):
+            l1_text = f"{L1_TRUNCATED_PENDING_PREFIX} {l1_text}"
+
         token_counter = None
         counter = getattr(context, "token_counter", None)
         if callable(counter):
@@ -209,6 +220,7 @@ class QABlockFreezer:
             l1_source=l1_source,
             l0_content_mode=l0_mode,
             had_full_compact_in_qa=had_compact,
+            recovery_required=recovery_required,
             preloaded_qa_ids=list(preloaded_qa_ids or []),
             l0_persist_status="pending",
             freeze_committed_at=_utc_now_iso(),
@@ -236,6 +248,7 @@ class QABlockFreezer:
                 "native_count": len(native_messages),
                 "l0_content_mode": l0_mode,
                 "had_full_compact_in_qa": had_compact,
+                "recovery_required": recovery_required,
                 "l1_source": l1_source,
                 "l1_allow_llm": False,
             },

@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.context_engine.qa_block.schema import PIN_LONG_USER_CHARS_DEFAULT
+
 
 class QABlockConfig(BaseModel):
     enabled: bool = True
@@ -23,6 +25,14 @@ class QABlockConfig(BaseModel):
         description="Overview await before freeze; read by host freeze rail, passed to await_pending_overview.",
     )
     excerpt_max_chars: int = Field(default=200, gt=0)
+    recovery_pin_user_chars: int = Field(
+        default=PIN_LONG_USER_CHARS_DEFAULT,
+        ge=0,
+        description=(
+            "When user_query length reaches this threshold (or L0 was compacted), "
+            "freeze_commit marks recovery_required. 0 disables the length trigger."
+        ),
+    )
     catalog_max_tokens: int = Field(default=8000, gt=0)
     catalog_short_max_chars: int = Field(default=150, gt=0)
     hydrate_artifact_aware: bool = True

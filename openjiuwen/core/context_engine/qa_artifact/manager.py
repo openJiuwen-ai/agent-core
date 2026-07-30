@@ -8,8 +8,6 @@ import json
 from collections import defaultdict
 from typing import Any
 
-TaskKey = tuple[str, str]
-
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     find_message_index_by_context_message_id,
@@ -17,7 +15,11 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds,
 )
 from openjiuwen.core.context_engine.observability import write_context_trace
-from openjiuwen.core.context_engine.qa_artifact.catalog import CatalogBuilder
+from openjiuwen.core.context_engine.qa_artifact.catalog import (
+    CatalogBuilder,
+    CatalogOffloadProcessor,
+    filesystem_handle_from_message,
+)
 from openjiuwen.core.context_engine.qa_artifact.checkpoint_flush import maybe_persist_qa_memory_state
 from openjiuwen.core.context_engine.qa_artifact.overview import render_plain
 from openjiuwen.core.context_engine.qa_artifact.schema import QAArtifactConfig, QAArtifacts
@@ -32,8 +34,14 @@ from openjiuwen.core.context_engine.qa_artifact.window import (
     make_processor_ctx,
     tail_after,
 )
-from openjiuwen.core.context_engine.qa_block.messages import message_qa_id
+from openjiuwen.core.context_engine.qa_block.messages import (
+    had_full_compact_in_messages,
+    message_qa_id,
+)
 from openjiuwen.core.context_engine.qa_ref import QARef
+from openjiuwen.core.foundation.llm import UserMessage
+
+TaskKey = tuple[str, str]
 
 _OVERVIEW_FREEZE_AWAIT_S = 3.0
 
@@ -48,6 +56,7 @@ class QAArtifactManager:
         self._config = config
         self._overview = overview_generator
         self._catalog = catalog_builder
+        self._pin_offloader = CatalogOffloadProcessor()
         self._bg: dict[TaskKey, asyncio.Task] = {}
         self._overview_bg: dict[TaskKey, asyncio.Task] = {}
         self._session_task_keys: dict[str, set[TaskKey]] = defaultdict(set)
@@ -284,6 +293,106 @@ class QAArtifactManager:
             covers_upto_message_id=state.covers_upto_message_id,
         )
 
+    @staticmethod
+    def _message_text_len(message: Any) -> int:
+        content = getattr(message, "content", None)
+        if isinstance(content, str):
+            return len(content)
+        if content is None:
+            return 0
+        return len(str(content))
+
+    @staticmethod
+    def _is_user_message(message: Any) -> bool:
+        if isinstance(message, UserMessage):
+            return True
+        return getattr(message, "role", None) == "user"
+
+    async def _pin_long_user_messages(
+        self,
+        ctx: Any,
+        messages: list,
+        *,
+        context: Any,
+    ) -> tuple[list, bool]:
+        """Filesystem-offload oversized UserMessages before fold/wholesale.
+
+        Returns ``(messages, ok)``. ``ok=False`` means a required pin failed and
+        the caller should skip destructive fold (P0-1).
+        """
+        pin_chars = self._config.safety_net_pin_user_chars
+        if pin_chars <= 0 or not messages:
+            return messages, True
+
+        context_obj = context if context is not None else getattr(ctx, "context", None)
+        if context_obj is None:
+            logger.error("[QAArtifactManager] pin long user skipped: no context on ctx")
+            return messages, False
+
+        sys_operation = resolve_sys_operation(ctx)
+        protected: list = []
+        changed = False
+        for message in messages:
+            if not self._is_user_message(message):
+                protected.append(message)
+                continue
+            if filesystem_handle_from_message(message):
+                protected.append(message)
+                continue
+            if self._message_text_len(message) < pin_chars:
+                protected.append(message)
+                continue
+
+            try:
+                offload_message = await self._pin_offloader.offload_messages(
+                    "user",
+                    "",
+                    [message],
+                    context=context_obj,
+                    offload_type="filesystem",
+                    sys_operation=sys_operation,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[QAArtifactManager] pin long user offload failed error=%s",
+                    exc,
+                )
+                return messages, False
+
+            handle = filesystem_handle_from_message(offload_message) if offload_message else None
+            if handle is None:
+                logger.error("[QAArtifactManager] pin long user offload missing filesystem handle")
+                return messages, False
+
+            # Preserve qa / context ids on the stub so apply/freeze keep attribution.
+            stub = offload_message
+            src_meta = getattr(message, "metadata", None) or {}
+            if isinstance(src_meta, dict) and src_meta:
+                stub_meta = dict(getattr(stub, "metadata", None) or {})
+                stub_meta.update(src_meta)
+                stub.metadata = stub_meta
+            protected.append(stub)
+            changed = True
+            logger.info(
+                "[QAArtifactManager] pinned long user message handle=%s chars=%s",
+                handle,
+                self._message_text_len(message),
+            )
+
+        return (protected if changed else messages), True
+
+    async def pin_long_user_messages_in_context(self, ctx: Any, context: Any) -> bool:
+        """Pin oversized users in the live context buffer. False on pin failure."""
+        if context is None or not hasattr(context, "get_messages"):
+            return True
+        messages = list(context.get_messages() or [])
+        pinned, ok = await self._pin_long_user_messages(ctx, messages, context=context)
+        if not ok:
+            return False
+        if pinned is not messages and hasattr(context, "set_messages"):
+            context.set_messages(pinned)
+        return True
+
     async def _safety_net_compact_active_once(
         self,
         ctx: Any,
@@ -307,6 +416,18 @@ class QAArtifactManager:
         if not fold_messages:
             return 0
 
+        fold_messages, pin_ok = await self._pin_long_user_messages(
+            ctx,
+            fold_messages,
+            context=context,
+        )
+        if not pin_ok:
+            logger.error(
+                "[QAArtifactManager] active qa safety net skipped: pin long user failed qa_id=%s",
+                active.qa_id,
+            )
+            return 0
+
         if not self._claim(store, active.qa_id, stale_refresh=True):
             await self._await_products(store, active.qa_id)
             if not self._claim(store, active.qa_id, stale_refresh=True):
@@ -325,8 +446,7 @@ class QAArtifactManager:
                 messages=fold_messages,
             )
             logger.info(
-                "[QAArtifactManager] active qa safety net compact qa_id=%s "
-                "fold_messages=%s uncovered_tokens=%s",
+                "[QAArtifactManager] active qa safety net compact qa_id=%s fold_messages=%s uncovered_tokens=%s",
                 active.qa_id,
                 len(fold_messages),
                 self._uncovered_tokens(ctx, store, active),
@@ -469,10 +589,22 @@ class QAArtifactManager:
         workspace: Any,
         qa_id: str,
         native_messages: list,
+        force_produce: bool = False,
+        l0_content_mode: str | None = None,
+        had_full_compact_in_qa: bool | None = None,
     ) -> bool:
         """Async full artifact produce after freeze; host freeze rail calls via ``post_commit``.
 
-        Skipped when below ``history_block_compact_tokens`` or artifacts already complete.
+        Skipped when below ``history_block_compact_tokens`` or artifacts already complete,
+        unless ``force_produce`` / compact_summary_tail / had_full_compact (P0-2).
+
+        Force-produce responsibility split:
+        - Caller/rail: maps ``QABlockEntry`` flags into ``force_produce`` /
+          ``l0_content_mode`` / ``had_full_compact_in_qa``. ``recovery_required`` is
+          entry-only and must arrive as ``force_produce=True`` (this method cannot infer it).
+        - Manager (here): final skip/force gate. Re-ORs ``had_full_compact_in_qa`` and
+          ``compact_summary_tail`` from kwargs, or infers them from ``native_messages``
+          when kwargs are omitted (defense-in-depth for non-rail callers).
         """
         if not native_messages:
             return False
@@ -491,7 +623,14 @@ class QAArtifactManager:
         if context is not None and callable(getattr(context, "token_counter", None)):
             token_counter = context.token_counter()
         tokens = estimate_context_messages_tokens(native_messages, token_counter)
-        if tokens < self._config.history_block_compact_tokens:
+
+        if had_full_compact_in_qa is None:
+            had_full_compact_in_qa = had_full_compact_in_messages(native_messages)
+        if l0_content_mode is None and had_full_compact_in_qa:
+            l0_content_mode = "compact_summary_tail"
+        force = bool(force_produce or had_full_compact_in_qa or l0_content_mode == "compact_summary_tail")
+
+        if (not force) and tokens < self._config.history_block_compact_tokens:
             logger.info(
                 "[QAArtifactManager] freeze produce skipped: below history_block_compact "
                 "qa_id=%s tokens=%s threshold=%s",
@@ -500,6 +639,16 @@ class QAArtifactManager:
                 self._config.history_block_compact_tokens,
             )
             return False
+        if force and tokens < self._config.history_block_compact_tokens:
+            logger.info(
+                "[QAArtifactManager] freeze produce forced qa_id=%s tokens=%s "
+                "threshold=%s l0_content_mode=%s had_full_compact=%s",
+                qa_id,
+                tokens,
+                self._config.history_block_compact_tokens,
+                l0_content_mode,
+                had_full_compact_in_qa,
+            )
 
         if not self._prepare_freeze_produce_claim(
             store,
@@ -606,9 +755,7 @@ class QAArtifactManager:
         store = self.build_store(ctx, workspace)
         if store.get_or_init(qa_id).is_extracting:
             return
-        task = asyncio.create_task(
-            self._refresh_overview_only(ctx, workspace, qa_ref, list(messages))
-        )
+        task = asyncio.create_task(self._refresh_overview_only(ctx, workspace, qa_ref, list(messages)))
         self._register_overview_task(ctx, qa_id, task)
         logger.info(
             "[QAArtifactManager] fallback overview refresh scheduled qa_id=%s messages=%s",

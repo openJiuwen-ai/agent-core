@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.context_engine.qa_block.schema import PIN_LONG_USER_CHARS_DEFAULT
+
 QA_MEMORY_STATE_KEY = "__qa_memory__"
 
 
@@ -41,6 +43,14 @@ class QAArtifactConfig(BaseModel):
         default=2,
         ge=0,
         description="Recent messages to preserve when folding an in-flight active QA.",
+    )
+    safety_net_pin_user_chars: int = Field(
+        default=PIN_LONG_USER_CHARS_DEFAULT,
+        ge=0,
+        description=(
+            "Before active-QA safety-net fold, filesystem-offload UserMessages whose "
+            "content length is at least this many characters. 0 disables pinning."
+        ),
     )
     catalog_long_message_tokens: int = Field(default=800, gt=0)
     catalog_summary_max_tokens: int = Field(default=80, gt=0)

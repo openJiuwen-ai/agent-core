@@ -17,6 +17,10 @@ QA_BLOCK_CATALOG_END = "[END_QA_BLOCK_CATALOG]"
 QA_BLOCK_L0_START_PREFIX = "[QA_BLOCK_L0: qa_id="
 QA_BLOCK_L0_END = "[END_QA_BLOCK_L0]"
 
+# Shared with qa_artifact safety-net pin threshold (keep defaults aligned).
+PIN_LONG_USER_CHARS_DEFAULT = 4000
+L1_TRUNCATED_PENDING_PREFIX = "[L1_TRUNCATED_PENDING]"
+
 
 class L0Store(BaseModel):
     type: Literal["filesystem"] = "filesystem"
@@ -42,6 +46,7 @@ class QABlockEntry(BaseModel):
     l0_persist_status: Literal["pending", "done", "failed"] = "pending"
     l0_content_mode: Literal["delta", "compact_summary_tail"] = "delta"
     had_full_compact_in_qa: bool = False
+    recovery_required: bool = False
     preloaded_qa_ids: list[str] = Field(default_factory=list)
     freeze_committed_at: str | None = None
     l0_persisted_at: str | None = None

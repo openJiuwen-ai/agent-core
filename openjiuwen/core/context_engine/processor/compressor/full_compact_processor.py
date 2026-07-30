@@ -240,6 +240,7 @@ class FullCompactProcessor(ContextProcessor):
         self._deferred_overflow_recovery: bool = False
         self._overflow_threshold_override: Optional[int] = None  # threshold_override from 413 recovery
         self._llm_compact_round_signature: tuple[Any, ...] | None = None
+        self._add_wholesale_episode_done: bool = False
         self._state_reinjector = FullCompactStateReinjector()
         self._state_reinjector.register_builder(
             name="skills",
@@ -577,11 +578,20 @@ class FullCompactProcessor(ContextProcessor):
             async def _fallback() -> bool:
                 nonlocal buffer_wholesale_replaced, whole_window_fallback_attempted
                 if not allow_whole_window_fallback:
-                    logger.info(
-                        "[FullCompact] ADD path skips whole-window LLM fallback tokens=%s",
-                        candidate_tokens,
+                    # P0-A/A3: ADD path — run classic whole-window once per episode
+                    # when per-QA compact cannot progress (R1=in fallback, R2=single-flight).
+                    ok = await self._add_conditional_whole_window_fallback(
+                        context,
+                        system_messages=system_messages,
+                        tools=tools,
+                        candidate_tokens=candidate_tokens,
+                        window_qas=window_qas,
+                        sys_operation=sys_operation,
                     )
-                    return False
+                    if ok:
+                        buffer_wholesale_replaced = True
+                        whole_window_fallback_attempted = True
+                    return ok
                 whole_window_fallback_attempted = True
                 ok = await self._fallback_whole_window_compact(
                     context,
@@ -616,6 +626,66 @@ class FullCompactProcessor(ContextProcessor):
                 )
                 return True, artifact_applied, buffer_wholesale_replaced, whole_window_fallback_attempted
         return False, artifact_applied, buffer_wholesale_replaced, whole_window_fallback_attempted
+
+    async def _add_conditional_whole_window_fallback(
+        self,
+        context: ModelContext,
+        *,
+        system_messages: List[BaseMessage],
+        tools: List[Any],
+        candidate_tokens: int,
+        window_qas: list[Any],
+        sys_operation: Any = None,
+    ) -> bool:
+        """ADD-path whole-window fallback with episode single-flight (P0-A/A3)."""
+        if self._add_wholesale_episode_done:
+            logger.info(
+                "[FullCompact] ADD conditional wholesale skipped reason=episode_done tokens=%s",
+                candidate_tokens,
+            )
+            return False
+
+        active_count = sum(1 for qa in (window_qas or []) if not getattr(qa, "is_history", True))
+        logger.info(
+            "[FullCompact] ADD conditional wholesale start tokens=%s reason=no_candidates "
+            "single_active=%s",
+            candidate_tokens,
+            active_count == 1,
+        )
+
+        if self._qa_mgr is not None:
+            proc_ctx = make_processor_ctx(
+                context,
+                sys_operation=sys_operation or getattr(context, "_sys_operation", None),
+            )
+            pin_ok = await self._qa_mgr.pin_long_user_messages_in_context(proc_ctx, context)
+            if not pin_ok:
+                logger.error(
+                    "[FullCompact] ADD conditional wholesale: pin long user failed; "
+                    "continuing wholesale (original may be unrecoverable)"
+                )
+
+        messages_before = len(context.get_messages() or [])
+        ok = await self._fallback_whole_window_compact(
+            context,
+            all_messages=context.get_messages(),
+            system_messages=system_messages,
+            tools=tools,
+        )
+        if ok:
+            self._add_wholesale_episode_done = True
+            mark_assembly_whole_compact_applied(context)
+            logger.info(
+                "[FullCompact] ADD conditional wholesale done messages_before=%s after=%s",
+                messages_before,
+                len(context.get_messages() or []),
+            )
+        else:
+            logger.info(
+                "[FullCompact] ADD conditional wholesale failed tokens=%s",
+                candidate_tokens,
+            )
+        return ok
 
     def _build_window_qas(self, context: ModelContext, *, sys_operation: Any) -> list[Any]:
         return build_window_qas_from_context(context, sys_operation=sys_operation)
@@ -800,6 +870,12 @@ class FullCompactProcessor(ContextProcessor):
         tools = kwargs.get("tools") or []
         sys_operation = kwargs.get("sys_operation") or getattr(context, "_sys_operation", None)
 
+        # New user turn starts a new overflow episode for ADD conditional wholesale (P0-A/A3).
+        for message in messages_to_add or []:
+            if isinstance(message, UserMessage) or getattr(message, "role", None) == "user":
+                self._add_wholesale_episode_done = False
+                break
+
         if self._qa_mgr is not None:
             compact_handled, artifact_applied, wholesale, _ = await self._run_qa_artifact_window_pass(
                 context,
@@ -834,7 +910,7 @@ class FullCompactProcessor(ContextProcessor):
         if candidate_tokens <= self._trigger_total_tokens:
             return None, messages_to_add
 
-        # ADD path never runs whole-window LLM; defer to GET (force_compact only affects GET).
+        # Without qa_artifact manager, ADD still defers whole-window LLM to GET.
         logger.info(
             "[FullCompact] ADD path skips whole-window LLM tokens=%s",
             candidate_tokens,

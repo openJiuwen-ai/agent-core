@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -290,7 +291,15 @@ class TestFullCompactProcessor:
                 },
             )
 
-            async def _fake_invoke(*, context_messages, notes_path, current_notes, is_incremental=False, trigger_tokens=0, full_scan_tokens=0):
+            async def _fake_invoke(
+                *,
+                context_messages,
+                notes_path,
+                current_notes,
+                is_incremental=False,
+                trigger_tokens=0,
+                full_scan_tokens=0,
+            ):
                 _ = context_messages, current_notes, is_incremental, trigger_tokens, full_scan_tokens
                 notes_path.write_text("updated notes", encoding="utf-8")
 
@@ -689,20 +698,14 @@ class TestFullCompactContextWindowAccounting:
         ]
         assert processor._count_context_window_tokens(
             [], no_usage, [], ctx, use_baseline=True
-        ) == processor._count_context_window_tokens(
-            [], no_usage, [], ctx, use_baseline=False
-        )
+        ) == processor._count_context_window_tokens([], no_usage, [], ctx, use_baseline=False)
 
         high_baseline_messages = [
             AssistantMessage(content="anchor", usage_metadata=UsageMetadata(total_tokens=9000)),
             UserMessage(content="tail"),
         ]
-        via_baseline = processor._count_context_window_tokens(
-            [], high_baseline_messages, [], ctx, use_baseline=True
-        )
-        full_small = processor._count_context_window_tokens(
-            [], high_baseline_messages, [], ctx, use_baseline=False
-        )
+        via_baseline = processor._count_context_window_tokens([], high_baseline_messages, [], ctx, use_baseline=True)
+        full_small = processor._count_context_window_tokens([], high_baseline_messages, [], ctx, use_baseline=False)
         assert via_baseline > full_small
 
     @pytest.mark.asyncio
@@ -846,9 +849,7 @@ class TestFullCompactQAArtifactManager:
         )
         from openjiuwen.core.context_engine.qa_artifact import QAArtifactConfig
 
-        processor = FullCompactProcessor(
-            FullCompactProcessorConfig(qa_artifact=QAArtifactConfig(enabled=True))
-        )
+        processor = FullCompactProcessor(FullCompactProcessorConfig(qa_artifact=QAArtifactConfig(enabled=True)))
         mgr = processor.qa_artifact_manager
         assert mgr is not None
         assert mgr._overview._sm._update_agent._config.model is None
@@ -964,3 +965,113 @@ class TestFullCompactHardWindowValidation:
         assert ok is True
         assert processor.consume_deferred_overflow_recovery() is True
         assert processor.is_force_compact_pending() is True
+
+
+class TestAddConditionalWholeWindowFallback:
+    """P0-A/A3: ADD-path conditional wholesale with episode single-flight."""
+
+    def _make_processor(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+
+        return FullCompactProcessor(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=1,
+                compression_call_max_tokens=2000,
+                messages_to_keep=1,
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_call_triggers_wholesale_and_marks_episode_done(self):
+        processor = self._make_processor()
+        context = MagicMock()
+        context.get_messages.return_value = [UserMessage(content="u")]
+        wholesale = AsyncMock(return_value=True)
+        with patch.object(processor, "_fallback_whole_window_compact", new=wholesale):
+            ok = await processor._add_conditional_whole_window_fallback(
+                context,
+                system_messages=[],
+                tools=[],
+                candidate_tokens=100,
+                window_qas=[],
+            )
+        assert ok is True
+        assert processor._add_wholesale_episode_done is True
+        wholesale.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_second_call_in_same_episode_skips_without_llm(self):
+        processor = self._make_processor()
+        processor._add_wholesale_episode_done = True
+        wholesale = AsyncMock(return_value=True)
+        with patch.object(processor, "_fallback_whole_window_compact", new=wholesale):
+            ok = await processor._add_conditional_whole_window_fallback(
+                MagicMock(),
+                system_messages=[],
+                tools=[],
+                candidate_tokens=100,
+                window_qas=[],
+            )
+        assert ok is False
+        wholesale.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_new_user_message_resets_episode_allowing_wholesale_again(self):
+        ctx = await create_context_with_full_compact(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=10_000,
+                compression_call_max_tokens=2000,
+                messages_to_keep=1,
+            ),
+            history_messages=[UserMessage(content="hist")],
+        )
+        processor = _full_compact_from_context(ctx)
+        processor._add_wholesale_episode_done = True
+        processor._qa_mgr = None
+
+        # Reset via on_add_messages user turn, then conditional path can fire again.
+        await processor.on_add_messages(ctx, [UserMessage(content="next turn")])
+        assert processor._add_wholesale_episode_done is False
+
+        wholesale = AsyncMock(return_value=True)
+        with patch.object(processor, "_fallback_whole_window_compact", new=wholesale):
+            ok = await processor._add_conditional_whole_window_fallback(
+                ctx,
+                system_messages=[],
+                tools=[],
+                candidate_tokens=100,
+                window_qas=[],
+            )
+        assert ok is True
+        wholesale.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_pin_failure_still_continues_wholesale(self):
+        processor = self._make_processor()
+        pin = AsyncMock(return_value=False)
+        processor._qa_mgr = SimpleNamespace(pin_long_user_messages_in_context=pin)
+        context = MagicMock()
+        context.get_messages.return_value = [UserMessage(content="u")]
+        wholesale = AsyncMock(return_value=True)
+
+        with (
+            patch(
+                "openjiuwen.core.context_engine.processor.compressor.full_compact_processor.make_processor_ctx",
+                return_value=SimpleNamespace(),
+            ),
+            patch.object(processor, "_fallback_whole_window_compact", new=wholesale),
+        ):
+            ok = await processor._add_conditional_whole_window_fallback(
+                context,
+                system_messages=[],
+                tools=[],
+                candidate_tokens=100,
+                window_qas=[SimpleNamespace(is_history=False)],
+            )
+
+        assert ok is True
+        pin.assert_awaited_once()
+        wholesale.assert_awaited_once()
+        assert processor._add_wholesale_episode_done is True
