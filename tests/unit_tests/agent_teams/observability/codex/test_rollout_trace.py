@@ -21,27 +21,53 @@ from openjiuwen.agent_teams.observability.codex.rollout_trace import (
 
 @pytest.mark.level0
 @pytest.mark.parametrize(
-    ("code", "expected_name"),
+    ("code", "expected_name", "expected_display_name"),
     [
         (
             "await tools.mcp__openjiuwen_team__view_task({action:'get'});",
             "openjiuwen_team.view_task",
+            "codex.exec",
         ),
-        ("await tools.apply_patch(patch);", "apply_patch"),
+        (
+            (
+                'const name = "mcp__openjiuwen_team__claim_task"; '
+                'if (typeof tools[name] === "function") { '
+                'await tools[name]({task_id:"task-1",status:"claimed"}); }'
+            ),
+            "openjiuwen_team.claim_task",
+            "codex.exec",
+        ),
+        (
+            'await tools["mcp__openjiuwen_team__send_message"]({to:"team-leader"});',
+            "openjiuwen_team.send_message",
+            "codex.exec",
+        ),
+        ("await tools.apply_patch(patch);", "apply_patch", "codex.exec"),
         (
             'await tools.exec_command({cmd:"cat result.md", workdir:"/tmp"});',
             "shell.cat",
+            "codex.exec",
         ),
         (
             "text(ALL_TOOLS.filter(x => /write_file/.test(x.name)));",
             "codex.tool_discovery",
+            "codex.tool_discovery",
         ),
-        ("text('no nested tool');", "codex.internal.exec"),
+        (
+            "text('no nested tool');",
+            "codex.internal.exec",
+            "codex.internal.exec",
+        ),
     ],
 )
-def test_hidden_exec_tool_name_is_decoded(code: str, expected_name: str):
+def test_hidden_exec_tool_name_is_decoded(
+    code: str,
+    expected_name: str,
+    expected_display_name: str,
+):
     from openjiuwen.agent_teams.observability.codex.bridge import (
         _decode_rollout_tool,
+        _sdk_tool_display_name,
     )
 
     decoded = _decode_rollout_tool(
@@ -54,6 +80,14 @@ def test_hidden_exec_tool_name_is_decoded(code: str, expected_name: str):
     )
 
     assert decoded["tool_name"] == expected_name
+    assert decoded["display_name"] == expected_display_name
+    assert (
+        _sdk_tool_display_name(
+            item_type="dynamicToolCall",
+            tool_args={"code": code},
+        )
+        == expected_display_name
+    )
 
 
 @pytest.mark.level0
@@ -347,7 +381,9 @@ def test_rollout_inference_emits_exact_content_reasoning_and_tool_parent(
 
 
 @pytest.mark.level0
-def test_rollout_hidden_exec_tool_is_decoded_and_emitted(monkeypatch):
+def test_rollout_exec_wrapper_keeps_distinct_display_and_logical_names(
+    monkeypatch,
+):
     exporter_module = pytest.importorskip(
         "opentelemetry.sdk.trace.export.in_memory_span_exporter",
     )
@@ -437,9 +473,13 @@ def test_rollout_hidden_exec_tool_is_decoded_and_emitted(monkeypatch):
                     "output_items": [
                         {
                             "type": "custom_tool_call",
-                            "call_id": "call-discovery",
+                            "call_id": "call-view-task",
                             "name": "exec",
-                            "input": ("text(ALL_TOOLS.filter(x => /view_task/.test(x.name)));"),
+                            "input": (
+                                "const task = await "
+                                "tools.mcp__openjiuwen_team__view_task("
+                                '{action:"get",task_id:"task-1"});'
+                            ),
                         },
                     ],
                 },
@@ -462,8 +502,8 @@ def test_rollout_hidden_exec_tool_is_decoded_and_emitted(monkeypatch):
                     "input": [
                         {
                             "type": "custom_tool_call_output",
-                            "call_id": "call-discovery",
-                            "output": [{"name": "view_task"}],
+                            "call_id": "call-view-task",
+                            "output": [{"status": "pending"}],
                         },
                     ],
                 },
@@ -497,7 +537,7 @@ def test_rollout_hidden_exec_tool_is_decoded_and_emitted(monkeypatch):
     team_span.end()
 
     spans = list(exporter.get_finished_spans())
-    tool_span = next(span for span in spans if span.name == "tool.codex.tool_discovery")
+    tool_span = next(span for span in spans if span.name == "tool.codex.exec")
     first_llm = next(
         span
         for span in spans
@@ -509,10 +549,13 @@ def test_rollout_hidden_exec_tool_is_decoded_and_emitted(monkeypatch):
     assert tool_span.attributes["codex.tool.parent_inference_call_id"] == "inference-1"
     assert tool_span.start_time == 1_750_000_000_350_000_000
     assert tool_span.end_time == 1_750_000_000_500_000_000
-    assert tool_span.attributes["gen_ai.tool.name"] == "codex.tool_discovery"
     assert tool_span.attributes["codex.tool.source"] == "rollout"
     assert tool_span.attributes["codex.tool.boundary_exact"] is False
-    assert "view_task" in tool_span.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+    assert "pending" in tool_span.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+    assert tool_span.attributes["gen_ai.tool.name"] == "codex.exec"
+    assert tool_span.attributes["codex.tool.logical_name"] == (
+        "openjiuwen_team.view_task"
+    )
 
 
 @pytest.mark.asyncio

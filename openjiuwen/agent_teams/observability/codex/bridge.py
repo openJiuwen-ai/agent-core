@@ -23,6 +23,13 @@ _NATIVE_EXPORT_QUIET_S = 0.15
 _MAX_INDEXED_MESSAGES = 48
 _ROLLOUT_TOOL_OVERLAP_TOLERANCE_NS = 250_000_000
 _EXEC_TOOL_PATTERN = re.compile(r"\btools\.([A-Za-z0-9_]+)\s*\(")
+_EXEC_TOOL_LITERAL_PATTERN = re.compile(
+    r"""\btools\s*\[\s*(["'])([A-Za-z0-9_]+)\1\s*\]\s*\(""",
+)
+_EXEC_TOOL_VARIABLE_PATTERN = re.compile(
+    r"""\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*"""
+    r"""(["'])([A-Za-z0-9_]+)\2\s*;[\s\S]*?\btools\s*\[\s*\1\s*\]\s*\(""",
+)
 _EXEC_COMMAND_PATTERN = re.compile(
     r"""\bcmd\s*:\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')""",
 )
@@ -194,6 +201,20 @@ def _command_display_name(code: str) -> str:
     return f"shell.{executable}" if executable else "shell.exec_command"
 
 
+def _exec_tool_identifier(code: str) -> str:
+    """Resolve only statically named tools from Codex exec JavaScript."""
+    direct_match = _EXEC_TOOL_PATTERN.search(code)
+    if direct_match is not None:
+        return direct_match.group(1)
+    literal_match = _EXEC_TOOL_LITERAL_PATTERN.search(code)
+    if literal_match is not None:
+        return literal_match.group(2)
+    variable_match = _EXEC_TOOL_VARIABLE_PATTERN.search(code)
+    if variable_match is not None:
+        return variable_match.group(3)
+    return ""
+
+
 def _decode_rollout_tool(item: dict[str, Any]) -> dict[str, Any]:
     """Turn a generic Codex ``exec`` call into a readable tool identity."""
     item_type = str(item.get("type") or "custom_tool_call")
@@ -203,18 +224,17 @@ def _decode_rollout_tool(item: dict[str, Any]) -> dict[str, Any]:
     tool_name = raw_name
     display_name = raw_name
     if item_type == "custom_tool_call" and raw_name == "exec":
-        identifiers = _EXEC_TOOL_PATTERN.findall(code)
-        identifier = identifiers[0] if identifiers else ""
+        identifier = _exec_tool_identifier(code)
         if identifier.startswith("mcp__") and "__" in identifier[5:]:
             server, tool = identifier[5:].rsplit("__", maxsplit=1)
             tool_name = f"{server}.{tool}"
-            display_name = tool_name
+            display_name = "codex.exec"
         elif identifier == "exec_command":
             tool_name = _command_display_name(code)
-            display_name = tool_name
+            display_name = "codex.exec"
         elif identifier:
             tool_name = identifier
-            display_name = identifier
+            display_name = "codex.exec"
         elif "ALL_TOOLS" in code:
             tool_name = "codex.tool_discovery"
             display_name = tool_name
@@ -230,6 +250,27 @@ def _decode_rollout_tool(item: dict[str, Any]) -> dict[str, Any]:
         "boundary_exact": False,
         "correlation_keys": _tool_correlation_keys(item),
     }
+
+
+def _sdk_tool_display_name(
+    *,
+    item_type: str,
+    tool_args: Any,
+) -> str | None:
+    """Keep an SDK dynamic exec wrapper distinct from its nested tool."""
+    if item_type != "dynamicToolCall":
+        return None
+    code = tool_args.get("code") if isinstance(tool_args, dict) else tool_args
+    if not isinstance(code, str) or not code:
+        return None
+    decoded = _decode_rollout_tool(
+        {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": code,
+        },
+    )
+    return str(decoded.get("display_name") or "") or None
 
 
 def _rollout_tool_outputs(request_payload: Any) -> dict[str, Any]:
@@ -945,7 +986,7 @@ class CodexSpanBridge:
         """Remember the SDK tool start until its model parent is known."""
         if self._turn_span is None or self._config is None:
             return
-        self._tool_records[call_id] = {
+        record = {
             "call_id": call_id,
             "tool_name": tool_name,
             "tool_args": tool_args,
@@ -953,6 +994,13 @@ class CodexSpanBridge:
             "server_name": server_name,
             "start_ns": time.time_ns(),
         }
+        display_name = _sdk_tool_display_name(
+            item_type=item_type,
+            tool_args=tool_args,
+        )
+        if display_name is not None:
+            record["display_name"] = display_name
+        self._tool_records[call_id] = record
 
     def finish_tool(
         self,
@@ -990,6 +1038,12 @@ class CodexSpanBridge:
                 "end_ns": time.time_ns(),
             },
         )
+        display_name = _sdk_tool_display_name(
+            item_type=item_type,
+            tool_args=tool_args,
+        )
+        if display_name is not None:
+            record["display_name"] = display_name
 
     def _emit_tool_spans(self) -> None:
         """Emit tools as turn children with explicit model-call causality."""
@@ -1030,9 +1084,14 @@ class CodexSpanBridge:
         for call_id, record in self._tool_records.items():
             tool_name = str(record.get("tool_name") or "")
             item_type = str(record.get("item_type") or "")
+            explicit_display_name = str(record.get("display_name") or "")
             display_name = (
-                str(record.get("display_name") or "") or tool_name.rsplit(".", maxsplit=1)[-1] or item_type or "unknown"
+                explicit_display_name
+                or tool_name.rsplit(".", maxsplit=1)[-1]
+                or item_type
+                or "unknown"
             )
+            observation_tool_name = explicit_display_name or tool_name
             start_ns = int(record.get("start_ns") or now_ns)
             end_ns = max(start_ns, int(record.get("end_ns") or now_ns))
             span = tracer.start_span(
@@ -1044,7 +1103,9 @@ class CodexSpanBridge:
             safe_input = redact_prompt(_json_text(record.get("tool_args")), config)
             span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "tool")
             span.set_attribute(LANGFUSE_OBSERVATION_INPUT, safe_input)
-            span.set_attribute(GEN_AI_TOOL_NAME, tool_name)
+            span.set_attribute(GEN_AI_TOOL_NAME, observation_tool_name)
+            if observation_tool_name != tool_name:
+                span.set_attribute("codex.tool.logical_name", tool_name)
             span.set_attribute(GEN_AI_TOOL_INPUT, safe_input)
             span.set_attribute(GEN_AI_TOOL_ID, call_id)
             span.set_attribute("codex.item.type", item_type)
