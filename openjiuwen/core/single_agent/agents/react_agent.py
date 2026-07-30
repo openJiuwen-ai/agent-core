@@ -1912,6 +1912,18 @@ class ReActAgent(BaseAgent):
                     session.get_session_id(),
                     exc_info=True,
                 )
+            # 上面的清理只改了内存 buffer，必须同步写回 session state。
+            # 否则下一轮 create_context 会用取消前的旧快照 rebuild 整个
+            # buffer，把本轮保留的 UserMessage 覆盖掉（外部传入 session 时
+            # need_cleanup=False，下面的 finally 不会帮忙保存）。
+            try:
+                await asyncio.shield(self.context_engine.save_contexts(session))
+            except Exception:
+                logger.warning(
+                    "Failed to save context on cancel for session %s",
+                    session.get_session_id(),
+                    exc_info=True,
+                )
             raise  # Re-raise to propagate cancellation signal
         finally:
             if need_cleanup:
