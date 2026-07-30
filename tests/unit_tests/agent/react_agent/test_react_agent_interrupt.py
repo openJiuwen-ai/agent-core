@@ -182,16 +182,18 @@ class TestInvokeInterruptResume(unittest.IsolatedAsyncioTestCase):
         interrupted_output = WorkflowOutput(result=None, state=WorkflowExecutionState.INPUT_REQUIRED)
         call_count = {"n": 0}
 
-        async def fake_execute(ctx, tool_call, session):
+        async def fake_execute_single(parent_ctx, tool_call, session, tag=None):
+            # execute_single returns a 3-tuple (result, tool_msg, tool_ctx);
+            # tool_ctx=None skips force_finish propagation in the consumer.
             call_count["n"] += 1
             if call_count["n"] == 1:
-                return [(interrupted_output, _tool_msg("c1"))]
-            return [("workflow completed", _tool_msg("c1"))]
+                return (interrupted_output, _tool_msg("c1"), None)
+            return ("workflow completed", _tool_msg("c1"), None)
 
         with patch("openjiuwen.core.foundation.llm.model.Model.stream", side_effect=mock_llm.stream), \
              patch("openjiuwen.core.foundation.llm.model.Model.invoke", side_effect=mock_llm.invoke):
             agent = _make_agent("agent_invoke_resume")
-            agent.ability_manager.execute = fake_execute
+            agent.ability_manager.execute_single = fake_execute_single
             session = create_agent_session(
                 session_id="sess_resume_001",
                 card=AgentCard(id="agent_invoke_resume"),
@@ -224,16 +226,19 @@ class TestInvokeInterruptResume(unittest.IsolatedAsyncioTestCase):
         interrupted_output = WorkflowOutput(result=None, state=WorkflowExecutionState.INPUT_REQUIRED)
         execute_calls = []
 
-        async def fake_execute(ctx, tool_call, session):
-            execute_calls.append([tc.id for tc in tool_call])
-            if len(execute_calls) == 1:
-                return [(interrupted_output, _tool_msg("c1")), (interrupted_output, _tool_msg("c2"))]
-            return [("wf_a done", _tool_msg("c1")), ("wf_b done", _tool_msg("c2"))]
+        async def fake_execute_single(parent_ctx, tool_call, session, tag=None):
+            # execute_single is invoked once per tool_call (not batched).
+            # First two calls = first invoke (c1, c2 -> both interrupt);
+            # later calls = resume round (both complete).
+            execute_calls.append(tool_call.id)
+            if len(execute_calls) <= 2:
+                return (interrupted_output, _tool_msg(tool_call.id), None)
+            return ("done", _tool_msg(tool_call.id), None)
 
         with patch("openjiuwen.core.foundation.llm.model.Model.stream", side_effect=mock_llm.stream), \
              patch("openjiuwen.core.foundation.llm.model.Model.invoke", side_effect=mock_llm.invoke):
             agent = _make_agent("agent_multi_pending")
-            agent.ability_manager.execute = fake_execute
+            agent.ability_manager.execute_single = fake_execute_single
             session = create_agent_session(
                 session_id="sess_multi_001",
                 card=AgentCard(id="agent_multi_pending"),
@@ -242,17 +247,21 @@ class TestInvokeInterruptResume(unittest.IsolatedAsyncioTestCase):
 
             result1 = await agent.invoke({"query": "start"}, session=session)
             self.assertEqual(result1.get("result_type"), "interrupt", result1)
+            self.assertEqual(len(execute_calls), 2)  # c1 + c2 executed (both interrupted)
 
             result2 = await agent.invoke({"query": "feedback for c1"}, session=session)
             self.assertEqual(result2.get("result_type"), "interrupt", result2)
+            self.assertEqual(len(execute_calls), 2)  # no re-execution; still collecting one by one
 
             result3 = await agent.invoke({"query": "feedback for c2"}, session=session)
             self.assertEqual(result3.get("result_type"), "answer", result3)
             self.assertIn("Both workflows done!", result3.get("output", ""))
 
-            self.assertEqual(len(execute_calls), 2)
-            self.assertIn("c1", execute_calls[1])
-            self.assertIn("c2", execute_calls[1])
+            # Resume round re-executed both workflows once all feedback was collected.
+            self.assertEqual(len(execute_calls), 4)
+            resume_round = execute_calls[2:]
+            self.assertIn("c1", resume_round)
+            self.assertIn("c2", resume_round)
 
 
 if __name__ == "__main__":

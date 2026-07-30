@@ -586,8 +586,19 @@ class TodoListTool(TodoTool):
 
 
 _SEQUENTIAL_UPDATE_RETRY_HINT = (
-    "\nNext: Call todo_list to verify task IDs and list order, "
-    "then retry todo_modify with corrections. Do not ignore this error and continue."
+    "\n\n--- Todo State Machine Guide ---\n"
+    "The todo list enforces strict sequential progression:\n"
+    "  pending -> in_progress -> completed/cancelled (one at a time, in list order).\n"
+    "Rules:\n"
+    "  R1: You cannot set a later task to in_progress/completed while an earlier task is still pending.\n"
+    "    -> Mark the earlier task completed or cancelled FIRST (in the same batch or a prior call).\n"
+    "  R2: Only the FIRST non-terminal task may be in_progress at any time.\n"
+    "    -> Complete or cancel the current in_progress task before starting the next one.\n"
+    "Tip: To avoid state-judgment errors, it is recommended (not required) to include ALL tasks\n"
+    "  from the first modified position to the end of the list in a single todo_modify batch.\n"
+    "  If you only have a subset, call todo_list first to get the full list with current IDs\n"
+    "  and statuses, then resend the batch with the missing tasks at their current status.\n"
+    "Do not ignore this error and continue — fix the batch and retry."
 )
 
 

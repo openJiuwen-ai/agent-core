@@ -20,6 +20,12 @@ Output = TypeVar('Output', contravariant=True)
 class ToolCard(BaseCard):
     input_params: Dict[str, Any] | Type[BaseModel] = Field(default_factory=dict)
     properties: Dict[str, Any] = Field(default_factory=dict)
+    stateful: bool = Field(
+        default=False,
+        description="If True, this tool maintains session-bound state "
+                    "(e.g. workspace binding, authentication context) and "
+                    "must not fall back to a shared/global instance.",
+    )
 
     def tool_info(self):
         return ToolInfo(name=self.name, description=self.description, parameters=self.input_params)

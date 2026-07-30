@@ -853,10 +853,71 @@ class AbilityManager:
             from openjiuwen.core.runner import Runner
             tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=tag, session=session)
             if not tool:
-                raise self._build_execution_error(
-                    tool_call,
-                    f"Tool instance not found in resource_mgr: {tool_id}",
-                )
+                # Fallback: try base tool id (without agent qualification suffix).
+                # The qualified instance may have been evicted from resource_mgr
+                # (e.g. by a re-registration or session teardown) while the card
+                # remains in ability_manager. Try the unqualified base id.
+                #
+                # NOTE: get_tool does exact-id lookup (tag is ignored when
+                # tool_id is provided), so this only finds tools registered
+                # under exactly base_tool_id — typically global/shared
+                # instances. The found tool may be a shared instance, not
+                # agent-specific.
+                #
+                # Skip fallback for stateful tools (card.stateful=True) —
+                # using a shared/global instance would leak session-bound
+                # state (workspace binding, auth context, etc.) and cause
+                # cross-session data corruption.
+                base_tool_id = None
+                if tag and isinstance(tool_id, str) \
+                        and not getattr(tool_card, "stateful", False):
+                    suffix = f"_{tag}"
+                    if tool_id.endswith(suffix):
+                        base_tool_id = tool_id[:-len(suffix)]
+                        # False-positive guard: tool_id convention is
+                        # f"{base_id}_{tag}" where base_id is PascalCase
+                        # (e.g. "ReadFileTool") and tag is the agent's
+                        # card.id.  If base_tool_id is an accidental trim
+                        # of the tool's snake_case name (e.g. tool_id=
+                        # "read_file" matching tag="file" → base_tool_id
+                        # "read"), the suffix match was incidental.
+                        if base_tool_id and tool_card.name.startswith(
+                                base_tool_id.lower(),
+                        ):
+                            logger.warning(
+                                "Suffix match on tool_id=%s for tag=%s "
+                                "appears to be a false positive: base_tool_"
+                                "id=%r is a prefix of tool name %r, "
+                                "skipping fallback",
+                                tool_id, tag, base_tool_id, tool_card.name,
+                            )
+                            base_tool_id = None
+                if base_tool_id and base_tool_id != tool_id:
+                    tool = Runner.resource_mgr.get_tool(
+                        tool_id=base_tool_id, tag=tag, session=session,
+                    )
+                    if tool is not None:
+                        found_card_id = getattr(getattr(tool, "card", None), "id", "")
+                        if found_card_id != base_tool_id:
+                            logger.warning(
+                                "Tool instance not found under qualified id %s, "
+                                "and base id %s resolved to a tool with card.id=%s "
+                                "(id mismatch, skipping fallback)",
+                                tool_id, base_tool_id, found_card_id,
+                            )
+                            tool = None
+                        else:
+                            logger.warning(
+                                "Tool instance not found under qualified id %s, "
+                                "recovered from base id %s (shared/global instance)",
+                                tool_id, base_tool_id,
+                            )
+                if not tool:
+                    raise self._build_execution_error(
+                        tool_call,
+                        f"Tool instance not found in resource_mgr: {tool_id}"
+                        + (f" (also tried base id: {base_tool_id})" if base_tool_id else ""),
+                    )
             try:
                 result = await tool.invoke(tool_args, session=session)
             except Exception as e:

@@ -874,7 +874,7 @@ class ReActAgent(BaseAgent):
         # creating a new one (defensive — _execute_tool_call normally pops it).
         await self._cleanup_streaming_executor(ctx)
 
-        agent_tag = getattr(getattr(self, "card", None), "id", "") or ""
+        agent_tag = self._get_agent_tag()
         executor = StreamingToolExecutor(
             executor_fn=lambda tc: self.ability_manager.execute_single(
                 parent_ctx=ctx,
@@ -1184,6 +1184,16 @@ class ReActAgent(BaseAgent):
         except BaseException as exc:
             logger.debug("Streaming executor cleanup swallowed: %s", exc)
 
+    def _get_agent_tag(self) -> str:
+        """Derive the agent tag used for resource_mgr lookups and executor
+        logging.
+
+        Centralised so the streaming path, non-streaming path, and resume
+        path all use the same derivation — prevents divergence when the
+        tag source changes (e.g. from card.id to a runtime override).
+        """
+        return getattr(getattr(self, "card", None), "id", "") or ""
+
     async def _execute_tool_call(
             self,
             ctx: AgentCallbackContext,
@@ -1212,19 +1222,29 @@ class ReActAgent(BaseAgent):
         )
 
         if executor is None:
-            # 如果stream执行器为空，降级到使用原先的并行执行器
-            logger.warning("No streaming_tool_executor, use origin executor instead")
-            results = await self.ability_manager.execute(
-                ctx=ctx, tool_call=tool_calls, session=session,
+            # Non-streaming path or tool-interrupt resume: no pre-launched
+            # executor exists. Create a fresh one so tool execution semantics
+            # stay consistent instead of degrading to the batch executor
+            # (which dropped streaming ordering and caused
+            # "No streaming_tool_executor" warnings on every resume).
+            agent_tag = self._get_agent_tag()
+            executor = StreamingToolExecutor(
+                executor_fn=lambda tc: self.ability_manager.execute_single(
+                    parent_ctx=ctx,
+                    tool_call=tc,
+                    session=session,
+                    tag=agent_tag,
+                ),
+                tag=agent_tag,
             )
-        else:
-            for tc in tool_calls:
-                if not executor.is_added(tc):
-                    executor.add(tc)
-            ordered = await executor.wait_all()
-            results = self._consume_streaming_executor_results(
-                ctx=ctx, tool_calls=tool_calls, ordered=ordered,
-            )
+
+        for tc in tool_calls:
+            if not executor.is_added(tc):
+                executor.add(tc)
+        ordered = await executor.wait_all()
+        results = self._consume_streaming_executor_results(
+            ctx=ctx, tool_calls=tool_calls, ordered=ordered,
+        )
 
         add_kwargs = {
             "system_messages": ctx.extra.get("_active_system_messages") or [],

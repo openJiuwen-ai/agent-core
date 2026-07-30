@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Optional
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.foundation.llm import AssistantMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
@@ -342,10 +342,59 @@ class ToolInterruptHandler:
         ctx.extra[RESUME_USER_INPUT_KEY] = user_input
 
         tools_to_execute = []
+        skipped_reload_tool_calls: list = []
         for outer_id, entry in state.interrupted_tools.items():
             tc = copy.deepcopy(entry.tool_call)
             if entry.is_sub_agent:
                 tc = self._build_sub_agent_resume_tool_call(tc, user_input)
+            # Skip re-execution of reload_original_context_messages on resume:
+            # re-executing this context-retrieval tool reloads offloaded context
+            # from scratch, causing the agent to "restart" (nested replay).
+            #
+            # Check whether this specific tool call's result was already
+            # committed to the context by matching tool_call_id. If yes,
+            # skip to avoid nested replay. If no (e.g. interrupt happened
+            # before the result was committed, or cross-process resume
+            # without checkpointer), execute the tool to provide content.
+            #
+            # Using tool_call_id matching is more precise than checking
+            # context.get_messages() emptiness, because the main buffer
+            # can be partially populated (non-offloaded messages) even
+            # when this specific reload result is missing.
+            if tc.name == "reload_original_context_messages":
+                already_committed = False
+                try:
+                    tc_id = tc.id or ""
+                    if tc_id:
+                        existing = context.get_messages()
+                        if existing:
+                            already_committed = any(
+                                isinstance(m, ToolMessage) and m.tool_call_id == tc_id
+                                for m in existing
+                            )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to check committed context messages on resume "
+                        "(outer_id=%s, tc_id=%s): %s, defaulting to execute reload",
+                        outer_id, tc.id, e,
+                    )
+
+                if already_committed:
+                    logger.info(
+                        "Skipping re-execution of reload_original_context_messages "
+                        "on resume (outer_id=%s) — result with tool_call_id=%s "
+                        "already committed, reloading would cause nested context replay",
+                        outer_id, tc.id,
+                    )
+                    skipped_reload_tool_calls.append(tc)
+                    continue
+                else:
+                    logger.info(
+                        "Executing reload_original_context_messages on resume "
+                        "(outer_id=%s) — result not yet committed (tc id=%s), "
+                        "providing offloaded content",
+                        outer_id, tc.id,
+                    )
             tools_to_execute.append(tc)
 
         if tools_to_execute:
@@ -356,6 +405,22 @@ class ToolInterruptHandler:
                 )
         else:
             results = []
+
+        # Add synthetic tool messages for skipped reload tools so their
+        # tool_calls stay paired with tool_results in the model context.
+        if skipped_reload_tool_calls:
+            add_kwargs = {
+                "system_messages": ctx.extra.get("_active_system_messages") or [],
+                "tools": ctx.extra.get("_active_tools") or [],
+            }
+            for tc in skipped_reload_tool_calls:
+                tool_msg = ToolMessage(
+                    content="reload_original_context_messages was skipped on "
+                            "resume because the offloaded context is already "
+                            "present in the conversation. No action needed.",
+                    tool_call_id=getattr(tc, "id", "") or "",
+                )
+                await context.add_messages(tool_msg, **add_kwargs)
 
         ctx.extra.pop(RESUME_USER_INPUT_KEY, None)
 
