@@ -3,6 +3,6 @@
 
 """Claude Code SDK backend for external CLI team members."""
 
-from openjiuwen.agent_teams.external.cli_agent.claude.runtime import build_claude_runtime
+from openjiuwen.agent_teams.external.cli_agent.claude.runtime import ClaudeSdkRuntime, build_claude_runtime
 
-__all__ = ["build_claude_runtime"]
+__all__ = ["ClaudeSdkRuntime", "build_claude_runtime"]
