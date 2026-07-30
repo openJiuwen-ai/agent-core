@@ -324,7 +324,6 @@ class TeamScheduler:
         outcome; a crash is logged and retried on the next scan.
         """
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
-        from openjiuwen.agent_teams.schema.status import TaskStatus
         from openjiuwen.agent_teams.tools.locales import make_translator
         from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
         from openjiuwen.agent_teams.tools.tool_task import VerifyTaskTool, ViewTaskToolV2
