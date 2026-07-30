@@ -123,7 +123,7 @@ class TeamScheduler:
         self._active = True
         self._all_done_announced = False
         if first:
-            team_logger.info("[scheduler] activated for team %s", self._blueprint.team_name or "?")
+            team_logger.info("[scheduler] activated for team %s", self._blueprint.spec.team_name or "?")
         await self._scan()
 
     def deactivate(self) -> None:
