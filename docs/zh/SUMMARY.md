@@ -142,6 +142,8 @@
         - [openai_auth](2.开发指南/API文档/openjiuwen.extensions/external_provider/openai_auth/README.md)
           - [openai_account_auth](2.开发指南/API文档/openjiuwen.extensions/external_provider/openai_auth/openai_account_auth.md)
           - [openai_account_models](2.开发指南/API文档/openjiuwen.extensions/external_provider/openai_auth/openai_account_models.md)
+      - [sys_operation](2.开发指南/API文档/openjiuwen.extensions/sys_operation.README.md)
+        - [jiuwenbox](2.开发指南/API文档/openjiuwen.extensions/sys_operation/sandbox/providers/jiuwenbox.md)
       - [store](2.开发指南/API文档/openjiuwen.extensions/store.README.md)
         - [vector](2.开发指南/API文档/openjiuwen.extensions/store/vector/es_vector_store.md)
           - [es_vector_store](2.开发指南/API文档/openjiuwen.extensions/store/vector/es_vector_store.md)
