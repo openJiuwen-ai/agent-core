@@ -308,9 +308,17 @@ class TeamScheduler:
     async def _dispatch_to_reviewer(self, reviewer: str, task: Any) -> None:
         """Send a review request to one reviewer, spawning a temp harness if needed.
 
-        The reviewer  is treated as a role label — the scheduler builds a one-shot
-        ``TeamHarness``, runs the review, and disposes it.
+        When ``reviewer`` names an existing team member the legacy
+        ``_send_as_leader`` path applies: a mailbox message is sent and the
+        member is lazily started.  When the reviewer does *not* match any
+        member row it is treated as a role label — the scheduler builds a
+        one-shot ``TeamHarness``, runs the review, and disposes it.
         """
+        backend = self._infra.team_backend
+        member_exists = backend is not None and await backend.member_exists(reviewer)
+        if member_exists:
+            await self._send_as_leader(reviewer, render.meta_review_request(task))
+            return
         team_logger.info("[scheduler] spawning temp harness", reviewer)
         asyncio.create_task(self._spawn_temp_reviewer(reviewer, task))
 
@@ -330,7 +338,7 @@ class TeamScheduler:
         from openjiuwen.agent_teams.schema.team import TeamRole
 
         spec = self._blueprint.spec
-        agents = spec.agents or {}
+        agents = getattr(spec, "agents", None) or {}
         base_agent_spec = agents.get("teammate") or agents.get("leader")
         if base_agent_spec is None:
             team_logger.error("[scheduler] no base agent spec for temp reviewer")
