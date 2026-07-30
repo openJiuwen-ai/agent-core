@@ -753,6 +753,8 @@ class TeamTaskManager:
         if self.member_name == task.assignee:
             return TaskOpResult.fail(f"{self.member_name} cannot verify their own task {task_id}")
 
+        team_logger.info("[verify_task] reviewer=%s task=%s decision=%s", self.member_name, task_id, normalized) 
+
         if self._dispatch_mode == "scheduled":
             return await self._record_review_vote(task, normalized, feedback)
 
@@ -792,6 +794,9 @@ class TeamTaskManager:
             ),
             error_label=f"Task review vote event for {task.task_id}",
         )
+        team_logger.info("[verify_vote] reviewer=%s task=%s decision=%s round=%d tally(pass=%d fail=%d of %d)", 
+                         self.member_name, task.task_id, decision, task.review_round,  
+                         tally["pass_count"], tally["fail_count"], tally["reviewer_count"]) 
         return TaskOpResult.success(data=tally)
 
     async def get_review_tally(self, task) -> dict[str, Any]:

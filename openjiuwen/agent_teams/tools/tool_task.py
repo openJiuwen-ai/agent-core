@@ -154,11 +154,11 @@ def _clean_reviewers(spec: dict) -> list[str]:
 
 
 async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str | None:
-    """Reject a batch whose reviewer names a non-member or the task's own author.
+    """Reject a batch whose reviewer equals the task's own author.
 
-    Reviewers are untrusted input crossing the tool boundary; the DB column has
-    no FK. A member may not review their own task (self-verification), so a
-    reviewer equal to the task's ``assignee`` is rejected.
+    Reviewers no longer must be pre-existing team members — the scheduler
+    spawns a temporary harness for any reviewer name not found in the roster.
+    Only the self-review guard remains.
     """
     for spec in tasks:
         reviewers = _clean_reviewers(spec)
@@ -166,8 +166,6 @@ async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str
             continue
         assignee = (spec.get("assignee") or "").strip()
         for reviewer in reviewers:
-            if not await agent_team.member_exists(reviewer):
-                return f"Task {_spec_label(spec)!r}: reviewer {reviewer!r} not found in the team"
             if assignee and reviewer == assignee:
                 return (
                     f"Task {_spec_label(spec)!r}: reviewer {reviewer!r} cannot review their own task "
@@ -687,8 +685,6 @@ class UpdateTaskTool(TeamTool):
             reviewer_names = [str(r).strip() for r in reviewer if str(r).strip()]
             current_assignee = (assignee or task.assignee or "").strip()
             for name in reviewer_names:
-                if not await self.agent_team.member_exists(name):
-                    return ToolOutput(success=False, error=f"Reviewer '{name}' not found in the team")
                 if current_assignee and name == current_assignee:
                     return ToolOutput(
                         success=False,
