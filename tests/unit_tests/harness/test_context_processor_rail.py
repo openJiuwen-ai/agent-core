@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from openjiuwen.core.context_engine import (
+    CompressionRecallConfig,
     LOOP_COMPACT_BAILOUT_STATE_KEY,
     TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
 )
@@ -19,6 +20,9 @@ from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor imp
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor import (
     SessionMemoryCompressorConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
+    DialogueCompressorConfig as ForkedDialogueCompressorConfig,
 )
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import (
@@ -67,7 +71,13 @@ def _make_sys_operation(tmp_path: Path):
     return Runner.resource_mgr.get_sys_operation(card.id)
 
 
-def _make_agent(sys_operation, workspace, *, enable_reload: bool = False):
+def _make_agent(
+    sys_operation,
+    workspace,
+    *,
+    enable_reload: bool = False,
+    compression_recall_config: CompressionRecallConfig | None = None,
+):
     model = init_model(
         provider="OpenAI",
         model_name="dummy-model",
@@ -83,7 +93,10 @@ def _make_agent(sys_operation, workspace, *, enable_reload: bool = False):
         enable_task_loop=False,
         workspace=workspace,
         sys_operation=sys_operation,
-        context_engine_config=ContextEngineConfig(enable_reload=enable_reload),
+        context_engine_config=ContextEngineConfig(
+            enable_reload=enable_reload,
+            compression_recall_config=compression_recall_config or CompressionRecallConfig(),
+        ),
     )
     return agent
 
@@ -201,7 +214,7 @@ async def test_init_processors_merge(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_init_preset_defaults(tmp_path: Path):
-    """Preset processors should have correct default config values."""
+    """Preset processors should use the forked configs with recall disabled by default."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace, enable_reload=True)
@@ -211,14 +224,13 @@ async def test_init_preset_defaults(tmp_path: Path):
 
     procs = dict(agent.react_config.context_processors)
 
-    # MessageSummaryOffloader tests (forked, ratio-based)
+    # MessageSummaryOffloader tests (forked, ratio-based, no model field)
     off = procs.get("MessageSummaryOffloader")
     assert off is not None
-    assert "messages_threshold" not in type(off).model_fields
-    assert "tokens_threshold" not in type(off).model_fields
-    assert "messages_to_keep" not in type(off).model_fields
-    assert "keep_last_round" not in type(off).model_fields
+    assert type(off).__module__ == ("openjiuwen.core.context_engine.processor.forked.offloader.message_offloader")
     assert "large_message_threshold" not in type(off).model_fields
+    assert "tokens_threshold" not in type(off).model_fields
+    assert "model" not in type(off).model_fields
     assert off.add_message_threshold_ratio == 0.1
     assert off.ttl_seconds == 300
     assert off.ttl_context_occupancy_ratio == 0.5
@@ -230,24 +242,83 @@ async def test_init_preset_defaults(tmp_path: Path):
     assert mem is not None
     assert mem.enabled is False
 
-    # DialogueCompressor tests (forked, ratio-based)
+    # DialogueCompressor tests (forked)
     comp = procs.get("DialogueCompressor")
     assert comp is not None
+    assert type(comp).__module__ == ("openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor")
+    assert "tokens_threshold" not in type(comp).model_fields
+    assert "messages_to_keep" not in type(comp).model_fields
     assert comp.trigger_context_ratio == 0.8
     assert comp.min_target_context_ratio == 0.1
+    assert "enable_recall" not in type(comp).model_fields
+    assert comp.model is not None
 
-    # CurrentRoundCompressor tests (forked, ratio-based)
+    # CurrentRoundCompressor tests (forked)
     curr = procs.get("CurrentRoundCompressor")
     assert curr is not None
+    assert type(curr).__module__ == (
+        "openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor"
+    )
     assert curr.trigger_context_ratio == 0.8
     assert curr.min_target_context_ratio == 0.1
     assert curr.keep_recent_messages == 0
+    assert "enable_recall" not in type(curr).model_fields
 
-    # RoundLevelCompressor tests (forked, ratio-based)
+    # RoundLevelCompressor tests (forked)
     round_lvl = procs.get("RoundLevelCompressor")
     assert round_lvl is not None
+    assert type(round_lvl).__module__ == (
+        "openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor"
+    )
     assert round_lvl.trigger_context_ratio == 0.8
     assert round_lvl.keep_recent_messages == 4
+    assert "enable_recall" not in type(round_lvl).model_fields
+
+
+@pytest.mark.asyncio
+async def test_preset_enables_compression_recall(tmp_path: Path):
+    """Enabling recall via override should register the tool and protect its results."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(
+        sys_operation,
+        workspace,
+        compression_recall_config=CompressionRecallConfig(enabled=True),
+    )
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    assert rail._recall_enabled is True
+    recall_card = agent.ability_manager.get("recall_compressed_context")
+    assert recall_card is not None
+
+    procs = dict(agent.react_config.context_processors)
+    off = procs.get("MessageSummaryOffloader")
+    assert "recall_compressed_context" in off.protected_tool_names
+
+
+@pytest.mark.asyncio
+async def test_preset_disables_compression_recall_by_default(tmp_path: Path):
+    """Default preset should keep recall off and not register the tool."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    rail = ContextProcessorRail(preset=True)
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    assert rail._recall_enabled is False
+    assert agent.ability_manager.get("recall_compressed_context") is None
+
+    procs = dict(agent.react_config.context_processors)
+    off = procs.get("MessageSummaryOffloader")
+    assert "recall_compressed_context" not in off.protected_tool_names
+
+
+def test_compressor_rejects_legacy_recall_config():
+    with pytest.raises(ValidationError, match="ContextEngineConfig.compression_recall_config"):
+        ForkedDialogueCompressorConfig(enable_recall=True)
 
 
 @pytest.mark.asyncio
@@ -268,6 +339,10 @@ async def test_init_logs_processor_config_module_paths(tmp_path: Path):
         "openjiuwen.core.context_engine.processor.forked.offloader.message_offloader."
         "MessageSummaryOffloaderConfig"
     ) in message
+    assert (
+        "compression recall effective config: "
+        "{'enabled': False, 'chunk_size_tokens': 3000, 'chunk_overlap_tokens': 300}"
+    ) in messages
 
 
 # =============================================================================
@@ -705,12 +780,12 @@ async def test_context_processor_rail_init_with_dict_override(tmp_path: Path):
     workspace = Workspace(root_path=str(tmp_path))
     agent = _make_agent(sys_operation, workspace)
 
-    rail = ContextProcessorRail(preset=True, processors=[("DialogueCompressor", {"trigger_context_ratio": 0.5})])
+    rail = ContextProcessorRail(preset=True, processors=[("DialogueCompressor", {"trigger_context_ratio": 0.7})])
     await agent.register_rail(rail)
     await agent.ensure_initialized()
 
     config = dict(agent.react_config.context_processors)
-    assert config["DialogueCompressor"].trigger_context_ratio == 0.5
+    assert config["DialogueCompressor"].trigger_context_ratio == 0.7
 
 
 @pytest.mark.asyncio

@@ -30,8 +30,20 @@ from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMe
 
 STATE_REINJECTION_MARKER = "[STATE_REINJECTION]"
 
+# Prefixes marking user-role messages that carry internal state rather than
+# real user input; such messages must not be treated as genuine user turns.
+INTERNAL_USER_PREFIXES = (
+    "<system-reminder>",
+    "<memory_block_current>",
+    "<memory_block_dialogue>",
+    "<memory_block_round>",
+    "<recovered_context>",
+    "[STATE_REINJECTION]",
+)
+
 __all__ = [
     "FullCompactStateReinjector",
+    "INTERNAL_USER_PREFIXES",
     "ReinjectedStateBuilderSpec",
     "STATE_REINJECTION_MARKER",
     "build_compressor_reinjected_state_message",
@@ -291,6 +303,7 @@ def build_compressor_reinjected_state_message(
     builder_names: List[str] | None,
     session_state: dict[str, Any] | None = None,
 ) -> UserMessage | None:
+    """Assemble a single reinjected-state user message for a compressor."""
     ctx = ReinjectContext(
         session_state=session_state if session_state is not None else get_session_state_for_reinjection(context),
         source_messages=source_messages,
@@ -308,6 +321,7 @@ def build_compressor_reinjected_state_message(
 
 
 def get_session_state_for_reinjection(context: Any) -> dict[str, Any]:
+    """Best-effort read of the session state dict for state reinjection."""
     if context is None or not hasattr(context, "get_session_ref"):
         return {}
     try:
@@ -324,6 +338,7 @@ def get_session_state_for_reinjection(context: Any) -> dict[str, Any]:
 
 
 def get_workspace_root_for_reinjection(context: Any) -> str | None:
+    """Best-effort resolve of the workspace root for state reinjection."""
     if context is None or not hasattr(context, "workspace_dir"):
         return None
     try:
@@ -334,22 +349,25 @@ def get_workspace_root_for_reinjection(context: Any) -> str | None:
 
 
 def truncate_state_text(text: str, max_chars: int) -> str:
+    """Truncate long state text head/tail-wise with a truncation marker."""
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     head = text[: max_chars // 2]
-    tail = text[-max(max_chars - len(head), 0):]
+    tail_start = -max(max_chars - len(head), 0)
+    tail = text[tail_start:]
     return f"{head}\n...[STATE_REINJECTION_TRUNCATED]...\n{tail}"
 
 
 def find_last_completed_api_round_end_idx(
-        messages: List[BaseMessage],
-        start_idx: int,
-        end_idx: int,
+    messages: List[BaseMessage],
+    start_idx: int,
+    end_idx: int,
 ) -> int:
     """Return absolute end index for the last complete API round in the selected range."""
     if end_idx < start_idx:
         return end_idx
-    candidate_messages = messages[start_idx:end_idx + 1]
+    end = end_idx + 1
+    candidate_messages = messages[start_idx:end]
     completed_rounds = group_completed_api_round_ranges(candidate_messages)
     if not completed_rounds:
         return start_idx - 1
@@ -358,9 +376,9 @@ def find_last_completed_api_round_end_idx(
 
 
 def iter_summary_merge_ranges(
-        messages: List[BaseMessage],
-        summary_marker: str,
-        min_blocks: int,
+    messages: List[BaseMessage],
+    summary_marker: str,
+    min_blocks: int,
 ) -> List[Tuple[int, int]]:
     """Return contiguous summary-message ranges eligible for second-stage merge."""
     ranges: List[Tuple[int, int]] = []
