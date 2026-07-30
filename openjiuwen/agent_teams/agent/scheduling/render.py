@@ -19,6 +19,8 @@ Two audiences, two mechanisms:
 
 from __future__ import annotations
 
+from typing import Any
+
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.message_template import build_meta
 from openjiuwen.agent_teams.schema.status import TaskStatus
