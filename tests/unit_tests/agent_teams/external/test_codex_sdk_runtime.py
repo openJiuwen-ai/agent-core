@@ -474,7 +474,7 @@ async def test_codex_sdk_runtime_emits_turn_and_tool_spans():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_sdk_runtime_splits_raw_responses_into_llm_call_spans():
+async def test_codex_sdk_runtime_keeps_sdk_response_as_separate_summary():
     exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
     from openjiuwen.agent_teams.observability import (
         ObservabilityConfig,
@@ -567,23 +567,18 @@ async def test_codex_sdk_runtime_splits_raw_responses_into_llm_call_spans():
         _ = [chunk async for chunk in runtime._drive({"query": "inspect task-1"})]
 
         spans = list(exporter.get_finished_spans())
-        llm_spans = sorted(
-            (span for span in spans if span.name == "llm.call"),
-            key=lambda span: span.attributes["codex.model.call.index"],
-        )
-        assert len(llm_spans) == 2
-        assert [span.attributes["codex.response.id"] for span in llm_spans] == [
+        assert not [span for span in spans if span.name == "llm.call"]
+        summary = next(span for span in spans if span.name == "codex.sdk.summary")
+        assert summary.attributes["codex.response.ids"] == (
             "response-1",
             "response-2",
-        ]
-        assert all(span.attributes["codex.llm.call.proxy"] is False for span in llm_spans)
-        assert all(span.attributes["codex.observation.granularity"] == "response" for span in llm_spans)
-        assert llm_spans[0].attributes[GEN_AI_USAGE_PROMPT_TOKENS] == 100
-        assert llm_spans[0].attributes[GEN_AI_USAGE_COMPLETION_TOKENS] == 10
-        assert llm_spans[0].attributes[GEN_AI_USAGE_TOTAL_TOKENS] == 110
-        assert llm_spans[1].attributes[GEN_AI_USAGE_PROMPT_TOKENS] == 130
-        assert "task is pending" in llm_spans[1].attributes[LANGFUSE_OBSERVATION_OUTPUT]
-        assert len([span for span in spans if span.name == "llm.reasoning"]) == 2
+        )
+        assert summary.attributes[GEN_AI_USAGE_PROMPT_TOKENS] == 130
+        assert summary.attributes[GEN_AI_USAGE_COMPLETION_TOKENS] == 15
+        assert summary.attributes[GEN_AI_USAGE_TOTAL_TOKENS] == 145
+        assert "task is pending" in summary.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+        reasoning_span = next(span for span in spans if span.name == "llm.reasoning")
+        assert reasoning_span.parent.span_id == summary.context.span_id
         assert (
             next(span for span in spans if span.name == "tool.view_task").parent.span_id
             == next(span for span in spans if span.name == "agent.developer.codex_turn.1").context.span_id
@@ -594,19 +589,7 @@ async def test_codex_sdk_runtime_splits_raw_responses_into_llm_call_spans():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-@pytest.mark.parametrize(
-    ("event_name", "duration_attribute"),
-    (
-        ("codex.api_request", "codex.api_request.duration_ms"),
-        (
-            "codex.websocket_request",
-            "codex.websocket_request.duration_ms",
-        ),
-    ),
-)
 async def test_codex_native_model_request_sets_exact_llm_span_timing(
-    event_name,
-    duration_attribute,
 ):
     exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
     from openjiuwen.agent_teams.observability import (
@@ -614,11 +597,7 @@ async def test_codex_native_model_request_sets_exact_llm_span_timing(
         init_observability,
         shutdown_observability,
     )
-    from openjiuwen.agent_teams.observability.codex_bridge import CodexSpanBridge
-    from openjiuwen.agent_teams.observability.semconv import (
-        LANGFUSE_OBSERVATION_OUTPUT,
-    )
-
+    from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
     exporter = exporter_module.InMemorySpanExporter()
     init_observability(
         ObservabilityConfig(
@@ -648,7 +627,7 @@ async def test_codex_native_model_request_sets_exact_llm_span_timing(
             team_name="team",
             session_id="session",
         )
-        bridge.enable_native_api_timing()
+        bridge.enable_native_model_spans()
         bridge.start_turn(
             prompt="inspect task-1",
             thread_id="thread-developer",
@@ -658,69 +637,56 @@ async def test_codex_native_model_request_sets_exact_llm_span_timing(
         clear_team_span()
 
         end_ns = time.time_ns()
-        bridge.append_reasoning("inspect the task")
-        bridge.append_output("task is pending")
-        bridge.complete_model_response(
-            response_id="response-native",
-            usage={
-                "inputTokens": 100,
-                "cachedInputTokens": 20,
-                "outputTokens": 10,
-                "reasoningOutputTokens": 4,
-                "totalTokens": 110,
-            },
-        )
-
-        async def deliver_native_log():
+        async def deliver_native_span():
             await asyncio.sleep(0)
-            bridge.record_native_api_request(
+            bridge.record_native_model_span(
                 {
-                    "name": event_name,
-                    "timestamp_ns": end_ns,
+                    "name": "run_sampling_request",
+                    "start_time_ns": end_ns - 25_000_000,
+                    "end_time_ns": end_ns,
+                    "trace_id": "11" * 16,
+                    "span_id": "22" * 8,
+                    "parent_span_id": "33" * 8,
+                    "status_code": 1,
                     "attributes": {
-                        "conversation.id": "thread-developer",
+                        "turn_id": "turn-native",
                         "model": "gpt-native",
-                        "duration_ms": 25,
-                        "http.response.status_code": 200,
-                        "attempt": 1,
-                        "success": True,
                     },
                 },
             )
 
-        delivery = asyncio.create_task(deliver_native_log())
+        delivery = asyncio.create_task(deliver_native_span())
         await bridge.wait_for_native_observations()
         await delivery
         bridge.finish_turn(status="completed")
 
         spans = list(exporter.get_finished_spans())
         llm_span = next(span for span in spans if span.name == "llm.call")
-        reasoning_span = next(span for span in spans if span.name == "llm.reasoning")
         assert llm_span.start_time == end_ns - 25_000_000
         assert llm_span.end_time == end_ns
-        assert llm_span.attributes["codex.observation.granularity"] == "api_request"
-        assert llm_span.attributes["codex.model.call.boundary"] == event_name
+        assert llm_span.attributes["codex.observation.granularity"] == "native_sampling_span"
+        assert llm_span.attributes["codex.model.call.boundary"] == "run_sampling_request"
         assert llm_span.attributes["codex.model.call.boundary_exact"] is True
         assert llm_span.attributes["codex.model.call.start_observed"] is True
-        assert llm_span.attributes[duration_attribute] == 25.0
+        assert llm_span.attributes["codex.model.call.paired"] is False
         assert llm_span.attributes["gen_ai.request.model"] == "gpt-native"
-        assert llm_span.attributes["codex.response.id"] == "response-native"
-        assert "task is pending" in llm_span.attributes[LANGFUSE_OBSERVATION_OUTPUT]
-        assert reasoning_span.parent.span_id == llm_span.context.span_id
+        assert llm_span.attributes["codex.turn.id"] == "turn-native"
+        assert llm_span.attributes["codex.native.trace_id"] == "11" * 16
+        assert llm_span.attributes["codex.native.span_id"] == "22" * 8
     finally:
         shutdown_observability()
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_native_mode_keeps_unpaired_model_observations():
+async def test_codex_native_mode_preserves_exact_unpaired_span():
     exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
     from openjiuwen.agent_teams.observability import (
         ObservabilityConfig,
         init_observability,
         shutdown_observability,
     )
-    from openjiuwen.agent_teams.observability.codex_bridge import CodexSpanBridge
+    from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
 
     exporter = exporter_module.InMemorySpanExporter()
     init_observability(
@@ -747,21 +713,21 @@ async def test_codex_native_mode_keeps_unpaired_model_observations():
             team_name="team",
             session_id="session",
         )
-        bridge.enable_native_api_timing()
+        bridge.enable_native_model_spans()
         bridge.start_turn(
             prompt="inspect task",
             thread_id="thread-developer",
             model="gpt-test",
         )
         end_ns = time.time_ns()
-        bridge.record_native_api_request(
+        bridge.record_native_model_span(
             {
-                "name": "codex.api_request",
-                "timestamp_ns": end_ns,
+                "name": "run_sampling_request",
+                "start_time_ns": end_ns - 10_000_000,
+                "end_time_ns": end_ns,
                 "attributes": {
-                    "conversation.id": "thread-developer",
-                    "duration_ms": 10,
-                    "success": True,
+                    "turn_id": "turn-1",
+                    "model": "gpt-test",
                 },
             },
         )
@@ -770,8 +736,9 @@ async def test_codex_native_mode_keeps_unpaired_model_observations():
         llm_span = next(
             span for span in exporter.get_finished_spans() if span.name == "llm.call"
         )
-        assert llm_span.attributes["codex.observation.granularity"] == "api_request"
+        assert llm_span.attributes["codex.observation.granularity"] == "native_sampling_span"
         assert llm_span.attributes["codex.model.call.observed"] is True
+        assert llm_span.attributes["codex.model.call.paired"] is False
         assert llm_span.start_time == end_ns - 10_000_000
         assert llm_span.end_time == end_ns
     finally:
@@ -780,14 +747,14 @@ async def test_codex_native_mode_keeps_unpaired_model_observations():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_turn_emits_sdk_fallback_when_native_export_is_missing():
+async def test_codex_turn_does_not_infer_llm_call_when_native_export_is_missing():
     exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
     from openjiuwen.agent_teams.observability import (
         ObservabilityConfig,
         init_observability,
         shutdown_observability,
     )
-    from openjiuwen.agent_teams.observability.codex_bridge import CodexSpanBridge
+    from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
 
     exporter = exporter_module.InMemorySpanExporter()
     init_observability(
@@ -814,7 +781,7 @@ async def test_codex_turn_emits_sdk_fallback_when_native_export_is_missing():
             team_name="team",
             session_id="session",
         )
-        bridge.enable_native_api_timing()
+        bridge.enable_native_model_spans()
         bridge.start_turn(
             prompt="inspect task",
             thread_id="thread-developer",
@@ -822,12 +789,12 @@ async def test_codex_turn_emits_sdk_fallback_when_native_export_is_missing():
         )
         bridge.finish_turn(status="failed", error="transport closed")
 
-        llm_span = next(
-            span for span in exporter.get_finished_spans() if span.name == "llm.call"
+        spans = list(exporter.get_finished_spans())
+        assert not [span for span in spans if span.name == "llm.call"]
+        turn_span = next(
+            span for span in spans if span.name == "agent.developer.codex_turn.1"
         )
-        assert llm_span.attributes["codex.observation.granularity"] == "response"
-        assert llm_span.attributes["codex.model.call.observed"] is False
-        assert llm_span.attributes["codex.model.call.boundary"] == "sdk.response"
+        assert turn_span.attributes["codex.native.model_span_count"] == 0
     finally:
         shutdown_observability()
 

@@ -103,7 +103,7 @@ def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_arg
     assert "launch_args_override" not in config.kwargs
 
 
-def test_build_codex_config_routes_native_otel_logs_to_loopback_receiver():
+def test_build_codex_config_routes_native_otel_traces_to_loopback_receiver():
     from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
 
     config = build_codex_config(
@@ -115,36 +115,82 @@ def test_build_codex_config_routes_native_otel_logs_to_loopback_receiver():
         mcp_default_tools_approval_mode=None,
         member_name="developer",
         codex_bin=None,
-        native_otel_log_endpoint="http://127.0.0.1:4318/v1/logs",
+        native_otel_trace_endpoint="http://127.0.0.1:4318/v1/traces",
         sdk=_FAKE_SDK,
     )
 
     overrides = config.kwargs["config_overrides"]
     assert 'otel.environment="openjiuwen"' in overrides
     assert (
-        'otel.exporter={ otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "binary" } }'
+        'otel.trace_exporter={ otlp-http = { endpoint = "http://127.0.0.1:4318/v1/traces", protocol = "binary" } }'
     ) in overrides
+    assert "otel.exporter=none" in overrides
+    assert "otel.metrics_exporter=none" in overrides
     assert "otel.log_user_prompt=false" in overrides
-    assert config.kwargs["env"]["OTEL_BLRP_SCHEDULE_DELAY"] == "100"
+    assert config.kwargs["env"]["OTEL_BSP_SCHEDULE_DELAY"] == "100"
 
 
-def test_build_codex_config_preserves_explicit_otel_log_export_delay():
+def test_build_codex_config_preserves_explicit_otel_trace_export_delay():
     from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
 
     config = build_codex_config(
         cwd="/workspace",
-        env={"OTEL_BLRP_SCHEDULE_DELAY": "250"},
+        env={"OTEL_BSP_SCHEDULE_DELAY": "250"},
         inject_mcp=False,
         mcp_server_name="team",
         mcp_server_command=(),
         mcp_default_tools_approval_mode=None,
         member_name="developer",
         codex_bin=None,
-        native_otel_log_endpoint="http://127.0.0.1:4318/v1/logs",
+        native_otel_trace_endpoint="http://127.0.0.1:4318/v1/traces",
         sdk=_FAKE_SDK,
     )
 
-    assert config.kwargs["env"]["OTEL_BLRP_SCHEDULE_DELAY"] == "250"
+    assert config.kwargs["env"]["OTEL_BSP_SCHEDULE_DELAY"] == "250"
+
+
+def test_build_codex_config_enables_private_rollout_trace_root():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={"TEAM": "one"},
+        inject_mcp=False,
+        mcp_server_name="team",
+        mcp_server_command=(),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        rollout_trace_root="/tmp/codex-rollout",
+        sdk=_FAKE_SDK,
+    )
+
+    assert config.kwargs["env"] == {
+        "TEAM": "one",
+        "CODEX_ROLLOUT_TRACE_ROOT": "/tmp/codex-rollout",
+    }
+
+
+def test_build_codex_config_keeps_trace_and_mcp_overrides_together():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={},
+        inject_mcp=True,
+        mcp_server_name="team",
+        mcp_server_command=("team-mcp", "--stdio"),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        native_otel_trace_endpoint="http://127.0.0.1:4318/v1/traces",
+        sdk=_FAKE_SDK,
+    )
+
+    overrides = config.kwargs["config_overrides"]
+    assert any(item.startswith("otel.trace_exporter=") for item in overrides)
+    assert 'mcp_servers.team.command="team-mcp"' in overrides
+    assert 'mcp_servers.team.args=["--stdio"]' in overrides
 
 
 def test_build_codex_thread_options_leave_approval_and_sandbox_unset():
