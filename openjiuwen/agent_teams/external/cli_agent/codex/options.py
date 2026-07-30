@@ -14,7 +14,7 @@ from openjiuwen.core.common.exception.errors import raise_error
 
 _MCP_STARTUP_TIMEOUT_S = 120
 _REASONING_SUMMARY = "detailed"
-_OTEL_LOG_EXPORT_DELAY_MS = 100
+_OTEL_TRACE_EXPORT_DELAY_MS = 100
 
 
 def load_codex_sdk() -> Any:
@@ -41,28 +41,33 @@ def build_codex_config(
     mcp_default_tools_approval_mode: str | None,
     member_name: str,
     codex_bin: str | None,
-    native_otel_log_endpoint: str | None = None,
+    native_otel_trace_endpoint: str | None = None,
+    rollout_trace_root: str | None = None,
     sdk: Any | None = None,
 ) -> Any:
     """Build ``CodexConfig`` without importing the optional SDK eagerly."""
     sdk = sdk or load_codex_sdk()
     process_env = dict(env)
+    if rollout_trace_root:
+        process_env["CODEX_ROLLOUT_TRACE_ROOT"] = rollout_trace_root
     config_overrides: tuple[str, ...] = ()
-    if native_otel_log_endpoint:
-        # Codex uses the OTel batch log processor. Keep its delivery interval
-        # below Jiuwen's turn-finalization grace period so real transport
-        # events can be paired with the corresponding SDK response.
+    if native_otel_trace_endpoint:
+        # Codex uses an OTel batch span processor. Keep its delivery interval
+        # below Jiuwen's turn-finalization grace period so the native logical
+        # sampling span arrives before the member turn is finalized.
         process_env.setdefault(
-            "OTEL_BLRP_SCHEDULE_DELAY",
-            str(_OTEL_LOG_EXPORT_DELAY_MS),
+            "OTEL_BSP_SCHEDULE_DELAY",
+            str(_OTEL_TRACE_EXPORT_DELAY_MS),
         )
         config_overrides = (
             'otel.environment="openjiuwen"',
+            "otel.exporter=none",
             (
-                "otel.exporter={ otlp-http = { "
-                f"endpoint = {json.dumps(native_otel_log_endpoint)}, "
+                "otel.trace_exporter={ otlp-http = { "
+                f"endpoint = {json.dumps(native_otel_trace_endpoint)}, "
                 'protocol = "binary" } }'
             ),
+            "otel.metrics_exporter=none",
             "otel.log_user_prompt=false",
         )
     if inject_mcp:
@@ -72,7 +77,7 @@ def build_codex_config(
                 reason="Codex SDK MCP injection requires a non-empty mcp_server_command",
             )
             raise AssertionError  # pragma: no cover - raise_error always raises
-        config_overrides = codex_mcp_config_overrides(
+        config_overrides += codex_mcp_config_overrides(
             server_name=mcp_server_name,
             server_command=mcp_server_command,
             default_tools_approval_mode=mcp_default_tools_approval_mode,

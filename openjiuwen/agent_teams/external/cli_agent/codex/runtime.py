@@ -63,10 +63,25 @@ class _NoopCodexSpanBridge:
     def enable_native_api_timing(self) -> None:
         pass
 
+    def enable_native_model_spans(self) -> None:
+        pass
+
+    def enable_rollout_trace(self) -> None:
+        pass
+
+    def native_traceparent(self) -> str | None:
+        return None
+
     def record_native_api_request(self, _: dict[str, Any]) -> None:
         pass
 
     def record_native_event(self, _: dict[str, Any]) -> None:
+        pass
+
+    def record_native_model_span(self, _: dict[str, Any]) -> None:
+        pass
+
+    def record_rollout_event(self, _: dict[str, Any]) -> None:
         pass
 
     async def wait_for_native_observations(self, **_: Any) -> None:
@@ -94,7 +109,7 @@ def _build_span_bridge(
 ) -> Any:
     """Load the OTel bridge only when its optional dependencies are installed."""
     try:
-        from openjiuwen.agent_teams.observability.codex_bridge import CodexSpanBridge
+        from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
     except ImportError:
         return _NoopCodexSpanBridge()
     return CodexSpanBridge(
@@ -142,6 +157,7 @@ class CodexSdkRuntime(CliRuntimeBase):
         turn_idle_retries: int = _DEFAULT_TURN_IDLE_RETRIES,
         span_bridge: Any | None = None,
         native_otel_receiver: Any | None = None,
+        rollout_trace_reader: Any | None = None,
     ) -> None:
         super().__init__(member_name=member_name)
         if turn_idle_timeout_s <= 0:
@@ -156,6 +172,7 @@ class CodexSdkRuntime(CliRuntimeBase):
             session_id=team_session_id,
         )
         self._native_otel_receiver = native_otel_receiver
+        self._rollout_trace_reader = rollout_trace_reader
         self._sdk = sdk
         self._config = config
         self._thread_options = dict(thread_options)
@@ -341,14 +358,18 @@ class CodexSdkRuntime(CliRuntimeBase):
         start_index: int,
     ) -> AsyncIterator[OutputSchema]:
         """Start one SDK turn and convert its typed notification stream."""
-        handle = await thread.turn(prompt)
-        self._active_turn = handle
         self._span_bridge.start_turn(
             prompt=prompt,
             thread_id=self._thread_id,
             developer_instructions=self._thread_options.get("developer_instructions"),
             model=self._thread_options.get("model"),
         )
+        try:
+            handle = await thread.turn(prompt)
+        except BaseException as exc:
+            self._span_bridge.finish_turn(status="failed", error=exc)
+            raise
+        self._active_turn = handle
         if self._aborted:
             await self._interrupt_handle(handle)
         index = start_index
@@ -384,18 +405,16 @@ class CodexSdkRuntime(CliRuntimeBase):
                     index = chunk.index + 1
         except BaseException as exc:
             # A transport failure can race with the App Server's batched OTel
-            # export.  Preserve any model calls that were already completed
-            # instead of clearing the bridge immediately on the error path.
+            # trace export. Preserve any native sampling spans that were
+            # already completed instead of clearing the bridge immediately.
             with contextlib.suppress(Exception):
                 await self._span_bridge.wait_for_native_observations()
             self._span_bridge.finish_turn(status="failed", error=exc)
             raise
         else:
-            # Codex exports ``codex.api_request`` through its batched OTLP log
-            # processor.  Those records can arrive shortly after the SDK emits
-            # ``turn/completed``.  Give the receiver a brief grace period so
-            # the bridge can pair the real request timing with the SDK response
-            # before ``finish_turn`` clears both queues.
+            # Native sampling spans can arrive shortly after the SDK emits
+            # ``turn/completed``. Give the batch span processor a brief flush
+            # window; no SDK/native event pairing happens here.
             with contextlib.suppress(Exception):
                 await self._span_bridge.wait_for_native_observations()
         finally:
@@ -481,10 +500,8 @@ class CodexSdkRuntime(CliRuntimeBase):
             )
             return
         if method == "turn/completed":
-            # Do not close the bridge here.  The App Server's batched
-            # ``codex.api_request`` log may not have reached the local receiver
-            # yet.  ``_run_turn`` waits for it after the SDK stream ends, then
-            # closes the turn exactly once.
+            # Do not close the bridge here. The App Server's batched native
+            # model span may not have reached the local receiver yet.
             return
 
     def _drain_pending(self) -> str | None:
@@ -552,9 +569,11 @@ class CodexSdkRuntime(CliRuntimeBase):
         async with self._close_lock:
             client = self._client
             receiver = self._native_otel_receiver
-            if client is None and receiver is None:
+            rollout_reader = self._rollout_trace_reader
+            if client is None and receiver is None and rollout_reader is None:
                 return
             self._native_otel_receiver = None
+            self._rollout_trace_reader = None
             handle = self._active_turn
             self._active_turn = None
             if handle is not None:
@@ -568,6 +587,9 @@ class CodexSdkRuntime(CliRuntimeBase):
             if receiver is not None:
                 with contextlib.suppress(Exception):
                     await receiver.aclose()
+            if rollout_reader is not None:
+                with contextlib.suppress(Exception):
+                    await rollout_reader.aclose()
 
 
 async def _start_thread_with_raw_events(
@@ -863,6 +885,7 @@ async def build_codex_runtime(
         session_id=team_session_id,
     )
     native_otel_receiver = None
+    rollout_trace_reader = None
     try:
         try:
             from openjiuwen.agent_teams.observability.setup import is_initialized
@@ -875,26 +898,39 @@ async def build_codex_runtime(
             span_bridge,
             _NoopCodexSpanBridge,
         ):
-            from openjiuwen.agent_teams.observability.codex_otel_receiver import (
-                CodexOtelLogReceiver,
+            from openjiuwen.agent_teams.observability.codex import (
+                CodexOtelTraceReceiver,
+                CodexRolloutTraceReader,
             )
 
-            native_otel_receiver = await CodexOtelLogReceiver.start(
-                span_bridge.record_native_event,
+            rollout_trace_reader = await CodexRolloutTraceReader.start(
+                span_bridge.record_rollout_event,
+            )
+            span_bridge.enable_rollout_trace()
+            native_otel_receiver = await CodexOtelTraceReceiver.start(
+                span_bridge.record_native_model_span,
             )
             if native_otel_receiver is not None:
-                span_bridge.enable_native_api_timing()
+                span_bridge.enable_native_model_spans()
+
+        process_env = dict(env)
+        traceparent = span_bridge.native_traceparent()
+        if traceparent:
+            # Codex reads TRACEPARENT when its App Server subprocess starts.
+            # The native trace therefore belongs to the same Jiuwen team trace.
+            process_env.setdefault("TRACEPARENT", traceparent)
 
         config = build_codex_config(
             cwd=cwd,
-            env=env,
+            env=process_env,
             inject_mcp=inject_mcp,
             mcp_server_name=mcp_server_name,
             mcp_server_command=mcp_server_command,
             mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
             member_name=member_name,
             codex_bin=codex_bin,
-            native_otel_log_endpoint=(native_otel_receiver.endpoint if native_otel_receiver is not None else None),
+            native_otel_trace_endpoint=(native_otel_receiver.endpoint if native_otel_receiver is not None else None),
+            rollout_trace_root=(str(rollout_trace_reader.root) if rollout_trace_reader is not None else None),
             sdk=sdk,
         )
         thread_options = build_codex_thread_options(
@@ -916,10 +952,16 @@ async def build_codex_runtime(
             turn_idle_retries=(_DEFAULT_TURN_IDLE_RETRIES if turn_idle_retries is None else turn_idle_retries),
             span_bridge=span_bridge,
             native_otel_receiver=native_otel_receiver,
+            rollout_trace_reader=rollout_trace_reader,
         )
     except BaseException:
+        cleanup = []
         if native_otel_receiver is not None:
-            await native_otel_receiver.aclose()
+            cleanup.append(native_otel_receiver.aclose())
+        if rollout_trace_reader is not None:
+            cleanup.append(rollout_trace_reader.aclose())
+        if cleanup:
+            await asyncio.gather(*cleanup, return_exceptions=True)
         raise
 
 
