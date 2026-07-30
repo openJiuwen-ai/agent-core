@@ -425,7 +425,8 @@ class CodexSpanBridge:
         if text and not self._reasoning:
             self.append_reasoning(text)
 
-    def append_raw_response_item(self, _: Any) -> None:
+    @staticmethod
+    def append_raw_response_item(_: Any) -> None:
         """Raw SDK items are not model-call boundaries."""
 
     def complete_model_response(
@@ -651,7 +652,8 @@ class CodexSpanBridge:
             (config.max_attributes - 40) // attributes_per_message,
             0,
         )
-        indexed_messages = messages[-min(_MAX_INDEXED_MESSAGES, writable_messages) :] if writable_messages else []
+        indexed_message_count = min(_MAX_INDEXED_MESSAGES, writable_messages)
+        indexed_messages = messages[-indexed_message_count:] if indexed_message_count else []
         for index, message in enumerate(indexed_messages):
             role = str(message.get("role") or "")
             content = redact_prompt(_content_text(message.get("content")), config)
@@ -838,7 +840,11 @@ class CodexSpanBridge:
         """Emit one content-less fallback for Codex builds without rollout."""
         turn_span = self._turn_span
         config = self._config
-        if not self._native_trace_enabled or turn_span is None or config is None or not turn_span.is_recording():
+        if not self._native_trace_enabled:
+            return
+        if turn_span is None or config is None:
+            return
+        if not turn_span.is_recording():
             return
         start_ns = int(event.get("start_time_ns") or 0)
         end_ns = int(event.get("end_time_ns") or 0)

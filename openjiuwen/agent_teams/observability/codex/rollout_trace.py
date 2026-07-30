@@ -81,7 +81,7 @@ def _cleanup_stale_roots(
         try:
             owner = json.loads(marker.read_text(encoding="utf-8"))
             owner_pid = int(owner.get("pid") or 0)
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        except (OSError, TypeError, ValueError):
             pass
         if owner_pid is not None and _pid_is_running(owner_pid):
             continue
@@ -118,7 +118,7 @@ def _load_payload(bundle_dir: Path, reference: Any) -> Any:
             return None
         with payload_path.open(encoding="utf-8") as payload_file:
             return json.load(payload_file)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:
         team_logger.warning(
             "otel: failed to read Codex rollout payload {}: {}",
             relative_path,
@@ -177,7 +177,10 @@ class CodexRolloutTraceReader:
             _remove_root(root)
             raise
         reader = cls(root=root, callback=callback)
-        reader._exit_cleanup = lambda: _remove_root(root)
+        def cleanup_root() -> None:
+            _remove_root(root)
+
+        reader._exit_cleanup = cleanup_root
         atexit.register(reader._exit_cleanup)
         reader._task = asyncio.create_task(
             reader._watch(),

@@ -69,7 +69,8 @@ class _NoopCodexSpanBridge:
     def enable_rollout_trace(self) -> None:
         pass
 
-    def native_traceparent(self) -> str | None:
+    @staticmethod
+    def native_traceparent() -> str | None:
         return None
 
     def record_native_api_request(self, _: dict[str, Any]) -> None:
