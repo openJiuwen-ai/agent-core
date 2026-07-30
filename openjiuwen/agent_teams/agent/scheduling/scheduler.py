@@ -314,11 +314,6 @@ class TeamScheduler:
         member row it is treated as a role label — the scheduler builds a
         one-shot ``TeamHarness``, runs the review, and disposes it.
         """
-        backend = self._infra.team_backend
-        member_exists = backend is not None and await backend.member_exists(reviewer)
-        if member_exists:
-            await self._send_as_leader(reviewer, render.meta_review_request(task))
-            return
         team_logger.info("[scheduler] spawning temp harness", reviewer)
         asyncio.create_task(self._spawn_temp_reviewer(reviewer, task))
 
