@@ -3,6 +3,8 @@
 
 """Tests for member-internal reliability detectors."""
 
+import pytest
+
 from openjiuwen.agent_teams.reliability.anomaly import AnomalyKind, Severity
 from openjiuwen.agent_teams.reliability.detectors.compaction import FrequentCompactionDetector
 from openjiuwen.agent_teams.reliability.detectors.model_error import ModelStreamErrorDetector
@@ -34,6 +36,7 @@ def _tool_ok(member: str = "m1") -> Signal:
 
 
 # ---- ToolErrorRateDetector ----
+
 
 def test_tool_error_consecutive_triggers_medium():
     clock = _Clock()
@@ -83,6 +86,7 @@ def test_tool_error_window_evicts_old_events():
 
 # ---- ModelStreamErrorDetector ----
 
+
 def test_model_error_consecutive_triggers():
     clock = _Clock()
     det = ModelStreamErrorDetector(window_seconds=120.0, rate_threshold=100, consecutive_threshold=2, now=clock)
@@ -94,6 +98,7 @@ def test_model_error_consecutive_triggers():
 
 
 # ---- OutputLengthDetector ----
+
 
 def test_output_text_too_long():
     det = OutputLengthDetector(text_threshold=100, thinking_threshold=100)
@@ -121,13 +126,12 @@ def test_output_under_threshold_silent():
 
 # ---- FrequentCompactionDetector ----
 
+
 def test_compaction_frequency_triggers_medium():
     clock = _Clock()
     det = FrequentCompactionDetector(window_seconds=300.0, frequency_threshold=3, drop_ratio=0.3, now=clock)
     counts = [10, 20, 5, 25, 6, 30, 7]
-    results = [
-        det.observe(Signal(kind=SignalKind.BEFORE_MODEL_CALL, member_name="m", message_count=c)) for c in counts
-    ]
+    results = [det.observe(Signal(kind=SignalKind.BEFORE_MODEL_CALL, member_name="m", message_count=c)) for c in counts]
     fired = [r for r in results if r is not None]
     assert fired
     assert fired[0].kind == AnomalyKind.FREQUENT_COMPACTION
@@ -138,13 +142,12 @@ def test_compaction_ignores_monotonic_growth():
     clock = _Clock()
     det = FrequentCompactionDetector(window_seconds=300.0, frequency_threshold=2, drop_ratio=0.3, now=clock)
     counts = [5, 10, 15, 20]
-    results = [
-        det.observe(Signal(kind=SignalKind.BEFORE_MODEL_CALL, member_name="m", message_count=c)) for c in counts
-    ]
+    results = [det.observe(Signal(kind=SignalKind.BEFORE_MODEL_CALL, member_name="m", message_count=c)) for c in counts]
     assert all(r is None for r in results)
 
 
 # ---- RepeatToolCallDetector ----
+
 
 def _call_cycle(
     det: RepeatToolCallDetector,
@@ -227,3 +230,19 @@ def test_repeat_result_aware_detects_identical_results():
         if result is not None:
             severities.append(result.severity)
     assert Severity.HIGH in severities or Severity.CRITICAL in severities
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="RepeatToolCallDetector keeps only one pending call key, so interleaved completions are mispaired",
+)
+def test_repeat_detector_preserves_interleaved_parallel_calls():
+    det = RepeatToolCallDetector(repeat_warn=2, pingpong_warn=100, loop_block=100, global_stop=200)
+    det.observe(Signal(kind=SignalKind.BEFORE_TOOL_CALL, member_name="m", tool_name="read", tool_args={"p": "a"}))
+    det.observe(Signal(kind=SignalKind.BEFORE_TOOL_CALL, member_name="m", tool_name="write", tool_args={"p": "b"}))
+    det.observe(Signal(kind=SignalKind.AFTER_TOOL_CALL, member_name="m", tool_name="read", tool_result="read-result"))
+    det.observe(Signal(kind=SignalKind.AFTER_TOOL_CALL, member_name="m", tool_name="write", tool_result="write-result"))
+
+    anomaly = _call_cycle(det, "read", {"p": "a"}, tool_result="read-result")
+    assert anomaly is not None
+    assert anomaly.kind == AnomalyKind.REPEAT_TOOL_CALL
