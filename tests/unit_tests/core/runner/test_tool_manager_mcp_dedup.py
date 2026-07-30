@@ -77,9 +77,13 @@ async def test_add_tool_server_serializes_concurrent_calls_for_same_server_id() 
     connect_started = asyncio.Event()
     release_connect = asyncio.Event()
 
-    async def slow_connect() -> bool:
+    async def slow_connect(*args, **kwargs) -> bool:
         connect_started.set()
-        await release_connect.wait()
+        # Use a short timeout instead of waiting forever, so wait_for can cancel cleanly
+        try:
+            await asyncio.wait_for(release_connect.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
         return True
 
     fake_client = MagicMock()

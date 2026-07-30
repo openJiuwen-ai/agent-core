@@ -120,19 +120,31 @@ class ToolMgr:
                         cards.append(deepcopy(tool.card))
                 return cards
             client = self._create_client(server_config)
+            connect_completed = False
             try:
-                connected = await client.connect()
+                connected = await asyncio.wait_for(client.connect(timeout=60.0), timeout=60.0)
                 if not connected:
                     raise build_error(
                         StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR, server_config=server_config, reason=""
                     )
                 results = await self._inner_refresh_mcp_tools(client, server_config, expiry_time)
                 self._mcp_server_name_to_ids.setdefault(server_config.server_name, []).append(server_config.server_id)
+                connect_completed = True
                 return results
+            except asyncio.TimeoutError as e:
+                raise build_error(
+                    StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR,
+                    server_config=server_config,
+                    reason="connection timed out after 60s"
+                ) from e
             except Exception as e:
                 raise build_error(
                     StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, cause=e, server_config=server_config, reason=str(e)
                 ) from e
+            finally:
+                # Cleanup if connection was not fully established
+                if not connect_completed:
+                    await client.disconnect(timeout=10.0)
 
     @staticmethod
     def _create_client(config: McpServerConfig) -> McpClient:
@@ -171,7 +183,7 @@ class ToolMgr:
             else:
                 return []
         try:
-            await mcp_server_resource.client.disconnect()
+            await asyncio.wait_for(mcp_server_resource.client.disconnect(timeout=15.0), timeout=15.0)
         except Exception as e:
             logger.warn(f"remove tool server discount {str(e)}, server_id={server_id}")
         finally:
@@ -251,6 +263,6 @@ class ToolMgr:
     async def release(self):
         for res in self._mcp_server_resources.values():
             try:
-                await res.client.disconnect()
+                await asyncio.wait_for(res.client.disconnect(timeout=15.0), timeout=15.0)
             except Exception:
                 continue
