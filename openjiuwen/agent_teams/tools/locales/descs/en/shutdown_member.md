@@ -3,7 +3,7 @@ Request a team member to enter the shutdown flow. After the Leader calls this to
 | Parameter | Usage |
 |---|---|
 | **member_name** | member_name of the member to request shutdown for; it should refer to a valid member in the current team |
-| **force** | Whether to force shutdown. Use only as a fallback when the member is stuck, unresponsive, or cannot finish a normal shutdown sequence |
+| **force** | Whether to force shutdown, default false. Use only as a fallback when the member is stuck, unresponsive, or cannot finish a normal shutdown sequence |
 
 Use when:
 - the member has completed its work and should exit cleanly
