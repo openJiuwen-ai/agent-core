@@ -63,7 +63,6 @@ _SESSION_ID = "external_cli_pause_resume_session"
 _MEMBER_NAME = "claude-1"
 _ACK_PHRASE = "会话暗号已接收"
 _RUN_TIMEOUT_S = 1200.0
-_MCP_SERVER_COMMAND = [sys.executable, "-m", "openjiuwen.agent_teams.mcp"]
 
 
 def _leader_api_key() -> str | None:
@@ -113,7 +112,6 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
         "cli_agent": "claude",
         "cwd": str(workspace_path),
         "inject_mcp": True,
-        "mcp_server_command": _MCP_SERVER_COMMAND,
     }
     if _use_ssh_for_claude():
         claude_cli_config["ssh_transport"] = _local_ssh_transport()
@@ -142,17 +140,6 @@ def _build_spec(team_name: str, workspace_path: Path) -> TeamAgentSpec:
         "workspace": {
             "enabled": True,
             "version_control": True,
-        },
-        "transport": {
-            "type": "pyzmq",
-            "params": {
-                "team_name": team_name,
-                "node_id": "team_leader",
-                "direct_addr": "tcp://127.0.0.1:15605",
-                "pubsub_publish_addr": "tcp://127.0.0.1:15606",
-                "pubsub_subscribe_addr": "tcp://127.0.0.1:15607",
-                "metadata": {"pubsub_bind": True},
-            },
         },
         "storage": {"type": "sqlite"},
         "external_cli_agents": [claude_cli_config],

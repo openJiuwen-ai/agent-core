@@ -266,7 +266,7 @@ class ExternalCliAgentSpec(BaseModel):
 
     inject_mcp: bool = True
     """Whether the spawn path auto-registers the team MCP server with the CLI
-    so it gets the team collaboration tools (read_inbox / claim_task / ...).
+    so it gets team collaboration tools such as view_task / claim_task / send_message.
     Injection is backend-specific (Claude SDK MCP options, codex
     ``-c mcp_servers...``); adapters without an injection strategy ignore it."""
 

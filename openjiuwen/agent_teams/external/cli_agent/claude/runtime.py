@@ -9,6 +9,10 @@ import json
 from typing import Any, AsyncIterator
 
 from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_options, load_claude_sdk
+from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import (
+    ClaudeSdkMcpToolSet,
+    build_claude_sdk_mcp_tool_set,
+)
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
@@ -25,18 +29,76 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         member_name: str,
         options: Any,
         transport: Any | None = None,
+        inject_mcp: bool = True,
+        mcp_server_name: str = "openjiuwen-team",
     ):
         """Bind SDK options; the SDK client is connected on start."""
         super().__init__(member_name=member_name)
         self._options = options
         self._transport = transport
+        self._inject_mcp = inject_mcp
+        self._mcp_server_name = mcp_server_name
+        self._sdk_mcp_tool_set: ClaudeSdkMcpToolSet | None = None
         self._client: Any | None = None
         self._abort_requested = False
         self._tool_names_by_id: dict[str, str] = {}
 
+    def bind_team_tools(
+        self,
+        *,
+        team_backend: Any,
+        role: str,
+        teammate_mode: str,
+        dispatch_mode: str,
+        lifecycle: str,
+        language: str,
+        workspace_manager: Any = None,
+        on_teammate_created: Any = None,
+        model_config_allocator: Any = None,
+        parent_agent: Any = None,
+        messager: Any = None,
+        team_name: str = "default",
+        swarmflow_model_resolver: Any = None,
+        swarmflow_worker_base_spec: Any = None,
+        swarmflow_human_base_spec: Any = None,
+        concurrency_governor: Any = None,
+        swarmflow_budget: Any = None,
+        team_permissions_enabled: bool = False,
+    ) -> None:
+        """Bind team tools to the owning TeamAgent shell."""
+        if not self._inject_mcp:
+            return
+        if self._sdk_mcp_tool_set is not None:
+            return
+        tool_set = build_claude_sdk_mcp_tool_set(
+            server_name=self._mcp_server_name,
+            team_backend=team_backend,
+            role=role,
+            teammate_mode=teammate_mode,
+            dispatch_mode=dispatch_mode,
+            lifecycle=lifecycle,
+            language=language,
+            workspace_manager=workspace_manager,
+            on_teammate_created=on_teammate_created,
+            model_config_allocator=model_config_allocator,
+            parent_agent=parent_agent,
+            messager=messager,
+            team_name=team_name,
+            swarmflow_model_resolver=swarmflow_model_resolver,
+            swarmflow_worker_base_spec=swarmflow_worker_base_spec,
+            swarmflow_human_base_spec=swarmflow_human_base_spec,
+            concurrency_governor=concurrency_governor,
+            swarmflow_budget=swarmflow_budget,
+            team_permissions_enabled=team_permissions_enabled,
+        )
+        self._sdk_mcp_tool_set = tool_set
+        self._options.mcp_servers = {self._mcp_server_name: tool_set.server}
+
     async def start(self, *, team_session: Any | None = None) -> None:
         """Start the SDK client and initialize Claude's streaming protocol."""
         await super().start(team_session=team_session)
+        if self._inject_mcp and self._sdk_mcp_tool_set is None:
+            team_logger.warning("[{}] Claude SDK MCP is enabled but no team tools were bound", self._member_name)
         sdk = load_claude_sdk()
         self._client = sdk.ClaudeSDKClient(options=self._options, transport=self._transport)
         await self._client.connect()
@@ -82,10 +144,14 @@ class ClaudeSdkRuntime(CliRuntimeBase):
     async def aclose(self) -> None:
         """Disconnect the SDK client. Idempotent."""
         if self._client is None:
+            self._sdk_mcp_tool_set = None
             return
         client = self._client
         self._client = None
-        await client.disconnect()
+        try:
+            await client.disconnect()
+        finally:
+            self._sdk_mcp_tool_set = None
 
 
 def build_claude_runtime(
@@ -103,13 +169,11 @@ def build_claude_runtime(
     resume_external_backend: bool,
 ) -> ClaudeSdkRuntime:
     """Build a Claude SDK runtime, using an SSH SDK transport when configured."""
+    _ = mcp_server_command
     options = build_claude_options(
         cwd=cwd,
         add_dirs=add_dirs,
         env=env,
-        inject_mcp=inject_mcp,
-        mcp_server_name=mcp_server_name,
-        mcp_server_command=mcp_server_command,
         system_prompt=system_prompt,
         team_session_id=team_session_id,
         member_name=member_name,
@@ -119,7 +183,13 @@ def build_claude_runtime(
     if ssh_transport is not None:
         team_logger.info("[external-cli] using claude sdk ssh transport for member {}", member_name)
         transport = build_claude_sdk_ssh_transport(prompt=_empty_prompt(), options=options, config=ssh_transport)
-    return ClaudeSdkRuntime(member_name=member_name, options=options, transport=transport)
+    return ClaudeSdkRuntime(
+        member_name=member_name,
+        options=options,
+        transport=transport,
+        inject_mcp=inject_mcp,
+        mcp_server_name=mcp_server_name,
+    )
 
 
 async def _empty_prompt() -> AsyncIterator[dict[str, Any]]:
