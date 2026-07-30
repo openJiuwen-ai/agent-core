@@ -177,6 +177,7 @@ class CodexRolloutTraceReader:
             _remove_root(root)
             raise
         reader = cls(root=root, callback=callback)
+
         def cleanup_root() -> None:
             _remove_root(root)
 
