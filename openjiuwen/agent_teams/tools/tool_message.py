@@ -262,10 +262,10 @@ class _SendMessageBase(TeamTool, ABC):
                 return self._format_multicast_text(base, d)
             return base
         if d["type"] == "broadcast":
-            return f"Broadcast sent from {d['from']}"
+            return f"Broadcast Already sent from {d['from']} Success"
         if d["type"] == "multicast":
             return self._format_multicast_text(None, d)
-        return f"Message sent from {d['from']} to {d['to']}"
+        return f"Message Already sent from {d['from']} to {d['to']} Success"
 
     @staticmethod
     def _format_multicast_text(error: str | None, d: dict[str, Any]) -> str:
