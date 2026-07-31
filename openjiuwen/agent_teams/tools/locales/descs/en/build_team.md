@@ -1,8 +1,12 @@
-Assemble a team and register yourself as Leader. Call as soon as you have a goal — don't hesitate.
+Assemble a team and register yourself as Leader. Once you decide to use `build_team`, call it immediately — don't hesitate.
 
 ## Call Order
-build_team → spawn_teammate → create_task → put the members to work (how depends on the team's dispatch mode). Members exist before tasks, so work lands on named people.
-No other team tool may be called before build_team.
+`build_team` must be the first team tool in this turn; no other team tool may be called before it. After the team is built, branch by the form of the final result expected by the user, as defined in the system prompt:
+
+- **Debate branch**: put participants in place using the current team mode → kick off member output or discussion with `send_message`; do not call `view_task` or `create_task`
+- **Task-collaboration branch**: put owners in place first → `view_task` → `create_task` → `view_task` again for self-check → put members to work (how depends on the team's dispatch mode)
+
+Members must exist before messages or tasks can land on named people.
 
 ## HITT (Human in the Team)
 HITT is a layered switch: `TeamAgentSpec.enable_hitt` is the spec-level capability ceiling (must be True for HITT to be available); `build_team(enable_hitt=...)` is the per-instance runtime flag.
@@ -21,7 +25,7 @@ Once HITT is on, the following rules apply to every `role=human_agent` member:
 - Once one of them has claimed a task, you cannot cancel or reassign it — only `send_message` nudges addressed to that specific human are allowed;
 - Direct conversation with a human member **must** go through `send_message(to="<human_member_name>", ...)`; plain text is invisible.
 
-## Task Design Principles
+## Task Design Principles for Task Collaboration
 - Describe goals, not steps: content should contain goals, acceptance criteria, and constraints — not specific operations
 - Single owner: each task is carried by exactly one teammate who owns delivery
 - Coarse-grained: one task = one independently deliverable outcome

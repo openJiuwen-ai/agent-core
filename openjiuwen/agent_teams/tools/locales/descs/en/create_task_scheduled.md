@@ -1,9 +1,20 @@
 Create team tasks and assign their owners (Leader only).
+**Call only on the task-collaboration branch. Whether to create tasks depends on the form of the final result the user expects, not wording about the handling process.**
 **Tasks should focus on deliverable outcomes and acceptance criteria, not execution steps.**
 
 This team runs in **scheduled assignment mode**: tasks never enter a shared claim pool and members never claim work themselves. **Every task must name its owner via `assignee` — an unassigned task will never be executed.**
 
 {{create_task_edge_semantics}}
+
+## When Not to Call
+
+- The user ultimately wants the team to form a view, judgment, choice, recommendation, or tradeoff and requests no independently verifiable deliverable or completed action → **do not** `create_task`; use `send_message` to start debate
+- Complexity, fact-finding, or decomposability does not by itself establish delivery intent; do not mistake the handling process for a task artifact
+- The user says **do not create tasks**
+
+## When to Call
+
+- The user explicitly asks for work to be completed and an independently verifiable outcome delivered, or for an action to be carried out. The outcome may contain analysis and judgment, but there must be a separate artifact or completion state for the user to accept
 
 ## Task Fields
 

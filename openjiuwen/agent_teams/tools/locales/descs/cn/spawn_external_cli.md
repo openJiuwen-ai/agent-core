@@ -12,4 +12,4 @@ CLI 成员不接受 `model_name`（模型在 CLI 侧）。框架按声明的配�
 
 **能力前提**：`TeamAgentSpec.external_cli_agents` 非空（至少声明一种 CLI 类型）。未声明任何 CLI 类型时本工具不会出现在可用工具列表中。
 
-必须先调用 build_team。调用顺序：build_team → spawn_external_cli → create_task。成员先于任务存在。spawn_external_cli 只创建成员记录（状态为 UNSTARTED），何时被拉起取决于团队的调度模式（见系统提示词《任务下发与获取》一节）。`prompt` 是长期角色设定，不要绑定到具体任务——任务通过 create_task / send_message 下发。
+必须先调用 build_team。spawn_external_cli 只创建成员记录（状态为 UNSTARTED）；成员就位后按已经选定的分支继续：思辨分支用 `send_message` 启动参与，任务协作分支才用 `create_task` 下发任务。成员必须先存在，消息或任务才能落到具体的人头上。成员何时被拉起取决于团队的调度模式（见系统提示词《任务下发与获取》一节）。`prompt` 是长期角色设定，不要绑定到具体请求——具体内容通过 create_task / send_message 下发。

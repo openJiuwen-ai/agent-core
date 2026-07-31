@@ -1,8 +1,12 @@
-组建团队并注册自己为 Leader。拿到目标后就调用，不要犹豫。
+组建团队并注册自己为 Leader。决定使用 `build_team` 后立即调用，不要犹豫。
 
 ## 调用顺序
-build_team → spawn_teammate → create_task → 让成员开工（方式取决于团队的调度模式）。成员先于任务存在，任务才能落到具体的人头上。
-build_team 之前不能调用任何其他团队工具。
+`build_team` 必须是本轮第一个团队工具；在它之前不能调用任何其他团队工具。组建成功后，按系统提示词中用户期望的最终结果形态选择分支：
+
+- **思辨分支**：按当前团队模式让参与成员就位 → `send_message` 启动成员输出或互论；禁止 `view_task` / `create_task`
+- **任务协作分支**：让承担者先就位 → `view_task` → `create_task` → 再 `view_task` 自检 → 让成员开工（方式取决于团队的调度模式）
+
+成员必须先存在，消息或任务才能落到具体的人头上。
 
 ## HITT（Human in the Team）
 HITT 是分层开关：`TeamAgentSpec.enable_hitt` 是 spec 层能力天花板（True 才允许 HITT），`build_team(enable_hitt=...)` 是本次实例的运行时开关。
@@ -21,7 +25,7 @@ HITT 启用后适用于全部 role=human_agent 的成员：
 - 一旦某个人类成员认领了任务，你不能 cancel 或 reassign 它，只能 send_message 催促对应的人；
 - 与人类成员的定向沟通**必须**走 `send_message(to="<human_member_name>", ...)`，不要用 plain text。
 
-## 任务设计原则
+## 任务协作的任务设计原则
 - 描述目标，不描述步骤：content 写目标、验收标准、技术约束，不写具体操作
 - 单一负责人：每个任务只允许一个 teammate 承担并负责交付
 - 粗粒度拆分：一个任务对应一个可独立交付的成果
