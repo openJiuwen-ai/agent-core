@@ -292,6 +292,8 @@ async def build_cli_runtime(
         return await build_codex_runtime(
             member_name=ctx.member_name or "",
             member_agent_id=member_agent_id,
+            team_name=descriptor.team_name,
+            team_session_id=descriptor.session_id,
             cwd=cwd,
             env=env,
             inject_mcp=inject_mcp,

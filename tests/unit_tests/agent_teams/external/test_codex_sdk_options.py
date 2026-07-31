@@ -79,10 +79,7 @@ def test_build_codex_config_uses_sdk_config_and_mcp_overrides():
     assert config.kwargs["client_name"] == "openjiuwen_agent_team"
     assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' in config.kwargs["config_overrides"]
     assert 'mcp_servers.openjiuwen_team.args=["--stdio"]' in config.kwargs["config_overrides"]
-    assert (
-        'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"'
-        in config.kwargs["config_overrides"]
-    )
+    assert 'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"' in config.kwargs["config_overrides"]
 
 
 def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_argv():
@@ -102,11 +99,98 @@ def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_arg
 
     assert config.kwargs["codex_bin"] == "/opt/codex"
     assert 'mcp_servers.team.command="team-mcp"' in config.kwargs["config_overrides"]
-    assert not any(
-        "default_tools_approval_mode" in item
-        for item in config.kwargs["config_overrides"]
-    )
+    assert not any("default_tools_approval_mode" in item for item in config.kwargs["config_overrides"])
     assert "launch_args_override" not in config.kwargs
+
+
+def test_build_codex_config_routes_native_otel_traces_to_loopback_receiver():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={},
+        inject_mcp=False,
+        mcp_server_name="team",
+        mcp_server_command=(),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        native_otel_trace_endpoint="http://127.0.0.1:4318/v1/traces",
+        sdk=_FAKE_SDK,
+    )
+
+    overrides = config.kwargs["config_overrides"]
+    assert 'otel.environment="openjiuwen"' in overrides
+    assert (
+        'otel.trace_exporter={ otlp-http = { endpoint = "http://127.0.0.1:4318/v1/traces", protocol = "binary" } }'
+    ) in overrides
+    assert "otel.exporter=none" in overrides
+    assert "otel.metrics_exporter=none" in overrides
+    assert "otel.log_user_prompt=false" in overrides
+    assert config.kwargs["env"]["OTEL_BSP_SCHEDULE_DELAY"] == "100"
+
+
+def test_build_codex_config_preserves_explicit_otel_trace_export_delay():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={"OTEL_BSP_SCHEDULE_DELAY": "250"},
+        inject_mcp=False,
+        mcp_server_name="team",
+        mcp_server_command=(),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        native_otel_trace_endpoint="http://127.0.0.1:4318/v1/traces",
+        sdk=_FAKE_SDK,
+    )
+
+    assert config.kwargs["env"]["OTEL_BSP_SCHEDULE_DELAY"] == "250"
+
+
+def test_build_codex_config_enables_private_rollout_trace_root():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={"TEAM": "one"},
+        inject_mcp=False,
+        mcp_server_name="team",
+        mcp_server_command=(),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        rollout_trace_root="/tmp/codex-rollout",
+        sdk=_FAKE_SDK,
+    )
+
+    assert config.kwargs["env"] == {
+        "TEAM": "one",
+        "CODEX_ROLLOUT_TRACE_ROOT": "/tmp/codex-rollout",
+    }
+
+
+def test_build_codex_config_keeps_trace_and_mcp_overrides_together():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={},
+        inject_mcp=True,
+        mcp_server_name="team",
+        mcp_server_command=("team-mcp", "--stdio"),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        native_otel_trace_endpoint="http://127.0.0.1:4318/v1/traces",
+        sdk=_FAKE_SDK,
+    )
+
+    overrides = config.kwargs["config_overrides"]
+    assert any(item.startswith("otel.trace_exporter=") for item in overrides)
+    assert 'mcp_servers.team.command="team-mcp"' in overrides
+    assert 'mcp_servers.team.args=["--stdio"]' in overrides
 
 
 def test_build_codex_thread_options_leave_approval_and_sandbox_unset():
@@ -119,6 +203,7 @@ def test_build_codex_thread_options_leave_approval_and_sandbox_unset():
 
     assert options == {
         "ephemeral": False,
+        "config": {"model_reasoning_summary": "detailed"},
         "cwd": "/workspace",
         "developer_instructions": "You are the developer.",
     }
