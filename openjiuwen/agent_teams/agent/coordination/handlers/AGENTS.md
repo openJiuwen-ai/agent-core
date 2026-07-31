@@ -141,6 +141,12 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
   自己的未完成任务**；别人 in-flight 的活不喂给 teammate——唤醒它是为了让它接活，不是让它
   围观别人干活。
 - **`resume_polls()` 对每个事件都触发**：上面的过滤只砍 nudge，不停 poll。
+- **板子一律 `use_steer=False`**（维度 3）：巡视只是提醒，从不说"你手上的活作废了"，
+  没有理由打断成员的推理。它因此进 follow-up 队列，这一轮结束才读到。**同一批排队的板子
+  会被压掉，只留最新一条**——每条都是全量快照，前面的在下一条渲染出来的瞬间就过期了；
+  剔除发生在 `TeamPolicyRail.on_user_message` 上，按整条输入丢弃、不解析正文（[[F_71]]）。
+  **leader 的板子不压**：它读的是快照之间的差异（哪个任务出现、哪个动了）来决定重规划还是
+  收尾，压掉就等于删掉它要看的信号。
 
 **`on_initial_task_poll`（inner，F_69）** 是 C 组的一次性入口：成员 runtime 起来时由
 `kernel.enqueue_initial_task_poll()` 投一次，对称于首启邮箱 sweep —— 那条收停机期间来的

@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-07-29 |
+| 最近一次修订日期 | 2026-07-31 |
 | 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md` |
 
 ## 范围 / 边界
@@ -60,7 +60,7 @@
 13. **团队状态走对话历史，不走 attachment，也不进系统提示词（[[F_70]]）**：成员自身身份、团队元数据、成员名册由 `team_context.TeamContextTracker` 在**数据第一次出现以及此后每次变化**时插入一条消息，正文由 `prompts/messages.py` 渲染、`inbound_render` 包成 `<team-context>` / `<team-event kind="roster"|"roster-change">`。五条硬约束：
     - **只插入，不删除、不重写**。名册变化只发增量（joined / left / changed），不重发全量；`team_info` 变更追加新的一条，旧那条留在历史里作为当时的事实。
     - **落位有两条通道，且都不按位置定位**（[[F_70]] D1c）。**禁止**任何"记住上次看到哪条消息、下次从它之后找起"的方案——无论用下标还是消息 id 锚：上下文压缩会重写整段历史，下标之后已不是同一条消息，而消息 id 锚被压缩抹掉后只能退化，等于给一条本可以不存在的路径养一套失效处理。
-      - **主通道 `on_user_message`**：core 的 `AgentCallbackEvent.ON_USER_MESSAGE` 在每条被消费的输入（新一轮 query / follow-up / steering / resume）**写进对话之前**触发，rail 就地改 `ctx.inputs.message.content`，把待发内容拼到正文最前面。这是能把一条输入当作"输入"来处理的唯一时刻；写进去之后它就是普通历史，会被压缩搬动。
+      - **主通道 `on_user_message`**：core 的 `AgentCallbackEvent.ON_USER_MESSAGE` 在被消费的那**批**输入（新一轮 query / 整批 follow-up / 整批 steering / resume）**拼成一条 user message 之前**触发，rail 就地改 `ctx.inputs.parts`（可变 `list[str]`），把待发内容 `insert(0, ...)` 到最前面。这是能把输入当作"输入"来处理的唯一时刻；写进去之后它们就是一条普通历史，会被压缩搬动。**钩子拿到的是列表而不是拼好的字符串**（[[F_71]]）：一条 entry 就是一条完整输入，rail 因此可以整条剔除（见不变量 13a），拼好了就只剩解析正文一条路。
       - **兜底 `before_model_call`**：只**追加**一条独立 user message，不定位。state 也可能在一轮的 tool-loop 中途出现（leader 的 `build_team` 在中途建队、写自己的 member 行和名册），此时没有输入可搭车，而下一条输入可能很久才来。尾部是唯一不需要定位、也不受"压缩重写了它前面的历史"影响的位置。
       - 两条通道共用同一个 tracker，谁先拿到 pending 就谁投递；**已在历史里的消息永远不改写**——改一条旧消息会让它之后的 KV cache 全部作废。
     - **同一次投递里产生的 `<team-context>` 正文合并成一个标签**：身份与团队元数据都是"关于团队的既成事实"，各包一个标签是把同一类东西说两遍。分别在不同调用上产生时自然是两条消息，不合并。
@@ -68,6 +68,12 @@
     - **投递进度基线必须持久化在成员自己的 child `AgentSession`**（state key `team_prompt_context`，字段 `identity_emitted` / `team_info_mtime` / `roster_mtime` / `roster`）。`TeamPolicyRail` **每一轮都会被重建**（round 结束 native 进 TERMINATED，下次 start 重新 `RailSpec.build`），基线留内存等于每轮重发；pause/resume、stop→start 只是更严重的版本。该 state 与成员的对话历史存在同一个 agent-session 桶里，由同一次 `AgentStorage.save` 落盘，故两者不会漂移。
     - **先投递、后 `commit`**：`pending_text()` 只渲染不推进，`commit()` 由调用方在投递成功后调用；反过来写会在投递失败时永久丢掉一条公告。tracker **不持锁**——一个成员的 rail 钩子、CLI `send` 与事件补偿都在同一条协程上。
     - **名册消息必带 `<team-note kind="announcement-only">`**（文案 `i18n.team_context.roster_announcement_note`）：否则成员看到"有人加入"就会礼节性寒暄，白烧一轮 LLM + 一轮邮箱投递并连锁触发对方。
+
+13a. **被覆盖的快照类输入整条剔除，只剔 teammate 的（[[F_71]]）**：`TeamPolicyRail.on_user_message` 在折入团队状态**之前**先给这批输入做减法——同一批里出现多条同 kind 的快照事件时，只留最后一条。四条硬约束：
+    - **只有全量幂等快照才算快照**：`inbound_render.SNAPSHOT_EVENT_KINDS` 当前只有 `task-board`。增量（`roster-change`）与按主体分片的事件（`stale-claim` 带 `task_id`）丢掉早的那条就是丢信息，**不得**加进这个集合。
+    - **按整条 entry 丢弃，不解析正文**：一条 entry 就是一次 `deliver_input` 的全部内容，`snapshot_kind_of` 用开闭标签判定"这条除了快照什么都没有"，带 note 或与别的内容同处一条的一律不动。正则抠 XML 是被明确拒绝的方案。
+    - **只对非 LEADER 生效**：teammate 的板子是可认领工作队列，只有当前那份可执行；leader 的板子是全团队未完成工作，它读的正是相邻两份之间的差异（哪个任务出现、哪个动了）来决定重规划还是收尾，压掉就等于删掉它要看的信号。
+    - **只作用于尚未写入的这一批**，历史一个字都不改——与不变量 13 的"只插入，不删除、不重写"同源。
 
 14. **探针语义**：`team_info` 用 `get_team_updated_at()`，名册用 `get_members_max_updated_at()`（状态变化不 bump，只有名册变动才 bump）；`identity` 恒定、无探针，靠基线里的一次性标志。**`team_info` 在团队行不存在时（leader 跑 `build_team` 之前，探针读 0）什么都不发**——工作区路径是 rail 构造参数、恒有值，不加这道闸就会渲染出一个「没有团队的团队信息」块，而真正完整的那条紧随其后，等于把同一件事说两遍、第一遍还是错的。名册同理只在有 peer 时才发：`list_members` 排除调用者本人，故 `build_team` 只写了 leader 自己那行时名册为空，不产出消息。探针推进但渲染为空时，基线在 `pending_text` 内部直接推进并落盘——没有东西会投递失败，不推进只会让每次调用重复读 DB。新增状态通道必须提供单调递增的探针；缺少探针的内容不应走这条路径。`MtimeSectionCache`（`prompts/section_cache.py`）作为通用原语保留，当前团队侧无使用者。
 
