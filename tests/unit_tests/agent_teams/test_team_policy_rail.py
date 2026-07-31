@@ -16,8 +16,8 @@ from openjiuwen.agent_teams.prompts import (
     build_team_static_sections,
     build_team_workflow_section,
 )
+from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.rails import TeamPolicyRail
-from openjiuwen.agent_teams.rails.team_policy_rail import prepend_to_content
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TEAM_CONTEXT_STATE_KEY
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
@@ -93,16 +93,25 @@ class _StubContext:
         self.inputs = None
 
 
-async def _admit(rail: TeamPolicyRail, ctx: _StubContext, text: str, *, source: str = "query"):
-    """Admit one input the way ``ReActAgent._admit_user_message`` does.
+async def _admit(
+    rail: TeamPolicyRail,
+    ctx: _StubContext,
+    *parts: str,
+    source: str = "query",
+    prefix: str = "",
+):
+    """Admit one batch of inputs the way ``ReActAgent._admit_user_message`` does.
 
-    Rails see the message before it is written, may rewrite its content, and
-    only then does it join the conversation.
+    Rails see the queued inputs as a mutable list before they are joined, so
+    they may drop or prepend entries; only what survives becomes the message
+    that joins the conversation.
     """
-    message = UserMessage(content=text)
-    ctx.inputs = UserMessageInputs(message=message, source=source)
+    batch = list(parts)
+    ctx.inputs = UserMessageInputs(parts=batch, source=source)
     await rail.on_user_message(ctx)
     ctx.inputs = None
+    body = "\n".join(batch)
+    message = UserMessage(content=f"{prefix}{body}")
     ctx.context.messages.append(message)
     return message
 
@@ -482,33 +491,6 @@ class TestTeamPolicyRailStaticSections:
         assert TeamSectionName.EXTRA not in sections
         assert TeamSectionName.ROLE in sections
         assert TeamSectionName.IDENTITY not in sections
-
-
-class TestPrependToContent:
-    """Message bodies come in two shapes and both have to accept a prefix."""
-
-    @pytest.mark.level0
-    def test_string_content(self):
-        assert prepend_to_content("hello", "CTX") == "CTX\n\nhello"
-
-    @pytest.mark.level0
-    def test_empty_string_content(self):
-        assert prepend_to_content("", "CTX") == "CTX"
-
-    @pytest.mark.level0
-    def test_list_content_with_leading_text_block(self):
-        assert prepend_to_content(["hello", {"type": "image"}], "CTX") == ["CTX\n\nhello", {"type": "image"}]
-
-    @pytest.mark.level0
-    def test_list_content_with_leading_structured_block(self):
-        blocks = [{"type": "image"}, "hello"]
-        assert prepend_to_content(blocks, "CTX") == ["CTX", {"type": "image"}, "hello"]
-
-    @pytest.mark.level0
-    def test_original_list_is_not_mutated(self):
-        blocks = ["hello"]
-        prepend_to_content(blocks, "CTX")
-        assert blocks == ["hello"]
 
 
 class TestTeamPolicyRailTeamContext:
@@ -1063,3 +1045,132 @@ class TestMemberSpecificInclusion:
         )
         assert "你的 member_name: dev1" in prompt
         assert "ship small PRs" in prompt
+
+
+class TestTeamPolicyRailSnapshotCollapse:
+    """Superseded task boards are dropped as whole inputs before the join.
+
+    Both input queues hand a busy member everything that piled up as one batch,
+    so several full board surveys can arrive together — all but the newest
+    already describing a board that no longer exists.
+    """
+
+    @staticmethod
+    def _rail(role: TeamRole, backend: _FakeTeamBackend | None = None) -> TeamPolicyRail:
+        """Build a rail in the given team role."""
+        return TeamPolicyRail(role=role, member_name="dev1", language="cn", team_backend=backend)
+
+    @staticmethod
+    def _board(body: str) -> str:
+        """Render one queued task-board input the way TaskBoardHandler does."""
+        return render_event(kind="task-board", body=body)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_teammate_keeps_only_the_newest_board(self):
+        rail = self._rail(TeamRole.TEAMMATE)
+        ctx = _StubContext()
+
+        body = (
+            await _admit(
+                rail,
+                ctx,
+                self._board("one task"),
+                self._board("two tasks"),
+                self._board("three tasks"),
+            )
+        ).content
+
+        assert body.count("<team-event") == 1
+        assert "three tasks" in body
+        assert "one task" not in body
+        logger.info("teammate batch collapsed to: %s", body)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_leader_boards_are_left_untouched(self):
+        """The leader reads the sequence of boards, not just the latest one.
+
+        Its board is the team's whole incomplete workload, and which task
+        appeared or moved between two surveys is exactly the signal it uses to
+        decide whether to re-plan or conclude.
+        """
+        rail = self._rail(TeamRole.LEADER)
+        ctx = _StubContext()
+
+        body = (
+            await _admit(
+                rail,
+                ctx,
+                self._board("one task"),
+                self._board("two tasks"),
+                self._board("three tasks"),
+            )
+        ).content
+
+        assert body.count("<team-event") == 3
+        assert "one task" in body
+        assert "two tasks" in body
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_a_lone_board_is_never_dropped(self):
+        rail = self._rail(TeamRole.TEAMMATE)
+        ctx = _StubContext()
+
+        body = (await _admit(rail, ctx, self._board("only board"))).content
+
+        assert "only board" in body
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_only_snapshot_inputs_are_dropped(self):
+        rail = self._rail(TeamRole.TEAMMATE)
+        ctx = _StubContext()
+
+        body = (
+            await _admit(
+                rail,
+                ctx,
+                render_event(kind="roster-change", body="alice joined"),
+                self._board("stale board"),
+                render_event(kind="stale-claim", body="task idle", task_id="t-1"),
+                self._board("fresh board"),
+                source="steering",
+                prefix="[STEERING] ",
+            )
+        ).content
+
+        assert "stale board" not in body
+        assert "fresh board" in body
+        # A roster delta and a per-task nudge each carry something no other
+        # entry repeats, so neither may be dropped.
+        assert "alice joined" in body
+        assert "task idle" in body
+        assert body.startswith("[STEERING] ")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_dropping_runs_before_team_context_is_prepended(self):
+        """Team state must end up in front of the *surviving* inputs."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("t1", "T1"),
+            members=[_StubMember("alice", "Alice", desc="peer")],
+            self_member_name="dev1",
+        )
+        rail = self._rail(TeamRole.TEAMMATE, backend)
+        ctx = _StubContext()
+
+        body = (
+            await _admit(
+                rail,
+                ctx,
+                self._board("stale board"),
+                self._board("fresh board"),
+                source="steering",
+            )
+        ).content
+
+        assert "<team-context>" in body
+        assert body.index("<team-context>") < body.index("fresh board")
+        assert "stale board" not in body

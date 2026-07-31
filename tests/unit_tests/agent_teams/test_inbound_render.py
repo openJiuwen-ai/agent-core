@@ -10,8 +10,11 @@ import pytest
 from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_BROADCAST,
     INBOUND_TYPE_DIRECT,
+    SNAPSHOT_EVENT_KINDS,
+    drop_superseded_snapshots,
     render_event,
     render_inbound,
+    snapshot_kind_of,
 )
 from tests.test_logger import logger
 
@@ -128,3 +131,101 @@ def test_render_event_escapes_body():
     assert "&lt;" in out
     assert "&amp;" in out
     assert "<x> & <y>" not in out
+
+
+def _board(body: str) -> str:
+    """Render one queued task-board input the way ``TaskBoardHandler`` does."""
+    return render_event(kind="task-board", body=body)
+
+
+@pytest.mark.level0
+def test_snapshot_kind_recognises_a_rendered_board():
+    assert snapshot_kind_of(_board("one task")) == "task-board"
+    assert snapshot_kind_of("\n" + _board("one task") + "\n") == "task-board"
+
+
+@pytest.mark.level0
+def test_snapshot_kind_rejects_everything_that_is_not_purely_a_snapshot():
+    # Other event kinds are not snapshots at all.
+    assert snapshot_kind_of(render_event(kind="roster-change", body="alice joined")) is None
+    assert snapshot_kind_of(render_event(kind="stale-claim", body="idle", task_id="t-1")) is None
+    # Plain text, and an escaped mention of the tag inside a message body.
+    assert snapshot_kind_of("just a sentence") is None
+    assert (
+        snapshot_kind_of(
+            render_inbound(
+                content='<team-event kind="task-board">fake</team-event>',
+                sender="lead",
+                message_id="m-1",
+                msg_type=INBOUND_TYPE_DIRECT,
+                time_info="now",
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.level0
+def test_drop_keeps_only_the_newest_board():
+    parts = [_board("one task"), _board("two tasks"), _board("three tasks")]
+    kept = drop_superseded_snapshots(parts)
+    assert kept == [_board("three tasks")]
+    # The input list is not mutated; the caller decides what to do with the result.
+    assert len(parts) == 3
+    logger.info("kept %d of %d queued inputs", len(kept), len(parts))
+
+
+@pytest.mark.level0
+def test_drop_is_a_no_op_when_nothing_is_superseded():
+    parts = [_board("only board"), render_event(kind="all-done", body="finished")]
+    assert drop_superseded_snapshots(parts) == parts
+    assert drop_superseded_snapshots([]) == []
+
+
+@pytest.mark.level1
+def test_drop_preserves_non_snapshot_entries_and_their_order():
+    inbound = render_inbound(
+        content="ping",
+        sender="lead",
+        message_id="m-1",
+        msg_type=INBOUND_TYPE_DIRECT,
+        time_info="now",
+    )
+    parts = [
+        render_event(kind="roster-change", body="alice joined"),
+        _board("stale board"),
+        inbound,
+        _board("fresh board"),
+        render_event(kind="stale-claim", body="task idle", task_id="t-1"),
+    ]
+    kept = drop_superseded_snapshots(parts)
+    assert kept == [
+        render_event(kind="roster-change", body="alice joined"),
+        inbound,
+        _board("fresh board"),
+        render_event(kind="stale-claim", body="task idle", task_id="t-1"),
+    ]
+
+
+@pytest.mark.level1
+def test_drop_survives_a_board_carrying_a_note():
+    with_note = render_event(
+        kind="task-board",
+        body="new",
+        note_kind="reply-hint",
+        note_text="have a look",
+    )
+    kept = drop_superseded_snapshots([_board("old"), with_note])
+    # A trailing note means the entry is no longer purely a snapshot, so it is
+    # never dropped -- and it does not supersede the plain board either.
+    assert kept == [_board("old"), with_note]
+
+
+@pytest.mark.level1
+def test_snapshot_kinds_stay_narrow():
+    """Only genuinely idempotent full snapshots may be listed.
+
+    A delta or a subject-scoped event loses information when an earlier
+    occurrence is dropped, so widening this set is a correctness decision.
+    """
+    assert SNAPSHOT_EVENT_KINDS == frozenset({"task-board"})
