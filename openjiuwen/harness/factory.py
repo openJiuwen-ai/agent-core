@@ -188,6 +188,7 @@ def resolve_deep_agent_parts(
     default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
+    enable_security_rail: bool = True,
     enable_llm_retry_rail: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
@@ -342,7 +343,7 @@ def resolve_deep_agent_parts(
         return TaskPlanningRail(model_selection=model_selection)
 
     default_rails = [
-        (SecurityRail, True, lambda: SecurityRail()),
+        (SecurityRail, enable_security_rail, lambda: SecurityRail()),
         (LLMRetryRail, enable_llm_retry_rail, lambda: LLMRetryRail()),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
@@ -426,6 +427,7 @@ def create_deep_agent(
     default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
+    enable_security_rail: bool = True,
     enable_llm_retry_rail: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgent:
@@ -472,6 +474,8 @@ def create_deep_agent(
         restrict_to_work_dir: If True, restrict file access to workspace directory.
             If False, allow access to any path including system root.
         default_mode: Initial agent mode (``AgentMode.NORMAL`` or ``AgentMode.PLAN``).
+        enable_security_rail: Enable the default SecurityRail that injects the
+            safety prompt section. Explicitly supplied security rails are kept.
         enable_llm_retry_rail: Enable default LLMRetryRail for stream frame timeout and repeated-output retries.
         model_selection: Optional model selection config for TaskPlanningRail.
             Dict mapping Model instance to description string. When provided along with
@@ -510,6 +514,7 @@ def create_deep_agent(
         default_mode=default_mode,
         model_selection=model_selection,
         parallel_tool_calls=parallel_tool_calls,
+        enable_security_rail=enable_security_rail,
         enable_llm_retry_rail=enable_llm_retry_rail,
         **config_kwargs,
     )

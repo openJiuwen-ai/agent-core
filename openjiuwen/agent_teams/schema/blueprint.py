@@ -190,6 +190,7 @@ class TinyAgentSpec(BaseModel):
     model_name: str
     name: str = "tiny"
     max_iterations: int = 6
+    enable_security_rail: bool = False
     default_schema: Optional[dict[str, Any]] = None
     """Optional default JSON-Schema applied to structured output on every call."""
 

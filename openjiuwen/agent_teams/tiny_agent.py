@@ -331,6 +331,7 @@ def create_tiny_agent(
     name: str = "tiny",
     language: str = "cn",
     max_iterations: int = 6,
+    enable_security_rail: bool = False,
 ) -> TinyAgent:
     """Create a tiny agent from a system prompt + a resolvable model name.
 
@@ -344,6 +345,8 @@ def create_tiny_agent(
         name: Logical name; becomes the agent card name/id base.
         language: Prompt language for the structured-output tool i18n.
         max_iterations: ReAct iteration ceiling for the underlying harness.
+        enable_security_rail: Whether the harness automatically mounts its
+            default SecurityRail. Tiny agents disable it by default.
 
     Returns:
         A ready-to-use :class:`TinyAgent`.
@@ -363,6 +366,7 @@ def create_tiny_agent(
         tools=None,
         auto_create_workspace=False,
         max_iterations=max_iterations,
+        enable_security_rail=enable_security_rail,
         language=_normalize_language(language),
     )
     return TinyAgent(spec, default_schema=default_schema, language=language)

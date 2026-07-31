@@ -457,6 +457,7 @@ class DeepAgentSpec(BaseModel):
     enable_task_loop: bool = True
     enable_async_subagent: bool = False
     add_general_purpose_agent: bool = False
+    enable_security_rail: bool = True
     enable_tool_resilience_rail: bool = True
     max_iterations: int = 15
     workspace: Optional[WorkspaceSpec] = None
@@ -584,6 +585,7 @@ class DeepAgentSpec(BaseModel):
             enable_task_loop=self.enable_task_loop,
             enable_async_subagent=self.enable_async_subagent,
             add_general_purpose_agent=self.add_general_purpose_agent,
+            enable_security_rail=self.enable_security_rail,
             enable_tool_resilience_rail=self.enable_tool_resilience_rail,
             max_iterations=self.max_iterations,
             workspace=workspace,
