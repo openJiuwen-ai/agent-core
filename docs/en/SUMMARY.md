@@ -148,6 +148,8 @@
         - [openai_auth](2.Development%20Guide/API%20Docs/openjiuwen.extensions/external_provider/openai_auth/README.md)
           - [openai_account_auth](2.Development%20Guide/API%20Docs/openjiuwen.extensions/external_provider/openai_auth/openai_account_auth.md)
           - [openai_account_models](2.Development%20Guide/API%20Docs/openjiuwen.extensions/external_provider/openai_auth/openai_account_models.md)
+      - [sys_operation](2.Development%20Guide/API%20Docs/openjiuwen.extensions/sys_operation.README.md)
+        - [jiuwenbox](2.Development%20Guide/API%20Docs/openjiuwen.extensions/sys_operation/sandbox/providers/jiuwenbox.md)
       - [store](2.Development%20Guide/API%20Docs/openjiuwen.extensions/store.README.md)
         - [db](2.Development%20Guide/API%20Docs/openjiuwen.extensions/store/db/gauss_db_store.md)
           - [gauss_db_store](2.Development%20Guide/API%20Docs/openjiuwen.extensions/store/db/gauss_db_store.md)
