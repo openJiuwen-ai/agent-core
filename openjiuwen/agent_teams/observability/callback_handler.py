@@ -654,6 +654,17 @@ class OtelCallbackHandler:
             span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.role", role)
             span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.content", redacted)
 
+            # tool_calls on assistant messages — content is often empty,
+            # but the LLM context includes the full tool call metadata.
+            tool_calls = m.get("tool_calls") if isinstance(m, dict) else getattr(m, "tool_calls", None)
+            if tool_calls:
+                tc_json = _serialize_tool_calls(tool_calls)
+                if tc_json:
+                    tc_redacted = redact_prompt(tc_json, self._config)
+                    if emit_standard_prompt:
+                        span.set_attribute(f"{GEN_AI_PROMPT}.{i}.tool_calls", tc_redacted)
+                    span.set_attribute(f"{LANGFUSE_GEN_AI_PROMPT}.{i}.tool_calls", tc_redacted)
+
         # ── langfuse.observation.input (delta, same logic) ───────────
         if is_first_call:
             # Drop system messages from the observation input — the UI

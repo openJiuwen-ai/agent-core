@@ -32,6 +32,7 @@ MEMORY_PROMPT_CN = """# 记忆使用策略（主动模式）
 
 ## 读取与检索
 
+- 今天和昨天的每日记忆（daily_memory）已自动加载到上下文中，无需调用 `memory_search` 或 `read_memory` 来获取今日/昨日记录。
 - 不确定相关记忆在哪个文件时，先调用 `memory_search`。
 - 已知具体文件时，调用 `read_memory`。
 - 回答历史问题、偏好问题、继续之前任务前，必须先检索或读取记忆。
@@ -61,6 +62,7 @@ Choose the storage location by content type:
 
 ## Reading and Retrieval
 
+- Today's and yesterday's daily memory files are already loaded in the context. Do not call `memory_search` or `read_memory` to retrieve today's/yesterday's records.
 - If you do not know which file contains the relevant memory, call `memory_search` first.
 - If you know the exact file, call `read_memory`.
 - Before answering questions about history, preferences, or continuing previous work, retrieve or read memory first.
@@ -128,7 +130,8 @@ MEMORY_INACTIVE_PROMPT_CN = """# 记忆使用策略（被动模式）
 
 ## 被动使用规则
 
-- 只有当用户明确说“记住、记录、保存、以后参考”等含义时，才写入或修改记忆。
+- 今天和昨天的每日记忆（daily_memory）已自动加载到上下文中，无需调用 `memory_search` 或 `read_memory` 来获取今日/昨日记录。
+- 只有当用户明确说"记住、记录、保存、以后参考"等含义时，才写入或修改记忆。
 - 只有当用户询问“之前、上次、继续、历史、回忆、偏好”等内容，或回答确实依赖历史信息时，才调用 `memory_search` / `read_memory`。
 - 普通闲聊、一次性任务、当前上下文足够回答的问题，不要调用记忆工具。
 - 当前用户消息优先于历史记忆。
@@ -161,6 +164,7 @@ Historical memory content is not included in the prompt by default. Use memory t
 
 ## Passive Usage Rules
 
+- Today's and yesterday's daily memory files are already loaded in the context. Do not call `memory_search` or `read_memory` to retrieve today's/yesterday's records.
 - Write or modify memory only when the user explicitly says "remember", "record", "save", "refer to this later", or similar.
 - Call `memory_search` / `read_memory` only when the user asks about previous context, last time, continuation, history, recall, preferences, or when the answer genuinely depends on historical information.
 - Do not call memory tools for casual conversation, one-off tasks, or questions that can be answered from the current context.

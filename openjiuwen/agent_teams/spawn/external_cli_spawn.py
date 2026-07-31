@@ -223,6 +223,21 @@ async def external_cli_spawn(
 
     teammate = _TeamAgent(card)
     teammate.configure(spec, ctx, member_runtime=runtime)
+    from openjiuwen.agent_teams.external.cli_agent.claude import ClaudeSdkRuntime
+
+    if isinstance(runtime, ClaudeSdkRuntime) and teammate.team_backend is not None:
+        runtime.bind_team_tools(
+            team_backend=teammate.team_backend,
+            role=ctx.role.value,
+            teammate_mode=spec.teammate_mode,
+            dispatch_mode=spec.dispatch_mode,
+            lifecycle=spec.lifecycle,
+            language=(ctx.team_spec.language if ctx.team_spec else None) or "cn",
+            workspace_manager=teammate.infra.workspace_manager,
+            messager=teammate.infra.messager,
+            team_name=team_name,
+            team_permissions_enabled=spec.enable_permissions,
+        )
 
     base_query = initial_message or ""
     # Backends that accept the system prompt as a launch arg already carry it;

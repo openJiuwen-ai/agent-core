@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Set, Tuple, Union
 
 from pydantic import BaseModel
 
@@ -21,6 +21,7 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     SessionMemoryManager,
 )
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
     CurrentRoundCompressorConfig as ForkedCurrentRoundCompressorConfig,
 )
@@ -39,6 +40,7 @@ from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.prompts.sections.compression_recall import build_compression_recall_section
 from openjiuwen.harness.prompts.sections.reload import build_reload_section
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.state import (
@@ -121,6 +123,8 @@ class ContextProcessorRail(DeepAgentRail):
         self._system_prompt_builder = None
         self._all_processors: List[Tuple[str, BaseModel]] = []
         self._reload_enabled = False
+        self._recall_enabled = False
+        self._owned_tool_names: Set[str] = set()
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -274,9 +278,28 @@ class ContextProcessorRail(DeepAgentRail):
             )
 
         self._all_processors = all_processors
-        context_engine_config = getattr(config, "context_engine_config", None)
-        self._reload_enabled = bool(getattr(context_engine_config, "enable_reload", False))
         self._system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        context_engine_config = getattr(config, "context_engine_config", None)
+        recall_config = getattr(context_engine_config, "compression_recall_config", None)
+        supported_compressor_present = any(
+            processor_name in {"DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor"}
+            for processor_name, _ in all_processors
+        )
+        recall_requested = isinstance(recall_config, CompressionRecallConfig) and recall_config.enabled
+        self._recall_enabled = recall_requested and supported_compressor_present
+        if isinstance(recall_config, CompressionRecallConfig):
+            logger.info(
+                "compression recall effective config: %s",
+                self._summarize_processor_config(recall_config),
+            )
+        if recall_requested and not supported_compressor_present:
+            logger.warning(
+                "compression recall is enabled but no supported forked compressor is configured"
+            )
+        if self._recall_enabled:
+            self._protect_compression_recall_tool_results(all_processors)
+            self._register_compression_recall_tool(agent)
+        self._reload_enabled = bool(getattr(context_engine_config, "enable_reload", False))
 
     def _maybe_setup_session_memory_manager(
         self,
@@ -336,8 +359,13 @@ class ContextProcessorRail(DeepAgentRail):
 
         if self._system_prompt_builder is not None:
             self._system_prompt_builder.remove_section("offload")
+            self._system_prompt_builder.remove_section("compression_recall")
+        for tool_name in list(self._owned_tool_names):
+            agent.ability_manager.remove_ability(tool_name)
+        self._owned_tool_names.clear()
         self._all_processors = []
         self._reload_enabled = False
+        self._recall_enabled = False
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         self._reset_loop_bailout_counter(ctx)
@@ -347,6 +375,7 @@ class ContextProcessorRail(DeepAgentRail):
         self._maybe_bailout_loop_compactions(ctx)
         self._refresh_task_state_runtime(ctx)
         await self._maybe_inject_offload_section()
+        self._maybe_inject_compression_recall_section()
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         self._refresh_task_state_runtime(ctx)
@@ -586,3 +615,37 @@ class ContextProcessorRail(DeepAgentRail):
 
         lang = self._system_prompt_builder.language or "cn"
         self._system_prompt_builder.add_section(build_reload_section(lang))
+
+    def _register_compression_recall_tool(self, agent) -> None:
+        ability_manager = getattr(agent, "ability_manager", None)
+        add_ability = getattr(ability_manager, "add_ability", None)
+        if not callable(add_ability):
+            return
+        from openjiuwen.harness.tools.compression_recall import CompressionRecallTool
+
+        workspace_dir = str(getattr(self.workspace, "root_path", "") or "")
+        agent_id = getattr(getattr(agent, "card", None), "id", None) or "default"
+        language = getattr(self._system_prompt_builder, "language", "cn") or "cn"
+        tool = CompressionRecallTool(workspace_dir, language=language, agent_id=agent_id)
+        result = add_ability(tool.card, tool)
+        if result.added:
+            self._owned_tool_names.add(tool.card.name)
+
+    @staticmethod
+    def _protect_compression_recall_tool_results(processors: List[Tuple[str, BaseModel]]) -> None:
+        for processor_name, processor_config in processors:
+            if processor_name != "MessageSummaryOffloader":
+                continue
+            protected = getattr(processor_config, "protected_tool_names", None)
+            if not isinstance(protected, list) or "recall_compressed_context" in protected:
+                continue
+            processor_config.protected_tool_names = [*protected, "recall_compressed_context"]
+
+    def _maybe_inject_compression_recall_section(self) -> None:
+        if self._system_prompt_builder is None:
+            return
+        if not self._recall_enabled:
+            self._system_prompt_builder.remove_section("compression_recall")
+            return
+        language = self._system_prompt_builder.language or "cn"
+        self._system_prompt_builder.add_section(build_compression_recall_section(language))

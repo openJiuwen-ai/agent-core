@@ -17,7 +17,7 @@ from openjiuwen.core.context_engine.context.processor_state_recorder import (
 )
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.token.base import TokenCounter
-from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
 from openjiuwen.core.foundation.kv_cache import first_changed_index
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -75,6 +75,7 @@ class SessionModelContext(ModelContext):
         self._window_mutators = window_mutators if window_mutators is not None else []
         self._session_ref = session_ref
         self._default_dialogue_round = config.default_window_round_num
+        self._compression_recall_config = config.compression_recall_config.model_copy(deep=True)
         self._token_counter = token_counter
         self._processors = processors
         self._processor_state_recorder = ContextProcessorStateRecorder(
@@ -105,6 +106,9 @@ class SessionModelContext(ModelContext):
 
     def context_id(self) -> str:
         return self._context_id
+
+    def compression_recall_config(self) -> CompressionRecallConfig:
+        return self._compression_recall_config
 
     def last_context_window_access_at(self) -> float | None:
         return self._last_context_window_access_at

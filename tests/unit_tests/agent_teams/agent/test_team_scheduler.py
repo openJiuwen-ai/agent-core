@@ -133,6 +133,7 @@ def _build_scheduler(db, bus, **spec_overrides):
     infra.task_manager = task_manager
     infra.message_manager = message_manager
     spec = SimpleNamespace(
+        team_name=TEAM,
         verify_vote_threshold=spec_overrides.get("verify_vote_threshold", 2 / 3),
         default_max_review_rounds=spec_overrides.get("default_max_review_rounds", 3),
         review_stall_timeout=spec_overrides.get("review_stall_timeout", 1800),

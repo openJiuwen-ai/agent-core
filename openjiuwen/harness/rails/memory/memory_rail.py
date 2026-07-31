@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
-from typing import Set
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Set
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
@@ -88,6 +90,7 @@ class MemoryRail(DeepAgentRail):
         self._tool_ctx = None
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("memory")
+            self.system_prompt_builder.remove_section("daily_memory_context")
             self.system_prompt_builder = None
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
@@ -119,6 +122,30 @@ class MemoryRail(DeepAgentRail):
         )
         if memory_section is not None:
             self.system_prompt_builder.add_section(memory_section)
+
+        daily_content = await self._load_recent_daily_memory()
+        if daily_content:
+            from openjiuwen.harness.prompts.builder import PromptSection
+            lang = self.system_prompt_builder.language or "cn"
+            if lang == "cn":
+                header = (
+                    "# 今日与昨日记忆（已自动加载）\n\n"
+                    "以下记忆已自动加载，无需调用 memory_search "
+                    "或 read_memory 来获取今日/昨日记录。\n\n"
+                )
+            else:
+                header = (
+                    "# Today's and Yesterday's Memory (auto-loaded)\n\n"
+                    "The following memories are auto-loaded. "
+                    "Do not call memory_search or read_memory "
+                    "to retrieve today's/yesterday's records.\n\n"
+                )
+            dm_section = PromptSection(
+                name="daily_memory_context",
+                content={lang: header + daily_content},
+                priority=52,
+            )
+            self.system_prompt_builder.add_section(dm_section)
 
     async def _init_memory_manager(self, ctx: AgentCallbackContext) -> None:
         """Initialize the memory index manager.
@@ -152,6 +179,57 @@ class MemoryRail(DeepAgentRail):
 
         except Exception as e:
             logger.error(f"[MemoryRail] Failed to initialize memory manager: {e}")
+
+    async def _load_recent_daily_memory(self) -> Optional[str]:
+        """Load today's and yesterday's daily memory files.
+
+        Returns:
+            Combined content of recent daily memory files, or None.
+        """
+        if not self.workspace or not self.sys_operation:
+            return None
+
+        memory_dir = self.workspace.get_node_path("memory")
+        if not memory_dir:
+            return None
+
+        daily_rel = self.workspace.get_directory("daily_memory")
+        if not daily_rel:
+            return None
+
+        daily_memory_dir = os.path.join(str(memory_dir), daily_rel)
+        if not os.path.isdir(daily_memory_dir):
+            return None
+
+        beijing_tz = timezone(timedelta(hours=8))
+        today = datetime.now(tz=beijing_tz)
+        dates = [
+            today.strftime("%Y-%m-%d"),
+            (today - timedelta(days=1)).strftime("%Y-%m-%d"),
+        ]
+
+        parts = []
+        for date_str in dates:
+            filename = f"{date_str}.md"
+            filepath = os.path.join(daily_memory_dir, filename)
+            if not os.path.isfile(filepath):
+                continue
+            try:
+                result = await self.sys_operation.fs().read_file(filepath)
+                if result.data is not None:
+                    content = (result.data.content or "").strip()
+                    if content:
+                        parts.append(f"## {date_str}\n\n{content}")
+            except Exception as e:
+                logger.warning(
+                    f"[MemoryRail] Failed to read daily memory "
+                    f"{filename}: {e}"
+                )
+
+        if not parts:
+            return None
+
+        return "\n\n---\n\n".join(parts)
 
     def _register_memory_tools(self, agent) -> None:
         """Register memory tools to the agent's ability manager.

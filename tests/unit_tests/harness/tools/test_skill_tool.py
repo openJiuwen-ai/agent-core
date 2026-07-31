@@ -238,3 +238,111 @@ async def test_skill_tool_non_hint_mode_skips_media_hints(sys_op, temp_dir):
     assert skill_res.success is True
     assert "content" not in skill_res.data
     assert SKILL_TOOL_MARKDOWN_IMAGES_HINT not in skill_res.data["skill_content"]
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_includes_directory_tree_and_nested_skills(sys_op, temp_dir):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    parent = _write_skill(skills_root, "pptx-craft", "parent skill", "parent body")
+    _write_skill(parent.directory, "designer", "designer skill", "designer body")
+    _write_skill(parent.directory, "outline-planner", "planner skill", "planner body")
+    (parent.directory / "scripts").mkdir()
+    (parent.directory / "scripts" / "run.js").write_text("console.log(1)", encoding="utf-8")
+    # Skipped noise dirs should not appear in the tree.
+    (parent.directory / "node_modules").mkdir()
+    (parent.directory / "node_modules" / "pkg").mkdir()
+    (parent.directory / "node_modules" / "pkg" / "index.js").write_text("x", encoding="utf-8")
+
+    skill_tool = SkillTool(sys_op, lambda: [parent])
+    skill_res = await skill_tool.invoke({"skill_name": "pptx-craft"})
+
+    assert skill_res.success is True
+    tree = skill_res.data["directory_tree"]
+    assert isinstance(tree, list) and len(tree) == 1
+    tree_text = tree[0]
+    assert "pptx-craft/" in tree_text
+    assert "designer/" in tree_text
+    assert "outline-planner/" in tree_text
+    assert "scripts/" in tree_text
+    assert "run.js" in tree_text
+    assert "node_modules" not in tree_text
+    assert skill_res.data["directory_tree_truncated"] is False
+    assert skill_res.data["discovered_skill_names"] == [
+        "designer",
+        "outline-planner",
+    ]
+    assert skill_res.data["discovered_skill_names_truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_loads_nested_skill_via_relative_path(sys_op, temp_dir):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    parent = _write_skill(skills_root, "pptx-craft", "parent skill", "parent body")
+    _write_skill(parent.directory, "designer", "designer skill", "designer body")
+
+    skill_tool = SkillTool(sys_op, lambda: [parent])
+    skill_res = await skill_tool.invoke(
+        {
+            "skill_name": "pptx-craft",
+            "relative_file_path": "designer/SKILL.md",
+        }
+    )
+
+    assert skill_res.success is True
+    assert "designer body" in skill_res.data["skill_content"]
+    assert "designer" in skill_res.data["discovered_skill_names"]
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_directory_walk_tolerates_symlink_cycles(sys_op, temp_dir):
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    parent = _write_skill(skills_root, "cyclic", "cyclic skill", "body")
+    loop_dir = parent.directory / "loop"
+    loop_dir.mkdir()
+    try:
+        (loop_dir / "back").symlink_to(parent.directory, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not supported on this platform/user")
+
+    skill_tool = SkillTool(sys_op, lambda: [parent])
+    skill_res = await skill_tool.invoke({"skill_name": "cyclic"})
+
+    assert skill_res.success is True
+    assert "cyclic/" in skill_res.data["directory_tree"][0]
+    assert skill_res.data["discovered_skill_names"] == []
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_media_hint_content_keeps_directory_layout(sys_op, temp_dir):
+    """AbilityManager uses data['content'] alone; layout must be embedded there."""
+    from openjiuwen.core.single_agent.ability_manager import AbilityManager
+
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    parent = _write_skill(
+        skills_root,
+        "pptx-craft",
+        "parent skill",
+        "See ![landing](images/landing.png) and use nested skills.",
+    )
+    _write_skill(parent.directory, "designer", "designer skill", "designer body")
+
+    skill_tool = SkillTool(sys_op, lambda: [parent], multimodal_skill_mode="hint")
+    skill_res = await skill_tool.invoke({"skill_name": "pptx-craft"})
+
+    assert skill_res.success is True
+    assert "content" in skill_res.data
+    assert "directory_tree" in skill_res.data
+    assert "designer" in skill_res.data["discovered_skill_names"]
+    assert "## Directory layout" in skill_res.data["content"]
+    assert "designer/" in skill_res.data["content"]
+    assert "## Nested skills" in skill_res.data["content"]
+    assert "designer/SKILL.md" in skill_res.data["content"]
+
+    model_text = AbilityManager._build_tool_message_content(skill_res)
+    assert "## Directory layout" in model_text
+    assert "designer/SKILL.md" in model_text
+    assert SKILL_TOOL_MARKDOWN_IMAGES_HINT in model_text
