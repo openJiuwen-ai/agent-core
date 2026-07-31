@@ -48,8 +48,16 @@ def _build_rebuild_workflow_instructions(
         "(preserve name, description, and other frontmatter keys).\n"
         "3. Compose the rebuilt SKILL.md from the deterministic context below, preserved frontmatter, "
         f"and {creator} guidance.\n"
-        f"4. write_file `{target_skill_md}` with the complete rebuilt body (overwrite the file).\n"
-        "5. Confirm write_file succeeded before finishing. "
+        f"4. MUST call write_file or edit_file on the absolute target path `{target_skill_md}` "
+        "with the complete rebuilt body (overwrite/update that file on disk).\n"
+        "5. Confirm the disk write succeeded (e.g. re-read or tool success) before finishing.\n"
+        "Hard constraints (violations mean the rebuild is incomplete):\n"
+        f"- You MUST write to `{target_skill_md}` via write_file/edit_file; "
+        "chat drafts, skill_tool, or skill_complete alone do NOT count as writing.\n"
+        "- Do NOT call todo_complete / todo_complete_batch / skill_complete until AFTER "
+        f"`{target_skill_md}` has been successfully written on disk.\n"
+        "- Do NOT mark Write/Confirm (or equivalent) todos as completed before the disk write "
+        "to the target SKILL.md succeeds.\n"
         "Do not paste the full draft in chat instead of writing to disk."
     )
 
