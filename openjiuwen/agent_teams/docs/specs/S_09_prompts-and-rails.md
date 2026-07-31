@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
 | 最近一次修订日期 | 2026-07-31 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md` |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md` |
 
 ## 范围 / 边界
 
@@ -67,7 +67,7 @@
     - **身份 = `member_name` + `display_name` + 私有工作区路径 + 私有工作约定**：判据是"per-member、spawn 时固定、此后恒定"，凡满足的都进这一段正文，不另开通道。`display_name` 必须**读自己那行 member 行**——名册每行都以两个名字标识成员，少了它成员认不出哪一行是自己，而构造期的值只是 spec 默认（leader 的真实标签由 `build_team(leader_display_name=...)` 写入 DB），所以身份通道**等自己那行存在**才发：teammate 在 spawn 时就有行，leader 则在建队后那次调用上拿到。私有工作区路径带一句用途说明（区分于团队共享工作空间、不作为新 skill 的创建目标）——只给路径模型分不清分工。公开 `desc` 仍然不进自己的身份（见不变量 18a）。
     - **投递进度基线必须持久化在成员自己的 child `AgentSession`**（state key `team_prompt_context`，字段 `identity_emitted` / `team_info_mtime` / `roster_mtime` / `roster`）。`TeamPolicyRail` **每一轮都会被重建**（round 结束 native 进 TERMINATED，下次 start 重新 `RailSpec.build`），基线留内存等于每轮重发；pause/resume、stop→start 只是更严重的版本。该 state 与成员的对话历史存在同一个 agent-session 桶里，由同一次 `AgentStorage.save` 落盘，故两者不会漂移。
     - **先投递、后 `commit`**：`pending_text()` 只渲染不推进，`commit()` 由调用方在投递成功后调用；反过来写会在投递失败时永久丢掉一条公告。tracker **不持锁**——一个成员的 rail 钩子、CLI `send` 与事件补偿都在同一条协程上。
-    - **名册消息必带 `<team-note kind="announcement-only">`**（文案 `i18n.team_context.roster_announcement_note`）：否则成员看到"有人加入"就会礼节性寒暄，白烧一轮 LLM + 一轮邮箱投递并连锁触发对方。
+    - **名册消息必带 `<team-note kind="announcement-only">`**（文案 `i18n.team_context.roster_announcement_note`，嵌在该 `<team-event>` 内部，见不变量 28）：否则成员看到"有人加入"就会礼节性寒暄，白烧一轮 LLM + 一轮邮箱投递并连锁触发对方。
 
 13a. **被覆盖的快照类输入整条剔除，只剔 teammate 的（[[F_71]]）**：`TeamPolicyRail.on_user_message` 在折入团队状态**之前**先给这批输入做减法——同一批里出现多条同 kind 的快照事件时，只留最后一条。四条硬约束：
     - **只有全量幂等快照才算快照**：`inbound_render.SNAPSHOT_EVENT_KINDS` 当前只有 `task-board`。增量（`roster-change`）与按主体分片的事件（`stale-claim` 带 `task_id`）丢掉早的那条就是丢信息，**不得**加进这个集合。
@@ -102,6 +102,17 @@
 25. **继承 `PermissionInterruptRail`**：复用完整 `PermissionEngine` 三级判定（ALLOW/DENY/ASK + auto_confirm）。`enable_permissions=True` 时替代 `TeamToolApprovalRail`。
 26. **`_persist_allow_always() → False`**：leader 审批 session-scoped，override 父类的磁盘写盘方法直接返回 `False`，不写 teammate 本地 YAML。
 27. **`parse_confirm_payload()` 自动设置 `decided_by="leader"`**：返回 `TeamPermissionConfirmResponse`（`PermissionConfirmResponse` + `decided_by`），`decided_by` 仅用于内部审计，不暴露给 LLM。
+
+### 入站 XML 标签结构
+
+28. **`<team-note>` 嵌在它所修饰的块内部，从不平级（[[F_72]]）**：`inbound_render` 渲染出的
+    `<team-inbound>` / `<team-event>` / `<team-context>` 是彼此平级的顶层块，`<team-note>`
+    **只作为前两者的最后一个子元素存在**，不单独出现、也不跟在被修饰块后面当兄弟。归属由树
+    结构给出，不靠语序推断——成员一次唤醒常拿到多条排队输入拼在一起，平级的 note 到前一个块
+    与到后一个块的距离一样近，`reply-hint` 认错块就是「不该回的回了」。三个渲染函数共用
+    `_render_block(tag, attrs, body, note="")`，无 note 时拼进空串，**不存在「有没有 note」
+    的分支**。`inbound_tags.md`（cn/en）必须与此逐字一致：正文边界写作「除 `<team-note>`
+    子元素外」，并明确「看嵌在哪个标签里，不要按前后位置猜」。
 
 ## 接口契约
 

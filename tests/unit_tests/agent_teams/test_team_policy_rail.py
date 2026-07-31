@@ -738,11 +738,14 @@ class TestTeamPolicyRailTeamContext:
         snapshot = await _admit(rail, ctx, "go")
         assert '<team-note kind="announcement-only">' in snapshot.content
         assert "不要" in snapshot.content
+        # The note belongs to the roster event, so it is nested inside it.
+        assert snapshot.content.index("<team-note") < snapshot.content.index("</team-event>")
 
         backend.add_member(_StubMember("dev2", "Newbie"), mtime=2)
         delta = await _admit(rail, ctx, "next")
         assert '<team-note kind="announcement-only">' in delta.content
         assert "不要" in delta.content
+        assert delta.content.index("<team-note") < delta.content.index("</team-event>")
 
     @pytest.mark.asyncio
     @pytest.mark.level1

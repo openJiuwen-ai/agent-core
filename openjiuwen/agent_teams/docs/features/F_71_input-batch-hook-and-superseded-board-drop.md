@@ -103,8 +103,11 @@ description 仍是拼好的字符串，所以既有的日志、失败重试、pa
 「它是不是幂等全量快照」。
 
 `snapshot_kind_of` 用「`strip()` 后以 `<team-event kind="X"` 开头**且**以 `</team-event>`
-结尾」判定，即**这条 entry 除了快照什么都没有**。带 note 的、和别的内容拼在一条里的，
-一律不动——剔除的前提是丢掉它不会连带丢别的东西。
+结尾」判定，即**这条 entry 除了快照什么都没有**。和别的内容拼在一条里的一律不动——剔除的
+前提是丢掉它不会连带丢别的东西。（本次归档时带 note 的块以 `</team-note>` 结尾、因而也被这条
+判定挡在外面；[[F_72_nested-team-note-inside-annotated-block]] 把 note 改为嵌进块内部后，带
+note 的板子重新算「纯快照」并参与剔除——note 只修饰它所在的那块板，板过期它也过期，一起丢
+才是对的。）
 
 ### D6 只剔 teammate 的板子，leader 保持现状
 
@@ -169,8 +172,8 @@ source .venv/bin/activate && export PYTHONPATH=.:$PYTHONPATH
 ```
 
 - `tests/unit_tests/agent_teams/test_inbound_render.py`（15 passed）：`snapshot_kind_of` 认
-  纯板子 / 拒非快照 kind、拒纯文本、拒 `<team-inbound>` 正文里被转义的伪标签、拒带 note 的
-  板子；`drop_superseded_snapshots` 只留最新、不改入参、无覆盖时原样返回、保序保留非快照
+  纯板子 / 拒非快照 kind、拒纯文本、拒 `<team-inbound>` 正文里被转义的伪标签（带 note 的板子
+  当时也被拒，[[F_72]] 之后改为接受，见上）；`drop_superseded_snapshots` 只留最新、不改入参、无覆盖时原样返回、保序保留非快照
   entry；`SNAPSHOT_EVENT_KINDS` 集合本身被钉住（扩集合是正确性决策）。
 - `tests/unit_tests/agent_teams/test_team_policy_rail.py`（48 passed）：teammate 三条板只剩
   最新一条；**leader 三条一条不少**；单条板永不丢；非快照 entry 全留且 `[STEERING] ` 前缀

@@ -23,6 +23,11 @@ clean boundary:
   a fact about the team rather than something that happened.
 - ``<team-note>`` carries a framework-added hint or constraint attached to
   either of the above (e.g. a reply hint, or the HITT silence constraint).
+  It is rendered **nested inside the block it annotates**, as the last
+  child: which message or event a note is about is then a fact about the
+  tree, not something the LLM has to infer from "the note came right
+  after". A sibling note sitting between two blocks is exactly as close to
+  the one before it as to the one after it.
 - A ``for="controller"`` attribute marks content surfaced to a human
   agent's controller (HITT), which the avatar must stay silent about.
 
@@ -66,10 +71,30 @@ def _esc_attr(value: object) -> str:
 
 
 def _render_note(note_kind: str | None, note_text: str | None) -> str:
-    """Render an optional ``<team-note>`` block, or ``""`` when absent."""
+    """Render the nested ``<team-note>`` child, or ``""`` when absent.
+
+    Carries its own trailing newline so the enclosing block needs no branch
+    on whether a note is there.
+    """
     if not note_kind or not note_text:
         return ""
-    return f'<team-note kind="{_esc_attr(note_kind)}">\n{_esc_text(note_text)}\n</team-note>'
+    return f'<team-note kind="{_esc_attr(note_kind)}">\n{_esc_text(note_text)}\n</team-note>\n'
+
+
+def _render_block(tag: str, attrs: list[str], body: str, note: str = "") -> str:
+    """Render one block element around its body and optional nested note.
+
+    Args:
+        tag: The element name (``team-inbound`` / ``team-event`` / ...).
+        attrs: Already-escaped ``name="value"`` fragments, in contract order.
+        body: The element body, escaped here.
+        note: A rendered ``<team-note>`` child (already escaped), or ``""``.
+
+    Returns:
+        The rendered element.
+    """
+    open_tag = " ".join([tag, *attrs])
+    return f"<{open_tag}>\n{_esc_text(body)}\n{note}</{tag}>"
 
 
 def render_inbound(
@@ -102,8 +127,8 @@ def render_inbound(
             ``note_kind`` and ``note_text`` are set.
 
     Returns:
-        The rendered XML string (a ``<team-inbound>`` block, optionally
-        followed by a ``<team-note>`` block).
+        The rendered ``<team-inbound>`` block, with the ``<team-note>``
+        nested inside it as its last child when there is one.
     """
     attrs = [
         f'from="{_esc_attr(sender)}"',
@@ -113,9 +138,7 @@ def render_inbound(
     ]
     if for_controller:
         attrs.append('for="controller"')
-    block = f"<team-inbound {' '.join(attrs)}>\n{_esc_text(content)}\n</team-inbound>"
-    note = _render_note(note_kind, note_text)
-    return f"{block}\n{note}" if note else block
+    return _render_block("team-inbound", attrs, content, _render_note(note_kind, note_text))
 
 
 def render_event(
@@ -142,22 +165,20 @@ def render_event(
         body: The framework instruction text, rendered verbatim (escaped).
         task_id: Optional task id, added as a ``task_id`` attribute.
         for_controller: When True, add ``for="controller"`` (HITT).
-        note_kind: Optional ``<team-note>`` kind appended after the event.
+        note_kind: Optional ``<team-note>`` kind nested inside the event.
         note_text: Optional ``<team-note>`` body; rendered only when both
             ``note_kind`` and ``note_text`` are set.
 
     Returns:
-        The rendered XML string (a ``<team-event>`` block, optionally
-        followed by a ``<team-note>`` block).
+        The rendered ``<team-event>`` block, with the ``<team-note>`` nested
+        inside it as its last child when there is one.
     """
     attrs = [f'kind="{_esc_attr(kind)}"']
     if task_id is not None:
         attrs.append(f'task_id="{_esc_attr(task_id)}"')
     if for_controller:
         attrs.append('for="controller"')
-    block = f"<team-event {' '.join(attrs)}>\n{_esc_text(body)}\n</team-event>"
-    note = _render_note(note_kind, note_text)
-    return f"{block}\n{note}" if note else block
+    return _render_block("team-event", attrs, body, _render_note(note_kind, note_text))
 
 
 def render_team_context(*, body: str) -> str:
@@ -175,7 +196,7 @@ def render_team_context(*, body: str) -> str:
     Returns:
         The rendered ``<team-context>`` block.
     """
-    return f"<team-context>\n{_esc_text(body)}\n</team-context>"
+    return _render_block("team-context", [], body)
 
 
 def snapshot_kind_of(text: str) -> str | None:
@@ -183,7 +204,10 @@ def snapshot_kind_of(text: str) -> str | None:
 
     An input qualifies only when a snapshot event is *all* it is: these are
     delivered one per ``deliver_input`` call, so the whole entry is the block
-    and dropping it takes nothing else with it.
+    and dropping it takes nothing else with it. A ``<team-note>`` is not
+    "something else" — it is nested inside the block and annotates that block
+    alone, so it goes stale with the snapshot it hangs on and is superseded
+    together with it.
 
     Args:
         text: One queued input, as it was handed to ``deliver_input``.

@@ -98,6 +98,25 @@ def test_render_inbound_note_rendered_only_when_both_present():
 
 
 @pytest.mark.level0
+def test_render_inbound_note_is_nested_inside_the_message_it_annotates():
+    out = render_inbound(
+        content="x",
+        sender="s",
+        message_id="m",
+        msg_type=INBOUND_TYPE_DIRECT,
+        time_info="t",
+        note_kind="reply-hint",
+        note_text="please reply",
+    )
+    # The note is a child of the block, not a sibling that follows it: which
+    # message the hint is about is a fact about the tree, not about ordering.
+    assert out.rstrip().endswith("</team-inbound>")
+    assert out.index("<team-note") < out.index("</team-inbound>")
+    assert out.index("</team-note>") < out.index("</team-inbound>")
+    logger.info("nested inbound note: %s", out)
+
+
+@pytest.mark.level0
 def test_render_event_carries_kind_and_body():
     out = render_event(kind="task-assigned", body="do the thing")
     assert out.startswith("<team-event ")
@@ -123,6 +142,9 @@ def test_render_event_optional_task_id_and_controller_and_note():
     assert 'for="controller"' in out
     assert '<team-note kind="hitt-silence">' in out
     assert "stay silent" in out
+    # Nested inside the event, same as on <team-inbound>.
+    assert out.rstrip().endswith("</team-event>")
+    assert out.index("<team-note") < out.index("</team-event>")
 
 
 @pytest.mark.level1
@@ -208,7 +230,7 @@ def test_drop_preserves_non_snapshot_entries_and_their_order():
 
 
 @pytest.mark.level1
-def test_drop_survives_a_board_carrying_a_note():
+def test_a_board_carrying_a_nested_note_is_still_purely_a_snapshot():
     with_note = render_event(
         kind="task-board",
         body="new",
@@ -216,9 +238,10 @@ def test_drop_survives_a_board_carrying_a_note():
         note_text="have a look",
     )
     kept = drop_superseded_snapshots([_board("old"), with_note])
-    # A trailing note means the entry is no longer purely a snapshot, so it is
-    # never dropped -- and it does not supersede the plain board either.
-    assert kept == [_board("old"), with_note]
+    # The note is nested inside the block and annotates that board alone, so
+    # the entry is still exactly one snapshot: it supersedes the older board,
+    # and dropping an older one would take only its own note with it.
+    assert kept == [with_note]
 
 
 @pytest.mark.level1
