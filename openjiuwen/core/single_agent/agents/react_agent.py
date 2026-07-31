@@ -1906,6 +1906,11 @@ class ReActAgent(BaseAgent):
             # 若整轮 clear 会把用户问题一并抹掉，下一轮同 session 就丢上下文。
             try:
                 await asyncio.shield(self._cleanup_context_on_cancel(session))
+            except asyncio.CancelledError:
+                logger.info(
+                    "Context cleanup was shielded but the caller was cancelled again for session %s",
+                    session.get_session_id(),
+                )
             except Exception:
                 logger.warning(
                     "Failed to cleanup context on cancel for session %s",
@@ -1916,14 +1921,7 @@ class ReActAgent(BaseAgent):
             # 否则下一轮 create_context 会用取消前的旧快照 rebuild 整个
             # buffer，把本轮保留的 UserMessage 覆盖掉（外部传入 session 时
             # need_cleanup=False，下面的 finally 不会帮忙保存）。
-            try:
-                await asyncio.shield(self.context_engine.save_contexts(session))
-            except Exception:
-                logger.warning(
-                    "Failed to save context on cancel for session %s",
-                    session.get_session_id(),
-                    exc_info=True,
-                )
+            await self._save_contexts_on_cancel(session)
             raise  # Re-raise to propagate cancellation signal
         finally:
             if need_cleanup:
@@ -2042,6 +2040,9 @@ class ReActAgent(BaseAgent):
                     await self._write_invoke_result_to_stream(
                         final_result, session
                     )
+            except asyncio.CancelledError:
+                await self._save_contexts_on_cancel(session)
+                raise
             except Exception as e:
                 logger.error(f"ReActAgent stream error: {e}", exc_info=True)
                 error_result = {"output": str(e), "result_type": "error"}
@@ -2123,6 +2124,22 @@ class ReActAgent(BaseAgent):
 
         kept = self._sanitize_cancelled_turn_messages(current)
         context.set_messages(kept, with_history=False)
+
+    async def _save_contexts_on_cancel(self, session: Session) -> None:
+        """Persist the cleaned context while the caller propagates cancellation."""
+        try:
+            await asyncio.shield(self.context_engine.save_contexts(session))
+        except asyncio.CancelledError:
+            logger.info(
+                "Context save was shielded but the caller was cancelled again for session %s",
+                session.get_session_id(),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to save context on cancel for session %s",
+                session.get_session_id(),
+                exc_info=True,
+            )
 
     @staticmethod
     def _sanitize_cancelled_turn_messages(messages: List[Any]) -> List[Any]:

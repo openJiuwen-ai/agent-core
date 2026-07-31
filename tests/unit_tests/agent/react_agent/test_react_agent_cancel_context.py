@@ -116,3 +116,46 @@ async def test_cancel_saves_cleaned_context_to_external_session():
     # 关键回归断言：即使 need_cleanup=False，取消后也要把清理后的 context
     # 写回 session state，否则下一轮会被旧快照 rebuild 覆盖。
     mock_context_engine.save_contexts.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_cancel_saves_context_to_external_session():
+    """The stream wrapper must also persist context when cancellation escapes invoke."""
+    agent = ReActAgent(card=AgentCard(name="stream_cancel_agent", description="stream cancel save test"))
+    agent.context_engine = MagicMock()
+    agent.context_engine.save_contexts = AsyncMock()
+    agent.is_agent_session = False
+    agent.invoke = AsyncMock(side_effect=asyncio.CancelledError())
+    session = MagicMock()
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in agent._inner_stream(session=session, inputs={"query": "查一下热搜"}, need_cleanup=False):
+            pass
+
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_shielded_context_save_continues_after_repeated_cancel():
+    """A repeated caller cancellation must not cancel the context save itself."""
+    save_started = asyncio.Event()
+    allow_save_to_finish = asyncio.Event()
+    save_finished = asyncio.Event()
+
+    async def save_contexts(_session):
+        save_started.set()
+        await allow_save_to_finish.wait()
+        save_finished.set()
+
+    agent = ReActAgent(card=AgentCard(name="shield_agent", description="shield save test"))
+    agent.context_engine = MagicMock()
+    agent.context_engine.save_contexts = AsyncMock(side_effect=save_contexts)
+    session = MagicMock()
+
+    save_task = asyncio.create_task(agent._save_contexts_on_cancel(session))
+    await save_started.wait()
+    save_task.cancel()
+    await save_task
+
+    allow_save_to_finish.set()
+    await asyncio.wait_for(save_finished.wait(), timeout=1)
