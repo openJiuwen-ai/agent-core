@@ -8,6 +8,12 @@ from typing import Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
 from openjiuwen.agent_teams.tools.locales import Translator
+from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.agent_teams.tools.tool_base import TeamTool
+from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.foundation.tool.base import ToolCard
+from openjiuwen.harness.tools.base_tool import ToolOutput
 
 # Role placeholder a scheduled-dispatch member addresses instead of the
 # leader's concrete member_name. The tool resolves it to the real leader at
@@ -23,12 +29,6 @@ LEADER_ROLE_RECIPIENT = "leader"
 # one screenful of Chinese; ordinary instructions, replies and summaries land
 # far below it.
 MAX_CONTENT_CHARS = 2000
-from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
-from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.agent_teams.tools.tool_base import TeamTool
-from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.foundation.tool.base import ToolCard
-from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
 # ========== Messaging ==========
@@ -142,6 +142,8 @@ class _SendMessageBase(TeamTool, ABC):
         )
 
     async def _send(self, to: str, content: str, summary: str) -> ToolOutput:
+        if to == USER_PSEUDO_MEMBER_NAME and self._team and self._team.is_leader:
+            return ToolOutput(success=False, error=self.t("send_message", "error_leader_to_user"))
         # "user" is the pseudo-member representing the human caller; skip
         # roster validation so teammates can reply through the same tool.
         if self._team and to != USER_PSEUDO_MEMBER_NAME:

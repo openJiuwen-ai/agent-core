@@ -153,6 +153,33 @@ async def test_limit_boundary_is_inclusive(db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_leader_cannot_send_message_to_user(db):
+    """Leader output is already visible to the user, so no user mailbox row is created."""
+    send = _leader_send(db, lang="en")
+
+    result = await send.invoke({"to": "user", "content": "hello user"})
+
+    assert not result.success
+    assert "Reply to the user directly" in result.error
+    assert await db.message.get_team_messages(team_name=TEAM_NAME) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_can_send_message_to_user(db):
+    """Members still need the user pseudo-recipient to answer human-originated messages."""
+    send = _member_send(db)
+
+    result = await send.invoke({"to": "user", "content": "hello user"})
+
+    assert result.success
+    messages = await db.message.get_team_messages(team_name=TEAM_NAME)
+    assert len(messages) == 1
+    assert messages[0].to_member_name == "user"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_no_recipient_is_exempt_including_user(db):
     """The rule is about the shape of the content, so the recipient never buys an exemption.
 
