@@ -170,6 +170,7 @@ class TeamAgent(BaseAgent):
             name=tiny_spec.name,
             language=language,
             max_iterations=tiny_spec.max_iterations,
+            enable_security_rail=tiny_spec.enable_security_rail,
         )
         infra.tiny_agents[name] = agent
         return agent

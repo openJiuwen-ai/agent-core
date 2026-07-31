@@ -23,7 +23,6 @@ from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tiny_agent import (
-    TinyAgent,
     create_summary_agent,
     create_tiny_agent,
     create_title_agent,
@@ -220,6 +219,24 @@ def test_create_tiny_agent_raises_when_model_unresolved() -> None:
         create_tiny_agent(system_prompt="p", model_name="missing", model_resolver=_none_resolver)
 
 
+@pytest.mark.level0
+def test_create_tiny_agent_disables_security_rail_by_default_and_can_enable_it() -> None:
+    default_agent = create_tiny_agent(
+        system_prompt="p",
+        model_name="m",
+        model_resolver=_model_resolver,
+    )
+    secured_agent = create_tiny_agent(
+        system_prompt="p",
+        model_name="m",
+        model_resolver=_model_resolver,
+        enable_security_rail=True,
+    )
+
+    assert default_agent._spec.enable_security_rail is False
+    assert secured_agent._spec.enable_security_rail is True
+
+
 # ---------------------------------------------------------------------------
 # chat() — multi-turn
 # ---------------------------------------------------------------------------
@@ -336,6 +353,23 @@ def test_get_tiny_agent_supports_multiple_independent_agents() -> None:
     assert summ is not None and title is not None and summ is not title
     assert summ._spec.system_prompt == "summarize"
     assert title._spec.system_prompt == "title"
+
+
+@pytest.mark.level0
+def test_get_tiny_agent_propagates_security_rail_setting() -> None:
+    agent = _make_leader(
+        {
+            "secured": TinyAgentSpec(
+                system_prompt="classify",
+                model_name="m",
+                enable_security_rail=True,
+            )
+        }
+    )
+
+    tiny_agent = agent.get_tiny_agent("secured")
+    assert tiny_agent is not None
+    assert tiny_agent._spec.enable_security_rail is True
 
 
 @pytest.mark.asyncio
