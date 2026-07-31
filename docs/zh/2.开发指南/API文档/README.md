@@ -6,7 +6,9 @@
 |---|---|
 | [`openjiuwen.core`](./openjiuwen.core.README.md) | 核心能力：workflow、session、runner、retrieval、memory 等。 |
 | [`openjiuwen.agent_teams`](./openjiuwen.agent_teams.README.md) | 多智能体团队协作框架：Leader/Teammate 协作、传输层、持久化存储。 |
+| [`openjiuwen.agent_evolving`](./openjiuwen.agent_evolving.README.md) | 自演进训练与评估框架：Trainer/Evaluator/Optimizer、数据集、轨迹、检查点、演进信号等。 |
 | [`openjiuwen.dev_tools`](./openjiuwen.dev_tools.README.md) | 开发工具：prompt_builder、tune（提示词生成/优化与调优）、[agent_builder](./openjiuwen.dev_tools/agent_builder.README.md)（Agent 构建）。 |
 | [`openjiuwen.harness`](./openjiuwen.harness.README.md) | Agent Harness 框架：DeepAgent，内置规划、上下文管理、子智能体生成、Rails、工具和长期记忆。 |
 | [`openjiuwen.extensions`](./openjiuwen.extensions.README.md) | 可选扩展：如 message_queue。 |
+| [`openjiuwen.auto_harness`](./openjiuwen.auto_harness.README.md) | 自主优化 harness 框架的编码 agent：orchestrator、pipeline、阶段、护栏与经验库。 |
 

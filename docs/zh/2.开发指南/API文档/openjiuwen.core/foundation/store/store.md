@@ -7,6 +7,7 @@
 - 定义 `BaseVectorStore` 向量存储抽象接口（集合管理、文档插入、向量搜索、文档删除）；
 - 提供 `InMemoryKVStore`（内存实现）、`DbBasedKVStore`（基于 SQLAlchemy 的实现）、`DefaultDbStore`（BaseDbStore 默认实现）；
 - 提供 `create_vector_store()` 工厂函数用于创建向量存储实例。
+- 定义 `BaseMemoryIndex` 记忆索引抽象基类、`MemoryDoc` 记忆数据模型与 `StorageCodec` 编解码协议，并提供基于 KV + 向量存储的弃用实现 `SimpleMemoryIndex`（详见 [`memory_index.md`](./memory_index.md)）。
 
 对应源码：`openjiuwen.core.foundation.store`。
 

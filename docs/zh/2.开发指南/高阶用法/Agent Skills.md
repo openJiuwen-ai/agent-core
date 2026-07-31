@@ -132,7 +132,7 @@ async def main():
     )
 ```
 
-SysOperation 用于控制文件系统、代码执行以及 shell 系统。`OperationMode` 支持 `LOCAL` 和 `SANDBOX`：`OperationMode.LOCAL` 表示在本地环境中运行代码、执行命令并创建文件；`OperationMode.SANDBOX` 表示将这些操作路由到隔离的沙箱环境。沙箱模式的配置方法参见[沙箱](./沙箱.md)。本示例使用本地模式。
+SysOperation 用于控制文件系统、代码执行以及 shell 系统。目前支持两种 OperationMode：`LOCAL` 与 `SANDBOX`。`OperationMode.LOCAL` 表示在本地环境中运行代码、执行命令并创建文件；`OperationMode.SANDBOX` 表示在受限沙箱环境中执行（更多沙箱用法见 **沙箱.md**）。
 
 ```python
 async def main():
