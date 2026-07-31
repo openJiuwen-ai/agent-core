@@ -208,8 +208,6 @@ def _image_block_tokens(part: dict) -> int:
     if dimensions is None:
         return DEFAULT_IMAGE_PLACEHOLDER_TOKENS
     return _estimate_image_tokens(*dimensions)
-
-
 #: Serializes first-use loads of tiktoken encodings. The very first
 #: ``tiktoken.get_encoding`` in a process downloads the BPE vocabulary file
 #: over HTTPS through a blocking ``requests.get`` without timeout, which can
@@ -259,7 +257,6 @@ def start_background_warm_up() -> None:
             daemon=True,
         )
         _warm_up_thread.start()
-
 
 
 class TiktokenCounter(TokenCounter):
