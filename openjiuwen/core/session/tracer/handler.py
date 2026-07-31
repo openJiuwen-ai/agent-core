@@ -54,6 +54,22 @@ class TraceExtAgentHandler(ABC):
         """Inject the session identifier associated with the current tracer."""
         self._session_id = session_id
 
+    def bind_trace(self, trace_id: str, session_id: str = None, agent_name: str = None) -> None:
+        """Optional identity hook called by ``Tracer.init()``.
+
+        Passes the owning agent session's id and agent name for the given
+        trace so handlers can attach identity/lineage metadata. Default is
+        a no-op; handlers that don't care can ignore it.
+        """
+
+    async def on_trace_close(self, trace_id: str, **kwargs) -> None:
+        """Optional lifecycle hook called when the owning session finishes.
+
+        ``Tracer.close()`` (triggered by ``Session.post_run``) invokes this
+        once per trace so handlers can flush and release per-trace state.
+        Default is a no-op; handlers that don't care can ignore it.
+        """
+
     # --- LLM events ---
     @abstractmethod
     async def on_llm_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
