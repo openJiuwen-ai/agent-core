@@ -1222,7 +1222,11 @@ version: v1.0.0
             return None
         return self.get_skill_archive_file(name, paired_name)
 
-    async def _archive_current_state(self, name: str, skill_dir: Path) -> Tuple[Optional[str], Optional[str]]:
+    async def _archive_current_state(
+        self,
+        name: str,
+        skill_dir: Path,
+    ) -> Tuple[Optional[str], Optional[str]]:
         archive = self._archive_dir(skill_dir)
         version = await self._resolve_archive_version(name, skill_dir)
         if self._archive_version_exists(archive, version):
@@ -1238,10 +1242,17 @@ version: v1.0.0
                 evo_path.name if evo_path.exists() else None,
             )
         body_archive = await self._archive_skill_body_at(name, skill_dir, version)
-        evo_archive = await self._archive_evolutions_at(skill_dir, version)
+        evo_archive = await self._archive_evolutions_at(
+            skill_dir,
+            version,
+            skill_id=name,
+        )
         return body_archive, evo_archive
 
-    async def archive_current_state(self, name: str) -> Tuple[Optional[str], Optional[str]]:
+    async def archive_current_state(
+        self,
+        name: str,
+    ) -> Tuple[Optional[str], Optional[str]]:
         skill_dir = self._resolve_skill_dir(name)
         if skill_dir is None:
             return None, None
@@ -1265,10 +1276,14 @@ version: v1.0.0
         logger.info("[EvolutionStore] archived %s -> %s for skill=%s", md_path.name, dest.name, name)
         return dest.name
 
-    async def _archive_evolutions_at(self, skill_dir: Path, version: str) -> Optional[str]:
-        evo_path = skill_dir / _EVOLUTION_FILENAME
-        if not evo_path.is_file():
-            return None
+    async def _archive_evolutions_at(
+        self,
+        skill_dir: Path,
+        version: str,
+        *,
+        skill_id: str = "",
+    ) -> Optional[str]:
+        """Write an empty paired evolutions archive (never copy live entries)."""
         archive = self._archive_dir(skill_dir)
         _, dest = self._archive_paths(archive, version)
         if dest.exists():
@@ -1277,9 +1292,11 @@ version: v1.0.0
                 version,
             )
             return None
-        content = await self._read_file_text(evo_path)
+        empty_log = EvolutionLog.empty(skill_id=skill_id or skill_dir.name)
+        empty_log.version = self._archive_version_key(version)
+        content = json.dumps(empty_log.to_dict(), ensure_ascii=False, indent=2)
         await self._write_file_text(dest, content)
-        logger.info("[EvolutionStore] archived evolutions -> %s", dest.name)
+        logger.info("[EvolutionStore] archived evolutions -> %s (empty)", dest.name)
         return dest.name
 
     async def archive_skill_body(self, name: str, version: Optional[str] = None) -> Optional[str]:
@@ -1293,11 +1310,10 @@ version: v1.0.0
         skill_dir = self._resolve_skill_dir(name)
         if skill_dir is None:
             return None
-        evo_path = skill_dir / _EVOLUTION_FILENAME
-        if not evo_path.is_file():
-            return None
         archive_version = await self._resolve_archive_version(name, skill_dir, version)
-        return await self._archive_evolutions_at(skill_dir, archive_version)
+        return await self._archive_evolutions_at(
+            skill_dir, archive_version, skill_id=name,
+        )
 
     async def clear_evolutions(self, name: str, *, retain_version: Optional[str] = None) -> None:
         skill_dir = self._resolve_skill_dir(name)

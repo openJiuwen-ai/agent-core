@@ -2242,7 +2242,9 @@ class SkillEvolutionRail(EvolutionRail):
         is used.
 
         Restores the archived ``SKILL.md`` body and always clears live
-        ``evolutions.json`` (empty entries, retained version).
+        ``evolutions.json`` (empty entries, retained version). The pre-rollback
+        snapshot archives an empty paired ``evolutions.v*.json`` (all evolution
+        archives are empty by design).
         """
         store = self._evolution_store
         archive = store.get_skill_archive_dir(skill_name)

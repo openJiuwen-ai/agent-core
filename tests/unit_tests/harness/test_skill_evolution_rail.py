@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -210,6 +211,11 @@ async def test_rollback_skill_uses_public_store_interfaces(tmp_path):
     assert len(current_archives) == 1
     assert current_archives[0].name == "SKILL.v1.0.1.md"
     assert "# Current\n" in current_archives[0].read_text(encoding="utf-8")
+    archived_evo = archive / "evolutions.v1.0.1.json"
+    assert archived_evo.is_file()
+    archived_evo_data = json.loads(archived_evo.read_text(encoding="utf-8"))
+    assert archived_evo_data.get("entries") == []
+    assert archived_evo_data.get("skill_id") == "skill-a"
 
 
 @pytest.mark.asyncio

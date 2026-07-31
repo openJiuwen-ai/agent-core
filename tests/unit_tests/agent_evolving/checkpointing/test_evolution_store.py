@@ -415,6 +415,13 @@ class TestEvolutionStoreArchive:
         archives = store.list_archives("skill-a")
         assert body_archive in archives
         assert evo_archive in archives
+        archived = json.loads(
+            (skill_dir / "archive" / evo_archive).read_text(encoding="utf-8")
+        )
+        assert archived.get("entries") == []
+        assert archived.get("skill_id") == "skill-a"
+        # Live log is not cleared by archive itself.
+        assert len((await store.load_evolution_log("skill-a")).entries) == 1
 
         assert await store.write_skill_content("skill-a", "# Rewritten\n") is True
         assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# Rewritten\n"
@@ -425,18 +432,29 @@ class TestEvolutionStoreArchive:
     @pytest.mark.asyncio
     async def test_archive_current_state_uses_semver_names(tmp_path: Path):
         root = tmp_path / "skills"
-        prepare_skill(
+        skill_dir = prepare_skill(
             root,
             "skill-a",
             "---\nname: skill-a\ndescription: d\nversion: 1.2.3\n---\n\n# Skill\n",
         )
         store = EvolutionStore(str(root))
         await store.append_record("skill-a", make_record("ev_1", content="first"))
+        live_body = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
         # append no longer bumps; archive uses current frontmatter version
         body_archive, evo_archive = await store.archive_current_state("skill-a")
 
         assert body_archive == "SKILL.v1.2.3.md"
         assert evo_archive == "evolutions.v1.2.3.json"
+        assert (skill_dir / "archive" / body_archive).read_text(encoding="utf-8") == live_body
+        archived = json.loads(
+            (skill_dir / "archive" / evo_archive).read_text(encoding="utf-8")
+        )
+        # Evolution archives are always empty; live log is unchanged.
+        assert archived.get("entries") == []
+        assert archived.get("skill_id") == "skill-a"
+        assert archived.get("version") == "v1.2.3"
+        live = await store.load_evolution_log("skill-a")
+        assert len(live.entries) == 1
 
     @staticmethod
     @pytest.mark.asyncio
