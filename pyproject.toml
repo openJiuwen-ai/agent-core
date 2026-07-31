@@ -137,6 +137,7 @@ include = ["openjiuwen*"]
 openjiuwen = [
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
+    "**/agent_ras/**/*.md",
 ]
 
 [tool.coverage.run]

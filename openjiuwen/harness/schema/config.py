@@ -200,6 +200,7 @@ class DeepAgentConfig:
     enable_read_image_multimodal: bool = True
     rails: Optional[List[AgentRail]] = None
     enable_plan_mode: bool = False
+    agent_ras: Optional[Any] = None
 
     # Progressive tool exposure config
     progressive_tool_enabled: bool = False

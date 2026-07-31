@@ -3,9 +3,12 @@
 """Detector protocol and async-recovery capability.
 
 A ``Detector`` consumes the unified ``Signal`` stream and emits an ``Anomaly``
-when a threshold trips — pure logic, no I/O, trivially unit-testable.
+when a threshold trips. The default contract is pure logic (no I/O) and
+trivially unit-testable.
+
 ``AsyncRecoveryDetector`` is an optional capability for detectors that finish
-stream recovery after ``observe`` returns.
+stream recovery after ``observe`` returns. Implementations on this path may
+perform asynchronous I/O (for example semantic skill invokes via ``RASAgents``).
 """
 from __future__ import annotations
 
@@ -21,6 +24,9 @@ AsyncRecoveryHandler = Callable[[Any, str], Awaitable[None]]
 
 class Detector(Protocol):
     """Consumes signals and emits anomalies when a threshold trips.
+
+    Default expectation: sync/async observe without I/O. Detectors that need
+    async I/O should also implement ``AsyncRecoveryDetector``.
 
     Every detector must implement:
       - ``name`` property: stable identifier used for logging / evidence.
@@ -49,8 +55,9 @@ class Detector(Protocol):
 class AsyncRecoveryDetector(Protocol):
     """Optional Detector capability: finish stream recovery after ``observe`` returns.
 
-    Main implementation: ``LlmThinkingLoopDetector`` (async L3 skill evaluation).
-    ``AgentRASMonitor`` wires the completion handler at start and awaits on stop.
+    May perform asynchronous I/O (e.g. L3 skill evaluation). Main implementation:
+    ``LlmThinkingLoopDetector``. ``AgentRASMonitor`` wires the completion handler
+    at start and awaits on stop.
     """
 
     def has_async_recovery_in_flight(self) -> bool:

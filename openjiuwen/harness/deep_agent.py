@@ -735,7 +735,8 @@ class DeepAgent(BaseAgent):
             "subagents": None,
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
-            "enable_plan_mode": spec.enable_plan_mode
+            "enable_plan_mode": spec.enable_plan_mode,
+            "agent_ras": getattr(self._deep_config, "agent_ras", None),
         }
 
         if spec.factory_name:

@@ -23,7 +23,7 @@ from openjiuwen.harness.agent_ras.agents.base import (
     ASYNC_RECOVERY_TIMEOUT_SECONDS,
     FAULT_DOMAIN_LLM_THINKING_LOOP,
     SKILL_TIMEOUT_SECONDS,
-    skill_for,
+    resolve_skill,
 )
 from openjiuwen.harness.agent_ras.detectors.base import (
     AsyncRecoveryHandler,
@@ -477,6 +477,7 @@ class AgentRASMonitor:
         chunk_type: str,
     ) -> None:
         """Callback for async detectors (e.g. L3 thinking-loop) that finish after observe."""
+        t0 = time.monotonic()
         try:
             await self.record_anomaly(anomaly)
             if self._executor is not None:
@@ -494,6 +495,15 @@ class AgentRASMonitor:
             if self._active_ctx is not None:
                 await self._dispatch_automatic_recovery(self._active_ctx)
         finally:
+            total_ms = int((time.monotonic() - t0) * 1000)
+            logger.info(
+                "Agent RAS async stream recovery completed "
+                "member=%s session=%s detector=%s total_ms=%d",
+                self._member,
+                self._session_id,
+                anomaly.detector,
+                total_ms,
+            )
             self._release_async_recovery_for(anomaly.detector)
 
     def _release_async_recovery_for(self, detector_name: str) -> None:
@@ -599,6 +609,7 @@ class AgentRASMonitor:
         pending: PendingRecovery,
     ) -> None:
         """Reviewer confirm → abnormal; timeout/error/invalid/normal → fail-open."""
+        t0 = time.monotonic()
         if self._executor is None or self._abnormal_committed:
             return
         suppress = self._executor.suppress_state
@@ -608,10 +619,13 @@ class AgentRASMonitor:
         try:
             confirmed_abnormal = await self._invoke_l3_recovery(pending)
         except Exception:
+            total_ms = int((time.monotonic() - t0) * 1000)
             logger.warning(
-                "Agent RAS L3 recovery failed member=%s session=%s",
+                "Agent RAS L3 recovery failed member=%s session=%s "
+                "total_ms=%d",
                 self._member,
                 self._session_id,
+                total_ms,
                 exc_info=True,
             )
             confirmed_abnormal = False
@@ -620,9 +634,26 @@ class AgentRASMonitor:
         # Pending may have been cleared by finalize_stream_recovery fail-open.
         if suppress.pending is None or suppress.resolved is not None:
             return
+        total_ms = int((time.monotonic() - t0) * 1000)
         if confirmed_abnormal:
+            logger.warning(
+                "Agent RAS L3 recovery completed member=%s session=%s "
+                "source=%s total_ms=%d confirmed_abnormal=True",
+                self._member,
+                self._session_id,
+                pending.source,
+                total_ms,
+            )
             await self._apply_abnormal_recovery(ctx, pending)
             return
+        logger.info(
+            "Agent RAS L3 recovery completed member=%s session=%s "
+            "source=%s total_ms=%d confirmed_abnormal=False",
+            self._member,
+            self._session_id,
+            pending.source,
+            total_ms,
+        )
         await self._apply_normal_recovery(ctx, pending, release_plan_execution=True)
 
     @staticmethod
@@ -672,7 +703,7 @@ class AgentRASMonitor:
         )
         fault_domain = self._fault_domain_for_pending(pending)
         try:
-            skill_name = skill_for(fault_domain, "recovery")
+            skill_name = resolve_skill(fault_domain, "recovery")
         except ValueError:
             logger.warning(
                 "Agent RAS L3 recovery fail-open member=%s session=%s "
@@ -683,19 +714,22 @@ class AgentRASMonitor:
                 exc_info=True,
             )
             return False
+        t1 = time.monotonic()
         result = await invoke(
             role="recovery",
             skill_name=skill_name,
             payload=payload,
             timeout=float(SKILL_TIMEOUT_SECONDS),
         )
+        invoke_ms = int((time.monotonic() - t1) * 1000)
         if not isinstance(result, dict) or not result:
             logger.warning(
                 "Agent RAS L3 recovery fail-open member=%s session=%s "
-                "skill=%s reason=empty_or_non_dict",
+                "skill=%s reason=empty_or_non_dict invoke_ms=%d",
                 self._member,
                 self._session_id,
                 skill_name,
+                invoke_ms,
             )
             return False
         # Re-parse so illegal / incomplete recovery payloads stay fail-open even
@@ -704,21 +738,32 @@ class AgentRASMonitor:
         if verdict.fail_open_reason:
             logger.warning(
                 "Agent RAS L3 recovery fail-open member=%s session=%s "
-                "skill=%s reason=%s",
+                "skill=%s reason=%s invoke_ms=%d",
                 self._member,
                 self._session_id,
                 skill_name,
                 verdict.fail_open_reason,
+                invoke_ms,
             )
             return False
         if not verdict.abnormal:
             logger.info(
-                "Agent RAS L3 recovery normal member=%s session=%s skill=%s",
+                "Agent RAS L3 recovery normal member=%s session=%s "
+                "skill=%s invoke_ms=%d",
                 self._member,
                 self._session_id,
                 skill_name,
+                invoke_ms,
             )
             return False
+        logger.info(
+            "Agent RAS L3 recovery confirmed abnormal member=%s session=%s "
+            "skill=%s invoke_ms=%d",
+            self._member,
+            self._session_id,
+            skill_name,
+            invoke_ms,
+        )
         return True
 
     async def _apply_abnormal_recovery(

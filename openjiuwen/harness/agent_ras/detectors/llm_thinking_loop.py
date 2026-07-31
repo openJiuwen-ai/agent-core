@@ -35,7 +35,7 @@ from openjiuwen.harness.agent_ras.agents.base import (
     FAULT_DOMAIN_LLM_THINKING_LOOP,
     NoOpAgentAdapter,
     SKILL_TIMEOUT_SECONDS,
-    skill_for,
+    resolve_skill,
 )
 from openjiuwen.harness.agent_ras.agents.ras_agents import RASAgents
 from openjiuwen.harness.agent_ras.detectors.base import AsyncRecoveryHandler
@@ -140,7 +140,10 @@ def _clause_similarity(a: str, b: str) -> float:
     key_b = _extract_lexical_key(b)
     if not key_a or not key_b:
         return 0.0
-    if len(key_a.replace(" ", "")) <= MIN_CLAUSE_LEN or len(key_b.replace(" ", "")) <= MIN_CLAUSE_LEN:
+    if (
+        len(key_a.replace(" ", "")) <= MIN_CLAUSE_LEN
+        or len(key_b.replace(" ", "")) <= MIN_CLAUSE_LEN
+    ):
         return 0.0
     return SequenceMatcher(None, key_a, key_b).ratio()
 
@@ -270,6 +273,19 @@ def _strategy_similar_clauses(
     )
 
 
+def _truncate_snippet(text: str, max_chars: int = 500) -> str:
+    """Return up to max_chars of ``text``, appending ``…<truncated>`` if longer.
+
+    Used to keep log messages readable while still including actionable
+    excerpts of the offending loop text.
+    """
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "…<truncated>"
+
+
 @dataclass
 class LoopDetector:
     """Literal loop detector — suffix_cycle → similar_clauses (stateless)."""
@@ -377,6 +393,30 @@ class LlmThinkingLoopDetector:
         self.release_eval_in_flight()
 
     def reset(self) -> None:
+        # Log per-model-call stream char totals before clearing.
+        if self._generation > 0 and (self._text_rep or self._plan_exec):
+            tr_parts: list[str] = []
+            for ct, ch in self._text_rep.items():
+                tr_parts.append(
+                    f"{ct}(total={ch.total_length} scanned={ch.last_scanned_pos}"
+                    f" latched={ch.detection_latched})"
+                )
+            pe_parts: list[str] = []
+            for ct, ch in self._plan_exec.items():
+                pe_parts.append(
+                    f"{ct}(total={ch.total_length} last_eval={ch.last_evaluated_pos}"
+                    f" latched={ch.detection_latched} in_flight={ch.eval_in_flight})"
+                )
+            logger.info(
+                "[LlmThinkingLoopDetector] model_call end generation=%d "
+                "detection_start_chars=%d "
+                "text_rep=[%s] plan_exec=[%s]",
+                self._generation,
+                self._config.detection_start_chars,
+                " ".join(tr_parts) if tr_parts else "none",
+                " ".join(pe_parts) if pe_parts else "none",
+            )
+
         self._generation += 1
         self._cancel_eval_tasks()
         self._text_rep.clear()
@@ -497,9 +537,6 @@ class LlmThinkingLoopDetector:
             self._plan_exec[chunk_type] = ch
         return ch
 
-    def _channel(self, chunk_type: str) -> _PlanExecutionChannel:
-        return self._plan_exec_channel(chunk_type)
-
     @staticmethod
     def _trim_text_rep_buffer(
         buffer: str,
@@ -614,6 +651,21 @@ class LlmThinkingLoopDetector:
         if not result.detected:
             return None
 
+        logger.warning(
+            "[LlmThinkingLoopDetector] L1/L2 text repetition DETECTED "
+            "member=%s chunk_type=%s mode=%s "
+            "total_chars=%d buffer_chars=%d repeat_count=%d threshold=%d "
+            "content_snippet=%s",
+            member,
+            chunk_type,
+            result.mode,
+            ch.total_length,
+            len(ch.buffer),
+            result.count,
+            result.threshold,
+            _truncate_snippet(ch.buffer),
+        )
+
         ch.detection_latched = True
         severity = Severity.LOW if result.mode == "suffix_cycle" else Severity.MEDIUM
         chunk_start = len(ch.buffer) - len(last_chunk_text)
@@ -663,6 +715,18 @@ class LlmThinkingLoopDetector:
         trigger_buffer_len = len(ch.buffer)
         excerpt_copy = excerpt
         generation = self._generation
+        logger.info(
+            "[LlmThinkingLoopDetector] L3 semantic eval TASK_START "
+            "member=%s chunk_type=%s "
+            "total_chars=%d incremental_chars=%d semantic_eval_chars=%d "
+            "excerpt_preview=%s",
+            member,
+            chunk_type,
+            ch.total_length,
+            incremental_len,
+            self._config.semantic_eval_chars,
+            _truncate_snippet(excerpt),
+        )
         # Empty Context cuts parent write_stream ContextVars (_current_session,
         # tool_batch, cwd) so nested detection does not inherit host state.
         task = asyncio.create_task(
@@ -683,6 +747,7 @@ class LlmThinkingLoopDetector:
         return None
 
     async def _run_semantic_eval(self, job: _SemanticEvalJob) -> None:
+        t0 = time.monotonic()
         ch = job.ch
         excerpt = job.excerpt
         trigger_buffer_len = job.trigger_buffer_len
@@ -690,10 +755,17 @@ class LlmThinkingLoopDetector:
         member = job.member
         generation = job.generation
         if generation != self._generation:
+            logger.info(
+                "[LlmThinkingLoopDetector] semantic eval aborted "
+                "member=%s reason=stale_generation elapsed_ms=%d",
+                member,
+                int((time.monotonic() - t0) * 1000),
+            )
             return
         abnormal = False
         skill_result: dict[str, Any] = {}
-        detection_skill = skill_for(FAULT_DOMAIN_LLM_THINKING_LOOP, "detection")
+        detection_skill = resolve_skill(FAULT_DOMAIN_LLM_THINKING_LOOP, "detection")
+        t1 = time.monotonic()
         try:
             result = await self._agents.invoke_skill(
                 role="detection",
@@ -701,9 +773,11 @@ class LlmThinkingLoopDetector:
                 payload=excerpt,
                 timeout=float(SKILL_TIMEOUT_SECONDS),
             )
+            invoke_ms = int((time.monotonic() - t1) * 1000)
             if isinstance(result, dict):
                 skill_result = result
             abnormal = self._parse_skill_abnormal(skill_result)
+            total_ms = int((time.monotonic() - t0) * 1000)
             if not abnormal:
                 fail_reason = (
                     skill_result.get("fail_open_reason")
@@ -713,29 +787,45 @@ class LlmThinkingLoopDetector:
                 if not skill_result:
                     logger.warning(
                         "[LlmThinkingLoopDetector] semantic eval fail-open "
-                        "member=%s skill=%s reason=empty_result",
+                        "member=%s skill=%s reason=empty_result "
+                        "total_ms=%d invoke_ms=%d excerpt_chars=%d",
                         member,
                         detection_skill,
+                        total_ms,
+                        invoke_ms,
+                        len(excerpt),
                     )
                 elif fail_reason:
                     logger.warning(
                         "[LlmThinkingLoopDetector] semantic eval fail-open "
-                        "member=%s skill=%s reason=%s",
+                        "member=%s skill=%s reason=%s "
+                        "total_ms=%d invoke_ms=%d excerpt_chars=%d",
                         member,
                         detection_skill,
                         fail_reason,
+                        total_ms,
+                        invoke_ms,
+                        len(excerpt),
                     )
                 else:
                     logger.info(
                         "[LlmThinkingLoopDetector] semantic eval normal "
-                        "member=%s skill=%s",
+                        "member=%s skill=%s "
+                        "total_ms=%d invoke_ms=%d excerpt_chars=%d",
                         member,
                         detection_skill,
+                        total_ms,
+                        invoke_ms,
+                        len(excerpt),
                     )
-        except Exception:
+        except Exception as exc:
+            total_ms = int((time.monotonic() - t0) * 1000)
             logger.warning(
-                "[LlmThinkingLoopDetector] semantic evaluation failed member=%s",
+                "[LlmThinkingLoopDetector] semantic evaluation failed "
+                "member=%s error_type=%s total_ms=%d",
                 member,
+                type(exc).__name__,
+                total_ms,
                 exc_info=True,
             )
             abnormal = False
@@ -754,6 +844,21 @@ class LlmThinkingLoopDetector:
 
         ch.detection_latched = True
         primary_fault = str(skill_result.get("primary_fault") or "semantic_deadlock")
+        logger.warning(
+            "[LlmThinkingLoopDetector] L3 semantic ANOMALY DETECTED "
+            "member=%s skill=%s "
+            "total_chars=%d incremental_chars=%d "
+            "primary_fault=%s confidence=%s "
+            "thinking_excerpt=%s rationale=%s",
+            member,
+            detection_skill,
+            ch.total_length,
+            len(excerpt),
+            primary_fault,
+            skill_result.get("confidence"),
+            _truncate_snippet(excerpt),
+            str(skill_result.get("rationale") or "")[:200],
+        )
         anomaly = self._build_anomaly(
             AnomalyKind.LLM_THINKING_DEAD_LOOP,
             Severity.HIGH,

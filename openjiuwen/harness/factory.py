@@ -39,10 +39,10 @@ from openjiuwen.harness.prompts.sections.tools.task_tool import GENERAL_PURPOSE_
 from openjiuwen.harness.tools.web_tools import is_free_search_enabled
 
 
-def _normalize_agent_ras_config(
+def _resolve_agent_ras_config(
     agent_ras: AgentRASConfig | dict[str, Any] | bool | None,
 ) -> AgentRASConfig | None:
-    """Normalize create_deep_agent ``agent_ras`` into a typed config or None.
+    """Resolve create_deep_agent ``agent_ras`` into a typed config or None.
 
     - ``None`` / ``True``: default enabled Agent RAS
     - ``False``: disable
@@ -374,16 +374,17 @@ def create_deep_agent(
         )
 
     def _make_agent_ras_rail() -> Any:
-        return build_agent_ras_rail(normalized_agent_ras, card.name, model=model)
+        return build_agent_ras_rail(agent_ras_config, card.name, model=model)
 
-    normalized_agent_ras = _normalize_agent_ras_config(agent_ras)
+    agent_ras_config = _resolve_agent_ras_config(agent_ras)
+    config.agent_ras = agent_ras
     default_rails = [
         (SecurityRail, True, lambda: SecurityRail()),
         (TaskPlanningRail, enable_task_planning, lambda: TaskPlanningRail()),
         (SkillUseRail, bool(skills), _make_skill_rail),
         (SessionRail, bool(subagents) and enable_async_subagent, lambda: SessionRail()),
         (SubagentRail, bool(subagents) and not enable_async_subagent, lambda: SubagentRail()),
-        (AgentRASRail, normalized_agent_ras is not None, _make_agent_ras_rail),
+        (AgentRASRail, agent_ras_config is not None, _make_agent_ras_rail),
     ]
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):

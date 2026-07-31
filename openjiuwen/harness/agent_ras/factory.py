@@ -6,17 +6,15 @@
 ``AgentRASMonitor`` keyed by session id (detectors + executor state). The rail
 drops that monitor in ``after_invoke``; HITL resume state stays on session.state.
 """
+
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.harness.agent_ras.agents.base import AgentAdapter, NoOpAgentAdapter
-from openjiuwen.harness.agent_ras.agents.deep_agent_adapter import (
-    DeepAgentAdapter,
-    adapter_config_from_agent_ras,
-)
 from openjiuwen.harness.agent_ras.agents.ras_agents import RASAgents
+from openjiuwen.harness.agent_ras.agents.react_adapter import ReActAgentAdapter
 from openjiuwen.harness.agent_ras.config import AgentRASConfig
 from openjiuwen.harness.agent_ras.detectors.base import Detector
 from openjiuwen.harness.agent_ras.detectors.llm_thinking_loop import LlmThinkingLoopDetector
@@ -32,16 +30,21 @@ from openjiuwen.harness.agent_ras.reporter import AnomalyReporter
 
 
 def build_agent_adapter(
-    config: AgentRASConfig,
-    invoke_fn: Optional[Any] = None,
     model: Optional[Model] = None,
+    *,
+    adapter: AgentAdapter | None = None,
 ) -> AgentAdapter:
-    """Build the default semantic AgentAdapter."""
-    adapter_cfg = adapter_config_from_agent_ras(config)
-    if invoke_fn is not None:
-        return DeepAgentAdapter(cfg=adapter_cfg, invoke_fn=invoke_fn)
+    """Select a platform ``AgentAdapter`` for semantic skills.
+
+    Priority:
+    1. Explicit ``adapter``
+    2. ``model`` → openjiuwen ``ReActAgentAdapter``
+    3. else ``NoOpAgentAdapter``
+    """
+    if adapter is not None:
+        return adapter
     if model is not None:
-        return DeepAgentAdapter(cfg=adapter_cfg, model=model)
+        return ReActAgentAdapter(model=model)
     return NoOpAgentAdapter()
 
 
@@ -66,9 +69,7 @@ def _build_llm_thinking_loop(
     )
 
 
-DETECTOR_BUILDERS: list[
-    tuple[str, Callable[[AgentRASConfig, RASAgents], Detector | None]]
-] = [
+DETECTOR_BUILDERS: list[tuple[str, Callable[[AgentRASConfig, RASAgents], Detector | None]]] = [
     ("repeat_tool", _build_repeat_tool),
     ("llm_thinking_loop", _build_llm_thinking_loop),
 ]
@@ -95,9 +96,9 @@ def _build_policy(config: AgentRASConfig) -> RecoveryPolicy:
 def build_agent_ras_components(
     config: AgentRASConfig,
     agents: RASAgents | None = None,
-    invoke_fn: Optional[Any] = None,
     model: Optional[Model] = None,
     *,
+    adapter: AgentAdapter | None = None,
     reporter: AnomalyReporter | None = None,
 ) -> tuple[
     list[Detector],
@@ -111,8 +112,8 @@ def build_agent_ras_components(
     Single-Agent path leaves ``reporter`` as None unless a host injects a sink.
     """
     if agents is None:
-        adapter = build_agent_adapter(config, invoke_fn=invoke_fn, model=model)
-        agents = RASAgents(adapter)
+        bound = build_agent_adapter(model=model, adapter=adapter)
+        agents = RASAgents(bound)
     policy = _build_policy(config)
     detectors = build_member_detectors(config, agents=agents)
     auto = LocalAutoRecovery(policy)
@@ -126,9 +127,9 @@ def build_agent_ras_components(
 def build_agent_ras_rail(
     config: AgentRASConfig,
     member_name: str,
-    invoke_fn: Optional[Any] = None,
     model: Optional[Model] = None,
     *,
+    adapter: AgentAdapter | None = None,
     session_id: str = "",
     agents: RASAgents | None = None,
     reporter: AnomalyReporter | None = None,
@@ -140,29 +141,26 @@ def build_agent_ras_rail(
     invoke; the rail drops the monitor in ``after_invoke``. The shared
     ``RASAgents`` instance is injected into every Monitor so L3 detection and
     the recovery Reviewer reuse the same skill members. Message language
-    follows DeepAgent at runtime (see ``AgentRASRail.init``).
+    follows the host agent at runtime (see ``AgentRASRail.init``).
 
+    Optional ``adapter`` injects an ``AgentAdapter`` implementation.
     Optional ``reporter`` / ``reporter_factory`` let hosts inject a per-session
     anomaly sink without duplicating recovery wiring. ``reporter_factory`` wins
     when provided; it receives the runtime session id.
     Optional ``agents`` reuses a shared ``RASAgents`` instance across sessions.
     """
     if agents is None:
-        adapter = build_agent_adapter(config, invoke_fn=invoke_fn, model=model)
-        agents = RASAgents(adapter)
+        bound = build_agent_adapter(model=model, adapter=adapter)
+        agents = RASAgents(bound)
 
     def monitor_factory(runtime_session_id: str) -> AgentRASMonitor:
         """Construct detectors, policy, and executor for one session id."""
-        sink = (
-            reporter_factory(runtime_session_id or session_id)
-            if reporter_factory is not None
-            else reporter
-        )
+        sink = reporter_factory(runtime_session_id or session_id) if reporter_factory is not None else reporter
         detectors, bound_reporter, policy, _auto, executor = build_agent_ras_components(
             config=config,
             agents=agents,
-            invoke_fn=invoke_fn,
             model=model,
+            adapter=adapter,
             reporter=sink,
         )
         return AgentRASMonitor(
