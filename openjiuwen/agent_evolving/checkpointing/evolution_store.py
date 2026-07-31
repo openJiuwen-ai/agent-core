@@ -1231,19 +1231,6 @@ version: v1.0.0
         version = await self._resolve_archive_version(name, skill_dir)
         if self._archive_version_exists(archive, version):
             body_path, evo_path = self._archive_paths(archive, version)
-            # #region agent log
-            try:
-                _exist_entries = -1
-                if evo_path.exists():
-                    try:
-                        _exist_entries = len(json.loads(evo_path.read_text(encoding="utf-8")).get("entries") or [])
-                    except Exception:
-                        _exist_entries = -2
-                with open(r"d:\codes\relay1\relay-claw\vendor\jiuwenclaw\debug-2781ba.log", "a", encoding="utf-8") as _df:
-                    _df.write(json.dumps({"sessionId": "2781ba", "hypothesisId": "H1", "location": "evolution_store.py:_archive_current_state", "message": "archive_skipped_version_exists", "data": {"skill": name, "version": version, "body_exists": body_path.exists(), "evo_exists": evo_path.exists(), "existing_evo_entries": _exist_entries, "module_file": __file__}, "timestamp": int(datetime.now(tz=timezone.utc).timestamp() * 1000)}, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
             logger.warning(
                 "[EvolutionStore] archive skipped for skill=%s version=%s (already exists)",
                 name,
@@ -1260,20 +1247,6 @@ version: v1.0.0
             version,
             skill_id=name,
         )
-        # #region agent log
-        try:
-            _new_entries = -1
-            _evo_dest = self._archive_paths(archive, version)[1]
-            if _evo_dest.exists():
-                try:
-                    _new_entries = len(json.loads(_evo_dest.read_text(encoding="utf-8")).get("entries") or [])
-                except Exception:
-                    _new_entries = -2
-            with open(r"d:\codes\relay1\relay-claw\vendor\jiuwenclaw\debug-2781ba.log", "a", encoding="utf-8") as _df:
-                _df.write(json.dumps({"sessionId": "2781ba", "hypothesisId": "H3", "location": "evolution_store.py:_archive_current_state", "message": "archive_wrote_new", "data": {"skill": name, "version": version, "body_archive": body_archive, "evo_archive": evo_archive, "written_evo_entries": _new_entries, "module_file": __file__}, "timestamp": int(datetime.now(tz=timezone.utc).timestamp() * 1000)}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         return body_archive, evo_archive
 
     async def archive_current_state(
@@ -1314,18 +1287,6 @@ version: v1.0.0
         archive = self._archive_dir(skill_dir)
         _, dest = self._archive_paths(archive, version)
         if dest.exists():
-            # #region agent log
-            try:
-                _skip_entries = -1
-                try:
-                    _skip_entries = len(json.loads(dest.read_text(encoding="utf-8")).get("entries") or [])
-                except Exception:
-                    _skip_entries = -2
-                with open(r"d:\codes\relay1\relay-claw\vendor\jiuwenclaw\debug-2781ba.log", "a", encoding="utf-8") as _df:
-                    _df.write(json.dumps({"sessionId": "2781ba", "hypothesisId": "H2", "location": "evolution_store.py:_archive_evolutions_at", "message": "evo_archive_skip_exists", "data": {"skill_dir": str(skill_dir), "version": version, "dest": dest.name, "existing_entries": _skip_entries}, "timestamp": int(datetime.now(tz=timezone.utc).timestamp() * 1000)}, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
             logger.warning(
                 "[EvolutionStore] archive evolutions skipped for version=%s (already exists)",
                 version,
@@ -1335,13 +1296,6 @@ version: v1.0.0
         empty_log.version = self._archive_version_key(version)
         content = json.dumps(empty_log.to_dict(), ensure_ascii=False, indent=2)
         await self._write_file_text(dest, content)
-        # #region agent log
-        try:
-            with open(r"d:\codes\relay1\relay-claw\vendor\jiuwenclaw\debug-2781ba.log", "a", encoding="utf-8") as _df:
-                _df.write(json.dumps({"sessionId": "2781ba", "hypothesisId": "H3", "location": "evolution_store.py:_archive_evolutions_at", "message": "evo_archive_wrote_empty", "data": {"skill_dir": str(skill_dir), "version": version, "dest": dest.name, "content_len": len(content), "entries": len(empty_log.entries)}, "timestamp": int(datetime.now(tz=timezone.utc).timestamp() * 1000)}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-        # #endregion
         logger.info("[EvolutionStore] archived evolutions -> %s (empty)", dest.name)
         return dest.name
 

@@ -59,46 +59,7 @@ class ExperienceRebuildService:
         evo_archive: Optional[str] = None
         archive_error: Optional[Exception] = None
         try:
-            # #region agent log
-            try:
-                import json as _json
-                from datetime import datetime as _dt, timezone as _tz
-                from pathlib import Path as _Path
-                _live = None
-                _store_mod = getattr(type(self._store), "__module__", "")
-                _skill_dir = getattr(self._store, "_resolve_skill_dir", lambda *_a, **_k: None)(skill_name)
-                if _skill_dir is not None:
-                    _lp = _Path(_skill_dir) / "evolutions.json"
-                    if _lp.is_file():
-                        try:
-                            _live = len(_json.loads(_lp.read_text(encoding="utf-8")).get("entries") or [])
-                        except Exception:
-                            _live = -2
-                with open(r"d:\codes\relay1\relay-claw\vendor\jiuwenclaw\debug-2781ba.log", "a", encoding="utf-8") as _df:
-                    _df.write(_json.dumps({"sessionId": "2781ba", "hypothesisId": "H5", "location": "rebuild.py:prepare_rebuild_context", "message": "before_archive_current_state", "data": {"skill_name": skill_name, "live_entries": _live, "store_module": _store_mod, "store_file": getattr(self._store.__class__, "__module__", "")}, "timestamp": int(_dt.now(tz=_tz.utc).timestamp() * 1000)}, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
             _, evo_archive = await self._store.archive_current_state(skill_name)
-            # #region agent log
-            try:
-                import json as _json
-                from datetime import datetime as _dt, timezone as _tz
-                from pathlib import Path as _Path
-                _arch_entries = None
-                _skill_dir = getattr(self._store, "_resolve_skill_dir", lambda *_a, **_k: None)(skill_name)
-                if _skill_dir is not None and evo_archive:
-                    _ap = _Path(_skill_dir) / "archive" / evo_archive
-                    if _ap.is_file():
-                        try:
-                            _arch_entries = len(_json.loads(_ap.read_text(encoding="utf-8")).get("entries") or [])
-                        except Exception:
-                            _arch_entries = -2
-                with open(r"d:\codes\relay1\relay-claw\vendor\jiuwenclaw\debug-2781ba.log", "a", encoding="utf-8") as _df:
-                    _df.write(_json.dumps({"sessionId": "2781ba", "hypothesisId": "H1", "location": "rebuild.py:prepare_rebuild_context", "message": "after_archive_current_state", "data": {"skill_name": skill_name, "evo_archive": evo_archive, "arch_entries": _arch_entries}, "timestamp": int(_dt.now(tz=_tz.utc).timestamp() * 1000)}, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-            # #endregion
         except Exception as exc:
             archive_error = exc
             logger.warning("[ExperienceRebuildService] archive failed for '%s': %s", skill_name, exc)
