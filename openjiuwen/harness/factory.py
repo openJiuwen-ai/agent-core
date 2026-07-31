@@ -182,7 +182,7 @@ def resolve_deep_agent_parts(
     prompt_mode: Optional[str] = None,
     vision_model_config: Optional[VisionModelConfig] = None,
     audio_model_config: Optional[AudioModelConfig] = None,
-    enable_read_image_multimodal: Optional[bool] = None,
+    enable_read_image_multimodal: Optional[bool] = True,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
     default_mode: AgentMode = AgentMode.NORMAL,
@@ -420,7 +420,7 @@ def create_deep_agent(
     prompt_mode: Optional[str] = None,
     vision_model_config: Optional[VisionModelConfig] = None,
     audio_model_config: Optional[AudioModelConfig] = None,
-    enable_read_image_multimodal: Optional[bool] = None,
+    enable_read_image_multimodal: Optional[bool] = True,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
     default_mode: AgentMode = AgentMode.NORMAL,
@@ -465,8 +465,8 @@ def create_deep_agent(
             configuration injected into all audio
             tools registered by DeepAgent rails.
         enable_read_image_multimodal: Controls read_file native image attachment.
-            None (default): probe the agent model once during lazy init.
-            True: always attach image bytes as multimodal input.
+            True (default): attach image bytes as multimodal input.
+            None: probe the agent model once during lazy init.
             False: return image metadata only and suggest vision tools.
         enable_task_planning: Enable task_planning_rail.
         restrict_to_work_dir: If True, restrict file access to workspace directory.

@@ -250,6 +250,7 @@ async def test_ensure_initialized_resolves_read_image_multimodal_before_rails(
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
         DeepAgentConfig(
             model=llm,
+            enable_read_image_multimodal=None,
             enable_task_loop=False,
             auto_create_workspace=False,
         )
@@ -745,13 +746,12 @@ async def test_create_deep_agent_skips_incomplete_vision_tools(
 
     assert agent.ability_manager.get("image_ocr") is None
     assert agent.ability_manager.get("visual_question_answering") is None
-    assert agent.deep_config.enable_read_image_multimodal is None
+    assert agent.deep_config.enable_read_image_multimodal is True
 
-    _mock_image_modality_probe.return_value = True
     await agent.ensure_initialized()
 
     assert agent.deep_config.enable_read_image_multimodal is True
-    _mock_image_modality_probe.assert_awaited_once_with(agent.deep_config.model)
+    _mock_image_modality_probe.assert_not_awaited()
 
 
 def test_create_deep_agent_skips_free_search_when_all_free_engines_disabled(monkeypatch) -> None:
