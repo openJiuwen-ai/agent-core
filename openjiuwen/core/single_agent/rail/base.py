@@ -179,21 +179,23 @@ class TaskIterationInputs:
 class UserMessageInputs:
     """Input data for the ON_USER_MESSAGE event.
 
-    Fired once for each consumed input, just before it is written into the
-    conversation. This is the only point at which a rail can act on an input
-    *as an input*: afterwards it is an ordinary history message that may be
-    compacted, summarized or dropped, and reaching back to it by position is
-    not safe.
+    Fired once per batch of consumed inputs, *before* they are joined into the
+    single ``UserMessage`` that enters the conversation. This is the only point
+    at which a rail can act on inputs *as inputs*: afterwards they are one
+    ordinary history message that may be compacted, summarized or dropped, and
+    reaching back to it by position is not safe.
 
     Attributes:
-        message: The ``UserMessage`` about to be written. Rails may modify
-            ``message.content`` in place — typically to prefix context the
-            model should read before the input itself.
-        source: Where the input came from — ``"query"`` (a new round or a
+        parts: The queued inputs, oldest first, as a **mutable** list. Rails
+            edit it in place: drop an entry that a later one supersedes, or
+            ``insert(0, ...)`` context the model should read first. Whatever
+            survives is joined with newlines into the message body, so an entry
+            is a whole input — dropping one costs nothing to the rest.
+        source: Where the batch came from — ``"query"`` (a new round or a
             follow-up), ``"steering"`` (injected mid-round), or ``"resume"``
             (a workflow interrupt being resumed).
     """
-    message: Any = None
+    parts: list[str] = field(default_factory=list)
     source: str = "query"
 
 

@@ -725,32 +725,56 @@ class ReActAgent(BaseAgent):
             self,
             ctx: AgentCallbackContext,
             context: ModelContext,
-            text: str,
+            parts: List[str],
             *,
             source: str,
+            prefix: str = "",
     ) -> None:
-        """Write one consumed input into the conversation, rails first.
+        """Join one batch of consumed inputs into the conversation, rails first.
 
-        Every input the agent consumes -- a new round's query, a follow-up, a
-        steering message, a resumed workflow interrupt -- lands here, and
-        ON_USER_MESSAGE fires before it is written. That is the one moment a
-        rail can treat it as an *input*: once written it is ordinary history,
-        subject to compaction, and can no longer be located by position.
+        Every input the agent consumes -- a new round's query, the follow-ups
+        that queued up while it was busy, a batch of steering messages, a
+        resumed workflow interrupt -- lands here. ON_USER_MESSAGE fires on the
+        list, *before* it is joined, so a rail still sees the individual inputs
+        and can drop a whole one that a later entry supersedes. This is the one
+        moment a rail can treat them as *inputs*: joined and written, they are
+        ordinary history, subject to compaction, and can no longer be located by
+        position.
 
         Args:
-            ctx: Callback context; ``inputs`` carries the message for rails.
-            context: Model context the message is written into.
-            text: The input text.
+            ctx: Callback context; ``inputs`` carries the part list for rails.
+            context: Model context the joined message is written into.
+            parts: The queued inputs, oldest first. Handed to rails as a mutable
+                list and consumed afterwards, so rails may reorder, drop or
+                prepend entries.
             source: Which input path this came from (see UserMessageInputs).
+            prefix: Literal text put in front of the joined body (the steering
+                marker). It is not a part, so a rail prepending at index 0
+                lands after it rather than displacing it.
         """
-        message = UserMessage(content=text)
         previous_inputs = ctx.inputs
-        ctx.inputs = UserMessageInputs(message=message, source=source)
+        ctx.inputs = UserMessageInputs(parts=parts, source=source)
         try:
             await ctx.fire(AgentCallbackEvent.ON_USER_MESSAGE)
         finally:
             ctx.inputs = previous_inputs
-        await context.add_messages(message)
+        if not parts:
+            return
+        body = "\n".join(parts)
+        await context.add_messages(UserMessage(content=f"{prefix}{body}"))
+
+    def _extract_user_parts(self, ctx: AgentCallbackContext, user_input: Any) -> List[str]:
+        """Normalize a round's query into the input list ON_USER_MESSAGE sees.
+
+        A round may be driven by several inputs that queued up together; the
+        caller hands those over unjoined so rails still see the seams. The
+        query itself is the same content already joined, and is the single
+        input in every other case.
+        """
+        parts = ctx.extra.get("_input_parts")
+        if parts:
+            return [str(part) for part in parts]
+        return [self._extract_user_text(user_input)]
 
     def _build_preview_messages(self, context: ModelContext) -> List[Any]:
         """Build a lightweight preview of the current model input messages."""
@@ -1760,6 +1784,11 @@ class ReActAgent(BaseAgent):
             # loop over the existing context, without a new user turn.
             if inputs.get("_resume_continuation"):
                 ctx.extra["_resume_continuation"] = True
+            # Several inputs queued up together and drive this one round. The
+            # query is already their joined text; these are the same content
+            # unjoined, so ON_USER_MESSAGE rails still see the seams.
+            if inputs.get("_input_parts"):
+                ctx.extra["_input_parts"] = list(inputs["_input_parts"])
 
         try:
             async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
@@ -1811,7 +1840,7 @@ class ReActAgent(BaseAgent):
                         await self._admit_user_message(
                             ctx,
                             context,
-                            self._extract_user_text(user_input),
+                            [self._extract_user_text(user_input)],
                             source="resume",
                         )
                         resume_result = await self._handle_resume(
@@ -1825,7 +1854,7 @@ class ReActAgent(BaseAgent):
                     await self._admit_user_message(
                         ctx,
                         context,
-                        self._extract_user_text(user_input),
+                        self._extract_user_parts(ctx, user_input),
                         source="query",
                     )
 
@@ -1847,12 +1876,12 @@ class ReActAgent(BaseAgent):
                         # before the next model call.
                         steering = ctx.drain_steering()
                         if steering:
-                            combined = "\n".join(steering)
                             await self._admit_user_message(
                                 ctx,
                                 context,
-                                f"[STEERING] {combined}",
+                                list(steering),
                                 source="steering",
+                                prefix="[STEERING] ",
                             )
 
                         ai_message = await self._call_model(

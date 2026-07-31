@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots
 from openjiuwen.agent_teams.prompts import build_team_static_sections
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TeamContextTracker
@@ -45,26 +46,6 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
-
-
-def prepend_to_content(content: Any, text: str) -> Any:
-    """Return ``content`` with ``text`` inserted at its very front.
-
-    ``BaseMessage.content`` is either a plain string or a list of string / dict
-    blocks, so both shapes have to be handled; a list whose first block is not a
-    string gets the text as a new leading block rather than being merged into a
-    structure it does not belong in.
-    """
-    if isinstance(content, str):
-        return f"{text}\n\n{content}" if content else text
-    if isinstance(content, list):
-        blocks = list(content)
-        if blocks and isinstance(blocks[0], str):
-            blocks[0] = f"{text}\n\n{blocks[0]}" if blocks[0] else text
-        else:
-            blocks.insert(0, text)
-        return blocks
-    return f"{text}\n\n{content}"
 
 
 class TeamPolicyRail(DeepAgentRail):
@@ -92,6 +73,14 @@ class TeamPolicyRail(DeepAgentRail):
     never persisted) but it is re-encoded on *every* model call and can never be
     served from the cache -- so constant content paid full price forever. Written
     into the conversation once, the same tokens are encoded once.
+
+    ``on_user_message`` carries one more job that is not about team state at
+    all: for a non-leader member it drops the queued task boards a later one has
+    already superseded. Everything the framework queued for a busy member is
+    handed over as one batch, and the board may be in there several times over
+    -- full surveys, all but the newest already wrong. Each is one whole entry
+    in that batch, so they come out as entries; a step later they are one joined
+    history message and can no longer be separated.
 
     When ``team_backend`` is ``None`` (e.g. unit tests that only care about
     static content) the state lane degrades to the identity channel alone.
@@ -176,25 +165,68 @@ class TeamPolicyRail(DeepAgentRail):
         self.system_prompt_builder = None
 
     async def on_user_message(self, ctx: AgentCallbackContext) -> None:
-        """Fold pending team state into the input being admitted.
+        """Drop superseded inputs from the batch, then fold in team state.
 
-        This is the primary lane, and the reason it is a hook rather than a
-        search through the history: the message is handed over *before* it
-        becomes history, so there is no position to track and nothing that
-        compaction can move out from under us. The state goes to the front of
-        the input, so the member reads who it is and what team it is on before
-        whatever prompted this round.
+        Two jobs on the list of inputs about to become one message, in that
+        order: the batch is pruned first, and the team state then goes in front
+        of what survives.
+
+        Both exist because this is the one moment these are still *inputs*. A
+        step later they are one ordinary history message — it can no longer be
+        located by position (compaction rewrites the history behind it) and it
+        must no longer be edited (rewriting a message invalidates every KV-cache
+        entry after it). So the superseded task boards that piled up while the
+        member was busy have to be dropped here or not at all, and the pending
+        team state has to be folded in here or be appended as a message of its
+        own by :meth:`_announce_unattached_state`.
+
+        The state is inserted at the front, so the member reads who it is and
+        what team it is on before whatever prompted this round.
         """
         inputs = getattr(ctx, "inputs", None)
-        message = getattr(inputs, "message", None)
+        parts = getattr(inputs, "parts", None)
+        if parts is None:
+            return
+
+        self._drop_superseded(parts)
+
         session = getattr(ctx, "session", None)
-        if message is None or session is None:
+        if session is None:
             return
         text = await self._tracker.pending_text(session)
         if not text:
             return
-        message.content = prepend_to_content(message.content, text)
+        parts.insert(0, text)
         await self._tracker.commit(session)
+
+    def _drop_superseded(self, parts: list[str]) -> None:
+        """Remove, in place, the queued inputs a later one already supersedes.
+
+        Both input queues hand over everything that piled up while the member
+        was busy, so a member woken after a busy stretch sees every task board
+        rendered meanwhile — each a full survey, each stale except the last.
+        Each board is one whole queued input, so the stale ones come out as
+        entries; nothing is parsed and nothing is rewritten.
+
+        **Leader boards are left alone.** A teammate's board is a work queue:
+        it lists what is claimable right now, so only the current one is
+        actionable. The leader's board is the whole team's incomplete work, and
+        it reads the sequence — which task appeared, which moved — to decide
+        whether to re-plan or conclude. Pruning that would delete the very
+        transitions it is watching for.
+        """
+        if self._role == TeamRole.LEADER or len(parts) < 2:
+            return
+        kept = drop_superseded_snapshots(parts)
+        if len(kept) == len(parts):
+            return
+        team_logger.debug(
+            "[{}] dropped {} superseded input(s) of {}",
+            self._member_name or "?",
+            len(parts) - len(kept),
+            len(parts),
+        )
+        parts[:] = kept
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject the static sections, then catch state with no input to ride."""
@@ -268,4 +300,4 @@ class TeamPolicyRail(DeepAgentRail):
         return sections
 
 
-__all__ = ["TeamPolicyRail", "prepend_to_content"]
+__all__ = ["TeamPolicyRail"]

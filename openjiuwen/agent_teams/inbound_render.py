@@ -43,6 +43,17 @@ import html
 INBOUND_TYPE_DIRECT = "direct"
 INBOUND_TYPE_BROADCAST = "broadcast"
 
+# Event kinds whose every occurrence is a *complete* snapshot of one piece of
+# state, so the newest occurrence alone says everything the earlier ones said.
+# Only kinds with that property belong here. A delta (``roster-change``) or an
+# event scoped to one subject (``stale-claim``, which carries a ``task_id``)
+# loses information the moment an earlier occurrence is dropped.
+SNAPSHOT_EVENT_KINDS = frozenset({"task-board"})
+
+# Opening tag of a <team-event> of a given kind. ``render_event`` puts ``kind``
+# first, so this identifies a rendered block from its very first characters.
+_OPEN_TAG = '<team-event kind="%s"'
+
 
 def _esc_text(text: str | None) -> str:
     """Escape text for an XML element body (leaves quotes intact)."""
@@ -167,10 +178,62 @@ def render_team_context(*, body: str) -> str:
     return f"<team-context>\n{_esc_text(body)}\n</team-context>"
 
 
+def snapshot_kind_of(text: str) -> str | None:
+    """Return the snapshot kind ``text`` is, or None when it is not one.
+
+    An input qualifies only when a snapshot event is *all* it is: these are
+    delivered one per ``deliver_input`` call, so the whole entry is the block
+    and dropping it takes nothing else with it.
+
+    Args:
+        text: One queued input, as it was handed to ``deliver_input``.
+
+    Returns:
+        The matching kind from :data:`SNAPSHOT_EVENT_KINDS`, or None.
+    """
+    stripped = text.strip()
+    if not stripped.endswith("</team-event>"):
+        return None
+    return next((kind for kind in SNAPSHOT_EVENT_KINDS if stripped.startswith(_OPEN_TAG % kind)), None)
+
+
+def drop_superseded_snapshots(parts: list[str]) -> list[str]:
+    """Return ``parts`` without the snapshot inputs a later one supersedes.
+
+    A member that was busy comes back to everything that queued up meanwhile.
+    The task board can be in there several times, each a full survey taken
+    seconds apart — but only the last describes the board the member is about
+    to act on, and the earlier ones are noise one step away from becoming
+    permanent history.
+
+    Entries are dropped whole, never edited: each is one input, and only the
+    kinds in :data:`SNAPSHOT_EVENT_KINDS` are ever dropped. Everything else,
+    including a roster delta or a per-task nudge, carries something no other
+    entry repeats.
+
+    Args:
+        parts: The queued inputs, oldest first.
+
+    Returns:
+        A new list with the superseded snapshot entries removed.
+    """
+    newest: dict[str, int] = {}
+    for index, part in enumerate(parts):
+        kind = snapshot_kind_of(part)
+        if kind is not None:
+            newest[kind] = index
+    # A non-snapshot entry has no kind, so ``newest.get(None, index)`` gives
+    # back its own index and it survives without a branch of its own.
+    return [part for index, part in enumerate(parts) if newest.get(snapshot_kind_of(part), index) == index]
+
+
 __all__ = [
     "INBOUND_TYPE_BROADCAST",
     "INBOUND_TYPE_DIRECT",
+    "SNAPSHOT_EVENT_KINDS",
+    "drop_superseded_snapshots",
     "render_event",
     "render_inbound",
     "render_team_context",
+    "snapshot_kind_of",
 ]
