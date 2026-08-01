@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -21,8 +23,8 @@ class LspRail(DeepAgentRail):
     This rail provides AI agents with code navigation capabilities through
     the Language Server Protocol. It:
 
-    1. Initializes the LSP subsystem (LSPServerManager) on ``init()``.
-       Servers are started lazily on first LSP request.
+    1. Resolves LSP options on ``init()`` and initializes the LSP manager before
+       the first model call. Servers are started lazily on first LSP request.
     2. Registers a single ``LspTool`` instance on the agent's
        ``ability_manager`` so the LLM can call it.
        The tool description (including operations, parameters, and usage notes)
@@ -66,15 +68,17 @@ class LspRail(DeepAgentRail):
         self._lsp_tool: "Tool | None" = None
         self._initialized = False
         self._log_file: "Path | None" = None
+        self._initialize_options: "InitializeOptions | None" = None
+        self._initialization_lock: asyncio.Lock | None = None
+        self._shutdown_task: asyncio.Task[None] | None = None
 
     def init(self, agent: Any) -> None:
         """Initialize LSP subsystem and register LspTool on the agent.
 
-        This method:
-        1. Initializes the LSP subsystem (LSPServerManager).
-           Idempotent — safe to call multiple times.
-        2. Creates an LspTool instance.
-        3. Registers it on the agent's ability_manager.
+        This method resolves options, creates an LspTool instance, and registers
+        it on the agent's ability_manager. LSP manager initialization happens in
+        ``before_model_call`` so this synchronous lifecycle hook never blocks a
+        running event loop.
 
         Args:
             agent: The DeepAgent instance to register tools on.
@@ -83,11 +87,7 @@ class LspRail(DeepAgentRail):
         from openjiuwen.harness.tools import LspTool
 
         # 类型检查：仅在 DeepAgent 上生效
-        if not (
-            isinstance(agent, DeepAgent)
-            and agent.deep_config
-            and hasattr(agent, "ability_manager")
-        ):
+        if not (isinstance(agent, DeepAgent) and agent.deep_config and hasattr(agent, "ability_manager")):
             logger.warning("LspRail: agent is not a DeepAgent or lacks ability_manager, skipping")
             return
 
@@ -111,6 +111,7 @@ class LspRail(DeepAgentRail):
         if self.verbose:
             from datetime import datetime, timezone
             from pathlib import Path as _Path
+
             _log_dir = _Path(__file__).parent.parent.parent.parent / "logs" / "logs" / "lsp"
             try:
                 _log_dir.mkdir(parents=True, exist_ok=True)
@@ -125,45 +126,15 @@ class LspRail(DeepAgentRail):
                 logger.warning("LspRail: failed to create log file: %s", exc)
 
         # 如果 options 中没有 cwd，则构建一个
-        import asyncio
-        import copy
         opts = self.options
         if opts is None:
             from openjiuwen.harness.lsp import InitializeOptions
+
             opts = InitializeOptions(cwd=effective_cwd)
         elif not opts.cwd and effective_cwd:
             opts = copy.deepcopy(opts)
             opts.cwd = effective_cwd
-
-        # Initialize LSP subsystem (synchronously blocking, with 15s timeout)
-        try:
-            import asyncio
-            from openjiuwen.harness.lsp.core.manager import LSPServerManager
-
-            if LSPServerManager.get_instance() is not None:
-                logger.info("LspRail: LSP subsystem already initialized")
-            else:
-                async def _init_with_timeout():
-                    try:
-                        await asyncio.wait_for(self._async_init_lsp(opts), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        logger.warning("LspRail: LSP initialization timed out after 15s")
-                    except Exception as e:
-                        logger.warning("LspRail: LSP initialization failed: %s", e)
-
-                try:
-                    loop = asyncio.get_running_loop()
-                    # Block until initialization completes (or timeout)
-                    future = asyncio.run_coroutine_threadsafe(
-                        _init_with_timeout(), loop
-                    )
-                    future.result(timeout=20.0)
-                except RuntimeError:
-                    # No running loop — use asyncio.run
-                    asyncio.run(_init_with_timeout())
-
-        except Exception as exc:
-            logger.warning("LspRail: failed to initialize LSP subsystem: %s", exc)
+        self._initialize_options = opts
 
         # 创建 LspTool 实例（从 config 获取语言设置、sys_operation、workspace 和 agent_id）
         language = getattr(agent, "deep_config", None)
@@ -183,11 +154,36 @@ class LspRail(DeepAgentRail):
             agent.ability_manager.add_ability(self._lsp_tool.card, self._lsp_tool)
             self._initialized = True
             logger.info(
-                "LspRail: initialized LSP subsystem and registered LspTool (cwd=%s)",
+                "LspRail: registered LspTool; LSP initialization will run before the first model call (cwd=%s)",
                 effective_cwd,
             )
         except Exception as exc:
             logger.warning("LspRail: failed to register LspTool, error: %s", exc)
+
+    async def _ensure_lsp_initialized(self) -> None:
+        """Initialize LSP without blocking the event loop that owns this rail."""
+        from openjiuwen.harness.lsp.core.manager import LSPServerManager
+
+        if LSPServerManager.get_instance() is not None:
+            return
+
+        if self._initialization_lock is None:
+            self._initialization_lock = asyncio.Lock()
+
+        async with self._initialization_lock:
+            if LSPServerManager.get_instance() is not None:
+                return
+
+            options = self._initialize_options
+            if options is None:
+                return
+
+            try:
+                await asyncio.wait_for(self._async_init_lsp(options), timeout=15.0)
+            except asyncio.TimeoutError:
+                logger.warning("LspRail: LSP initialization timed out after 15s")
+            except Exception as exc:
+                logger.warning("LspRail: LSP initialization failed: %s", exc)
 
     async def _async_init_lsp(self, options: "InitializeOptions") -> None:
         """异步初始化 LSP 子系统。
@@ -227,28 +223,27 @@ class LspRail(DeepAgentRail):
             except Exception as exc:
                 logger.warning("LspRail: failed to remove LspTool: %s", exc)
 
-        # Shutdown LSP subsystem (synchronously blocking, with 10s timeout)
+        # Shutdown LSP subsystem without blocking the loop that owns this rail.
+        async def _shutdown_with_timeout() -> None:
+            try:
+                await asyncio.wait_for(self._async_shutdown_lsp(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning("LspRail: shutdown timed out after 10s, forcing")
+            except Exception as exc:
+                logger.warning("LspRail: shutdown error: %s", exc)
+
         try:
-            import asyncio
             loop = asyncio.get_running_loop()
-
-            async def _shutdown_with_timeout():
-                try:
-                    await asyncio.wait_for(self._async_shutdown_lsp(), timeout=10.0)
-                except asyncio.TimeoutError:
-                    logger.warning("LspRail: shutdown timed out after 10s, forcing")
-                except Exception as e:
-                    logger.warning("LspRail: shutdown error: %s", e)
-
-            future = asyncio.run_coroutine_threadsafe(_shutdown_with_timeout(), loop)
-            future.result(timeout=15.0)
         except RuntimeError:
             try:
-                asyncio.run(self._async_shutdown_lsp())
+                asyncio.run(_shutdown_with_timeout())
             except Exception as exc:
                 logger.warning("LspRail: failed to shutdown LSP subsystem: %s", exc)
         except Exception as exc:
             logger.warning("LspRail: shutdown failed: %s", exc)
+        else:
+            if self._shutdown_task is None or self._shutdown_task.done():
+                self._shutdown_task = loop.create_task(_shutdown_with_timeout())
 
         self._lsp_tool = None
         self._initialized = False
@@ -261,7 +256,7 @@ class LspRail(DeepAgentRail):
             logger.info("LspRail: LSP subsystem shutdown successfully")
         except Exception as exc:
             logger.warning("LspRail: failed to shutdown LSP subsystem: %s", exc)
-    
+
     # Tool names that modify file content and should trigger LSP re-analysis.
     _WRITE_TOOL_NAMES: frozenset[str] = frozenset({"edit_file", "write_file"})
 
@@ -282,6 +277,7 @@ class LspRail(DeepAgentRail):
         tool_args = getattr(inputs, "tool_args", None) or {}
         if isinstance(tool_args, str):
             import json
+
             try:
                 tool_args = json.loads(tool_args)
             except Exception:
@@ -290,7 +286,6 @@ class LspRail(DeepAgentRail):
         if not file_path:
             return
 
-        import asyncio
         from openjiuwen.harness.lsp.core.manager import LSPServerManager
 
         manager = LSPServerManager.get_instance()
@@ -300,6 +295,7 @@ class LspRail(DeepAgentRail):
         # Resolve to absolute path now (on the calling thread) so _trigger
         # always works regardless of cwd changes inside the coroutine.
         from pathlib import Path as _Path
+
         _p = _Path(file_path)
         if _p.is_absolute():
             resolved_path = str(_p.resolve())
@@ -311,6 +307,7 @@ class LspRail(DeepAgentRail):
             try:
                 from pathlib import Path as _Path
                 from openjiuwen.harness.lsp.core.utils.file_uri import path_to_file_uri
+
                 ext = _Path(resolved_path).suffix.lower()
                 language_id = "python" if ext in {".py", ".pyi"} else ext.lstrip(".") or "plaintext"
                 # Some servers (e.g. pyright) require a prior didOpen before they
@@ -336,6 +333,8 @@ class LspRail(DeepAgentRail):
         sees the errors without the agent having to call any diagnostic tool
         explicitly.
         """
+        await self._ensure_lsp_initialized()
+
         from openjiuwen.harness.lsp import get_pending_lsp_diagnostics
 
         diagnostics = get_pending_lsp_diagnostics()
@@ -355,6 +354,7 @@ class LspRail(DeepAgentRail):
 
         try:
             from openjiuwen.core.foundation.llm.schema.message import UserMessage
+
             messages.append(UserMessage(content=text))
             logger.debug("LspRail: injected %d diagnostic file(s) into model context", len(diagnostics))
         except Exception as exc:
