@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """
 Comprehensive Async Callback Framework
@@ -57,6 +57,7 @@ from openjiuwen.core.runner.callback.filters import (
     CircuitBreakerFilter,
     EventFilter,
 )
+from openjiuwen.core.common.logging import runner_logger
 from openjiuwen.core.runner.callback.models import (
     CallbackInfo,
     CallbackMetrics,
@@ -64,6 +65,12 @@ from openjiuwen.core.runner.callback.models import (
     ChainResult,
     FilterResult,
 )
+
+# Above this, a single callback is reported at INFO so a slow hook is visible
+# without enabling debug logging. Mirrors ``SLOW_RAIL_CHAIN_SECONDS`` on the
+# rail side; kept local so this low-level module does not import from
+# ``single_agent``. Keep the two values in step.
+SLOW_CALLBACK_SECONDS = 1.0
 
 
 @lru_cache(maxsize=4096)
@@ -1048,6 +1055,19 @@ class AsyncCallbackFramework:
                     result = await callback_result
 
                 execution_time = time.time() - start_time
+
+                # Name the individual slow callback, so a slow rail chain can be
+                # attributed to one hook instead of the whole event.
+                if execution_time >= SLOW_CALLBACK_SECONDS:
+                    # ``__qualname__`` carries the owning class for a bound rail
+                    # method, so "before_invoke" points at one rail instead of
+                    # every rail that implements the hook.
+                    runner_logger.info(
+                        "[RailChain] slow callback: event=%s callback=%s elapsed_ms=%.1f",
+                        event,
+                        getattr(callback, "__qualname__", None) or callback.__name__,
+                        execution_time * 1000,
+                    )
 
                 # Update metrics
                 if self.enable_metrics:

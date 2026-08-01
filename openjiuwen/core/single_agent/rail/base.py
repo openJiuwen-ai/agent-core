@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Rail & Callback base definitions for Agent lifecycle hooks.
 
 Main classes included:
@@ -39,6 +39,14 @@ from openjiuwen.core.session.agent import Session
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.base import BaseAgent
+
+# Above this, a rail chain is reported at INFO so a slow hook shows up without
+# having to enable debug logging. A chain that does real work -- memory
+# prefetch, context processing -- routinely runs for a few hundred
+# milliseconds, so the bar sits well above that: an INFO line here means
+# something is wrong, not that the agent is busy. Everything below still gets a
+# DEBUG line for profiling runs.
+SLOW_RAIL_CHAIN_SECONDS = 1.0
 
 
 class RunKind(Enum):
@@ -335,9 +343,28 @@ class AgentCallbackContext:
             event: The event to fire
         """
         self.event = event
-        await self.agent.agent_callback_manager.execute(
-            event, self
-        )
+        logger.debug("[RailChain] %s started", event)
+        started_at = time.monotonic()
+        try:
+            await self.agent.agent_callback_manager.execute(
+                event, self
+            )
+        finally:
+            elapsed = time.monotonic() - started_at
+            # A rail chain is expected to be cheap glue around the model call;
+            # anything slower is worth surfacing without turning on debug logs.
+            if elapsed >= SLOW_RAIL_CHAIN_SECONDS:
+                logger.info(
+                    "[RailChain] %s finished, elapsed_ms=%.1f",
+                    event,
+                    elapsed * 1000,
+                )
+            else:
+                logger.debug(
+                    "[RailChain] %s finished, elapsed_ms=%.1f",
+                    event,
+                    elapsed * 1000,
+                )
 
     def request_retry(self, delay_seconds: float = 0.0) -> None:
         """Request the wrapped rail method to retry once more.

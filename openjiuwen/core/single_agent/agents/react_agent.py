@@ -82,6 +82,12 @@ _SKILLS_SECTION = "legacy_skills"
 _IDENTITY_SECTION_PRIORITY = 10
 _SKILLS_SECTION_PRIORITY = 90
 _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
+# Above this, the per-stage breakdown of invoke preparation is reported at INFO
+# so a slow start shows up without having to enable debug logging. Preparation
+# loads interruption state and builds the prompt, which is normal work worth a
+# few hundred milliseconds; the bar sits above that so an INFO line means a
+# genuine stall. Kept in step with ``SLOW_RAIL_CHAIN_SECONDS``.
+SLOW_INVOKE_PREP_SECONDS = 1.0
 _IMAGE_INPUT_UNSUPPORTED_ERROR_CODES = (
     "invalid_image_input",
     "image_input_unsupported",
@@ -1799,6 +1805,11 @@ class ReActAgent(BaseAgent):
                 if not user_input and not resume_continuation:
                     raise ValueError("Input must contain 'query'")
 
+                # Invoke preparation runs between BEFORE_INVOKE and the first
+                # ReAct iteration with no events of its own; stage timings turn
+                # that window into something a slow-start report can name.
+                prep_started_at = time.monotonic()
+
                 hitl_state = self._hitl_handler.load(session)
                 interruption_state = hitl_state or self._load_interruption_state(session)
                 if interruption_state is not None:
@@ -1809,8 +1820,11 @@ class ReActAgent(BaseAgent):
                     # Restore original query so MemoryRail.after_invoke writes the right UserMessage
                     ctx.extra["_original_query"] = interruption_state.original_query
 
+                state_loaded_at = time.monotonic()
+
                 context = await self._init_context(session)
                 ctx.context = context
+                context_ready_at = time.monotonic()
 
                 rendered_system_prompt = self._build_rendered_system_prompt(
                     inputs,
@@ -1821,9 +1835,27 @@ class ReActAgent(BaseAgent):
                     rendered_system_prompt,
                     priority=_IDENTITY_SECTION_PRIORITY,
                 )
+                system_prompt_ready_at = time.monotonic()
+
                 await self._update_skill_prompt_builder_section(rendered_system_prompt)
+                skills_ready_at = time.monotonic()
 
                 tools = await self.ability_manager.list_tool_info()
+                tools_ready_at = time.monotonic()
+
+                prep_elapsed = tools_ready_at - prep_started_at
+                if prep_elapsed >= SLOW_INVOKE_PREP_SECONDS:
+                    logger.info(
+                        "[InvokePrep] slow invoke preparation, total_ms=%.1f "
+                        "(interruption_state=%.1f context=%.1f system_prompt=%.1f "
+                        "skills=%.1f tools=%.1f)",
+                        prep_elapsed * 1000,
+                        (state_loaded_at - prep_started_at) * 1000,
+                        (context_ready_at - state_loaded_at) * 1000,
+                        (system_prompt_ready_at - context_ready_at) * 1000,
+                        (skills_ready_at - system_prompt_ready_at) * 1000,
+                        (tools_ready_at - skills_ready_at) * 1000,
+                    )
 
                 start_iteration = 0
                 if interruption_state is not None:
