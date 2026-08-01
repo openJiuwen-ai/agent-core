@@ -156,7 +156,6 @@
           - [gauss_db_store](2.开发指南/API文档/openjiuwen.extensions/store/db/gauss_db_store.md)
       - [sys_operation](2.开发指南/API文档/openjiuwen.extensions/sys_operation/README.md)
         - [jiuwenbox](2.开发指南/API文档/openjiuwen.extensions/sys_operation/sandbox/providers/jiuwenbox.md)
-      - [context_evolver](2.开发指南/API文档/openjiuwen.extensions/context_evolver/README.md)
       - [vendor_specific](2.开发指南/API文档/openjiuwen.extensions/vendor_specific/README.md)
     - [openjiuwen.auto_harness](2.开发指南/API文档/openjiuwen.auto_harness.README.md)
     - [openjiuwen.core](2.开发指南/API文档/openjiuwen.core.README.md)
