@@ -6,8 +6,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 import re
+import threading
 
 from openjiuwen.core.foundation.tool.base import ToolCard
+from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     CONTEXT_HEADER,
     CONTEXT_FILE_TITLES,
@@ -102,12 +104,49 @@ DAILY_MEMORY_GUIDANCE = {
 }
 
 
+# Resolved context-file content per path, keyed on the file's identity. These
+# files (AGENT.md, SOUL.md, USER.md, ...) are re-read on every model call to be
+# folded into the system prompt, but they hold an agent's identity and change
+# about as often as its configuration does.
+#
+# Only LOCAL sys operations are cached. Under a sandbox the path names a file
+# inside the sandbox, so a same-named file on the host would stamp content that
+# was never read — the check below keeps that case on the uncached path rather
+# than serving a wrong answer.
+_CONTEXT_FILE_CACHE: dict[str, tuple[tuple[int, int], str | None]] = {}
+_CONTEXT_FILE_CACHE_LOCK = threading.Lock()
+
+
+def _local_context_file_stamp(sys_operation, full_path: Path) -> tuple[int, int] | None:
+    """Return the identity a cached read of this context file is keyed on.
+
+    Args:
+        sys_operation: SysOperation the read will go through.
+        full_path: Absolute path of the context file.
+
+    Returns:
+        ``(mtime_ns, size)`` for a local, stat-able file; None when the read is
+        not local or the file cannot be stat'd, meaning it must not be cached.
+    """
+    if getattr(sys_operation, "mode", None) != OperationMode.LOCAL:
+        return None
+    try:
+        stat_result = full_path.stat()
+    except OSError:
+        return None
+    return stat_result.st_mtime_ns, stat_result.st_size
+
+
 async def _read_context_file(
         sys_operation,
         workspace,
         file_key: str,
 ) -> str | None:
     """Read a single context file using sys_operation.
+
+    The resolved result is cached against the file's mtime and size, so an
+    unchanged file is not re-read on every model call. Both outcomes are cached:
+    an unfilled template resolves to None just as durably as real content does.
 
     Args:
         sys_operation: SysOperation instance.
@@ -130,15 +169,27 @@ async def _read_context_file(
     if full_path is None:
         return None
 
+    stamp = _local_context_file_stamp(sys_operation, full_path)
+    cache_key = str(full_path)
+    if stamp is not None:
+        with _CONTEXT_FILE_CACHE_LOCK:
+            cached = _CONTEXT_FILE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+
+    resolved: str | None = None
     result = await sys_operation.fs().read_file(str(full_path))
     if result.code == 0 and result.data:
         content = result.data.content
         if file_key == WorkspaceNode.IDENTITY_MD.value and _identity_has_filled_name(content):
-            return content
-        if content and not _is_unfilled_template(content):
-            return content
+            resolved = content
+        elif content and not _is_unfilled_template(content):
+            resolved = content
 
-    return None
+    if stamp is not None:
+        with _CONTEXT_FILE_CACHE_LOCK:
+            _CONTEXT_FILE_CACHE[cache_key] = (stamp, resolved)
+    return resolved
 
 
 async def _build_context_content(
