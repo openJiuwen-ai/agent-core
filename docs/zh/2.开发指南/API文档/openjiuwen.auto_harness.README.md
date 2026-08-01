@@ -4,7 +4,27 @@ Auto Harness Agent — 自主优化 harness 框架的编码 agent。
 
 本子包在 `openjiuwen.harness` 之上构建了一套自驱动的编码 agent：由 `AutoHarnessOrchestrator` 调度 session 级与 task 级 pipeline，内置 `meta_evolve`（元演进）与 `extended_evolve`（扩展演进）两条 pipeline，覆盖 assess / plan / implement / verify / commit / publish_pr / learnings / activate / merge 等阶段，并配套经验库、安全护栏、预算控制、git worktree 隔离、CI 门控等基础设施。
 
-> 说明：本页为子包级索引，按源码子包结构给出各类与函数的一句话说明；完整签名与实现细节请参见 `openjiuwen/auto_harness/` 下对应源文件。带 `_` 前缀的内部类型不在此列。
+> 说明：本页为子包级索引，按源码子包结构给出各类与函数的一句话说明；完整签名、字段、方法与示例请参见下方各子包详细文档。带 `_` 前缀的内部类型不在此列。
+
+## 详细文档
+
+各子包的完整 API 参考（含类签名、`__init__` 参数、方法列表、返回值与示例）：
+
+- [orchestrator（顶层入口）](./openjiuwen.auto_harness/orchestrator.md)
+- [schema（数据模型）](./openjiuwen.auto_harness/schema.md)
+- [agents（智能体工厂）](./openjiuwen.auto_harness/agents.md)
+- [artifacts（产物存储）](./openjiuwen.auto_harness/artifacts.md)
+- [contexts（执行上下文）](./openjiuwen.auto_harness/contexts.md)
+- [experience（经验库）](./openjiuwen.auto_harness/experience.md)
+- [infra（基础设施）](./openjiuwen.auto_harness/infra.md)
+- [pipelines（流水线）](./openjiuwen.auto_harness/pipelines.md)
+- [prompts（提示词）](./openjiuwen.auto_harness/prompts.md)
+- [rails（安全护栏）](./openjiuwen.auto_harness/rails.md)
+- [registry（注册表）](./openjiuwen.auto_harness/registry.md)
+- [stages（阶段）](./openjiuwen.auto_harness/stages.md)
+- [tools（工具）](./openjiuwen.auto_harness/tools.md)
+- [resources（配置模板）](./openjiuwen.auto_harness/resources.md)
+- [skills（提示词技能）](./openjiuwen.auto_harness/skills.md)
 
 ## 顶层入口
 
@@ -273,3 +293,11 @@ Auto Harness Agent — 自主优化 harness 框架的编码 agent。
 |---|---|
 | `ExperienceSearchTool` | 只读的经验检索工具。 |
 | `ExperienceSearchMetadataProvider` | `ExperienceSearchTool` 的元数据提供者。 |
+
+## resources（配置模板）
+
+`auto_harness/resources/` 下内置的 YAML 配置模板，供 `load_auto_harness_config` 与运行时扩展 manifest 使用。详见 [resources.md](./openjiuwen.auto_harness/resources.md)。
+
+## skills（提示词技能）
+
+`auto_harness/skills/` 下的 `SKILL.md` 提示词技能文件，由 agent 工厂通过 `skill_names` 引用并注入。详见 [skills.md](./openjiuwen.auto_harness/skills.md)。
