@@ -226,7 +226,7 @@ def build_identity_text(
     private_prompt = member_prompt.strip() if member_prompt else ""
     label = display_name.strip() if display_name else ""
     workspace = member_workspace_path.strip() if member_workspace_path else ""
-    if not member_name and not label and not workspace and not private_prompt:
+    if not any((member_name, label, workspace, private_prompt)):
         return None
     labels = labels_for(language)
     lines = [labels["identity_heading"], ""]
@@ -235,7 +235,8 @@ def build_identity_text(
     if label:
         lines.append(f"{labels['display_name_line']}: {label}")
     if workspace:
-        lines.append(f"{labels['member_workspace_line']}: `{workspace}`{_parenthesized(labels['member_workspace_purpose'], language)}")
+        purpose = _parenthesized(labels["member_workspace_purpose"], language)
+        lines.append(f"{labels['member_workspace_line']}: `{workspace}`{purpose}")
     if private_prompt:
         lines.extend(["", labels["private_prompt_heading"], "", private_prompt])
     return "\n".join(lines) + "\n"

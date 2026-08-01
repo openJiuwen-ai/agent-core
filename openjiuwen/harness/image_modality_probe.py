@@ -217,10 +217,10 @@ def schedule_image_support_probe(llm) -> None:
 
 async def _probe_and_cache(llm, key: tuple[str, str]) -> None:
     """Run one probe for *key* and cache a conclusive verdict."""
+    # Cancellation needs no clause of its own: CancelledError derives from
+    # BaseException, so the handler below never swallows it.
     try:
         supported = await _run_probe(llm)
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
         logger.warning("[ImageModalityProbe] background image modality probe failed: %s", exc)
         return

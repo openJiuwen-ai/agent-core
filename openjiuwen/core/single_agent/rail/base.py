@@ -60,7 +60,7 @@ SLOW_RAIL_INIT_SECONDS = 0.1
 SLOW_RAIL_INIT_BATCH_SECONDS = 0.25
 
 
-def init_rail(rail: "AgentRail", agent: Any) -> float:
+def init_rail(rail_instance: "AgentRail", agent: Any) -> float:
     """Run one rail's ``init`` and report what it cost.
 
     ``init`` is a plain synchronous call rather than a callback-framework
@@ -76,7 +76,9 @@ def init_rail(rail: "AgentRail", agent: Any) -> float:
     fails slowly is still attributable.
 
     Args:
-        rail: Rail whose ``init`` should run.
+        rail_instance: Rail whose ``init`` should run. Named this way rather
+            than ``rail`` so it does not shadow the module-level ``@rail``
+            decorator.
         agent: Agent handed to ``init``; also the owner the rail registers
             its tools and prompt sections against.
 
@@ -85,13 +87,13 @@ def init_rail(rail: "AgentRail", agent: Any) -> float:
     """
     started_at = time.monotonic()
     try:
-        rail.init(agent)
+        rail_instance.init(agent)
     finally:
         elapsed = time.monotonic() - started_at
         log = logger.info if elapsed >= SLOW_RAIL_INIT_SECONDS else logger.debug
         log(
             "[RailInit] %s finished, elapsed_ms=%.1f",
-            type(rail).__name__,
+            type(rail_instance).__name__,
             elapsed * 1000,
         )
     return elapsed
