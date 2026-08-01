@@ -4,4 +4,7 @@ AgentTeams 是 Leader-Teammate 协作框架，通过 Leader（负责人）和 Te
 
 - [概述](./概述.md)
 - [AgentTeams 使用指南](./AgentTeams.md)
+- [HITT 人机交互团队模式](./HITT人机交互团队模式.md)
+- [Team 权限护栏](./Team权限护栏.md)
+- [OTEL 团队级追踪](./OTEL团队级追踪.md)
 - [团队技能演进](./团队技能演进.md)
