@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import json
 import threading
@@ -23,6 +23,8 @@ OPENROUTER_MODEL_CACHE_TTL_SECONDS = 3600
 _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {}
 _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_FETCHED_AT = 0.0
 _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_LOCK = threading.Lock()
+_OPENROUTER_PREFETCH_LOCK = threading.Lock()
+_OPENROUTER_PREFETCH_THREAD: Optional[threading.Thread] = None
 
 MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     # GLM
@@ -166,8 +168,58 @@ class ContextUtils:
         return fetched_tokens
 
     @staticmethod
+    def _run_openrouter_prefetch(timeout: float) -> None:
+        """Body of the background prefetch thread; never propagates failures."""
+        try:
+            ContextUtils.fetch_openrouter_model_context_window_tokens(timeout)
+        except Exception:
+            logger.debug(
+                "OpenRouter context window prefetch failed, keeping built-in values",
+                exc_info=True,
+            )
+
+    @staticmethod
+    def prefetch_openrouter_model_context_window_tokens(timeout: float = 3.0) -> None:
+        """Warm the OpenRouter context-window cache without blocking the caller.
+
+        The fetch is a ~600KB cross-region HTTPS download; awaiting it on the
+        context-creation path costs every process its first turn (measured at
+        ~2.2s). Callers that only need context windows *eventually* schedule it
+        here instead: the current call falls back to the built-in table, and a
+        later context picks up the fetched values once the background thread
+        lands them.
+
+        No-ops when the cache is still fresh or a prefetch is already in flight.
+        The worker is a daemon thread so it never holds up interpreter exit.
+
+        Args:
+            timeout: Per-request timeout handed to the underlying fetch.
+        """
+        global _OPENROUTER_PREFETCH_THREAD
+
+        fetched_at = _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_FETCHED_AT
+        if fetched_at and (time.monotonic() - fetched_at) < OPENROUTER_MODEL_CACHE_TTL_SECONDS:
+            return
+
+        with _OPENROUTER_PREFETCH_LOCK:
+            in_flight = _OPENROUTER_PREFETCH_THREAD
+            if in_flight is not None and in_flight.is_alive():
+                return
+            _OPENROUTER_PREFETCH_THREAD = threading.Thread(
+                target=ContextUtils._run_openrouter_prefetch,
+                args=(timeout,),
+                name="openrouter-context-window-prefetch",
+                daemon=True,
+            )
+            _OPENROUTER_PREFETCH_THREAD.start()
+
+    @staticmethod
     def fetch_openrouter_model_context_window_tokens(timeout: float = 3.0) -> Dict[str, int]:
-        """Fetch OpenRouter model context windows with a process-wide TTL cache."""
+        """Fetch OpenRouter model context windows with a process-wide TTL cache.
+
+        Blocking. Prefer :meth:`prefetch_openrouter_model_context_window_tokens`
+        on any path that a user request waits on.
+        """
         global _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS
         global _OPENROUTER_MODEL_CONTEXT_WINDOW_TOKENS_FETCHED_AT
 
@@ -213,9 +265,13 @@ class ContextUtils:
         enable_openrouter_model_context_window_tokens: bool = False,
         openrouter_request_timeout: float = 3.0,
     ) -> Dict[str, int]:
-        """Build explicit model context windows and optionally warm the OpenRouter cache."""
+        """Build explicit model context windows and optionally warm the OpenRouter cache.
+
+        The warm-up is scheduled in the background: this runs while a context is
+        being constructed for a live request, so it must not wait on the network.
+        """
         if enable_openrouter_model_context_window_tokens:
-            ContextUtils.fetch_openrouter_model_context_window_tokens(openrouter_request_timeout)
+            ContextUtils.prefetch_openrouter_model_context_window_tokens(openrouter_request_timeout)
         return dict(model_context_window_tokens) if model_context_window_tokens else {}
 
     @staticmethod

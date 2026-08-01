@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -891,6 +892,64 @@ def test_read_lock_supports_sqlite_without_schema_alias(work_dir, monkeypatch):
         lock.release()
     finally:
         lock.close()
+
+
+def _age_file(path: Path, seconds: float) -> None:
+    """Backdate a file's mtime by *seconds* so the orphan scan can see it."""
+    aged = time.time() - seconds
+    os.utime(path, (aged, aged))
+
+
+def test_orphan_scan_only_picks_untracked_databases_past_the_orphan_ttl(rw_lock_dir):
+    """Age selects candidates, and the bar is the orphan TTL -- not the idle one.
+
+    ``_idle_ttl`` measures how long *this* process leaves its own lock unused.
+    A database another process still holds for reads keeps its mtime frozen, so
+    reusing that bar here would queue live locks for deletion.
+    """
+    stale = rw_lock_dir / "stale.db"
+    recent = rw_lock_dir / "recent.db"
+    tracked = rw_lock_dir / "tracked.db"
+    unrelated = rw_lock_dir / "notes.txt"
+    for path in (stale, recent, tracked, unrelated):
+        path.write_bytes(b"")
+    _age_file(stale, ReadWriteLockManager._orphan_ttl + 60)
+    _age_file(tracked, ReadWriteLockManager._orphan_ttl + 60)
+    _age_file(recent, ReadWriteLockManager._idle_ttl + 60)
+
+    candidates, scanned = ReadWriteLockManager._collect_orphan_candidates(frozenset({tracked}))
+
+    assert candidates == [stale]
+    assert scanned == 4
+
+
+def test_orphan_scan_stops_once_the_batch_is_full(rw_lock_dir, monkeypatch):
+    """A backlog costs a bounded number of syscalls per tick, not one per file."""
+    monkeypatch.setattr(ReadWriteLockManager, "_orphan_sweep_batch", 2)
+    for index in range(5):
+        orphan = rw_lock_dir / f"orphan{index}.db"
+        orphan.write_bytes(b"")
+        _age_file(orphan, ReadWriteLockManager._orphan_ttl + 60)
+
+    candidates, scanned = ReadWriteLockManager._collect_orphan_candidates(frozenset())
+
+    assert len(candidates) == 2
+    assert scanned == 2
+
+
+@pytest.mark.asyncio
+async def test_orphan_sweep_queues_stale_databases_for_deletion(rw_lock_dir):
+    """A database left by a dead process gets queued; a fresh one does not."""
+    orphan = rw_lock_dir / "orphan.db"
+    live = rw_lock_dir / "live.db"
+    orphan.write_bytes(b"")
+    live.write_bytes(b"")
+    _age_file(orphan, ReadWriteLockManager._orphan_ttl + 60)
+
+    await ReadWriteLockManager._sweep_orphan_databases()
+
+    assert orphan in ReadWriteLockManager._idle_deadlines
+    assert live not in ReadWriteLockManager._idle_deadlines
 
 
 @pytest.mark.asyncio

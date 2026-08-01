@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -37,6 +37,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import (
     DeepAgentConfig,
@@ -77,9 +78,13 @@ def _create_dummy_model() -> Model:
 
 @pytest.fixture(autouse=True)
 def _mock_image_modality_probe(monkeypatch):
-    probe = AsyncMock(return_value=True)
-    monkeypatch.setattr("openjiuwen.harness.deep_agent.probe_image_support", probe)
-    return probe
+    from openjiuwen.harness.image_modality_probe import reset_image_support_cache
+
+    reset_image_support_cache()
+    schedule = MagicMock()
+    monkeypatch.setattr("openjiuwen.harness.deep_agent.schedule_image_support_probe", schedule)
+    yield schedule
+    reset_image_support_cache()
 
 
 class FakeInnerCallbackManager:
@@ -241,11 +246,10 @@ class DummyTool(Tool):
 
 
 @pytest.mark.asyncio
-async def test_ensure_initialized_resolves_read_image_multimodal_before_rails(
+async def test_ensure_initialized_defers_read_image_multimodal_probe(
     _mock_image_modality_probe,
 ) -> None:
     llm = _create_dummy_model()
-    _mock_image_modality_probe.return_value = False
     rail = CapturingRail()
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
         DeepAgentConfig(
@@ -259,9 +263,38 @@ async def test_ensure_initialized_resolves_read_image_multimodal_before_rails(
 
     await agent.ensure_initialized()
 
-    assert agent.deep_config.enable_read_image_multimodal is False
-    assert rail.enable_read_image_multimodal is False
-    _mock_image_modality_probe.assert_awaited_once_with(llm)
+    # The probe never blocks startup: rails see the unresolved value and
+    # degrade to metadata-only while the verdict is fetched in the background.
+    assert agent.deep_config.enable_read_image_multimodal is None
+    assert rail.enable_read_image_multimodal is None
+    assert should_enable_read_image_multimodal(agent) is False
+    _mock_image_modality_probe.assert_called_once_with(llm)
+
+
+@pytest.mark.asyncio
+async def test_ensure_initialized_uses_cached_read_image_multimodal(
+    _mock_image_modality_probe,
+) -> None:
+    from openjiuwen.harness import image_modality_probe
+
+    llm = _create_dummy_model()
+    image_modality_probe._probe_results[image_modality_probe.probe_cache_key(llm)] = True
+    rail = CapturingRail()
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(
+            model=llm,
+            enable_task_loop=False,
+            auto_create_workspace=False,
+        )
+    )
+    agent.set_react_agent(FakeReactAgent(), initialized=False)
+    agent.add_rail(rail)
+
+    await agent.ensure_initialized()
+
+    assert agent.deep_config.enable_read_image_multimodal is True
+    assert rail.enable_read_image_multimodal is True
+    _mock_image_modality_probe.assert_not_called()
 
 
 def test_configure_set_react_agent_and_is_initialized() -> None:
@@ -792,7 +825,7 @@ async def test_create_deep_agent_auto_registers_complete_vision_tools(
         assert agent.ability_manager.get("visual_question_answering") is not None
         assert agent.deep_config.enable_read_image_multimodal is False
         await agent.ensure_initialized()
-        _mock_image_modality_probe.assert_not_awaited()
+        _mock_image_modality_probe.assert_not_called()
     finally:
         agent.ability_manager.teardown_tools()
 
@@ -811,11 +844,11 @@ async def test_create_deep_agent_skips_incomplete_vision_tools(
     assert agent.ability_manager.get("visual_question_answering") is None
     assert agent.deep_config.enable_read_image_multimodal is None
 
-    _mock_image_modality_probe.return_value = True
     await agent.ensure_initialized()
 
-    assert agent.deep_config.enable_read_image_multimodal is True
-    _mock_image_modality_probe.assert_awaited_once_with(agent.deep_config.model)
+    # Still auto: the probe was only scheduled, never waited for.
+    assert agent.deep_config.enable_read_image_multimodal is None
+    _mock_image_modality_probe.assert_called_once_with(agent.deep_config.model)
 
 
 def test_create_deep_agent_skips_free_search_when_all_free_engines_disabled(monkeypatch) -> None:

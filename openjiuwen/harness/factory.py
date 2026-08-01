@@ -191,6 +191,7 @@ def resolve_deep_agent_parts(
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
     enable_llm_retry_rail: bool = True,
+    enable_sys_operation: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -201,6 +202,13 @@ def resolve_deep_agent_parts(
     default rails (Security / TaskPlanning / SkillUse / Subagent) that the
     caller did not already provide. Returns a :class:`DeepAgentParts` that
     :func:`apply_deep_agent_parts` materializes onto a target agent.
+
+    Args:
+        enable_sys_operation: Whether to resolve a sys_operation for the agent.
+            Set False for an agent that owns no filesystem / shell / code tools;
+            its ``config.sys_operation`` is then None and no tool resources are
+            registered for it. Other arguments are documented on
+            :func:`create_deep_agent`.
     """
     if card is None:
         card = AgentCard(
@@ -248,7 +256,12 @@ def resolve_deep_agent_parts(
     else:
         workspace_obj = workspace
 
-    if not isinstance(sys_operation, SysOperation):
+    if not enable_sys_operation:
+        # An agent with no filesystem / shell / code surface: skip the
+        # sys_operation entirely rather than registering its ~16 tool resources
+        # only to tear them down again at the end of a one-shot run.
+        sys_operation_obj = None
+    elif not isinstance(sys_operation, SysOperation):
         sysop_id = f"{card.name}_{card.id}"
         # Get-or-create: the id is stable across rebuilds (a member harness is
         # reconstructed on every team resume), and add_sys_operation is a strict

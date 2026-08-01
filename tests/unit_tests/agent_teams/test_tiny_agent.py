@@ -88,6 +88,7 @@ class _FakeHarness:
         self.spec = spec
         self.rails: list[Any] = []
         self.sent: list[str] = []
+        self.run_sessions: list[Any] = []
         self.started = False
         self.disposed = False
         self.ability_manager = _FakeAbilityManager()
@@ -111,6 +112,7 @@ class _FakeHarness:
 
     async def run_once(self, content: str, *, session: Any = None) -> dict[str, Any]:
         self.sent.append(content)
+        self.run_sessions.append(session)
         await self._maybe_submit()
         return {"output": _FakeHarness.output_text}
 
@@ -211,6 +213,50 @@ async def test_run_uses_unique_card_id_per_call(fake_harness) -> None:
     await agent.run("two")
     ids = [h.spec.card.id for h in fake_harness.instances]
     assert len(ids) == 2 and ids[0] != ids[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_run_hands_run_once_an_unprimed_session(fake_harness) -> None:
+    """A single-shot run has nothing to restore or persist.
+
+    ``run`` passes its own session in, which puts the harness on its
+    ``owns_session=False`` path and skips the pre_run / post_run checkpointer
+    pair. The session must therefore reach ``run_once`` un-primed -- a session
+    this side had already pre_run would mean the round trip happened anyway.
+    The other half of the contract (that ``run_once`` really does skip both
+    hooks for a caller-owned session) is covered in
+    ``tests/unit_tests/agent_teams/harness/test_run_once.py``.
+    """
+    agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
+
+    await agent.run("one")
+
+    session = fake_harness.instances[0].run_sessions[0]
+    assert session is not None
+    assert session._pre_run_done is False
+
+
+@pytest.mark.level0
+def test_create_tiny_agent_keeps_a_minimal_footprint() -> None:
+    """A tiny agent carries no machinery beyond its prompt and submit tool."""
+    agent = create_tiny_agent(
+        system_prompt="p",
+        model_name="m",
+        model_resolver=_model_resolver,
+        default_schema=_DICT_SCHEMA,
+    )
+    spec = agent._spec_for_run(_DICT_SCHEMA)
+
+    # No filesystem / shell / code surface, so no sys_operation is resolved and
+    # none of its tool resources get registered.
+    assert spec.enable_sys_operation is False
+    # No image reading either, so the modality probe never runs.
+    assert spec.enable_read_image_multimodal is False
+    # Only the caller's prompt reaches the model — no harness sections.
+    assert spec.prompt_mode == "none"
+    # The submit tool is the only tool it owns.
+    assert [type(tool).__name__ for tool in (spec.tools or [])] == ["StructuredOutputTool"]
 
 
 @pytest.mark.level0

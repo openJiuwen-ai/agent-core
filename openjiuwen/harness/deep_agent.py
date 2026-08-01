@@ -56,7 +56,10 @@ from openjiuwen.core.single_agent.rail.base import (
     RunKind,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.image_modality_probe import probe_image_support
+from openjiuwen.harness.image_modality_probe import (
+    get_cached_image_support,
+    schedule_image_support_probe,
+)
 from openjiuwen.harness.rails import DeepAgentRail
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.rails.task_completion_rail import (
@@ -958,7 +961,13 @@ class DeepAgent(BaseAgent):
             self.ability_manager.add(mcp_config)
 
     async def _resolve_read_image_multimodal(self) -> None:
-        """Probe the agent model when read_file image modality is set to auto."""
+        """Resolve read_file image modality when it is set to auto.
+
+        A probe costs a full LLM round-trip, so it never blocks startup: a
+        cached verdict is applied straight away, otherwise the probe runs in the
+        background and this run stays metadata-only (``None`` is falsy at every
+        read site). Later agents on the same endpoint and model reuse the cache.
+        """
         config = self._deep_config
         if config is None or config.enable_read_image_multimodal is not None:
             return
@@ -970,19 +979,20 @@ class DeepAgent(BaseAgent):
             config.enable_read_image_multimodal = False
             return
 
-        supported = await probe_image_support(config.model)
-        if supported is None:
-            logger.warning(
-                "[DeepAgent] image multimodal probe inconclusive; "
-                "leaving auto and degrading to metadata-only for this run",
+        cached = get_cached_image_support(config.model)
+        if cached is not None:
+            config.enable_read_image_multimodal = cached
+            logger.info(
+                "[DeepAgent] read_file image multimodal from probe cache: %s",
+                cached,
             )
             return
 
-        config.enable_read_image_multimodal = supported
         logger.info(
-            "[DeepAgent] read_file image multimodal auto-detected: %s",
-            supported,
+            "[DeepAgent] read_file image multimodal not probed yet; "
+            "probing in background and degrading to metadata-only for this run",
         )
+        schedule_image_support_probe(config.model)
 
     def _apply_inherited_artifact_cwd(self) -> None:
         """Set cwd from ``_inherited_artifact_root`` for a reused subagent.

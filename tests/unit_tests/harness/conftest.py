@@ -96,11 +96,15 @@ _install_dashscope_stub()
 @pytest.fixture(autouse=True)
 def _mock_image_modality_probe(monkeypatch):
     """Prevent auto image-modality probe from consuming mock LLM responses."""
-    from unittest.mock import AsyncMock
+    from unittest.mock import MagicMock
 
-    probe = AsyncMock(return_value=True)
-    monkeypatch.setattr("openjiuwen.harness.deep_agent.probe_image_support", probe)
-    return probe
+    from openjiuwen.harness.image_modality_probe import reset_image_support_cache
+
+    reset_image_support_cache()
+    schedule = MagicMock()
+    monkeypatch.setattr("openjiuwen.harness.deep_agent.schedule_image_support_probe", schedule)
+    yield schedule
+    reset_image_support_cache()
 
 
 @pytest.fixture(autouse=True)

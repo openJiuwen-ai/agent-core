@@ -27,6 +27,11 @@ from openjiuwen.harness.rails._multimodal import should_enable_read_image_multim
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool, ListSkillTool, SkillTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 
+# Lines read when probing a SKILL.md for its YAML front matter. Bodies run to
+# tens of KB while the front matter is a handful of lines; a file whose front
+# matter does not fit within this budget falls back to a full read.
+_FRONT_MATTER_PROBE_LINES = 64
+
 
 class SkillUseRail(DeepAgentRail):
     """Rail that manages skill prompt injection and tool registration."""
@@ -710,12 +715,88 @@ class SkillUseRail(DeepAgentRail):
         """Normalize skill names into a set."""
         return set(cls._normalize_name_list(raw))
 
+    async def _read_skill_text(self, path: Path, *, head: Optional[int] = None) -> str:
+        """Read SKILL.md text, optionally only its first *head* lines.
+
+        Args:
+            path: Path to the SKILL.md file.
+            head: When set, read only that many leading lines. Skill metadata is
+                read-only, so the cross-process file lock is waived.
+
+        Returns:
+            The file text that was read.
+
+        Raises:
+            FileNotFoundError: The read failed or returned no content.
+        """
+        result = await self.sys_operation.fs().read_file(
+            str(path),
+            mode="text",
+            encoding="utf-8",
+            head=head,
+            only_read=True,
+        )
+
+        if getattr(result, "code", 0) != 0:
+            raise FileNotFoundError(
+                getattr(result, "message", f"read_file failed: {path}")
+            )
+
+        data = getattr(result, "data", None)
+        content = getattr(data, "content", None) if data is not None else None
+        if content is None:
+            raise FileNotFoundError(f"read_file content is None: {path}")
+
+        return content if isinstance(content, str) else str(content)
+
+    @staticmethod
+    def _split_front_matter(text: str) -> Optional[Tuple[dict, str]]:
+        """Split YAML front matter from the markdown body.
+
+        Args:
+            text: File text starting at the top of the file.
+
+        Returns:
+            The parsed front matter and the remaining body, or None when the
+            text does not open with a complete ``---`` delimited block.
+        """
+        if not text.startswith("---"):
+            return None
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            return None
+        _, yaml_block, body = parts
+        return yaml.safe_load(yaml_block) or {}, body.lstrip()
+
+    async def _load_front_matter(self, path: Path) -> Optional[dict]:
+        """Load only the YAML front matter of a SKILL.md.
+
+        A SKILL.md body can be tens of KB while the front matter is a handful of
+        lines, so a bounded head read is tried first and only a file whose front
+        matter does not fit falls back to reading the whole file.
+
+        Args:
+            path: Path to the SKILL.md file.
+
+        Returns:
+            The parsed front matter mapping, or None when the file has none.
+        """
+        head_text = await self._read_skill_text(path, head=_FRONT_MATTER_PROBE_LINES)
+        parsed = self._split_front_matter(head_text)
+        if parsed is not None:
+            return parsed[0]
+        if not head_text.startswith("---"):
+            return None
+        yaml_data, _ = await self._load_yaml(path)
+        return yaml_data
+
     async def _load_yaml(self, path: Path) -> Tuple[Optional[dict], str]:
         """Load YAML front matter and markdown body from SKILL.md."""
         result = await self.sys_operation.fs().read_file(
             str(path),
             mode="text",
             encoding="utf-8",
+            only_read=True,
         )
 
         if getattr(result, "code", 0) != 0:
@@ -741,7 +822,7 @@ class SkillUseRail(DeepAgentRail):
 
     async def _load_description(self, path: Path) -> str:
         """Load description from YAML front matter."""
-        yaml_data, _ = await self._load_yaml(path)
+        yaml_data = await self._load_front_matter(path)
         if yaml_data is None or "description" not in yaml_data:
             raise KeyError("SKILL.md file does not contain a description field")
         return str(yaml_data["description"])

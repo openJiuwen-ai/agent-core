@@ -472,6 +472,18 @@ class DeepAgentSpec(BaseModel):
     prompt_mode: Optional[str] = None
     vision_model: Optional[VisionModelSpec] = None
     audio_model: Optional[AudioModelSpec] = None
+    enable_read_image_multimodal: Optional[bool] = None
+    """Whether read_file may attach images natively.
+
+    ``None`` leaves it to the runtime probe; set it explicitly to skip that
+    probe entirely (an agent that never reads images should say ``False``).
+    """
+    enable_sys_operation: bool = True
+    """Whether this agent gets a sys_operation (filesystem / shell / code).
+
+    ``False`` skips resolving one, so none of its tool resources are registered.
+    Only meaningful for an agent that declares no such tools to begin with.
+    """
     enable_task_planning: bool = False
     restrict_to_sandbox: bool = False
     auto_create_workspace: bool = True
@@ -598,6 +610,8 @@ class DeepAgentSpec(BaseModel):
             prompt_mode=self.prompt_mode,
             vision_model_config=vision_config,
             audio_model_config=audio_config,
+            enable_read_image_multimodal=self.enable_read_image_multimodal,
+            enable_sys_operation=self.enable_sys_operation,
             enable_task_planning=self.enable_task_planning,
             restrict_to_work_dir=self.restrict_to_sandbox,
             auto_create_workspace=self.auto_create_workspace,
