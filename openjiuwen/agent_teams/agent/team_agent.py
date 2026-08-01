@@ -122,6 +122,14 @@ class TeamAgent(BaseAgent):
         return self._configurator.resources
 
     @property
+    def build_context(self):
+        """Return the assembly BuildContext, or None before configure()."""
+        harness = self.harness
+        if harness is not None:
+            return harness.build_context
+        return None
+
+    @property
     def tiny_agent_model_resolver(self):
         """Return the team's model-name resolver used to build tiny agents.
 

@@ -2,7 +2,7 @@ Cast a review vote on a task (reviewers only).
 
 ## When to use
 
-- After the leader assigns you as a reviewer on a task, once its author finishes the work the task enters `in_review` and the scheduling framework sends you a review-assignment message.
+- You are a reviewer for a task. Once its author finishes the work and the task enters `in_review`, the scheduling framework sends you a review-assignment message.
 - On that message, use `view_task(action=get)` for the goal and acceptance criteria, inspect the deliverable, then call this tool to vote.
 
 ## Decision
