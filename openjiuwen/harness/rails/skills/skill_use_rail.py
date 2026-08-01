@@ -11,7 +11,7 @@ import yaml
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.runner.runner import Runner
+from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.sections import SectionName
@@ -98,9 +98,12 @@ class SkillUseRail(DeepAgentRail):
         # Cache evolution experience texts per skill name.
         self._evolution_texts: Dict[str, str] = {}
 
-        # Track tools added by this rail only.
-        self._owned_tool_names: Set[str] = set()
-        self._owned_tool_ids: Set[str] = set()
+        # Abilities this rail actually registered, mapped from tool name to the
+        # exact card that was stored. The name is the ability-manager key
+        # (``add_ability`` rewrites card ids, so an id is not a stable handle),
+        # while the card identity tells uninit whether this rail is still the
+        # owner or another rail has since taken the name over.
+        self._owned_tool_cards: Dict[str, ToolCard] = {}
 
         # Snapshot of visible skill directories and SKILL.md mtimes.
         self._skills_snapshot_signature: Optional[Tuple[Tuple[str, float], ...]] = None
@@ -249,7 +252,13 @@ class SkillUseRail(DeepAgentRail):
         return filtered
 
     def init(self, agent):
-        """Register tool cards into agent and concrete tools into resource manager."""
+        """Register this rail's tools through the agent ability manager.
+
+        Every tool is registered with ``AbilityManager.add_ability`` (card plus
+        concrete instance) so the ability-manager card id and the
+        resource-manager key stay consistent. Abilities already owned by another
+        rail are left untouched; see the loop comment for why.
+        """
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
@@ -294,65 +303,62 @@ class SkillUseRail(DeepAgentRail):
                 )
             )
 
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is None:
+            logger.warning(
+                "[SkillUseRail] agent has no ability_manager; skill tools are not registered"
+            )
+            return
+
         for tool in tools:
+            # ``include_tools`` only provides a *fallback* read_file / code /
+            # bash set for hosts that mount no filesystem rail. When another
+            # rail (typically SysOperationRail) already owns the ability, that
+            # owner's instance carries policy this rail cannot reproduce
+            # (read-only mode, bash deny patterns, an explicit multimodal
+            # override), so defer to it instead of rebinding the shared
+            # resource-manager entry behind its back.
+            if ability_manager.get(tool.card.name) is not None:
+                logger.debug(
+                    "[SkillUseRail] ability '%s' is already registered by another "
+                    "owner; skip the fallback registration",
+                    tool.card.name,
+                )
+                continue
             try:
-                existing_tool = Runner.resource_mgr.get_tool(tool.card.id)
-                if existing_tool is not None:
-                    Runner.resource_mgr.remove_tool(tool.card.id)
-                Runner.resource_mgr.add_tool(tool)
-                self._owned_tool_ids.add(tool.card.id)
+                # Register card + instance through the single entry point so the
+                # ability-manager card id and the resource-manager key stay
+                # consistent (stateful tools get an agent-qualified id).
+                result = ability_manager.add_ability(tool.card, tool)
+                if result.added:
+                    self._owned_tool_cards[tool.card.name] = tool.card
             except Exception as exc:
                 logger.warning(
-                    f"[SkillUseRail] failed to add tool resource '{tool.card.id}' "
-                    f"to resource_mgr: {exc}"
+                    f"[SkillUseRail] failed to register tool '{tool.card.name}' "
+                    f"on ability_manager: {exc}"
                 )
 
-        if hasattr(agent, "ability_manager"):
-            for tool in tools:
-                try:
-                    result = agent.ability_manager.add(tool.card)
-                    if result.added:
-                        self._owned_tool_names.add(tool.card.name)
-                except Exception as exc:
-                    logger.warning(
-                        f"[SkillUseRail] failed to add tool card '{tool.card.name}' "
-                        f"to ability_manager: {exc}"
-                    )
-
     def uninit(self, agent):
-        """Remove tool cards from agent ability manager and resource manager."""
-        if hasattr(agent, "ability_manager"):
-            for tool_name in list(self._owned_tool_names):
+        """Remove the abilities this rail still owns from the agent."""
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is not None:
+            for tool_name, tool_card in list(self._owned_tool_cards.items()):
+                if ability_manager.get(tool_name) is not tool_card:
+                    # Another rail re-registered the name after this rail did
+                    # and now owns both the card and the live instance; tearing
+                    # it down here would unregister that rail's tool.
+                    continue
                 try:
-                    agent.ability_manager.remove(tool_name)
+                    # remove_ability mirrors add_ability: it drops the card and,
+                    # for stateful tools, the agent-qualified resource entry.
+                    ability_manager.remove_ability(tool_name)
                 except Exception as exc:
                     logger.warning(
                         f"[SkillUseRail] failed to remove tool '{tool_name}' "
                         f"from ability_manager: {exc}"
                     )
 
-        for tool_id in list(self._owned_tool_ids):
-            if Runner.resource_mgr.get_tool(tool_id) is None:
-                continue
-            try:
-                result = Runner.resource_mgr.remove_tool(tool_id)
-                if hasattr(result, "is_err") and result.is_err():
-                    logger.warning(
-                        "[SkillUseRail] failed to remove tool resource '%s' "
-                        "from resource_mgr: %s",
-                        tool_id,
-                        result,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "[SkillUseRail] failed to remove tool resource '%s' "
-                    "from resource_mgr: %s",
-                    tool_id,
-                    exc,
-                )
-
-        self._owned_tool_names.clear()
-        self._owned_tool_ids.clear()
+        self._owned_tool_cards.clear()
 
     async def refresh_skill_prompt(self, ctx: AgentCallbackContext) -> None:
         """Regenerate the skills system prompt"""

@@ -173,6 +173,28 @@ _SUB_AGENTS_DIR = "sub_agents"
 _ROUND_BOUNDARY = object()
 
 
+def _render_identity_prompt(prompt_builder: SystemPromptBuilder, language: str) -> str:
+    """Render the identity section alone, for ReActAgent's prompt template.
+
+    ``ReActAgent`` re-reads ``prompt_template`` into its own identity section on
+    every round (see ``ReActAgent._inner_invoke``) and, because DeepAgent shares
+    its builder with the ReActAgent, that builder still contributes the other
+    sections itself. Handing over the fully built prompt would therefore fold
+    every section present at configure time into identity and emit them twice.
+
+    Args:
+        prompt_builder: The builder holding the sections for this agent.
+        language: Language the section is rendered in.
+
+    Returns:
+        The rendered identity text, or an empty string when there is none.
+    """
+    identity_section = prompt_builder.get_section(SectionName.IDENTITY)
+    if identity_section is None:
+        return ""
+    return identity_section.render(language)
+
+
 class DeepAgent(BaseAgent):
     """High-level agent that delegates to an internal ReActAgent."""
 
@@ -280,12 +302,31 @@ class DeepAgent(BaseAgent):
                 result.msg(),
             )
 
+    @staticmethod
+    def _resolve_tool_owner_id(config: DeepAgentConfig) -> str:
+        """Return the owner id qualifying this agent's stateful tool registrations.
+
+        Tool ownership and persistence identity are separate concerns: the
+        checkpointer keys state by ``card.id``, so that id has to stay stable,
+        while the process-global resource manager needs one owner per live agent
+        or concurrent agents sharing a card silently overwrite each other's tool
+        instances. ``tool_owner_id`` lets a host separate the two; omitting it
+        keeps the historical behaviour of reusing ``card.id``.
+
+        Args:
+            config: The configuration being applied.
+
+        Returns:
+            The explicit ``tool_owner_id`` when set, otherwise the card id.
+        """
+        return config.tool_owner_id or config.card.id
+
     def _initial_configure(self, config: DeepAgentConfig) -> None:
         """First-time setup: persist config, create the inner ReActAgent, and queue rails."""
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
-            self.ability_manager.set_owner_id(self.card.id)
+            self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
 
         self._react_agent = self._create_react_agent()
         self._queue_pending_rails(config)
@@ -296,7 +337,7 @@ class DeepAgent(BaseAgent):
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
-            self.ability_manager.set_owner_id(self.card.id)
+            self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
 
         self._hot_reload_rails(config)
 
@@ -444,9 +485,10 @@ class DeepAgent(BaseAgent):
         else:
             prompt_builder.add_section(build_identity_section(language))
         prompt_builder.add_section(build_prompt_attachments_section(language))
-        prompt = prompt_builder.build()
         new_react_config = self._react_agent.config.model_copy()
-        new_react_config.prompt_template = [{"role": "system", "content": prompt}]
+        new_react_config.prompt_template = [
+            {"role": "system", "content": _render_identity_prompt(prompt_builder, language)}
+        ]
         self._react_agent.configure(new_react_config)
         self.system_prompt_builder = prompt_builder
         self._sync_prompt_builder_references()
@@ -480,16 +522,24 @@ class DeepAgent(BaseAgent):
 
         Public entry point for resource binding targets after a prompt section
         mutation: rebuilds ``react_agent.config.prompt_template`` from the
-        builder's current output and reconfigures the ReActAgent, then syncs
+        builder's identity section and reconfigures the ReActAgent, then syncs
         every prompt participant to the same builder reference via
         :meth:`_sync_prompt_builder_references`. Keeps the binding target from
         touching ``react_agent.config`` / ``react_agent.configure`` directly.
+
+        The template carries the identity alone, for the same reason it does in
+        :meth:`_hot_reload_system_prompt` -- see :func:`_render_identity_prompt`.
         """
         builder = self.system_prompt_builder
         if builder is None or self._react_agent is None:
             return
+        language = resolve_language(
+            self._deep_config.language if self._deep_config is not None else None
+        )
         new_react_config = self._react_agent.config.model_copy()
-        new_react_config.prompt_template = [{"role": "system", "content": builder.build()}]
+        new_react_config.prompt_template = [
+            {"role": "system", "content": _render_identity_prompt(builder, language)}
+        ]
         self._react_agent.configure(new_react_config)
         self._sync_prompt_builder_references()
 
@@ -832,8 +882,9 @@ class DeepAgent(BaseAgent):
         else:
             prompt_builder.add_section(build_identity_section(language))
         prompt_builder.add_section(build_prompt_attachments_section(language))
-        prompt = prompt_builder.build()
-        react_config.prompt_template = [{"role": "system", "content": prompt}]
+        react_config.prompt_template = [
+            {"role": "system", "content": _render_identity_prompt(prompt_builder, language)}
+        ]
 
         if cfg.model is not None:
             model = cfg.model

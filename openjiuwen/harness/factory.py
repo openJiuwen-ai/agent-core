@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Factory function for creating DeepAgent instances."""
 
 from __future__ import annotations
@@ -165,6 +165,7 @@ def resolve_deep_agent_parts(
     model: Model,
     *,
     card: Optional[AgentCard] = None,
+    tool_owner_id: Optional[str] = None,
     system_prompt: Optional[str] = None,
     tools: Optional[List[Tool | ToolCard]] = None,
     mcps: Optional[List[McpServerConfig]] = None,
@@ -273,6 +274,7 @@ def resolve_deep_agent_parts(
     config = DeepAgentConfig(
         model=model,
         card=card,
+        tool_owner_id=tool_owner_id,
         system_prompt=system_prompt,
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
@@ -404,6 +406,7 @@ def create_deep_agent(
     model: Model,
     *,
     card: Optional[AgentCard] = None,
+    tool_owner_id: Optional[str] = None,
     system_prompt: Optional[str] = None,
     tools: Optional[List[Tool | ToolCard]] = None,
     mcps: Optional[List[McpServerConfig]] = None,
@@ -440,7 +443,12 @@ def create_deep_agent(
     Args:
         model: Pre-constructed Model instance.
         card: Agent identity card. If None, a default
-            card is created.
+            card is created. Its id is the persistence identity used in
+            checkpointer keys, so it must stay stable across restarts.
+        tool_owner_id: Owner id qualifying this agent's stateful tool
+            registrations. Defaults to ``card.id``; pass it when several live
+            agents share one card identity (e.g. one adapter per session) so
+            their tool instances do not overwrite each other.
         system_prompt: System prompt for the inner
             ReActAgent.
         tools: Tool instances or tool cards to register on the agent.
@@ -491,6 +499,7 @@ def create_deep_agent(
     parts = resolve_deep_agent_parts(
         model,
         card=card,
+        tool_owner_id=tool_owner_id,
         system_prompt=system_prompt,
         tools=tools,
         mcps=mcps,

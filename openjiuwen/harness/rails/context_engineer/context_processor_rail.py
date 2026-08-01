@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Set, Tuple, Union
+from typing import Any, Dict, List, Tuple, Union
 
 from pydantic import BaseModel
 
@@ -38,6 +38,7 @@ from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader
     MessageSummaryOffloaderConfig as ForkedMessageSummaryOffloaderConfig,
 )
 from openjiuwen.core.foundation.llm import ModelRequestConfig
+from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.sections.compression_recall import build_compression_recall_section
@@ -124,7 +125,11 @@ class ContextProcessorRail(DeepAgentRail):
         self._all_processors: List[Tuple[str, BaseModel]] = []
         self._reload_enabled = False
         self._recall_enabled = False
-        self._owned_tool_names: Set[str] = set()
+        # Abilities this rail actually registered, mapped from tool name to the
+        # exact card that was stored. The name is the ability-manager key, while
+        # the card identity tells uninit whether this rail is still the owner or
+        # another rail has since taken the name over.
+        self._owned_tool_cards: Dict[str, ToolCard] = {}
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -360,9 +365,14 @@ class ContextProcessorRail(DeepAgentRail):
         if self._system_prompt_builder is not None:
             self._system_prompt_builder.remove_section("offload")
             self._system_prompt_builder.remove_section("compression_recall")
-        for tool_name in list(self._owned_tool_names):
+        for tool_name, tool_card in list(self._owned_tool_cards.items()):
+            if agent.ability_manager.get(tool_name) is not tool_card:
+                # Another rail re-registered the name after this rail did and
+                # now owns both the card and the live instance; tearing it down
+                # here would unregister that rail's tool.
+                continue
             agent.ability_manager.remove_ability(tool_name)
-        self._owned_tool_names.clear()
+        self._owned_tool_cards.clear()
         self._all_processors = []
         self._reload_enabled = False
         self._recall_enabled = False
@@ -629,7 +639,7 @@ class ContextProcessorRail(DeepAgentRail):
         tool = CompressionRecallTool(workspace_dir, language=language, agent_id=agent_id)
         result = add_ability(tool.card, tool)
         if result.added:
-            self._owned_tool_names.add(tool.card.name)
+            self._owned_tool_cards[tool.card.name] = tool.card
 
     @staticmethod
     def _protect_compression_recall_tool_results(processors: List[Tuple[str, BaseModel]]) -> None:

@@ -290,9 +290,15 @@ def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt
 
     assert agent.system_prompt_builder is not None
     assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
-    initial_prompt = agent._react_agent.config.prompt_template[0]["content"]
+    # The template carries the identity alone; the reminder reaches the model
+    # through the shared builder, exactly once (ReActAgent folds the template
+    # back into the identity section on every round).
+    initial_template = agent._react_agent.config.prompt_template[0]["content"]
+    assert "initial identity" in initial_template
+    assert "<prompt-attachment>" not in initial_template
+    initial_prompt = agent.system_prompt_builder.build()
     assert "initial identity" in initial_prompt
-    assert "<prompt-attachment>" in initial_prompt
+    assert initial_prompt.count("<prompt-attachment>") == 1
 
     agent.configure(
         DeepAgentConfig(
@@ -303,9 +309,67 @@ def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt
     )
 
     assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
-    reloaded_prompt = agent._react_agent.config.prompt_template[0]["content"]
+    reloaded_template = agent._react_agent.config.prompt_template[0]["content"]
+    assert "updated identity" in reloaded_template
+    reloaded_prompt = agent.system_prompt_builder.build()
     assert "updated identity" in reloaded_prompt
-    assert "<prompt-attachment>" in reloaded_prompt
+    assert reloaded_prompt.count("<prompt-attachment>") == 1
+
+
+@pytest.mark.asyncio
+async def test_rendered_system_prompt_keeps_each_section_once() -> None:
+    """The prompt actually sent to the model must not repeat a section.
+
+    ReActAgent writes ``prompt_template`` back into the identity section on
+    every round while DeepAgent's shared builder still owns the other sections,
+    so a template holding the fully built prompt used to emit them twice.
+    """
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            enable_task_loop=False,
+            auto_create_workspace=False,
+            language="en",
+            system_prompt="IDENTITY_MARKER",
+        )
+    )
+    react_agent = agent._react_agent
+    react_agent.prompt_builder = agent.system_prompt_builder
+
+    # Mirror what a round does: fold the template back into identity, then build.
+    rendered = react_agent._build_rendered_system_prompt({"query": "hi"})
+    react_agent.add_prompt_builder_section("identity", rendered, priority=10)
+    prompt = react_agent.prompt_builder.build()
+
+    assert prompt.count("IDENTITY_MARKER") == 1
+    assert prompt.count("<prompt-attachment>") == 1
+
+
+def test_apply_prompt_builder_to_react_agent_keeps_the_template_identity_only() -> None:
+    """The public re-render entry point must not fold every section into identity.
+
+    ``apply_prompt_builder_to_react_agent`` is what resource-binding targets
+    call after mutating a section. It writes ``prompt_template``, which
+    ReActAgent folds back into identity on every round, so handing it the fully
+    built prompt would reintroduce the duplication for anything that goes
+    through this path.
+    """
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            enable_task_loop=False,
+            auto_create_workspace=False,
+            language="en",
+            system_prompt="IDENTITY_MARKER",
+        )
+    )
+
+    agent.apply_prompt_builder_to_react_agent()
+
+    template = agent._react_agent.config.prompt_template[0]["content"]
+    assert "IDENTITY_MARKER" in template
+    assert "<prompt-attachment>" not in template
+    assert agent.system_prompt_builder.build().count("<prompt-attachment>") == 1
 
 
 @pytest.mark.asyncio

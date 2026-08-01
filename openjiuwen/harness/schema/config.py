@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """DeepAgent configuration dataclasses."""
 
 from __future__ import annotations
@@ -167,7 +167,15 @@ class DeepAgentConfig:
     Attributes:
         model: Pre-constructed Model instance for LLM
             calls.
-        card: Agent identity card.
+        card: Agent identity card. Its id is a *persistence* identity: it is the
+            entity segment of every checkpointer key, so it must stay stable
+            across restarts for a session's state to be recoverable.
+        tool_owner_id: Owner id used to qualify this agent's stateful tool
+            registrations in the process-global resource manager. Defaults to
+            ``card.id``. Set it when several agents legitimately share one card
+            identity (e.g. one adapter per session) so their tool instances do
+            not overwrite each other under the same id — the checkpointer key
+            keeps using ``card.id`` and is unaffected.
         system_prompt: System prompt injected into the
             ReAct agent's prompt template.
         context_engine_config: Reserved for P1 context
@@ -218,6 +226,7 @@ class DeepAgentConfig:
 
     model: Optional[Model] = None
     card: Optional[AgentCard] = None
+    tool_owner_id: Optional[str] = None
     system_prompt: Optional[str] = None
     context_engine_config: Optional[Any] = None
     kv_cache_affinity_config: Optional[KVCacheAffinityConfig] = None
