@@ -551,10 +551,16 @@ class AgentRail(ABC):
     Rails provide class-based lifecycle hooks with:
     - State management across callback invocations
     - Tools/skills that are auto-registered on the agent
-    - Priority-based execution ordering (higher = first)
+    - Priority-based ordering, for both ``init`` and callbacks (higher = first)
 
     Attributes:
-        priority: Execution priority (higher runs first)
+        priority: Execution priority (higher runs first). It orders two things
+            that are really one question: when this rail's ``init`` runs
+            relative to other rails', and when its callbacks run within a hook
+            chain. ``init`` is where a rail registers its tools and prompt
+            sections, so "my hook runs after that rail's" and "that rail's
+            tools exist when I initialize" both follow from one number. Rails
+            sharing a priority keep the order they were added in.
 
     Example::
 

@@ -103,7 +103,7 @@ class VerificationRail(DeepAgentRail):
             Defaults to :data:`VERIFICATION_ALLOWED_TOOLS`.
     """
 
-    priority = 90  # runs after SysOperationRail (100) so tools are already registered
+    priority = 90  # inits and runs after SysOperationRail (100), so its tools are present
 
     def __init__(self, allowed_tools: frozenset[str] | None = None) -> None:
         super().__init__()

@@ -405,6 +405,81 @@ def test_apply_prompt_builder_to_react_agent_keeps_the_template_identity_only() 
     assert agent.system_prompt_builder.build().count("<prompt-attachment>") == 1
 
 
+def test_skill_use_rail_initializes_after_the_filesystem_toolset() -> None:
+    """SkillUseRail defers read_file / code / bash to whoever owns them for real.
+
+    Its init only contributes fallback copies of those tools when nothing has
+    claimed the names yet, which is a question it can only answer correctly
+    once the rails that own them have initialized. Since rails initialize in
+    priority order, that requirement is a priority requirement.
+    """
+    from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
+    from openjiuwen.harness.tools.worktree.rails import WorktreeRail
+
+    assert SkillUseRail.priority < SysOperationRail.priority
+    assert SkillUseRail.priority < WorktreeRail.priority
+
+
+@pytest.mark.asyncio
+async def test_rails_are_initialized_in_priority_order() -> None:
+    """init runs highest priority first, so a rail's tools exist for lower ones.
+
+    A rail registers its tools and prompt sections in init, so "run my hook
+    after that rail's" and "see that rail's tools when I initialize" are the
+    same question. One priority answers both, whatever order rails were added.
+    """
+    init_order: List[str] = []
+
+    class _OrderRail(AgentRail):
+        def __init__(self, name: str, priority: int) -> None:
+            super().__init__()
+            self._name = name
+            self.priority = priority
+
+        def init(self, agent) -> None:
+            init_order.append(self._name)
+
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(enable_task_loop=False, auto_create_workspace=False)
+    )
+    agent.set_react_agent(FakeReactAgent(), initialized=False)
+    # Added low-to-high on purpose: list order must not decide this.
+    agent.add_rail(_OrderRail("low", 10))
+    agent.add_rail(_OrderRail("high", 100))
+    agent.add_rail(_OrderRail("mid", 50))
+
+    await agent.ensure_initialized()
+
+    assert init_order == ["high", "mid", "low"]
+
+
+@pytest.mark.asyncio
+async def test_rails_sharing_a_priority_keep_insertion_order() -> None:
+    """A stable sort, so an equal priority still means "the order I listed them"."""
+    init_order: List[str] = []
+
+    class _TiedRail(AgentRail):
+        priority = 100
+
+        def __init__(self, name: str) -> None:
+            super().__init__()
+            self._name = name
+
+        def init(self, agent) -> None:
+            init_order.append(self._name)
+
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(enable_task_loop=False, auto_create_workspace=False)
+    )
+    agent.set_react_agent(FakeReactAgent(), initialized=False)
+    agent.add_rail(_TiedRail("first"))
+    agent.add_rail(_TiedRail("second"))
+
+    await agent.ensure_initialized()
+
+    assert init_order == ["first", "second"]
+
+
 @pytest.mark.asyncio
 async def test_add_rail_lazy_register_on_first_invoke() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(DeepAgentConfig(enable_task_loop=False))

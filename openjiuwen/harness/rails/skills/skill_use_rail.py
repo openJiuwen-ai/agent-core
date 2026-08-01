@@ -36,7 +36,13 @@ _FRONT_MATTER_PROBE_LINES = 64
 class SkillUseRail(DeepAgentRail):
     """Rail that manages skill prompt injection and tool registration."""
 
-    priority = 100
+    # Below the filesystem toolset tier (SysOperationRail / WorktreeRail, 100)
+    # on purpose: ``init`` checks whether read_file / code / bash already have
+    # an owner before contributing its own fallback copies, and that check only
+    # means anything once the rails that own them for real have initialized.
+    # Level with McpRail / SubagentRail, which register their own tools and
+    # neither read nor write anything this rail touches.
+    priority = 95
 
     SKILL_MODE_ALL = "all"
     SKILL_MODE_AUTO_LIST = "auto_list"

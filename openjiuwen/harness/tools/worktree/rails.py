@@ -86,8 +86,9 @@ class WorktreeRail(DeepAgentRail):
             manager's hook chain (commit lint, auto-setup, etc.).
     """
 
-    # Match SysOperationRail so tool injection happens at the same
-    # priority tier as the filesystem/bash toolset.
+    # Same tier as SysOperationRail: tool injection happens alongside the
+    # filesystem/bash toolset, and before_invoke restores the worktree session
+    # *and* the cwd ContextVar ahead of every rail that reads the cwd.
     priority = 100
 
     def __init__(

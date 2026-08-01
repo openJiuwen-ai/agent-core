@@ -1062,7 +1062,13 @@ class DeepAgent(BaseAgent):
                 await self.unregister_rail(stale_rail)
         self._stale_rails.clear()
 
-        for rail_inst in self._pending_rails:
+        # Initialize in the same order callbacks run in: highest priority
+        # first. A rail's init registers its tools and prompt sections, so
+        # "run my hook after that rail's" and "see that rail's tools at init
+        # time" are the same question, and one number now answers both. The
+        # sort is stable, so rails sharing a priority keep the order the
+        # caller listed them in.
+        for rail_inst in sorted(self._pending_rails, key=lambda r: r.priority, reverse=True):
             if isinstance(rail_inst, TaskCompletionRail):
                 self._task_completion_rail = rail_inst
             if isinstance(rail_inst, DeepAgentRail):
