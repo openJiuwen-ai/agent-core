@@ -54,6 +54,8 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
     RunContext,
     RunKind,
+    init_rail,
+    log_rail_init_breakdown,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.image_modality_probe import (
@@ -1068,14 +1070,18 @@ class DeepAgent(BaseAgent):
         # time" are the same question, and one number now answers both. The
         # sort is stable, so rails sharing a priority keep the order the
         # caller listed them in.
+        rail_init_timings: List[tuple] = []
         for rail_inst in sorted(self._pending_rails, key=lambda r: r.priority, reverse=True):
             if isinstance(rail_inst, TaskCompletionRail):
                 self._task_completion_rail = rail_inst
             if isinstance(rail_inst, DeepAgentRail):
                 rail_inst.set_sys_operation(self._deep_config.sys_operation)
                 rail_inst.set_workspace(self._deep_config.workspace)
-            rail_inst.init(self)
+            rail_init_timings.append(
+                (type(rail_inst).__name__, init_rail(rail_inst, self))
+            )
             await self._register_rail_selective(rail_inst)
+        log_rail_init_breakdown(rail_init_timings)
         self._pending_rails.clear()
         self._sync_prompt_builder_references()
         self._initialized = True
@@ -1558,7 +1564,7 @@ class DeepAgent(BaseAgent):
             rail.set_sys_operation(self.deep_config.sys_operation)
             rail.set_workspace(self.deep_config.workspace)
         self._sync_prompt_builder_references()
-        rail.init(self)
+        init_rail(rail, self)
         await self._register_rail_selective(rail)
         self._sync_prompt_builder_references()
         return self
@@ -2905,7 +2911,7 @@ class DeepAgent(BaseAgent):
             if rail is not None and hasattr(rail, "set_goal_manager"):
                 rail.set_goal_manager(self.goal_manager)
                 try:
-                    rail.init(self)
+                    init_rail(rail, self)
                 except Exception:
                     logger.exception("[DeepAgent] Failed to register goal tools")
 

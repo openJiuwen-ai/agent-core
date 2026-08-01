@@ -48,6 +48,78 @@ if TYPE_CHECKING:
 # DEBUG line for profiling runs.
 SLOW_RAIL_CHAIN_SECONDS = 1.0
 
+# Above this, a single rail's init is reported at INFO. Init is one-off setup
+# rather than per-round glue, so the bar is lower than the rail-chain one: a
+# rail that spends 100ms building tools or loading skills is worth naming even
+# on a healthy start-up.
+SLOW_RAIL_INIT_SECONDS = 0.1
+
+# Above this, a whole batch of rail inits is reported at INFO. A dozen-plus
+# rails each doing modest setup add up without any one of them being at fault,
+# so the batch bar sits higher than the per-rail one.
+SLOW_RAIL_INIT_BATCH_SECONDS = 0.25
+
+
+def init_rail(rail: "AgentRail", agent: Any) -> float:
+    """Run one rail's ``init`` and report what it cost.
+
+    ``init`` is a plain synchronous call rather than a callback-framework
+    hook, and necessarily so: it takes the agent itself (not a context), and
+    it is the step that registers the rail's hooks *into* that framework, so
+    it has to run before the framework knows the rail exists. That leaves it
+    outside the chain timing in :meth:`AgentCallbackContext.fire` even though
+    init is where rails do their heaviest work — building tools, loading
+    skills, assembling prompt sections. This is the matching half of that
+    timing, and the single place every init call site should go through.
+
+    The elapsed time is recorded even when ``init`` raises, so a rail that
+    fails slowly is still attributable.
+
+    Args:
+        rail: Rail whose ``init`` should run.
+        agent: Agent handed to ``init``; also the owner the rail registers
+            its tools and prompt sections against.
+
+    Returns:
+        Elapsed seconds, so a batch caller can assemble a breakdown.
+    """
+    started_at = time.monotonic()
+    try:
+        rail.init(agent)
+    finally:
+        elapsed = time.monotonic() - started_at
+        log = logger.info if elapsed >= SLOW_RAIL_INIT_SECONDS else logger.debug
+        log(
+            "[RailInit] %s finished, elapsed_ms=%.1f",
+            type(rail).__name__,
+            elapsed * 1000,
+        )
+    return elapsed
+
+
+def log_rail_init_breakdown(entries: List[tuple]) -> None:
+    """Report what a batch of rail inits cost, slowest rail first.
+
+    A single total across a dozen-plus rails says nothing about which one to
+    look at, so the per-rail split is the point of this line.
+
+    Args:
+        entries: ``(rail class name, elapsed seconds)`` in initialization
+            order; an empty list logs nothing.
+    """
+    if not entries:
+        return
+    total = sum(elapsed for _, elapsed in entries)
+    ranked = sorted(entries, key=lambda item: item[1], reverse=True)
+    breakdown = " ".join("%s=%.1f" % (name, elapsed * 1000) for name, elapsed in ranked)
+    log = logger.info if total >= SLOW_RAIL_INIT_BATCH_SECONDS else logger.debug
+    log(
+        "[RailInit] %d rails initialized, total_ms=%.1f %s",
+        len(entries),
+        total * 1000,
+        breakdown,
+    )
+
 
 class RunKind(Enum):
     """Run kind enumeration for different execution modes."""

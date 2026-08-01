@@ -16,7 +16,7 @@ from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
-from openjiuwen.core.single_agent.rail.base import AgentRail
+from openjiuwen.core.single_agent.rail.base import AgentRail, init_rail
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails import SkillUseRail
 from openjiuwen.harness.rails.subagent import SubagentRail
@@ -382,7 +382,7 @@ async def _ensure_subagent_rail_ready(agent: DeepAgent) -> ResourceRef | None:
         created = True
 
     if not getattr(rail, "tools", None):
-        rail.init(agent)
+        init_rail(rail, agent)
     else:
         rail.refresh_available_agents(agent)
 
