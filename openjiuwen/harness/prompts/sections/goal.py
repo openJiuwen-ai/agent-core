@@ -28,7 +28,7 @@ _GOAL_PROTOCOL_PRIORITY = 88
 
 _GOAL_PROTOCOL: Dict[str, str] = {
     "cn": (
-        "\n\n## Goal 模式工作协议\n\n"
+        "\n\n# Goal 模式工作规则\n\n"
         "当用户消息中包含 <goal_task> 标签时，本次调用处于 Goal 模式。"
         "当前处理需要按照「尝试执行 -> 评估完成度」的节奏推进。"
         "你不需要解释这个机制。 \n\n"
@@ -50,7 +50,7 @@ _GOAL_PROTOCOL: Dict[str, str] = {
         "submit_goal_report 调用成功后**不允许再次调用其它工具**\n\n"
     ),
     "en": (
-        "\n\n## Goal Mode Protocol\n\n"
+        "\n\n# Goal Mode Work Rules\n\n"
         "When the user message contains a <goal_task> tag, this call is in Goal mode. "
         "The current handling should progress in an \"attempt -> assess completion\" "
         "cadence. Do not explain this mechanism.\n\n"

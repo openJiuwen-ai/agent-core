@@ -24,7 +24,7 @@ from openjiuwen.harness.prompts.sections.skills import (
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
-from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool, ListSkillTool, SkillTool
+from openjiuwen.harness.tools import BashTool, ReadFileTool, ListSkillTool, SkillTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 
 
@@ -62,7 +62,7 @@ class SkillUseRail(DeepAgentRail):
                 - "auto_list": add list_skill tool and let model decide when to inspect skills
             list_skill_model: Optional model used by list_skill tool.
             enable_cache: Whether to cache loaded skills across invokes.
-            include_tools: Whether to register read_file / code / bash tools.
+            include_tools: Whether to register read_file / bash tools.
             enabled_skills: Optional allow-list of skill names. Supports str or List[str].
             disabled_skills: Optional deny-list of skill names. Supports str or List[str].
             evolution_store: Optional EvolutionStore for progressive disclosure experience text.
@@ -279,7 +279,6 @@ class SkillUseRail(DeepAgentRail):
                         agent_id=agent_id,
                         enable_image_multimodal=enable_read_image_multimodal,
                     ),
-                    CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
                     BashTool(self.sys_operation, language=lang, agent_id=agent_id),
                 ]
             )
@@ -468,6 +467,7 @@ class SkillUseRail(DeepAgentRail):
                         index=idx,
                         skill_name=skill.name,
                         description=skill.description,
+                        language=self.system_prompt_builder.language,
                         # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                     )
                 )
@@ -625,6 +625,7 @@ class SkillUseRail(DeepAgentRail):
                         index=index,
                         skill_name=skill.name,
                         description=skill.description,
+                        language=self.system_prompt_builder.language,
                     )
                     for index, skill in enumerate(additions)
                 )
@@ -646,6 +647,7 @@ class SkillUseRail(DeepAgentRail):
                     index=index,
                     skill_name=skill.name,
                     description=skill.description,
+                    language=self.system_prompt_builder.language,
                 )
                 for index, skill in enumerate(additions)
             )
@@ -669,6 +671,7 @@ class SkillUseRail(DeepAgentRail):
                     index=idx,
                     skill_name=skill.name,
                     description=self._get_skill_description(skill),
+                    language=self.system_prompt_builder.language,
                     # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                 )
             )
@@ -734,11 +737,18 @@ class SkillUseRail(DeepAgentRail):
         return None, text
 
     async def _load_description(self, path: Path) -> str:
-        """Load description from YAML front matter."""
+        """Load the localized description from YAML front matter."""
         yaml_data, _ = await self._load_yaml(path)
-        if yaml_data is None or "description" not in yaml_data:
+        if yaml_data is None:
             raise KeyError("SKILL.md file does not contain a description field")
-        return str(yaml_data["description"])
+
+        builder = getattr(self, "system_prompt_builder", None)
+        language = str(getattr(builder, "language", "cn") or "cn").strip().lower()
+        localized_key = f"description_{language}"
+        description = yaml_data.get(localized_key) or yaml_data.get("description")
+        if not description:
+            raise KeyError("SKILL.md file does not contain a description field")
+        return str(description).strip()
 
     @staticmethod
     def _skill_md_path(skill: Skill) -> Path:

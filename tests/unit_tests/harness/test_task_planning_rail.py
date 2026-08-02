@@ -617,6 +617,18 @@ def test_enable_progress_repeat_true() -> None:
     assert rail.enable_progress_repeat is True
 
 
+@pytest.mark.asyncio
+async def test_inject_prompt_false_removes_todo_section() -> None:
+    """Disabling prompt injection keeps the rail active without the todo section."""
+    rail = TaskPlanningRail(inject_prompt=False)
+    rail.system_prompt_builder = MagicMock(language="en")
+
+    await rail.before_model_call(MagicMock())
+
+    rail.system_prompt_builder.remove_section.assert_called_once_with("todo")
+    rail.system_prompt_builder.add_section.assert_not_called()
+
+
 def test_list_tool_call_interval_default() -> None:
     """Default list_tool_call_interval is 20."""
     rail = TaskPlanningRail()

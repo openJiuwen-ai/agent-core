@@ -146,9 +146,10 @@ class TestSharedSurface:
 
     def test_system_prompt_block(self):
         prompt = JiuwenMemoryProvider().system_prompt_block()
-        assert isinstance(prompt, str)
-        assert "ltm_search" in prompt
-        assert len(prompt) > 0
+        assert "# 长期记忆规则" in prompt["cn"]
+        assert "# Long-Term Memory Rules" in prompt["en"]
+        assert "ltm_search" in prompt["cn"]
+        assert "ltm_search_summary" in prompt["en"]
 
     def test_schema_constants(self):
         assert LTM_SEARCH_SCHEMA["name"] == "ltm_search"

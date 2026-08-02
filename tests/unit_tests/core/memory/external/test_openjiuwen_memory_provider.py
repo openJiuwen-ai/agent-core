@@ -224,11 +224,12 @@ class TestInitialize:
 
 
 class TestSystemPromptBlock:
-    def test_returns_non_empty_string(self, provider_with_stores):
+    def test_returns_localized_prompt(self, provider_with_stores):
         prompt = provider_with_stores.system_prompt_block()
-        assert isinstance(prompt, str)
-        assert len(prompt) > 0
-        assert "ltm_search" in prompt
+        assert "# 长期记忆规则" in prompt["cn"]
+        assert "# Long-Term Memory Rules" in prompt["en"]
+        assert "ltm_search" in prompt["cn"]
+        assert "ltm_search_summary" in prompt["en"]
 
 
 class TestGetToolSchemas:

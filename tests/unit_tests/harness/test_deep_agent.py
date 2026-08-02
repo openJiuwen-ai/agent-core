@@ -279,7 +279,7 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
     assert agent.loop_coordinator is None
 
 
-def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt() -> None:
+def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
         DeepAgentConfig(
             enable_task_loop=False,
@@ -289,10 +289,10 @@ def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt
     )
 
     assert agent.system_prompt_builder is not None
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
+    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
     initial_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "initial identity" in initial_prompt
-    assert "<prompt-attachment>" in initial_prompt
+    assert "<prompt-attachment>" not in initial_prompt
 
     agent.configure(
         DeepAgentConfig(
@@ -302,10 +302,10 @@ def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt
         )
     )
 
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
+    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
     reloaded_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "updated identity" in reloaded_prompt
-    assert "<prompt-attachment>" in reloaded_prompt
+    assert "<prompt-attachment>" not in reloaded_prompt
 
 
 @pytest.mark.asyncio
