@@ -983,16 +983,16 @@ async def test_evolution_protocol_section_is_injected_without_command_parsing(tm
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
     assert section.name == SectionName.EVOLUTION_PROTOCOL
-    assert "## 技能演进自检" in section.content["cn"]
+    assert "# 技能演进自检" in section.content["cn"]
     for heading in (
-        "### 判断场景",
-        "#### 应考虑演进",
-        "#### 不应演进",
-        "### 用户意图信号",
-        "### 回复与确认规则",
-        "#### 最终回复",
-        "#### 用户确认",
-        "#### 工具执行",
+        "## 判断场景",
+        "### 应考虑演进",
+        "### 不应演进",
+        "## 用户意图信号",
+        "## 回复与确认规则",
+        "### 最终回复",
+        "### 用户确认",
+        "### 工具执行",
     ):
         assert heading in section.content["cn"]
     assert "### 核心原则" not in section.content["cn"]
@@ -1018,13 +1018,13 @@ async def test_evolution_protocol_section_supports_english(tmp_path):
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
     assert section.name == SectionName.EVOLUTION_PROTOCOL
-    assert "## Skill Evolution Self-Check" in section.content["en"]
-    assert "### Decision Scenarios" in section.content["en"]
-    assert "#### Consider Evolving" in section.content["en"]
-    assert "#### Do Not Evolve" in section.content["en"]
-    assert "### User Intent Signals" in section.content["en"]
-    assert "### Reply And Confirmation Rules" in section.content["en"]
-    assert "#### Tool Execution" in section.content["en"]
+    assert "# Skill Evolution Self-Check" in section.content["en"]
+    assert "## Decision Scenarios" in section.content["en"]
+    assert "### Consider Evolving" in section.content["en"]
+    assert "### Do Not Evolve" in section.content["en"]
+    assert "## User Intent Signals" in section.content["en"]
+    assert "## Reply And Confirmation Rules" in section.content["en"]
+    assert "### Tool Execution" in section.content["en"]
     assert "#### Runtime Follow-Up" not in section.content["en"]
     assert "from creation confirmation" not in section.content["en"]
     assert "Skill workflow is outdated" in section.content["en"]

@@ -10,7 +10,6 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
 )
-from openjiuwen.harness.prompts.sections.workspace import build_workspace_section as _build_workspace
 from openjiuwen.harness.prompts.sections.context import (
     build_context_file_sections,
     build_tools_section,
@@ -18,26 +17,37 @@ from openjiuwen.harness.prompts.sections.context import (
 
 
 _SYSTEM_CONTEXT_SECTIONS = frozenset({
+    "context.user",
+})
+
+# AGENT.md, SOUL.md, and IDENTITY.md remain ordinary Workspace files that
+# tools can read and edit, but their contents are not injected into the system
+# prompt.
+_DISABLED_CONTEXT_SECTIONS = frozenset({
     "context.agent",
     "context.soul",
     "context.identity",
-    "context.user",
 })
 
 _ATTACHMENT_CONTEXT_SECTIONS = frozenset({
     "context.heartbeat",
 })
 
-_ALL_SPLIT_CONTEXT_SECTIONS = _SYSTEM_CONTEXT_SECTIONS | _ATTACHMENT_CONTEXT_SECTIONS
+_ALL_SPLIT_CONTEXT_SECTIONS = (
+    _SYSTEM_CONTEXT_SECTIONS
+    | _DISABLED_CONTEXT_SECTIONS
+    | _ATTACHMENT_CONTEXT_SECTIONS
+)
 
 
 class ContextAssembleRail(DeepAgentRail):
-    """Rail that injects workspace directory structure and context files into system prompt.
+    """Rail that injects selected context files into the system prompt.
 
     In ``init``, captures references to ``system_prompt_builder`` and ``ability_manager``.
 
-    In ``before_model_call``, builds and injects workspace/context/tools sections
-    into the system prompt builder.
+        In ``before_model_call``, builds and injects selected context/tools sections
+        into the system prompt builder. Workspace, AGENT.md, SOUL.md, and
+        IDENTITY.md stay available to file tools but are not prompt-injected.
     """
 
     priority = 85
@@ -55,7 +65,7 @@ class ContextAssembleRail(DeepAgentRail):
         self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
     def uninit(self, agent) -> None:
-        """Remove workspace, context, and tools sections from system prompt builder."""
+        """Remove context and tools sections from system prompt builder."""
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("workspace")
             self.system_prompt_builder.remove_section("context")
@@ -84,7 +94,7 @@ class ContextAssembleRail(DeepAgentRail):
             logger.warning("[ContextAssembleRail] skip clearing prompt attachment section=%s: %s", section, exc)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject workspace directory structure and context files into messages before model call."""
+        """Inject selected context files into messages before model call."""
         if self.system_prompt_builder is None:
             return
         writer = None
@@ -107,11 +117,6 @@ class ContextAssembleRail(DeepAgentRail):
             return
 
         lang = self.system_prompt_builder.language
-        workspace_section = await _build_workspace(
-            self.sys_operation,
-            workspace,
-            lang,
-        )
         tools_section = build_tools_section(self._ability_manager, lang)
         context_sections = await build_context_file_sections(
             self.sys_operation,
@@ -119,10 +124,9 @@ class ContextAssembleRail(DeepAgentRail):
             lang,
         )
 
-        if workspace_section is not None:
-            self.system_prompt_builder.add_section(workspace_section)
-        else:
-            self.system_prompt_builder.remove_section("workspace")
+        # Workspace remains available for initialization and file tools, but
+        # its directory overview is intentionally not injected into prompts.
+        self.system_prompt_builder.remove_section("workspace")
 
         if tools_section is not None:
             self.system_prompt_builder.add_section(tools_section)
@@ -139,6 +143,10 @@ class ContextAssembleRail(DeepAgentRail):
                 self.system_prompt_builder.add_section(section)
             else:
                 self.system_prompt_builder.remove_section(section_name)
+
+        # These files are retained on disk but never prompt-injected.
+        for section_name in _DISABLED_CONTEXT_SECTIONS:
+            self.system_prompt_builder.remove_section(section_name)
 
         for section_name in _ATTACHMENT_CONTEXT_SECTIONS:
             section = context_sections.get(section_name)

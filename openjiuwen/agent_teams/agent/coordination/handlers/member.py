@@ -180,7 +180,7 @@ class MemberHandler(BaseCoordinationHandler):
         for attachment in attachments:
             if attachment is not None:
                 present_attachments.append(attachment)
-        return PromptAttachmentManager().render(present_attachments) or None
+        return PromptAttachmentManager(language=language).render(present_attachments) or None
 
     async def _build_team_info_section(self, language: str) -> PromptSection | None:
         """Build the same team_info section used by TeamPolicyRail."""

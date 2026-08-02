@@ -290,32 +290,26 @@ def test_build_tools_content():
     # Valid cn
     cn = build_tools_content(mock_manager, "cn")
     assert cn is not None
-    assert "- paid_search:" in cn
-    assert cn.index("- paid_search:") < cn.index("- free_search:")
-    assert "free_search" in cn
-    assert "read_file / write_file / edit_file" in cn
-    assert "bash" in cn
-    assert "code" in cn
-    assert "list_skill" in cn
-    assert "task_tool" in cn
-    assert cn.index("- bash:") < cn.index("## bash")
-    assert cn.index("- list_skill:") < cn.index("## task_tool")
-    assert "cron_list_jobs" not in cn
-    assert "t2" not in cn
-    assert "skip" not in cn
+    assert cn.startswith("# 工具使用规则\n")
+    assert "只调用当前请求中实际可用的工具" in cn
+    assert "不要用 `sleep` 轮询" in cn
+    assert "# 可用工具" not in cn
+    assert "## 工具调用去重规则" not in cn
+    assert "## bash 使用原则" not in cn
+    assert "paid_search" not in cn
+    assert "task_tool" not in cn
     assert cn.endswith("\n")
     # Valid en
     en = build_tools_content(mock_manager, "en")
     assert en is not None
-    assert "# Available Tools\n" in en
-    assert "- paid_search: Paid web search (preferred when configured)" in en
-    assert "- free_search: Free web search" in en
-    assert en.index("- paid_search:") < en.index("- free_search:")
-    assert "- read_file / write_file / edit_file: Read, write, and edit files" in en
-    assert "- bash: Run shell commands" in en
-    assert "- code: Run Python or JavaScript code" in en
-    assert "## bash Guidelines" in en
-    assert "## task_tool Guidelines" in en
+    assert en.startswith("# Tool Usage Rules\n")
+    assert "Call only tools that are actually available" in en
+    assert "instead of polling with `sleep`" in en
+    assert "# Available Tools" not in en
+    assert "## Tool Call Deduplication Rules" not in en
+    assert "## bash Guidelines" not in en
+    assert "paid_search" not in en
+    assert "task_tool" not in en
 
 
 @pytest.mark.asyncio
@@ -336,8 +330,8 @@ async def test_build_context_section_with_tools_content(tmp_path: Path):
         tools_content=tools_cn,
         timezone="Asia/Shanghai",
     )
-    assert "# 可用工具" in section_cn.render("cn")
-    assert "MyTool" in section_cn.render("cn")
+    assert "# 工具使用规则" in section_cn.render("cn")
+    assert "MyTool" not in section_cn.render("cn")
 
     section_en = await build_context_section(
         sys_operation,
@@ -346,8 +340,8 @@ async def test_build_context_section_with_tools_content(tmp_path: Path):
         tools_content=tools_en,
         timezone="Asia/Shanghai",
     )
-    assert "# Available Tools" in section_en.render("en")
-    assert "MyTool" in section_en.render("en")
+    assert "# Tool Usage Rules" in section_en.render("en")
+    assert "MyTool" not in section_en.render("en")
 
 
 @pytest.mark.asyncio
@@ -367,6 +361,8 @@ async def test_build_context_section_without_tools(tmp_path: Path):
     assert "## AGENT.md" in content
     assert "# 可用工具" not in content
     assert "# Available Tools" not in content
+    assert "# 工具使用规则" not in content
+    assert "# Tool Usage Rules" not in content
 
 
 # =============================================================================
@@ -375,8 +371,8 @@ async def test_build_context_section_without_tools(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_before_model_call_injects_sections(tmp_path: Path):
-    """before_model_call should inject workspace and context sections."""
+async def test_before_model_call_skips_workspace_agent_and_soul_prompt_sections(tmp_path: Path):
+    """Workspace files remain initialized but are not prompt-injected."""
     sys_operation = _make_sys_operation(tmp_path)
     card = AgentCard(name="test", description="test")
     workspace = Workspace(root_path=str(tmp_path))
@@ -399,16 +395,12 @@ async def test_before_model_call_injects_sections(tmp_path: Path):
     await rail.before_model_call(ctx)
 
     builder = agent.system_prompt_builder
-    ws = builder.get_section("workspace")
-    agent_section = builder.get_section("context.agent")
-    soul_section = builder.get_section("context.soul")
-    assert ws is not None
-    assert agent_section is not None
-    assert soul_section is not None
+    assert builder.get_section("workspace") is None
+    assert builder.get_section("context.agent") is None
+    assert builder.get_section("context.soul") is None
     assert not builder.has_section("context")
-    assert "# 工作空间" in ws.render("cn")
-    assert "## AGENT.md" in agent_section.render("cn")
-    assert "## SOUL.md" in soul_section.render("cn")
+    assert (tmp_path / "AGENT.md").is_file()
+    assert (tmp_path / "SOUL.md").is_file()
     assert await _attachment(agent, "session.sess1.context") is None
     assert await _attachment(agent, "session.sess1.context.daily_memory") is None
 
@@ -437,13 +429,11 @@ async def test_before_model_call_heartbeat_uses_lightweight_context(tmp_path: Pa
     builder = agent.system_prompt_builder
     heartbeat_section = await _attachment(agent, "session.sess1.context.heartbeat")
     daily_section = await _attachment(agent, "session.sess1.context.daily_memory")
-    assert builder.get_section("workspace") is not None
-    assert builder.get_section("context.agent") is not None
-    assert builder.get_section("context.soul") is not None
+    assert builder.get_section("workspace") is None
+    assert builder.get_section("context.agent") is None
+    assert builder.get_section("context.soul") is None
     assert heartbeat_section is not None
     assert not builder.has_section("context")
-    assert "# Agent Config" in builder.get_section("context.agent").render("cn")
-    assert "# Soul Content" in builder.get_section("context.soul").render("cn")
     assert "# Heartbeat Tasks" in (heartbeat_section.content or "")
     assert not builder.has_section("context.daily_memory")
     assert daily_section is None
@@ -476,8 +466,8 @@ async def test_before_model_call_keeps_user_in_system_and_skips_daily_memory(tmp
 
 
 @pytest.mark.asyncio
-async def test_before_model_call_injects_filled_identity_in_system(tmp_path: Path):
-    """Filled IDENTITY.md should be injected as system context every model call."""
+async def test_before_model_call_keeps_filled_identity_out_of_system(tmp_path: Path):
+    """Filled IDENTITY.md remains on disk but is not system context."""
     sys_operation = _make_sys_operation(tmp_path)
     await sys_operation.fs().write_file(
         f"{tmp_path}/IDENTITY.md",
@@ -494,9 +484,10 @@ async def test_before_model_call_injects_filled_identity_in_system(tmp_path: Pat
     await rail.before_invoke(ctx)
     await rail.before_model_call(ctx)
 
-    identity_section = agent.system_prompt_builder.get_section("context.identity")
-    assert identity_section is not None
-    assert "- **名字：** 青团" in identity_section.render("cn")
+    assert not agent.system_prompt_builder.has_section("context.identity")
+    stored_identity = await sys_operation.fs().read_file(f"{tmp_path}/IDENTITY.md")
+    assert stored_identity.code == 0
+    assert "- **名字：** 青团" in stored_identity.data.content
 
 
 @pytest.mark.asyncio
@@ -529,7 +520,7 @@ async def test_before_model_call_normal_turn_replaces_heartbeat_context_attachme
     normal_attachment = await _attachment(agent, "session.sess1.context.heartbeat")
     assert normal_attachment is not None
     assert "# Heartbeat Tasks" in (normal_attachment.content or "")
-    assert "# Agent Config" in agent.system_prompt_builder.get_section("context.agent").render("cn")
+    assert agent.system_prompt_builder.get_section("context.agent") is None
 
 
 @pytest.mark.asyncio
@@ -547,8 +538,8 @@ async def test_before_model_call_removes_sections_when_workspace_is_none(tmp_pat
     await rail.before_model_call(ctx)
 
     builder = agent.system_prompt_builder
-    assert builder.has_section("workspace")
-    assert builder.has_section("context.agent")
+    assert not builder.has_section("workspace")
+    assert not builder.has_section("context.agent")
 
     rail.workspace = None
     await rail.before_model_call(ctx)
@@ -675,14 +666,15 @@ async def test_before_model_call_with_empty_workspace(tmp_path: Path):
     await rail.before_model_call(ctx)
 
     builder = agent.system_prompt_builder
-    ws = builder.get_section("workspace")
-    assert ws is not None
-    assert builder.has_section("workspace")
+    assert builder.get_section("workspace") is None
+    assert not builder.has_section("workspace")
+    assert (tmp_path / "AGENT.md").is_file()
+    assert (tmp_path / "SOUL.md").is_file()
 
 
 @pytest.mark.asyncio
 async def test_before_model_call_with_only_readme(tmp_path: Path):
-    """before_model_call should include workspace section when README exists."""
+    """README remains in Workspace but does not create a prompt section."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     await sys_operation.fs().write_file(f"{workspace.root_path}/README.md", "# Test Project")
@@ -697,9 +689,9 @@ async def test_before_model_call_with_only_readme(tmp_path: Path):
     await rail.before_model_call(ctx)
 
     builder = agent.system_prompt_builder
-    ws = builder.get_section("workspace")
-    assert ws is not None
-    assert builder.has_section("workspace")
+    assert builder.get_section("workspace") is None
+    assert not builder.has_section("workspace")
+    assert (tmp_path / "README.md").is_file()
 
 
 @pytest.mark.asyncio
@@ -721,7 +713,7 @@ async def test_before_model_call_adds_tools_section(tmp_path: Path):
     builder = agent.system_prompt_builder
     tools_section = builder.get_section("tools")
     assert tools_section is not None
-    assert "test_tool" in tools_section.render("cn")
+    assert "# 工具使用规则" in tools_section.render("cn")
 
 
 @pytest.mark.asyncio
@@ -763,7 +755,7 @@ async def test_uninit_handles_none_builder(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_before_model_call_with_chinese_language(tmp_path: Path):
-    """before_model_call should use Chinese language for section rendering."""
+    """Workspace prompt injection stays disabled for Chinese runs."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     await sys_operation.fs().write_file(f"{workspace.root_path}/README.md", "# Test")
@@ -779,15 +771,14 @@ async def test_before_model_call_with_chinese_language(tmp_path: Path):
     await rail.before_model_call(ctx)
 
     builder = agent.system_prompt_builder
-    ws = builder.get_section("workspace")
-    assert ws is not None
-    assert builder.has_section("workspace")
-    assert str(tmp_path) in ws.render("cn")
+    assert builder.get_section("workspace") is None
+    assert not builder.has_section("workspace")
+    assert (tmp_path / "README.md").is_file()
 
 
 @pytest.mark.asyncio
 async def test_before_model_call_with_english_language(tmp_path: Path):
-    """before_model_call should use English language for section rendering."""
+    """Workspace prompt injection stays disabled for English runs."""
     sys_operation = _make_sys_operation(tmp_path)
     workspace = Workspace(root_path=str(tmp_path))
     await sys_operation.fs().write_file(f"{workspace.root_path}/README.md", "# Test")
@@ -803,7 +794,6 @@ async def test_before_model_call_with_english_language(tmp_path: Path):
     await rail.before_model_call(ctx)
 
     builder = agent.system_prompt_builder
-    ws = builder.get_section("workspace")
-    assert ws is not None
-    assert builder.has_section("workspace")
-    assert "# Workspace" in ws.render("en")
+    assert builder.get_section("workspace") is None
+    assert not builder.has_section("workspace")
+    assert (tmp_path / "README.md").is_file()

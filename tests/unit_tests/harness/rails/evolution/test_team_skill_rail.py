@@ -118,16 +118,16 @@ async def test_team_evolution_protocol_section_handles_confirmation_followup(tmp
 
     section = builder.get_section(SectionName.EVOLUTION_TEAM_PROTOCOL)
     assert section is not None
-    assert "## 团队 Skill 演进自检" in section.content["cn"]
+    assert "# 团队 Skill 演进自检" in section.content["cn"]
     for heading in (
-        "### 判断场景",
-        "#### 应考虑演进",
-        "#### 不应演进",
-        "### 用户意图信号",
-        "### 回复与确认规则",
-        "#### 最终回复",
-        "#### 用户确认",
-        "#### 工具执行",
+        "## 判断场景",
+        "### 应考虑演进",
+        "### 不应演进",
+        "## 用户意图信号",
+        "## 回复与确认规则",
+        "### 最终回复",
+        "### 用户确认",
+        "### 工具执行",
     ):
         assert heading in section.content["cn"]
     assert "#### 运行时 follow-up" not in section.content["cn"]

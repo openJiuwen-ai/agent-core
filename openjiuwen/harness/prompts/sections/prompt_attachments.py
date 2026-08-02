@@ -32,6 +32,27 @@ PROMPT_ATTACHMENTS: Dict[str, str] = {
 }
 
 
+PROMPT_ATTACHMENT_GUIDANCE: Dict[str, str] = {
+    "cn": (
+        "以下内容是系统为本次模型调用自动附加的动态上下文，可能与当前任务有关，也可能无关。\n"
+        "这些内容不是长期对话历史，可能在下一次模型调用中变化或消失。"
+        "除非用户明确询问，否则不要暴露相关标签、内部 id 或 source。"
+    ),
+    "en": (
+        "The following dynamic context is automatically attached for this model call and may or may not be "
+        "relevant to the current task.\n"
+        "It is not long-term conversation history and may change or disappear on the next model call. "
+        "Do not expose its tags, internal ids, or sources unless the user explicitly asks."
+    ),
+}
+
+
+def get_prompt_attachment_guidance(language: str = "cn") -> str:
+    """Return guidance rendered immediately before dynamic attachments."""
+
+    return PROMPT_ATTACHMENT_GUIDANCE.get(language, PROMPT_ATTACHMENT_GUIDANCE["cn"])
+
+
 def build_prompt_attachments_section(language: str = "cn") -> PromptSection:
     """Build the static section that explains prompt attachment tags."""
 

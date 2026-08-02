@@ -23,6 +23,43 @@ from openjiuwen.core.memory.external.provider import MemoryProvider
 DEFAULT_RECALL_USER_MEM_NUM = 5
 DEFAULT_RECALL_HISTORY_MEM_NUM = 3
 
+_SYSTEM_PROMPT_BLOCK = {
+    "cn": """# 长期记忆规则
+
+## 自动写入记忆
+
+系统具备跨会话长期记忆能力，并可能自动从对话中提取有长期价值的信息，包括：
+- 用户画像：身份、偏好和习惯。
+- 情景记忆：具体事件和决策。
+- 语义记忆：背景知识和技术细节。
+- 会话摘要：关键结论和主要讨论内容。
+
+## 自动查询记忆
+
+- 需要回忆用户信息、历史事件或背景知识时，调用 `ltm_search`。
+- 需要回忆历史会话的主题或结论时，调用 `ltm_search_summary`。
+- 查询应包含姓名、日期、事件或主题等关键字；结果不足时调整关键字后再搜索。
+- 当前用户消息和当前任务上下文优先于历史记忆。
+""",
+    "en": """# Long-Term Memory Rules
+
+## Automatic Memory Storage
+
+The system provides cross-session long-term memory and may automatically extract information with lasting value from conversations, including:
+- User profile: identity, preferences, and habits.
+- Episodic memory: specific events and decisions.
+- Semantic memory: background knowledge and technical details.
+- Conversation summaries: key conclusions and main discussion points.
+
+## Automatic Memory Retrieval
+
+- When recalling user information, historical events, or background knowledge, call `ltm_search`.
+- When recalling the topics or conclusions of previous conversations, call `ltm_search_summary`.
+- Include keywords such as names, dates, events, or topics in queries; if results are insufficient, adjust the keywords and search again.
+- The current user message and current task context take priority over historical memory.
+""",
+}
+
 LTM_SEARCH_SCHEMA = {
     "name": "ltm_search",
     "description": "在长期记忆中搜索相关信息。搜索范围包括用户用户画像、情景记忆和语义记忆。",
@@ -130,22 +167,8 @@ class OpenJiuwenMemoryProvider(MemoryProvider):
 
         self._is_initialized = True
 
-    def system_prompt_block(self) -> str:
-        return (
-            "# Long-Term Memory System\n\n"
-            "You have long-term memory capabilities and can remember user information across sessions. "
-            "The system automatically extracts valuable information from conversations and stores it in memory.\n\n"
-            "## Memory Search\n\n"
-            "When you need to recall previous information, use the `ltm_search` tool to search long-term memory.\n"
-            "- Search queries should contain key information (names, dates, event keywords)\n"
-            "- If results are insufficient, try searching again with different keywords\n\n"
-            "## Automatic Memory\n\n"
-            "The system automatically extracts from each conversation:\n"
-            "- User profile (identity, preferences, habits)\n"
-            "- Episodic memory (specific events, decisions)\n"
-            "- Semantic memory (background knowledge, technical details)\n"
-            "- Conversation summaries (key conclusions, main points)"
-        )
+    def system_prompt_block(self) -> dict[str, str]:
+        return _SYSTEM_PROMPT_BLOCK
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         return [LTM_SEARCH_SCHEMA, LTM_SEARCH_SUMMARY_SCHEMA]

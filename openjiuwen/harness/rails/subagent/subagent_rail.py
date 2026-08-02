@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import List, TYPE_CHECKING
+from typing import Callable, List, Optional, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import ToolCard
@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
 
+TaskPromptExtension = Callable[[AgentCallbackContext, str], Optional[str]]
+
+
 class SubagentRail(DeepAgentRail):
     """Rail that registers task or session tools for subagent delegation.
 
@@ -35,9 +38,24 @@ class SubagentRail(DeepAgentRail):
 
     priority = 95
 
-    def __init__(self, enable_async_subagent: bool = False) -> None:
+    def __init__(
+        self,
+        enable_async_subagent: bool = False,
+        task_prompt_extension: TaskPromptExtension | None = None,
+    ) -> None:
+        """Initialize the subagent rail.
+
+        Args:
+            enable_async_subagent: Whether to register async session tools
+                instead of the synchronous ``task_tool``.
+            task_prompt_extension: Optional callback that supplies additional
+                guidance for the synchronous ``task_tool`` prompt. It receives
+                the current callback context and prompt language, and its
+                result is appended to the same ``task_tool`` section.
+        """
         super().__init__()
         self.enable_async_subagent = enable_async_subagent
+        self.task_prompt_extension = task_prompt_extension
         self.tools = None
         self._toolkit = None  # only used in async branch
         self.system_prompt_builder = None
@@ -139,7 +157,14 @@ class SubagentRail(DeepAgentRail):
                     build_task_section,
                 )
 
-                section = build_task_section(language=self.system_prompt_builder.language)
+                language = self.system_prompt_builder.language
+                extension_content = None
+                if self.task_prompt_extension is not None:
+                    extension_content = self.task_prompt_extension(ctx, language)
+                section = build_task_section(
+                    language=language,
+                    extension_content=extension_content,
+                )
                 if section is not None:
                     self.system_prompt_builder.add_section(section)
                 else:
@@ -259,4 +284,5 @@ class SubagentRail(DeepAgentRail):
 
 __all__ = [
     "SubagentRail",
+    "TaskPromptExtension",
 ]

@@ -185,6 +185,7 @@ class PowerShellTool(Tool):
             if res.data is not None:
                 partial = render_partial_on_failure(
                     CommandOutput(
+                        command=p.command,
                         stdout=res.data.stdout or "",
                         stderr=res.data.stderr or "",
                         exit_code=res.data.exit_code if res.data.exit_code is not None else -1,
@@ -209,6 +210,7 @@ class PowerShellTool(Tool):
 
         content, is_error = render_tool_content(
             CommandOutput(
+                command=p.command,
                 stdout=stdout,
                 stderr=stderr,
                 exit_code=exit_code,
@@ -301,6 +303,7 @@ class PowerShellTool(Tool):
 
         content, is_error = render_tool_content(
             CommandOutput(
+                command=p.command,
                 stdout=accumulated_stdout,
                 stderr=accumulated_stderr,
                 exit_code=final_exit_code,
