@@ -79,6 +79,9 @@ from openjiuwen.harness.prompts import (
     PromptSection,
     SystemPromptBuilder,
 )
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentManager,
+)
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.identity import build_identity_section
 from openjiuwen.harness.workspace.workspace import Workspace
@@ -127,6 +130,7 @@ class DeepAgent(BaseAgent):
         self._task_completion_rail: Optional[TaskCompletionRail] = None
         self._initialized = False
         self.system_prompt_builder: Optional[SystemPromptBuilder] = None
+        self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager()
         self._invoke_active: bool = False
         self._auto_invoke_scheduled: bool = False
         self._bound_session_id: Optional[str] = None
@@ -372,6 +376,7 @@ class DeepAgent(BaseAgent):
         self.system_prompt_builder = prompt_builder
         self._react_agent.prompt_builder = prompt_builder
         self._react_agent.system_prompt_builder = prompt_builder
+        self._react_agent.prompt_attachment_manager = self.prompt_attachment_manager
         logger.info("[DeepAgent] System prompt hot reloaded")
 
     def _queue_pending_rails(self, config: DeepAgentConfig) -> None:
@@ -521,6 +526,9 @@ class DeepAgent(BaseAgent):
         self.system_prompt_builder = prompt_builder
         agent.prompt_builder = prompt_builder
         agent.system_prompt_builder = prompt_builder
+        # TeamPolicyRail writes team_members/team_info into this manager; ReActAgent
+        # must hold the same instance so window_mutators can inject them.
+        agent.prompt_attachment_manager = self.prompt_attachment_manager
 
         # Share ability manager so tools registered on DeepAgent are visible inside.
         agent.ability_manager = self.ability_manager

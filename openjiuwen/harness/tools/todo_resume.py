@@ -11,6 +11,8 @@ _ACTIVE_TODO_STATUS_VALUES = frozenset({"pending", "in_progress"})
 
 _RESUME_QUERY_PATTERNS = (
     re.compile(r"^(继续|接着(做|来|干)?|往下(做|走)?|接着吧|继续吧|继续执行|继续任务|继续完成)[。!！?？…]*$", re.I),
+    # Relay reconnect / interrupt-continue default phrase.
+    re.compile(r"^请?继续(刚才的)?任务[。!！?？…]*$", re.I),
     re.compile(r"^(重试|再试(一次|一下)?|请重试|重新尝试)[。!！?？…]*$", re.I),
     re.compile(r"^(continue|resume|go on|carry on|keep going)[.!?…]*$", re.I),
     re.compile(r"^(retry|try again)[.!?…]*$", re.I),

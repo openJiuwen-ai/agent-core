@@ -10,11 +10,12 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from openjiuwen.core.foundation.llm import BaseMessage
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
     from openjiuwen.harness.deep_agent import DeepAgent
 
 
@@ -131,6 +132,10 @@ class ActiveRound:
             call (between before_model_call and the AssistantMessage write).
             This is the only window where a hard-cancel is safe (it lands in
             the LLM await, never in a running tool).
+        model_call_ctx: Live ``AgentCallbackContext`` for the in-flight model
+            call. Pause/abort use it to ``request_abort_stream()`` so the ReAct
+            loop acloses the provider HTTP stream promptly instead of waiting
+            for the model to finish generating.
         tool_started: True once the current iteration has begun executing tool
             calls (side effects may have happened). Reset at the iteration
             boundary.
@@ -140,8 +145,10 @@ class ActiveRound:
         last_iter_snapshot: Most recent snapshot captured at an inner ReAct
             iteration boundary (AFTER_REACT_ITERATION). Primary rollback target
             for pause/abort — the nearest clean boundary.
-        pause_ack: Deferred ack Future for a cooperative (tool-phase) pause,
-            resolved by ``_on_round_done`` once the round settles to PAUSED.
+        pause_acks: Deferred ack Futures for cooperative (tool-phase) pause
+            callers, resolved by ``_on_round_done`` once the round settles to
+            PAUSED. Multiple waiters (quiesce + re-entrant pause) share this
+            list so a second ``pause()`` during ``PAUSING`` does not return early.
     """
 
     round_id: int
@@ -156,10 +163,11 @@ class ActiveRound:
     last_safe_snapshot: SafeStateSnapshot | None = None
     iter_phase: RoundPhase = RoundPhase.BOUNDARY
     model_call_in_flight: bool = False
+    model_call_ctx: "AgentCallbackContext | Any | None" = None
     tool_started: bool = False
     pause_requested: bool = False
     last_iter_snapshot: SafeStateSnapshot | None = None
-    pause_ack: asyncio.Future | None = None
+    pause_acks: list[asyncio.Future] = field(default_factory=list)
 
 
 @dataclass(slots=True)

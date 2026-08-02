@@ -183,6 +183,7 @@ def test_settings_forwarded_to_runtime_constructor() -> None:
         model_name=settings.model_name,
         mcp_cfg=settings.mcp_cfg,
         guardrails=settings.guardrails,
+        instance=None,
     )
 
 

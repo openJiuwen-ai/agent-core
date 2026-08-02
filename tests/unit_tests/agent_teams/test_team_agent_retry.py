@@ -282,3 +282,34 @@ def test_detect_task_failed_handles_empty_data() -> None:
     )
     result = stream_controller_module._detect_task_failed(chunk)
     assert result == (None, "")
+
+
+def test_tag_chunk_stamps_role_and_source_member_on_non_output_schema_chunk() -> None:
+    """Non-OutputSchema chunks (e.g. AgentResponseChunk from web adapters) must
+    be stamped with role/source_member so team consumers can attribute them
+    instead of skipping (chat.delta streaming to the member card depends on this).
+    """
+    controller = _make_controller(_RetryRuntime([]))
+    # A non-OutputSchema chunk duck-typed as a web adapter AgentResponseChunk.
+    chunk = SimpleNamespace(
+        request_id="r1",
+        channel_id="c",
+        payload={"event_type": "chat.delta", "content": "tok"},
+        is_complete=False,
+    )
+    tagged = controller._tag_chunk(chunk)
+    assert tagged is chunk  # not wrapped, stamped in place
+    assert getattr(tagged, "role", None) is TeamRole.LEADER
+    assert getattr(tagged, "source_member", None) == "stub"
+
+
+def test_tag_chunk_noop_when_no_blueprint_member() -> None:
+    """Without a blueprint member_name the chunk passes through untouched."""
+    controller = _make_controller(_RetryRuntime([]))
+    controller._get_blueprint = lambda: None  # type: ignore[method-assign]
+    chunk = SimpleNamespace(
+        payload={"event_type": "chat.delta", "content": "x"},
+    )
+    tagged = controller._tag_chunk(chunk)
+    assert tagged is chunk
+    assert not hasattr(tagged, "role")

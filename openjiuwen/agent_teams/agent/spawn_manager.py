@@ -67,6 +67,20 @@ class SpawnManager:
         self.recovery_tasks: set[asyncio.Task] = set()
         self.worktree_lifecycle = TeammateWorktreeLifecycle(configurator)
 
+    def _is_pause_blocking_spawn(self) -> bool:
+        """True when the host harness is pausing/paused or pause is armed."""
+        team_agent = self._get_team_agent()
+        harness = getattr(getattr(team_agent, "resources", None), "harness", None)
+        if harness is None:
+            return False
+        from openjiuwen.agent_teams.harness.state import HarnessState
+
+        state = getattr(harness, "state", None)
+        if state in (HarnessState.PAUSING, HarnessState.PAUSED):
+            return True
+        active = getattr(harness, "active_round", None)
+        return bool(active is not None and getattr(active, "pause_requested", False))
+
     async def spawn_teammate(
         self,
         ctx: TeamRuntimeContext,
@@ -77,6 +91,17 @@ class SpawnManager:
         resume_external_backend: bool = False,
     ) -> Optional[SpawnedProcessHandle]:
         member_name = ctx.member_name
+        # Pause window: refuse new spawns immediately. Kernel.pause deactivates
+        # the scheduler and shuts handles down, but a leader tool batch or a
+        # late auto-start can still race into spawn_teammate before the
+        # harness settles to PAUSED.
+        if self._is_pause_blocking_spawn():
+            team_logger.info(
+                "[{}] refuse spawn of {} — team pausing/paused",
+                self._configurator.member_name or "?",
+                member_name,
+            )
+            return None
         # Idempotency: skip a duplicate spawn of an already-spawned or
         # in-flight member. ``startup()`` re-reads UNSTARTED rows on every
         # auto-start trigger, so the same member can be requested several

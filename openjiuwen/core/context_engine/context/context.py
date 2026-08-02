@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import uuid
-from typing import List, Optional, Tuple, Dict, Any
+from typing import Awaitable, Callable, List, Optional, Tuple, Dict, Any
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -54,6 +54,9 @@ class SessionModelContext(ModelContext):
             token_counter: TokenCounter = None,
             workspace=None,
             sys_operation=None,
+            window_mutators: List[
+                Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
+            ] = None,
     ):
         self._message_id = 0
         self._validate_and_init_messages(history_messages)
@@ -67,6 +70,7 @@ class SessionModelContext(ModelContext):
         self._enable_reload_prompt = config.enable_reload_prompt
         self._workspace = workspace
         self._sys_operation = sys_operation
+        self._window_mutators = window_mutators if window_mutators is not None else []
         self._default_dialogue_round = config.default_window_round_num
         self._token_counter = token_counter
         self._processors = processors
@@ -305,6 +309,7 @@ class SessionModelContext(ModelContext):
             tools=tools or []
         )
 
+        call_window_mutators = kwargs.pop("window_mutators", None) or []
         kwargs.update({"window_size": window_size})
         kwargs.setdefault("sys_operation", self._sys_operation)
         for processor in self._processors:
@@ -366,6 +371,15 @@ class SessionModelContext(ModelContext):
         except Exception as exc:
             logger.warning(f"Failed to append active skill pins: {exc}")
 
+        self._validate_and_fix_context_window(window)
+        window_mutators = [*self._window_mutators, *call_window_mutators]
+        for mutator in window_mutators:
+            try:
+                window = await mutator(self, window)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to mutate context window by using {mutator}, reason: {str(e)}"
+                )
         self._validate_and_fix_context_window(window)
         if self._kv_cache_manager:
             await self._kv_cache_manager.release(window, **kwargs)

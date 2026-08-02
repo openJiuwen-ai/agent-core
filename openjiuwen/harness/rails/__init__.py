@@ -20,6 +20,7 @@ from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 from openjiuwen.harness.rails.session_rail import SessionRail
 from openjiuwen.harness.rails.memory_rail import MemoryRail
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
+from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.security import (
     BaseSecurityRail,
     SecurityAlert,
@@ -56,4 +57,5 @@ __all__ = [
     "MemoryRail",
     "LspRail",
     "AgentModeRail",
+    "SysOperationRail",
 ]

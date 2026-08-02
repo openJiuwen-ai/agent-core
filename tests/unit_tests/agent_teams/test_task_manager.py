@@ -983,6 +983,26 @@ class TestAssign:
         assert refreshed.assignee == "member1"
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_assign_activates_create_time_assignee(self, task_manager, message_bus):
+        """create_task may seed PENDING(assignee); assign must start via start_task CAS."""
+        created = await task_manager.add_graph(
+            [TaskGraphSpec(title="T", content="c", task_id="pre-assigned", assignee="member1")]
+        )
+        assert created.ok
+        seeded = await task_manager.get("pre-assigned")
+        assert seeded.assignee == "member1"
+        assert seeded.status == TaskStatus.PENDING.value
+
+        result = await task_manager.assign("pre-assigned", "member1")
+
+        assert result.ok, result.reason
+        refreshed = await task_manager.get("pre-assigned")
+        assert refreshed.status == TaskStatus.IN_PROGRESS.value
+        assert refreshed.assignee == "member1"
+        assert _published_events(message_bus, TeamEvent.TASK_CLAIMED)
+
+    @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_assign_to_unknown_member_fails_at_manager_layer(self, task_manager):
         """Assignee must exist in team_member, otherwise the task would

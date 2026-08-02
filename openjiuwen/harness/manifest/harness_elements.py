@@ -28,11 +28,7 @@ from openjiuwen.harness.manifest import (
 )
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
-from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
-from openjiuwen.harness.rails.mcp_rail import McpRail
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
-from openjiuwen.harness.rails.skills.skill_create_rail import SkillCreateRail
-from openjiuwen.harness.rails.subagent.verification_rail import VerificationRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
@@ -41,7 +37,9 @@ from openjiuwen.harness.subagents.code_agent import build_code_agent_config
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
-from openjiuwen.harness.subagents.verification_agent import build_verification_agent_config
+
+# Optional rails / subagents (may be absent on ENT agent-core trees). Import lazily
+# in builders so a missing package does not skip the entire harness_elements catalog.
 
 # ---------------------------------------------------------------------------
 # Element names
@@ -160,6 +158,32 @@ def _build_memory_rail(params: dict[str, Any], context: Any) -> Any:
     return MemoryRail(**dict(params or {}))
 
 
+def _build_context_assemble_rail(params: dict[str, Any], context: Any) -> Any:
+    """Lazy-build ContextAssembleRail (ENT trees may lack ``rails.context_engineer``)."""
+    del params, context
+    from openjiuwen.harness.rails.context_engineer.context_assemble_rail import (
+        ContextAssembleRail,
+    )
+
+    return ContextAssembleRail()
+
+
+def _build_mcp_rail(params: dict[str, Any], context: Any) -> Any:
+    """Lazy-build McpRail (optional on ENT agent-core)."""
+    del params, context
+    from openjiuwen.harness.rails.mcp_rail import McpRail
+
+    return McpRail()
+
+
+def _build_skill_create_rail(params: dict[str, Any], context: Any) -> Any:
+    """Lazy-build SkillCreateRail (optional on ENT agent-core)."""
+    del context
+    from openjiuwen.harness.rails.skills.skill_create_rail import SkillCreateRail
+
+    return SkillCreateRail(**dict(params or {}))
+
+
 class TaskCompletionInput(ConstructionInput):
     """Construction inputs for TaskCompletionRail."""
 
@@ -180,9 +204,11 @@ class VerificationInput(ConstructionInput):
     )
 
 
-def _build_verification_rail(params: dict[str, Any], context: Any) -> VerificationRail:
+def _build_verification_rail(params: dict[str, Any], context: Any) -> Any:
     """Build VerificationRail; coerce list allowlists to frozenset."""
     del context
+    from openjiuwen.harness.rails.subagent.verification_rail import VerificationRail
+
     p = dict(params or {})
     allowed = p.pop("allowed_tools", None)
     if allowed is not None and not isinstance(allowed, frozenset):
@@ -225,13 +251,13 @@ harness_element(
     kind=ElementKind.RAIL,
     name=MCP,
     description="MCP resource list/read tools rail.",
-    builder=McpRail,
+    builder=_build_mcp_rail,
 )
 harness_element(
     kind=ElementKind.RAIL,
     name=CONTEXT_ASSEMBLE,
     description="Workspace / context prompt assembly rail.",
-    builder=ContextAssembleRail,
+    builder=_build_context_assemble_rail,
 )
 harness_element(
     kind=ElementKind.RAIL,
@@ -266,7 +292,7 @@ harness_element(
     name=SKILL_CREATE,
     description="Skill-creation evolution rail.",
     input_model=SkillCreateInput,
-    builder=SkillCreateRail,
+    builder=_build_skill_create_rail,
 )
 
 
@@ -396,6 +422,10 @@ def build_research_subagent(factory_kwargs: dict[str, Any], context: Any) -> Any
 
 def build_verification_subagent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     """Build verification sub-agent config; parent model from extras when present."""
+    from openjiuwen.harness.subagents.verification_agent import (
+        build_verification_agent_config,
+    )
+
     inp = SubAgentInput.resolve(factory_kwargs, context)
     return build_verification_agent_config(model=_parent_model(context), **_common_kwargs(inp))
 

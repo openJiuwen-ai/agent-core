@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 import shutil
+import socket
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +25,7 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 from .agents import build_browser_worker_agent
-from .config import BrowserRunGuardrails, parse_command_args, resolve_playwright_mcp_cwd
+from .config import BrowserInstanceConfig, BrowserRunGuardrails, parse_command_args, resolve_playwright_mcp_cwd
 from .profiles import BrowserProfile, BrowserProfileStore
 from ..drivers.managed_browser import ManagedBrowserDriver, _default_chrome_user_data_dir
 from ..utils.parsing import extract_json_object
@@ -127,6 +128,7 @@ class BrowserService:
         mcp_cfg: McpServerConfig,
         guardrails: BrowserRunGuardrails,
         cancel_store: Optional[BaseKVStore] = None,
+        instance: Optional[BrowserInstanceConfig] = None,
     ) -> None:
         self.provider = provider
         self.api_key = api_key
@@ -134,6 +136,7 @@ class BrowserService:
         self.model_name = model_name
         self.mcp_cfg = mcp_cfg
         self.guardrails = guardrails
+        self._instance = instance or BrowserInstanceConfig()
         self._cancel_store: BaseKVStore = cancel_store or InMemoryKVStore()
 
         self.started = False
@@ -147,7 +150,7 @@ class BrowserService:
         self._screenshots_dir = self._mcp_cwd / self._screenshot_subdir
         self._artifacts_dir = self._mcp_cwd / self._artifacts_subdir
         self._profile_store = BrowserProfileStore(self._resolve_profile_store_path())
-        self._profile_name = (os.getenv("BROWSER_PROFILE_NAME") or "jiuwenclaw").strip() or "jiuwenclaw"
+        self._profile_name = self._resolve_profile_name()
         self._driver_mode = self._resolve_driver_mode()
         self._active_profile: Optional[BrowserProfile] = None
         self._managed_driver: Optional[ManagedBrowserDriver] = None
@@ -199,14 +202,36 @@ class BrowserService:
                 paths.append(legacy)
         return paths
 
-    @staticmethod
-    def _resolve_driver_mode() -> str:
-        explicit = (os.getenv("BROWSER_DRIVER") or "").strip().lower()
+    def _resolve_profile_name(self) -> str:
+        """Resolve the active profile name (per-instance key wins over env).
+
+        Distinct browser keys map to distinct profile names so the managed
+        user-data-dir and persisted port never collide across agents.
+        """
+        instance = self._instance
+        name = ""
+        if instance:
+            name = (instance.profile_name or instance.sanitized_key() or "").strip()
+        if not name:
+            name = (os.getenv("BROWSER_PROFILE_NAME") or "").strip()
+        return name or "jiuwenclaw"
+
+    def _resolve_driver_mode(self) -> str:
+        explicit = (self._instance.driver_mode or "").strip().lower() if self._instance else ""
+        if not explicit:
+            explicit = (os.getenv("BROWSER_DRIVER") or "").strip().lower()
         if explicit:
             if explicit not in {"remote", "managed", "extension"}:
                 raise ValueError("BROWSER_DRIVER must be one of: remote, managed, extension")
             return explicit
         return "remote"
+
+    @staticmethod
+    def _allocate_free_port() -> int:
+        """Reserve an OS-assigned free TCP port for a managed Chrome launch."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
 
     @staticmethod
     def _cancel_key(session_id: str, request_id: Optional[str] = None) -> str:
@@ -255,12 +280,18 @@ class BrowserService:
         return False
 
     def _resolve_existing_cdp_profile(self) -> Optional[BrowserProfile]:
+        # A keyed instance must only ever reuse a browser whose profile name
+        # matches its own key. The shared store tracks a single global
+        # selected_profile; adopting it would let whoever starts second attach
+        # to another key's live Chrome, collapsing the per-key isolation.
+        keyed = bool(self._instance and self._instance.key)
         candidates: list[BrowserProfile] = []
         for store_path in self._iter_profile_store_paths():
             store = BrowserProfileStore(store_path)
-            selected = store.selected_profile()
-            if selected is not None:
-                candidates.append(selected)
+            if not keyed:
+                selected = store.selected_profile()
+                if selected is not None:
+                    candidates.append(selected)
             named = store.get_profile(self._profile_name)
             if named is not None and all(named.name != item.name for item in candidates):
                 candidates.append(named)
@@ -291,8 +322,21 @@ class BrowserService:
         env_map = dict(params.get("env", {}) or {})
         return str(env_map.get("PLAYWRIGHT_MCP_CDP_ENDPOINT") or "").strip()
 
-    def _build_managed_profile(self) -> BrowserProfile:
-        host = (os.getenv("BROWSER_MANAGED_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    def _configured_browser_binary(self) -> str:
+        instance_binary = self._instance.browser_binary if self._instance else ""
+        return str(instance_binary or os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
+
+    def _resolve_managed_port(self) -> int:
+        """Resolve the managed Chrome debug port.
+
+        Precedence: explicit per-instance port > (keyed: auto-allocate a free
+        port; legacy/unkeyed: env BROWSER_MANAGED_PORT, else 9333).
+        """
+        instance = self._instance
+        if instance and instance.managed_port > 0:
+            return instance.managed_port
+        if instance and instance.key:
+            return self._allocate_free_port()
         port_raw = (os.getenv("BROWSER_MANAGED_PORT") or "9333").strip()
         try:
             port = int(port_raw)
@@ -300,17 +344,25 @@ class BrowserService:
                 raise ValueError
         except ValueError as exc:
             raise ValueError(f"Invalid BROWSER_MANAGED_PORT: {port_raw}") from exc
+        return port
+
+    def _build_managed_profile(self) -> BrowserProfile:
+        instance = self._instance
+        host = (os.getenv("BROWSER_MANAGED_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+        port = self._resolve_managed_port()
 
         kill_existing_raw = (os.getenv("BROWSER_MANAGED_KILL_EXISTING") or "").strip().lower()
         kill_existing = kill_existing_raw in {"1", "true", "yes", "on"}
-        explicit_user_data_dir = (os.getenv("BROWSER_MANAGED_USER_DATA_DIR") or "").strip()
+        explicit_user_data_dir = (
+            (instance.user_data_dir if instance else "") or (os.getenv("BROWSER_MANAGED_USER_DATA_DIR") or "")
+        ).strip()
         if explicit_user_data_dir:
             user_data_dir = explicit_user_data_dir
         elif kill_existing:
             user_data_dir = _default_chrome_user_data_dir()
         else:
             user_data_dir = str(self._mcp_cwd / ".browser-profiles" / self._profile_name)
-        browser_binary = (os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
+        browser_binary = self._configured_browser_binary()
         extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
         cdp_url = f"http://{host}:{port}"
         return BrowserProfile(

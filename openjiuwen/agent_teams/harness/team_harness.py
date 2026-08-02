@@ -113,12 +113,29 @@ class TeamHarness:
     async def start(self, *, team_session: Optional[Any] = None) -> None:
         """Bind a child session and start the supervisor for one run cycle.
 
-        The native is torn down at ``stop`` (round-end) and rebuilt here for the
-        next cycle because a stopped native is terminal. Cross-cycle state (task
-        plan, history, plan mode) recovers from the persisted session id shared
-        by the child session.
+        The native is torn down at ``stop`` (round-end / classic standby pause)
+        and rebuilt here for the next cycle because a stopped native is
+        terminal. Cross-cycle state (task plan, history, plan mode) recovers
+        from the persisted session id shared by the child session.
         """
-        if self._native is None or self._native.state is HarnessState.TERMINATED:
+        rebuild_native = False
+        if self._native is not None and self._native.state is HarnessState.PAUSED:
+            # Defensive: pause should have stopped the harness already. Do not
+            # warm-reuse; stop and rebuild so resume matches task-end standby.
+            rebuild_native = True
+            try:
+                await self._native.stop()
+            except Exception:
+                logger.debug(
+                    "[TeamHarness] stop leftover PAUSED native failed session=%s",
+                    self._session_id_of(team_session),
+                    exc_info=True,
+                )
+        if (
+            rebuild_native
+            or self._native is None
+            or self._native.state is HarnessState.TERMINATED
+        ):
             self._native = NativeHarness(self._agent_spec, self._build_context)
         if self._bg_controller is not None:
             self._native.background_task_controller = self._bg_controller
@@ -250,6 +267,13 @@ class TeamHarness:
     def state(self) -> HarnessState:
         """Return the native's lifecycle phase, or IDLE when no cycle is live."""
         return self._native.state if self._native is not None else HarnessState.IDLE
+
+    @property
+    def active_round(self):
+        """Forward the native's in-flight round (for pause/abort LLM abort)."""
+        if self._native is None:
+            return None
+        return self._native.active_round
 
     @property
     def session_id(self) -> Optional[str]:

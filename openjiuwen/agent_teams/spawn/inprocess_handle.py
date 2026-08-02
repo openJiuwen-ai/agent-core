@@ -76,13 +76,48 @@ class InProcessSpawnHandle:
             await asyncio.wait_for(asyncio.shield(self._task), timeout=timeout or 10.0)
         return self._task.done()
 
+    def abort_llm_stream(self) -> None:
+        """Best-effort ``request_abort_stream`` on the member's active model call.
+
+        Stops token burn without tearing down the in-process task / handle.
+        Arms ``pause_requested`` first so a stream that ends before
+        ``harness.pause`` cannot continue into tools.
+        """
+        agent = self.agent_ref
+        if agent is None:
+            return
+        harness = None
+        resources = getattr(agent, "resources", None)
+        if resources is not None:
+            harness = getattr(resources, "harness", None)
+        if harness is None:
+            harness = getattr(agent, "harness", None)
+        active = getattr(harness, "active_round", None) if harness is not None else None
+        if active is None:
+            return
+        with contextlib.suppress(Exception):
+            active.pause_requested = True
+        ctx = getattr(active, "model_call_ctx", None)
+        if ctx is None:
+            return
+        with contextlib.suppress(Exception):
+            ctx.request_abort_stream()
+
     async def force_kill(self) -> None:
-        """Immediately cancel the task."""
+        """Immediately cancel the task.
+
+        Abort any in-flight LLM stream first so provider ``aclose`` runs
+        promptly; bare task cancellation can otherwise wait on a long
+        generation and stall team pause for minutes.
+        """
         self._shutdown_requested = True
+        self.abort_llm_stream()
         if self._task is not None and not self._task.done():
             self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                # Bound the wait: if cancel does not unwind quickly, abandon
+                # awaiting so leader pause can proceed.
+                await asyncio.wait_for(asyncio.shield(self._task), timeout=2.0)
 
     async def wait_for_completion(self) -> int:
         """Block until the wrapped task finishes. Returns 0 on success."""

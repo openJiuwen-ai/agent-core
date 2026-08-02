@@ -79,10 +79,11 @@ _LABELS: dict[str, dict[str, str]] = {
         "team_desc": "团队目标与指令",
         "team_workspace": "团队共享工作空间",
         "team_workspace_purpose": (
-            "用于存放团队共享文件（方案、设计、交付成果），"
-            "所有成员通过该路径前缀读写同一份文件，系统自动管理版本和文件锁"
+            "工具读写请用挂载前缀（如 `.team/foo.md`），不要把绝对路径和 `.team/` 拼在一起；"
+            "磁盘绝对路径是共享根下的文件（如 `{abs}/foo.md`），不是 `{abs}/.team/foo.md`。"
+            "系统自动管理版本和文件锁"
         ),
-        "team_workspace_abs": "绝对路径",
+        "team_workspace_abs": "共享根绝对路径（勿再追加 .team）",
         "members_heading": "# 成员关系",
         "leader_mode_plan": (
             "团队成员执行模式: plan_mode（成员选择或接到任务后需直接通过 submit_plan 提交计划，"
@@ -109,11 +110,13 @@ _LABELS: dict[str, dict[str, str]] = {
         "team_desc": "Team Goal & Directives",
         "team_workspace": "Team Shared Workspace",
         "team_workspace_purpose": (
-            "Holds team-shared files (plans, designs, deliverables); "
-            "all members read/write the same files through this path prefix. "
+            "For tool I/O use the mount prefix (e.g. `.team/foo.md`); "
+            "do NOT concatenate the absolute root with `.team/`. "
+            "On-disk absolute paths are files under the shared root "
+            "(e.g. `{abs}/foo.md`), never `{abs}/.team/foo.md`. "
             "Versioning and file locks are managed automatically"
         ),
-        "team_workspace_abs": "Absolute path",
+        "team_workspace_abs": "Shared-root absolute path (do not append .team)",
         "members_heading": "# Relationships",
         "leader_mode_plan": (
             "Teammate execution mode: plan_mode (teammates must submit a plan "
@@ -430,9 +433,9 @@ def build_team_info_section(
             and ``desc`` keys (the shape returned by
             ``TeamBackend.get_team_info``).
         team_workspace_mount: Agent-relative mount point of the team
-            shared workspace (e.g. ``.team/{team_name}/``).  When set,
-            the section appends a bullet telling the LLM how to
-            read/write team-shared files from its own workspace.
+            shared workspace (e.g. ``.team/``).  When set, the section
+            appends a bullet telling the LLM how to read/write
+            team-shared files from its own workspace.
         team_workspace_path: Absolute path of the team shared
             workspace on disk.  Purely informational; appended as a
             nested bullet when ``team_workspace_mount`` is provided, or
@@ -466,6 +469,17 @@ def build_team_info_section(
         lines.append(f"  - {labels['team_workspace_purpose']}")
         if path:
             lines.append(f"  - {labels['team_workspace_abs']}: `{path}`")
+            # Explicit anti-join rule — models often concatenate abs + mount.
+            if language == "cn":
+                lines.append(
+                    f"  - 读写示例：`{mount}report.md`；对应磁盘路径：`{path}/report.md`"
+                    f"（错误示例：`{path}/.team/report.md`）"
+                )
+            else:
+                lines.append(
+                    f"  - I/O example: `{mount}report.md` → on disk `{path}/report.md` "
+                    f"(wrong: `{path}/.team/report.md`)"
+                )
     elif path:
         lines.append(f"- {labels['team_workspace']}: `{path}`")
         lines.append(f"  - {labels['team_workspace_purpose']}")

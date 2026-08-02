@@ -766,6 +766,28 @@ class ReActAgent(BaseAgent):
                     _session_id = str(_sid_getter() or "")
                 except Exception:
                     _session_id = ""
+        if not _session_id and ctx.context is not None:
+            # ModelContext.session_id is a @property (str); some fakes expose a
+            # callable. Handle both — callable-only missed the property path.
+            _ctx_sid = getattr(ctx.context, "session_id", None)
+            if callable(_ctx_sid):
+                try:
+                    _session_id = str(_ctx_sid() or "")
+                except Exception:
+                    _session_id = ""
+            elif _ctx_sid:
+                _session_id = str(_ctx_sid)
+
+        # Inject prompt attachments (team_members / team_info / …) into the
+        # final context window. TeamPolicyRail writes them into the shared
+        # PromptAttachmentManager during BEFORE_MODEL_CALL.
+        prompt_attachment_manager = getattr(self, "prompt_attachment_manager", None)
+        make_window_mutator = getattr(prompt_attachment_manager, "make_window_mutator", None)
+        if callable(make_window_mutator) and _session_id:
+            context_window_kwargs["window_mutators"] = [
+                make_window_mutator(_session_id)
+            ]
+
         _gw_start = time.perf_counter()
         logger.debug(
             "[ReActAgent] get_context_window start session_id=%s",

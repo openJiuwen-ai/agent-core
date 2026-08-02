@@ -28,10 +28,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
+    ToolCallInputs,
 )
 from openjiuwen.agent_teams.harness.state import (
     ActiveRound,
@@ -123,8 +125,9 @@ class PhaseSnapshotRail(AgentRail):
       (AFTER_TASK_ITERATION) — the rollback targets.
     - Cooperative stop: when ``pause_requested`` or ``graceful_abort`` is armed,
       force-finish at a model-call boundary so the loop stops cleanly, never
-      interrupting a running tool. The tool-call hook deliberately does NOT
-      force-finish — a started iteration must run to completion.
+      interrupting a *running* tool. Tools that have not yet entered
+      ``before_tool_call`` are rejected immediately via ``_skip_tool`` so a
+      parallel batch cannot start new side effects after pause is armed.
     """
 
     priority: int = 1000
@@ -153,6 +156,7 @@ class PhaseSnapshotRail(AgentRail):
             return
         active.iter_phase = RoundPhase.MODEL
         active.model_call_in_flight = True
+        active.model_call_ctx = ctx
         if active.pause_requested or active.graceful_abort:
             # A before-hook force_finish skips the LLM body entirely — the
             # cleanest boundary (no model call, no tool, no message change).
@@ -168,6 +172,7 @@ class PhaseSnapshotRail(AgentRail):
         if active is None:
             return
         active.model_call_in_flight = False
+        active.model_call_ctx = None
         if active.pause_requested:
             # PAUSE semantics: an LLM-phase pause discards the in-flight
             # iteration and rewinds to the previous boundary. react_agent
@@ -183,13 +188,43 @@ class PhaseSnapshotRail(AgentRail):
             ctx.request_force_finish(COOPERATIVE_STOP_RESULT)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Enter TOOL phase.
+        """Enter TOOL phase; reject tools that have not started once pause is armed.
 
-        Never force-finish here: a started iteration's tools must run to
-        completion, because their side effects are irreversible.
+        Never ``request_force_finish`` here: tools already past this hook must
+        run to completion (irreversible side effects). But a parallel batch may
+        still have queued calls that have not entered this hook — those are
+        refused immediately with ``_skip_tool`` so pause does not wait on them.
         """
         active = self._active()
         if active is None:
+            return
+        if active.pause_requested:
+            tool_call = None
+            if isinstance(ctx.inputs, ToolCallInputs):
+                tool_call = ctx.inputs.tool_call
+            tool_name = getattr(tool_call, "name", None) or "?"
+            tool_call_id = getattr(tool_call, "id", None) or ""
+            error_msg = (
+                f"paused: tool {tool_name!r} rejected before start "
+                "(cooperative pause armed)"
+            )
+            logger.info(
+                "[PhaseSnapshotRail] reject unstarted tool on pause: "
+                "round_id=%s tool=%s",
+                active.round_id,
+                tool_name,
+            )
+            # Stay in TOOL phase for observability, but do not claim a real
+            # tool started — hard-cancel remains safe if nothing is running.
+            active.iter_phase = RoundPhase.TOOL
+            ctx.extra["_skip_tool"] = True
+            if isinstance(ctx.inputs, ToolCallInputs):
+                ctx.inputs.tool_result = {"error": error_msg, "paused": True}
+                ctx.inputs.tool_msg = ToolMessage(
+                    content=error_msg,
+                    tool_call_id=tool_call_id,
+                    metadata={"is_error": True, "paused": True},
+                )
             return
         active.iter_phase = RoundPhase.TOOL
         active.tool_started = True

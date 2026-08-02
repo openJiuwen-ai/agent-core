@@ -200,6 +200,10 @@ class EventDispatcher:
         self._blueprint = blueprint
         self._infra = infra
         self._dispatch_mode = dispatch_mode
+        # Real wakes that arrive before the harness exists used to be
+        # task_done'd and permanently lost (only POLL_* would retry later).
+        # Buffer them and flush once ready.
+        self._deferred_wakes: list[CoordinationEvent] = []
 
         self.lifecycle = AgentLifecycleHandler(host, blueprint, infra, poll_ctrl)
         self.member = MemberHandler(host, blueprint, infra, poll_ctrl)
@@ -273,12 +277,64 @@ class EventDispatcher:
         """The dispatch mode this handler set was assembled for."""
         return self._dispatch_mode
 
+    # Periodic / teardown signals: safe to drop while not ready (POLL_*
+    # re-fire on a timer; SHUTDOWN is handled by the bus loop itself).
+    _DROP_WHEN_NOT_READY: ClassVar[frozenset[InnerEventType]] = frozenset(
+        {
+            InnerEventType.POLL_TASK,
+            InnerEventType.POLL_MAILBOX,
+            InnerEventType.SHUTDOWN,
+        }
+    )
+    _MAX_DEFERRED_WAKES: ClassVar[int] = 64
+
+    def _should_defer_when_not_ready(self, event: CoordinationEvent) -> bool:
+        if isinstance(event, InnerEventMessage):
+            return event.event_type not in self._DROP_WHEN_NOT_READY
+        return True
+
+    def _defer_wake(self, event: CoordinationEvent) -> None:
+        if len(self._deferred_wakes) >= self._MAX_DEFERRED_WAKES:
+            dropped = self._deferred_wakes.pop(0)
+            team_logger.warning(
+                "deferred wake buffer full; dropping oldest event type={}",
+                getattr(dropped, "event_type", type(dropped).__name__),
+            )
+        self._deferred_wakes.append(event)
+        team_logger.debug(
+            "agent not ready, deferring coordination wake: type={}",
+            getattr(event, "event_type", type(event).__name__),
+        )
+
+    async def flush_deferred(self) -> None:
+        """Replay wakes buffered while the harness was not ready."""
+        if not self._round.is_agent_ready() or not self._deferred_wakes:
+            return
+        pending = self._deferred_wakes
+        self._deferred_wakes = []
+        team_logger.info(
+            "flushing {} deferred coordination wake(s)",
+            len(pending),
+        )
+        for event in pending:
+            await self._dispatch_ready(event)
+
     async def dispatch(self, event: CoordinationEvent) -> None:
         """Wake-up entry. Applies coarse rules, then triggers framework."""
         if not self._round.is_agent_ready():
-            team_logger.debug("agent not ready, skipping coordination wake")
+            if self._should_defer_when_not_ready(event):
+                self._defer_wake(event)
+            else:
+                team_logger.debug("agent not ready, skipping coordination wake")
             return
+        # Prefer any buffered wake before a newly arrived one so ordering
+        # across the not-ready window stays FIFO.
+        if self._deferred_wakes:
+            await self.flush_deferred()
+        await self._dispatch_ready(event)
 
+    async def _dispatch_ready(self, event: CoordinationEvent) -> None:
+        """Dispatch after the readiness gate (and any deferred flush)."""
         role = self._blueprint.role
 
         if isinstance(event, InnerEventMessage):

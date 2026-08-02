@@ -91,7 +91,9 @@ class TaskLoopEventExecutor(TaskExecutor):
             task_filter=self._make_filter(task_id)
         )
 
-        query: Any = task_id
+        # Do not default the user-facing query to the scheduler task_id;
+        # an empty query is preferable to injecting a hex UUID user turn.
+        query: Any = ""
         raw_input: Any = None
 
         if tasks:

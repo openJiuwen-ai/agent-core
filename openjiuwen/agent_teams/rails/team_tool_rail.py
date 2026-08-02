@@ -142,17 +142,20 @@ class TeamToolRail(DeepAgentRail):
             ws_t = make_translator(self._language)
             tools.append(WorkspaceMetaTool(self._workspace_manager, ws_t))
 
-        # Register through the unified ``add_ability`` entry point. It qualifies
-        # each stateful tool id to ``{name}_{owner_id}`` (owner_id is this
-        # member's agent id, so ids stay unique across members sharing one
-        # process — superseding the old ``qualify_ids`` suffixing), binds the
-        # instance in the resource manager, and — crucially — registers the tool
-        # the same way ``ability_manager.teardown_tools`` expects, so the team
-        # tools are dropped at round-end stop. The previous bespoke path
-        # (``qualify_team_tool_ids`` + ``add_tool(refresh=True)`` +
-        # ``ability_manager.add``) produced ``team.<tool>.<session>.<member>``
-        # ids that teardown_tools did not match, so they leaked across native
-        # rebuilds and refresh-warned every cycle.
+        # Inprocess spawn shares one process-global Runner.resource_mgr.
+        # Team tools keep a fixed ToolCard.id (e.g. team.claim_task); without
+        # per-member suffixing, later members overwrite earlier registrations
+        # and claim/complete runs under the wrong TaskManager.member_name.
+        # add_ability alone does not qualify ids — restore the suffix here.
+        if self._qualify_ids:
+            qualify_team_tool_ids(
+                tools,
+                team_name=self._team_name,
+                member_name=self._member_name,
+            )
+
+        # Register through add_ability so resource_mgr + ability_manager stay
+        # in sync and teardown_tools can drop the same ids at round-end stop.
         ability_manager = getattr(agent, "ability_manager", None)
         if ability_manager is not None:
             for tool in tools:

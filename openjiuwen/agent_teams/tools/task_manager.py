@@ -58,6 +58,10 @@ from openjiuwen.agent_teams.schema.task import (
     TaskSummary,
 )
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.runtime.pause_gate import (
+    is_pause_blocking,
+    pause_block_reason,
+)
 from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamTaskBase,
@@ -142,6 +146,12 @@ class TeamTaskManager:
         self.team_plan_id = _safe_token(team_plan_id or get_session_id() or team_name, "team_plan")
         self.leader_member_name = str(leader_member_name or "").strip()
         self._dispatch_mode = dispatch_mode
+
+    def _reject_if_pausing(self, task_op: str) -> TaskOpResult | None:
+        """Reject mutating task ops while the team/member pause gate is armed."""
+        if is_pause_blocking(team_name=self.team_name, member_name=self.member_name):
+            return TaskOpResult.fail(pause_block_reason(task_op))
+        return None
 
     def configure_plan_storage(
         self,
@@ -464,7 +474,13 @@ class TeamTaskManager:
                 f"reset the task before reassigning to {assignee}"
             )
 
-        success = await self.db.task.claim_task(task_id, assignee, to_status=entry_status)
+        # Create-with-assignee leaves PENDING(assignee). claim_task only matches
+        # unassigned rows, so enter the entry gate via start_task — same CAS as
+        # scheduled dispatch / member claim of an already-reserved task.
+        if task.assignee == assignee and task.status == TaskStatus.PENDING.value:
+            success = await self.db.task.start_task(task_id, assignee, to_status=entry_status)
+        else:
+            success = await self.db.task.claim_task(task_id, assignee, to_status=entry_status)
         if not success:
             return TaskOpResult.fail(
                 f"Database rejected assign for task {task_id} (invalid state transition from {task.status})"
@@ -524,6 +540,9 @@ class TeamTaskManager:
             so the caller (typically a team tool) can pass it through to
             the LLM instead of dropping it to the log sink.
         """
+        blocked = self._reject_if_pausing("claim")
+        if blocked is not None:
+            return blocked
         member_name = self.member_name
         task = await self.get(task_id)
         if not task:
@@ -610,6 +629,9 @@ class TeamTaskManager:
         Returns:
             ``TaskOpResult`` describing the outcome.
         """
+        blocked = self._reject_if_pausing("complete_task")
+        if blocked is not None:
+            return blocked
         # Get member to check mode (drives the plan-index write below).
         member = await self.db.member.get_member(self.member_name, self.team_name)
         if not member:
@@ -1512,6 +1534,9 @@ class TeamTaskManager:
         Returns:
             ``TaskOpResult`` carrying the failure reason on error.
         """
+        blocked = self._reject_if_pausing("start_task")
+        if blocked is not None:
+            return blocked
         task = await self.get(task_id)
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")

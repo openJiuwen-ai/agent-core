@@ -14,7 +14,7 @@ def test_ensure_team_member_workspace_link_falls_back_to_copy(monkeypatch, tmp_p
     independent_workspace = tmp_path / "independent"
     independent_workspace.mkdir()
     (independent_workspace / "README.md").write_text("hello", encoding="utf-8")
-    team_workspace = tmp_path / "team-home" / "workspaces" / "alice_workspace"
+    team_workspace = tmp_path / "team-home" / "workspaces" / "alice"
 
     monkeypatch.setattr(
         "openjiuwen.agent_teams.workspace_layout.independent_member_workspace",
@@ -44,7 +44,7 @@ def test_ensure_team_member_workspace_link_falls_back_to_copy(monkeypatch, tmp_p
 def test_ensure_team_member_workspace_link_reraises_non_permission_symlink_error(monkeypatch, tmp_path: Path):
     independent_workspace = tmp_path / "independent"
     independent_workspace.mkdir()
-    team_workspace = tmp_path / "team-home" / "workspaces" / "alice_workspace"
+    team_workspace = tmp_path / "team-home" / "workspaces" / "alice"
 
     monkeypatch.setattr(
         "openjiuwen.agent_teams.workspace_layout.independent_member_workspace",

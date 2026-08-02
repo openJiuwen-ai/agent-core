@@ -50,7 +50,7 @@ class _CmdPause:
         ack: Future resolved with None once the harness has settled to PAUSED.
             For an LLM-phase pause this is synchronous; for a tool-phase pause
             it is deferred until the current iteration completes cooperatively
-            (the supervisor stashes it on ``ActiveRound.pause_ack``).
+            (the supervisor stashes it on ``ActiveRound.pause_acks``).
     """
 
     ack: asyncio.Future

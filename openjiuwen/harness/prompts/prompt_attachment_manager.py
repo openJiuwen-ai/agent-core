@@ -143,6 +143,21 @@ def _resolve_session_id_from_context(ctx: Any) -> str | None:
             session_id = source.get("session_id") or source.get("_session_id")
             if session_id:
                 return str(session_id)
+
+    # Align with ReActAgent injection fallbacks so TeamPolicyRail writes and
+    # window_mutator reads use the same PAM key (avoids silent empty roster).
+    context = getattr(ctx, "context", None)
+    if context is not None:
+        ctx_sid = getattr(context, "session_id", None)
+        if callable(ctx_sid):
+            try:
+                session_id = ctx_sid()
+            except Exception:
+                session_id = None
+            if session_id:
+                return str(session_id)
+        elif ctx_sid:
+            return str(ctx_sid)
     return None
 
 
@@ -544,7 +559,7 @@ class PromptAttachmentManager:
         async def mutator(context: ModelContext, window: ContextWindow) -> ContextWindow:
             del context
             prompt_attachments = await self.collect_for_session(session_id)
-            logger.info(
+            logger.debug(
                 "[PromptAttachmentManager] collect prompt attachments: "
                 f"session_id={session_id}, collected_ids={[item.id for item in prompt_attachments]}"
             )

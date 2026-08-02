@@ -503,7 +503,10 @@ class AgentConfigurator:
         team_workspace_mount: str | None = None
         team_workspace_path: str | None = None
         if self.workspace_manager:
-            team_workspace_mount = f".team/{resolved_team_name}/"
+            from openjiuwen.agent_teams.paths import TEAM_WORKSPACE_MOUNT
+
+            # Flat mount: ``.team`` → team-workspace (no embedded team_name).
+            team_workspace_mount = f"{TEAM_WORKSPACE_MOUNT}/"
             team_workspace_path = self.workspace_manager.workspace_path
 
         # Decide which team rails this member gets, as declarative RailSpecs.

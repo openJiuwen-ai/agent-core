@@ -173,11 +173,11 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
     "create_task.task.content": "任务详细内容，包含目标和验收标准",
-    # Both create_task variants expose assignee. Autonomous treats it as
-    # optional; scheduled requires it.
+    # Scheduled create_task requires assignee; autonomous create_task omits it
+    # (members claim from the shared board; leader assigns via update_task).
     "create_task.task.assignee": (
-        "承担该任务的成员名称；该成员必须已存在且不能是 leader。自主模式可选，未填写则进入公共认领池；"
-        "调度模式必填，成员不会自主认领"
+        "承担该任务的成员名称；该成员必须已存在且不能是 leader。"
+        "调度模式必填（成员不会自主认领）"
     ),
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",

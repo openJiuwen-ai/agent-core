@@ -797,6 +797,41 @@ class TestTaskCreateTool:
         assert result.error is not None
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_lands_unassigned_even_if_assignee_passed(self, agent_team, t, db, sample_agent_card):
+        """Autonomous create_task has no assignee field; extras are ignored."""
+        await db.member.create_member(
+            member_name="dev-1",
+            team_name="test_team",
+            display_name="Dev",
+            agent_card=sample_agent_card.model_dump_json(),
+            status=MemberStatus.READY,
+        )
+        tool = TaskCreateTool(agent_team, t)
+        node_props = tool.card.input_params["properties"]["tasks"]["items"]["properties"]
+        assert "assignee" not in node_props
+
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {
+                        "task_id": "academic-position",
+                        "title": "Academic position",
+                        "content": "Form an academic position",
+                        "assignee": "dev-1",
+                    }
+                ]
+            }
+        )
+
+        assert result.success is True, result.error
+        assert not result.data.get("assignee")
+        assert result.data["status"] == TaskStatus.PENDING.value
+        stored = await agent_team.task_manager.get("academic-position")
+        assert stored.status == TaskStatus.PENDING.value
+        assert stored.assignee is None
+
+    @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_create_task_with_depended_by(self, agent_team, t):
         """Test creating a task with reverse dependencies (depended_by)"""

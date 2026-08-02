@@ -15,6 +15,7 @@ class SectionName:
     TOOL_NAVIGATION = "tool_navigation"
     PROGRESSIVE_TOOL_RULES = "progressive_tool_rules"
     RUNTIME = "runtime"
+    PROMPT_ATTACHMENTS = "prompt_attachments"
     MEMORY = "memory"
     SESSION_TOOLS = "session_tools"
     MODE_INSTRUCTIONS = "mode_instructions"

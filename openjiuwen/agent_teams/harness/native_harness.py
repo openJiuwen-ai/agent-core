@@ -902,9 +902,25 @@ class NativeHarness(DeepAgent):
         force-finishes before any tool starts.
         """
         phase = self._st.phase
-        if phase is not HarnessState.RUNNING:
-            # PAUSING: a cooperative pause is already in flight. PAUSED / IDLE /
-            # TERMINATED: nothing to pause.
+        if phase is HarnessState.PAUSED:
+            self._ack(cmd.ack, None)
+            return
+        if phase is HarnessState.PAUSING:
+            # Cooperative pause already in flight — wait for the same
+            # settlement instead of returning early (early return left
+            # teammates "quiesced" while the round could still start tasks).
+            active = self._st.active
+            if active is not None:
+                active.pause_acks.append(cmd.ack)
+                return
+            self._ack(cmd.ack, None)
+            return
+        if phase is HarnessState.TERMINATED:
+            self._ack(cmd.ack, None)
+            return
+        if phase is HarnessState.IDLE:
+            # Freeze idle harness as PAUSED so quiesce/resume treat it as warm.
+            await self._transition(HarnessState.PAUSED)
             self._ack(cmd.ack, None)
             return
 
@@ -943,7 +959,7 @@ class NativeHarness(DeepAgent):
 
         # Cooperative: let the in-flight iteration finish. The ack is resolved by
         # ``_on_round_done`` once the round settles at the boundary.
-        active.pause_ack = cmd.ack
+        active.pause_acks.append(cmd.ack)
         await self._transition(HarnessState.PAUSING)
 
     async def _on_resume(self, cmd: _CmdResume) -> None:
@@ -992,12 +1008,11 @@ class NativeHarness(DeepAgent):
             self._resolve_pause_ack(active)
 
     def _resolve_pause_ack(self, active: ActiveRound) -> None:
-        """Resolve a deferred cooperative-pause ack, if one is pending."""
-        ack = active.pause_ack
-        if ack is None:
-            return
-        active.pause_ack = None
-        self._ack(ack, None)
+        """Resolve deferred cooperative-pause acks, if any are pending."""
+        acks = list(active.pause_acks)
+        active.pause_acks.clear()
+        for ack in acks:
+            self._ack(ack, None)
 
     async def _settle_round_done(
         self,
@@ -1340,9 +1355,24 @@ class NativeHarness(DeepAgent):
         supervisor's ``_run_round`` task that is blocked on
         ``wait_round_completion``.
 
+        Before cancelling, request an LLM stream abort so ReAct acloses the
+        provider HTTP iterator promptly (task cancel alone can wait on a long
+        generation). Checkpoint resume is preserved by the pause caller via
+        snapshot rollback + ``pending_resume``.
+
         Args:
             active: The round to cancel.
         """
+        ctx = getattr(active, "model_call_ctx", None)
+        if ctx is not None:
+            try:
+                ctx.request_abort_stream()
+            except Exception:
+                logger.debug(
+                    "[NativeHarness] request_abort_stream failed for round_id=%s",
+                    active.round_id,
+                    exc_info=True,
+                )
         controller = self.loop_controller
         if controller is not None and controller.task_scheduler is not None:
             try:

@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import time
 from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
@@ -18,6 +21,12 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
 )
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.runtime.pause_gate import (
+    clear_member_pausing,
+    clear_team_pausing,
+    mark_member_pausing,
+    mark_team_pausing,
+)
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -145,6 +154,10 @@ class CoordinationKernel:
                 member_name,
                 type(session).__name__,
             )
+        # Clear pause gate for this host (and whole team when leader starts).
+        clear_member_pausing(host.team_name, host.member_name)
+        if host.role == TeamRole.LEADER:
+            clear_team_pausing(host.team_name)
         if infra.team_backend:
             await infra.team_backend.db.initialize()
         if session is not None:
@@ -219,6 +232,11 @@ class CoordinationKernel:
             if self._dispatcher is None:
                 raise RuntimeError("CoordinationKernel.start() requires setup() before start()")
             await self._event_bus.start(wake_callback=self._build_wake_callback())
+        # Harness is live now: replay any wakes that arrived while
+        # ``is_agent_ready`` was still false (otherwise they were only
+        # buffered in the dispatcher and never re-driven).
+        if self._dispatcher is not None:
+            await self._dispatcher.flush_deferred()
         if infra.messager:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
@@ -236,11 +254,9 @@ class CoordinationKernel:
         if self._scheduler is not None and team_row_present:
             await self._scheduler.activate()
         self._lifecycle_state = "running"
-        # Warm / cold resume: a lifecycle pause left this member's round
-        # suspended at a clean boundary. Now that the session, stream and
-        # event bus are back, continue it in place instead of idling until a
-        # new message arrives. Runs last, once the kernel is fully live, and
-        # is a no-op when there is nothing suspended to resume.
+        # Resume a paused round from checkpoint. Pause stops the harness;
+        # ``recover_team`` re-spawns members, ``pending_resume`` replays
+        # the leader round.
         await self.resume_paused_round()
 
     def _build_wake_callback(self):
@@ -274,36 +290,72 @@ class CoordinationKernel:
             return
         await self._scheduler.activate()
 
+    def _abort_host_llm_stream(self) -> None:
+        """Best-effort stop of this host's in-flight model HTTP stream.
+
+        Same promptness path as ``InProcessSpawnHandle.abort_llm_stream``:
+        ``harness.pause`` already aborts when ``model_call_in_flight``, but that
+        runs after member teardown begins — abort here so leader token burn
+        stops while teammates are still settling.
+
+        Arms ``pause_requested`` first so ``after_model_call`` force-finishes
+        if the stream ends before ``pause_agent_round`` runs (otherwise a
+        partial AssistantMessage could continue into tools).
+        """
+        host = self._host
+        harness = getattr(host.resources, "harness", None)
+        if harness is None:
+            return
+        active = getattr(harness, "active_round", None)
+        if active is None:
+            return
+        with contextlib.suppress(Exception):
+            active.pause_requested = True
+        ctx = getattr(active, "model_call_ctx", None)
+        if ctx is None:
+            return
+        with contextlib.suppress(Exception):
+            ctx.request_abort_stream()
+
     async def pause(self) -> None:
         # Idempotent: ignore if not currently running. Pause is only a valid
         # transition from running; paused/stopped/idle short-circuit so the
         # Runner-level finally can safely call pause even after an external
         # stop_coordination has already torn things down.
+        #
+        # Abort LLM, kill member handles, stop harness. Task board rows in
+        # SQLite are untouched so ``view_task`` still lists unfinished work
+        # after resume / process restart.
         if self._lifecycle_state != "running":
             return
         host = self._host
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
+        # Arm task mutation gate before abort/teardown so in-flight
+        # complete/start/claim tools cannot flip DB state after pause begins.
+        mark_team_pausing(host.team_name)
+        mark_member_pausing(host.team_name, host.member_name)
         if self._scheduler is not None:
             self._scheduler.deactivate()
-        # Pause, do not tear down: the round stops at a clean inner-iteration
-        # boundary and stays resumable in place. This used to hard-cancel via
-        # ``drain_agent_task`` → ``abort(immediate=True)``, which threw away
-        # everything the member had done in the round it interrupted mid-way.
+        # Stop this host's LLM tokens immediately (leader may still be
+        # generating while members are torn down below).
+        self._abort_host_llm_stream()
+        if host.role == TeamRole.LEADER:
+            await host.spawn_manager.cancel_recovery_tasks()
+            await self._mark_live_teammates(MemberStatus.PAUSED)
+            # force_kill aborts each member LLM stream before cancelling tasks.
+            await host.spawn_manager.shutdown_all_handles()
+        # Pause leader round at a clean boundary, then stop the harness so
+        # the next cycle rebuilds native.
         await self.pause_agent_round()
+        await self._await_harness_paused()
         host.persist_allocator_state()
-        # Extract team memories while the session is still bound and the DB
-        # is accessible. Moved from finalize_round so extraction runs once
-        # per run cycle instead of on every streaming round.
         memory_manager = host.resources.memory_manager
         if memory_manager:
             await memory_manager.extract_after_round()
         if host.role == TeamRole.LEADER:
-            await self._mark_live_teammates(MemberStatus.PAUSED)
-            await host.spawn_manager.cancel_recovery_tasks()
-            await host.spawn_manager.shutdown_all_handles()
             self._persist_team_lifecycle("paused")
-            # Make a later cold start (pause -> stop -> start) continue this
-            # round rather than idle waiting for a new message.
+            # Persist pending_resume so a later request can continue this
+            # round from checkpoint; task rows remain in DB regardless.
             self._persist_pending_resume()
         messager = host.infra.messager
         if messager and host.role == TeamRole.LEADER:
@@ -327,7 +379,21 @@ class CoordinationKernel:
         if self._event_bus:
             await self._event_bus.stop()
         self.close_stream()
+        harness = getattr(host.resources, "harness", None)
+        if harness is not None and getattr(harness, "state", None) is not HarnessState.TERMINATED:
+            try:
+                await harness.stop()
+            except Exception as exc:
+                team_logger.warning(
+                    "[{}] harness.stop during pause failed: {}",
+                    host.member_name or "?",
+                    exc,
+                )
         host.session_manager.release_session()
+        # Pause teardown is complete; clear mutation gates so a later recover
+        # is not blocked if start() is skipped. start() also clears.
+        clear_team_pausing(host.team_name)
+        clear_member_pausing(host.team_name, host.member_name)
         # team_member status update is owned by ``TeamRuntimeManager.finalize_member``
         # so persistence-layer status (lives across restarts) stays decoupled
         # from kernel runtime teardown (volatile). External stop_coordination
@@ -336,15 +402,53 @@ class CoordinationKernel:
         # delete a team that should be recoverable.
         self._lifecycle_state = "paused"
 
+    async def _await_harness_paused(self, *, timeout_sec: float = 60.0) -> None:
+        """Block until the host harness is ``PAUSED`` (true freeze).
+
+        ``pause()`` must not return early while still ``PAUSING``; this wait is
+        the backstop so leader pause cannot proceed while the round could
+        still mutate tasks.
+        """
+        host = self._host
+        harness = getattr(host.resources, "harness", None)
+        if harness is None:
+            return
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        while time.monotonic() < deadline:
+            state = getattr(harness, "state", None)
+            if state is HarnessState.PAUSED:
+                return
+            if state is HarnessState.PAUSING:
+                await asyncio.sleep(0.05)
+                continue
+            if state is HarnessState.RUNNING:
+                await self.pause_agent_round()
+                await asyncio.sleep(0.05)
+                continue
+            # IDLE / TERMINATED / other: one more pause to force PAUSED when IDLE.
+            await self.pause_agent_round()
+            if getattr(harness, "state", None) is HarnessState.PAUSED:
+                return
+            team_logger.warning(
+                "[{}] harness not PAUSED after pause wait (state={})",
+                host.member_name or "?",
+                state,
+            )
+            return
+        team_logger.warning(
+            "[{}] timed out waiting for harness PAUSED (state={})",
+            host.member_name or "?",
+            getattr(harness, "state", None),
+        )
+
     async def _mark_live_teammates(self, target_status: MemberStatus) -> None:
-        """Persist ``target_status`` for every spawned teammate before tearing down handles.
+        """Persist ``target_status`` for every spawned teammate.
 
         Members that were never started (UNSTARTED) or already gone (SHUTDOWN)
         keep their existing status — the mark only applies to runtime that
-        was actually live during this round. Used by both pause (writes
-        PAUSED — natural round-end idle) and stop (writes STOPPED —
-        external teardown without disbanding the team) so the persistence
-        layer captures *why* the teammate runtime went away.
+        was actually live during this round. Used by pause (writes PAUSED)
+        and stop (writes STOPPED) so the persistence layer captures *why* the
+        teammate is idle / gone.
         """
         host = self._host
         team_backend = host.infra.team_backend
@@ -428,8 +532,13 @@ class CoordinationKernel:
             return
         from openjiuwen.agent_teams.runtime.metadata import merge_pending_resume
 
+        paused_query = getattr(harness, "paused_query", None) or ""
+        if not str(paused_query).strip():
+        # IDLE-path pause / InteractiveInput rounds leave paused_query empty;
+        # fall back to the host's last user query so resume is not blank.
+            paused_query = getattr(getattr(host, "state", None), "pending_user_query", "") or ""
         try:
-            merge_pending_resume(session, team_name, {"query": harness.paused_query or ""})
+            merge_pending_resume(session, team_name, {"query": str(paused_query or "")})
         except Exception as e:
             team_logger.warning(
                 "[{}] failed to persist pending resume: {}",
@@ -668,16 +777,33 @@ class CoordinationKernel:
             self._clear_pending_resume()
             return
 
+        # Teammates do not own the shared ``pending_resume`` marker.
+        if self._host.role != TeamRole.LEADER:
+            team_logger.warning(
+                "[{}] teammate harness not PAUSED (state={}); skip cold pending_resume",
+                self._host.member_name or "?",
+                getattr(harness, "state", None),
+            )
+            return
+
         pending = self._read_pending_resume()
         if pending is None:
+            return
+        # Empty marker: do not start a round with query="". Let the next
+        # chat.send query drive the round instead.
+        resume_query = str(pending.get("query") or "").strip()
+        if not resume_query:
+            team_logger.info(
+                "[{}] pending_resume has empty query; skip cold resume round",
+                self._host.member_name or "?",
+            )
+            self._clear_pending_resume()
             return
         team_logger.info(
             "[{}] resuming the paused round from the session checkpoint",
             self._host.member_name or "?",
         )
-        await self._host.stream_controller.resume_agent(
-            query=str(pending.get("query") or ""),
-        )
+        await self._host.stream_controller.resume_agent(query=resume_query)
         self._clear_pending_resume()
 
     def close_stream(self) -> None:
@@ -702,12 +828,18 @@ class CoordinationKernel:
         and native harness). Memory extraction has moved to
         :meth:`pause` / :meth:`stop` so it runs once per run cycle
         rather than on every round.
+
+        Always stops the harness (including after persistent pause). The next
+        cycle rebuilds native from scratch.
         """
         host = self._host
-        # Tear down this cycle's runtime: stop the controller's forwarder/status
-        # mappers, then the member runtime (native supervisor). start() rebuilds
-        # a fresh native next cycle.
+        # Always stop the stream forwarder for this run cycle.
         await host.stream_controller.stop()
-        if host.resources.harness is not None:
-            await host.resources.harness.stop()
+        harness = host.resources.harness
+        if harness is not None:
+            state = getattr(harness, "state", None)
+            if state is not HarnessState.TERMINATED:
+                # Tear down the member runtime (native supervisor). start()
+                # rebuilds a fresh native next cycle when terminated.
+                await harness.stop()
         host.stream_controller.stream_queue = None

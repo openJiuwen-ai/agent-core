@@ -942,7 +942,7 @@ Worktree 工具（`enter_worktree` / `exit_worktree`）已下沉到 `openjiuwen.
 
 ## 13. 团队共享工作区
 
-`TeamWorkspaceManager` 通过 `.team/{team_name}` 挂载点提供跨成员文件共享。
+`TeamWorkspaceManager` 通过扁平挂载点 `.team`（→ `team-workspace`）提供跨成员文件共享。
 
 ### 13.1 模式
 

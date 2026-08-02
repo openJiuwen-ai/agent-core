@@ -142,6 +142,21 @@ class TeamPolicyRail(DeepAgentRail):
         super().init(agent)
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
+        # Only mount the prompt-attachment explainer when this rail will write
+        # attachments (plan DeepAgents have a PAM instance but no writer).
+        if self.attachment_manager is not None:
+            self._ensure_prompt_attachments_section()
+
+    def _ensure_prompt_attachments_section(self) -> None:
+        """Add the static <prompt-attachment> explainer once for PAM writers."""
+        from openjiuwen.harness.prompts.sections import SectionName
+        from openjiuwen.harness.prompts.sections.prompt_attachments import (
+            build_prompt_attachments_section,
+        )
+
+        if any(section.name == SectionName.PROMPT_ATTACHMENTS for section in self._static_sections):
+            return
+        self._static_sections.append(build_prompt_attachments_section(self._language))
 
     def uninit(self, agent: Any) -> None:
         """Remove the team static sections from the shared builder.
@@ -181,14 +196,36 @@ class TeamPolicyRail(DeepAgentRail):
         dynamic; both are refreshed from their mtime-backed caches and upserted
         into the attachment tail (cleared when None) so stale state never
         lingers across rounds. This method never touches the system prompt
-        builder — every builder section is static. When no attachment manager
-        is available (e.g. a minimal unit-test agent) it is a no-op.
+        builder — every builder section is static — **except** when no
+        attachment manager is wired: then it falls back to the system prompt
+        so Leaders still see member names/descs for ``create_task(assignee=…)``.
         """
-        if self.attachment_manager is None:
-            return
         members_section = await self._refresh_members_section() if self._team_backend is not None else None
         info_section = await self._info_cache.refresh() if self._info_cache is not None else None
+        if self.attachment_manager is None:
+            # Safety net: without PromptAttachmentManager the roster would be
+            # invisible and Leaders omit assignees (ENT regression vs swarm).
+            if self.system_prompt_builder is not None:
+                if members_section is not None:
+                    self.system_prompt_builder.add_section(members_section)
+                if info_section is not None:
+                    self.system_prompt_builder.add_section(info_section)
+            return
         writer = self.attachment_manager.bind_context(ctx)
+        if not getattr(writer, "session_id", None):
+            # bind_context failed to resolve session_id — don't silently drop
+            # roster (upsert would warn and skip). Fall back to system prompt.
+            team_logger.warning(
+                "[{}] TeamPolicyRail attachment session_id missing; "
+                "falling back to system-prompt roster",
+                self._member_name or "?",
+            )
+            if self.system_prompt_builder is not None:
+                if members_section is not None:
+                    self.system_prompt_builder.add_section(members_section)
+                if info_section is not None:
+                    self.system_prompt_builder.add_section(info_section)
+            return
         await self._upsert_or_clear(writer, TeamSectionName.MEMBERS, members_section)
         await self._upsert_or_clear(writer, TeamSectionName.INFO, info_section)
 

@@ -17,7 +17,7 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRa
 
 from ..controllers import ActionController, BaseController
 from .browser_tools import ensure_browser_runtime_client_patch
-from .config import BrowserRunGuardrails
+from .config import BrowserInstanceConfig, BrowserRunGuardrails
 from .service import BrowserService, BrowserTaskProgressState, MAX_ITERATION_MESSAGE
 
 _BROWSER_PROGRESS_STATE_KEY = "__browser_subagent_progress_state__"
@@ -57,8 +57,10 @@ class BrowserAgentRuntime:
         model_name: str,
         mcp_cfg: McpServerConfig,
         guardrails: BrowserRunGuardrails,
+        instance: Optional[BrowserInstanceConfig] = None,
     ) -> None:
         ensure_browser_runtime_client_patch()
+        self._instance = instance
         self._service = BrowserService(
             provider=provider,
             api_key=api_key,
@@ -66,6 +68,7 @@ class BrowserAgentRuntime:
             model_name=model_name,
             mcp_cfg=mcp_cfg,
             guardrails=guardrails,
+            instance=instance,
         )
         self._browser_custom_action_tool = None
         self._browser_list_actions_tool = None

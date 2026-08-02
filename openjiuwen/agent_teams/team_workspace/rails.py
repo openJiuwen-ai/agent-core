@@ -71,8 +71,25 @@ class TeamWorkspaceRail(DeepAgentRail):
         """
         tool_name = ctx.inputs.tool_name
         tool_args = ctx.inputs.tool_args if isinstance(ctx.inputs.tool_args, dict) else {}
-        path = tool_args.get("file_path", "")
-        if not path or not path.startswith(self.TEAM_PREFIX):
+        path = self._path_from_tool_args(tool_name, tool_args)
+        if not path:
+            return
+
+        # Flat mount: ``.team`` → team-workspace. Rewrite legacy /
+        # confused paths (``.team/{team}/...``, ``{ws}/.team/...``) onto
+        # the canonical relative mount before policy checks.
+        canonical = self._canonicalize_team_path(path)
+        if canonical != path:
+            self._set_path_on_tool_args(tool_name, tool_args, canonical)
+            team_logger.info(
+                "[{}] rewrote team path {} -> {}",
+                self._member_name,
+                path,
+                canonical,
+            )
+            path = canonical
+
+        if not path.startswith(self.TEAM_PREFIX):
             return
 
         # Read path: pull before read (distributed mode, throttled)
@@ -107,7 +124,10 @@ class TeamWorkspaceRail(DeepAgentRail):
             return
 
         tool_args = ctx.inputs.tool_args if isinstance(ctx.inputs.tool_args, dict) else {}
-        path = tool_args.get("file_path", "")
+        path = self._path_from_tool_args(tool_name, tool_args)
+        if not path:
+            return
+        path = self._canonicalize_team_path(path)
         if not path.startswith(self.TEAM_PREFIX):
             return
 
@@ -140,14 +160,81 @@ class TeamWorkspaceRail(DeepAgentRail):
         self._last_pull_time = now
         await self._ws.pull()
 
+    @staticmethod
+    def _path_from_tool_args(tool_name: str, tool_args: dict) -> str:
+        """Pick the path argument used by filesystem team tools."""
+        if tool_name in {"glob", "grep", "list_files"}:
+            raw = tool_args.get("path") or tool_args.get("file_path") or ""
+        else:
+            raw = tool_args.get("file_path") or tool_args.get("path") or ""
+        return str(raw).replace("\\", "/")
+
+    @staticmethod
+    def _set_path_on_tool_args(tool_name: str, tool_args: dict, path: str) -> None:
+        """Write the rewritten path back into the tool args the executor will use."""
+        if tool_name in {"glob", "grep", "list_files"}:
+            if "path" in tool_args or "file_path" not in tool_args:
+                tool_args["path"] = path
+            if "file_path" in tool_args:
+                tool_args["file_path"] = path
+            return
+        if "file_path" in tool_args or "path" not in tool_args:
+            tool_args["file_path"] = path
+        if "path" in tool_args:
+            tool_args["path"] = path
+
+    def _canonicalize_team_path(self, path: str) -> str:
+        """Normalize confused / legacy team paths onto flat ``.team/...``.
+
+        Flat mount is ``{member_cwd}/.team`` → shared team-workspace, so the
+        canonical tool path is ``.team/<rel>`` (no embedded team_name).
+
+        Rewrites:
+        - Legacy hub: ``.team/{team_name}/foo`` → ``.team/foo``
+        - Abs nest mistake: ``{team_workspace}/.team/foo`` → ``.team/foo``
+          (models often join the absolute root with the mount prefix)
+        - Abs + legacy: ``{team_workspace}/.team/{team_name}/foo`` → ``.team/foo``
+        """
+        normalized = str(path or "").replace("\\", "/")
+        if not normalized:
+            return normalized
+
+        team_name = (self._ws.team_name or "").strip()
+        ws = str(self._ws.workspace_path or "").replace("\\", "/").rstrip("/")
+
+        # Absolute path under the shared workspace root.
+        if ws and normalized.lower().startswith(ws.lower() + "/"):
+            rel = normalized[len(ws) + 1 :]  # noqa: E203
+            if rel == ".team" or rel.startswith(".team/"):
+                after = "" if rel == ".team" else rel[len(self.TEAM_PREFIX) :]  # noqa: E203
+                after = self._strip_legacy_team_segment(after, team_name)
+                return f"{self.TEAM_PREFIX}{after}" if after else self.TEAM_PREFIX.rstrip("/")
+            return normalized
+
+        if not normalized.startswith(self.TEAM_PREFIX) and normalized != ".team":
+            return normalized
+
+        after = "" if normalized == ".team" else normalized[len(self.TEAM_PREFIX) :]  # noqa: E203
+        after = self._strip_legacy_team_segment(after, team_name)
+        return f"{self.TEAM_PREFIX}{after}" if after else self.TEAM_PREFIX.rstrip("/")
+
+    @staticmethod
+    def _strip_legacy_team_segment(after: str, team_name: str) -> str:
+        """Drop a leading ``{team_name}/`` segment left from the hub mount era."""
+        if not team_name:
+            return after
+        if after == team_name:
+            return ""
+        prefix = team_name + "/"
+        if after.startswith(prefix):
+            return after[len(prefix) :]  # noqa: E203
+        return after
+
     def _resolve_workspace_relative(self, path: str) -> str:
-        """Extract the workspace-relative path from a .team/ prefixed path.
+        """Extract the workspace-relative path from a ``.team/`` prefixed path.
 
-        Handles both layouts:
-        - Hub: ``.team/{team_name}/artifacts/report.md`` → ``artifacts/report.md``
-        - Legacy: ``.team/artifacts/report.md`` → ``artifacts/report.md``
-
-        Uses ``self._ws.team_name`` to detect the hub layout.
+        Flat mount: ``.team/artifacts/report.md`` → ``artifacts/report.md``.
+        Also tolerates a leftover hub segment ``.team/{team_name}/...``.
 
         Args:
             path: File path starting with ".team/".
@@ -155,9 +242,9 @@ class TeamWorkspaceRail(DeepAgentRail):
         Returns:
             Path relative to the team workspace root.
         """
-        after_prefix = path[len(self.TEAM_PREFIX):]
-        # Hub layout: first segment matches team_name
-        team_name_prefix = self._ws.team_name + "/"
-        if after_prefix.startswith(team_name_prefix):
-            return after_prefix[len(team_name_prefix):]
-        return after_prefix
+        if path == ".team":
+            return ""
+        after_prefix = path[len(self.TEAM_PREFIX) :]  # noqa: E203
+        return self._strip_legacy_team_segment(
+            after_prefix, (self._ws.team_name or "").strip()
+        )

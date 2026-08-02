@@ -15,9 +15,19 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+from typing import Iterator
 
 _configured_openjiuwen_home: Path | None = None
+# Per-task override so team files land under the same project root as plan mode
+# (``effective_project_dir`` / thread ``projectPath``). Concurrent sessions with
+# different projects stay isolated because ContextVar is task-local.
+_agent_teams_home_override: ContextVar[Path | None] = ContextVar(
+    "agent_teams_home_override",
+    default=None,
+)
 
 
 def configure_openjiuwen_home(path: str | Path) -> None:
@@ -40,8 +50,45 @@ def get_openjiuwen_home() -> Path:
 
 
 def get_agent_teams_home() -> Path:
-    """Return the root directory for agent-team-owned state."""
+    """Return the root directory for agent-team-owned state.
+
+    Default: ``{openjiuwen_home}/.agent_teams``.
+    When :func:`agent_teams_home_scope` is active (plan/project-bound team
+    run): ``{project_dir}/.agent_teams`` so team artifacts share the plan root.
+    """
+    override = _agent_teams_home_override.get()
+    if override is not None:
+        return override
     return get_openjiuwen_home() / ".agent_teams"
+
+
+def project_agent_teams_home(project_dir: str | Path) -> Path:
+    """Return ``{project_dir}/.agent_teams`` — team home nested under a plan root."""
+    return Path(project_dir).expanduser().resolve() / ".agent_teams"
+
+
+@contextmanager
+def agent_teams_home_scope(project_dir: str | Path | None) -> Iterator[Path | None]:
+    """Scope :func:`get_agent_teams_home` / :func:`team_home` under *project_dir*.
+
+    Used by ENT team runs that share the plan-mode project root
+    (``effective_project_dir``). When *project_dir* is empty/None, yields
+    without changing the home (legacy ``{user_data}/.agent_teams`` layout).
+
+    Yields:
+        The active agent-teams home path, or ``None`` when unscoped.
+    """
+    raw = str(project_dir or "").strip()
+    if not raw:
+        yield None
+        return
+    home = project_agent_teams_home(raw)
+    home.mkdir(parents=True, exist_ok=True)
+    token = _agent_teams_home_override.set(home)
+    try:
+        yield home
+    finally:
+        _agent_teams_home_override.reset(token)
 
 
 def __getattr__(name: str) -> Path:
@@ -53,17 +100,28 @@ def __getattr__(name: str) -> Path:
     raise AttributeError(name)
 
 
+# Relative mount point of the shared team workspace inside a member cwd.
+# The junction/symlink itself is ``{member_cwd}/.team`` → ``team-workspace/``,
+# so agents read/write ``.team/artifacts/...`` without embedding ``team_name``.
+TEAM_WORKSPACE_MOUNT = ".team"
+
+
 def team_home(team_name: str) -> Path:
     """Return the per-team root directory.
 
-    Layout:
-        ``{get_agent_teams_home()}/{team_name}/``
-            team-workspace/         # default team shared workspace
-            workspaces/             # stable_base member workspaces
-              {member}_workspace/
+    Layout (under :func:`get_agent_teams_home`, which may be project-scoped)::
+
+        {agent_teams_home}/{team_name}/
+            team-workspace/         # shared artifacts (DEV layout)
+            workspaces/             # leader + member DeepAgent workspaces
+              {member_name}/
+                .team/              # mount → ../team-workspace
             sessions/               # per-session state (swarmflow journals)
               {session_id}/workflows/{workflow_name}/journal.jsonl
-            team.db                 # default sqlite db
+
+    When a plan/project root is active via :func:`agent_teams_home_scope`,
+    ``agent_teams_home`` is ``{project_dir}/.agent_teams`` so team files share
+    the same root as plan-mode ``files/`` deliverables.
 
     Args:
         team_name: Team identifier.
@@ -79,7 +137,8 @@ def independent_member_workspace(member_name: str) -> Path:
 
     Predefined independent DeepAgents keep their workspace at
     ``{get_openjiuwen_home()}/{member_name}_workspace/`` so it survives
-    joining and leaving teams.
+    joining and leaving teams. (Standalone keeps the ``_workspace`` suffix;
+    in-team member dirs under ``team_home/.../workspaces/`` do not.)
 
     Args:
         member_name: Member identifier.

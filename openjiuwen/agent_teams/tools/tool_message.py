@@ -77,8 +77,8 @@ class _SendMessageBase(TeamTool, ABC):
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         to_raw = inputs.get("to")
-        content = inputs.get("content", "").strip()
-        summary = inputs.get("summary", "").strip()
+        content = (inputs.get("content") or "").strip()
+        summary = (inputs.get("summary") or "").strip()
 
         if not content:
             return ToolOutput(success=False, error="'content' is required")

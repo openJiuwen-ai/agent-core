@@ -396,11 +396,11 @@ class TeamWorkerBackend(AgentBackend):
 
         Mirrors the layout used by ``agent_configurator`` for stable_base
         members: each worker gets its own workspace at
-        ``{agent_teams_home}/{team_name}/workspaces/{member}_workspace/``.
+        ``{agent_teams_home}/{team_name}/workspaces/{member}/``.
         It lives under the team home, which ``agent_configurator`` already
         registers for team cleanup — so the worker workspace is removed with
         the team and needs no per-worker cleanup registration. Also mounts the
-        team shared workspace into the worker's tree (``.team/{team_name}/``).
+        team shared workspace into the worker's tree (``.team`` → team-workspace).
 
         Returns:
             A ``WorkspaceSpec`` with the worker's resolved root_path.
@@ -429,7 +429,7 @@ class TeamWorkerBackend(AgentBackend):
             )
 
         # Mount team workspace into worker workspace so it can access shared
-        # files via .team/{team_name}/ — mirrors agent_configurator.
+        # files via ``.team/`` — mirrors agent_configurator.
         from openjiuwen.agent_teams.rails.team_context import get_workspace_manager
         workspace_manager = get_workspace_manager(self._build_context)
         if workspace_manager is not None:

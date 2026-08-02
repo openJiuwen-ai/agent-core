@@ -111,7 +111,7 @@ class TeamWorkspaceManager:
             os.makedirs(os.path.join(self.workspace_path, d), exist_ok=True)
 
         # Shared skills directory; each member agent's SkillUseRail picks
-        # this up via the ``.team/{team_name}`` mount so team-authored
+        # this up via the ``.team`` mount so team-authored
         # skills are visible everywhere.
         os.makedirs(os.path.join(self.workspace_path, "skills"), exist_ok=True)
 
@@ -208,7 +208,7 @@ class TeamWorkspaceManager:
             shell=False,
         )
         if result.returncode != 0:
-            error_output = result.stderr.strip() or result.stdout.strip()
+            error_output = (result.stderr or result.stdout or "").strip()
             raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
 
 
@@ -249,9 +249,9 @@ class TeamWorkspaceManager:
     def _merge_existing_mount_contents(self, link_path: str) -> None:
         """Copy files from a stale mount directory into the canonical workspace.
 
-        A stale real ``.team/<team_name>`` directory can be created when file
-        tools write before the mount exists.  Merge missing files so user
-        artifacts are not stranded before the directory is replaced by a mount.
+        A stale real ``.team`` directory can be created when file tools write
+        before the mount exists.  Merge missing files so user artifacts are
+        not stranded before the directory is replaced by a mount.
         Existing canonical files win to avoid overwriting newer workspace data.
         """
         if not os.path.isdir(link_path) or os.path.islink(link_path):
@@ -296,17 +296,18 @@ class TeamWorkspaceManager:
         return True
 
     def mount_into_workspace(self, workspace_root: str) -> None:
-        """Create .team/{team_name} symlink in an agent workspace.
+        """Mount the shared team workspace at ``{workspace_root}/.team``.
 
-        Mounts this team workspace into the agent's workspace hub so
-        the agent can access shared files via ``.team/{team_name}/...``.
+        The mount point is the ``.team`` directory itself (not
+        ``.team/{team_name}``), so agents use short relative paths like
+        ``.team/artifacts/...`` and the filesystem path no longer embeds
+        the (often session-scoped) team name twice.
 
         Args:
             workspace_root: Absolute path to the agent workspace root.
         """
-        team_dir = os.path.join(workspace_root, ".team")
-        os.makedirs(team_dir, exist_ok=True)
-        link_path = os.path.join(team_dir, self.team_name)
+        link_path = os.path.join(workspace_root, ".team")
+        os.makedirs(workspace_root, exist_ok=True)
         if self._prepare_mount_path(link_path):
             self._mount_directory(self.workspace_path, link_path)
             team_logger.debug(

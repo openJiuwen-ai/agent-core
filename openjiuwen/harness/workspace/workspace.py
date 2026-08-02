@@ -172,7 +172,6 @@ class Workspace:
 
     # ── Link management (.team/ and .worktree/ symlinks) ──────
 
-    TEAM_LINKS_DIR = ".team"
     WORKTREE_LINKS_DIR = ".worktree"
 
     def _ensure_link_dir(self, subdir: str) -> Path:
@@ -187,37 +186,6 @@ class Workspace:
         link_dir = Path(self.root_path) / subdir
         link_dir.mkdir(parents=True, exist_ok=True)
         return link_dir
-
-    def link_team(self, team_id: str, target_path: str) -> Path:
-        """Create .team/{team_id} symlink pointing to a team workspace.
-
-        Args:
-            team_id: Team identifier used as the symlink directory name.
-            target_path: Absolute path to the team workspace directory.
-
-        Returns:
-            Path to the created symlink.
-        """
-        link_dir = self._ensure_link_dir(self.TEAM_LINKS_DIR)
-        link = link_dir / team_id
-        if not link.exists():
-            os.symlink(target_path, str(link), target_is_directory=True)
-        return link
-
-    def unlink_team(self, team_id: str) -> bool:
-        """Remove .team/{team_id} symlink.
-
-        Args:
-            team_id: Team identifier of the symlink to remove.
-
-        Returns:
-            True if the symlink was removed, False if it didn't exist.
-        """
-        link = Path(self.root_path) / self.TEAM_LINKS_DIR / team_id
-        if link.is_symlink():
-            link.unlink()
-            return True
-        return False
 
     def link_worktree(self, slug: str, target_path: str) -> Path:
         """Create .worktree/{slug} symlink pointing to a git worktree.
@@ -250,14 +218,6 @@ class Workspace:
             return True
         return False
 
-    def list_team_links(self) -> list[tuple[str, str]]:
-        """List all .team/ symlinks.
-
-        Returns:
-            List of (team_id, resolved_target_path) tuples.
-        """
-        return self._list_links(self.TEAM_LINKS_DIR)
-
     def list_worktree_links(self) -> list[tuple[str, str]]:
         """List all .worktree/ symlinks.
 
@@ -270,7 +230,7 @@ class Workspace:
         """List all symlinks in a subdirectory.
 
         Args:
-            subdir: Subdirectory name (".team" or ".worktree").
+            subdir: Subdirectory name (e.g. ``.worktree``).
 
         Returns:
             List of (name, resolved_target_path) tuples.

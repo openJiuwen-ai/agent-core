@@ -13,8 +13,12 @@ from openjiuwen.agent_teams.paths import independent_member_workspace, team_home
 
 
 def team_member_workspace_path(team_name: str, member_name: str) -> Path:
-    """Return the stable workspace path for one team member."""
-    return team_home(team_name) / "workspaces" / f"{member_name}_workspace"
+    """Return the stable workspace path for one team member.
+
+    Layout: ``{team_home}/workspaces/{member_name}/`` (no ``_workspace``
+    suffix — the parent ``workspaces/`` segment already scopes the role).
+    """
+    return team_home(team_name) / "workspaces" / member_name
 
 
 def ensure_team_member_workspace_link(team_name: str, member_name: str) -> str:

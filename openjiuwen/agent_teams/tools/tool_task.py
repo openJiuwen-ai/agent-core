@@ -58,10 +58,8 @@ def _task_node_schema(
 
 
 def _autonomous_task_node_schema(t: Translator) -> dict:
-    """Build the autonomous create_task node schema."""
-    properties = _base_task_node_properties(t)
-    properties["assignee"] = {"type": "string", "description": t("create_task", "task.assignee")}
-    return _task_node_schema(properties)
+    """Build the autonomous create_task node schema (claim pool; no assignee)."""
+    return _task_node_schema(_base_task_node_properties(t))
 
 
 def _scheduled_task_node_schema(t: Translator) -> dict:
@@ -176,15 +174,15 @@ async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str
 
 
 class TaskCreateTool(TeamTool):
-    """Create autonomous-dispatch team tasks, optionally pre-assigned.
+    """Create team tasks; tasks land unassigned and claimable (autonomous dispatch).
 
     The whole call is one atomic graph mutation via ``add_graph``: edges
     among tasks of the same call are expressed with ``depends_on`` only
     (forward references allowed), while ``depended_by`` is reserved for
     wiring *existing* tasks to depend on a new task. In-batch ``depended_by``
-    targets are rejected at this boundary as redundant. Tasks without an
-    ``assignee`` are claimable from the shared board; tasks with an assignee
-    are reserved for that non-leader member.
+    targets are rejected at this boundary as redundant. Assignee is not part
+    of this tool — members claim from the shared board, and the leader
+    assigns via ``update_task`` when needed.
     """
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
@@ -217,9 +215,6 @@ class TaskCreateTool(TeamTool):
         error = _validate_task_batch(tasks)
         if error:
             return ToolOutput(success=False, error=error)
-        error = await _validate_assignees(self.agent_team, tasks, required=False)
-        if error:
-            return ToolOutput(success=False, error=error)
 
         # One atomic graph mutation for the whole call: depends_on may
         # forward-reference tasks later in the batch, and either every
@@ -232,7 +227,6 @@ class TaskCreateTool(TeamTool):
                     task_id=spec.get("task_id"),
                     depends_on=tuple(spec.get("depends_on") or ()),
                     depended_by=tuple(spec.get("depended_by") or ()),
-                    assignee=(spec.get("assignee") or "").strip() or None,
                 )
                 for spec in tasks
             ]
@@ -240,12 +234,11 @@ class TaskCreateTool(TeamTool):
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
 
-        briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
-        if len(briefs) == 1:
-            return ToolOutput(success=True, data=briefs[0])
+        if len(result.tasks) == 1:
+            return ToolOutput(success=True, data=result.tasks[0].brief())
         return ToolOutput(
             success=True,
-            data={"tasks": briefs, "count": len(briefs)},
+            data={"tasks": [task.brief() for task in result.tasks], "count": len(result.tasks)},
         )
 
     def map_result(self, output: ToolOutput) -> str:
@@ -253,16 +246,8 @@ class TaskCreateTool(TeamTool):
             return output.error or "Operation failed"
         d = output.data
         if "task_id" in d and "title" in d:
-            line = f"Task created: task_id={d['task_id']} title={d['title']}"
-            if d.get("assignee"):
-                line += f" -> {d['assignee']}"
-            return line
-        lines = []
-        for task in d.get("tasks", []):
-            line = f"task_id={task['task_id']} title={task['title']}"
-            if task.get("assignee"):
-                line += f" -> {task['assignee']}"
-            lines.append(line)
+            return f"Task created: task_id={d['task_id']} title={d['title']}"
+        lines = [f"task_id={task['task_id']} title={task['title']}" for task in d.get("tasks", [])]
         lines.append(f"Created {d['count']}")
         return "\n".join(lines)
 

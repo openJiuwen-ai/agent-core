@@ -74,3 +74,27 @@ def test_workflow_path_sanitizes_untrusted_segments():
 
     # Spaces and unsafe characters collapse to underscores.
     assert paths.workflow_run_dir("demo-team", "s", "My Flow!").name == "My_Flow"
+
+
+@pytest.mark.level1
+def test_agent_teams_home_scope_nests_under_project(tmp_path):
+    project = tmp_path / "workspace" / "20260803154027"
+    project.mkdir(parents=True)
+    paths.configure_openjiuwen_home(tmp_path / "user-data")
+
+    with paths.agent_teams_home_scope(project) as teams_home:
+        assert teams_home == project.resolve() / ".agent_teams"
+        assert paths.get_agent_teams_home() == teams_home
+        assert paths.team_home("oc_team_demo") == teams_home / "oc_team_demo"
+        assert (teams_home).is_dir()
+
+    assert paths.get_agent_teams_home() == tmp_path / "user-data" / ".agent_teams"
+
+
+@pytest.mark.level1
+def test_agent_teams_home_scope_noop_without_project(tmp_path):
+    paths.configure_openjiuwen_home(tmp_path / "user-data")
+    with paths.agent_teams_home_scope(None) as teams_home:
+        assert teams_home is None
+        assert paths.get_agent_teams_home() == tmp_path / "user-data" / ".agent_teams"
+

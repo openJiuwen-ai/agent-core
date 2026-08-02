@@ -570,3 +570,63 @@ async def test_wake_mailbox_if_interrupt_cleared_enqueues_poll():
     agent.coordination_loop.enqueue.assert_awaited_once()
     event = agent.coordination_loop.enqueue.await_args.args[0]
     assert event.event_type == InnerEventType.POLL_MAILBOX
+
+
+@pytest.mark.asyncio
+async def test_dispatch_defers_wake_until_agent_ready():
+    """Real wakes must not be dropped while harness is missing; POLL may drop."""
+    from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
+    from openjiuwen.agent_teams.agent.coordination.event_bus import InnerEventMessage
+    from openjiuwen.agent_teams.agent.infra import TeamInfra
+
+    ready = {"value": False}
+    host = MagicMock()
+    host.is_agent_ready = lambda: ready["value"]
+    host.is_agent_running = lambda: False
+    host.idle_seconds = lambda: None
+    host.has_in_flight_round = lambda: False
+    host.has_pending_interrupt = lambda: False
+    host.cancel_agent = AsyncMock()
+    host.deliver_input = AsyncMock()
+    host.resume_interrupt = AsyncMock()
+    host.shutdown_self = AsyncMock()
+    host.conclude_completed_round = AsyncMock()
+    host.finalize_non_contributing_worktrees = AsyncMock()
+
+    blueprint = MagicMock(spec=TeamAgentBlueprint)
+    blueprint.role = TeamRole.LEADER
+    blueprint.member_name = "leader-1"
+    blueprint.spec = MagicMock(reliability=None)
+
+    poll_ctrl = MagicMock()
+    poll_ctrl.pause_polls = AsyncMock()
+    poll_ctrl.resume_polls = AsyncMock()
+
+    dispatcher = EventDispatcher(
+        host,
+        blueprint,
+        TeamInfra(),
+        poll_ctrl,
+    )
+    seen: list[Any] = []
+
+    async def _capture(event_key: str, event: Any) -> None:
+        seen.append((event_key, event))
+
+    dispatcher._framework.trigger = AsyncMock(side_effect=_capture)
+
+    user_wake = InnerEventMessage(
+        event_type=InnerEventType.USER_INPUT,
+        payload={"content": "hello"},
+    )
+    poll_wake = InnerEventMessage(event_type=InnerEventType.POLL_TASK)
+
+    await dispatcher.dispatch(user_wake)
+    await dispatcher.dispatch(poll_wake)
+    assert seen == []
+    assert dispatcher._deferred_wakes == [user_wake]
+
+    ready["value"] = True
+    await dispatcher.flush_deferred()
+    assert seen == [(InnerEventType.USER_INPUT.value, user_wake)]
+    assert dispatcher._deferred_wakes == []

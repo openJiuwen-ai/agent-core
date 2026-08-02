@@ -772,7 +772,10 @@ class TeamAgent(BaseAgent):
         await self._coordination.pause()
 
     async def pause_coordination(self) -> None:
-        """Pause coordination without tearing down teammate processes."""
+        """Pause coordination: abort LLM, kill teammate handles, stop harness.
+
+        Task board rows stay in SQLite for resume via ``recover_team``.
+        """
         await self._pause_coordination()
 
     async def _stop_coordination(
@@ -1080,6 +1083,19 @@ class TeamAgent(BaseAgent):
         backend = self.team_backend
         if backend is None or not backend.is_leader:
             return False
+        # Mirror SpawnManager: do not auto-start while pause is in flight.
+        spawn_mgr = getattr(self, "_spawn_manager", None)
+        if spawn_mgr is not None and getattr(spawn_mgr, "_is_pause_blocking_spawn", None):
+            try:
+                # pylint: disable=protected-access — mirror SpawnManager pause gate; method existence checked via getattr above.
+                if spawn_mgr._is_pause_blocking_spawn():
+                    team_logger.info(
+                        "auto_start_member({}) skipped — team pausing/paused",
+                        member_name,
+                    )
+                    return False
+            except Exception:  # noqa: BLE001 - pause-gate check is best-effort; fall through on failure
+                team_logger.debug("auto_start_member({}) pause-gate check failed", member_name, exc_info=True)
         try:
             started = await backend.startup_member(member_name, on_created=self._on_teammate_created)
         except Exception as exc:
