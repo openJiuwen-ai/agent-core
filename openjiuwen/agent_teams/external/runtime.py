@@ -181,6 +181,10 @@ class CliRuntimeBase(ABC):
         self._turn_aborted = False
         self._phase = HarnessState.IDLE
 
+    def bind_team_context_tracker(self, tracker: "TeamContextTracker | None") -> None:
+        """Bind the tracker that injects pending team state into outbound messages."""
+        self._team_context_tracker = tracker
+
     async def _ensure_member_session(self, team_session: Optional[Any]) -> Any:
         """Open this member's stable child AgentSession once.
 
