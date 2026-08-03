@@ -23,6 +23,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
     INTERNAL_USER_PREFIXES,
     build_compressor_reinjected_state_message,
     count_messages_tokens,
+    count_usage_tokens_with_tail,
     resolve_context_max,
     resolve_ratio_token_threshold,
 )
@@ -85,10 +86,7 @@ class PrefixCompactProcessorConfig(BaseModel):
         }
         configured_fields = sorted(legacy_fields.intersection(value))
         if configured_fields:
-            raise ValueError(
-                f"{', '.join(configured_fields)} moved to "
-                "ContextEngineConfig.compression_recall_config"
-            )
+            raise ValueError(f"{', '.join(configured_fields)} moved to ContextEngineConfig.compression_recall_config")
         return value
 
 
@@ -705,13 +703,15 @@ class PrefixCompactProcessor(ContextProcessor):
         return original_tokens <= 0 or new_tokens < original_tokens
 
     def _count_context_window_tokens(self, context_window: ContextWindow, context: ModelContext) -> int:
-        # usage_aware: 末尾 AssistantMessage.usage_metadata.total_tokens 已含
-        # 当时 system+tools，故不再单独加 count_tools(tools)；尾部新增消息
-        # 由 len//4 补算。无 usage 时 fallback 到原 tiktoken 路径（含 tools）。
-        return self._count_messages_tokens(
-            list(context_window.system_messages or []) + list(context_window.context_messages or []),
+        messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])
+        usage_tokens = count_usage_tokens_with_tail(messages)
+        if usage_tokens is not None:
+            # The model-reported usage already includes the system prompt and
+            # tools that were present when this still-valid baseline was made.
+            return usage_tokens
+        return self._count_messages_tokens(messages, context) + self._count_tools_tokens(
+            list(context_window.tools or []),
             context,
-            usage_aware=True,
         )
 
     def _count_tools_tokens(self, tools: list[ToolInfo], context: ModelContext) -> int:

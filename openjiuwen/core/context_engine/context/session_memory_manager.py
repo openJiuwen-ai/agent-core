@@ -959,11 +959,7 @@ class SessionMemoryManager:
         # usage 时 fallback 到 token_counter / char 估算。
         for idx in range(len(all_messages) - 1, -1, -1):
             message = all_messages[idx]
-            if (
-                isinstance(message, AssistantMessage)
-                and message.usage_metadata is not None
-                and message.usage_metadata.total_tokens > 0
-            ):
+            if ContextUtils.has_valid_usage_metadata(message):
                 tail = all_messages[idx + 1 :]
                 return message.usage_metadata.total_tokens + sum(
                     SessionMemoryManager._estimate_message_tokens(msg) for msg in tail

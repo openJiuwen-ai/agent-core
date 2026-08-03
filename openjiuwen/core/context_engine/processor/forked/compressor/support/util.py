@@ -290,10 +290,9 @@ def count_messages_tokens(
     if not messages:
         return 0
     if usage_aware:
-        split = _last_usage_base(messages)
-        if split is not None:
-            base, tail = split
-            return base + sum(_len4(message) for message in tail)
+        usage_tokens = count_usage_tokens_with_tail(messages)
+        if usage_tokens is not None:
+            return usage_tokens
     if token_counter is not None:
         try:
             return token_counter.count_messages(messages)
@@ -301,6 +300,15 @@ def count_messages_tokens(
             prefix = f"[{processor_type}] " if processor_type else ""
             logger.warning(f"{prefix}token_counter failed, fallback to char-based estimate: {exc}")
     return sum(estimate_content_tokens(getattr(message, "content", "")) for message in messages)
+
+
+def count_usage_tokens_with_tail(messages: List[BaseMessage]) -> Optional[int]:
+    """Return a valid model-reported usage baseline plus its appended tail."""
+    split = _last_usage_base(messages)
+    if split is None:
+        return None
+    base, tail = split
+    return base + sum(_len4(message) for message in tail)
 
 
 def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[BaseMessage]]]:
@@ -312,11 +320,7 @@ def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[Ba
     """
     for idx in range(len(messages) - 1, -1, -1):
         message = messages[idx]
-        if (
-            isinstance(message, AssistantMessage)
-            and message.usage_metadata is not None
-            and message.usage_metadata.total_tokens > 0
-        ):
+        if ContextUtils.has_valid_usage_metadata(message):
             return message.usage_metadata.total_tokens, messages[idx + 1 :]
     return None
 
