@@ -361,11 +361,14 @@ STRINGS: dict[str, str] = {
         "as separate messages to each member, cost is linear in recipient count and "
         "MORE expensive than broadcast for the same audience, use only when truly needed "
         'and cannot mix with "*"/"user"; '
-        '"user" (teammates only, to reply to the user); '
+        '"user" (teammates only, to reply to the user; leader calls are rejected); '
         '"*" to broadcast on the team channel, visible to all members'
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
+    "send_message.error_leader_to_user": (
+        "Leader cannot send_message to 'user'. Reply to the user directly in your assistant output instead."
+    ),
     "send_message.error_content_too_long": (
         "'content' is too long ({actual} chars, limit {limit}): a body this size is an "
         "artifact, not a message. Write it to a file under the shared team workspace "

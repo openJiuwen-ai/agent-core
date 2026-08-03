@@ -359,6 +359,7 @@ class SpawnManager:
         return TeamRuntimeContext(
             role=role,
             member_name=teammate.member_name,
+            display_name=teammate.display_name or "",
             desc=teammate.desc or "",
             prompt=teammate.prompt or "",
             team_spec=ctx.team_spec if ctx else None,

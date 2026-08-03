@@ -103,6 +103,20 @@ _EVENT_NAMESPACE = "native_harness"
 _SLOW_ROUND_REPEAT_LOG_INTERVAL_SECONDS = 600.0
 
 
+def _query_text(query: "str | list[str] | InteractiveInput") -> str | None:
+    """Flatten a round query to replayable plain text.
+
+    A batch of follow-ups joins the way the inner agent joins it; an
+    ``InteractiveInput`` is a single-round resume payload and has no replayable
+    text at all, so it yields None.
+    """
+    if isinstance(query, str):
+        return query
+    if isinstance(query, list):
+        return "\n".join(query)
+    return None
+
+
 class NativeHarness(DeepAgent):
     """Concurrent-safe multi-round interaction wrapper that is itself a DeepAgent.
 
@@ -917,11 +931,11 @@ class NativeHarness(DeepAgent):
 
         # Remember the round's originating query: ``resume()`` hands it to the
         # continuation round as ``original_query`` so a task-plan continuation
-        # can still reuse it. An InteractiveInput resume payload is single-round
-        # and not replayable, so it is not cached.
-        self._st.paused_query = (
-            active.original_query if isinstance(active.original_query, str) else None
-        )
+        # can still reuse it. A batch of follow-ups flattens to its joined text
+        # (the continuation appends no user turn, so the seams no longer matter).
+        # An InteractiveInput resume payload is single-round and not replayable,
+        # so it is not cached.
+        self._st.paused_query = _query_text(active.original_query)
 
         # Arm the cooperative stop first — it is the correctness authority; the
         # hard-cancel below is only a promptness optimisation.
@@ -1080,7 +1094,8 @@ class NativeHarness(DeepAgent):
         if runtime_crashed:
             self._reset_coordinator()
             death_reason = cmd.error
-            if isinstance(active.original_query, str) and not active.failure_retry:
+            replayable = not isinstance(active.original_query, InteractiveInput)
+            if replayable and not active.failure_retry:
                 logger.warning(
                     "[NativeHarness] round_id=%s died abnormally (%s); "
                     "retrying its query once on a new round",
@@ -1107,9 +1122,9 @@ class NativeHarness(DeepAgent):
 
         # Decision priority (matches _run_task_loop):
         #   follow-up (external immediate=False sends) > remaining task-plan task.
-        next_follow_up = self._drain_next_follow_up(session)
-        if next_follow_up is not None:
-            nxt = self._start_round(next_follow_up, is_follow_up=True)
+        follow_ups = self._drain_pending_follow_ups(session)
+        if follow_ups is not None:
+            nxt = self._start_round(follow_ups, is_follow_up=True)
             await self._emit_round("started", nxt.round_id)
             return
 
@@ -1159,7 +1174,7 @@ class NativeHarness(DeepAgent):
 
     def _start_round(
         self,
-        query: "str | InteractiveInput",
+        query: "str | list[str] | InteractiveInput",
         is_follow_up: bool = False,
         failure_retry: bool = False,
         resume_continuation: bool = False,
@@ -1171,7 +1186,9 @@ class NativeHarness(DeepAgent):
         where the inner loop runs — unlike a ContextVar set here.
 
         Args:
-            query: Query to drive this round.
+            query: Query to drive this round. A list is a batch of follow-ups
+                drained together, handed over unjoined so the inner agent's
+                ON_USER_MESSAGE rails see the individual inputs.
             is_follow_up: Whether this round continues a prior one (passed to
                 ``submit_round`` so the executor treats it as a follow-up).
             failure_retry: Whether this round is the one-shot retry of a round
@@ -1388,12 +1405,33 @@ class NativeHarness(DeepAgent):
         if handler is not None and handler.interaction_queues is not None:
             handler.interaction_queues.push_steer(content)
 
-    def _drain_next_follow_up(self, session: Session) -> str | None:
-        """Drain queued follow-ups into state and pop the next one (FIFO).
+    def _drain_pending_follow_ups(self, session: Session) -> list[str] | None:
+        """Drain every queued follow-up as the next round's batch of inputs.
 
-        Mirrors ``_run_task_loop``: drain ``LoopQueues.follow_up`` into
-        ``DeepAgentState.pending_follow_ups``, then pop the first. Returns None
-        when no follow-up is pending.
+        Mirrors ``_run_task_loop`` in draining ``LoopQueues.follow_up`` into
+        ``DeepAgentState.pending_follow_ups`` first, so a follow-up that landed
+        while the round was finishing is not left behind.
+
+        All of them then drive **one** round, the way the steering queue already
+        drives one model call with everything it drained. Running one round per
+        follow-up made the two queues behave differently for no reason, and the
+        difference was expensive: everything that piled up while the member was
+        busy got a full model round of its own, and the member acted on the
+        oldest entry while the newer ones sat waiting behind it. For inputs that
+        supersede each other -- a task board is a full survey, stale the moment
+        the next one is rendered -- that means acting on a board that is already
+        wrong.
+
+        The batch stays a **list** rather than being joined here: the inner
+        agent joins it, and only after ON_USER_MESSAGE rails have seen the
+        individual inputs and had their chance to drop the superseded ones.
+        Joining early would leave them a blob to parse.
+
+        Args:
+            session: Session holding the persisted follow-up queue.
+
+        Returns:
+            The queued inputs, oldest first, or None when nothing is pending.
         """
         controller = self.loop_controller
         new_follow_ups = controller.drain_follow_up() if controller is not None else []
@@ -1402,9 +1440,10 @@ class NativeHarness(DeepAgent):
             st.pending_follow_ups.extend(new_follow_ups)
         if not st.pending_follow_ups:
             return None
-        nxt = st.pending_follow_ups.pop(0)
+        batch = list(st.pending_follow_ups)
+        st.pending_follow_ups.clear()
         self.save_state(session, st)
-        return nxt
+        return batch
 
     def _drain_follow_ups_discard(self, session: Session) -> None:
         """Drop all queued follow-ups (LoopQueues + state) on graceful stop."""

@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.foundation.tool import ToolCard, ToolInfo
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.sections.progressive_tool_rail import (
@@ -44,7 +44,11 @@ class ProgressiveToolRail(DeepAgentRail):
         self.max_loaded_tools = config.progressive_tool_max_loaded_tools
 
         self._meta_tool_names: Set[str] = set()
-        self._owned_tool_names: Set[str] = set()
+        # Meta tools this rail actually registered, mapped from tool name to the
+        # exact card that was stored. The name is the ability-manager key, while
+        # the card identity tells uninit whether this rail is still the owner or
+        # another rail has since taken the name over.
+        self._owned_tool_cards: Dict[str, ToolCard] = {}
         self._cached_all_tool_infos: List[ToolInfo] = []
 
     def init(self, agent) -> None:
@@ -73,16 +77,21 @@ class ProgressiveToolRail(DeepAgentRail):
                 try:
                     result = agent.ability_manager.add_ability(tool.card, tool)
                     if result.added:
-                        self._owned_tool_names.add(tool.card.name)
+                        self._owned_tool_cards[tool.card.name] = tool.card
                 except Exception as exc:
                     logger.warning(
                         f"[ProgressiveToolRail] failed to register tool '{tool.card.name}': {exc}"
                     )
 
     def uninit(self, agent) -> None:
-        """Remove meta tools registered by this rail."""
+        """Remove the meta tools this rail still owns."""
         if hasattr(agent, "ability_manager"):
-            for tool_name in list(self._owned_tool_names):
+            for tool_name, tool_card in list(self._owned_tool_cards.items()):
+                if agent.ability_manager.get(tool_name) is not tool_card:
+                    # Another owner re-registered the name after this rail did
+                    # and now holds both the card and the live instance; tearing
+                    # it down here would unregister that owner's tool.
+                    continue
                 try:
                     agent.ability_manager.remove_ability(tool_name)
                 except Exception as exc:
@@ -91,7 +100,7 @@ class ProgressiveToolRail(DeepAgentRail):
                         f"from ability_manager: {exc}"
                     )
 
-        self._owned_tool_names.clear()
+        self._owned_tool_cards.clear()
         self._meta_tool_names.clear()
         self._cached_all_tool_infos = []
 

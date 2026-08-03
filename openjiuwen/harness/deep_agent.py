@@ -54,9 +54,14 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
     RunContext,
     RunKind,
+    init_rail,
+    log_rail_init_breakdown,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.image_modality_probe import probe_image_support
+from openjiuwen.harness.image_modality_probe import (
+    get_cached_image_support,
+    schedule_image_support_probe,
+)
 from openjiuwen.harness.rails import DeepAgentRail
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.rails.task_completion_rail import (
@@ -145,6 +150,9 @@ _BRIDGE_EVENTS = frozenset(
         # rail registered via DeepAgent.register_rail must bridge to the inner
         # agent (same callback-manager namespace) rather than the outer one.
         AgentCallbackEvent.AFTER_REACT_ITERATION,
+        # Same reason: the inner agent is what admits consumed inputs into the
+        # conversation, so it is what fires this.
+        AgentCallbackEvent.ON_USER_MESSAGE,
     }
 )
 
@@ -168,6 +176,28 @@ _SUB_AGENTS_DIR = "sub_agents"
 
 
 _ROUND_BOUNDARY = object()
+
+
+def _render_identity_prompt(prompt_builder: SystemPromptBuilder, language: str) -> str:
+    """Render the identity section alone, for ReActAgent's prompt template.
+
+    ``ReActAgent`` re-reads ``prompt_template`` into its own identity section on
+    every round (see ``ReActAgent._inner_invoke``) and, because DeepAgent shares
+    its builder with the ReActAgent, that builder still contributes the other
+    sections itself. Handing over the fully built prompt would therefore fold
+    every section present at configure time into identity and emit them twice.
+
+    Args:
+        prompt_builder: The builder holding the sections for this agent.
+        language: Language the section is rendered in.
+
+    Returns:
+        The rendered identity text, or an empty string when there is none.
+    """
+    identity_section = prompt_builder.get_section(SectionName.IDENTITY)
+    if identity_section is None:
+        return ""
+    return identity_section.render(language)
 
 
 class DeepAgent(BaseAgent):
@@ -277,12 +307,31 @@ class DeepAgent(BaseAgent):
                 result.msg(),
             )
 
+    @staticmethod
+    def _resolve_tool_owner_id(config: DeepAgentConfig) -> str:
+        """Return the owner id qualifying this agent's stateful tool registrations.
+
+        Tool ownership and persistence identity are separate concerns: the
+        checkpointer keys state by ``card.id``, so that id has to stay stable,
+        while the process-global resource manager needs one owner per live agent
+        or concurrent agents sharing a card silently overwrite each other's tool
+        instances. ``tool_owner_id`` lets a host separate the two; omitting it
+        keeps the historical behaviour of reusing ``card.id``.
+
+        Args:
+            config: The configuration being applied.
+
+        Returns:
+            The explicit ``tool_owner_id`` when set, otherwise the card id.
+        """
+        return config.tool_owner_id or config.card.id
+
     def _initial_configure(self, config: DeepAgentConfig) -> None:
         """First-time setup: persist config, create the inner ReActAgent, and queue rails."""
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
-            self.ability_manager.set_owner_id(self.card.id)
+            self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
 
         self._react_agent = self._create_react_agent()
         self._queue_pending_rails(config)
@@ -293,7 +342,7 @@ class DeepAgent(BaseAgent):
         self._deep_config = config
         if config.card is not None:
             self.card = config.card
-            self.ability_manager.set_owner_id(self.card.id)
+            self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
 
         self._hot_reload_rails(config)
 
@@ -441,9 +490,10 @@ class DeepAgent(BaseAgent):
         else:
             prompt_builder.add_section(build_identity_section(language))
         prompt_builder.add_section(build_prompt_attachments_section(language))
-        prompt = prompt_builder.build()
         new_react_config = self._react_agent.config.model_copy()
-        new_react_config.prompt_template = [{"role": "system", "content": prompt}]
+        new_react_config.prompt_template = [
+            {"role": "system", "content": _render_identity_prompt(prompt_builder, language)}
+        ]
         self._react_agent.configure(new_react_config)
         self.system_prompt_builder = prompt_builder
         self._sync_prompt_builder_references()
@@ -477,16 +527,24 @@ class DeepAgent(BaseAgent):
 
         Public entry point for resource binding targets after a prompt section
         mutation: rebuilds ``react_agent.config.prompt_template`` from the
-        builder's current output and reconfigures the ReActAgent, then syncs
+        builder's identity section and reconfigures the ReActAgent, then syncs
         every prompt participant to the same builder reference via
         :meth:`_sync_prompt_builder_references`. Keeps the binding target from
         touching ``react_agent.config`` / ``react_agent.configure`` directly.
+
+        The template carries the identity alone, for the same reason it does in
+        :meth:`_hot_reload_system_prompt` -- see :func:`_render_identity_prompt`.
         """
         builder = self.system_prompt_builder
         if builder is None or self._react_agent is None:
             return
+        language = resolve_language(
+            self._deep_config.language if self._deep_config is not None else None
+        )
         new_react_config = self._react_agent.config.model_copy()
-        new_react_config.prompt_template = [{"role": "system", "content": builder.build()}]
+        new_react_config.prompt_template = [
+            {"role": "system", "content": _render_identity_prompt(builder, language)}
+        ]
         self._react_agent.configure(new_react_config)
         self._sync_prompt_builder_references()
 
@@ -829,8 +887,9 @@ class DeepAgent(BaseAgent):
         else:
             prompt_builder.add_section(build_identity_section(language))
         prompt_builder.add_section(build_prompt_attachments_section(language))
-        prompt = prompt_builder.build()
-        react_config.prompt_template = [{"role": "system", "content": prompt}]
+        react_config.prompt_template = [
+            {"role": "system", "content": _render_identity_prompt(prompt_builder, language)}
+        ]
 
         if cfg.model is not None:
             model = cfg.model
@@ -904,7 +963,13 @@ class DeepAgent(BaseAgent):
             self.ability_manager.add(mcp_config)
 
     async def _resolve_read_image_multimodal(self) -> None:
-        """Probe the agent model when read_file image modality is set to auto."""
+        """Resolve read_file image modality when it is set to auto.
+
+        A probe costs a full LLM round-trip, so it never blocks startup: a
+        cached verdict is applied straight away, otherwise the probe runs in the
+        background and this run stays metadata-only (``None`` is falsy at every
+        read site). Later agents on the same endpoint and model reuse the cache.
+        """
         config = self._deep_config
         if config is None or config.enable_read_image_multimodal is not None:
             return
@@ -916,19 +981,20 @@ class DeepAgent(BaseAgent):
             config.enable_read_image_multimodal = False
             return
 
-        supported = await probe_image_support(config.model)
-        if supported is None:
-            logger.warning(
-                "[DeepAgent] image multimodal probe inconclusive; "
-                "leaving auto and degrading to metadata-only for this run",
+        cached = get_cached_image_support(config.model)
+        if cached is not None:
+            config.enable_read_image_multimodal = cached
+            logger.info(
+                "[DeepAgent] read_file image multimodal from probe cache: %s",
+                cached,
             )
             return
 
-        config.enable_read_image_multimodal = supported
         logger.info(
-            "[DeepAgent] read_file image multimodal auto-detected: %s",
-            supported,
+            "[DeepAgent] read_file image multimodal not probed yet; "
+            "probing in background and degrading to metadata-only for this run",
         )
+        schedule_image_support_probe(config.model)
 
     def _apply_inherited_artifact_cwd(self) -> None:
         """Set cwd from ``_inherited_artifact_root`` for a reused subagent.
@@ -998,14 +1064,24 @@ class DeepAgent(BaseAgent):
                 await self.unregister_rail(stale_rail)
         self._stale_rails.clear()
 
-        for rail_inst in self._pending_rails:
+        # Initialize in the same order callbacks run in: highest priority
+        # first. A rail's init registers its tools and prompt sections, so
+        # "run my hook after that rail's" and "see that rail's tools at init
+        # time" are the same question, and one number now answers both. The
+        # sort is stable, so rails sharing a priority keep the order the
+        # caller listed them in.
+        rail_init_timings: List[tuple] = []
+        for rail_inst in sorted(self._pending_rails, key=lambda r: r.priority, reverse=True):
             if isinstance(rail_inst, TaskCompletionRail):
                 self._task_completion_rail = rail_inst
             if isinstance(rail_inst, DeepAgentRail):
                 rail_inst.set_sys_operation(self._deep_config.sys_operation)
                 rail_inst.set_workspace(self._deep_config.workspace)
-            rail_inst.init(self)
+            rail_init_timings.append(
+                (type(rail_inst).__name__, init_rail(rail_inst, self))
+            )
             await self._register_rail_selective(rail_inst)
+        log_rail_init_breakdown(rail_init_timings)
         self._pending_rails.clear()
         self._sync_prompt_builder_references()
         self._initialized = True
@@ -1488,7 +1564,7 @@ class DeepAgent(BaseAgent):
             rail.set_sys_operation(self.deep_config.sys_operation)
             rail.set_workspace(self.deep_config.workspace)
         self._sync_prompt_builder_references()
-        rail.init(self)
+        init_rail(rail, self)
         await self._register_rail_selective(rail)
         self._sync_prompt_builder_references()
         return self
@@ -2835,7 +2911,7 @@ class DeepAgent(BaseAgent):
             if rail is not None and hasattr(rail, "set_goal_manager"):
                 rail.set_goal_manager(self.goal_manager)
                 try:
-                    rail.init(self)
+                    init_rail(rail, self)
                 except Exception:
                     logger.exception("[DeepAgent] Failed to register goal tools")
 

@@ -53,7 +53,9 @@ from openjiuwen.agent_teams.workflow.engine.schema import coerce, resolve_schema
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.prompts import PromptMode
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec, TeamModelConfig
@@ -178,9 +180,20 @@ class TinyAgent:
             # lifecycle. Keep a reference to read ``captured`` after the run.
             capture = next(t for t in spec.tools if isinstance(t, StructuredOutputTool))
             prompt = f"{content}\n\n{self._t('structured_output', key='reminder')}"
+        # Own the session so ``run_once`` skips its pre_run / post_run pair: a
+        # single-shot run has nothing to restore and nothing worth persisting,
+        # and the checkpointer round-trip is pure cost here. That also skips the
+        # AGENT_SESSION_CREATED event pre_run fires, so a tiny agent's session
+        # is deliberately invisible to session-lifecycle observers. Closing the
+        # stream is still required to release the emitter.
+        session = Session(card=spec.card)
         try:
-            result = await harness.run_once(prompt)
+            result = await harness.run_once(prompt, session=session)
         finally:
+            try:
+                await session.close_stream()
+            except Exception:
+                team_logger.debug("[tiny_agent] run session close failed", exc_info=True)
             try:
                 await harness.dispose()
             except Exception:
@@ -331,6 +344,7 @@ def create_tiny_agent(
     name: str = "tiny",
     language: str = "cn",
     max_iterations: int = 6,
+    enable_security_rail: bool = False,
 ) -> TinyAgent:
     """Create a tiny agent from a system prompt + a resolvable model name.
 
@@ -344,6 +358,8 @@ def create_tiny_agent(
         name: Logical name; becomes the agent card name/id base.
         language: Prompt language for the structured-output tool i18n.
         max_iterations: ReAct iteration ceiling for the underlying harness.
+        enable_security_rail: Whether the harness automatically mounts its
+            default SecurityRail. Tiny agents disable it by default.
 
     Returns:
         A ready-to-use :class:`TinyAgent`.
@@ -363,7 +379,19 @@ def create_tiny_agent(
         tools=None,
         auto_create_workspace=False,
         max_iterations=max_iterations,
+        enable_security_rail=enable_security_rail,
         language=_normalize_language(language),
+        # A tiny agent has no filesystem tools at all, so image support is
+        # irrelevant to it; saying so keeps it from paying for a modality probe.
+        enable_read_image_multimodal=False,
+        # The caller's system prompt is the whole contract here. Harness
+        # sections (the <system-reminder> explainer and friends) describe
+        # machinery a tiny agent does not have, so keep them out of a prompt
+        # that is otherwise two sentences long.
+        prompt_mode=PromptMode.NONE.value,
+        # No filesystem / shell / code tools by definition (see module docstring),
+        # so do not register a sys_operation's tool resources for it either.
+        enable_sys_operation=False,
     )
     return TinyAgent(spec, default_schema=default_schema, language=language)
 

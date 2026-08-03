@@ -71,12 +71,14 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
   闸门（`S_03` 机制 18）。`force` 的语义是"立刻拆，不给收尾的 round"，对所有非 leader 角色
   一视同仁，human avatar 也不例外，**所以这里没有角色分支**。
 
-不指向自己的事件还有一个副作用：`_deliver_external_team_context`。成员名册变动
-（`TEAM_CONTEXT_EVENTS` = `MEMBER_SPAWNED` / `MEMBER_SHUTDOWN`）时，把 `team_info` +
-`team_members` 两个 section 渲染成快照 steer 进**外部 CLI 成员**的 runtime——它们的系统提示词
-是 spawn 时一次性下发的静态快照，没有 prompt attachment 通道，只能靠这条补。非外部成员
-`_external_runtime()` 返回 None，整条路径静默跳过。`REFRESH_TEAM_CONTEXT`（inner）是同一
-动作的主动触发入口。
+不指向自己的事件还有一个副作用：`_announce_external_team_context`。成员名册变动
+（`TEAM_CONTEXT_EVENTS` = `MEMBER_SPAWNED` / `MEMBER_SHUTDOWN`）时调一句
+`runtime.announce_team_context()`——**handler 自己不构造任何内容**，待发什么由 runtime 持有的
+`TeamContextTracker` 判定，没有更新就是 no-op。这条存在的理由是实时性：外部 CLI 成员没有
+rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`），而名册变动不该等到下次有人
+给它发消息。两条路共用同一个 tracker，所以不会重复投递。非外部成员 `_external_runtime()`
+返回 None，整条路径静默跳过；runtime 已 TERMINATED 时同样跳过。`REFRESH_TEAM_CONTEXT`
+（inner，kernel 启动时入队）是同一动作的主动触发入口。见 [[F_70]]。
 
 ### `MessageHandler`（4 个事件，无状态）
 
@@ -139,6 +141,12 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
   自己的未完成任务**；别人 in-flight 的活不喂给 teammate——唤醒它是为了让它接活，不是让它
   围观别人干活。
 - **`resume_polls()` 对每个事件都触发**：上面的过滤只砍 nudge，不停 poll。
+- **板子一律 `use_steer=False`**（维度 3）：巡视只是提醒，从不说"你手上的活作废了"，
+  没有理由打断成员的推理。它因此进 follow-up 队列，这一轮结束才读到。**同一批排队的板子
+  会被压掉，只留最新一条**——每条都是全量快照，前面的在下一条渲染出来的瞬间就过期了；
+  剔除发生在 `TeamPolicyRail.on_user_message` 上，按整条输入丢弃、不解析正文（[[F_71]]）。
+  **leader 的板子不压**：它读的是快照之间的差异（哪个任务出现、哪个动了）来决定重规划还是
+  收尾，压掉就等于删掉它要看的信号。
 
 **`on_initial_task_poll`（inner，F_69）** 是 C 组的一次性入口：成员 runtime 起来时由
 `kernel.enqueue_initial_task_poll()` 投一次，对称于首启邮箱 sweep —— 那条收停机期间来的

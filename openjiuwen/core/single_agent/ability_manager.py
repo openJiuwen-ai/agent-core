@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """AbilityManager Class Definition
 """
 from __future__ import annotations
@@ -449,6 +449,26 @@ class AbilityManager:
         def add_single_ability(_ability: Ability) -> AddAbilityResult:
             if isinstance(_ability, ToolCard):
                 existing = self._tools.get(_ability.name)
+                if existing is not None and existing.id == _ability.id:
+                    # Same registry id: this is a re-registration of one logical
+                    # tool (a rail rebinding its own instance after a
+                    # reconfigure, or two rails contributing the same ability),
+                    # not an ambiguous name conflict. ``add_ability`` binds the
+                    # resource with ``refresh=True``, so the newest instance
+                    # already won; store its card too, otherwise the exposed
+                    # description would describe a different object than the one
+                    # that executes.
+                    logger.debug(
+                        f"Tool ability re-registered: "
+                        f"name='{_ability.name}', id='{_ability.id}'. "
+                        f"Rebind to the new ability."
+                    )
+                    self._tools[_ability.name] = _ability
+                    return AddAbilityResult(
+                        name=_ability.name,
+                        added=True,
+                        reason="refreshed_tool",
+                    )
                 if existing is not None:
                     logger.warning(
                         f"Duplicate tool ability detected: "
