@@ -94,7 +94,13 @@ def _jpeg_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
 
 
 def _image_block_base64(part: dict) -> Optional[str]:
-    """Pull the base64 payload out of the common image block shapes."""
+    """Pull the base64 payload out of the common image block shapes.
+
+    Remote references (an http(s) ``image_url`` or an Anthropic ``source`` with
+    ``type == "url"``) carry no payload to sniff; they return None here and the
+    caller prices them at the flat fallback unless producer-stamped dimensions
+    are present.
+    """
     image_url = part.get("image_url")
     url = image_url.get("url") if isinstance(image_url, dict) else image_url
     if isinstance(url, str) and url.startswith("data:"):

@@ -44,6 +44,14 @@ def test_sanitize_strips_data_urls_from_every_shape() -> None:
     assert sanitize_value_for_text({"a": [1, "two"]}) == {"a": [1, "two"]}
 
 
+def test_sanitize_leaves_non_image_data_urls_alone() -> None:
+    """Only image payloads get the image placeholder: a non-image data URL
+    under a generic "url" key must survive untouched rather than being
+    mislabeled as an omitted image."""
+    pdf_url = "data:application/pdf;base64," + ("P" * 64)
+    assert sanitize_value_for_text({"url": pdf_url}) == {"url": pdf_url}
+
+
 def test_sanitized_serialization_keeps_the_text_parts() -> None:
     text = sanitize_content_for_text(_MULTIMODAL_CONTENT)
     assert "what is on screen?" in text

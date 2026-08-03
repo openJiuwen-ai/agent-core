@@ -30,7 +30,10 @@ def _sanitize_dict(payload: dict) -> dict:
     sanitized: dict = {}
     for key, value in payload.items():
         if key in {"data", "data_url", "url"} and isinstance(value, str):
-            if value.startswith("data:image/") or (key == "url" and "base64," in value):
+            # Image data URLs only: a non-image payload (e.g. data:application/pdf)
+            # must not be mislabeled with an image placeholder. Case-variant image
+            # URLs are still caught by the _DATA_URL_RE pass in the fallthrough.
+            if value.startswith("data:image/"):
                 sanitized[key] = IMAGE_DATA_URL_PLACEHOLDER
                 continue
         if key == "source" and isinstance(value, dict):
