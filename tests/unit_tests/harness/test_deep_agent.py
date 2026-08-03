@@ -78,6 +78,7 @@ def _create_dummy_model() -> Model:
 
 @pytest.fixture(autouse=True)
 def _mock_image_modality_probe(monkeypatch):
+    """Stub background image-modality scheduling; use assert_not_called(), not assert_not_awaited()."""
     from openjiuwen.harness.image_modality_probe import reset_image_support_cache
 
     reset_image_support_cache()
