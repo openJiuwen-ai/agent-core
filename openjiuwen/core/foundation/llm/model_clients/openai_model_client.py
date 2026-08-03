@@ -1,6 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+
+import inspect
+from functools import lru_cache
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
@@ -131,6 +134,38 @@ class OpenAIModelClient(BaseModelClient):
     ) -> dict[str, str]:
         """Merge request-level headers with prebuilt config-level headers (request wins)."""
         return merge_request_headers(base_headers, request_headers)
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _openai_chat_completion_param_names() -> set[str]:
+        from openai.resources.chat.completions import AsyncCompletions
+
+        signature = inspect.signature(AsyncCompletions.create)
+        return set(signature.parameters)
+
+    def _move_unsupported_params_to_extra_body(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Move OpenAI-compatible vendor extensions into extra_body.
+
+        The OpenAI SDK rejects unknown top-level kwargs. For vLLM-compatible
+        endpoints we still want to preserve those fields, but they must travel
+        in the JSON body instead of as SDK kwargs.
+        """
+        allowed = self._openai_chat_completion_param_names() | {"extra_headers", "extra_query", "extra_body", "timeout"}
+        extra_body = dict(params.get("extra_body") or {})
+        moved: list[str] = []
+        for key in list(params.keys()):
+            if key in allowed:
+                continue
+            extra_body[key] = params.pop(key)
+            moved.append(key)
+        if moved:
+            params["extra_body"] = extra_body
+            llm_logger.info(
+                "Moved unsupported OpenAI request params into extra_body.",
+                event_type=LogEventType.LLM_CALL_START,
+                metadata={"moved_params": moved},
+            )
+        return params
 
     def _build_request_params(
             self,
@@ -358,6 +393,7 @@ class OpenAIModelClient(BaseModelClient):
             extra_body = dict(params.get("extra_body") or {})
             extra_body["return_token_ids"] = params.pop("return_token_ids")
             params["extra_body"] = extra_body
+        params = self._move_unsupported_params_to_extra_body(params)
 
         self._apply_model_specific_params(model, params)
         if tracer_record_data:
@@ -523,6 +559,8 @@ class OpenAIModelClient(BaseModelClient):
             extra_body = dict(params.get("extra_body") or {})
             extra_body["return_token_ids"] = params.pop("return_token_ids")
             params["extra_body"] = extra_body
+
+        params = self._move_unsupported_params_to_extra_body(params)
         self._apply_model_specific_params(model, params)
 
         if tracer_record_data:

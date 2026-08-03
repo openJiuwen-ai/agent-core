@@ -5,6 +5,7 @@
 
 from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository, LoRAVersion
 from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+from openjiuwen.agent_evolving.agent_rl.storage.training_task_store import TrainingTaskStore
 from openjiuwen.agent_evolving.agent_rl.storage.trajectory_store import (
     InMemoryTrajectoryStore,
     TrajectorySampleStore,
@@ -16,4 +17,5 @@ __all__ = [
     "LoRAVersion",
     "RedisTrajectoryStore",
     "TrajectorySampleStore",
+    "TrainingTaskStore",
 ]

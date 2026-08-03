@@ -51,6 +51,7 @@ def _build_config_from_env() -> GatewayConfig:
         log_level=_env("LOG_LEVEL", "INFO"),
         dump_token_ids=_env("DUMP_TOKEN_IDS", "").lower() in ("1", "true"),
         lora_repo_root=_env("LORA_REPO_ROOT", ""),
+        lora_default_policy=_env("LORA_DEFAULT_POLICY", "disabled"),
         redis_url=_env("REDIS_URL", ""),
         upstream_max_retries=int(_env("UPSTREAM_MAX_RETRIES", "2")),
         upstream_retry_backoff_sec=float(_env("UPSTREAM_RETRY_BACKOFF_SEC", "0.2")),
@@ -123,6 +124,8 @@ def build_app_from_config(
             lora_repo = LoRARepository(config.lora_repo_root)
         except Exception:
             logger.warning("LoRA repo not available at %s", config.lora_repo_root)
+    from ....storage.training_task_store import TrainingTaskStore
+    training_task_store = TrainingTaskStore(redis_client)
 
     async def close_resources() -> None:
         if owns_http_client:
@@ -136,6 +139,7 @@ def build_app_from_config(
         forwarder=forwarder,
         upstream_client=upstream_client,
         trajectory_runtime=trajectory_runtime,
+        training_task_store=training_task_store,
         close_resources=close_resources,
         lora_repo=lora_repo,
     )

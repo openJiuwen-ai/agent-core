@@ -115,7 +115,11 @@ class TrajectoryUploader:
                 if attempt >= self.max_retries:
                     break
                 await asyncio.sleep(self.backoff_base_sec * (2 ** attempt))
-        logger.warning("[TrajectoryUploader] upload failed; writing WAL err=%s", last_exc)
+        logger.warning(
+            "[TrajectoryUploader] upload failed; writing WAL err_type=%s err=%r",
+            type(last_exc).__name__ if last_exc is not None else "None",
+            last_exc,
+        )
         return False
 
     def _headers(self) -> dict[str, str]:
