@@ -19,14 +19,13 @@ from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.auto_harness.schema import (
+from openjiuwen.rsi.auto_harness.infra.worktree_manager import (
+    WorktreeManager,
+)
+from openjiuwen.rsi.auto_harness.schema import (
     AutoHarnessConfig,
     load_auto_harness_config,
 )
-from openjiuwen.auto_harness.infra.worktree_manager import (
-    WorktreeManager,
-)
-
 
 # ------------------------------------------------------------------
 # 配置加载
@@ -60,7 +59,8 @@ class TestAutoHarnessConfigLoading:
         )
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(
-            yaml_content, encoding="utf-8",
+            yaml_content,
+            encoding="utf-8",
         )
 
         cfg = load_auto_harness_config(str(cfg_file))
@@ -80,7 +80,8 @@ class TestAutoHarnessConfigLoading:
         assert cfg.fix_phase2_max_retries == 3
 
     def test_missing_config_uses_defaults(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         cfg = load_auto_harness_config(
             str(tmp_path / "nonexistent.yaml"),
@@ -91,13 +92,11 @@ class TestAutoHarnessConfigLoading:
         assert cfg.git_base_branch == "develop"
 
     def test_partial_config_merges(self, tmp_path):
-        yaml_content = (
-            "git:\n"
-            "  remote: partial-fork\n"
-        )
+        yaml_content = "git:\n  remote: partial-fork\n"
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(
-            yaml_content, encoding="utf-8",
+            yaml_content,
+            encoding="utf-8",
         )
 
         cfg = load_auto_harness_config(str(cfg_file))
@@ -135,31 +134,23 @@ class TestAutoHarnessWorktreeWithLocalRepo:
         async def fake_git(*args, cwd, env=None):
             del env
             nonlocal created_wt
-            if (
-                args[0] == "worktree"
-                and args[1] == "add"
-            ):
+            if args[0] == "worktree" and args[1] == "add":
                 # args: worktree add -b branch wt_path base
                 created_wt = args[4]
                 Path(created_wt).mkdir(
-                    parents=True, exist_ok=True,
+                    parents=True,
+                    exist_ok=True,
                 )
-            if (
-                args[0] == "remote"
-                and args[1] == "get-url"
-            ):
+            if args[0] == "remote" and args[1] == "get-url":
                 return 1, ""
-            if (
-                args[0] == "worktree"
-                and args[1] == "remove"
-            ):
+            if args[0] == "worktree" and args[1] == "remove":
                 wt = Path(args[3])
                 if wt.exists():
                     wt.rmdir()
             return 0, "ok"
 
         with patch(
-            "openjiuwen.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_git,
         ):
             wt_path = await mgr.prepare(
@@ -195,24 +186,20 @@ class TestAutoHarnessWorktreeWithoutLocalRepo:
             if args[0] == "clone":
                 clone_called = True
                 Path(args[-1]).mkdir(
-                    parents=True, exist_ok=True,
+                    parents=True,
+                    exist_ok=True,
                 )
-            if (
-                args[0] == "worktree"
-                and args[1] == "add"
-            ):
+            if args[0] == "worktree" and args[1] == "add":
                 Path(args[3]).mkdir(
-                    parents=True, exist_ok=True,
+                    parents=True,
+                    exist_ok=True,
                 )
-            if (
-                args[0] == "remote"
-                and args[1] == "get-url"
-            ):
+            if args[0] == "remote" and args[1] == "get-url":
                 return 1, ""
             return 0, "ok"
 
         with patch(
-            "openjiuwen.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_git,
         ):
             wt_path = await mgr.prepare("test-clone")
@@ -230,13 +217,11 @@ class TestAutoHarnessConfigCliOverride:
     """CLI 参数覆盖 YAML 配置。"""
 
     def test_budget_override(self, tmp_path):
-        yaml_content = (
-            "budget:\n"
-            "  session_secs: 3600\n"
-        )
+        yaml_content = "budget:\n  session_secs: 3600\n"
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(
-            yaml_content, encoding="utf-8",
+            yaml_content,
+            encoding="utf-8",
         )
 
         cfg = load_auto_harness_config(str(cfg_file))
@@ -245,19 +230,18 @@ class TestAutoHarnessConfigCliOverride:
         # 模拟 CLI --budget 600 覆盖
         cfg.session_budget_secs = 600
         cfg.task_timeout_secs = min(
-            cfg.task_timeout_secs, 600 * 0.95,
+            cfg.task_timeout_secs,
+            600 * 0.95,
         )
         assert cfg.session_budget_secs == 600
         assert cfg.task_timeout_secs <= 570
 
     def test_no_push_override(self, tmp_path):
-        yaml_content = (
-            "git:\n"
-            "  remote: myfork\n"
-        )
+        yaml_content = "git:\n  remote: myfork\n"
         cfg_file = tmp_path / "config.yaml"
         cfg_file.write_text(
-            yaml_content, encoding="utf-8",
+            yaml_content,
+            encoding="utf-8",
         )
 
         cfg = load_auto_harness_config(str(cfg_file))
@@ -294,7 +278,8 @@ class TestAutoHarnessDataDirIsolation:
 
     @pytest.mark.asyncio
     async def test_worktree_not_polluted(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         """worktree 目录不包含 memory/runs 产物。"""
         data_dir = tmp_path / "data"
@@ -312,23 +297,18 @@ class TestAutoHarnessDataDirIsolation:
         async def fake_git(*args, cwd, env=None):
             del env
             nonlocal wt_created
-            if (
-                args[0] == "worktree"
-                and args[1] == "add"
-            ):
+            if args[0] == "worktree" and args[1] == "add":
                 wt_created = args[3]
                 Path(wt_created).mkdir(
-                    parents=True, exist_ok=True,
+                    parents=True,
+                    exist_ok=True,
                 )
-            if (
-                args[0] == "remote"
-                and args[1] == "get-url"
-            ):
+            if args[0] == "remote" and args[1] == "get-url":
                 return 1, ""
             return 0, "ok"
 
         with patch(
-            "openjiuwen.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_git,
         ):
             wt_path = await mgr.prepare("test-iso")
@@ -336,9 +316,7 @@ class TestAutoHarnessDataDirIsolation:
         # experience 和 runs 在 data_dir 下，不在 wt 下
         assert not (Path(wt_path) / "experience").exists()
         assert not (Path(wt_path) / "runs").exists()
-        assert cfg.resolved_experience_dir == str(
-            data_dir / "experience"
-        )
+        assert cfg.resolved_experience_dir == str(data_dir / "experience")
         assert cfg.runs_dir == str(data_dir / "runs")
 
 
@@ -355,11 +333,11 @@ class TestSubcmdRunIntegration:
         """--task 传入时 orchestrator 收到对应任务。"""
         from unittest.mock import MagicMock
 
-        from openjiuwen.auto_harness.schema import (
-            CycleResult,
-        )
         from openjiuwen.core.session.stream.base import (
             OutputSchema,
+        )
+        from openjiuwen.rsi.auto_harness.schema import (
+            CycleResult,
         )
 
         received_tasks = None
@@ -368,7 +346,8 @@ class TestSubcmdRunIntegration:
             nonlocal received_tasks
             received_tasks = tasks
             yield OutputSchema(
-                type="message", index=0,
+                type="message",
+                index=0,
                 payload={"content": "会话启动"},
             )
 
@@ -379,8 +358,7 @@ class TestSubcmdRunIntegration:
         ]
 
         with patch(
-            "openjiuwen.auto_harness.orchestrator"
-            ".create_auto_harness_orchestrator",
+            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             return_value=mock_orch,
         ):
             from rich.console import Console
@@ -389,9 +367,13 @@ class TestSubcmdRunIntegration:
                 _subcmd_run,
             )
 
-            console = Console(file=open(
-                os.devnull, "w",
-            ))
+            console = Console(
+                file=open(
+                    os.devnull,
+                    "w",
+                    encoding="utf-8",
+                )
+            )
             data_dir = tmp_path / "auto_harness"
             data_dir.mkdir(parents=True)
 
@@ -420,7 +402,8 @@ class TestSubcmdRunIntegration:
             nonlocal received_tasks
             received_tasks = tasks
             yield OutputSchema(
-                type="message", index=0,
+                type="message",
+                index=0,
                 payload={"content": "会话启动"},
             )
 
@@ -429,8 +412,7 @@ class TestSubcmdRunIntegration:
         mock_orch.results = []
 
         with patch(
-            "openjiuwen.auto_harness.orchestrator"
-            ".create_auto_harness_orchestrator",
+            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             return_value=mock_orch,
         ):
             from rich.console import Console
@@ -439,9 +421,13 @@ class TestSubcmdRunIntegration:
                 _subcmd_run,
             )
 
-            console = Console(file=open(
-                os.devnull, "w",
-            ))
+            console = Console(
+                file=open(
+                    os.devnull,
+                    "w",
+                    encoding="utf-8",
+                )
+            )
             data_dir = tmp_path / "auto_harness"
             data_dir.mkdir(parents=True)
 
@@ -455,11 +441,13 @@ class TestSubcmdRunIntegration:
 
     @pytest.mark.asyncio
     async def test_dry_run_skips_execution(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         """--dry-run 只打印任务 JSON，不创建 orch。"""
-        from rich.console import Console
         from io import StringIO
+
+        from rich.console import Console
 
         from openjiuwen.harness.cli.ui.repl import (
             _subcmd_run,
@@ -471,8 +459,7 @@ class TestSubcmdRunIntegration:
         data_dir.mkdir(parents=True)
 
         with patch(
-            "openjiuwen.auto_harness.orchestrator"
-            ".create_auto_harness_orchestrator",
+            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
         ) as mock_create:
             await _subcmd_run(
                 console,
@@ -487,7 +474,8 @@ class TestSubcmdRunIntegration:
 
     @pytest.mark.asyncio
     async def test_budget_and_no_push_override(
-        self, tmp_path,
+        self,
+        tmp_path,
     ):
         """--budget 和 --no-push 覆盖配置。"""
         from unittest.mock import MagicMock
@@ -504,7 +492,8 @@ class TestSubcmdRunIntegration:
 
             async def _fake_stream(tasks=None):
                 yield OutputSchema(
-                    type="message", index=0,
+                    type="message",
+                    index=0,
                     payload={"content": "ok"},
                 )
 
@@ -514,8 +503,7 @@ class TestSubcmdRunIntegration:
             return mock_orch
 
         with patch(
-            "openjiuwen.auto_harness.orchestrator"
-            ".create_auto_harness_orchestrator",
+            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             side_effect=_capture_create,
         ):
             from rich.console import Console
@@ -524,17 +512,23 @@ class TestSubcmdRunIntegration:
                 _subcmd_run,
             )
 
-            console = Console(file=open(
-                os.devnull, "w",
-            ))
+            console = Console(
+                file=open(
+                    os.devnull,
+                    "w",
+                    encoding="utf-8",
+                )
+            )
             data_dir = tmp_path / "auto_harness"
             data_dir.mkdir(parents=True)
 
             await _subcmd_run(
                 console,
                 [
-                    "--task", "t1",
-                    "--budget", "120",
+                    "--task",
+                    "t1",
+                    "--budget",
+                    "120",
                     "--no-push",
                 ],
                 str(tmp_path),
@@ -543,7 +537,6 @@ class TestSubcmdRunIntegration:
         assert captured_config is not None
         assert captured_config.session_budget_secs == 120
         assert captured_config.git_remote == ""
-
 
 
 # ------------------------------------------------------------------
@@ -587,12 +580,15 @@ class TestAutoHarnessOptimizationScenarios:
         )
         cfg_file = data_dir / "config.yaml"
         cfg_file.write_text(
-            cfg_content, encoding="utf-8",
+            cfg_content,
+            encoding="utf-8",
         )
         return str(data_dir)
 
     def test_optimize_add_type_annotations(
-        self, ah_config, tmp_path,
+        self,
+        ah_config,
+        tmp_path,
     ):
         """优化场景：为现有模块补充类型注解。
 
@@ -600,19 +596,21 @@ class TestAutoHarnessOptimizationScenarios:
         通过 lint 检查、commit + push + 创建 PR。
         """
         from tests.cli.e2e.conftest import (
-            CLI_CMD, E2E_ENV,
+            CLI_CMD,
+            E2E_ENV,
         )
 
         result = subprocess.run(
             [
                 *CLI_CMD,
-                "-w", ah_config,
-                "auto-harness", "run",
+                "-w",
+                ah_config,
+                "auto-harness",
+                "run",
                 "--task",
-                "为 openjiuwen/auto_harness/"
-                "controller/session_budget.py "
-                "补充所有公共方法的返回值类型注解",
-                "--budget", "240",
+                "为 openjiuwen/rsi/auto_harness/controller/session_budget.py 补充所有公共方法的返回值类型注解",
+                "--budget",
+                "240",
             ],
             capture_output=True,
             text=True,
@@ -625,26 +623,30 @@ class TestAutoHarnessOptimizationScenarios:
         assert "成功" in result.stdout or "OK" in result.stdout
 
     def test_optimize_improve_docstrings(
-        self, ah_config, tmp_path,
+        self,
+        ah_config,
+        tmp_path,
     ):
         """优化场景：改善现有模块的文档字符串。
 
         auto-harness 典型任务：提升代码可读性。
         """
         from tests.cli.e2e.conftest import (
-            CLI_CMD, E2E_ENV,
+            CLI_CMD,
+            E2E_ENV,
         )
 
         result = subprocess.run(
             [
                 *CLI_CMD,
-                "-w", ah_config,
-                "auto-harness", "run",
+                "-w",
+                ah_config,
+                "auto-harness",
+                "run",
                 "--task",
-                "为 openjiuwen/auto_harness/"
-                "memory/store.py 中缺少 docstring "
-                "的公共方法补充 Google 风格文档字符串",
-                "--budget", "240",
+                "为 openjiuwen/rsi/auto_harness/memory/store.py 中缺少 docstring 的公共方法补充 Google 风格文档字符串",
+                "--budget",
+                "240",
             ],
             capture_output=True,
             text=True,
@@ -656,41 +658,54 @@ class TestAutoHarnessOptimizationScenarios:
         assert result.returncode == 0
 
     def test_optimize_fix_lint_issues(
-        self, ah_config, tmp_path,
+        self,
+        ah_config,
+        tmp_path,
     ):
         """优化场景：修复 ruff lint 告警。
 
         auto-harness 典型任务：代码规范治理。
         """
         from tests.cli.e2e.conftest import (
-            CLI_CMD, E2E_ENV,
+            CLI_CMD,
+            E2E_ENV,
         )
 
-        task_json = json.dumps([{
-            "topic": "修复 lint 告警",
-            "description": (
-                "运行 ruff check openjiuwen/"
-                "auto_harness/ 并修复所有可自动修复"
-                "的 lint 告警（unused imports、"
-                "trailing whitespace 等）"
-            ),
-            "files": [
-                "openjiuwen/auto_harness/",
+        task_json = json.dumps(
+            [
+                {
+                    "topic": "修复 lint 告警",
+                    "description": (
+                        "运行 ruff check openjiuwen/"
+                        "auto_harness/ 并修复所有可自动修复"
+                        "的 lint 告警（unused imports、"
+                        "trailing whitespace 等）"
+                    ),
+                    "files": [
+                        "openjiuwen/rsi/auto_harness/",
+                    ],
+                }
             ],
-        }], ensure_ascii=False)
+            ensure_ascii=False,
+        )
 
         task_file = tmp_path / "tasks.json"
         task_file.write_text(
-            task_json, encoding="utf-8",
+            task_json,
+            encoding="utf-8",
         )
 
         result = subprocess.run(
             [
                 *CLI_CMD,
-                "-w", ah_config,
-                "auto-harness", "run",
-                "--task-file", str(task_file),
-                "--budget", "240",
+                "-w",
+                ah_config,
+                "auto-harness",
+                "run",
+                "--task-file",
+                str(task_file),
+                "--budget",
+                "240",
             ],
             capture_output=True,
             text=True,
@@ -702,27 +717,33 @@ class TestAutoHarnessOptimizationScenarios:
         assert result.returncode == 0
 
     def test_optimize_add_error_handling(
-        self, ah_config, tmp_path,
+        self,
+        ah_config,
+        tmp_path,
     ):
         """优化场景：增强错误处理和日志。
 
         auto-harness 典型任务：提升代码健壮性。
         """
         from tests.cli.e2e.conftest import (
-            CLI_CMD, E2E_ENV,
+            CLI_CMD,
+            E2E_ENV,
         )
 
         result = subprocess.run(
             [
                 *CLI_CMD,
-                "-w", ah_config,
-                "auto-harness", "run",
+                "-w",
+                ah_config,
+                "auto-harness",
+                "run",
                 "--task",
-                "为 openjiuwen/auto_harness/tools/"
+                "为 openjiuwen/rsi/auto_harness/tools/"
                 "git_tool.py 的 _create_pr_sync 方法"
                 "增加更详细的错误日志，包括 HTTP "
                 "状态码和响应体摘要",
-                "--budget", "240",
+                "--budget",
+                "240",
             ],
             capture_output=True,
             text=True,

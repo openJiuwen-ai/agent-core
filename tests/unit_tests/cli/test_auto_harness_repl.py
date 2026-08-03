@@ -17,25 +17,17 @@ from rich.console import Console
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
-from openjiuwen.auto_harness.pipelines import (
+from openjiuwen.rsi.auto_harness.pipelines import (
     EXTENDED_EVOLVE_PIPELINE,
     META_EVOLVE_PIPELINE,
 )
 
 
 def _install_prompt_toolkit_stubs() -> dict[str, types.ModuleType]:
-    prompt_toolkit = types.ModuleType(
-        "prompt_toolkit"
-    )
-    completion = types.ModuleType(
-        "prompt_toolkit.completion"
-    )
-    document = types.ModuleType(
-        "prompt_toolkit.document"
-    )
-    history = types.ModuleType(
-        "prompt_toolkit.history"
-    )
+    prompt_toolkit = types.ModuleType("prompt_toolkit")
+    completion = types.ModuleType("prompt_toolkit.completion")
+    document = types.ModuleType("prompt_toolkit.document")
+    history = types.ModuleType("prompt_toolkit.history")
 
     class PromptSession: ...
 
@@ -69,11 +61,10 @@ def _import_repl_module():
     stubs = _install_prompt_toolkit_stubs()
     with patch.dict(sys.modules, stubs):
         sys.modules.pop(
-            "openjiuwen.harness.cli.ui.repl", None,
+            "openjiuwen.harness.cli.ui.repl",
+            None,
         )
-        return importlib.import_module(
-            "openjiuwen.harness.cli.ui.repl"
-        )
+        return importlib.import_module("openjiuwen.harness.cli.ui.repl")
 
 
 class TestAutoHarnessRepl:
@@ -81,7 +72,8 @@ class TestAutoHarnessRepl:
 
     @pytest.mark.asyncio
     async def test_subcmd_run_goal_keeps_full_flow(
-        self, tmp_path,
+        self,
+        tmp_path,
     ) -> None:
         """--goal 应保留 tasks=None，走 assess→plan。"""
         repl = _import_repl_module()
@@ -108,8 +100,7 @@ class TestAutoHarnessRepl:
             return mock_orch
 
         with patch(
-            "openjiuwen.auto_harness.orchestrator"
-            ".create_auto_harness_orchestrator",
+            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             side_effect=_capture_create,
         ):
             with patch.dict(
@@ -124,9 +115,13 @@ class TestAutoHarnessRepl:
                     encoding="utf-8",
                 )
                 (repo / "openjiuwen").mkdir()
-                console = Console(file=open(
-                    os.devnull, "w",
-                ))
+                console = Console(
+                    file=open(
+                        os.devnull,
+                        "w",
+                        encoding="utf-8",
+                    )
+                )
                 data_dir = tmp_path / "auto_harness"
                 data_dir.mkdir(parents=True)
 
@@ -137,25 +132,16 @@ class TestAutoHarnessRepl:
                 )
 
         assert captured_config is not None
-        assert (
-            captured_config.optimization_goal
-            == "分析差距 claude-code"
-        )
-        assert captured_config.local_repo == str(
-            (tmp_path / "agent-core").resolve()
-        )
-        assert captured_config.workspace == str(
-            (tmp_path / "agent-core").resolve()
-        )
-        assert (
-            captured_config.pipeline_preference
-            == META_EVOLVE_PIPELINE
-        )
+        assert captured_config.optimization_goal == "分析差距 claude-code"
+        assert captured_config.local_repo == str((tmp_path / "agent-core").resolve())
+        assert captured_config.workspace == str((tmp_path / "agent-core").resolve())
+        assert captured_config.pipeline_preference == META_EVOLVE_PIPELINE
         assert received_tasks is None
 
     @pytest.mark.asyncio
     async def test_natural_language_dispatch_runs_full_flow(
-        self, tmp_path,
+        self,
+        tmp_path,
     ) -> None:
         """未知子命令应直接当成自然语言目标。"""
         repl = _import_repl_module()
@@ -182,8 +168,7 @@ class TestAutoHarnessRepl:
             return mock_orch
 
         with patch(
-            "openjiuwen.auto_harness.orchestrator"
-            ".create_auto_harness_orchestrator",
+            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             side_effect=_capture_create,
         ):
             with patch.dict(
@@ -203,14 +188,8 @@ class TestAutoHarnessRepl:
                 )
 
         assert captured_config is not None
-        assert (
-            captured_config.optimization_goal
-            == "分析差距 claude-code"
-        )
-        assert (
-            captured_config.pipeline_preference
-            == META_EVOLVE_PIPELINE
-        )
+        assert captured_config.optimization_goal == "分析差距 claude-code"
+        assert captured_config.pipeline_preference == META_EVOLVE_PIPELINE
         assert received_tasks is None
 
     @pytest.mark.asyncio
@@ -237,11 +216,10 @@ class TestAutoHarnessRepl:
             return mock_orch
 
         with patch(
-            "openjiuwen.auto_harness.orchestrator"
-            ".create_auto_harness_orchestrator",
+            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             side_effect=_capture_create,
         ):
-            console = Console(file=open(os.devnull, "w"))
+            console = Console(file=open(os.devnull, "w", encoding="utf-8"))
             data_dir = tmp_path / "auto_harness"
             data_dir.mkdir(parents=True)
 
@@ -257,7 +235,4 @@ class TestAutoHarnessRepl:
             )
 
         assert captured_config is not None
-        assert (
-            captured_config.pipeline_preference
-            == EXTENDED_EVOLVE_PIPELINE
-        )
+        assert captured_config.pipeline_preference == EXTENDED_EVOLVE_PIPELINE

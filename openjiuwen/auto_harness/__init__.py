@@ -1,27 +1,23 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Auto Harness Agent — 自主优化 harness 框架的编码 agent。"""
+"""Compatibility exports for AutoHarness after its move into RSI."""
 
-from openjiuwen.auto_harness.schema import (
+from openjiuwen.rsi.auto_harness import (
+    PIPELINE_PREFERENCE_AUTO,
     AutoHarnessConfig,
+    AutoHarnessOrchestrator,
     AutoHarnessPaths,
     CycleResult,
     Experience,
     Gap,
     OptimizationTask,
-    PIPELINE_PREFERENCE_AUTO,
+    PipelineRegistry,
     PipelineSpec,
     ResearchContext,
-    StageSpec,
-    normalize_pipeline_preference,
-)
-from openjiuwen.auto_harness.orchestrator import (
-    AutoHarnessOrchestrator,
-    create_auto_harness_orchestrator,
-)
-from openjiuwen.auto_harness.registry import (
-    PipelineRegistry,
     StageRegistry,
+    StageSpec,
+    create_auto_harness_orchestrator,
+    normalize_pipeline_preference,
 )
 
 __all__ = [

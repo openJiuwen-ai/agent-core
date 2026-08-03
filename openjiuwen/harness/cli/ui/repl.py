@@ -85,9 +85,7 @@ class InterruptManager:
 # ---------------------------------------------------------------------------
 
 
-async def _cmd_help(
-    console: Console, **_: Any
-) -> None:
+async def _cmd_help(console: Console, **_: Any) -> None:
     """Display available commands."""
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column(style="bold cyan")
@@ -98,9 +96,7 @@ async def _cmd_help(
     table.add_row("/status", "Show token usage and model info")
     table.add_row("/cost", "Show token cost summary")
     table.add_row("/compact", "Compact conversation history")
-    table.add_row(
-        "/sessions", "List saved sessions"
-    )
+    table.add_row("/sessions", "List saved sessions")
     table.add_row(
         "/auto-harness",
         "Run auto-harness optimization",
@@ -109,13 +105,8 @@ async def _cmd_help(
     console.print(table)
 
     if _SKILL_COMMANDS:
-        console.print(
-            "\n[bold]Skills[/bold] "
-            "[dim](invoke with /<skill-name>)[/dim]"
-        )
-        skill_table = Table(
-            show_header=False, box=None, padding=(0, 2)
-        )
+        console.print("\n[bold]Skills[/bold] [dim](invoke with /<skill-name>)[/dim]")
+        skill_table = Table(show_header=False, box=None, padding=(0, 2))
         skill_table.add_column(style="bold cyan")
         skill_table.add_column()
         for cmd in sorted(_SKILL_COMMANDS):
@@ -142,27 +133,13 @@ async def _cmd_status(
 ) -> None:
     """Show model info and token usage."""
     if cfg:
-        console.print(
-            f"[bold]Model:[/bold] {cfg.model} ({cfg.provider})"
-        )
+        console.print(f"[bold]Model:[/bold] {cfg.model} ({cfg.provider})")
     if tracker:
         s = tracker.get_summary()
-        console.print(
-            f"[bold]Input tokens:[/bold]  "
-            f"{s['input_tokens']:,}"
-        )
-        console.print(
-            f"[bold]Output tokens:[/bold] "
-            f"{s['output_tokens']:,}"
-        )
-        console.print(
-            f"[bold]Total tokens:[/bold]  "
-            f"{s['total_tokens']:,}"
-        )
-        console.print(
-            f"[bold]Model calls:[/bold]   "
-            f"{s['model_calls']}"
-        )
+        console.print(f"[bold]Input tokens:[/bold]  {s['input_tokens']:,}")
+        console.print(f"[bold]Output tokens:[/bold] {s['output_tokens']:,}")
+        console.print(f"[bold]Total tokens:[/bold]  {s['total_tokens']:,}")
+        console.print(f"[bold]Model calls:[/bold]   {s['model_calls']}")
 
 
 async def _cmd_cost(
@@ -177,26 +154,23 @@ async def _cmd_cost(
     s = tracker.get_summary()
     console.print("[bold]Token usage:[/bold]")
     console.print(f"  Input:  {s['input_tokens']:,} tokens")
-    console.print(
-        f"  Output: {s['output_tokens']:,} tokens"
-    )
+    console.print(f"  Output: {s['output_tokens']:,} tokens")
     console.print(f"  Total:  {s['total_tokens']:,} tokens")
     console.print(f"  Calls:  {s['model_calls']}")
 
 
 async def _cmd_compact(console: Console, **_: Any) -> None:
     """Compact conversation (MVP: simple info message)."""
-    console.print(
-        "[dim]Conversation compaction is not yet "
-        "implemented in MVP.[/dim]"
-    )
+    console.print("[dim]Conversation compaction is not yet implemented in MVP.[/dim]")
 
 
 def _auto_harness_help(console: Console) -> None:
     """Print /auto-harness subcommand usage."""
     console.print("[bold]Usage:[/bold]")
     tbl = Table(
-        show_header=False, box=None, padding=(0, 2),
+        show_header=False,
+        box=None,
+        padding=(0, 2),
     )
     tbl.add_column(style="bold cyan")
     tbl.add_column()
@@ -217,8 +191,7 @@ def _auto_harness_help(console: Console) -> None:
         "搜索经验库",
     )
     tbl.add_row(
-        "/auto-harness experience list "
-        "[--type TYPE] [--limit N]",
+        "/auto-harness experience list [--type TYPE] [--limit N]",
         "列出经验库记录",
     )
     tbl.add_row(
@@ -266,7 +239,10 @@ async def _cmd_auto_harness(
 
     if subcmd == "run":
         await _subcmd_run(
-            console, rest, workspace, cfg,
+            console,
+            rest,
+            workspace,
+            cfg,
             backend=backend,
         )
     elif subcmd == "experience":
@@ -296,20 +272,20 @@ async def _subcmd_run(
     """Handle /auto-harness run."""
     import time as _time
 
-    from openjiuwen.auto_harness.schema import (
-        OptimizationTask,
-        normalize_pipeline_preference,
-        is_placeholder_local_repo,
-        load_auto_harness_config,
+    from openjiuwen.rsi.auto_harness.infra.github_cli import (
+        ensure_github_cli_ready,
     )
-    from openjiuwen.auto_harness.pipelines import (
-        META_EVOLVE_PIPELINE,
-    )
-    from openjiuwen.auto_harness.orchestrator import (
+    from openjiuwen.rsi.auto_harness.orchestrator import (
         create_auto_harness_orchestrator,
     )
-    from openjiuwen.auto_harness.infra.github_cli import (
-        ensure_github_cli_ready,
+    from openjiuwen.rsi.auto_harness.pipelines import (
+        META_EVOLVE_PIPELINE,
+    )
+    from openjiuwen.rsi.auto_harness.schema import (
+        OptimizationTask,
+        is_placeholder_local_repo,
+        load_auto_harness_config,
+        normalize_pipeline_preference,
     )
 
     # Parse flags
@@ -336,9 +312,7 @@ async def _subcmd_run(
             try:
                 budget = float(args[i + 1])
             except ValueError:
-                console.print(
-                    "[red]--budget 需要数字[/red]"
-                )
+                console.print("[red]--budget 需要数字[/red]")
                 return
             i += 2
         elif a == "--goal" and i + 1 < len(args):
@@ -347,54 +321,31 @@ async def _subcmd_run(
         elif a == "--pipeline" and i + 1 < len(args):
             raw_pipeline = args[i + 1]
             if raw_pipeline not in ("meta", "extended", "auto"):
-                console.print(
-                    "[red]--pipeline 只支持 meta、extended 或 auto[/red]"
-                )
+                console.print("[red]--pipeline 只支持 meta、extended 或 auto[/red]")
                 return
             pipeline = raw_pipeline
             i += 2
         else:
-            console.print(
-                f"[red]未知参数: {a}[/red]"
-            )
+            console.print(f"[red]未知参数: {a}[/red]")
             return
 
     # data_dir 由 CLI workspace 决定
-    data_dir = str(
-        Path(workspace) / "auto_harness"
-    )
-    config_path = str(
-        Path(data_dir) / "config.yaml"
-    )
+    data_dir = str(Path(workspace) / "auto_harness")
+    config_path = str(Path(data_dir) / "config.yaml")
     config = load_auto_harness_config(
-        config_path, workspace_hint=workspace,
+        config_path,
+        workspace_hint=workspace,
     )
     config.data_dir = data_dir
-    if (
-        config.local_repo
-        and (
-            is_placeholder_local_repo(
-                config.local_repo
-            )
-            or not Path(config.local_repo).exists()
-        )
-    ):
-        console.print(
-            "[yellow]忽略无效的 local_repo 配置: "
-            f"{config.local_repo}[/yellow]"
-        )
+    if config.local_repo and (is_placeholder_local_repo(config.local_repo) or not Path(config.local_repo).exists()):
+        console.print(f"[yellow]忽略无效的 local_repo 配置: {config.local_repo}[/yellow]")
         config.local_repo = ""
     if config.config_bootstrapped:
-        console.print(
-            "[yellow]已初始化 auto-harness 配置模板:"
-            f" {config.config_path}[/yellow]"
-        )
+        console.print(f"[yellow]已初始化 auto-harness 配置模板: {config.config_path}[/yellow]")
     if not config.local_repo and config.suggested_local_repo:
         config.local_repo = config.suggested_local_repo
         console.print(
-            "[yellow]检测到本地仓库，临时使用 "
-            f"local_repo={config.local_repo}。"
-            "建议写回 config.yaml。[/yellow]"
+            f"[yellow]检测到本地仓库，临时使用 local_repo={config.local_repo}。建议写回 config.yaml。[/yellow]"
         )
     elif not config.local_repo:
         console.print(
@@ -440,15 +391,9 @@ async def _subcmd_run(
         config.git_remote = ""
     if goal:
         config.optimization_goal = goal
-    config.pipeline_preference = normalize_pipeline_preference(
-        pipeline or META_EVOLVE_PIPELINE
-    )
+    config.pipeline_preference = normalize_pipeline_preference(pipeline or META_EVOLVE_PIPELINE)
 
-    ensure_github_cli_ready(
-        lambda msg: console.print(
-            f"[yellow]{msg}[/yellow]"
-        )
-    )
+    ensure_github_cli_ready(lambda msg: console.print(f"[yellow]{msg}[/yellow]"))
 
     debug_dir = Path(config.runs_dir)
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -470,12 +415,14 @@ async def _subcmd_run(
             }
             for t in tasks
         ]
-        console.print(json.dumps(
-            data, ensure_ascii=False, indent=2,
-        ))
         console.print(
-            "[dim][dry-run] 跳过执行[/dim]"
+            json.dumps(
+                data,
+                ensure_ascii=False,
+                indent=2,
+            )
         )
+        console.print("[dim][dry-run] 跳过执行[/dim]")
         return
 
     from openjiuwen.harness.cli.rails.tool_tracker import (
@@ -483,11 +430,7 @@ async def _subcmd_run(
     )
 
     t0 = _time.monotonic()
-    agent = (
-        getattr(backend, "agent", None)
-        if backend
-        else None
-    )
+    agent = getattr(backend, "agent", None) if backend else None
     orch = create_auto_harness_orchestrator(
         config,
         agent=agent,
@@ -495,26 +438,17 @@ async def _subcmd_run(
     )
 
     async def _on_activate_interaction(
-        iid: str, value: Any,
+        iid: str,
+        value: Any,
     ) -> str:
         """Handle activate_confirm interaction in CLI."""
-        if (
-            isinstance(value, dict)
-            and value.get("interaction_type")
-            == "activate_confirm"
-        ):
-            ext_name = value.get(
-                "extension_name", "unknown"
-            )
+        if isinstance(value, dict) and value.get("interaction_type") == "activate_confirm":
+            ext_name = value.get("extension_name", "unknown")
             summary = value.get("components_summary", {})
             console.print()
-            console.print(
-                f"[bold]扩展 {ext_name} 已就绪[/bold]"
-            )
+            console.print(f"[bold]扩展 {ext_name} 已就绪[/bold]")
             if value.get("runtime_path"):
-                console.print(
-                    f"  路径: {value['runtime_path']}"
-                )
+                console.print(f"  路径: {value['runtime_path']}")
             if summary:
                 console.print(
                     f"  组件: "
@@ -523,26 +457,18 @@ async def _subcmd_run(
                     f"{summary.get('skills', 0)} skills"
                 )
             console.print()
-            console.print(
-                "  [green][A][/green] 接受并热加载"
-            )
-            console.print(
-                "  [red][R][/red] 拒绝并清理"
-            )
+            console.print("  [green][A][/green] 接受并热加载")
+            console.print("  [red][R][/red] 拒绝并清理")
             console.print()
             while True:
-                choice = console.input(
-                    "[bold]选择 (A/R): [/bold]"
-                ).strip().lower()
+                choice = console.input("[bold]选择 (A/R): [/bold]").strip().lower()
                 if choice in ("a", "accept", ""):
                     action = "accept"
                     break
                 if choice in ("r", "reject"):
                     action = "reject"
                     break
-                console.print(
-                    "[dim]请输入 A 或 R[/dim]"
-                )
+                console.print("[dim]请输入 A 或 R[/dim]")
             orch.run_session_stream(
                 message={
                     "interaction_id": iid,
@@ -561,25 +487,12 @@ async def _subcmd_run(
     results = orch.results
     elapsed = _time.monotonic() - t0
     ok = sum(1 for r in results if r.success)
-    console.print(
-        f"Session 完成: {ok}/{len(results)} 成功, "
-        f"耗时 {elapsed:.1f}s"
-    )
+    console.print(f"Session 完成: {ok}/{len(results)} 成功, 耗时 {elapsed:.1f}s")
     for i_r, r in enumerate(results):
-        s = (
-            "[green]OK[/green]"
-            if r.success
-            else "[red]FAIL[/red]"
-        )
-        console.print(
-            f"  Task {i_r + 1}: {s}"
-            f" | pr={r.pr_url or 'N/A'}"
-            f" | error={r.error or 'none'}"
-        )
+        s = "[green]OK[/green]" if r.success else "[red]FAIL[/red]"
+        console.print(f"  Task {i_r + 1}: {s} | pr={r.pr_url or 'N/A'} | error={r.error or 'none'}")
         if r.summary:
-            console.print(
-                f"    summary={r.summary}"
-            )
+            console.print(f"    summary={r.summary}")
 
 
 async def _subcmd_memory(
@@ -588,19 +501,14 @@ async def _subcmd_memory(
     workspace: str,
 ) -> None:
     """Handle /auto-harness experience <search|list>."""
-    from openjiuwen.auto_harness.experience.experience_store import (
+    from openjiuwen.rsi.auto_harness.experience.experience_store import (
         ExperienceStore,
     )
 
-    mem_dir = str(
-        Path(workspace) / "auto_harness" / "experience"
-    )
+    mem_dir = str(Path(workspace) / "auto_harness" / "experience")
 
     if not args:
-        console.print(
-            "[red]用法: /auto-harness experience "
-            "<search|list>[/red]"
-        )
+        console.print("[red]用法: /auto-harness experience <search|list>[/red]")
         return
 
     action = args[0]
@@ -609,10 +517,7 @@ async def _subcmd_memory(
     if action == "search":
         query = " ".join(rest)
         if not query:
-            console.print(
-                "[red]用法: /auto-harness experience "
-                "search <query>[/red]"
-            )
+            console.print("[red]用法: /auto-harness experience search <query>[/red]")
             return
         store = ExperienceStore(mem_dir)
         results = await store.search(query, top_k=10)
@@ -620,10 +525,7 @@ async def _subcmd_memory(
             console.print("[dim]无匹配结果[/dim]")
             return
         for m in results:
-            console.print(
-                f"[{m.type.value}] {m.topic}: "
-                f"{m.summary or m.outcome}"
-            )
+            console.print(f"[{m.type.value}] {m.topic}: {m.summary or m.outcome}")
 
     elif action == "list":
         mem_type: Optional[str] = None
@@ -637,35 +539,23 @@ async def _subcmd_memory(
                 try:
                     limit = int(rest[i + 1])
                 except ValueError:
-                    console.print(
-                        "[red]--limit 需要整数[/red]"
-                    )
+                    console.print("[red]--limit 需要整数[/red]")
                     return
                 i += 2
             else:
-                console.print(
-                    f"[red]未知参数: {rest[i]}[/red]"
-                )
+                console.print(f"[red]未知参数: {rest[i]}[/red]")
                 return
         store = ExperienceStore(mem_dir)
         entries = await store.list_recent(limit=limit)
         if mem_type:
-            entries = [
-                e for e in entries
-                if e.type.value == mem_type
-            ]
+            entries = [e for e in entries if e.type.value == mem_type]
         if not entries:
             console.print("[dim]无记录[/dim]")
             return
         for m in entries:
-            console.print(
-                f"[{m.type.value}] {m.topic}: "
-                f"{m.summary or m.outcome}"
-            )
+            console.print(f"[{m.type.value}] {m.topic}: {m.summary or m.outcome}")
     else:
-        console.print(
-            f"[red]未知 experience 子命令: {action}[/red]"
-        )
+        console.print(f"[red]未知 experience 子命令: {action}[/red]")
 
 
 async def _subcmd_gap_analyze(
@@ -674,36 +564,27 @@ async def _subcmd_gap_analyze(
     workspace: str,
 ) -> None:
     """Handle /auto-harness gap-analyze."""
-    from openjiuwen.auto_harness.schema import (
+    from openjiuwen.rsi.auto_harness.schema import (
         AutoHarnessConfig,
     )
-    from openjiuwen.auto_harness.stages.assess import (
+    from openjiuwen.rsi.auto_harness.stages.assess import (
         run_gap_analysis,
     )
 
     if args:
-        console.print(
-            f"[red]未知参数: {args[0]}[/red]"
-        )
+        console.print(f"[red]未知参数: {args[0]}[/red]")
         return
 
     config = AutoHarnessConfig(workspace=workspace)
     gaps = await run_gap_analysis(
-        config, harness_state="",
+        config,
+        harness_state="",
     )
     if not gaps:
-        console.print(
-            "[dim]Phase 1 占位: "
-            "差距分析尚未接入 LLM[/dim]"
-        )
+        console.print("[dim]Phase 1 占位: 差距分析尚未接入 LLM[/dim]")
         return
     for g in gaps:
-        console.print(
-            f"[{g.priority:.1f}] {g.feature}: "
-            f"{g.gap_description}"
-        )
-
-
+        console.print(f"[{g.priority:.1f}] {g.feature}: {g.gap_description}")
 
 
 async def _subcmd_history(
@@ -712,7 +593,7 @@ async def _subcmd_history(
     workspace: str,
 ) -> None:
     """Handle /auto-harness history."""
-    from openjiuwen.auto_harness.experience.experience_store import (
+    from openjiuwen.rsi.auto_harness.experience.experience_store import (
         ExperienceStore,
     )
 
@@ -723,30 +604,21 @@ async def _subcmd_history(
             try:
                 limit = int(args[i + 1])
             except ValueError:
-                console.print(
-                    "[red]--limit 需要整数[/red]"
-                )
+                console.print("[red]--limit 需要整数[/red]")
                 return
             i += 2
         else:
-            console.print(
-                f"[red]未知参数: {args[i]}[/red]"
-            )
+            console.print(f"[red]未知参数: {args[i]}[/red]")
             return
 
-    mem_dir = str(
-        Path(workspace) / "auto_harness" / "experience"
-    )
+    mem_dir = str(Path(workspace) / "auto_harness" / "experience")
     store = ExperienceStore(mem_dir)
     entries = await store.list_recent(limit=limit)
     if not entries:
         console.print("[dim]无记录[/dim]")
         return
     for m in entries:
-        console.print(
-            f"[{m.type.value}] {m.topic}: "
-            f"{m.summary or m.outcome}"
-        )
+        console.print(f"[{m.type.value}] {m.topic}: {m.summary or m.outcome}")
 
 
 async def _cmd_sessions(
@@ -762,9 +634,7 @@ async def _cmd_sessions(
     if not sessions:
         console.print("[dim]No saved sessions.[/dim]")
         return
-    table = Table(
-        title="Sessions", show_lines=False
-    )
+    table = Table(title="Sessions", show_lines=False)
     table.add_column("ID", style="cyan")
     table.add_column("Model")
     table.add_column("Created")
@@ -852,9 +722,7 @@ class SlashCompleter(Completer):
 # ---------------------------------------------------------------------------
 
 
-async def _handle_shell(
-    cmd: str, console: Console
-) -> None:
+async def _handle_shell(cmd: str, console: Console) -> None:
     """Execute a shell command directly (no agent)."""
     proc = await asyncio.create_subprocess_shell(
         cmd,
@@ -865,9 +733,7 @@ async def _handle_shell(
     if stdout:
         console.print(stdout.decode(errors="replace"))
     if stderr:
-        console.print(
-            f"[red]{stderr.decode(errors='replace')}[/red]"
-        )
+        console.print(f"[red]{stderr.decode(errors='replace')}[/red]")
 
 
 # ---------------------------------------------------------------------------
@@ -929,9 +795,7 @@ def _scan_skill_dirs() -> dict[str, Path]:
                 continue
             try:
                 name = item.name
-                desc_text = skill_md.read_text(
-                    encoding="utf-8"
-                )
+                desc_text = skill_md.read_text(encoding="utf-8")
             except OSError:
                 continue
             # Extract name override from front matter
@@ -981,9 +845,7 @@ def _register_skill_commands(
         _SKILL_COMMANDS[cmd] = skill_md
 
 
-def _build_skill_query(
-    skill_md: Path, args: str
-) -> str:
+def _build_skill_query(skill_md: Path, args: str) -> str:
     """Build a structured query for skill invocation.
 
     Reads the SKILL.md content and wraps it with the user's
@@ -999,22 +861,15 @@ def _build_skill_query(
     try:
         content = skill_md.read_text(encoding="utf-8")
     except OSError:
-        return (
-            f"Error reading skill file: {skill_md}. "
-            "Please check the skill directory."
-        )
+        return f"Error reading skill file: {skill_md}. Please check the skill directory."
 
     parts = ["<skill-instructions>"]
     parts.append(content)
     parts.append("</skill-instructions>")
     if args:
-        parts.append(
-            f"\nUser request: {args}"
-        )
+        parts.append(f"\nUser request: {args}")
     else:
-        parts.append(
-            "\nPlease follow the skill instructions above."
-        )
+        parts.append("\nPlease follow the skill instructions above.")
     return "\n".join(parts)
 
 
@@ -1052,12 +907,8 @@ async def _handle_slash(
 
     # Known command?
     if cmd_name not in SLASH_COMMANDS:
-        console.print(
-            f"[red]Unknown command: {cmd_name}[/red]"
-        )
-        console.print(
-            "Type /help to see available commands."
-        )
+        console.print(f"[red]Unknown command: {cmd_name}[/red]")
+        console.print("Type /help to see available commands.")
         return None
 
     handler = SLASH_COMMANDS[cmd_name]
@@ -1128,9 +979,7 @@ def _extract_question_text(request: Any) -> str:
     return str(request)
 
 
-def _render_interaction(
-    request: Any, console: Console
-) -> None:
+def _render_interaction(request: Any, console: Console) -> None:
     """Render an interaction request to the terminal.
 
     Shows different formats for different interrupt types:
@@ -1167,10 +1016,7 @@ def _render_interaction(
         )
 
         display_name = get_display_name(tool_name)
-        console.print(
-            f"\n[bold yellow]⚠ Approve {display_name}?"
-            f"[/bold yellow]"
-        )
+        console.print(f"\n[bold yellow]⚠ Approve {display_name}?[/bold yellow]")
         tool_args = getattr(request, "tool_args", None)
         if tool_args:
             import json as _json
@@ -1191,10 +1037,7 @@ def _render_interaction(
                     if len(val) > 200:
                         val = val[:200] + "..."
                     console.print(f"[dim]  {k}: {val}[/dim]")
-        console.print(
-            "[dim]  (y/yes=approve, n/no=reject,"
-            " or type feedback)[/dim]"
-        )
+        console.print("[dim]  (y/yes=approve, n/no=reject, or type feedback)[/dim]")
 
 
 async def _collect_interaction_answers(
@@ -1236,9 +1079,7 @@ async def _collect_interaction_answers(
                 answers = {}
                 for q in questions:
                     question_text = q.get("question", "")
-                    q_answer = await prompt_session.prompt_async(
-                        f"Answer for '{question_text}'> "
-                    )
+                    q_answer = await prompt_session.prompt_async(f"Answer for '{question_text}'> ")
                     answers[question_text] = q_answer.strip()
                 interactive_input.update(iid, {"answers": answers})
             else:
@@ -1256,11 +1097,7 @@ async def _collect_interaction_answers(
                 "1",
                 "",
             )
-            feedback = (
-                ""
-                if approved
-                else (answer or "User rejected")
-            )
+            feedback = "" if approved else (answer or "User rejected")
             interactive_input.update(
                 iid,
                 {
@@ -1278,9 +1115,7 @@ async def _collect_interaction_answers(
 # ---------------------------------------------------------------------------
 
 
-def _print_welcome(
-    console: Console, cfg: CLIConfig
-) -> None:
+def _print_welcome(console: Console, cfg: CLIConfig) -> None:
     """Display the REPL welcome banner in Claude Code style."""
     from rich.columns import Columns
     from rich.panel import Panel
@@ -1303,16 +1138,12 @@ def _print_welcome(
 
     # ── Right side: tips ──
     tips = Text()
-    tips.append(
-        "Tips for getting started\n", style="bold"
-    )
+    tips.append("Tips for getting started\n", style="bold")
     tips.append(
         "Create an OPENJIUWEN.md for project rules\n",
         style="dim",
     )
-    tips.append(
-        "\u2500" * 40 + "\n", style="dim"
-    )
+    tips.append("\u2500" * 40 + "\n", style="dim")
     tips.append("Commands\n", style="bold")
     tips.append(
         "  /help      Show available commands\n",
@@ -1373,9 +1204,7 @@ async def run_repl(
     interrupt_mgr = InterruptManager()
 
     # Retrieve tracker from backend for /status and /cost
-    tracker: Optional[TokenTrackingRail] = getattr(
-        backend, "tracker", None
-    )
+    tracker: Optional[TokenTrackingRail] = getattr(backend, "tracker", None)
 
     # Scan default skill directories and register slash commands
     _scan_skills()
@@ -1417,9 +1246,7 @@ async def run_repl(
                 continue
             parts = text.split(None, 1)
             skill_args = parts[1] if len(parts) > 1 else ""
-            text = _build_skill_query(
-                skill_md, skill_args
-            )
+            text = _build_skill_query(skill_md, skill_args)
 
         # ---- Shell passthrough ----
         if text.startswith("!"):
@@ -1433,9 +1260,7 @@ async def run_repl(
         try:
             stream = backend.run_streaming(text)
 
-            async def interaction_cb(
-                iid: str, q: Any
-            ) -> str:
+            async def interaction_cb(iid: str, q: Any) -> str:
                 _render_interaction(q, console)
                 return ""
 
@@ -1449,21 +1274,15 @@ async def run_repl(
             # Handle pending interactions (interrupt
             # resume loop).
             while render_result.pending_interactions:
-                interactive_input = (
-                    await _collect_interaction_answers(
-                        render_result.pending_interactions,
-                        prompt_session,
-                        console,
-                    )
+                interactive_input = await _collect_interaction_answers(
+                    render_result.pending_interactions,
+                    prompt_session,
+                    console,
                 )
                 if interactive_input is None:
                     break
 
-                resume_stream = (
-                    backend.run_streaming(
-                        interactive_input
-                    )
-                )
+                resume_stream = backend.run_streaming(interactive_input)
                 render_result = await render_stream(
                     resume_stream,
                     console,
@@ -1471,24 +1290,15 @@ async def run_repl(
                     show_reasoning=cfg.verbose,
                 )
 
-            session_store.add_message(
-                "assistant", render_result.text
-            )
+            session_store.add_message("assistant", render_result.text)
         except KeyboardInterrupt:
             action = interrupt_mgr.handle(backend)
             if action == "abort":
-                console.print(
-                    "\n[dim]\u23f9 Interrupted[/dim]"
-                )
+                console.print("\n[dim]\u23f9 Interrupted[/dim]")
             elif action == "warn":
-                console.print(
-                    "\n[dim]Press Ctrl+C once more to "
-                    "exit.[/dim]"
-                )
+                console.print("\n[dim]Press Ctrl+C once more to exit.[/dim]")
             else:
                 console.print("[dim]Goodbye![/dim]")
                 break
         except Exception as exc:  # noqa: BLE001
-            console.print(
-                f"[red]\u2717 Error: {exc}[/red]"
-            )
+            console.print(f"[red]\u2717 Error: {exc}[/red]")
