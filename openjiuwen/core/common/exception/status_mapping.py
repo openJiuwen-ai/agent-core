@@ -75,6 +75,7 @@ _MANUAL_OVERRIDES_RAW = {
     "AGENT_RL_REWARD_NOT_FOUND": "ValidationError",
     "COMMON_ENCRYPTION_ERROR": "CryptError",
     "COMMON_DECRYPTION_ERROR": "CryptError",
+    "DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR": "AgentError",
 }
 
 # Build the actual mapping only for StatusCode members that exist in the current enum.

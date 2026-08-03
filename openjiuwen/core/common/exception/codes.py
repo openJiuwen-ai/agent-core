@@ -207,7 +207,9 @@ class StatusCode(Enum):
     DEEPAGENT_RUNTIME_ERROR = (123023, "deepagent runtime error, reason: {error_msg}")
     DEEPAGENT_TASK_LOOP_NOT_IMPLEMENTED = (123024, "deepagent task loop not implemented, reason: {error_msg}")
     DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND = (123025, "subagent not found, reason: {error_msg}")
-    DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR = (123026, "deepagent load expert harness error, reason: {error_msg}")
+    DEEPAGENT_LOAD_PLUGIN_ERROR = (123026, "deepagent load plugin error, reason: {error_msg}")
+    DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR = (123027, "deepagent load agent template error, reason: {error_msg}")
+    DEEPAGENT_UNLOAD_EXTENSION_ERROR = (123028, "deepagent unload extension error, reason: {error_msg}")
 
     # =============================================================================================================
     # 110 Runner / Distributed 110000–110999

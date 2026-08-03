@@ -105,15 +105,15 @@ def _load_class_from_file(
 ) -> type[Any]:
     path = Path(file_path).expanduser().resolve()
     if not path.is_file():
-        raise FileNotFoundError(f"ExpertHarness Python file not found: {path}")
+        raise FileNotFoundError(f"Plugin Python file not found: {path}")
     if not class_name:
-        raise ValueError(f"ExpertHarness file spec must define class_name: {path}")
+        raise ValueError(f"Plugin file spec must define class_name: {path}")
 
     canonical_name = _canonical_extension_module_name(path, package_root)
     module_name = canonical_name or f"_openjiuwen_resource_{path.stem}_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load ExpertHarness Python file: {path}")
+        raise ImportError(f"Cannot load Plugin Python file: {path}")
     module = importlib.util.module_from_spec(spec)
     # Hold the import-state lock across the whole snapshot/mutate/restore window
     # so concurrent extension loads cannot clobber each other's sys.path /
@@ -132,9 +132,9 @@ def _load_class_from_file(
     try:
         loaded = getattr(module, class_name)
     except AttributeError as exc:
-        raise ImportError(f"Cannot find class '{class_name}' in ExpertHarness Python file: {path}") from exc
+        raise ImportError(f"Cannot find class '{class_name}' in Plugin Python file: {path}") from exc
     if not isinstance(loaded, type):
-        raise TypeError(f"ExpertHarness entry '{class_name}' is not a class: {path}")
+        raise TypeError(f"Plugin entry '{class_name}' is not a class: {path}")
     return loaded
 
 

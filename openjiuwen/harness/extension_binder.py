@@ -1,12 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""ExpertHarness hot apply / unapply on a live DeepAgent.
-
-Resolve lives in ``resources/expert_harness_parts`` (Parts only, no live agent).
-This module binds / unbinds those Parts and records ``ResourceRef``s for unload.
-Kept outside ``resources/`` to avoid a resources → DeepAgent dependency.
-"""
+"""Bind / unbind ExtensionParts on a live DeepAgent; record ResourceRefs."""
 
 from __future__ import annotations
 
@@ -16,13 +11,12 @@ from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
-from openjiuwen.core.single_agent.rail.base import AgentRail, init_rail
+from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.harness.deep_agent import DeepAgent
-from openjiuwen.harness.rails import SkillUseRail
-from openjiuwen.harness.rails.subagent import SubagentRail
-from openjiuwen.harness.resources.expert_harness_parts import (
-    ExpertHarnessParts,
-    ResolvedFileSection,
+from openjiuwen.harness.rails import SkillUseRail, SubagentRail
+from openjiuwen.harness.resources.extension_resolver import (
+    ExtensionParts,
+    ResolvedPromptSection,
     ResolvedSkill,
     ResourceKind,
     ResourceRef,
@@ -30,66 +24,51 @@ from openjiuwen.harness.resources.expert_harness_parts import (
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 
 
-async def apply_expert_harness_hot(
+async def apply_extension_hot(
     agent: DeepAgent,
-    parts: ExpertHarnessParts,
+    parts: ExtensionParts,
 ) -> list[ResourceRef]:
-    """Bind resolved ExpertHarness parts onto a live DeepAgent.
+    """Bind resolved Plugin / AgentTemplate parts onto a live DeepAgent.
 
-    Idempotent bind / unload bookkeeping (hard-coded):
-    - same-name / same-class resource already present → skip (no ref)
-    - new resource → bind and record a ref
+    Bind bookkeeping (hard-coded):
+    - same-name / same-identity resource already present -> raise (batch fails)
+    - AgentTemplate identity prompt section -> replace + snapshot (see module doc)
+    - new resource -> bind and record a ref
 
     On failure, unapplies refs already bound in this call, then re-raises.
     """
     refs: list[ResourceRef] = []
     try:
         for tool in parts.tools:
-            ref = _hot_bind_tool(agent, tool)
-            if ref is not None:
-                refs.append(ref)
+            refs.append(_bind_tool(agent, tool))
         for mcp in parts.mcps:
-            ref = await _hot_bind_mcp(agent, mcp)
-            if ref is not None:
-                refs.append(ref)
+            refs.append(await _bind_mcp(agent, mcp))
         for rail in parts.rails:
-            ref = await _hot_bind_rail(agent, rail)
-            if ref is not None:
-                refs.append(ref)
-        for section in parts.prompt_sections:
-            ref = _hot_bind_prompt_section(agent, section)
-            if ref is not None:
-                refs.append(ref)
-        for section in parts.file_sections:
-            ref = _hot_bind_file_section(agent, section)
-            if ref is not None:
-                refs.append(ref)
+            refs.append(await _bind_rail(agent, rail))
+        for resolved_section in parts.prompt_sections:
+            refs.append(_bind_prompt_section(agent, resolved_section))
         for skill in parts.skills:
-            ref = await _hot_bind_skill(agent, skill)
-            if ref is not None:
-                refs.append(ref)
+            refs.append(await _bind_skill(agent, skill))
         for subagent in parts.subagents:
-            ref = _hot_bind_subagent(agent, subagent)
-            if ref is not None:
-                refs.append(ref)
+            refs.append(_bind_subagent(agent, subagent))
         if parts.subagents:
             ensure_ref = await _ensure_subagent_rail_ready(agent)
             if ensure_ref is not None:
                 refs.append(ensure_ref)
     except Exception:
-        await unapply_expert_harness_hot(agent, refs)
+        await unapply_extension_hot(agent, refs)
         raise
     return refs
 
 
-async def unapply_expert_harness_hot(
+async def unapply_extension_hot(
     agent: DeepAgent,
     refs: list[ResourceRef],
 ) -> list[str]:
     """Undo bindings recorded in ``refs`` (reverse order)."""
     unloaded: list[str] = []
     for ref in reversed(refs):
-        await _hot_unbind(agent, ref)
+        await _unbind(agent, ref)
         unloaded.append(f"{ref.kind.value}:{ref.identity}")
     return unloaded
 
@@ -101,40 +80,27 @@ def _require_deep_config(agent: DeepAgent) -> DeepAgentConfig:
     return config
 
 
-def _hot_tool_identity(agent: DeepAgent, card: ToolCard) -> str:
+def _tool_identity(agent: DeepAgent, card: ToolCard) -> str:
     if not card.stateless and agent.card.id:
         return AbilityManager.qualify_tool_id(card, agent.card.id)
     return card.id or card.name
 
 
-def _hot_existing_tool_card(agent: DeepAgent, card: ToolCard) -> ToolCard | None:
-    existing = agent.ability_manager.get(card.name)
-    if not isinstance(existing, ToolCard):
-        return None
-    incoming_id = _hot_tool_identity(agent, card)
-    return existing if (existing.id or existing.name) == incoming_id else None
-
-
-def _hot_bind_tool(agent: DeepAgent, resource: Tool | ToolCard) -> ResourceRef | None:
-    if isinstance(resource, list):
-        raise TypeError("Tool part must be one instance, got a list")
+def _bind_tool(agent: DeepAgent, resource: Tool | ToolCard) -> ResourceRef:
     if not isinstance(resource, (Tool, ToolCard)):
         raise TypeError(f"Unsupported tool resource: {type(resource).__name__}")
     card = resource.card if isinstance(resource, Tool) else resource
-    identity = _hot_tool_identity(agent, card)
-    if _hot_existing_tool_card(agent, card) is not None:
-        return None
     if agent.ability_manager.get(card.name) is not None:
-        agent.ability_manager.remove(card.name)
+        raise ValueError(f"Tool already bound: {card.name}")
+    identity = _tool_identity(agent, card)
     if isinstance(resource, Tool):
         agent.ability_manager.add_ability(card, resource)
     else:
         agent.ability_manager.add(card)
     config = _require_deep_config(agent)
     tools = list(config.tools or [])
-    tools = [c for c in tools if (c.id or c.name) != identity and c.name != card.name]
     tools.append(card)
-    config.tools = tools or None
+    config.tools = tools
     return ResourceRef(
         kind=ResourceKind.TOOL,
         identity=identity,
@@ -142,14 +108,12 @@ def _hot_bind_tool(agent: DeepAgent, resource: Tool | ToolCard) -> ResourceRef |
     )
 
 
-async def _hot_bind_mcp(agent: DeepAgent, config: McpServerConfig) -> ResourceRef | None:
+async def _bind_mcp(agent: DeepAgent, config: McpServerConfig) -> ResourceRef:
     deep_config = _require_deep_config(agent)
-    agent_local = next(
-        (item for item in deep_config.mcps or [] if item.server_id == config.server_id),
-        None,
-    )
-    if agent_local is not None:
-        return None
+    if any(item.server_id == config.server_id for item in deep_config.mcps or []):
+        raise ValueError(f"MCP server already bound: {config.server_id}")
+    if agent.ability_manager.get(config.server_name) is not None:
+        raise ValueError(f"MCP ability already bound: {config.server_name}")
 
     # Side effects first; commit deep_config last. On failure, unbind self so the
     # outer apply rollback does not need a ref for this incomplete bind.
@@ -172,55 +136,45 @@ async def _hot_bind_mcp(agent: DeepAgent, config: McpServerConfig) -> ResourceRe
                 tool_tag_result = Runner.resource_mgr.add_resource_tag(tool_id, agent.card.id)
                 if tool_tag_result.is_err():
                     raise tool_tag_result.msg()
-        existing_ability = agent.ability_manager.get(config.server_name)
-        if existing_ability is not None:
-            agent.ability_manager.remove(config.server_name)
         agent.ability_manager.add(config)
 
         mcps = list(deep_config.mcps or [])
-        mcps = [item for item in mcps if item.server_id != config.server_id]
         mcps.append(config)
-        deep_config.mcps = mcps or None
+        deep_config.mcps = mcps
     except Exception:
-        await _hot_unbind(agent, ref)
+        await _unbind(agent, ref)
         raise
     return ref
 
 
-async def _hot_bind_rail(agent: DeepAgent, rail: AgentRail) -> ResourceRef | None:
+async def _bind_rail(agent: DeepAgent, rail: AgentRail) -> ResourceRef:
     identity = type(rail).__name__
     if agent.find_rail_by_name(identity) is not None:
-        return None
+        raise ValueError(f"Rail already bound: {identity}")
     await agent.register_rail(rail)
     return ResourceRef(kind=ResourceKind.RAIL, identity=identity)
 
 
-def _hot_bind_prompt_section(agent: DeepAgent, section: PromptSection) -> ResourceRef | None:
+def _bind_prompt_section(agent: DeepAgent, resolved: ResolvedPromptSection) -> ResourceRef:
     if agent.system_prompt_builder is None:
         raise ValueError("Cannot bind prompt section before DeepAgent.configure()")
-    if agent.system_prompt_builder.get_section(section.name) is not None:
-        return None
+    section = resolved.section
+    existing = agent.system_prompt_builder.get_section(section.name)
+    if existing is not None and not resolved.replace_existing:
+        raise ValueError(f"Prompt section already bound: {section.name}")
+
+    extra: dict = {}
+    if resolved.replace_existing:
+        extra["previous_exists"] = existing is not None
+        if existing is not None:
+            extra["previous_snapshot"] = {
+                "name": existing.name,
+                "content": dict(existing.content),
+                "priority": existing.priority,
+            }
     agent.system_prompt_builder.add_section(section)
     agent.apply_prompt_builder_to_react_agent()
-    return ResourceRef(kind=ResourceKind.PROMPT_SECTION, identity=section.name)
-
-
-def _hot_bind_file_section(agent: DeepAgent, section: ResolvedFileSection) -> ResourceRef | None:
-    previous_exists = section.target.is_file()
-    previous_content = section.target.read_text(encoding="utf-8") if previous_exists else None
-    if previous_exists and previous_content == section.content:
-        return None
-    section.target.parent.mkdir(parents=True, exist_ok=True)
-    section.target.write_text(section.content, encoding="utf-8")
-    return ResourceRef(
-        kind=ResourceKind.FILE_SECTION,
-        identity=section.filename,
-        extra={
-            "path": str(section.target),
-            "previous_content": previous_content,
-            "previous_exists": previous_exists,
-        },
-    )
+    return ResourceRef(kind=ResourceKind.PROMPT_SECTION, identity=section.name, extra=extra)
 
 
 def _skill_paths_to_rail_mounts(skill_paths: list[str]) -> tuple[list[str], list[str]]:
@@ -249,89 +203,69 @@ def _skill_values(raw: str | list[str] | None) -> list[str]:
     return list(raw)
 
 
-def _hot_skill_mounted(agent: DeepAgent, skill: ResolvedSkill) -> bool:
+def _is_skill_leaf_dir(directory: Path) -> bool:
+    return (directory / "SKILL.md").is_file()
+
+
+async def _bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef:
+    """Load one skill onto the agent's existing ``SkillUseRail``.
+
+    A ``SkillUseRail`` is not auto-created here: the agent is expected to
+    already carry one (see ``factory._make_skill_rail`` / ``enable_skill_discovery``).
+    Binding only adds this skill's root to the rail and reloads it; unbinding
+    (``_unbind`` below) removes that root again.
+    """
     config = _require_deep_config(agent)
-    directory = str(Path(skill.directory).expanduser().resolve())
-    skill_path = Path(directory)
-    mount_root = str(skill_path.parent) if (skill_path / "SKILL.md").is_file() else directory
-    mounted = {str(Path(item).expanduser().resolve()) for item in _skill_values(config.skills)}
-    return mount_root in mounted
+    directory = Path(skill.directory).expanduser().resolve()
+    is_leaf = _is_skill_leaf_dir(directory)
+    mount_root = str(directory.parent) if is_leaf else str(directory)
 
+    rails = agent.find_rails_by_type((SkillUseRail,))
+    if not rails:
+        raise ValueError("No SkillUseRail registered on the agent; cannot bind a skill.")
+    target = rails[0]
 
-async def _hot_bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef | None:
-    if _hot_skill_mounted(agent, skill):
-        return None
     roots, enabled_names = _skill_paths_to_rail_mounts([skill.directory])
     if skill.enabled_skills:
         for name in skill.enabled_skills:
             if name not in enabled_names:
                 enabled_names.append(name)
-    config = _require_deep_config(agent)
-    rails = agent.find_rails_by_type((SkillUseRail,))
-    target = rails[0] if rails else None
-    created_rail = False
-    previous_dirs: list[str] | None = None
-    previous_mode = None
-    previous_enabled: set[str] | None = None
-    previous_enabled_was_none = False
 
+    previous_dirs = _skill_values(target.skills_dir)
+    current_dirs = {str(Path(item).expanduser().resolve()) for item in previous_dirs}
+
+    if mount_root in current_dirs:
+        # Parent-dir mounts are one-shot. Leaf dirs under the same parent are
+        # siblings in new manifests and must merge into the shared mount.
+        if not is_leaf or target.enabled_skills is None:
+            raise ValueError(f"Skill already bound: {mount_root}")
+        if directory.name in target.enabled_skills:
+            raise ValueError(f"Skill already bound: {directory}")
+
+    previous_enabled = None if target.enabled_skills is None else set(target.enabled_skills)
+
+    # New roots go first: duplicate skill names across roots keep the first
+    # (i.e. newly bound) one, so a fresh bind can refresh/shadow a stale copy.
+    target.skills_dir = [*(root for root in roots if root not in current_dirs), *previous_dirs]
+    if enabled_names:
+        target.enabled_skills = (target.enabled_skills or set()) | set(enabled_names)
+    target.enable_cache = False
+    target.clear_skills()
     try:
-        if target is None:
-            target = SkillUseRail(
-                skills_dir=roots,
-                skill_mode=skill.mode,
-                enabled_skills=enabled_names or None,
-            )
-            await agent.register_rail(target)
-            created_rail = True
-            await target.reload_skills()
-        else:
-            current_dirs = _skill_values(target.skills_dir)
-            previous_dirs = [
-                str(Path(item).expanduser().resolve())
-                for item in current_dirs
-                if str(item).strip()
-            ]
-            previous_mode = target.skill_mode
-            if target.enabled_skills is None:
-                previous_enabled_was_none = True
-            else:
-                previous_enabled = set(target.enabled_skills)
-
-            target.skills_dir = [*roots, *(item for item in previous_dirs if item not in roots)]
-            target.skill_mode = skill.mode
-            if enabled_names:
-                if target.enabled_skills:
-                    target.enabled_skills.update(enabled_names)
-                else:
-                    target.enabled_skills = set(enabled_names)
-            target.enable_cache = False
-            target.clear_skills()
-            if agent.is_pending_rail(target):
-                agent.remove_pending_rail(target)
-                await agent.register_rail(target)
-            await target.reload_skills()
-
-        # Commit config only after rail side effects succeed.
-        skills = list(_skill_values(config.skills))
-        for root in roots:
-            if root not in skills:
-                skills.append(root)
-        config.skills = skills or None
+        await target.reload_skills()
     except Exception:
-        if created_rail and target is not None:
-            if agent.is_registered_rail(target):
-                await agent.unregister_rail(target)
-            elif agent.is_pending_rail(target):
-                agent.remove_pending_rail(target)
-        elif target is not None and previous_dirs is not None:
-            target.skills_dir = previous_dirs
-            target.skill_mode = previous_mode
-            target.enabled_skills = None if previous_enabled_was_none else previous_enabled
-            target.enable_cache = False
-            target.clear_skills()
-            await target.reload_skills()
+        target.skills_dir = previous_dirs
+        target.enabled_skills = previous_enabled
+        target.enable_cache = False
+        target.clear_skills()
         raise
+
+    # Commit config only after rail side effects succeed.
+    skills = list(_skill_values(config.skills))
+    for root in roots:
+        if root not in skills:
+            skills.append(root)
+    config.skills = skills
 
     return ResourceRef(
         kind=ResourceKind.SKILL,
@@ -345,18 +279,17 @@ def _subagent_key(subagent: SubAgentConfig) -> str:
     return str(card.name or card.id)
 
 
-def _hot_bind_subagent(agent: DeepAgent, subagent: SubAgentConfig) -> ResourceRef | None:
+def _bind_subagent(agent: DeepAgent, subagent: SubAgentConfig) -> ResourceRef:
     identity = _subagent_key(subagent)
     config = _require_deep_config(agent)
-    existing = next(
-        (item for item in config.subagents or [] if _subagent_key(item) == identity),
-        None,
-    )
-    if existing is not None:
-        return None
+    if any(_subagent_key(item) == identity for item in config.subagents or []):
+        raise ValueError(f"Subagent already bound: {identity}")
+    name = subagent.agent_card.name
+    if name and agent.ability_manager.get(name) is not None:
+        raise ValueError(f"Subagent ability already bound: {identity}")
     subagents = list(config.subagents or [])
     subagents.append(subagent)
-    config.subagents = subagents or None
+    config.subagents = subagents
     agent.ability_manager.add(subagent.agent_card)
     return ResourceRef(kind=ResourceKind.SUBAGENT, identity=identity)
 
@@ -364,10 +297,8 @@ def _hot_bind_subagent(agent: DeepAgent, subagent: SubAgentConfig) -> ResourceRe
 async def _ensure_subagent_rail_ready(agent: DeepAgent) -> ResourceRef | None:
     """After subagent binds: ensure SubagentRail exists and has task/session tools.
 
-    Covers two hot-load races:
-    - SubagentRail was registered earlier while ``config.subagents`` was still
-      empty, so ``init`` skipped and ``tools`` stayed ``None``.
-    - Package declared subagents without a ``core.subagent`` rail; mount one.
+    Not a same-name conflict scenario: shared bootstrap infrastructure is
+    idempotently reused/created regardless of which Extension load triggered it.
     """
     config = _require_deep_config(agent)
     if not config.subagents:
@@ -382,7 +313,7 @@ async def _ensure_subagent_rail_ready(agent: DeepAgent) -> ResourceRef | None:
         created = True
 
     if not getattr(rail, "tools", None):
-        init_rail(rail, agent)
+        rail.init(agent)
     else:
         rail.refresh_available_agents(agent)
 
@@ -391,7 +322,7 @@ async def _ensure_subagent_rail_ready(agent: DeepAgent) -> ResourceRef | None:
     return None
 
 
-async def _hot_unbind(agent: DeepAgent, ref: ResourceRef) -> None:
+async def _unbind(agent: DeepAgent, ref: ResourceRef) -> None:
     if ref.kind == ResourceKind.TOOL:
         names = ref.extra.get("ability_names") or []
         tool_name = names[0] if names else ref.identity
@@ -440,34 +371,58 @@ async def _hot_unbind(agent: DeepAgent, ref: ResourceRef) -> None:
             agent.remove_pending_rail(rail)
         return
     if ref.kind == ResourceKind.PROMPT_SECTION:
-        if agent.system_prompt_builder is not None:
-            agent.system_prompt_builder.remove_section(ref.identity)
-            agent.apply_prompt_builder_to_react_agent()
-        return
-    if ref.kind == ResourceKind.FILE_SECTION:
-        target = Path(ref.extra.get("path") or ref.identity)
-        previous_exists = bool(ref.extra.get("previous_exists"))
-        previous_content = ref.extra.get("previous_content")
+        if agent.system_prompt_builder is None:
+            return
+        previous_exists = ref.extra.get("previous_exists")
         if previous_exists:
-            target.write_text(previous_content or "", encoding="utf-8")
-        elif target.is_file():
-            target.unlink()
+            snapshot = ref.extra.get("previous_snapshot") or {}
+            agent.system_prompt_builder.add_section(
+                PromptSection(
+                    name=snapshot.get("name", ref.identity),
+                    content=dict(snapshot.get("content") or {}),
+                    priority=snapshot.get("priority", 100),
+                )
+            )
+        else:
+            agent.system_prompt_builder.remove_section(ref.identity)
+        agent.apply_prompt_builder_to_react_agent()
         return
     if ref.kind == ResourceKind.SKILL:
         directory = str(ref.extra.get("directory") or ref.identity)
         path = Path(directory).expanduser().resolve()
-        root = str(path.parent) if (path / "SKILL.md").is_file() else str(path)
+        is_leaf = _is_skill_leaf_dir(path)
+        root = str(path.parent) if is_leaf else str(path)
         config = _require_deep_config(agent)
-        if config.skills:
-            config.skills = [item for item in _skill_values(config.skills) if item != root] or None
         for rail in agent.find_rails_by_type((SkillUseRail,)):
             current = _skill_values(rail.skills_dir)
-            if root not in {str(Path(item).expanduser().resolve()) for item in current}:
+            mounted = {str(Path(item).expanduser().resolve()) for item in current}
+            if root not in mounted:
                 continue
-            rail.skills_dir = [item for item in current if str(Path(item).expanduser().resolve()) != root]
+
+            # Sibling leaf unbind: drop only this skill name while others remain.
+            if is_leaf and rail.enabled_skills is not None:
+                rail.enabled_skills.discard(path.name)
+                if rail.enabled_skills:
+                    if agent.is_registered_rail(rail):
+                        rail.enable_cache = False
+                        rail.clear_skills()
+                        await rail.reload_skills()
+                    break
+
+            if config.skills:
+                config.skills = [
+                    item
+                    for item in _skill_values(config.skills)
+                    if str(Path(item).expanduser().resolve()) != root
+                ] or None
+            rail.skills_dir = [
+                item for item in current if str(Path(item).expanduser().resolve()) != root
+            ]
             if not rail.skills_dir:
+                # Nothing left to mount; reload_skills() requires a non-empty
+                # skills_dir, so just drop the cached skills instead.
                 rail.clear_skills()
-            if agent.is_registered_rail(rail):
+            elif agent.is_registered_rail(rail):
                 rail.enable_cache = False
                 rail.clear_skills()
                 await rail.reload_skills()
@@ -488,5 +443,13 @@ async def _hot_unbind(agent: DeepAgent, ref: ResourceRef) -> None:
         name = subagent.agent_card.name
         if name and agent.ability_manager.get(name) is not None:
             agent.ability_manager.remove(name)
+        for rail in agent.find_rails_by_type((SubagentRail,)):
+            rail.refresh_available_agents(agent)
         return
     raise ValueError(f"Unsupported hot unbind: kind={ref.kind.value}")
+
+
+__all__ = [
+    "apply_extension_hot",
+    "unapply_extension_hot",
+]

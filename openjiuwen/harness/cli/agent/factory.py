@@ -663,7 +663,7 @@ class LocalBackend:
             if ext_key in self._loaded_extensions:
                 continue
             try:
-                record = await self.agent.load_expert_harness(
+                record = await self.agent.load_plugin(
                     ext_key,
                 )
                 self._loaded_extensions.add(ext_key)
