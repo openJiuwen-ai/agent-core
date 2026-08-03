@@ -71,9 +71,7 @@ class _Agent:
     _registered_rails: list[Any] = field(default_factory=list)
     _pending_rails: list[Any] = field(default_factory=list)
     ability_manager: Any = None
-    system_prompt_builder: SystemPromptBuilder = field(
-        default_factory=lambda: SystemPromptBuilder(language="cn")
-    )
+    system_prompt_builder: SystemPromptBuilder = field(default_factory=lambda: SystemPromptBuilder(language="cn"))
 
 
 def _ctx(agent: _Agent, inputs: Any) -> AgentCallbackContext:
@@ -109,9 +107,7 @@ def _attach_team_creator_capability(agent: _Agent, skills_dir: Path) -> None:
         )
     ]
     agent._registered_rails = [skill_rail]
-    agent.ability_manager = SimpleNamespace(
-        list_tool_info=AsyncMock(return_value=[SimpleNamespace(name="skill_tool")])
-    )
+    agent.ability_manager = SimpleNamespace(list_tool_info=AsyncMock(return_value=[SimpleNamespace(name="skill_tool")]))
 
 
 @pytest.mark.asyncio
@@ -154,10 +150,11 @@ async def test_team_skill_create_rail_schedules_nudge_after_spawn_threshold(tmp_
     assert follow_up_prompt.startswith("<auto_team_skill_creation_followup>\n")
     assert follow_up_prompt.endswith("\n</auto_team_skill_creation_followup>")
     assert "不是用户的新需求" in follow_up_prompt
-    assert "常驻提示词中的“团队技能沉淀自检”规则" in follow_up_prompt
-    assert "在本条普通回复末尾最多追加两句" in follow_up_prompt
+    assert "参考常驻“团队技能沉淀自检”规则" in follow_up_prompt
+    assert "普通最终回复末尾追加一至两句" in follow_up_prompt
+    assert "同时包含可复用团队方法" in follow_up_prompt
     assert "是否创建 Team/Swarm Skill" in follow_up_prompt
-    assert "不要提及自检、沉淀、无需创建、已检查、内部判断或本提醒" in follow_up_prompt
+    assert "否则自然回复，不提本提醒或内部判断" in follow_up_prompt
     assert "ask_user" not in follow_up_prompt
     assert "swarmskill-creator" not in follow_up_prompt
     assert "team-skill-creator" not in follow_up_prompt
@@ -166,8 +163,11 @@ async def test_team_skill_create_rail_schedules_nudge_after_spawn_threshold(tmp_
     section = agent.system_prompt_builder.get_section(SectionName.TEAM_SKILL_CREATION_GUIDANCE)
     assert section is not None
     prompt = section.render("cn")
-    assert "swarmskill-creator" in prompt
-    assert "普通回复文本" in prompt
+    assert "### 目标与边界" in prompt
+    assert "### 决策顺序" in prompt
+    assert "高优先级用户意图" in prompt
+    assert "一至两句" in prompt
+    assert "swarmskill-creator" not in prompt
     assert not agent.system_prompt_builder.has_section(SectionName.TEAM_SKILL_CREATION_NUDGE)
 
 
