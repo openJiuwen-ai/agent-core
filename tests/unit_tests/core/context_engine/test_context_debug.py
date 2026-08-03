@@ -7,8 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from openjiuwen.core.context_engine.processor.forked.support.context_debug import (
-    write_debug_record,
     CONTEXT_DEBUG_DIR_ENV,
+    write_debug_record,
 )
 
 

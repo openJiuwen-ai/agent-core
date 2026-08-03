@@ -11,20 +11,22 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.session_memory_manager import (
+    group_completed_api_rounds as group_completed_api_round_ranges,
+)
 from openjiuwen.core.context_engine.processor.forked.compressor.reinjection import (
     ReinjectContext,
-    StateReinjector as FullCompactStateReinjector,
     build_file_reinjected_content,
     build_plan_mode_reinjected_content,
     build_plan_reinjected_content,
-    build_skill_reinjected_content,
     build_single_reinjected_state_message,
+    build_skill_reinjected_content,
     build_task_status_reinjected_content,
     build_todo_reinjected_content,
     build_tool_result_hint_reinjected_content,
 )
-from openjiuwen.core.context_engine.context.session_memory_manager import (
-    group_completed_api_rounds as group_completed_api_round_ranges,
+from openjiuwen.core.context_engine.processor.forked.compressor.reinjection import (
+    StateReinjector as FullCompactStateReinjector,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage, UserMessage
 
@@ -321,7 +323,7 @@ def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[Ba
     for idx in range(len(messages) - 1, -1, -1):
         message = messages[idx]
         if ContextUtils.has_valid_usage_metadata(message):
-            return message.usage_metadata.total_tokens, messages[idx + 1 :]
+            return message.usage_metadata.total_tokens, messages[slice(idx + 1, None)]
     return None
 
 

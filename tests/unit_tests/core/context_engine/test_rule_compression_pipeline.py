@@ -1,13 +1,17 @@
 import json
 from pathlib import Path
 
-from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.pipeline import (
-    RuleCompressionPipeline,
-)
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.compressors.search_results_compressor import (
     SearchResultsCompressor,
 )
-from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import RuleContext
+from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.pipeline import (
+    RuleCompressionPipeline,
+)
+from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import (
+    ContentType,
+    RuleCompressionResult,
+    RuleContext,
+)
 from openjiuwen.core.foundation.llm import ToolMessage, UserMessage
 
 
@@ -31,6 +35,41 @@ class _Context:
         if self._workspace_dir is None:
             return ""
         return str(self._workspace_dir)
+
+
+class _CapturingRouter:
+    def __init__(self):
+        self.context = None
+
+    def compress(self, content: str, context: RuleContext) -> RuleCompressionResult:
+        self.context = context
+        return RuleCompressionResult(
+            content=content,
+            content_type=ContentType.PLAIN_TEXT,
+            modified=False,
+        )
+
+
+def test_rule_compression_pipeline_uses_four_characters_per_token():
+    context = _Context(None)
+    router = _CapturingRouter()
+    pipeline = RuleCompressionPipeline(router=router)
+
+    pipeline.compress(
+        ToolMessage(content="x" * 80, tool_call_id="tc-budget"),
+        context,
+        pass_name="add",
+        max_chars=80,
+        force=True,
+        context_messages=[],
+    )
+
+    assert pipeline.context_character_capacity(context) == 400
+    assert router.context is not None
+    assert router.context.max_tokens == 20
+    assert router.context.head_tokens == 10
+    assert router.context.tail_tokens == 10
+    assert router.context.count_tokens("x" * 40) == 10
 
 
 def test_rule_compression_dump_is_written_when_enabled(tmp_path):
@@ -131,7 +170,10 @@ def test_search_results_compression_ignores_numbered_line_prefixes():
     assert result.details["files_affected"] == 1
     assert result.details["retained_match_count"] == 3
     assert "1\topenjiuwen" not in result.content
-    assert "[... and 5 more matches in openjiuwen/core/context_engine/processor/offloader/message_offloader.py]" in result.content
+    assert (
+        "[... and 5 more matches in openjiuwen/core/context_engine/processor/offloader/message_offloader.py]"
+        in result.content
+    )
     assert "more files omitted" not in result.content
 
 

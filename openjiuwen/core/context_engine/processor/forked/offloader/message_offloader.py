@@ -53,9 +53,7 @@ class MessageSummaryOffloaderConfig(BaseModel):
     )
     """Context-token-capacity ratio above which one TTL tool message is processed."""
 
-    protected_tool_names: list[str] = Field(
-        default_factory=lambda: ["read_file"]
-    )
+    protected_tool_names: list[str] = Field(default_factory=lambda: ["read_file"])
     """Tool names, or ``tool:argument-pattern`` entries, that must remain inline."""
 
     enable_debug_dump: bool = Field(default=False)
@@ -452,13 +450,7 @@ class MessageSummaryOffloader(ContextProcessor):
         head_budget = body_budget - len(body_separator) - tail_budget
         if head_budget <= 0:
             return f"{body[-body_budget:].lstrip()}{marker_separator}{marker}"
-        return (
-            f"{body[:head_budget].rstrip()}"
-            f"{body_separator}"
-            f"{body[-tail_budget:].lstrip()}"
-            f"{marker_separator}"
-            f"{marker}"
-        )
+        return f"{body[:head_budget].rstrip()}{body_separator}{body[-tail_budget:].lstrip()}{marker_separator}{marker}"
 
     @staticmethod
     def _rule_compression_requests_original_offload(message: BaseMessage) -> bool:
@@ -519,11 +511,7 @@ class MessageSummaryOffloader(ContextProcessor):
             return f"[{description}]"
         if len(content) <= keep_chars * 2:
             return content
-        return (
-            f"{content[:keep_chars]}"
-            f"\n{OMIT_STRING} [{description}] {OMIT_STRING}\n"
-            f"{content[-keep_chars:]}"
-        )
+        return f"{content[:keep_chars]}\n{OMIT_STRING} [{description}] {OMIT_STRING}\n{content[-keep_chars:]}"
 
     def _offload_strategy(self) -> OffloadStrategy:
         return _OFFLOAD_STRATEGY

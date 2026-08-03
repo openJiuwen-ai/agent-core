@@ -3,7 +3,8 @@
 
 
 from typing import List, Optional
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -11,13 +12,13 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
     BaseMessage,
     SystemMessage,
-    UserMessage,
-    AssistantMessage,
-    UsageMetadata,
-    ToolMessage,
     ToolCall,
+    ToolMessage,
+    UsageMetadata,
+    UserMessage,
 )
 from openjiuwen.core.foundation.tool import ToolInfo
 

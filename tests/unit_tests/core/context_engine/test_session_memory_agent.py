@@ -1,24 +1,29 @@
-import pytest
 from types import SimpleNamespace
 
+import pytest
+
+from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig, SessionMemoryManager
 from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_agent import (
     SessionMemoryAbilityManager,
     SessionMemoryAgent,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor import (
+    SessionMemoryCompressor,
+    SessionMemoryCompressorConfig,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
     CompressionExecutor,
     CompressionRequest,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.support.forked_agent import ForkedAgent
-from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor import (
-    SessionMemoryCompressor,
-    SessionMemoryCompressorConfig,
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    ModelClientConfig,
+    ModelRequestConfig,
+    ToolCall,
+    UserMessage,
 )
-from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig
-from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryManager
-from openjiuwen.core.context_engine.base import ContextWindow
-from openjiuwen.core.foundation.llm import ToolCall, UserMessage
-from openjiuwen.core.foundation.llm import AssistantMessage, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool import ToolInfo
 
 

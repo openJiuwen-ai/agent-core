@@ -5,27 +5,26 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Awaitable, Callable, List, Optional, Tuple, Dict, Any
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.context_engine.base import ContextStats, ContextWindow, ContextWindowChange, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.processor_state_recorder import (
     ContextProcessorStateInput,
     ContextProcessorStateRecorder,
 )
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
-from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
-from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.foundation.kv_cache import first_changed_index
+from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.context_engine.base import ContextWindowChange, ModelContext, ContextWindow, ContextStats
-from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
-
 
 _ACTIVE_COMPRESSION_RESULT_BUSY = "busy"
 _ACTIVE_COMPRESSION_RESULT_COMPRESSED = "compressed"
@@ -1075,7 +1074,7 @@ class SessionModelContext(ModelContext):
         messages = context_state.get("messages", [])
         ContextUtils.validate_messages(messages)
         messages = ContextUtils.ensure_context_message_ids(messages)
-        self._message_buffer.rebulid(messages)
+        self._message_buffer.rebulid(messages)  # codespell:ignore rebulid
         last_access_at = context_state.get("last_context_window_access_at")
         self._last_context_window_access_at = (
             float(last_access_at) if isinstance(last_access_at, (int, float)) else None

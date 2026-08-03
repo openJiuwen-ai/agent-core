@@ -13,8 +13,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow
-from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, AssistantMessage
-
+from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage
 
 CONTEXT_MESSAGE_ID_KEY = "context_message_id"
 CONTEXT_USAGE_STALE_KEY = "context_usage_stale"
@@ -315,11 +314,13 @@ class ContextUtils:
     @staticmethod
     def has_valid_usage_metadata(message: BaseMessage) -> bool:
         """Return whether an assistant usage record still describes its prefix."""
+        metadata = getattr(message, "metadata", None)
+        usage_is_stale = metadata.get(CONTEXT_USAGE_STALE_KEY, False) if isinstance(metadata, dict) else False
         return (
             isinstance(message, AssistantMessage)
             and message.usage_metadata is not None
             and message.usage_metadata.total_tokens > 0
-            and not bool((getattr(message, "metadata", None) or {}).get(CONTEXT_USAGE_STALE_KEY))
+            and not bool(usage_is_stale)
         )
 
     @staticmethod

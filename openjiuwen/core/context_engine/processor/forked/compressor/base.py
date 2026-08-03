@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field, model_validator
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
-from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
     CompressionError,
@@ -30,6 +29,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
 from openjiuwen.core.context_engine.processor.forked.support.context_debug import (
     write_debug_record,
 )
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,

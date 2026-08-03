@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
     DialogueCompressor,
     DialogueCompressorConfig,
@@ -9,8 +11,6 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
     resolve_context_max,
     resolve_ratio_token_threshold,
 )
-from openjiuwen.core.context_engine.base import ContextWindow
-from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata, UserMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 
@@ -114,6 +114,13 @@ def test_usage_aware_ignores_stale_usage_after_context_rewrite():
 
     assert result == 23
     token_counter.count_messages.assert_called_once_with(messages)
+
+
+def test_usage_aware_handles_truthy_non_dict_metadata():
+    assistant = AssistantMessage(content="ok", usage_metadata=UsageMetadata(total_tokens=5000))
+    object.__setattr__(assistant, "metadata", ["unexpected metadata"])
+
+    assert ContextUtils.has_valid_usage_metadata(assistant) is True
 
 
 def test_context_window_without_valid_usage_counts_messages_and_tools():

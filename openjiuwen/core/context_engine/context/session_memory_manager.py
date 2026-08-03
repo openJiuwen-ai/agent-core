@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -23,7 +24,6 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation import SysOperation
 
 if TYPE_CHECKING:
@@ -960,7 +960,7 @@ class SessionMemoryManager:
         for idx in range(len(all_messages) - 1, -1, -1):
             message = all_messages[idx]
             if ContextUtils.has_valid_usage_metadata(message):
-                tail = all_messages[idx + 1 :]
+                tail = all_messages[slice(idx + 1, None)]
                 return message.usage_metadata.total_tokens + sum(
                     SessionMemoryManager._estimate_message_tokens(msg) for msg in tail
                 )

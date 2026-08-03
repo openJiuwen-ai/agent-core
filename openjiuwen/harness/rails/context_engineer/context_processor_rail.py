@@ -21,7 +21,6 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     SessionMemoryManager,
 )
-from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
     CurrentRoundCompressorConfig as ForkedCurrentRoundCompressorConfig,
 )
@@ -37,6 +36,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_c
 from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
     MessageSummaryOffloaderConfig as ForkedMessageSummaryOffloaderConfig,
 )
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.runner.callback.errors import AbortError
@@ -267,9 +267,7 @@ class ContextProcessorRail(DeepAgentRail):
         model_config = getattr(config, "model_config_obj", None)
         model_client_config = getattr(config, "model_client_config", None)
         context_engine_config = getattr(config, "context_engine_config", None)
-        context_debug_enabled = bool(
-            getattr(context_engine_config, "enable_context_debug", False)
-        )
+        context_debug_enabled = bool(getattr(context_engine_config, "enable_context_debug", False))
         context_debug_dir = getattr(context_engine_config, "context_debug_dir", None)
 
         # The engine instantiates every processor in the final list regardless
@@ -335,9 +333,7 @@ class ContextProcessorRail(DeepAgentRail):
                 self._summarize_processor_config(recall_config),
             )
         if recall_requested and not supported_compressor_present:
-            logger.warning(
-                "compression recall is enabled but no supported forked compressor is configured"
-            )
+            logger.warning("compression recall is enabled but no supported forked compressor is configured")
         if self._recall_enabled:
             self._protect_compression_recall_tool_results(all_processors)
             self._register_compression_recall_tool(agent)

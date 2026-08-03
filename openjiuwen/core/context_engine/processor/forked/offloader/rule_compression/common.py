@@ -4,7 +4,6 @@ import re
 
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import RuleContext
 
-
 ERROR_RE = re.compile(
     r"\b(error|failed|failure|traceback|exception|warn|warning)\b",
     re.IGNORECASE,
