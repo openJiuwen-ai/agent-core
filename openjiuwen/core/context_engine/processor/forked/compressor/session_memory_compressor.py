@@ -122,7 +122,12 @@ class SessionMemoryCompressor(ContextProcessor):
         messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])
         token_counter_factory = getattr(context, "token_counter", None)
         token_counter = token_counter_factory() if callable(token_counter_factory) else None
-        current_tokens = count_messages_tokens(messages, token_counter, self.processor_type())
+        current_tokens = count_messages_tokens(
+            messages,
+            token_counter,
+            self.processor_type(),
+            usage_aware=True,
+        )
         context_max = resolve_context_max(context)
         threshold = max(int(context_max * self.config.trigger_context_ratio), 1)
         reached = current_tokens >= threshold

@@ -24,7 +24,12 @@ def test_compressor_delegates_message_counting_to_shared_helper(monkeypatch):
     messages = [UserMessage(content="hello")]
 
     assert compressor.count_messages_tokens(messages, context) == 37
-    shared_counter.assert_called_once_with(messages, context.token_counter(), "DialogueCompressor")
+    shared_counter.assert_called_once_with(
+        messages,
+        context.token_counter(),
+        "DialogueCompressor",
+        usage_aware=False,
+    )
 
 
 def test_shared_message_counter_uses_token_counter():
@@ -48,6 +53,52 @@ def test_shared_message_counter_falls_back_to_character_estimate(caplog):
 
     assert result == 3
     assert "[TestProcessor] token_counter failed" in caplog.text
+
+
+def test_usage_aware_uses_last_assistant_usage_plus_tail_len_estimate():
+    from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata
+
+    token_counter = MagicMock()
+    token_counter.count_messages.return_value = 999  # should not be reached
+
+    messages = [
+        UserMessage(content="earlier"),
+        AssistantMessage(content="ok", usage_metadata=UsageMetadata(total_tokens=5000)),
+        UserMessage(content="x" * 40),  # tail: 40 // 4 = 10
+    ]
+
+    result = count_messages_tokens(messages, token_counter, "TestProcessor", usage_aware=True)
+
+    assert result == 5010
+    token_counter.count_messages.assert_not_called()
+
+
+def test_usage_aware_without_usage_falls_back_to_token_counter():
+    token_counter = MagicMock()
+    token_counter.count_messages.return_value = 23
+
+    messages = [UserMessage(content="hello")]  # no AssistantMessage with usage
+
+    result = count_messages_tokens(messages, token_counter, "TestProcessor", usage_aware=True)
+
+    assert result == 23
+    token_counter.count_messages.assert_called_once_with(messages)
+
+
+def test_usage_aware_false_default_ignores_usage():
+    from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata
+
+    token_counter = MagicMock()
+    token_counter.count_messages.return_value = 7
+
+    messages = [
+        AssistantMessage(content="ok", usage_metadata=UsageMetadata(total_tokens=5000)),
+    ]
+
+    result = count_messages_tokens(messages, token_counter, "TestProcessor")
+
+    assert result == 7
+    token_counter.count_messages.assert_called_once_with(messages)
 
 
 def test_shared_context_max_resolver_uses_config_model_mapping_and_default():

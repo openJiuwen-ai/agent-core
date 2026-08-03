@@ -462,7 +462,7 @@ class MessageSummaryOffloader(ContextProcessor):
         return self._rule_compression_requests_original_offload(message)
 
     def _context_occupancy_tokens(self, context: ModelContext) -> int:
-        return self._count_messages_tokens(context, context.get_messages())
+        return self._count_messages_tokens(context, context.get_messages(), usage_aware=True)
 
     def _ttl_occupancy_token_threshold(self, context: ModelContext) -> int:
         return resolve_ratio_token_threshold(self._context_max(context), self._ttl_context_occupancy_ratio())
@@ -487,8 +487,19 @@ class MessageSummaryOffloader(ContextProcessor):
     def _context_max(self, context: ModelContext) -> int:
         return resolve_context_max(context)
 
-    def _count_messages_tokens(self, context: ModelContext, messages: list[BaseMessage]) -> int:
-        return count_messages_tokens(messages, context.token_counter(), self.processor_type())
+    def _count_messages_tokens(
+        self,
+        context: ModelContext,
+        messages: list[BaseMessage],
+        *,
+        usage_aware: bool = False,
+    ) -> int:
+        return count_messages_tokens(
+            messages,
+            context.token_counter(),
+            self.processor_type(),
+            usage_aware=usage_aware,
+        )
 
     def _head_tail_preview(self, content: str, *, description: str) -> str:
         keep_chars = self._offload_preview_head_tail_chars()

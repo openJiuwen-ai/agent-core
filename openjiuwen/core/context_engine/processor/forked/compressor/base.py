@@ -613,11 +613,14 @@ class PrefixCompactProcessor(ContextProcessor):
         return original_tokens <= 0 or new_tokens < original_tokens
 
     def _count_context_window_tokens(self, context_window: ContextWindow, context: ModelContext) -> int:
-        total = self._count_messages_tokens(
+        # usage_aware: 末尾 AssistantMessage.usage_metadata.total_tokens 已含
+        # 当时 system+tools，故不再单独加 count_tools(tools)；尾部新增消息
+        # 由 len//4 补算。无 usage 时 fallback 到原 tiktoken 路径（含 tools）。
+        return self._count_messages_tokens(
             list(context_window.system_messages or []) + list(context_window.context_messages or []),
             context,
+            usage_aware=True,
         )
-        return total + self._count_tools_tokens(list(context_window.tools or []), context)
 
     def _count_tools_tokens(self, tools: list[ToolInfo], context: ModelContext) -> int:
         token_counter = context.token_counter()
@@ -628,8 +631,19 @@ class PrefixCompactProcessor(ContextProcessor):
                 logger.warning("[%s] tool token counter failed: %s", self.processor_type(), exc)
         return sum(self._estimate_text_tokens(_serialize_tool(tool)) for tool in tools)
 
-    def _count_messages_tokens(self, messages: list[BaseMessage], context: ModelContext) -> int:
-        return count_messages_tokens(messages, context.token_counter(), self.processor_type())
+    def _count_messages_tokens(
+        self,
+        messages: list[BaseMessage],
+        context: ModelContext,
+        *,
+        usage_aware: bool = False,
+    ) -> int:
+        return count_messages_tokens(
+            messages,
+            context.token_counter(),
+            self.processor_type(),
+            usage_aware=usage_aware,
+        )
 
     def count_messages_tokens(self, messages: list[BaseMessage], context: ModelContext) -> int:
         """Count message tokens for diagnostics and extension points."""

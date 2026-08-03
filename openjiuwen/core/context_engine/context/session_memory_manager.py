@@ -907,8 +907,22 @@ class SessionMemoryManager:
         context: ModelContext,
         context_window: ContextWindow,
     ) -> int:
-        token_counter = context.token_counter()
         all_messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])
+        # 优先用末尾 AssistantMessage.usage_metadata.total_tokens 作为整窗口
+        # 基准（已含当时 system+tools），尾部新增消息用 len//4 补算；无
+        # usage 时 fallback 到 token_counter / char 估算。
+        for idx in range(len(all_messages) - 1, -1, -1):
+            message = all_messages[idx]
+            if (
+                isinstance(message, AssistantMessage)
+                and message.usage_metadata is not None
+                and message.usage_metadata.total_tokens > 0
+            ):
+                tail = all_messages[idx + 1 :]
+                return message.usage_metadata.total_tokens + sum(
+                    SessionMemoryManager._estimate_message_tokens(msg) for msg in tail
+                )
+        token_counter = context.token_counter()
         if token_counter is not None:
             try:
                 return token_counter.count_messages(all_messages)
