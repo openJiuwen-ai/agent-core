@@ -27,15 +27,18 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
 )
 
-from ..controllers import ActionController, BaseController
+from ..controllers import ActionController, BaseController, validate_batch_steps
 from ..utils.parsing import extract_json_object
-from .browser_capabilities import DEFAULT_BROWSER_CAPABILITIES
+from .browser_capabilities import (
+    CORE_BROWSER_TOOL_NAMES,
+)
 from .browser_logging import (
     browser_agent_log_info,
     browser_agent_log_warning,
 )
 from .browser_tools import ensure_browser_runtime_client_patch
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
+from .page_state import BrowserPageState, BrowserTarget
 from .probes import build_card_probe_js, build_interactive_probe_js
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import builtin_site_profiles, get_selector_cache
@@ -60,6 +63,7 @@ _BROWSER_EXPLICIT_REF_RE = re.compile(
     r"""^\s*\[?\s*ref\s*=\s*["']?([^"'\]\s]+)["']?\s*\]?\s*$""",
     re.IGNORECASE,
 )
+_BROWSER_PAGE_STATE_TAG = "browser_page_state"
 _BROWSER_SNAPSHOT_REF_RE = re.compile(
     r"""\bref\s*=\s*["']?([A-Za-z0-9_.:-]+)""",
     re.IGNORECASE,
@@ -74,6 +78,36 @@ _BROWSER_REF_TARGET_KEYS = frozenset(
         "endRef",
     }
 )
+_BATCH_MODEL_LOCATOR_KEYS = frozenset(
+    {"target_id", "ref", "selector", "role", "name", "label", "placeholder", "text", "testid"}
+)
+_BATCH_REGISTERED_TARGET_OPS = frozenset(
+    {
+        "click",
+        "fill",
+        "type",
+        "autocomplete",
+        "select_option",
+        "set_checked",
+        "select_visible_text",
+        "extract_text",
+        "extract_value",
+    }
+)
+_BATCH_MUTATING_TARGET_OPS = frozenset(
+    {"click", "fill", "type", "autocomplete", "select_option", "set_checked", "select_visible_text"}
+)
+_BATCH_EXPLICIT_SELECTOR_OPS = frozenset(
+    {
+        "wait_for_selector",
+        "wait_for_first_card_title",
+        "wait_for_sort_state",
+        "wait_for_result_count",
+        "wait_for_dom_text_change",
+        "wait_for_stable",
+    }
+)
+_SINGLE_BATCH_CONDITION_OPS = frozenset({"wait_for_text"})
 _BROWSER_PROGRESS_FORMAT_GUIDANCE = {
     "en": (
         "When you stop and answer without another browser tool call, append exactly one "
@@ -151,6 +185,11 @@ class BrowserAgentRuntime:
     ) -> None:
         ensure_browser_runtime_client_patch()
         self._instance = instance
+        resolved_allowed_tool_names = (
+            CORE_BROWSER_TOOL_NAMES
+            if allowed_tool_names is None
+            else tuple(dict.fromkeys(allowed_tool_names))
+        )
         self._service = BrowserService(
             provider=provider,
             api_key=api_key,
@@ -159,7 +198,7 @@ class BrowserAgentRuntime:
             mcp_cfg=mcp_cfg,
             guardrails=guardrails,
             instance=instance,
-            allowed_tool_names=allowed_tool_names,
+            allowed_tool_names=resolved_allowed_tool_names,
         )
         self._browser_custom_action_tool = None
         self._browser_list_actions_tool = None
@@ -168,9 +207,10 @@ class BrowserAgentRuntime:
         self._browser_probe_interactives_tool = None
         self._browser_probe_cards_tool = None
         self._browser_batch_interact_tool = None
-        self._page_generation = 0
-        self._reference_generations: Dict[str, int] = {}
-        self._selector_primary_links: Dict[str, tuple[int, str]] = {}
+        self._page_state = BrowserPageState()
+        self._page_generation = self._page_state.generation
+        self._reference_generations = self._page_state.reference_generations
+        self._selector_primary_links = self._page_state.selector_primary_links
         self._last_observed_url = ""
         _ACTIVE_BROWSER_RUNTIMES.add(self)
 
@@ -206,12 +246,36 @@ class BrowserAgentRuntime:
     def code_executor(self) -> Any:
         return self._code_executor
 
+    def _ensure_page_state(self) -> BrowserPageState:
+        """Create PageState lazily for compatibility with lightweight test runtimes."""
+        page_state = getattr(self, "_page_state", None)
+        if isinstance(page_state, BrowserPageState):
+            return page_state
+        page_state = BrowserPageState(
+            generation=int(getattr(self, "_page_generation", 0) or 0),
+        )
+        page_state.reference_generations.update(getattr(self, "_reference_generations", {}) or {})
+        page_state.selector_primary_links.update(getattr(self, "_selector_primary_links", {}) or {})
+        self._page_state = page_state
+        self._reference_generations = page_state.reference_generations
+        self._selector_primary_links = page_state.selector_primary_links
+        return page_state
+
+    @property
+    def page_id(self) -> str:
+        return self._ensure_page_state().page_id
+
     @property
     def generation_id(self) -> str:
-        return f"g{self._page_generation}"
+        return self._ensure_page_state().generation_id
+
+    def export_page_state(self) -> Dict[str, Any]:
+        return self._ensure_page_state().export()
 
     def _advance_page_generation(self) -> None:
-        self._page_generation += 1
+        page_state = self._ensure_page_state()
+        page_state.advance()
+        self._page_generation = page_state.generation
 
     def _observe_page_url(self, url: Any, *, force_navigation: bool = False) -> None:
         normalized = str(url or "").strip()
@@ -230,6 +294,7 @@ class BrowserAgentRuntime:
         )
         if force_navigation or changed:
             self._advance_page_generation()
+        self._ensure_page_state().observe(url=normalized)
         if normalized:
             self._last_observed_url = normalized
 
@@ -261,6 +326,34 @@ class BrowserAgentRuntime:
                 return match.group(1).rstrip(".,;)")
         return ""
 
+    @classmethod
+    def _extract_result_title(cls, value: Any) -> str:
+        if isinstance(value, dict):
+            direct = value.get("title")
+            if direct:
+                return str(direct)
+            page = value.get("page")
+            if isinstance(page, dict) and page.get("title"):
+                return str(page["title"])
+            for nested in value.values():
+                resolved = cls._extract_result_title(nested)
+                if resolved:
+                    return resolved
+        elif isinstance(value, (list, tuple)):
+            for nested in value:
+                resolved = cls._extract_result_title(nested)
+                if resolved:
+                    return resolved
+        elif isinstance(value, str):
+            match = re.search(
+                r"(?:Page\s+Title|title)\s*[:=]\s*([^\r\n]+)",
+                value,
+                re.IGNORECASE,
+            )
+            if match is not None:
+                return match.group(1).strip()
+        return ""
+
     @staticmethod
     def _tool_result_succeeded(value: Any) -> bool:
         if hasattr(value, "success") and getattr(value, "success", None) is False:
@@ -273,17 +366,23 @@ class BrowserAgentRuntime:
         return True
 
     def _register_snapshot_refs(self, value: Any) -> None:
+        page_state = self._ensure_page_state()
+        registered = page_state.register_ax_snapshot(value)
+        if registered:
+            return
+        # Preserve ref-only snapshots that do not follow the normal AX line shape.
         text = value if isinstance(value, str) else str(value)
         for ref_value in _BROWSER_SNAPSHOT_REF_RE.findall(text):
-            self._reference_generations[str(ref_value)] = self._page_generation
+            page_state.reference_generations[str(ref_value)] = page_state.generation
 
     def validate_reference_values(self, values: Iterable[str]) -> None:
+        page_state = self._ensure_page_state()
         stale = sorted(
             {
                 ref_value
                 for ref_value in values
-                if ref_value in self._reference_generations
-                and self._reference_generations[ref_value] != self._page_generation
+                if ref_value in page_state.reference_generations
+                and page_state.reference_generations[ref_value] != page_state.generation
             }
         )
         if stale:
@@ -305,6 +404,7 @@ class BrowserAgentRuntime:
         if not self._tool_result_succeeded(tool_result):
             return
         result_url = self._extract_result_url(tool_result)
+        result_title = self._extract_result_title(tool_result)
         navigation_like = any(
             token in normalized_name
             for token in (
@@ -320,7 +420,8 @@ class BrowserAgentRuntime:
                 "close",
             }
         self._observe_page_url(result_url, force_navigation=navigation_like)
-        if "browser_snapshot" in normalized_name:
+        self._ensure_page_state().observe(url=result_url, title=result_title)
+        if "browser_snapshot" in normalized_name or "browser_find" in normalized_name:
             self._register_snapshot_refs(tool_result)
 
     def _annotate_probe_generation(self, value: Any) -> None:
@@ -334,6 +435,7 @@ class BrowserAgentRuntime:
                 self._annotate_probe_generation(nested)
 
     def register_card_primary_links(self, result: Dict[str, Any]) -> None:
+        page_state = self._ensure_page_state()
         cards = result.get("cards")
         if not isinstance(cards, list):
             return
@@ -346,8 +448,8 @@ class BrowserAgentRuntime:
             for key in ("selector_hint", "primary_link_selector_hint"):
                 selector = str(card.get(key) or "").strip()
                 if selector:
-                    self._selector_primary_links[selector] = (
-                        self._page_generation,
+                    page_state.selector_primary_links[selector] = (
+                        page_state.generation,
                         href,
                     )
 
@@ -372,10 +474,7 @@ class BrowserAgentRuntime:
         for key in ("selector", "target"):
             selector = str(parsed.get(key) or "").strip()
             generation_and_href = self._selector_primary_links.get(selector)
-            if (
-                generation_and_href
-                and generation_and_href[0] == self._page_generation
-            ):
+            if generation_and_href and generation_and_href[0] == self._ensure_page_state().generation:
                 return generation_and_href[1]
         return ""
 
@@ -637,6 +736,7 @@ class BrowserAgentRuntime:
         }
 
     async def ensure_runtime_ready(self) -> None:
+        _ACTIVE_BROWSER_RUNTIMES.add(self)
         await self._service.ensure_runtime_ready()
         if self._code_executor is not None:
             return
@@ -647,6 +747,11 @@ class BrowserAgentRuntime:
         self._code_executor = _direct_code_executor
         self._controller.bind_code_executor(_direct_code_executor)
         self._controller.register_builtin_actions()
+
+    async def acquire_task_resources(self) -> None:
+        """Acquire one task reference before invoking a reusable subagent."""
+        _ACTIVE_BROWSER_RUNTIMES.add(self)
+        self._service.acquire_task_binding()
 
     async def ensure_started(self) -> None:
         await self.ensure_runtime_ready()
@@ -713,10 +818,302 @@ class BrowserAgentRuntime:
             timeout_s=timeout_s,
         )
 
+    async def _materialize_ax_target(self, target: BrowserTarget) -> BrowserTarget:
+        """Convert an MCP AX ref into a temporary DOM marker without model translation."""
+        if target.locator.get("selector"):
+            return target
+        ref_value = str(target.ref or target.locator.get("ref") or "").strip()
+        if not ref_value:
+            raise ValueError(f"PageState target has no executable locator: {target.target_id}")
+
+        attribute = "data-openjiuwen-target-id"
+        marker_value = target.target_id
+        function = (
+            f"(element) => {{element.setAttribute({json.dumps(attribute)}, {json.dumps(marker_value)});return true;}}"
+        )
+        tool = await self._get_playwright_mcp_tool("browser_evaluate")
+        result = await tool.invoke(
+            {
+                "target": ref_value,
+                "element": f"PageState target {target.target_id}",
+                "function": function,
+            }
+        )
+        if getattr(result, "success", None) is False:
+            error = str(getattr(result, "error", "") or "").strip()
+            raise ValueError(error or f"Failed to resolve AX ref {ref_value} for batch execution")
+        selector = f'[{attribute}="{marker_value}"]'
+        self._ensure_page_state().update_target_locator(
+            target.target_id,
+            {"selector": selector},
+        )
+        return target
+
+    async def _resolve_batch_target(
+        self,
+        step: Dict[str, Any],
+        *,
+        generation_id: str,
+        option: bool = False,
+        allow_navigation_rewrite: bool = False,
+    ) -> None:
+        page_state = self._ensure_page_state()
+        prefix = "option_" if option else ""
+        target_id = str(
+            step.get(f"{prefix}target_id") or (step.get("choose_target_id") if option else "") or ""
+        ).strip()
+        ref_value = str(step.get(f"{prefix}ref") or (step.get("choose_ref") if option else "") or "").strip()
+        selector = str(step.get(f"{prefix}selector") or (step.get("choose_selector") if option else "") or "").strip()
+        op = str(step.get("op") or "").strip().lower()
+
+        if not target_id and not ref_value and not selector:
+            return
+        require_registered_selector = op in _BATCH_REGISTERED_TARGET_OPS
+        if op in _BATCH_EXPLICIT_SELECTOR_OPS:
+            require_registered_selector = False
+        target = page_state.resolve_target(
+            generation_id=generation_id,
+            target_id=target_id,
+            ref=ref_value,
+            selector=selector,
+            require_registered_selector=require_registered_selector,
+        )
+        if target is None:
+            return
+        if target.href and target.source in {"card", "card_primary_link"} and op == "click":
+            if allow_navigation_rewrite:
+                for key in _BATCH_MODEL_LOCATOR_KEYS:
+                    step.pop(key, None)
+                step["resolved_target_id"] = target.target_id
+                step["_navigate_url"] = target.href
+                return
+            raise ValueError(
+                f"Target {target.target_id} has primary_link={target.href}; "
+                "call browser_navigate directly instead of clicking it in a batch"
+            )
+        if (
+            op in _BATCH_MUTATING_TARGET_OPS
+            and target.source != "ax"
+            and (not target.visible or not target.enabled or not target.actionable)
+        ):
+            raise ValueError(f"PageState target {target.target_id} is not actionable in {target.generation_id}")
+        if target.locator.get("ref"):
+            target = await self._materialize_ax_target(target)
+
+        locator = dict(target.locator)
+        if option:
+            for key in (
+                "option_target_id",
+                "choose_target_id",
+                "option_ref",
+                "choose_ref",
+                "option_selector",
+                "choose_selector",
+                "option_role",
+                "choose_role",
+                "option_name",
+                "choose_name",
+                "option_text",
+                "choose_text",
+                "text_to_choose",
+            ):
+                step.pop(key, None)
+            if locator.get("selector"):
+                step["option_selector"] = locator["selector"]
+            elif locator.get("role"):
+                step["option_role"] = locator["role"]
+                if locator.get("name"):
+                    step["option_name"] = locator["name"]
+            elif locator.get("text"):
+                step["option_text"] = locator["text"]
+            else:
+                raise ValueError(f"PageState option target is not executable: {target.target_id}")
+            step["resolved_option_target_id"] = target.target_id
+            return
+
+        for key in _BATCH_MODEL_LOCATOR_KEYS:
+            step.pop(key, None)
+        step.update(locator)
+        step["resolved_target_id"] = target.target_id
+
+    async def _resolve_batch_steps(
+        self,
+        steps: Any,
+        *,
+        generation_id: str,
+        allow_navigation_rewrite: bool = False,
+    ) -> list[Dict[str, Any]]:
+        resolved_steps = [dict(step) for step in steps]
+        for step in resolved_steps:
+            await self._resolve_batch_target(
+                step,
+                generation_id=generation_id,
+                allow_navigation_rewrite=allow_navigation_rewrite,
+            )
+            if any(
+                step.get(key) not in (None, "")
+                for key in (
+                    "option_target_id",
+                    "choose_target_id",
+                    "option_ref",
+                    "choose_ref",
+                    "option_selector",
+                    "choose_selector",
+                )
+            ):
+                await self._resolve_batch_target(
+                    step,
+                    generation_id=generation_id,
+                    option=True,
+                )
+        return resolved_steps
+
+    @staticmethod
+    def _single_batch_primitive_spec(
+        step: Dict[str, Any],
+    ) -> Optional[tuple[str, Dict[str, Any]]]:
+        """Map a semantically equivalent one-step batch to an MCP primitive."""
+        op = str(step.get("op") or "").strip().lower()
+        selector = str(step.get("selector") or "").strip()
+        element = str(
+            step.get("description")
+            or step.get("resolved_target_id")
+            or selector
+            or op
+        )
+        target_args = {"target": selector, "element": element} if selector else {}
+
+        navigation_url = str(step.get("_navigate_url") or "").strip()
+        if op == "click" and navigation_url:
+            return "browser_navigate", {"url": navigation_url}
+        if op == "click" and target_args:
+            return "browser_click", target_args
+        if op in {"fill", "type"} and target_args:
+            try:
+                typing_delay_ms = int(step.get("delay_ms") or 0)
+            except (TypeError, ValueError):
+                typing_delay_ms = 0
+            return "browser_type", {
+                **target_args,
+                "text": str(step.get("value") or ""),
+                "slowly": op == "type" or typing_delay_ms > 0,
+            }
+        if op == "select_option" and target_args:
+            values = step.get("values")
+            if values is None:
+                values = step.get("option_value", step.get("value"))
+            if values is not None:
+                normalized_values = values if isinstance(values, list) else [values]
+                return "browser_select_option", {
+                    **target_args,
+                    "values": [str(value) for value in normalized_values],
+                }
+        if op == "press" and not any(step.get(key) for key in _BATCH_MODEL_LOCATOR_KEYS):
+            return "browser_press_key", {"key": str(step.get("key") or "Enter")}
+        if op == "wait_for_text":
+            return "browser_wait_for", {"text": str(step.get("text") or "")}
+        if op == "sleep":
+            wait_ms = max(0, int(step.get("ms", step.get("time_ms", 0)) or 0))
+            return "browser_wait_for", {"time": wait_ms / 1000}
+        if op == "screenshot":
+            args: Dict[str, Any] = {
+                "type": "png",
+                "fullPage": bool(step.get("full_page", False)),
+            }
+            if step.get("path"):
+                args["filename"] = str(step["path"])
+            return "browser_take_screenshot", args
+        return None
+
+    async def _run_single_batch_primitive(
+        self,
+        step: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        spec = self._single_batch_primitive_spec(step)
+        if spec is None:
+            return None
+
+        tool_name, tool_args = spec
+        op = str(step.get("op") or "").strip().lower()
+        started_at = time.perf_counter()
+        try:
+            tool = await self._get_playwright_mcp_tool(tool_name)
+        except RuntimeError:
+            logger.debug(
+                "Single-step primitive %s is unavailable; using compact runtime RPC",
+                tool_name,
+                exc_info=True,
+            )
+            return None
+        try:
+            tool_result = await tool.invoke(tool_args)
+            success = self._tool_result_succeeded(tool_result)
+            error = str(getattr(tool_result, "error", "") or "").strip()
+            payload = getattr(tool_result, "data", None)
+            if payload is None:
+                payload = tool_result
+        except Exception as exc:
+            success = False
+            error = str(exc)
+            payload = None
+
+        elapsed_ms = int(max(0.0, (time.perf_counter() - started_at) * 1000))
+        if success:
+            recorded_payload = payload
+            if tool_name == "browser_navigate":
+                target_url = str(tool_args.get("url") or "")
+                if isinstance(payload, dict):
+                    recorded_payload = dict(payload)
+                    recorded_payload.setdefault("url", target_url)
+                else:
+                    recorded_payload = {"url": target_url, "result": payload}
+            self.record_tool_reference_state(
+                tool_name=tool_name,
+                tool_args=tool_args,
+                tool_result=recorded_payload,
+            )
+
+        runtime_url = self._extract_result_url(payload)
+        if tool_name == "browser_navigate" and success:
+            runtime_url = runtime_url or str(tool_args.get("url") or "")
+        runtime_title = self._extract_result_title(payload)
+        step_result = {
+            "index": 0,
+            "op": op,
+            "ok": success,
+            "status": "completed" if success else "failed",
+            "elapsed_ms": elapsed_ms,
+        }
+        if error:
+            step_result["error"] = error
+        conditions = []
+        if op in _SINGLE_BATCH_CONDITION_OPS:
+            condition = dict(step_result)
+            condition["observed"] = {"text": str(step.get("text") or "")}
+            conditions.append(condition)
+        return {
+            "ok": success,
+            "status": "completed" if success else "failed",
+            "error": error or None,
+            "action": "browser_batch_interact",
+            "execution_mode": "primitive",
+            "generation_id": self.generation_id,
+            "steps": [step_result],
+            "extracted": {},
+            "conditions": conditions,
+            "metrics": {
+                "tool_name": tool_name,
+                "executor_elapsed_ms": elapsed_ms,
+                "response_size_bytes": len(str(payload).encode("utf-8", "ignore")),
+            },
+            "_runtime_page": {"url": runtime_url, "title": runtime_title},
+        }
+
     async def batch_interact(
         self,
         *,
         steps: Any,
+        generation_id: str,
         timeout_ms: Any = None,
         condition_timeout_ms: Any = None,
         wait_after_each_ms: Any = None,
@@ -725,22 +1122,66 @@ class BrowserAgentRuntime:
         session_id: str = "",
         request_id: str = "",
     ) -> Dict[str, Any]:
-        await self.ensure_runtime_ready()
-        self._controller.bind_runtime(self)
-        if self._code_executor is not None:
-            self._controller.bind_code_executor(self._code_executor)
-        return await self._controller.run_action(
-            action="browser_batch_interact",
-            session_id=session_id,
-            request_id=request_id,
-            steps=steps,
-            timeout_ms=timeout_ms,
-            condition_timeout_ms=condition_timeout_ms,
-            wait_after_each_ms=wait_after_each_ms,
-            continue_on_error=continue_on_error,
-            global_timeout_ms=global_timeout_ms,
-            generation_id=self.generation_id,
-        )
+        page_state = self._ensure_page_state()
+        validation_errors = validate_batch_steps(steps)
+        if validation_errors:
+            return {
+                "ok": False,
+                "status": "failed",
+                "error": f"batch_validation_failed: {validation_errors[0]}",
+                "validation_errors": validation_errors,
+                "page_state": page_state.export(),
+            }
+        try:
+            page_state.validate_generation(generation_id)
+            await self.ensure_runtime_ready()
+            resolved_steps = await self._resolve_batch_steps(
+                steps,
+                generation_id=generation_id,
+                allow_navigation_rewrite=len(steps) == 1,
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "status": "failed",
+                "error": f"batch_target_validation_failed: {exc}",
+                "page_state": page_state.export(),
+            }
+        result = None
+        if len(resolved_steps) == 1:
+            result = await self._run_single_batch_primitive(resolved_steps[0])
+        if result is None:
+            self._controller.bind_runtime(self)
+            if self._code_executor is not None:
+                self._controller.bind_code_executor(self._code_executor)
+            result = await self._controller.run_action(
+                action="browser_batch_interact",
+                session_id=session_id,
+                request_id=request_id,
+                steps=resolved_steps,
+                timeout_ms=timeout_ms,
+                condition_timeout_ms=condition_timeout_ms,
+                wait_after_each_ms=wait_after_each_ms,
+                continue_on_error=continue_on_error,
+                global_timeout_ms=global_timeout_ms,
+                generation_id=generation_id,
+            )
+        if isinstance(result, dict):
+            runtime_page = result.pop("_runtime_page", {})
+            runtime_url = runtime_page.get("url") if isinstance(runtime_page, dict) else ""
+            runtime_title = runtime_page.get("title") if isinstance(runtime_page, dict) else ""
+            if result.get("execution_mode") != "primitive":
+                self._observe_page_url(runtime_url)
+            self._ensure_page_state().observe(
+                url=runtime_url,
+                title=runtime_title,
+            )
+            extracted = result.get("extracted")
+            if isinstance(extracted, dict):
+                self._ensure_page_state().add_field_coverage(extracted.keys())
+            result["generation_id"] = self.generation_id
+            result["page_state"] = self.export_page_state()
+        return result
 
     async def run_custom_action(
         self,
@@ -776,6 +1217,7 @@ class BrowserAgentRuntime:
                 "ok": False,
                 "error": "browser_code_executor_not_ready",
                 "elements": [],
+                "page_state": self.export_page_state(),
             }
 
         js_code = build_interactive_probe_js(
@@ -793,6 +1235,7 @@ class BrowserAgentRuntime:
                 "ok": False,
                 "error": f"browser_probe_interactives failed: {exc}",
                 "elements": [],
+                "page_state": self.export_page_state(),
             }
 
         parsed = extract_json_object(raw)
@@ -802,6 +1245,7 @@ class BrowserAgentRuntime:
                 "error": "Could not parse browser_probe_interactives result JSON",
                 "raw_preview": str(raw)[:400],
                 "elements": [],
+                "page_state": self.export_page_state(),
             }
 
         parsed.setdefault("ok", True)
@@ -809,6 +1253,9 @@ class BrowserAgentRuntime:
         parsed.setdefault("elements", [])
         self._observe_page_url(parsed.get("url"))
         self._annotate_probe_generation(parsed)
+        page_state = self._ensure_page_state()
+        page_state.register_interactives(parsed)
+        parsed["page_state"] = page_state.export()
         return parsed
 
     async def probe_cards(
@@ -827,6 +1274,7 @@ class BrowserAgentRuntime:
                 "ok": False,
                 "error": "browser_code_executor_not_ready",
                 "cards": [],
+                "page_state": self.export_page_state(),
             }
 
         site_profiles = builtin_site_profiles()
@@ -851,6 +1299,7 @@ class BrowserAgentRuntime:
                 "ok": False,
                 "error": f"browser_probe_cards failed: {exc}",
                 "cards": [],
+                "page_state": self.export_page_state(),
             }
 
         parsed = extract_json_object(raw)
@@ -860,6 +1309,7 @@ class BrowserAgentRuntime:
                 "error": "Could not parse browser_probe_cards result JSON",
                 "raw_preview": str(raw)[:400],
                 "cards": [],
+                "page_state": self.export_page_state(),
             }
 
         parsed.setdefault("ok", True)
@@ -867,7 +1317,10 @@ class BrowserAgentRuntime:
         parsed.setdefault("cards", [])
         self._observe_page_url(parsed.get("url"))
         self._annotate_probe_generation(parsed)
+        page_state = self._ensure_page_state()
+        page_state.register_cards(parsed)
         self.register_card_primary_links(parsed)
+        parsed["page_state"] = page_state.export()
 
         if parsed.get("ok"):
             try:
@@ -907,11 +1360,25 @@ class BrowserAgentRuntime:
         }
 
     async def shutdown(self) -> None:
-        await self._service.shutdown()
+        try:
+            await self._service.shutdown()
+        finally:
+            _ACTIVE_BROWSER_RUNTIMES.discard(self)
+
+    async def release_task_resources(self) -> None:
+        """Release task bindings while preserving Chrome and its profile."""
+        fully_released = await self._service.release_task_binding()
+        if fully_released:
+            self._advance_page_generation()
+            self._last_observed_url = ""
 
     async def reset(self) -> None:
         """Release the current browser and restart lazily on the next task."""
-        await self._service.reset()
+        try:
+            await self._service.reset()
+        finally:
+            self._advance_page_generation()
+            self._last_observed_url = ""
 
 
 async def reset_active_browser_runtimes() -> int:
@@ -934,6 +1401,51 @@ async def reset_active_browser_runtimes() -> int:
             )
             continue
         reset_count += 1
+    return reset_count
+
+
+async def reset_managed_browser_runtime(
+    *,
+    browser_key: str = "",
+    profile_name: str = "jiuwenclaw",
+    display_mode: str,
+    browser_binary: str = "",
+) -> int:
+    """Reset only the configured managed browser, including its idle handle."""
+    normalized_binary = BrowserService._normalize_browser_binary(browser_binary)
+    normalized_key = str(browser_key or "").strip()
+    normalized_profile = str(profile_name or "").strip()
+    normalized_mode = str(display_mode or "").strip().lower()
+
+    reset_count = 0
+    for runtime in list(_ACTIVE_BROWSER_RUNTIMES):
+        identity = runtime.service.lifecycle_identity
+        if not (
+            len(identity) >= 6
+            and identity[0] == normalized_key
+            and identity[1] == normalized_profile
+            and identity[2] == "managed"
+            and identity[3] == normalized_mode
+            and identity[5] == normalized_binary
+        ):
+            continue
+        try:
+            await runtime.reset()
+        except Exception as exc:
+            logger.warning(
+                "Failed to reset managed browser runtime %s: %s",
+                id(runtime),
+                exc,
+            )
+        else:
+            reset_count += 1
+
+    reset_count += await BrowserService.reset_registered_managed_browser(
+        browser_key=normalized_key,
+        profile_name=normalized_profile,
+        display_mode=normalized_mode,
+        browser_binary=normalized_binary,
+    )
     return reset_count
 
 
@@ -1164,6 +1676,7 @@ class BrowserRuntimeRail(AgentRail):
             tool_args=getattr(inputs, "tool_args", None),
             tool_result=tool_result,
         )
+        self._attach_page_state(inputs, tool_name, tool_result)
         session = getattr(ctx, "session", None)
         if session is None:
             return
@@ -1183,6 +1696,48 @@ class BrowserRuntimeRail(AgentRail):
             tool_result=tool_result,
         )
         self._persist_service_progress_to_session(session)
+
+    def _attach_page_state(
+        self,
+        inputs: Any,
+        tool_name: str,
+        tool_result: Any,
+    ) -> None:
+        normalized_name = str(tool_name or "").strip().lower()
+        if not any(
+            token in normalized_name
+            for token in (
+                "browser_navigate",
+                "browser_tabs",
+                "browser_snapshot",
+                "browser_find",
+                "browser_probe_",
+                "browser_batch_interact",
+            )
+        ):
+            return
+
+        page_state = self._runtime.export_page_state()
+        already_embedded = isinstance(tool_result, dict) and isinstance(
+            tool_result.get("page_state"),
+            dict,
+        )
+        if isinstance(tool_result, dict) and not already_embedded:
+            tool_result["page_state"] = page_state
+
+        if already_embedded:
+            return
+        tool_msg = getattr(inputs, "tool_msg", None)
+        content = getattr(tool_msg, "content", None)
+        if tool_msg is None or not isinstance(content, str):
+            return
+        marker = (
+            f"\n<{_BROWSER_PAGE_STATE_TAG}>"
+            f"{json.dumps(page_state, ensure_ascii=False, separators=(',', ':'))}"
+            f"</{_BROWSER_PAGE_STATE_TAG}>"
+        )
+        if f"<{_BROWSER_PAGE_STATE_TAG}>" not in content:
+            tool_msg.content = content.rstrip() + marker
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         try:
@@ -1788,47 +2343,15 @@ class BrowserRuntimeRail(AgentRail):
         )
         return getattr(deep_config, "enable_read_image_multimodal", None) is True
 
-    @staticmethod
-    def _known_browser_tool_names() -> tuple[str, ...]:
-        return tuple(
-            dict.fromkeys(
-                tool_name
-                for capability in DEFAULT_BROWSER_CAPABILITIES
-                for tool_name in capability.tool_names
-            )
-        )
-
     async def _effective_browser_tool_allowlist(
         self,
         agent: Any,
         mcp_cfg: McpServerConfig,
-    ) -> Optional[tuple[str, ...]]:
-        configured = self._runtime.service.allowed_tool_names
+    ) -> tuple[str, ...]:
+        del mcp_cfg
+        configured = self._runtime.service.allowed_tool_names or CORE_BROWSER_TOOL_NAMES
         if self._image_input_supported(agent):
-            return configured
-
-        if configured is None:
-            try:
-                tool_infos = (
-                    await Runner.resource_mgr.get_mcp_tool_infos(
-                        server_id=mcp_cfg.server_id,
-                    )
-                    or []
-                )
-                configured = tuple(
-                    tool_info.name
-                    for tool_info in tool_infos
-                    if tool_info is not None
-                )
-                if not configured:
-                    configured = self._known_browser_tool_names()
-            except Exception as exc:
-                browser_agent_log_warning(
-                    "[BROWSER_SUBAGENT] failed to enumerate MCP tools while "
-                    "disabling screenshot input: %s",
-                    exc,
-                )
-                configured = self._known_browser_tool_names()
+            return tuple(configured)
 
         return tuple(
             tool_name

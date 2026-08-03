@@ -18,6 +18,10 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.kv_cache import kv_cache_hooks
+from openjiuwen.harness.subagent_lifecycle import (
+    cleanup_subagent_task_resources,
+    prepare_subagent_task_resources,
+)
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 try:
@@ -167,7 +171,9 @@ class TaskTool(Tool):
             logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
         succeeded = False
+        affinity_enabled = False
         try:
+            await prepare_subagent_task_resources(subagent)
             affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
             if affinity_enabled:
                 kv_cache_hooks.prefetch_sticky_subagent(
@@ -194,6 +200,7 @@ class TaskTool(Tool):
                 reason=f"Subagent {subagent_type} execution failed: {e}",
             ) from e
         finally:
+            await cleanup_subagent_task_resources(subagent)
             if affinity_enabled:
                 await kv_cache_hooks.finish_subagent(
                     self.parent_agent,

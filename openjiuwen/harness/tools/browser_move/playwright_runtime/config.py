@@ -16,6 +16,7 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from .browser_capabilities import (
     CORE_BROWSER_CAPABILITY_NAME,
     DEFAULT_BROWSER_CAPABILITIES,
+    POLICY_ONLY_BROWSER_CAPABILITY_NAMES,
 )
 from ..utils.env import (
     DEFAULT_BROWSER_TIMEOUT_S,
@@ -42,6 +43,7 @@ PLAYWRIGHT_MCP_CAPABILITY_NAMES: tuple[str, ...] = tuple(
     capability.name
     for capability in DEFAULT_BROWSER_CAPABILITIES
     if capability.name != CORE_BROWSER_CAPABILITY_NAME
+    and capability.name not in POLICY_ONLY_BROWSER_CAPABILITY_NAMES
 )
 
 

@@ -116,6 +116,15 @@ def test_build_playwright_mcp_config_enables_all_optional_capabilities_by_defaul
     assert cfg.params["args"][-1] == "--caps=pdf,vision,devtools,config,network,storage,testing"
 
 
+def test_model_policy_capabilities_are_not_forwarded_as_playwright_caps() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        cfg = build_playwright_mcp_config()
+
+    caps_arg = cfg.params["args"][-1]
+    assert "advanced_code" not in caps_arg
+    assert "unsafe_dev" not in caps_arg
+
+
 def test_build_playwright_mcp_config_preserves_other_capabilities() -> None:
     with patch.dict(
         os.environ,

@@ -30,6 +30,7 @@ from ..utils.parsing import extract_json_object
 from .agents import build_browser_worker_agent
 from .config import BrowserInstanceConfig, BrowserRunGuardrails, parse_command_args, resolve_playwright_mcp_cwd
 from .profiles import BrowserProfile, BrowserProfileStore
+from .service_registry import BROWSER_SERVICE_REGISTRY, BrowserServiceIdentity
 
 MAX_ITERATION_MESSAGE = "Max iterations reached without completion"
 _ctx_observer_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -166,6 +167,9 @@ class BrowserService:
         self._heartbeat_interval: float = 30.0
         self._connection_healthy: bool = False
         self._last_heartbeat_ok: Optional[float] = None
+        self._lifecycle_identity = self._build_lifecycle_identity()
+        self._registry_acquired = False
+        self._task_binding_ref_count = 0
 
     @property
     def browser_agent(self) -> Optional[ReActAgent]:
@@ -235,6 +239,60 @@ class BrowserService:
                 raise ValueError("BROWSER_DRIVER must be one of: remote, managed, extension")
             return explicit
         return "remote"
+
+    def _build_lifecycle_identity(self) -> BrowserServiceIdentity:
+        """Build the process resource identity for this browser instance."""
+        instance = self._instance
+        browser_key = instance.sanitized_key() if instance else ""
+        managed_args = tuple(parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or ""))
+        headless = any(
+            arg == "--headless" or arg.startswith("--headless=")
+            for arg in managed_args
+        )
+        if self._driver_mode == "managed":
+            display_mode = "headless" if headless else "headed"
+        else:
+            display_mode = self._driver_mode
+
+        explicit_user_data_dir = str(
+            (instance.user_data_dir if instance else "")
+            or os.getenv("BROWSER_MANAGED_USER_DATA_DIR")
+            or ""
+        ).strip()
+        normalized_user_data_dir = (
+            os.path.normcase(
+                os.path.normpath(str(Path(explicit_user_data_dir).expanduser()))
+            )
+            if explicit_user_data_dir
+            else f"profile:{self._profile_name}"
+        )
+        server_id = (self.mcp_cfg.server_id or "").strip() or self.mcp_cfg.server_name
+        return (
+            browser_key,
+            self._profile_name,
+            self._driver_mode,
+            display_mode,
+            managed_args,
+            self._normalize_browser_binary(self._configured_browser_binary()),
+            normalized_user_data_dir,
+            self._configured_cdp_endpoint(),
+            server_id,
+        )
+
+    @property
+    def lifecycle_identity(self) -> BrowserServiceIdentity:
+        return self._lifecycle_identity
+
+    def _acquire_registry_lease(self) -> None:
+        if self._registry_acquired:
+            return
+        BROWSER_SERVICE_REGISTRY.acquire(self._lifecycle_identity, self)
+        self._registry_acquired = True
+
+    def acquire_task_binding(self) -> None:
+        """Acquire one task reference to the shared browser process resources."""
+        self._task_binding_ref_count += 1
+        self._acquire_registry_lease()
 
     @staticmethod
     def _allocate_free_port() -> int:
@@ -464,6 +522,11 @@ class BrowserService:
         profile.cdp_url = endpoint
         self._profile_store.upsert_profile(profile, select=True)
         self._managed_driver = driver
+        BROWSER_SERVICE_REGISTRY.register_managed_driver(
+            self._lifecycle_identity,
+            self,
+            driver,
+        )
         return True
 
     async def _stop_managed_driver(self) -> None:
@@ -471,7 +534,13 @@ class BrowserService:
             return
         driver = self._managed_driver
         self._managed_driver = None
-        await asyncio.to_thread(driver.stop)
+        try:
+            await asyncio.to_thread(driver.stop)
+        finally:
+            BROWSER_SERVICE_REGISTRY.unregister_managed_driver(
+                self._lifecycle_identity,
+                driver,
+            )
 
     def _ensure_screenshots_dir(self) -> None:
         self._screenshots_dir.mkdir(parents=True, exist_ok=True)
@@ -657,6 +726,10 @@ class BrowserService:
         return sid
 
     async def ensure_runtime_ready(self) -> None:
+        if self._task_binding_ref_count <= 0:
+            # Standalone BrowserAgentRuntime usage has no outer TaskTool hook.
+            self.acquire_task_binding()
+        self._acquire_registry_lease()
         if self.started:
             browser_rebound = await self._ensure_managed_driver_started()
             configured_endpoint = self._configured_cdp_endpoint()
@@ -689,7 +762,11 @@ class BrowserService:
 
         self._registered_cdp_endpoint = self._configured_cdp_endpoint()
         self.started = True
-        self._start_heartbeat()
+        if BROWSER_SERVICE_REGISTRY.activate_binding(
+            self._lifecycle_identity,
+            self,
+        ):
+            self._start_heartbeat()
 
     async def ensure_started(self) -> None:
         await self.ensure_runtime_ready()
@@ -791,22 +868,145 @@ class BrowserService:
         self._browser_agent = None
         await self._stop_managed_driver()
 
-    async def reset(self) -> None:
-        """Stop owned browser resources and restart lazily on the next task."""
+    async def _stop_heartbeat(self) -> None:
         heartbeat = self._heartbeat_task
         self._heartbeat_task = None
-        if heartbeat is not None and not heartbeat.done():
-            heartbeat.cancel()
+        if heartbeat is None or heartbeat.done():
+            return
+        heartbeat.cancel()
+        try:
+            await heartbeat
+        except asyncio.CancelledError:
+            pass
+
+    def _clear_task_scoped_state(self) -> None:
+        """Drop observers and task/session state without touching the profile."""
+        self._browser_agent = None
+        for tasks in self._inflight_tasks.values():
+            for task in tuple(tasks):
+                if not task.done():
+                    task.cancel()
+        self._inflight_tasks.clear()
+        self._locks.clear()
+        self._sessions.clear()
+        self._failure_context_by_session.clear()
+        self._progress_by_session.clear()
+
+    async def release_task_binding(self) -> bool:
+        """Release task-owned MCP/observer resources and preserve Chrome state."""
+        if self._task_binding_ref_count > 0:
+            self._task_binding_ref_count -= 1
+        if self._task_binding_ref_count > 0:
+            return False
+        if not self._registry_acquired:
+            await self._stop_heartbeat()
+            self._clear_task_scoped_state()
+            self.started = False
+            self._registered_cdp_endpoint = ""
+            self._connection_healthy = False
+            self._last_heartbeat_ok = None
+            return True
+
+        release = BROWSER_SERVICE_REGISTRY.release(
+            self._lifecycle_identity,
+            self,
+        )
+        self._registry_acquired = False
+        await self._stop_heartbeat()
+
+        if release.close_mcp_binding:
             try:
-                await heartbeat
-            except asyncio.CancelledError:
+                await self._remove_registered_mcp_server()
+            except Exception:
                 pass
-        await self._reset_browser_runtime()
+
+        self.started = False
+        self._registered_cdp_endpoint = ""
         self._connection_healthy = False
         self._last_heartbeat_ok = None
+        self._clear_task_scoped_state()
+
+        next_owner = release.next_heartbeat_owner
+        if next_owner is not None and next_owner.started:
+            next_owner._start_heartbeat()
+        return True
+
+    @classmethod
+    async def _reset_lifecycle_resources(
+        cls,
+        identity: BrowserServiceIdentity,
+        fallback_service: Optional["BrowserService"] = None,
+    ) -> bool:
+        """Stop all process resources associated with one browser identity."""
+        snapshot = BROWSER_SERVICE_REGISTRY.begin_reset(identity)
+        services = snapshot.services
+        if not services and fallback_service is not None:
+            services = (fallback_service,)
+        drivers = list(snapshot.managed_drivers)
+        for service in services:
+            driver = service._managed_driver
+            if driver is not None and all(existing is not driver for existing in drivers):
+                drivers.append(driver)
+            await service._stop_heartbeat()
+            service.started = False
+            service._registered_cdp_endpoint = ""
+            service._browser_agent = None
+            service._connection_healthy = False
+            service._last_heartbeat_ok = None
+
+        representative = services[0] if services else fallback_service
+        if representative is not None:
+            try:
+                await representative._remove_registered_mcp_server()
+            except Exception:
+                pass
+
+        for driver in drivers:
+            try:
+                await asyncio.to_thread(driver.stop)
+            except Exception:
+                pass
+            finally:
+                BROWSER_SERVICE_REGISTRY.unregister_managed_driver(
+                    identity,
+                    driver,
+                )
+        for service in services:
+            service._managed_driver = None
+            service._active_profile = None
+        return bool(services or drivers)
+
+    async def reset(self) -> None:
+        """Reset one shared browser identity and restart lazily on next use."""
+        await self._reset_lifecycle_resources(
+            self._lifecycle_identity,
+            fallback_service=self,
+        )
+
+    @classmethod
+    async def reset_registered_managed_browser(
+        cls,
+        *,
+        browser_key: str,
+        profile_name: str,
+        display_mode: str,
+        browser_binary: str,
+    ) -> int:
+        """Stop a preserved managed browser matching one logical identity."""
+        identities = BROWSER_SERVICE_REGISTRY.find_managed_driver_identities(
+            browser_key=str(browser_key or "").strip(),
+            profile_name=str(profile_name or "").strip(),
+            display_mode=str(display_mode or "").strip().lower(),
+            browser_binary=cls._normalize_browser_binary(browser_binary),
+        )
+        reset_count = 0
+        for identity in identities:
+            if await cls._reset_lifecycle_resources(identity):
+                reset_count += 1
+        return reset_count
 
     async def _restart_browser_runtime(self) -> None:
-        await self._reset_browser_runtime()
+        await self.reset()
         await self.ensure_started()
 
     @staticmethod
@@ -1574,15 +1774,9 @@ class BrowserService:
                     self._unregister_inflight_task(sid, rid, current_task)
 
     async def shutdown(self) -> None:
-        if self._heartbeat_task is not None and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
-            try:
-                await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
         try:
-            if self.started:
-                await Runner.stop()
-            self.started = False
+            await self.reset()
         finally:
-            await self._stop_managed_driver()
+            self._task_binding_ref_count = 0
+            await self.release_task_binding()
+            BROWSER_SERVICE_REGISTRY.discard_idle(self._lifecycle_identity)

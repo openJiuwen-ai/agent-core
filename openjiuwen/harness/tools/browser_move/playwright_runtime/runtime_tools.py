@@ -98,7 +98,9 @@ _PROBE_INTERACTIVES_DESC = (
     "search/input terms, including placeholders, aria labels, input type/name/id/class, and Chinese "
     "search text such as 搜索/关键词. Prefer max_items around 20-30 unless a larger inventory "
     "is needed. For product/search/listing card data, prefer browser_probe_cards first. "
-    "The result includes role/action_likelihood/text/aria-label/testid/bbox/selector_hint plus "
+    "The result includes compact PageState and generation-scoped target_id values that can be "
+    "passed directly to browser_batch_interact without rebuilding CSS. It also includes "
+    "role/action_likelihood/text/aria-label/testid/bbox/selector_hint plus "
     "match_count/visible/enabled/clickable/generation_id. Click only validated hints with "
     "clickable=true."
 )
@@ -125,7 +127,8 @@ _PROBE_CARDS_DESC = (
     "Return compact repeated card/listing structures from the current page. "
     "Use this first on product pages, marketplace pages, search-result pages, catalog pages, "
     "article-list pages, table/list-row result pages, or any page with repeated visible cards/listings. "
-    "The result includes candidate card title, author/source, summary/snippet, price, rating, "
+    "The result includes compact PageState with generation-scoped card/control target_id values, "
+    "candidate card title, author/source, summary/snippet, price, rating, "
     "review count, availability, primary link, visible buttons, bbox, selector_hint, "
     "match_count/visible/enabled/clickable/generation_id, recurring structure signatures, and "
     "cache diagnostics. Navigate primary_link/href directly instead of clicking a card hint. "
@@ -158,13 +161,17 @@ _PROBE_CARDS_PARAMS: Dict[str, Any] = {
 }
 
 _BATCH_INTERACT_DESC = (
-    "Execute multiple deterministic browser interactions in one standalone runtime tool call. "
+    "Execute deterministic browser interactions in one standalone runtime tool call. "
     "Use after browser_probe_interactives/browser_probe_cards when a page-level flow has multiple "
     "known targets, such as three or more form fields, click+type+choose autocomplete, dropdown or "
     "date-picker selection, filter panels, search submit plus result wait, or compact extraction. "
     "This is a first-class helper like the probe tools; do not route this through browser_custom_action. "
-    "Do not use it for a single uncertain click; keep using browser_fill_form for ordinary visible "
-    "text fields when that official tool is enough."
+    "Pass the current PageState generation_id and use target_id from probes or ref from an AX "
+    "snapshot instead of constructing CSS. Locator strategies are mutually exclusive. "
+    "A one-step call is rewritten by the runtime to an equivalent official browser primitive when "
+    "one exists, so it does not fail and require another model turn. Multi-step calls are preflighted "
+    "before side effects. Results use status=completed/partial/failed and contain only compact step "
+    "status, extracted fields, condition observations, metrics, and PageState."
 )
 _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
     "type": "object",
@@ -179,7 +186,7 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                 "wait_for_dom_text_change, wait_for_stable, sleep, extract_text, "
                 "extract_value, screenshot."
             ),
-            "minItems": 2,
+            "minItems": 1,
             "maxItems": 25,
             "items": {
                 "type": "object",
@@ -211,9 +218,28 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                             "screenshot",
                         ],
                     },
+                    "target_id": {
+                        "type": "string",
+                        "description": (
+                            "Generation-scoped target_id returned by the current PageState/probe. "
+                            "Preferred for actions and mutually exclusive with ref/selector/role/"
+                            "label/placeholder/text/testid."
+                        ),
+                    },
+                    "ref": {
+                        "type": "string",
+                        "description": (
+                            "Native AX ref returned by browser_snapshot/browser_find in the current generation. "
+                            "The runtime resolves it without model-generated CSS."
+                        ),
+                    },
                     "selector": {
                         "type": "string",
-                        "description": "CSS selector, preferably selector_hint from probes.",
+                        "description": (
+                            "Current-generation selector_hint from a probe, or an explicit selector only "
+                            "for a wait condition. "
+                            "Do not combine with another locator strategy."
+                        ),
                     },
                     "role": {
                         "type": "string",
@@ -231,6 +257,10 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                         "type": "string",
                         "description": "Placeholder text for form controls.",
                     },
+                    "testid": {
+                        "type": "string",
+                        "description": "Exact data-testid value for a target.",
+                    },
                     "text": {
                         "type": "string",
                         "description": "Visible text for locate/click/wait_for_text.",
@@ -242,8 +272,7 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                     "option_text": {
                         "type": "string",
                         "description": (
-                            "Visible option text for autocomplete/select_visible_text/native select "
-                            "label."
+                            "Visible option text for autocomplete/select_visible_text/native select label."
                         ),
                     },
                     "choose_text": {
@@ -260,9 +289,7 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                     },
                     "option_role": {
                         "type": "string",
-                        "description": (
-                            "ARIA role for an autocomplete/dropdown option, e.g. option/menuitem."
-                        ),
+                        "description": ("ARIA role for an autocomplete/dropdown option, e.g. option/menuitem."),
                     },
                     "choose_role": {
                         "type": "string",
@@ -284,16 +311,12 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "MCP/Playwright-style native select values list. Also accepted for "
-                            "single-select fields."
+                            "MCP/Playwright-style native select values list. Also accepted for single-select fields."
                         ),
                     },
                     "option_label": {
                         "type": "string",
-                        "description": (
-                            "Native select visible label. Alias for option_text when "
-                            "op=select_option."
-                        ),
+                        "description": ("Native select visible label. Alias for option_text when op=select_option."),
                     },
                     "label_value": {
                         "type": "string",
@@ -314,9 +337,16 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                     "state": {
                         "type": "string",
                         "description": (
-                            "Wait state for wait_for_selector/load_state, e.g. "
-                            "visible/attached/domcontentloaded."
+                            "Wait state for wait_for_selector/load_state, e.g. visible/attached/domcontentloaded."
                         ),
+                    },
+                    "option_target_id": {
+                        "type": "string",
+                        "description": "PageState target_id for an autocomplete/dropdown option.",
+                    },
+                    "option_ref": {
+                        "type": "string",
+                        "description": "Current-generation AX ref for an autocomplete/dropdown option.",
                     },
                     "url": {
                         "type": "string",
@@ -364,7 +394,10 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                     },
                     "poll_interval_ms": {
                         "type": "integer",
-                        "description": "Condition polling interval, clamped to 50..1000ms; default 100ms.",
+                        "description": (
+                            "Dynamic-condition polling interval, clamped to 50..1000ms; default 100ms. "
+                            "Polling always shares the step's total timeout."
+                        ),
                     },
                     "stable_ms": {
                         "type": "integer",
@@ -392,9 +425,7 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                     },
                     "wait_after_type_ms": {
                         "type": "integer",
-                        "description": (
-                            "Optional wait after autocomplete typing before choosing an option."
-                        ),
+                        "description": ("Optional wait after autocomplete typing before choosing an option."),
                     },
                     "wait_after_ms": {
                         "type": "integer",
@@ -426,8 +457,14 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
         },
         "timeout_ms": {
             "type": "integer",
+            "description": ("Default per-step timeout in milliseconds. Default 2500, clamped to 250..30000."),
+        },
+        "generation_id": {
+            "type": "string",
+            "pattern": "^g[0-9]+$",
             "description": (
-                "Default per-step timeout in milliseconds. Default 2500, clamped to 250..30000."
+                "Current PageState generation_id returned by navigate, probe, snapshot, or the previous batch. "
+                "Targets from older generations are rejected before browser execution."
             ),
         },
         "condition_timeout_ms": {
@@ -461,7 +498,7 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
             "description": "Optional browser task request id.",
         },
     },
-    "required": ["steps"],
+    "required": ["steps", "generation_id"],
 }
 
 
@@ -739,6 +776,7 @@ class BrowserBatchInteractTool(Tool):
         try:
             result = await self._runtime.batch_interact(
                 steps=steps,
+                generation_id=str(inputs.get("generation_id") or ""),
                 timeout_ms=inputs.get("timeout_ms"),
                 condition_timeout_ms=inputs.get("condition_timeout_ms"),
                 wait_after_each_ms=inputs.get("wait_after_each_ms"),

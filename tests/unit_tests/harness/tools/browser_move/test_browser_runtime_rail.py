@@ -12,10 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openjiuwen.core.foundation.tool import McpServerConfig, ToolInfo
+from openjiuwen.core.foundation.llm.schema.message import ToolMessage
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    CORE_BROWSER_TOOL_NAMES,
     resolve_browser_capabilities,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime import runtime as runtime_module
@@ -115,7 +117,7 @@ def test_before_invoke_calls_ensure_runtime_ready() -> None:
     )
 
 
-def test_before_invoke_with_none_allowlist_preserves_unrestricted_mode() -> None:
+def test_before_invoke_with_none_allowlist_defaults_to_core() -> None:
     runtime = MagicMock(spec=BrowserAgentRuntime)
     runtime.ensure_runtime_ready = AsyncMock()
     runtime.service = MagicMock()
@@ -128,7 +130,10 @@ def test_before_invoke_with_none_allowlist_preserves_unrestricted_mode() -> None
     _run(rail.before_invoke(ctx))
 
     ctx.agent.ability_manager.add.assert_called_once_with(runtime.service.mcp_cfg)
-    ctx.agent.ability_manager.set_mcp_tool_allowlist.assert_not_called()
+    ctx.agent.ability_manager.set_mcp_tool_allowlist.assert_called_once_with(
+        runtime.service.mcp_cfg,
+        CORE_BROWSER_TOOL_NAMES,
+    )
 
 
 def test_before_invoke_removes_screenshot_for_non_multimodal_model() -> None:
@@ -154,7 +159,7 @@ def test_before_invoke_removes_screenshot_for_non_multimodal_model() -> None:
     )
 
 
-def test_before_invoke_builds_non_multimodal_allowlist_from_registered_tools() -> None:
+def test_before_invoke_builds_non_multimodal_allowlist_from_core() -> None:
     runtime = MagicMock(spec=BrowserAgentRuntime)
     runtime.ensure_runtime_ready = AsyncMock()
     runtime.service = MagicMock()
@@ -164,22 +169,15 @@ def test_before_invoke_builds_non_multimodal_allowlist_from_registered_tools() -
     ctx = _make_ctx()
     ctx.agent.deep_config.enable_read_image_multimodal = False
     ctx.agent.ability_manager = MagicMock()
-    registered_tools = [
-        ToolInfo(name="browser_click", description="click", parameters={}),
-        ToolInfo(name="browser_take_screenshot", description="image", parameters={}),
-        ToolInfo(name="browser_snapshot", description="dom", parameters={}),
-    ]
-
-    with patch.object(
-        Runner.resource_mgr,
-        "get_mcp_tool_infos",
-        new=AsyncMock(return_value=registered_tools),
-    ):
-        _run(rail.before_invoke(ctx))
+    _run(rail.before_invoke(ctx))
 
     ctx.agent.ability_manager.set_mcp_tool_allowlist.assert_called_once_with(
         runtime.service.mcp_cfg,
-        ("browser_click", "browser_snapshot"),
+        tuple(
+            tool_name
+            for tool_name in CORE_BROWSER_TOOL_NAMES
+            if tool_name != "browser_take_screenshot"
+        ),
     )
 
 
@@ -360,6 +358,30 @@ def test_navigation_invalidates_snapshot_refs_from_older_generation() -> None:
     assert runtime.generation_id == "g1"
     with pytest.raises(ValueError, match="older page generation"):
         runtime.validate_reference_values(("f1e2",))
+
+
+def test_after_snapshot_attaches_compact_page_state_to_tool_message() -> None:
+    runtime = _make_bare_runtime()
+    rail = BrowserRuntimeRail(runtime)
+    tool_message = ToolMessage(
+        tool_call_id="snapshot-call",
+        content='textbox "Search" [ref=f1e2]',
+    )
+    ctx = AgentCallbackContext(
+        agent=MagicMock(),
+        inputs=ToolCallInputs(
+            tool_name="mcp_playwright_browser_snapshot",
+            tool_args={},
+            tool_result='textbox "Search" [ref=f1e2]',
+            tool_msg=tool_message,
+        ),
+    )
+
+    _run(rail.after_tool_call(ctx))
+
+    assert "<browser_page_state>" in tool_message.content
+    assert '"generation_id":"g0"' in tool_message.content
+    assert '"ref":"f1e2"' in tool_message.content
 
 
 def test_click_result_url_change_invalidates_snapshot_refs() -> None:

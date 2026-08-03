@@ -89,8 +89,11 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "For product/listing/item-data tasks, prefer browser_probe_cards first; call "
     "browser_probe_interactives only if you also need page-level navigation, filters, forms, or "
     "controls outside the cards. "
-    "Use selector_hint values for clicks only when the probe marks them as validated and "
-    "clickable=true; match_count must be 1 and visible/enabled must both be true. "
+    "Treat page_id/generation_id/url/title/interactives/cards/field_coverage/blockers as the single "
+    "compact PageState contract. Pass PageState generation_id and probe target_id, or a current AX "
+    "ref, directly to browser_batch_interact; never translate refs or target IDs into guessed CSS. "
+    "A selector_hint is only a compatibility locator and must remain bound to the generation that "
+    "returned it; use it only when validated, clickable=true, match_count=1, visible=true, and enabled=true. "
     "When a card exposes primary_link or href, navigate directly to that URL instead of clicking "
     "its selector_hint. "
     "When several fields are needed from the same page, extract them together in one "
@@ -101,10 +104,10 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "When an older browser result is replaced by a <persisted-output> marker and its preview is "
     "insufficient, use browser_recall_offload with the marker handle. Recalled refs/selectors are "
     "stale after navigation and are evidence only; never use them for interaction. "
-    "Use browser_run_code_unsafe or browser_run_code only when you already know the exact "
-    "selector/computation, or when the compact probes and browser_snapshot are insufficient. "
-    "Do not use browser_run_code_unsafe or browser_run_code to dump the entire document body unless "
-    "all compact approaches fail. "
+    "Use browser_evaluate for a small, exact target or computation. If an explicit advanced_code "
+    "or unsafe_dev capability makes a browser_run_code tool visible, use that tool only when the "
+    "compact probes, evaluate, snapshot, and deterministic actions are insufficient. Never use a "
+    "run-code tool to dump the entire document body. "
     "Use browser_custom_action only for deterministic helper actions that are awkward to express with "
     "the primitive browser tools. "
     "Do not assume a nested browser worker or browser_run_task wrapper exists. "
@@ -139,8 +142,11 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "标题/价格/评分/评论数/库存字段、主链接、可见按钮、边界框、selector_hint 和重复结构特征。"
     "对于商品、列表或条目数据任务，优先使用 browser_probe_cards；只有在还需要卡片外的页面级导航、"
     "筛选器、表单或控件时，再调用 browser_probe_interactives。"
-    "仅当紧凑探测明确标记 selector_hint 已验证、clickable=true、match_count=1，"
-    "且 visible/enabled 均为 true 时，才使用它执行点击。"
+    "将 page_id/generation_id/url/title/interactives/cards/field_coverage/blockers 作为唯一的紧凑 "
+    "PageState 契约。调用 browser_batch_interact 时直接传当前 PageState 的 generation_id，"
+    "以及 probe 返回的 target_id 或当前 AX ref；禁止把 ref/target_id 重新拼成猜测的 CSS。"
+    "selector_hint 只是兼容 locator，必须绑定返回它的 generation；仅当它已验证、clickable=true、"
+    "match_count=1 且 visible/enabled 均为 true 时才可使用。"
     "卡片包含 primary_link 或 href 时，应直接导航该 URL，不要点击其 selector_hint。"
     "同一页面需要多个字段时，应在一次 browser_batch_interact 中使用带字段名的 "
     "extract_text/extract_value 统一提取，或直接使用一次已包含全部字段的 "
@@ -151,9 +157,9 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "仅在紧凑探测不足、需要无障碍结构，或 Playwright MCP 操作需要精确元素引用时使用 browser_snapshot。"
     "旧浏览器结果被替换为 <persisted-output> 且预览不足时，使用标记中的 handle 调用 "
     "browser_recall_offload。页面导航后，恢复结果里的 ref/selector 已过期，只能作为证据，禁止用于交互。"
-    "仅在已经知道精确 selector/计算逻辑，或紧凑探测和 browser_snapshot 都不足时，"
-    "使用 browser_run_code_unsafe 或 browser_run_code。"
-    "除非所有紧凑方式都失败，不要使用 browser_run_code_unsafe 或 browser_run_code 转储整个 document body。"
+    "小范围精确目标或计算优先使用 browser_evaluate。只有显式 advanced_code 或 unsafe_dev 能力让 "
+    "browser_run_code 工具可见，且紧凑探测、evaluate、snapshot 和确定性操作都不足时，才使用该工具。"
+    "禁止使用任何 run-code 工具转储整个 document body。"
     "browser_custom_action 只用于基础浏览器工具难以表达的确定性辅助动作。"
     "不要假设存在嵌套 browser worker 或 browser_run_task 包装器。"
     "将导航、表单、筛选和提取分别作为完整阶段执行。"
@@ -348,7 +354,8 @@ def create_browser_agent(
     """Create the browser subagent with task-scoped capability context.
 
     ``browser_capabilities`` is resolved against the trusted capability
-    catalog here. The resolved allowlist does not yet alter registered tools.
+    catalog here. Core is always applied, including when the caller omits the
+    optional capability list.
     """
     if browser_capabilities is not None and (
         not isinstance(browser_capabilities, list)
@@ -394,9 +401,8 @@ def create_browser_agent(
         "mcp_cfg": resolved_settings.mcp_cfg,
         "guardrails": resolved_settings.guardrails,
         "instance": resolved_settings.instance,
+        "allowed_tool_names": resolved_capabilities.allowed_tool_names,
     }
-    if browser_capabilities is not None:
-        runtime_kwargs["allowed_tool_names"] = resolved_capabilities.allowed_tool_names
     browser_backend = BrowserAgentRuntime(**runtime_kwargs)
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
     injected_tools.append(BrowserOffloadRecallTool(workspace, language=resolved_language))
@@ -430,7 +436,7 @@ def create_browser_agent(
     final_mcps = list(mcps or [])
     final_rails = list(rails or []) + injected_rails
 
-    return create_deep_agent(
+    agent = create_deep_agent(
         model=browser_model,
         card=final_card,
         system_prompt=final_prompt,
@@ -448,6 +454,11 @@ def create_browser_agent(
         prompt_mode=prompt_mode,
         **config_kwargs,
     )
+    agent.register_task_resource_cleanup(
+        browser_backend.release_task_resources,
+        prepare=browser_backend.acquire_task_resources,
+    )
+    return agent
 
 
 __all__ = [

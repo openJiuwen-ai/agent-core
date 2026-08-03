@@ -258,6 +258,7 @@ def test_runtime_health_tool_uses_runtime_api() -> None:
     assert result.success is True
     assert result.data["started"] is False
 
+
 def test_batch_interact_tool_uses_runtime_api_for_realistic_form_flow() -> None:
     runtime = _make_runtime()
     runtime.batch_interact = AsyncMock(
@@ -291,6 +292,7 @@ def test_batch_interact_tool_uses_runtime_api_for_realistic_form_flow() -> None:
                 "wait_after_each_ms": 50,
                 "continue_on_error": False,
                 "global_timeout_ms": 15000,
+                "generation_id": "g3",
                 "session_id": "sess-batch",
                 "request_id": "req-batch",
             }
@@ -299,6 +301,7 @@ def test_batch_interact_tool_uses_runtime_api_for_realistic_form_flow() -> None:
 
     runtime.batch_interact.assert_called_once_with(
         steps=steps,
+        generation_id="g3",
         timeout_ms=3000,
         condition_timeout_ms=None,
         wait_after_each_ms=50,
@@ -322,20 +325,31 @@ def test_batch_interact_tool_reports_runtime_error() -> None:
     )
     tool = BrowserBatchInteractTool(runtime)
 
-    result = _run(tool.invoke({"steps": [{"op": "click", "text": "Search"}]}))
+    result = _run(
+        tool.invoke(
+            {
+                "steps": [{"op": "click", "text": "Search"}],
+                "generation_id": "g0",
+            }
+        )
+    )
 
     assert result.success is False
     assert result.error == "browser_code_executor_not_ready"
     assert result.data["steps_requested"] == 1
 
 
-def test_batch_interact_schema_requires_multi_action_and_exposes_condition_waits() -> None:
+def test_batch_interact_schema_supports_single_action_and_exposes_condition_waits() -> None:
     tool = BrowserBatchInteractTool(_make_runtime())
     steps_schema = tool.card.input_params["properties"]["steps"]
     operations = steps_schema["items"]["properties"]["op"]["enum"]
 
-    assert steps_schema["minItems"] == 2
+    assert steps_schema["minItems"] == 1
     assert steps_schema["maxItems"] == 25
+    assert "generation_id" in tool.card.input_params["required"]
+    assert "target_id" in steps_schema["items"]["properties"]
+    assert "ref" in steps_schema["items"]["properties"]
+    assert "option_target_id" in steps_schema["items"]["properties"]
     assert "wait_for_url" in operations
     assert "wait_for_first_card_title" in operations
     assert "wait_for_sort_state" in operations
@@ -345,4 +359,3 @@ def test_batch_interact_schema_requires_multi_action_and_exposes_condition_waits
     assert "default 2500" in (
         tool.card.input_params["properties"]["timeout_ms"]["description"].lower()
     )
-

@@ -27,6 +27,9 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserRunGuardrails,
     RuntimeSettings,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    CORE_BROWSER_TOOL_NAMES,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserRuntimeRail,
 )
@@ -99,6 +102,19 @@ def test_default_wiring_creates_one_agent() -> None:
     assert len(calls) == 1
 
 
+def test_browser_agent_registers_runtime_task_cleanup() -> None:
+    calls, fake = _capture_create_deep_agent()
+    ctx, runtime_cls, _build_tools, _tools = _patch_all(fake)
+    with ctx:
+        agent = create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    del calls
+    agent.register_task_resource_cleanup.assert_called_once_with(
+        runtime_cls.return_value.release_task_resources,
+        prepare=runtime_cls.return_value.acquire_task_resources,
+    )
+
+
 def test_browser_agent_uses_independent_sampling_config_and_large_budget() -> None:
     parent_model = SimpleNamespace(
         model_client_config=SimpleNamespace(),
@@ -160,6 +176,10 @@ def test_browser_agent_prompt_enforces_convergent_browser_strategy() -> None:
     assert "可观察条件" in chinese
     assert "直接导航该 URL" in chinese
     assert "立即结束" in chinese
+    assert "browser_run_code_unsafe" not in english
+    assert "browser_run_code_unsafe" not in chinese
+    assert "makes a browser_run_code tool visible" in english
+    assert "工具可见" in chinese
 
 
 def test_selected_capabilities_are_logged_and_forwarded_to_runtime(caplog) -> None:
@@ -194,7 +214,49 @@ def test_unknown_capability_error_lists_rejected_and_available_names() -> None:
 
     message = str(exc_info.value)
     assert "Unsupported browser capabilities: not-a-capability" in message
-    assert "Available capabilities: core, pdf, vision, devtools, config, network, storage, testing" in message
+    assert (
+        "Available capabilities: core, advanced_code, unsafe_dev, pdf, vision, "
+        "devtools, config, network, storage, testing"
+    ) in message
+
+
+def test_default_factory_always_forwards_core_allowlist() -> None:
+    calls, fake = _capture_create_deep_agent()
+    ctx, mock_runtime_cls, _mock_build, _tools = _patch_all(fake)
+
+    with ctx:
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    del calls
+    assert mock_runtime_cls.call_args.kwargs["allowed_tool_names"] == CORE_BROWSER_TOOL_NAMES
+
+
+@pytest.mark.parametrize(
+    ("capability", "included", "excluded"),
+    [
+        ("advanced_code", "browser_run_code", "browser_run_code_unsafe"),
+        ("unsafe_dev", "browser_run_code_unsafe", "browser_run_code"),
+    ],
+)
+def test_factory_exposes_only_selected_run_code_variant(
+    capability: str,
+    included: str,
+    excluded: str,
+) -> None:
+    calls, fake = _capture_create_deep_agent()
+    ctx, mock_runtime_cls, _mock_build, _tools = _patch_all(fake)
+
+    with ctx:
+        create_browser_agent(
+            _fake_model(),
+            settings=_fake_settings(),
+            browser_capabilities=[capability],
+        )
+
+    del calls
+    allowed = mock_runtime_cls.call_args.kwargs["allowed_tool_names"]
+    assert included in allowed
+    assert excluded not in allowed
 
 
 def test_default_wiring_main_agent_card_is_browser_agent() -> None:
@@ -340,6 +402,7 @@ def test_settings_forwarded_to_runtime_constructor() -> None:
         mcp_cfg=settings.mcp_cfg,
         guardrails=settings.guardrails,
         instance=settings.instance,
+        allowed_tool_names=CORE_BROWSER_TOOL_NAMES,
     )
 
 

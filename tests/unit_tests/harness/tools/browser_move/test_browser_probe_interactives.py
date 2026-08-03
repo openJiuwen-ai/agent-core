@@ -11,6 +11,9 @@ from unittest.mock import AsyncMock
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    CORE_BROWSER_TOOL_NAMES,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.probes import (
     build_interactive_probe_js,
 )
@@ -172,6 +175,12 @@ def test_runtime_probe_interactives_uses_code_executor_and_parses_json() -> None
                     "role": "button",
                     "text": "Search",
                     "selector_hint": "button:nth-of-type(1)",
+                    "selector_hint_validated": True,
+                    "match_count": 1,
+                    "visible": True,
+                    "enabled": True,
+                    "actionable": True,
+                    "clickable": True,
                 }
             ],
         }
@@ -190,6 +199,9 @@ def test_runtime_probe_interactives_uses_code_executor_and_parses_json() -> None
     assert result["ok"] is True
     assert result["url"] == "https://example.com"
     assert result["elements"][0]["text"] == "Search"
+    assert result["elements"][0]["target_id"].startswith("t_g")
+    assert result["elements"][0]["generation_id"] == result["page_state"]["generation_id"]
+    assert result["page_state"]["interactives"][0]["target_id"] == result["elements"][0]["target_id"]
 
 
 def test_runtime_probe_interactives_handles_missing_code_executor() -> None:
@@ -234,6 +246,8 @@ def test_runtime_unwrap_mcp_text_result() -> None:
 
 def test_runtime_call_playwright_run_code_unsafe_uses_runner_mcp_tool(monkeypatch) -> None:
     runtime = _make_runtime()
+    assert runtime.service.allowed_tool_names == CORE_BROWSER_TOOL_NAMES
+    assert "browser_run_code_unsafe" not in runtime.service.allowed_tool_names
 
     class FakeToolResult:
         success = True
