@@ -73,6 +73,7 @@ class GatewayServiceConfig(BaseModel):
     log_level: str = Field(default="info")
     health_timeout: float = Field(default=30.0, gt=0)
     disable_trajectory_collection: bool = True
+    lora_default_policy: str = Field(default="disabled")
     env: dict[str, str] = Field(default_factory=dict)
 
 
@@ -87,6 +88,10 @@ class TrainingConfig(BaseModel):
     scan_interval: int = Field(default=30, ge=1)
     ppo_config: str | None = None
     lora_repo: str | None = None
+    drain_pending_on_train: bool = False
+    max_samples_per_run: int = Field(default=0, ge=0)
+    ppo_samples_per_step: int = Field(default=0, ge=0)
+    allow_partial_last_step: bool = True
 
 
 class JiuwenConfig(BaseModel):
@@ -178,7 +183,7 @@ ONLINE_PPO_VERL_HYDRA_OVERLAY: dict[str, Any] = {
         "actor": {
             "strategy": "fsdp",
             "ppo_mini_batch_size": 4,
-            "ppo_micro_batch_size_per_gpu": 2,
+            "ppo_micro_batch_size_per_gpu": 1,
             "ppo_epochs": 1,
             "use_kl_loss": False,
             "kl_loss_coef": 0.02,
@@ -200,7 +205,7 @@ ONLINE_PPO_VERL_HYDRA_OVERLAY: dict[str, Any] = {
             "fsdp_config": {
                 "param_offload": True,
             },
-            "log_prob_micro_batch_size_per_gpu": 2,
+            "log_prob_micro_batch_size_per_gpu": 1,
         },
         "rollout": {
             "mode": "async",
@@ -211,7 +216,7 @@ ONLINE_PPO_VERL_HYDRA_OVERLAY: dict[str, Any] = {
             "max_model_len": 512,
             "max_num_seqs": 1,
             "n": 1,
-            "log_prob_micro_batch_size_per_gpu": 2,
+            "log_prob_micro_batch_size_per_gpu": 1,
         },
     },
     "trainer": {

@@ -423,6 +423,7 @@ async def test_stream_chat_response_preserves_runtime_token_fields():
         "object": "chat.completion",
         "created": 123,
         "model": "m1",
+        "rl_lora": {"model_id": "user-1", "version": "v3", "path": "/tmp/lora/v3"},
         "prompt_token_ids": [1, 2, 3],
         "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
         "choices": [{
@@ -442,6 +443,7 @@ async def test_stream_chat_response_preserves_runtime_token_fields():
     first = chunks[0]
     last = chunks[1]
     assert '"prompt_token_ids": [1, 2, 3]' in first
+    assert '"rl_lora": {"model_id": "user-1", "version": "v3", "path": "/tmp/lora/v3"}' in first
     assert '"token_ids": [4, 5]' in first
     assert '"logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]}' in first
     assert '"usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}' in last
