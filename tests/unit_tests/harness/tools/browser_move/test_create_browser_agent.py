@@ -11,12 +11,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import (
     BROWSER_AGENT_FACTORY_NAME,
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
     DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT,
+    DEFAULT_BROWSER_AGENT_TEMPERATURE,
     build_browser_agent_config,
     create_browser_agent,
 )
@@ -94,6 +97,69 @@ def test_default_wiring_creates_one_agent() -> None:
         create_browser_agent(_fake_model(), settings=_fake_settings())
 
     assert len(calls) == 1
+
+
+def test_browser_agent_uses_independent_sampling_config_and_large_budget() -> None:
+    parent_model = SimpleNamespace(
+        model_client_config=SimpleNamespace(),
+        model_config=ModelRequestConfig(
+            model="test-model",
+            temperature=0.95,
+        ),
+    )
+
+    spec = build_browser_agent_config(
+        parent_model,
+        settings=_fake_settings(),
+        language="en",
+    )
+
+    assert spec.model is not parent_model
+    assert spec.model.model_config.temperature == DEFAULT_BROWSER_AGENT_TEMPERATURE
+    assert parent_model.model_config.temperature == 0.95
+    assert spec.max_iterations == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+
+
+def test_browser_agent_uses_independent_client_with_lower_temperature() -> None:
+    parent_model = object.__new__(Model)
+    parent_model.model_client_config = SimpleNamespace(client_provider="test")
+    parent_model.model_config = ModelRequestConfig(
+        model="test-model",
+        temperature=0.95,
+    )
+    parent_model._client = SimpleNamespace(model_config=parent_model.model_config)
+
+    def fake_model_init(self, model_client_config, model_config):
+        self.model_client_config = model_client_config
+        self.model_config = model_config
+        self._client = SimpleNamespace(model_config=model_config)
+
+    with patch.object(Model, "__init__", fake_model_init):
+        spec = build_browser_agent_config(
+            parent_model,
+            settings=_fake_settings(),
+            language="en",
+        )
+
+    assert spec.model is not parent_model
+    assert spec.model._client is not parent_model._client
+    assert spec.model._client.model_config.temperature == DEFAULT_BROWSER_AGENT_TEMPERATURE
+    assert parent_model._client.model_config.temperature == 0.95
+
+
+def test_browser_agent_prompt_enforces_convergent_browser_strategy() -> None:
+    english = DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["en"]
+    chinese = DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["cn"]
+
+    assert "direct search-results URL" in english
+    assert "browser_batch_interact" in english
+    assert "observable condition waits" in english
+    assert "navigate directly to that URL" in english
+    assert "Stop immediately" in english
+    assert "直接构造搜索结果 URL" in chinese
+    assert "可观察条件" in chinese
+    assert "直接导航该 URL" in chinese
+    assert "立即结束" in chinese
 
 
 def test_selected_capabilities_are_logged_and_forwarded_to_runtime(caplog) -> None:
@@ -197,6 +263,9 @@ def test_default_wiring_windows_browser_probe_and_snapshot_results() -> None:
         "browser_snapshot",
     ]
     assert config.keep_last_k == 1
+    assert config.trim_size == 1000
+    assert config.min_offload_chars == 4096
+    assert config.small_result_trim_size == 800
 
 
 def test_caller_context_processor_rail_suppresses_injection() -> None:
@@ -218,6 +287,21 @@ def test_default_wiring_does_not_add_sys_operation_rail() -> None:
 
     rails = calls[0].get("rails", [])
     assert not any(type(rail).__name__ == "SysOperationRail" for rail in rails)
+
+
+def test_default_wiring_adds_scoped_offload_recall_without_filesystem_tools() -> None:
+    calls, fake = _capture_create_deep_agent()
+    with _patch_all(fake)[0]:
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    tool_names = [
+        getattr(getattr(tool, "card", None), "name", None)
+        for tool in calls[0].get("tools", [])
+    ]
+    assert "browser_recall_offload" in tool_names
+    assert "read_file" not in tool_names
+    assert "bash" not in tool_names
+    assert "powershell" not in tool_names
 
 
 def test_default_wiring_build_tools_called_with_runtime_instance() -> None:
@@ -321,7 +405,7 @@ def test_user_tools_are_merged_with_browser_tools() -> None:
 
     tool_cards = calls[0].get("tools", [])
     assert user_tool in tool_cards
-    assert len(tool_cards) == 4
+    assert len(tool_cards) == 5
 
 
 def test_build_browser_agent_config_uses_browser_factory() -> None:

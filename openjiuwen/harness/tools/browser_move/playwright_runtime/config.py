@@ -47,9 +47,9 @@ PLAYWRIGHT_MCP_CAPABILITY_NAMES: tuple[str, ...] = tuple(
 
 @dataclass
 class BrowserRunGuardrails:
-    max_steps: int = 20
-    max_failures: int = 2
-    timeout_s: int = 180
+    max_steps: int = DEFAULT_GUARDRAIL_MAX_STEPS
+    max_failures: int = DEFAULT_GUARDRAIL_MAX_FAILURES
+    timeout_s: int = DEFAULT_BROWSER_TIMEOUT_S
     retry_once: bool = True
     resume_on_max_iterations: bool = False
 

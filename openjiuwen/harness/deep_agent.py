@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
-import importlib
 import os
 import sys
 import uuid
@@ -1175,6 +1174,25 @@ class DeepAgent(BaseAgent):
                 )
 
                 factory_kwargs = dict(spec.factory_kwargs or {})
+                browser_model = create_kwargs["model"]
+                browser_parent_model = getattr(
+                    browser_model,
+                    "_browser_agent_parent_model",
+                    None,
+                )
+                if (
+                    browser_model is self._deep_config.model
+                    or browser_parent_model is self._deep_config.model
+                ):
+                    parent_image_support = getattr(
+                        self._deep_config,
+                        "enable_read_image_multimodal",
+                        None,
+                    )
+                    factory_kwargs.setdefault(
+                        "enable_read_image_multimodal",
+                        parent_image_support is True,
+                    )
                 if browser_capabilities is not None:
                     factory_kwargs["browser_capabilities"] = list(browser_capabilities)
                 return self._bind_inherited_artifact_root(

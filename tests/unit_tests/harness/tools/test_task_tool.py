@@ -12,11 +12,15 @@ from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelReques
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.harness.tools import TaskTool, create_task_tool
+from openjiuwen.harness.tools.subagent.task_tool import (
+    DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+)
 
 
 def _create_dummy_model() -> Model:
@@ -169,6 +173,14 @@ class TestTaskToolSync(unittest.TestCase):
 
         self.assertEqual(len(tools), 1)
         self.assertIsInstance(tools[0], TaskTool)
+        self.assertEqual(
+            tools[0].card.properties["resilience"]["timeout_s"],
+            DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+        )
+        self.assertEqual(
+            AbilityManager._resolve_call_timeout(tools[0].card),
+            DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+        )
 
     def test_general_purpose_subagent_inherits_parent_mcps(self) -> None:
         tools = [ToolCard(id="parent_tool", name="read_file", description="read file")]

@@ -98,7 +98,9 @@ _PROBE_INTERACTIVES_DESC = (
     "search/input terms, including placeholders, aria labels, input type/name/id/class, and Chinese "
     "search text such as 搜索/关键词. Prefer max_items around 20-30 unless a larger inventory "
     "is needed. For product/search/listing card data, prefer browser_probe_cards first. "
-    "The result includes role/action_likelihood/text/aria-label/testid/bbox/selector_hint for likely controls."
+    "The result includes role/action_likelihood/text/aria-label/testid/bbox/selector_hint plus "
+    "match_count/visible/enabled/clickable/generation_id. Click only validated hints with "
+    "clickable=true."
 )
 _PROBE_INTERACTIVES_PARAMS: Dict[str, Any] = {
     "type": "object",
@@ -125,7 +127,9 @@ _PROBE_CARDS_DESC = (
     "article-list pages, table/list-row result pages, or any page with repeated visible cards/listings. "
     "The result includes candidate card title, author/source, summary/snippet, price, rating, "
     "review count, availability, primary link, visible buttons, bbox, selector_hint, "
-    "recurring structure signatures, and cache diagnostics. If this returns the fields needed "
+    "match_count/visible/enabled/clickable/generation_id, recurring structure signatures, and "
+    "cache diagnostics. Navigate primary_link/href directly instead of clicking a card hint. "
+    "If this returns the fields needed "
     "for the task, including article/search-result title/link/author/source/summary fields, "
     "use the compact card result directly instead of taking screenshots/snapshots or running "
     "broad DOM evaluation. Only evaluate again when a required field is missing."
@@ -170,15 +174,42 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
             "description": (
                 "Ordered browser steps to execute in one batch. Supported ops: click, fill, type, "
                 "autocomplete, select_visible_text, press, select_option, set_checked, "
-                "wait_for_selector, wait_for_text, wait_for_load_state, sleep, extract_text, "
+                "wait_for_selector, wait_for_text, wait_for_load_state, wait_for_url, "
+                "wait_for_first_card_title, wait_for_sort_state, wait_for_result_count, "
+                "wait_for_dom_text_change, wait_for_stable, sleep, extract_text, "
                 "extract_value, screenshot."
             ),
+            "minItems": 2,
+            "maxItems": 25,
             "items": {
                 "type": "object",
                 "properties": {
                     "op": {
                         "type": "string",
                         "description": "Step operation name.",
+                        "enum": [
+                            "click",
+                            "fill",
+                            "type",
+                            "autocomplete",
+                            "select_visible_text",
+                            "press",
+                            "select_option",
+                            "set_checked",
+                            "wait_for_selector",
+                            "wait_for_text",
+                            "wait_for_load_state",
+                            "wait_for_url",
+                            "wait_for_first_card_title",
+                            "wait_for_sort_state",
+                            "wait_for_result_count",
+                            "wait_for_dom_text_change",
+                            "wait_for_stable",
+                            "sleep",
+                            "extract_text",
+                            "extract_value",
+                            "screenshot",
+                        ],
                     },
                     "selector": {
                         "type": "string",
@@ -287,6 +318,62 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                             "visible/attached/domcontentloaded."
                         ),
                     },
+                    "url": {
+                        "type": "string",
+                        "description": "Exact URL expected by wait_for_url.",
+                    },
+                    "expected_url": {
+                        "type": "string",
+                        "description": "Alias for the exact URL expected by wait_for_url.",
+                    },
+                    "url_contains": {
+                        "type": "string",
+                        "description": "URL substring expected by wait_for_url.",
+                    },
+                    "url_pattern": {
+                        "type": "string",
+                        "description": "Regular expression expected to match the current URL.",
+                    },
+                    "expected_text": {
+                        "type": "string",
+                        "description": "Expected first-card title text.",
+                    },
+                    "attribute": {
+                        "type": "string",
+                        "description": "Attribute inspected by wait_for_sort_state; defaults to aria-sort.",
+                    },
+                    "expected_value": {
+                        "type": "string",
+                        "description": "Expected attribute or text value for a wait condition.",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Exact result count expected.",
+                    },
+                    "min_count": {
+                        "type": "integer",
+                        "description": "Minimum result count expected.",
+                    },
+                    "max_count": {
+                        "type": "integer",
+                        "description": "Maximum result count expected.",
+                    },
+                    "previous_text": {
+                        "type": "string",
+                        "description": "Previous DOM text used by wait_for_dom_text_change.",
+                    },
+                    "poll_interval_ms": {
+                        "type": "integer",
+                        "description": "Condition polling interval, clamped to 50..1000ms; default 100ms.",
+                    },
+                    "stable_ms": {
+                        "type": "integer",
+                        "description": "How long a matched value must remain unchanged.",
+                    },
+                    "field": {
+                        "type": "string",
+                        "description": "Structured output field name for extraction steps.",
+                    },
                     "exact": {
                         "type": "boolean",
                         "description": "Use exact matching for role/label/text locators.",
@@ -340,7 +427,14 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
         "timeout_ms": {
             "type": "integer",
             "description": (
-                "Default per-step timeout in milliseconds. Default 5000, clamped to 250..30000."
+                "Default per-step timeout in milliseconds. Default 2500, clamped to 250..30000."
+            ),
+        },
+        "condition_timeout_ms": {
+            "type": "integer",
+            "description": (
+                "Default timeout for condition waits in milliseconds. "
+                "Default 10000, clamped to the action timeout..30000."
             ),
         },
         "wait_after_each_ms": {
@@ -355,7 +449,7 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
             "type": "integer",
             "description": (
                 "Hard timeout for the whole batch. Default is computed from step count, capped at "
-                "90000."
+                "120000; explicit values are capped at 180000."
             ),
         },
         "session_id": {
@@ -646,6 +740,7 @@ class BrowserBatchInteractTool(Tool):
             result = await self._runtime.batch_interact(
                 steps=steps,
                 timeout_ms=inputs.get("timeout_ms"),
+                condition_timeout_ms=inputs.get("condition_timeout_ms"),
                 wait_after_each_ms=inputs.get("wait_after_each_ms"),
                 continue_on_error=bool(inputs.get("continue_on_error", False)),
                 global_timeout_ms=inputs.get("global_timeout_ms"),

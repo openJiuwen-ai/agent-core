@@ -459,7 +459,7 @@ class BrowserService:
         kill_existing = kill_existing_raw in {"1", "true", "yes", "on"}
 
         driver = ManagedBrowserDriver(profile=profile)
-        endpoint = await asyncio.to_thread(driver.start, 20.0, kill_existing)
+        endpoint = await asyncio.to_thread(driver.start, 30.0, kill_existing)
         self._inject_cdp_endpoint(endpoint)
         profile.cdp_url = endpoint
         self._profile_store.upsert_profile(profile, select=True)
@@ -1362,6 +1362,9 @@ class BrowserService:
         sid = self.session_new(session_id)
         rid = (request_id or "").strip() or uuid.uuid4().hex
         effective_timeout = int(timeout_s) if (timeout_s is not None and timeout_s > 0) else self.guardrails.timeout_s
+        timeout_deadline = (
+            asyncio.get_running_loop().time() + float(effective_timeout)
+        )
         attempts = 2 if self.guardrails.retry_once else 1
         base_task = (task or "").strip()
         previous_failure_summary = self._failure_context_by_session.get(sid, "")
@@ -1396,10 +1399,16 @@ class BrowserService:
                 last_failure_page: Dict[str, Any] = {}
                 last_failure_screenshot: Any = None
                 while attempt_idx < max_attempts:
+                    remaining_timeout = (
+                        timeout_deadline - asyncio.get_running_loop().time()
+                    )
+                    if remaining_timeout <= 0:
+                        last_error = f"task_timeout: exceeded {effective_timeout}s"
+                        break
                     try:
                         parsed = await asyncio.wait_for(
                             self.run_task_once(task=next_task, session_id=sid, request_id=rid),
-                            timeout=float(effective_timeout),
+                            timeout=remaining_timeout,
                         )
                         attempt_idx += 1
                         self._update_progress_from_worker_result(
@@ -1498,7 +1507,10 @@ class BrowserService:
                     except TimeoutError:
                         attempt_idx += 1
                         last_error = f"task_timeout: exceeded {effective_timeout}s"
-                        if attempt_idx >= attempts:
+                        if (
+                            attempt_idx >= attempts
+                            or asyncio.get_running_loop().time() >= timeout_deadline
+                        ):
                             break
                     except asyncio.CancelledError:
                         await self.clear_cancel(sid, rid)

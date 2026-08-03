@@ -26,6 +26,8 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_tools impo
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     DEFAULT_BROWSER_TIMEOUT_S,
+    DEFAULT_GUARDRAIL_MAX_FAILURES,
+    DEFAULT_GUARDRAIL_MAX_STEPS,
     DEFAULT_MODEL_NAME,
     BrowserInstanceConfig,
     build_playwright_mcp_config,
@@ -74,6 +76,8 @@ def test_build_runtime_settings_uses_shared_defaults() -> None:
         assert settings.api_key == ""
         assert settings.api_base == "https://api.openai.com/v1"
         assert settings.model_name == DEFAULT_MODEL_NAME
+        assert settings.guardrails.max_steps == DEFAULT_GUARDRAIL_MAX_STEPS
+        assert settings.guardrails.max_failures == DEFAULT_GUARDRAIL_MAX_FAILURES
         assert settings.guardrails.timeout_s == DEFAULT_BROWSER_TIMEOUT_S
         assert settings.mcp_cfg.params["timeout_s"] == DEFAULT_BROWSER_TIMEOUT_S
 
