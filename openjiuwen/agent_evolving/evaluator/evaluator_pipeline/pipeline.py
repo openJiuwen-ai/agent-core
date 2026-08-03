@@ -486,8 +486,6 @@ class EvolutionPipeline:
         
         # Install uv (modern Python package manager) using pip to leverage mirror
         pip_install_lines.append('RUN python3 -m pip install --break-system-packages -i ${PIP_MIRROR} uv==0.9.7')
-        pip_install_lines.append('ENV EVOLUTION_AUTO_SCAN=true')
-        
         logger.info(f"  Using {install_mode} mode, packages: {packages}")
         
         lines = original_dockerfile_content.split('\n')
