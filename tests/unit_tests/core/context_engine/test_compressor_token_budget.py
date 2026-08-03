@@ -46,7 +46,7 @@ def test_shared_message_counter_falls_back_to_character_estimate(caplog):
         "TestProcessor",
     )
 
-    assert result == 4
+    assert result == 3
     assert "[TestProcessor] token_counter failed" in caplog.text
 
 

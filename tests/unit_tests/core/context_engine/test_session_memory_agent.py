@@ -189,7 +189,7 @@ async def test_session_memory_compressor_renders_committed_notes(tmp_path):
         _context_window_tokens=1,
     )
     messages = [
-        UserMessage(content="old", metadata={"context_message_id": "m1"}),
+        UserMessage(content="old context padding here", metadata={"context_message_id": "m1"}),
         UserMessage(content="new", metadata={"context_message_id": "m2"}),
     ]
     window = ContextWindow(context_messages=messages)

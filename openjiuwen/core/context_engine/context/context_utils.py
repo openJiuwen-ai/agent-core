@@ -593,13 +593,17 @@ class ContextUtils:
 
     @staticmethod
     def estimate_tokens(content: Any) -> int:
-        """估计内容的 token 数，使用字符数 // 3 的粗略估算。"""
+        """估计内容的 token 数，使用字符数 // 4 的粗略估算。
+
+        ``// 4`` 与 ``TiktokenCounter`` 自身 fallback 一致，且更接近真实
+        token 量级，可与按真实 context window 标定的阈值对齐。
+        """
         if isinstance(content, str):
-            return max(len(content) // 3, 1)
+            return max(len(content) // 4, 1)
         try:
-            return max(len(json.dumps(content, ensure_ascii=False)) // 3, 1)
+            return max(len(json.dumps(content, ensure_ascii=False)) // 4, 1)
         except (TypeError, ValueError):
-            return max(len(str(content)) // 3, 1)
+            return max(len(str(content)) // 4, 1)
 
     @staticmethod
     def estimate_message_tokens(message: BaseMessage) -> int:

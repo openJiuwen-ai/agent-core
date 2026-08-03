@@ -258,13 +258,17 @@ def collect_summary_indices(messages: List[BaseMessage], summary_marker: str) ->
 
 
 def estimate_content_tokens(content: Any) -> int:
-    """Approximate token count when no token counter is available."""
+    """Approximate token count when no token counter is available.
+
+    Uses ``len // 4`` to mirror ``TiktokenCounter``'s own fallback and align
+    with thresholds scaled to real context-window token counts.
+    """
     if isinstance(content, str):
-        return len(content) // 3
+        return len(content) // 4
     try:
-        return len(json.dumps(content, ensure_ascii=False)) // 3
+        return len(json.dumps(content, ensure_ascii=False)) // 4
     except TypeError:
-        return len(str(content)) // 3
+        return len(str(content)) // 4
 
 
 def count_messages_tokens(messages: List[BaseMessage], token_counter, processor_type: str = "") -> int:

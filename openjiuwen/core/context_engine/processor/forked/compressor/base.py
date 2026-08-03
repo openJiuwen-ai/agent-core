@@ -646,7 +646,7 @@ class PrefixCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _estimate_text_tokens(text: str) -> int:
-        return max(len(text) // 3, 1) if text else 0
+        return max(len(text) // 4, 1) if text else 0
 
     def load_state(self, state: dict[str, Any]) -> None:
         return
