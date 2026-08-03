@@ -618,6 +618,22 @@ def build_system_prompt_text(messages: List[BaseMessage]) -> str:
     return first_message.content
 
 
+def _load_context_debug_writer():
+    """Lazy import the forked context-debug writer to avoid circular imports.
+
+    ``session_memory_manager`` is imported early by ``processor.base`` and the
+    forked subtree, so a top-level import of ``processor.forked.support.*
+    here would cycle. Resolve it at call time instead.
+    """
+    try:
+        from openjiuwen.core.context_engine.processor.forked.support.context_debug import (
+            write_debug_record,
+        )
+    except Exception:  # pragma: no cover - defensive
+        return None
+    return write_debug_record
+
+
 class SessionMemoryManager:
     def __init__(self, config: SessionMemoryConfig):
         self.config = config
@@ -746,6 +762,21 @@ class SessionMemoryManager:
                 self.config.update_trigger_context_ratio,
                 context_max,
             )
+            write_debug_record = _load_context_debug_writer()
+            if write_debug_record is not None:
+                write_debug_record(
+                    context,
+                    processor_type="SessionMemory",
+                    event="threshold_check",
+                    enabled=bool(getattr(self.config, "enable_debug_dump", False)),
+                    dump_dir=getattr(self.config, "debug_dump_dir", None),
+                    phase="should_update",
+                    total_tokens=current_tokens,
+                    context_max=context_max,
+                    threshold=threshold,
+                    hit=False,
+                    reason="below_threshold",
+                )
             return False
 
         runtime = self._get_runtime_state(session)
@@ -773,6 +804,21 @@ class SessionMemoryManager:
             self.config.update_trigger_context_ratio,
             context_max,
         )
+        write_debug_record = _load_context_debug_writer()
+        if write_debug_record is not None:
+            write_debug_record(
+                context,
+                processor_type="SessionMemory",
+                event="threshold_check",
+                enabled=bool(getattr(self.config, "enable_debug_dump", False)),
+                dump_dir=getattr(self.config, "debug_dump_dir", None),
+                phase="should_update",
+                total_tokens=current_tokens,
+                context_max=context_max,
+                threshold=threshold,
+                hit=True,
+                reason="reached_threshold",
+            )
         return True
 
     async def _update_background(

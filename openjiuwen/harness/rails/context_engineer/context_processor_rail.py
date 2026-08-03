@@ -192,6 +192,8 @@ class ContextProcessorRail(DeepAgentRail):
         self,
         model_config=None,
         model_client_config=None,
+        context_debug_enabled: bool = False,
+        context_debug_dir: str | None = None,
     ) -> List[Tuple[str, BaseModel]]:
         if model_config is not None:
             model_cfg = ModelRequestConfig.model_copy(model_config)
@@ -203,14 +205,24 @@ class ContextProcessorRail(DeepAgentRail):
         # The forked chain is the default preset. SessionMemoryCompressor ships
         # disabled: users opt in by overriding it with enabled=True, which also
         # starts the companion SessionMemoryManager (see init()).
+        # When the unified enable_context_debug flag is on, propagate it to every
+        # forked processor so threshold/span/retry/before-after records are all
+        # persisted to the same debug directory.
         presets: List[Tuple[str, BaseModel]] = [
             (
                 "MessageSummaryOffloader",
-                ForkedMessageSummaryOffloaderConfig(),
+                ForkedMessageSummaryOffloaderConfig(
+                    enable_debug_dump=context_debug_enabled,
+                    debug_dump_dir=context_debug_dir,
+                ),
             ),
             (
                 "SessionMemoryCompressor",
-                SessionMemoryCompressorConfig(enabled=False),
+                SessionMemoryCompressorConfig(
+                    enabled=False,
+                    enable_context_debug=context_debug_enabled,
+                    context_debug_dir=context_debug_dir,
+                ),
             ),
             (
                 "ReasoningToolLoopCompactProcessor",
@@ -218,15 +230,30 @@ class ContextProcessorRail(DeepAgentRail):
             ),
             (
                 "DialogueCompressor",
-                ForkedDialogueCompressorConfig(model=model_cfg, model_client=model_client_config),
+                ForkedDialogueCompressorConfig(
+                    model=model_cfg,
+                    model_client=model_client_config,
+                    enable_compression_dump=context_debug_enabled,
+                    compression_dump_dir=context_debug_dir,
+                ),
             ),
             (
                 "CurrentRoundCompressor",
-                ForkedCurrentRoundCompressorConfig(model=model_cfg, model_client=model_client_config),
+                ForkedCurrentRoundCompressorConfig(
+                    model=model_cfg,
+                    model_client=model_client_config,
+                    enable_compression_dump=context_debug_enabled,
+                    compression_dump_dir=context_debug_dir,
+                ),
             ),
             (
                 "RoundLevelCompressor",
-                ForkedRoundLevelCompressorConfig(model=model_cfg, model_client=model_client_config),
+                ForkedRoundLevelCompressorConfig(
+                    model=model_cfg,
+                    model_client=model_client_config,
+                    enable_compression_dump=context_debug_enabled,
+                    compression_dump_dir=context_debug_dir,
+                ),
             ),
         ]
         return presets
@@ -239,6 +266,11 @@ class ContextProcessorRail(DeepAgentRail):
 
         model_config = getattr(config, "model_config_obj", None)
         model_client_config = getattr(config, "model_client_config", None)
+        context_engine_config = getattr(config, "context_engine_config", None)
+        context_debug_enabled = bool(
+            getattr(context_engine_config, "enable_context_debug", False)
+        )
+        context_debug_dir = getattr(context_engine_config, "context_debug_dir", None)
 
         # The engine instantiates every processor in the final list regardless
         # of its ``enabled`` flag, so the forked implementations must be
@@ -254,7 +286,12 @@ class ContextProcessorRail(DeepAgentRail):
 
         if self._preset:
             all_processors = self._merge_processors(
-                self._build_preset_processors(model_config, model_client_config),
+                self._build_preset_processors(
+                    model_config,
+                    model_client_config,
+                    context_debug_enabled=context_debug_enabled,
+                    context_debug_dir=context_debug_dir,
+                ),
                 self._user_processors,
                 model_config=model_config,
                 model_client_config=model_client_config,

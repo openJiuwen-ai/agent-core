@@ -99,6 +99,18 @@ class MessageSummaryOffloader(ContextProcessor):
                     content_chars=len(message.content),
                     original_content=message.content,
                 )
+            else:
+                self._write_debug_log(
+                    context,
+                    event="threshold_check",
+                    pass_name="add",
+                    message=message,
+                    message_index=index,
+                    threshold_tokens=threshold_tokens,
+                    content_tokens=content_tokens,
+                    hit=False,
+                    reason="message_below_threshold",
+                )
         return triggered
 
     async def on_add_messages(

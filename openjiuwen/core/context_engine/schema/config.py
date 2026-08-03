@@ -77,6 +77,18 @@ class ContextEngineConfig(BaseModel):
     compression_recall_config : CompressionRecallConfig
         Context-wide policy for archiving source messages replaced by
         compression and making those archives available for recall.
+
+    enable_context_debug : bool, default False
+        Unified debug toggle for the forked context processors. When on,
+        processors persist JSONL records at each pipeline stage (threshold
+        checks, span splits, compression retries, before/after diffs) to
+        ``context_debug_dir`` so developers can quickly locate context
+        compression issues. Zero overhead when off.
+
+    context_debug_dir : str, optional
+        Directory for context-debug records. When None, falls back to the
+        ``OPENJIUWEN_CONTEXT_DEBUG_DIR`` env var, then to
+        ``{workspace}/context/{session_id}_context/context_debug/``.
     """
 
     max_context_message_num: Optional[int] = Field(default=None, gt=0)
@@ -92,3 +104,5 @@ class ContextEngineConfig(BaseModel):
     compression_recall_config: CompressionRecallConfig = Field(
         default_factory=CompressionRecallConfig,
     )
+    enable_context_debug: bool = Field(default=False)
+    context_debug_dir: Optional[str] = Field(default=None)
