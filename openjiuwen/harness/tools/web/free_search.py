@@ -34,6 +34,7 @@ from openjiuwen.harness.tools.web._common import (
     _FREE_SEARCH_DDG_ENABLED_ENV,
     _FREE_SEARCH_DEBUG_DIR_ENV,
     _FREE_SEARCH_DEBUG_ENV,
+    _JINA_READER_HEADERS,
     _contains_cjk,
     _decode_ddg_redirect,
     _decode_bing_redirect,
@@ -517,7 +518,7 @@ class WebFreeSearchTool(Tool):
             session,
             "GET",
             url,
-            headers=_search_request_headers(query),
+            headers=_JINA_READER_HEADERS,
             timeout_seconds=timeout_seconds,
         )
         _http.raise_for_status_with_body(status, body, engine="duckduckgo-jina")
