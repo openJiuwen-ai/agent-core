@@ -269,7 +269,7 @@ class PPOTrainingExecutor:
         if self.lora_repo:
             scores = [s.get("judge", {}).get("score", 0.0) for s in samples]
             avg_score = sum(scores) / len(scores) if scores else 0.0
-            version = self.lora_repo.publish(
+            version = self.lora_repo.publish_sync(
                 LoRAPublishRequest(
                     user_id=user_id,
                     lora_path=peft_dir,

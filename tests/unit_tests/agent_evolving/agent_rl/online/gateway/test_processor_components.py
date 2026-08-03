@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from openjiuwen.agent_evolving.agent_rl.online.gateway.app.server import (
     _forward_chat_completions,
     _inject_latest_lora,
+    _lora_to_response,
     build_gateway_app,
 )
 from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.judge_dispatcher import JudgeDispatcher
@@ -173,9 +174,7 @@ def test_inject_latest_lora_routes_by_model_name():
         "messages": [{"role": "user", "content": "hi"}],
         "extra_body": {"lora_name": "stale", "return_token_ids": True},
     }
-    repo = _FakeLoRARepo({
-        "user-1": SimpleNamespace(version="v3", path="/tmp/lora/v3", base_model="base-model")
-    })
+    repo = _FakeLoRARepo({"user-1": SimpleNamespace(version="v3", path="/tmp/lora/v3", base_model="base-model")})
 
     lora_info = _inject_latest_lora(
         body=body,
@@ -197,7 +196,7 @@ def test_inject_latest_lora_routes_by_model_name():
         "default_policy": "latest_by_user",
     }
     assert body["model"] == "user-1"
-    assert body["extra_body"] == {"return_token_ids": True}
+    assert body["extra_body"] == {"lora_name": "user-1", "return_token_ids": True}
 
 
 def test_inject_latest_lora_is_disabled_by_default():
@@ -227,18 +226,51 @@ def test_inject_latest_lora_leaves_base_model_without_adapter():
     assert body["model"] == "base-model"
 
 
+@pytest.mark.asyncio
+async def test_lora_response_fallback_uses_repository_size_calculator(tmp_path, monkeypatch):
+    from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
+
+    lora_dir = tmp_path / "adapter"
+    lora_dir.mkdir()
+    calls = []
+
+    def fake_path_size_bytes(path):
+        calls.append(path)
+        return 123
+
+    monkeypatch.setattr(LoRARepository, "path_size_bytes", staticmethod(fake_path_size_bytes))
+
+    response = await _lora_to_response(
+        SimpleNamespace(
+            user_id="user-1",
+            version="v1",
+            path=str(lora_dir),
+            base_model="base-model",
+            reward_avg=0.5,
+            trajectory_count=2,
+            created_at=SimpleNamespace(isoformat=lambda: "2026-01-01T00:00:00+00:00"),
+            size_bytes=0,
+        ),
+    )
+
+    assert calls == [lora_dir]
+    assert response["size_bytes"] == 123
+
+
 def test_effective_lora_api_hot_loads_latest_adapter():
     upstream = _FakeUpstreamClient(models=[])
     app = _build_test_gateway(
         upstream,
-        _FakeLoRARepo({
-            "user-1": SimpleNamespace(
-                user_id="user-1",
-                version="v3",
-                path="/tmp/lora/v3",
-                base_model="base-model",
-            )
-        }),
+        _FakeLoRARepo(
+            {
+                "user-1": SimpleNamespace(
+                    user_id="user-1",
+                    version="v3",
+                    path="/tmp/lora/v3",
+                    base_model="base-model",
+                )
+            }
+        ),
     )
 
     with TestClient(app) as client:
@@ -265,14 +297,16 @@ def test_effective_lora_api_skips_load_when_adapter_is_already_loaded():
     upstream = _FakeUpstreamClient(models=[{"id": "user-1", "root": "/tmp/lora/v3"}])
     app = _build_test_gateway(
         upstream,
-        _FakeLoRARepo({
-            "user-1": SimpleNamespace(
-                user_id="user-1",
-                version="v3",
-                path="/tmp/lora/v3",
-                base_model="base-model",
-            )
-        }),
+        _FakeLoRARepo(
+            {
+                "user-1": SimpleNamespace(
+                    user_id="user-1",
+                    version="v3",
+                    path="/tmp/lora/v3",
+                    base_model="base-model",
+                )
+            }
+        ),
     )
 
     with TestClient(app) as client:
@@ -292,14 +326,16 @@ def test_effective_lora_api_returns_disabled_when_hot_load_fails():
     upstream = _FakeUpstreamClient(models=[], load_response=_FakeResponse(status_code=500, text="boom"))
     app = _build_test_gateway(
         upstream,
-        _FakeLoRARepo({
-            "user-1": SimpleNamespace(
-                user_id="user-1",
-                version="v3",
-                path="/tmp/lora/v3",
-                base_model="base-model",
-            )
-        }),
+        _FakeLoRARepo(
+            {
+                "user-1": SimpleNamespace(
+                    user_id="user-1",
+                    version="v3",
+                    path="/tmp/lora/v3",
+                    base_model="base-model",
+                )
+            }
+        ),
     )
 
     with TestClient(app) as client:

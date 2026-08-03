@@ -75,7 +75,7 @@ async def test_forwarder_flattens_extra_body_for_vllm():
         {
             "model": "user-1",
             "messages": [{"role": "user", "content": "hi"}],
-            "extra_body": {"return_token_ids": True},
+            "extra_body": {"return_token_ids": True, "model": "wrong-model", "unknown_flag": True},
         },
         {},
     )
@@ -83,4 +83,5 @@ async def test_forwarder_flattens_extra_body_for_vllm():
     sent = upstream_client.calls[0]["json_body"]
     assert sent["model"] == "user-1"
     assert sent["return_token_ids"] is True
+    assert "unknown_flag" not in sent
     assert "extra_body" not in sent
