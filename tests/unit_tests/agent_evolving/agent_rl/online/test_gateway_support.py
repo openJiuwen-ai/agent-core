@@ -251,16 +251,23 @@ async def test_judge_scorer_retries_length_and_sanitizes_prompt():
 async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tmp_path: Path):
     from openjiuwen.agent_evolving.agent_rl.online.gateway.config import GatewayConfig
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory import GatewayTrajectoryRuntime
+    from openjiuwen.agent_evolving.agent_rl.storage.local_store import (
+        LocalPendingJudgeStore,
+        LocalTrajectoryStore,
+    )
 
-    redis = _FakeRedis()
+    store_dir = tmp_path / "local_store"
     runtime = GatewayTrajectoryRuntime(
         GatewayConfig(port=18080, model_id="dummy-model", record_dir=str(tmp_path)),
-        redis=redis,
+        trajectory_store=LocalTrajectoryStore(store_dir),
+        pending_judge_store=LocalPendingJudgeStore(store_dir),
     )
 
     await runtime.record_sample({"sample_id": "s1"})
 
-    assert redis._hashes["rl:traj:s1"]["user_id"] == "jiuwenclaw-web"
+    trajectory = await runtime.get_trajectory("s1")
+    assert trajectory is not None
+    assert trajectory["user_id"] == "jiuwenclaw-web"
     assert json.loads((tmp_path / "samples.jsonl").read_text(encoding="utf-8").strip())["user_id"] == "jiuwenclaw-web"
 
 

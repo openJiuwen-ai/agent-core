@@ -202,12 +202,12 @@ def run_online_rl_loop(
         log.info('  Gateway ready at %s', runtime.gateway_base_url)
 
         log.info(
-            '[3/5] Starting OnlineTrainingScheduler (PPO, threshold=%d, interval=%ds) ...',
+            '[3/5] Starting OnlineTrainingScheduler (PPO task-driven, min_samples=%d, interval=%ds) ...',
             cfg.training.threshold,
             cfg.training.scan_interval,
         )
         training_scheduler = start_online_training_scheduler(cfg=cfg, runtime=runtime)
-        log.info('  OnlineTrainingScheduler running (PPO, train GPU: [%s])', cfg.training.gpu_ids)
+        log.info('  OnlineTrainingScheduler running (task-driven PPO, train GPU: [%s])', cfg.training.gpu_ids)
 
         if not cfg.jiuwen.enabled:
             log.info('[4/5] Skip JiuwenClaw startup (jiuwen.enabled=false)')

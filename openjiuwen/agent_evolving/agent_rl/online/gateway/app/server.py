@@ -9,6 +9,8 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,7 +18,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 
 from .http_helpers import build_upstream_headers, ensure_gateway_auth, stream_chat_response
 from .request_context import require_messages, require_user_id, resolve_trace_id
@@ -24,6 +27,7 @@ from ...lora_runtime import build_lora_info, lora_id as build_lora_id
 from ..trajectory import GatewayTrajectoryRuntime
 from ..upstream import Forwarder, UpstreamGatewayClient
 from ....storage.lora_repo import LoRAPublishRequest
+from ....storage.training_task_store import TrainingTaskStore
 
 logger = logging.getLogger("online_rl.gateway")
 
@@ -82,6 +86,7 @@ async def _snapshot_stats(*, trajectory_runtime: GatewayTrajectoryRuntime, total
     return {
         "total_requests": total_requests,
         "total_samples": trajectory_stats["total_samples"],
+        "trajectory_store_backend": trajectory_stats["trajectory_store_backend"],
         "trajectory_store_total": trajectory_stats["trajectory_store_total"],
         "trajectory_store_pending": trajectory_stats["trajectory_store_pending"],
     }
@@ -192,6 +197,26 @@ def _lora_to_response(
     }
 
 
+def _build_lora_download_archive(lora_path: Path, *, lora_id: str) -> Path:
+    """Create a temporary zip archive for directory-backed LoRA adapters."""
+    if not lora_path.exists():
+        raise FileNotFoundError(str(lora_path))
+    if lora_path.is_file():
+        return lora_path
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="online_rl_lora_download_"))
+    archive_base = tmp_dir / lora_id.replace(":", "_")
+    archive_path = Path(shutil.make_archive(str(archive_base), "zip", root_dir=str(lora_path)))
+    return archive_path
+
+
+def _cleanup_download_archive(path: Path) -> None:
+    """Remove the temporary archive directory after FileResponse completes."""
+    tmp_dir = path.parent
+    if tmp_dir.name.startswith("online_rl_lora_download_"):
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def _require_lora_repo(lora_repo: Any) -> Any:
     if lora_repo is None:
         raise HTTPException(status_code=503, detail="LoRA repository is not configured")
@@ -204,6 +229,7 @@ def build_gateway_app(
     forwarder: Forwarder,
     upstream_client: UpstreamGatewayClient,
     trajectory_runtime: GatewayTrajectoryRuntime,
+    training_task_store: TrainingTaskStore | None = None,
     close_resources: Callable[[], Awaitable[None]],
     lora_repo: Any = None,
 ) -> FastAPI:
@@ -340,6 +366,63 @@ def build_gateway_app(
             trajectory_runtime=trajectory_runtime,
             total_requests=request_count,
         )
+
+    @app.post("/v1/training/tasks")
+    async def create_training_task(
+        payload: Optional[dict[str, Any]] = Body(default=None),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        await ensure_gateway_auth(config.gateway_api_key, authorization)
+        if training_task_store is None:
+            raise HTTPException(status_code=503, detail="training task store is not configured")
+        try:
+            return await training_task_store.create_task(payload or {})
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/v1/training/tasks")
+    async def list_training_tasks(
+        limit: int = Query(default=20),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        await ensure_gateway_auth(config.gateway_api_key, authorization)
+        if training_task_store is None:
+            raise HTTPException(status_code=503, detail="training task store is not configured")
+        return {"items": await training_task_store.list_tasks(limit=limit)}
+
+    @app.get("/v1/training/tasks/{task_id}")
+    async def get_training_task(
+        task_id: str,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        await ensure_gateway_auth(config.gateway_api_key, authorization)
+        if training_task_store is None:
+            raise HTTPException(status_code=503, detail="training task store is not configured")
+        task = await training_task_store.get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="training task not found")
+        return task
+
+    @app.patch("/v1/training/tasks/{task_id}")
+    async def patch_training_task(
+        task_id: str,
+        payload: Optional[dict[str, Any]] = Body(default=None),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        await ensure_gateway_auth(config.gateway_api_key, authorization)
+        if training_task_store is None:
+            raise HTTPException(status_code=503, detail="training task store is not configured")
+        payload = payload or {}
+        status = str(payload.get("status") or "").strip()
+        if status not in {"stopping", "canceled", "succeeded", "failed"}:
+            raise HTTPException(status_code=400, detail="status must be stopping/canceled/succeeded/failed")
+        if status == "stopping":
+            task = await training_task_store.request_stop(task_id)
+        else:
+            task = await training_task_store.update_task_status(task_id, status=status)
+        if task is None:
+            raise HTTPException(status_code=404, detail="training task not found")
+        return task
 
     @app.post("/v1/gateway/upload/batch")
     async def create_upload_batch(
@@ -537,16 +620,28 @@ def build_gateway_app(
     async def download_lora(
         lora_id: str,
         authorization: Optional[str] = Header(default=None),
-    ) -> dict[str, Any]:
+    ) -> FileResponse:
         await ensure_gateway_auth(config.gateway_api_key, authorization)
         repo = _require_lora_repo(lora_repo)
         user_id, version = _split_lora_id(lora_id)
         item = repo.get_version(user_id, version)
         if item is None:
             raise HTTPException(status_code=404, detail="LoRA not found")
-        # The first implementation returns local path metadata. File streaming or
-        # signed URLs are reserved for object-store based repos.
-        return await _lora_response(item, latest_version=(repo.get_latest(user_id) or item).version)
+        lora_path = Path(item.path)
+        try:
+            download_path = await asyncio.to_thread(_build_lora_download_archive, lora_path, lora_id=lora_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="LoRA path not found") from exc
+
+        filename = download_path.name if lora_path.is_file() else f"{lora_id.replace(':', '_')}.zip"
+        media_type = "application/octet-stream" if lora_path.is_file() else "application/zip"
+        background = None if lora_path.is_file() else BackgroundTask(_cleanup_download_archive, download_path)
+        return FileResponse(
+            path=str(download_path),
+            media_type=media_type,
+            filename=filename,
+            background=background,
+        )
 
     @app.get("/v1/rl/lora/{lora_id}")
     async def get_lora(

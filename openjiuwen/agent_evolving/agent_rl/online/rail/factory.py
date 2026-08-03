@@ -28,6 +28,7 @@ def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
     - ``USE_RL_ONLINE_RAIL`` — must be truthy to build (otherwise returns None without error).
     - ``TRAJECTORY_GATEWAY_URL`` — default ``http://127.0.0.1:18080``.
     - ``TRAJECTORY_GATEWAY_API_KEY`` — optional Bearer token for the gateway.
+    - ``TRAJECTORY_WAL_DIR`` — optional local WAL directory for failed async uploads.
     - ``RL_ONLINE_TENANT_ID`` — optional tenant / user namespace for LoRA routing.
     - ``LORA_DEFAULT_POLICY`` — optional; ``latest_by_user`` makes Rail ask the gateway for the
       effective LoRA. The gateway owns latest-version lookup and vLLM runtime loading.
@@ -48,11 +49,12 @@ def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
 
     gw = os.getenv("TRAJECTORY_GATEWAY_URL", "http://127.0.0.1:18080").rstrip("/")
     api_key = os.getenv("TRAJECTORY_GATEWAY_API_KEY", "") or ""
+    wal_dir = os.getenv("TRAJECTORY_WAL_DIR", "records/rail_v1_wal").strip() or "records/rail_v1_wal"
     tenant_raw = os.getenv("RL_ONLINE_TENANT_ID", "").strip()
     tenant_id: str | None = tenant_raw or None
     lora_default_policy = os.getenv("LORA_DEFAULT_POLICY", "disabled").strip() or "disabled"
 
-    uploader = TrajectoryUploader(gw, api_key=api_key)
+    uploader = TrajectoryUploader(gw, api_key=api_key, wal_dir=wal_dir)
     rail = RLOnlineRail(
         session_id="",
         gateway_endpoint=gw,

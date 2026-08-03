@@ -182,7 +182,11 @@ def start_gateway(
     env['GATEWAY_HOST'] = gateway_cfg.host
     env['GATEWAY_PORT'] = str(gateway_cfg.port)
     env['RECORD_DIR'] = gateway_cfg.record_dir
-    env['REDIS_URL'] = gateway_cfg.redis_url
+    if gateway_cfg.redis_url:
+        env['REDIS_URL'] = gateway_cfg.redis_url
+    env['TRAJECTORY_STORE_BACKEND'] = gateway_cfg.trajectory_store_backend
+    if gateway_cfg.local_trajectory_store_dir:
+        env['LOCAL_TRAJECTORY_STORE_DIR'] = gateway_cfg.local_trajectory_store_dir
     env['LORA_DEFAULT_POLICY'] = gateway_cfg.lora_default_policy
     if lora_repo_root:
         env['LORA_REPO_ROOT'] = lora_repo_root
@@ -217,14 +221,17 @@ def start_online_training_scheduler(
     cfg: OnlineRLConfig,
     runtime: LaunchRuntime,
 ):
-    """Start the OnlineTrainingScheduler that polls RedisTrajectoryStore."""
+    """Start the OnlineTrainingScheduler that polls the configured trajectory store."""
     from openjiuwen.agent_evolving.agent_rl.online.inference.notifier import InferenceNotifier
     from openjiuwen.agent_evolving.agent_rl.online.scheduler.online_training_scheduler import OnlineTrainingScheduler
     from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
 
     train_gpu_count = len([gpu for gpu in cfg.training.gpu_ids.split(',') if gpu.strip()]) or 1
     scheduler = OnlineTrainingScheduler(
-        redis_url=cfg.gateway.redis_url,
+        redis_url=cfg.gateway.redis_url or "",
+        trajectory_store_backend=cfg.gateway.trajectory_store_backend,
+        local_trajectory_store_dir=cfg.gateway.local_trajectory_store_dir,
+        record_dir=cfg.gateway.record_dir,
         poll_interval=float(cfg.training.scan_interval),
         min_samples_for_training=cfg.training.threshold,
         base_model_path=cfg.inference.model_path,
@@ -365,11 +372,14 @@ def print_launch_summary(
         lines.append(f'  JiuwenClaw WS:   ws://{ws_display_host}:{cfg.jiuwen.ws_port}/ws')
     else:
         lines.append('  JiuwenClaw:      skipped (jiuwen.enabled=false)')
+    local_store_dir = cfg.gateway.local_trajectory_store_dir or str(Path(cfg.gateway.record_dir) / "local_store")
     lines.extend([
         f'  vLLM Inference:  {runtime.inference_url}',
         f'  vLLM Judge:      {runtime.judge_url} ({runtime.judge_label})',
         f'  Gateway proxy:   {runtime.gateway_base_url}',
-        f'  Redis store:     {cfg.gateway.redis_url}',
+        f'  Store backend:   {cfg.gateway.trajectory_store_backend}',
+        f'  Redis store:     {cfg.gateway.redis_url or "disabled"}',
+        f'  Local store:     {local_store_dir}',
         f'  Trajectory mode: {cfg.trajectory.mode}',
         f'  Trajectory log:  {cfg.gateway.record_dir}/ (JSONL, per-turn)',
         f'  LoRA repo:       {runtime.lora_repo}',
@@ -393,7 +403,8 @@ def print_launch_summary(
     lines.extend([
         '  Each turn auto-records token_ids + logprobs,',
         '  next turn triggers delayed Judge scoring,',
-        '  when pending trajectories reach threshold, PPO LoRA training auto-triggers.',
+        '  training task API: POST /v1/training/tasks',
+        '  training is started by POST /v1/training/tasks, then scheduler consumes pending trajectories.',
         '  Press Ctrl+C to stop all services.',
         '=' * 60,
     ])
