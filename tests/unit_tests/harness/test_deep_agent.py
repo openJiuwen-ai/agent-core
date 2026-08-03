@@ -923,7 +923,7 @@ async def test_create_deep_agent_skips_incomplete_vision_tools(
     await agent.ensure_initialized()
 
     assert agent.deep_config.enable_read_image_multimodal is True
-    _mock_image_modality_probe.assert_not_awaited()
+    _mock_image_modality_probe.assert_not_called()
 
 
 def test_create_deep_agent_skips_free_search_when_all_free_engines_disabled(monkeypatch) -> None:
