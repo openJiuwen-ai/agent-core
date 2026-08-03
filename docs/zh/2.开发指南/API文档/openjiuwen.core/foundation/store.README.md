@@ -16,6 +16,10 @@
 | **DbBasedKVStore** | 基于数据库的KV存储实现。 |
 | **DefaultDbStore** | 默认数据库存储实现。 |
 | **AioBotoClient** | 基于 aioboto3 的异步 S3 客户端实现。 |
+| **BaseMemoryIndex** | 记忆索引抽象基类（增删改查、按用户/作用域批量删除、语义检索、备份与版本管理）。 |
+| **MemoryDoc** | 记忆文档数据模型（id/text/type/timestamp/扩展字段）。 |
+| **StorageCodec** | 记忆文本编解码协议（encode/decode，如加解密）。 |
+| **SimpleMemoryIndex** | 基于 KV + 向量存储的记忆索引实现，**已弃用**，仅兼容旧版数据。 |
 
 **函数与常量**：
 
@@ -26,6 +30,12 @@
 | **VECTOR_STORE_ENTRY_POINT_GROUP** | 第三方向量存储插件所需的 Python entry_points group 名，稳定公共常量。 |
 
 > 第三方插件开发指引见[插件开发-存储后端](../../高阶用法/插件开发-存储后端.md)。
+
+**memory index**（记忆索引）：
+
+| 文档 | DESCRIPTION |
+|------|-------------|
+| [memory_index.md](./store/memory_index.md) | `BaseMemoryIndex` 抽象基类、`MemoryDoc` 数据模型、`StorageCodec` 编解码协议与弃用实现 `SimpleMemoryIndex`（旧版 KV + 向量数据布局）。 |
 
 **graph**（图存储）：
 
