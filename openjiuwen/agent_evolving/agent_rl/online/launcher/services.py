@@ -183,6 +183,7 @@ def start_gateway(
     env['GATEWAY_PORT'] = str(gateway_cfg.port)
     env['RECORD_DIR'] = gateway_cfg.record_dir
     env['REDIS_URL'] = gateway_cfg.redis_url
+    env['LORA_DEFAULT_POLICY'] = gateway_cfg.lora_default_policy
     if lora_repo_root:
         env['LORA_REPO_ROOT'] = lora_repo_root
     if gateway_cfg.disable_trajectory_collection:
@@ -232,6 +233,10 @@ def start_online_training_scheduler(
         nproc_per_node=train_gpu_count,
         training_gpu_ids=cfg.training.gpu_ids,
         ppo_config_path=cfg.training.ppo_config,
+        drain_pending_on_train=cfg.training.drain_pending_on_train,
+        max_samples_per_run=cfg.training.max_samples_per_run,
+        ppo_samples_per_step=cfg.training.ppo_samples_per_step,
+        allow_partial_last_step=cfg.training.allow_partial_last_step,
     )
     scheduler.start()
     return scheduler
@@ -249,6 +254,8 @@ def start_jiuwenclaw(
     ws_port: int,
     web_host: str,
     web_port: int,
+    lora_repo_root: str = "",
+    lora_default_policy: str = "disabled",
 ) -> tuple[subprocess.Popen, subprocess.Popen | None]:
     """Start JiuwenClaw app + web frontend (if dist exists)."""
     env = os.environ.copy()
@@ -271,6 +278,9 @@ def start_jiuwenclaw(
             trajectory_tenant_id=trajectory_tenant_id,
         )
     )
+    if lora_repo_root:
+        env['LORA_REPO_ROOT'] = lora_repo_root
+    env['LORA_DEFAULT_POLICY'] = lora_default_policy
     env['WEB_HOST'] = app_host
     env['WEB_PORT'] = str(ws_port)
 
@@ -364,6 +374,9 @@ def print_launch_summary(
         f'  Trajectory log:  {cfg.gateway.record_dir}/ (JSONL, per-turn)',
         f'  LoRA repo:       {runtime.lora_repo}',
         f'  Train threshold: {cfg.training.threshold} samples',
+        f'  Drain pending:   {cfg.training.drain_pending_on_train}',
+        f'  Max/run:         {cfg.training.max_samples_per_run or "unlimited"} samples',
+        f'  PPO step size:   {cfg.training.ppo_samples_per_step or "all claimed"} samples',
         f'  Collect batch:   {cfg.trajectory.batch_size}',
         f'  Scan interval:   {cfg.training.scan_interval}s',
         f'  Training mode:   PPO (Ray)',
