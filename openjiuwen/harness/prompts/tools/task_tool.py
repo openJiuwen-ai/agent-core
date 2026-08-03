@@ -193,6 +193,14 @@ TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
         "cn": "任务描述（必填，需包含完整上下文）",
         "en": "Required task description with full context for the subagent",
     },
+    "thinking": {
+        "cn": "深度思考控制（可选）：default|off|on。"
+              "除非任务上下文明确要求开启或关闭思考，否则一律填 default。"
+              "留空等同于 default。",
+        "en": "Optional thinking control: default|off|on. "
+              "Unless the task explicitly requires enabling or disabling "
+              "thinking, always use default. Empty means default.",
+    },
     "browser_capabilities": {
         "cn": "浏览器子代理所需的额外能力类别列表；仅使用核心能力时传入空列表",
         "en": "Additional capability categories required by browser_agent; use an empty list for core-only tasks",
@@ -220,6 +228,10 @@ def get_task_tool_input_params(language: str = "cn") -> Dict[str, Any]:
             "task_description": {
                 "type": "string",
                 "description": p["task_description"].get(language, p["task_description"]["cn"]),
+            },
+            "thinking": {
+                "type": "string",
+                "description": p["thinking"].get(language, p["thinking"]["cn"]),
             },
             "browser_capabilities": {
                 "type": "array",
