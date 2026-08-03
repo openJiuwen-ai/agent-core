@@ -974,7 +974,7 @@ def _build_ext_acceptance_test_prompt(
         "  from openjiuwen.core.single_agent.schema.agent_card import AgentCard\n"
         "  agent = DeepAgent(AgentCard(name='test_agent', description='test')).configure(\n"
         "    DeepAgentConfig(enable_task_loop=False))\n"
-        "  record = await agent.load_expert_harness(config_path)\n"
+        "  record = await agent.load_plugin(config_path)\n"
         "  labels = [f'{ref.kind.value}:{ref.identity}' for ref in record.refs]\n"
         "  ```\n"
         "  断言:\n"
@@ -983,7 +983,7 @@ def _build_ext_acceptance_test_prompt(
         "  - 每个 tool 在 labels 中有 tool:<tool_id_or_name>\n"
         "  - ToolCard 出现在 agent.ability_manager.list()\n"
         "  - 每个 skill 在 labels 中有 skill:<resolved_path>，且目录被追加到 SkillUseRail\n"
-        "  建议测试: test_load_expert_harness, test_tools_registered\n\n"
+        "  建议测试: test_load_plugin, test_tools_registered\n\n"
 
         "L3 运行时验收:\n"
         "  Tool 验收:\n"
@@ -1125,7 +1125,7 @@ def _build_ext_acceptance_fix_prompt(
         "  - skill_manifest_invalid: 检查 SKILL.md frontmatter name/description\n\n"
 
         "L2 热加载类:\n"
-        "  - harness_load_failed: 检查 harness_config.yaml 格式 + DeepAgent.load_expert_harness 路径\n"
+        "  - harness_load_failed: 检查 harness_config.yaml 格式 + DeepAgent.load_plugin 路径\n"
         "  - rail_not_registered: 检查 LoadRecord.refs 包含 rail:<ClassName>\n"
         "  - tool_not_registered: 检查 ToolCard 在 ability_manager.list() 返回的Ability中\n"
         "  - skill_not_loaded: 检查 skills.dirs 被追加到 SkillUseRail\n\n"
