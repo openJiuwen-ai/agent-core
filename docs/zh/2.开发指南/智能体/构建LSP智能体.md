@@ -68,10 +68,10 @@ uv run python examples/lsp/deep_agent_lsp_demo.py
 
 | 生命周期事件 | `LspRail` 的行为 |
 |---|---|
-| `init()` — 智能体启动 | 初始化 `LSPServerManager`；向智能体的 `ability_manager` 注册 `LspTool` |
+| `init()` — 智能体启动 | 解析 LSP 选项；向智能体的 `ability_manager` 注册 `LspTool` |
 | 智能体运行中 | LLM 可自由调用 `lsp` 工具；语言服务器在首次请求时按需启动；`publishDiagnostics` 通知被缓冲到 `LspDiagnosticRegistry` |
 | `after_tool_call` — `edit_file` / `write_file` 执行后 | 向语言服务器发送 `textDocument/didChange`，触发对修改文件的重新分析；新诊断以异步方式（fire-and-forget）缓冲 |
-| `before_model_call` — 每次 LLM 调用前 | 消费缓冲的诊断信息，将其作为 `UserMessage` 注入消息列表，使 LLM 无需显式调用任何诊断工具即可感知错误 |
+| `before_model_call` — 每次 LLM 调用前 | 在首次 LLM 调用前异步初始化 `LSPServerManager`，随后消费缓冲的诊断信息并将其作为 `UserMessage` 注入消息列表，使 LLM 无需显式调用任何诊断工具即可感知错误 |
 | `uninit()` — 智能体停止 | 移除 `LspTool`；关闭所有语言服务器进程 |
 
 智能体只会看到一个名为 `lsp` 的工具。工具的描述及完整的操作 Schema 会自动注入到系统提示词中，无需手动描述。
