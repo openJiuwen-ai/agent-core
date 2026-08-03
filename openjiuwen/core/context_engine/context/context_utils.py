@@ -111,7 +111,7 @@ MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     "gemini-2.5-flash-lite": 1048576,
     # Meta Llama
     "llama-4-maverick": 1048576,
-    "llama-4-scout": 1310720,
+    "llama-4-scout": 10000000,  # 10M context window (Meta official spec)
     # Qwen
     "qwen3.7-max": 1000000,
     "qwen3.7-plus": 1000000,
