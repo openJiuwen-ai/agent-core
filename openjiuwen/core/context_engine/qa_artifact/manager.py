@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
@@ -1182,11 +1183,20 @@ class QAArtifactManager:
         context: Any,
         fallback: Any,
         trigger_total_tokens: int | None = None,
+        count_full_window_tokens: Callable[[], int] | None = None,
     ) -> bool:
         store = self.build_store(ctx, workspace)
         est = total_tokens
         token_counter = context.token_counter() if hasattr(context, "token_counter") else None
-        trigger_line = trigger_total_tokens or self._config.full_compact_target_tokens
+        trigger_line = (
+            trigger_total_tokens if trigger_total_tokens is not None
+            else self._config.full_compact_target_tokens
+        )
+
+        def _recount() -> int:
+            if count_full_window_tokens is not None:
+                return count_full_window_tokens()
+            return estimate_context_messages_tokens(context.get_messages(), token_counter)
 
         safety_reduced = await self._safety_net_compact_active_once(
             ctx,
@@ -1195,7 +1205,7 @@ class QAArtifactManager:
             context=context,
         )
         if safety_reduced > 0:
-            est = estimate_context_messages_tokens(context.get_messages(), token_counter)
+            est = _recount()
             if est <= self._config.full_compact_target_tokens:
                 logger.info(
                     "[QAArtifactManager] compact_to_target reached target after safety net est=%s",
@@ -1250,7 +1260,7 @@ class QAArtifactManager:
                     state.products_ready = False
                     store.save(qa_ref.qa_id, state)
             if reduced == 0:
-                msg_est = estimate_context_messages_tokens(context.get_messages(), token_counter)
+                msg_est = _recount()
                 if msg_est <= self._config.full_compact_target_tokens:
                     logger.info(
                         "[QAArtifactManager] compact_to_target zero progress but at target est=%s",
@@ -1263,9 +1273,9 @@ class QAArtifactManager:
                         msg_est,
                     )
                     return True
-                logger.info("[QAArtifactManager] compact_to_target zero progress, fallback")
+                logger.info("[QAArtifactManager] compact_to_target zero progress, fallback est=%s", msg_est)
                 return await fallback()
-            est = estimate_context_messages_tokens(context.get_messages(), token_counter)
+            est = _recount()
             if est <= self._config.full_compact_target_tokens:
                 logger.info("[QAArtifactManager] compact_to_target reached target est=%s", est)
                 write_context_trace(

@@ -612,6 +612,9 @@ class FullCompactProcessor(ContextProcessor):
                 context=context,
                 fallback=_fallback,
                 trigger_total_tokens=self._trigger_total_tokens,
+                count_full_window_tokens=lambda: self._count_context_window_tokens(
+                    system_messages, context.get_messages(), tools, context,
+                ),
             )
             if handled:
                 write_context_trace(
