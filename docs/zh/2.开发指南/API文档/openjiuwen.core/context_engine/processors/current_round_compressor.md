@@ -1,12 +1,12 @@
-# openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor
+# openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor
 
-## class openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor.RoundLevelCompressorConfig
+## class openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor.CurrentRoundCompressorConfig
 
-`RoundLevelCompressor` 的配置类。当上下文 token 数达到上下文容量的一定比例时，仅保留最近 `keep_recent_messages` 条消息，将更早的全部历史消息经 LLM 压缩为一条 `<memory_block_round>` 跨轮检查点摘要消息。
+`CurrentRoundCompressor` 的配置类。当上下文 token 数达到上下文容量的一定比例时，将「当前轮」内已经完成的工作（最后一条真实用户消息之后产生的推理、工具调用与工具结果等消息）经 LLM 压缩为一条 `<memory_block_current>` 摘要消息，用户请求本身保留不动。
 
 * **trigger_context_ratio**(float，可选)：上下文 token 数占上下文容量的比例达到该值时触发压缩。取值范围 (0, 1)。默认值：`0.8`。
-* **keep_recent_messages**(int，可选)：压缩时保留的最新消息条数。默认值：`4`。
 * **min_target_context_ratio**(float，可选)：可压缩消息的 token 数低于上下文容量的该比例时跳过本次压缩。取值范围 [0, 1)。默认值：`0.1`。
+* **keep_recent_messages**(int，可选)：压缩时在当前轮尾部保留的最新消息条数。默认值：`0`。
 * **model**(ModelRequestConfig | None，可选)：用于执行压缩的模型请求配置。默认值：`None`。
 * **model_client**(ModelClientConfig | None，可选)：用于执行压缩的模型服务配置。默认值：`None`。
 * **enable_compression_dump**(bool，可选)：是否将每次真实压缩的请求与压缩后上下文落盘，用于离线效果分析。默认值：`False`。
@@ -14,17 +14,17 @@
 
 **约束**：`model` 与 `model_client` 必须同时配置，否则该处理器永远不会触发。保留消息边界会自动向前扩展，保证 tool call 与其 tool 结果不被拆散。
 
-## class openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor.RoundLevelCompressor
+## class openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor.CurrentRoundCompressor
 
 ```python
-RoundLevelCompressor(config: RoundLevelCompressorConfig)
+CurrentRoundCompressor(config: CurrentRoundCompressorConfig)
 ```
 
-`RoundLevelCompressor` 继承自 [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor)，在获取上下文窗口时判断上下文 token 数是否达到 `trigger_context_ratio`，若是则将最近 `keep_recent_messages` 条之外的历史消息压缩为一条跨轮检查点摘要（可包含长期项目状态、历史决策、当前目标、已完成与未完成的工作等），并在摘要中附带含义说明与冲突处理策略。接口与基类一致，详见 [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor)。
+`CurrentRoundCompressor` 继承自 [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor)，在获取上下文窗口时判断上下文 token 数是否达到 `trigger_context_ratio`，若是则将当前轮内已完成的工作压缩为一条摘要消息，用于恢复已完成的分析、工具调用、代码改动、测试结果与后续步骤；最后一条真实用户消息及其之前的内容作为保留前缀不受压缩影响。接口与基类一致，详见 [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor)。
 
 **参数**：
 
-* **config**(RoundLevelCompressorConfig)：处理器配置，见上文。
+* **config**(CurrentRoundCompressorConfig)：处理器配置，见上文。
 
 **样例**：
 
@@ -33,13 +33,14 @@ RoundLevelCompressor(config: RoundLevelCompressorConfig)
 >>> import asyncio
 >>> from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 >>> from openjiuwen.core.context_engine.processor import forked
->>> from openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor import (
-...     RoundLevelCompressor,
-...     RoundLevelCompressorConfig,
+>>> from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
+...     CurrentRoundCompressor,
+...     CurrentRoundCompressorConfig,
 ... )
 >>> from openjiuwen.core.foundation.llm import (
 ...     UserMessage,
 ...     AssistantMessage,
+...     ToolMessage,
 ...     ModelRequestConfig,
 ...     ModelClientConfig,
 ... )
@@ -56,9 +57,9 @@ RoundLevelCompressor(config: RoundLevelCompressorConfig)
 ...         api_base=API_BASE,
 ...         api_key=API_KEY,
 ...     )
-...     compressor_config = RoundLevelCompressorConfig(
+...     compressor_config = CurrentRoundCompressorConfig(
 ...         trigger_context_ratio=0.8,
-...         keep_recent_messages=4,
+...         keep_recent_messages=2,
 ...         model=model_config,
 ...         model_client=model_client_config,
 ...     )
@@ -69,16 +70,17 @@ RoundLevelCompressor(config: RoundLevelCompressorConfig)
 ...         "demo_ctx",
 ...         None,
 ...         history_messages=[],
-...         processors=[("RoundLevelCompressor", compressor_config)],
+...         processors=[("CurrentRoundCompressor", compressor_config)],
 ...     )
-...     rounds = []
-...     for i in range(4):
-...         rounds.append(UserMessage(content=f"用户第{i}轮提问"))
-...         rounds.append(AssistantMessage(content=f"助手第{i}轮回复"))
-...     await ctx.add_messages(rounds)
+...     await ctx.add_messages([
+...         UserMessage(content="帮我修复这个报错"),
+...         AssistantMessage(content="", tool_calls=[{"id": "1", "name": "read_file", "type": "function", "arguments": "{}"}]),
+...         ToolMessage(content="文件内容……", tool_call_id="1"),
+...         AssistantMessage(content="已定位问题，正在修复。"),
+...     ])
 ...     # 消息量未达到 trigger_context_ratio，不发生压缩
 ...     return len(ctx.get_messages())
 >>>
 >>> asyncio.run(main())
-8
+4
 ```

@@ -1,12 +1,12 @@
-# openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor
+# openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor
 
-## class openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor.RoundLevelCompressorConfig
+## class openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor.CurrentRoundCompressorConfig
 
-Configuration class for `RoundLevelCompressor`. When the context token count reaches a given ratio of the context capacity, only the most recent `keep_recent_messages` messages are kept, and all earlier history messages are compressed by an LLM into a single `<memory_block_round>` cross-round checkpoint summary message.
+Configuration class for `CurrentRoundCompressor`. When the context token count reaches a given ratio of the context capacity, the work already performed within the current round (reasoning, tool calls, tool results, etc. produced after the last real user message) is compressed by an LLM into a single `<memory_block_current>` summary message, while the user request itself is left untouched.
 
 * **trigger_context_ratio** (float, optional): Triggers compression when the context token count reaches this ratio of the context capacity. Range (0, 1). Default value: `0.8`.
-* **keep_recent_messages** (int, optional): Number of most recent messages kept uncompressed. Default value: `4`.
 * **min_target_context_ratio** (float, optional): Skips compression when the compressible messages' token count is below this ratio of the context capacity. Range [0, 1). Default value: `0.1`.
+* **keep_recent_messages** (int, optional): Number of most recent messages kept uncompressed at the tail of the current round. Default value: `0`.
 * **model** (ModelRequestConfig | None, optional): Model request configuration used to perform compression. Default value: `None`.
 * **model_client** (ModelClientConfig | None, optional): Model service configuration used to perform compression. Default value: `None`.
 * **enable_compression_dump** (bool, optional): Whether to persist each real compression invocation (the request plus the post-compression context) to disk for offline analysis. Default value: `False`.
@@ -14,17 +14,17 @@ Configuration class for `RoundLevelCompressor`. When the context token count rea
 
 **Constraints**: `model` and `model_client` must both be configured, otherwise the processor never triggers. The kept-message boundary is automatically extended backwards so that a tool call and its tool result are never split apart.
 
-## class openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor.RoundLevelCompressor
+## class openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor.CurrentRoundCompressor
 
 ```python
-RoundLevelCompressor(config: RoundLevelCompressorConfig)
+CurrentRoundCompressor(config: CurrentRoundCompressorConfig)
 ```
 
-`RoundLevelCompressor` inherits from [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor). When the context window is being materialized, it checks whether the context token count reaches `trigger_context_ratio`; if so, it compresses all history messages except the most recent `keep_recent_messages` ones into a cross-round checkpoint summary (which may cover long-running project state, prior decisions, current goals, completed and unfinished work, etc.), embedding a meaning note and a conflict policy. Interface is consistent with the base class, see [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor).
+`CurrentRoundCompressor` inherits from [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor). When the context window is being materialized, it checks whether the context token count reaches `trigger_context_ratio`; if so, it compresses the work already done in the current round into a summary message used to recover completed analysis, tool calls, code changes, test results, and next steps. The last real user message and everything before it form a preserved prefix that is never compressed. Interface is consistent with the base class, see [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor).
 
 **Parameters**:
 
-* **config** (RoundLevelCompressorConfig): Processor configuration, see above.
+* **config** (CurrentRoundCompressorConfig): Processor configuration, see above.
 
 **Example**:
 
@@ -33,13 +33,14 @@ RoundLevelCompressor(config: RoundLevelCompressorConfig)
 >>> import asyncio
 >>> from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 >>> from openjiuwen.core.context_engine.processor import forked
->>> from openjiuwen.core.context_engine.processor.forked.compressor.round_level_compressor import (
-...     RoundLevelCompressor,
-...     RoundLevelCompressorConfig,
+>>> from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
+...     CurrentRoundCompressor,
+...     CurrentRoundCompressorConfig,
 ... )
 >>> from openjiuwen.core.foundation.llm import (
 ...     UserMessage,
 ...     AssistantMessage,
+...     ToolMessage,
 ...     ModelRequestConfig,
 ...     ModelClientConfig,
 ... )
@@ -56,9 +57,9 @@ RoundLevelCompressor(config: RoundLevelCompressorConfig)
 ...         api_base=API_BASE,
 ...         api_key=API_KEY,
 ...     )
-...     compressor_config = RoundLevelCompressorConfig(
+...     compressor_config = CurrentRoundCompressorConfig(
 ...         trigger_context_ratio=0.8,
-...         keep_recent_messages=4,
+...         keep_recent_messages=2,
 ...         model=model_config,
 ...         model_client=model_client_config,
 ...     )
@@ -69,16 +70,17 @@ RoundLevelCompressor(config: RoundLevelCompressorConfig)
 ...         "demo_ctx",
 ...         None,
 ...         history_messages=[],
-...         processors=[("RoundLevelCompressor", compressor_config)],
+...         processors=[("CurrentRoundCompressor", compressor_config)],
 ...     )
-...     rounds = []
-...     for i in range(4):
-...         rounds.append(UserMessage(content=f"user question of round {i}"))
-...         rounds.append(AssistantMessage(content=f"assistant reply of round {i}"))
-...     await ctx.add_messages(rounds)
+...     await ctx.add_messages([
+...         UserMessage(content="Help me fix this error"),
+...         AssistantMessage(content="", tool_calls=[{"id": "1", "name": "read_file", "type": "function", "arguments": "{}"}]),
+...         ToolMessage(content="file content ...", tool_call_id="1"),
+...         AssistantMessage(content="Located the problem, fixing it now."),
+...     ])
 ...     # Below trigger_context_ratio, no compression happens
 ...     return len(ctx.get_messages())
 >>>
 >>> asyncio.run(main())
-8
+4
 ```

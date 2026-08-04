@@ -20,6 +20,61 @@ The Context Engine (`ContextEngine`) is a unified component in openJiuwen for **
   - Represents a snapshot of a "context window" about to be sent to the model, i.e., the return result of `get_context_window()`.
   - Encapsulates three types of content: system_messages (system instructions), context_messages (conversation history), tools (tool definitions).
 
+## Default Harness processor chain
+
+The Harness assembles context processors through `ContextProcessorRail`.
+With the default `preset=True`, the processor chain runs in this order:
+
+1. `MessageSummaryOffloader`
+2. `SessionMemoryCompressor` (disabled by default)
+3. `ReasoningToolLoopCompactProcessor`
+4. `DialogueCompressor`
+5. `CurrentRoundCompressor`
+6. `RoundLevelCompressor`
+
+## Optional capabilities
+
+### Defaults
+
+The default chain enables offload and compression out of the box, while
+Session Memory stays disabled, so its background model calls add no overhead
+until explicitly enabled.
+
+### Enabling Session Memory
+
+```python
+from openjiuwen.core.context_engine.context.session_memory_manager import (
+    SessionMemoryConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor import (
+    SessionMemoryCompressorConfig,
+)
+from openjiuwen.harness.rails.context_engineer.context_processor_rail import (
+    ContextProcessorRail,
+)
+
+context_rail = ContextProcessorRail(
+    preset=True,
+    processors=[
+        (
+            "SessionMemoryCompressor",
+            SessionMemoryCompressorConfig(
+                enabled=True,
+                memory=SessionMemoryConfig(
+                    update_trigger_context_ratio=0.7,
+                ),
+            ),
+        ),
+    ],
+)
+```
+
+Session notes are stored by default at:
+
+```text
+{workspace}/context/{session_id}_context/session_memory/session_context.md
+```
+
 ## Agent Using Context
 
 ContextEngine is a member of the Agent, created during Agent initialization. The Agent manages context through `context_engine` in `invoke`, with a typical flow as follows:

@@ -11,3 +11,5 @@
 | [AgentContext](./context_engine/context_engine.md)       | Agent上下文类。    |
 | [WorkflowContext](./context_engine/context_engine.md)    | Workflow上下文类。 |
 | [ContextEngine](./context_engine/context_engine.md)       | 上下文引擎类。       |
+
+处理器列表参见 [processor](./context_engine/processors.README.md)。
