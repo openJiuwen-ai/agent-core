@@ -53,6 +53,7 @@ from openjiuwen.agent_teams.workflow.engine.schema import coerce, resolve_schema
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.prompts import PromptMode
@@ -76,6 +77,12 @@ _SUMMARY_SCHEMA: dict[str, Any] = {
     "properties": {"summary": {"type": "string", "description": "A concise summary."}},
     "required": ["summary"],
 }
+_STRUCTURED_OUTPUT_TOOL_CHOICE = {
+    "type": "function",
+    "function": {"name": "structured_output"},
+}
+# One compensating user turn when a completed schema round omits the tool call.
+_STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2
 _TITLE_PROMPT: dict[str, str] = {
     "cn": (
         "你是一个标题生成助手。根据用户提供的内容生成一个简洁、准确、概括性强的标题。"
@@ -110,6 +117,22 @@ def _output_text(result: Any) -> str:
     if isinstance(result, dict):
         return str(result.get("output", ""))
     return str(result or "")
+
+
+def _force_structured_output_model(model: "TeamModelConfig") -> "TeamModelConfig":
+    """Copy a model config with the structured-output tool selected explicitly."""
+    request_config = model.model_request_config
+    if request_config is None:
+        model_name = str(getattr(model.model_client_config, "model", "") or "")
+        request_config = ModelRequestConfig(model=model_name)
+    forced_request_config = request_config.model_copy(
+        update={"tool_choice": _STRUCTURED_OUTPUT_TOOL_CHOICE},
+        deep=True,
+    )
+    return model.model_copy(
+        update={"model_request_config": forced_request_config},
+        deep=True,
+    )
 
 
 class TinyAgent:
@@ -187,8 +210,24 @@ class TinyAgent:
         # is deliberately invisible to session-lifecycle observers. Closing the
         # stream is still required to release the emitter.
         session = Session(card=spec.card)
+        result: Any = None
         try:
-            result = await harness.run_once(prompt, session=session)
+            for attempt in range(_STRUCTURED_OUTPUT_MAX_ATTEMPTS):
+                if attempt > 0 and capture is not None:
+                    # run_once removes stateful tools after every round. Mount
+                    # the same capture instance again and keep the Session so
+                    # the reminder continues the existing model conversation.
+                    harness.ability_manager.add_ability(capture.card, capture)
+                    prompt = self._t("structured_output", key="reminder")
+                result = await harness.run_once(prompt, session=session)
+                if capture is None or (capture.called and capture.captured is not None):
+                    break
+                if attempt + 1 < _STRUCTURED_OUTPUT_MAX_ATTEMPTS:
+                    team_logger.warning(
+                        "[tiny_agent] structured_output not submitted; retrying turn %d/%d",
+                        attempt + 2,
+                        _STRUCTURED_OUTPUT_MAX_ATTEMPTS,
+                    )
         finally:
             try:
                 await session.close_stream()
@@ -223,6 +262,7 @@ class TinyAgent:
         update: dict[str, Any] = {"card": run_card}
         if json_schema is not None:
             update["tools"] = [StructuredOutputTool(json_schema, self._t)]
+            update["model"] = _force_structured_output_model(self._spec.model)
         return self._spec.model_copy(update=update)
 
     # ------------------------------------------------------------------
@@ -253,16 +293,31 @@ class TinyAgent:
                 capture = StructuredOutputTool(json_schema, self._t)
                 harness.ability_manager.add_ability(capture.card, capture)
                 turn_prompt = f"{content}\n\n{self._t('structured_output', key='reminder')}"
+            result: Any = None
             try:
-                result = await self._drive_turn(turn_prompt)
+                for attempt in range(_STRUCTURED_OUTPUT_MAX_ATTEMPTS):
+                    if attempt > 0:
+                        turn_prompt = self._t("structured_output", key="reminder")
+                    result = await self._drive_turn(turn_prompt)
+                    if self._failed:
+                        raise_error(
+                            StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                            error_msg="tiny agent chat round failed",
+                        )
+                    if capture is None or (capture.called and capture.captured is not None):
+                        break
+                    if attempt + 1 < _STRUCTURED_OUTPUT_MAX_ATTEMPTS:
+                        team_logger.warning(
+                            "[tiny_agent] structured_output not submitted; retrying chat turn %d/%d",
+                            attempt + 2,
+                            _STRUCTURED_OUTPUT_MAX_ATTEMPTS,
+                        )
             finally:
                 if capture is not None:
                     try:
                         harness.ability_manager.remove_ability("structured_output")
                     except Exception:
                         team_logger.debug("[tiny_agent] structured_output detach failed", exc_info=True)
-            if self._failed:
-                raise_error(StatusCode.AGENT_TEAM_EXECUTION_ERROR, error_msg="tiny agent chat round failed")
             if json_schema is None:
                 return _output_text(result)
             if capture is None or not (capture.called and capture.captured is not None):
