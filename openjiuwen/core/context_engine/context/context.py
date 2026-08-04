@@ -5,27 +5,26 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Awaitable, Callable, List, Optional, Tuple, Dict, Any
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.context_engine.base import ContextStats, ContextWindow, ContextWindowChange, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.context_engine.context.processor_state_recorder import (
     ContextProcessorStateInput,
     ContextProcessorStateRecorder,
 )
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
-from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
-from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
+from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.foundation.kv_cache import first_changed_index
+from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.context_engine.base import ContextWindowChange, ModelContext, ContextWindow, ContextStats
-from openjiuwen.core.context_engine.context.message_buffer import ContextMessageBuffer, OffloadMessageBuffer
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
-
 
 _ACTIVE_COMPRESSION_RESULT_BUSY = "busy"
 _ACTIVE_COMPRESSION_RESULT_COMPRESSED = "compressed"
@@ -41,20 +40,18 @@ _PROCESSOR_LOCK_WARN_INTERVAL_SECONDS = 120.0
 
 class SessionModelContext(ModelContext):
     def __init__(
-            self,
-            context_id: str,
-            session_id: str,
-            config: ContextEngineConfig,
-            *,
-            history_messages: List[BaseMessage] = None,
-            processors: List[ContextProcessor] = None,
-            token_counter: TokenCounter = None,
-            session_ref=None,
-            workspace=None,
-            sys_operation=None,
-            window_mutators: List[
-                Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
-            ] = None,
+        self,
+        context_id: str,
+        session_id: str,
+        config: ContextEngineConfig,
+        *,
+        history_messages: List[BaseMessage] = None,
+        processors: List[ContextProcessor] = None,
+        token_counter: TokenCounter = None,
+        session_ref=None,
+        workspace=None,
+        sys_operation=None,
+        window_mutators: List[Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]] = None,
     ):
         self._message_id = 0
         ContextUtils.validate_messages(history_messages)
@@ -154,8 +151,7 @@ class SessionModelContext(ModelContext):
                 )
                 if waited:
                     logger.warning(
-                        "context %s (session %s): %s acquired the processor lock "
-                        "after waiting %.0fs",
+                        "context %s (session %s): %s acquired the processor lock after waiting %.0fs",
                         self._context_id,
                         self._session_id,
                         caller,
@@ -183,11 +179,7 @@ class SessionModelContext(ModelContext):
             self._processor_lock.release()
 
     @_fw.emit_after(ContextEvents.CONTEXT_UPDATED, result_key="messages")
-    async def add_messages(
-            self,
-            messages: BaseMessage | List[BaseMessage],
-            **kwargs
-    ) -> List[BaseMessage]:
+    async def add_messages(self, messages: BaseMessage | List[BaseMessage], **kwargs) -> List[BaseMessage]:
         ContextUtils.validate_messages(messages)
         messages_to_add = messages if isinstance(messages, list) else [messages]
         messages_to_add = ContextUtils.ensure_context_message_ids(messages_to_add)
@@ -210,34 +202,36 @@ class SessionModelContext(ModelContext):
             return messages_to_add
 
     async def compress_context(
-            self,
-            processor_types: List[str] = None,
-            **kwargs,
+        self,
+        processor_types: List[str] = None,
+        **kwargs,
     ) -> str | dict[str, Any]:
         return_state = bool(kwargs.pop("return_state", False))
         if self._processor_lock.locked():
             history_start = len(self._processor_state_recorder.history())
             logger.info("skip active compression because context processor is already running")
-            await self._build_and_emit_compression_state(ContextProcessorStateInput(
-                operation_id=uuid.uuid4().hex,
-                status="skipped",
-                phase="active_compress",
-                trigger="manual",
-                processor=None,
-                reason="busy",
-                before_messages=self.get_messages(),
-                after_messages=None,
-                started_at=time.time(),
-                ended_at=time.time(),
-                error=None,
-                messages_to_modify=[],
-                force=True,
-                context_max=ContextUtils.resolve_context_max(
-                    model_name=self._resolve_context_model_name(kwargs),
-                    fallback_context_window_tokens=self._context_window_tokens,
-                    model_context_window_tokens=self._model_context_window_tokens,
-                ),
-            ))
+            await self._build_and_emit_compression_state(
+                ContextProcessorStateInput(
+                    operation_id=uuid.uuid4().hex,
+                    status="skipped",
+                    phase="active_compress",
+                    trigger="manual",
+                    processor=None,
+                    reason="busy",
+                    before_messages=self.get_messages(),
+                    after_messages=None,
+                    started_at=time.time(),
+                    ended_at=time.time(),
+                    error=None,
+                    messages_to_modify=[],
+                    force=True,
+                    context_max=ContextUtils.resolve_context_max(
+                        model_name=self._resolve_context_model_name(kwargs),
+                        fallback_context_window_tokens=self._context_window_tokens,
+                        model_context_window_tokens=self._model_context_window_tokens,
+                    ),
+                )
+            )
             return self._build_active_compression_result(
                 _ACTIVE_COMPRESSION_RESULT_BUSY,
                 return_state,
@@ -317,21 +311,18 @@ class SessionModelContext(ModelContext):
 
     def pop_messages(self, size: int = 1, with_history: bool = True) -> List[BaseMessage]:
         if size is not None and size < 0:
-            raise build_error(
-                StatusCode.CONTEXT_EXECUTION_ERROR,
-                error_msg="pop size should be larger than 0"
-            )
+            raise build_error(StatusCode.CONTEXT_EXECUTION_ERROR, error_msg="pop size should be larger than 0")
 
         popped_messages = self._message_buffer.pop_back(size, with_history)
+
+        if popped_messages:
+            ContextUtils.invalidate_usage_metadata(self._message_buffer.get_back())
 
         return popped_messages
 
     def get_messages(self, size: Optional[int] = None, with_history: bool = True) -> List[BaseMessage]:
         if size is not None and size < 0:
-            raise build_error(
-                StatusCode.CONTEXT_EXECUTION_ERROR,
-                error_msg="get size should be larger than 0"
-            )
+            raise build_error(StatusCode.CONTEXT_EXECUTION_ERROR, error_msg="get size should be larger than 0")
 
         messages = self._message_buffer.get_back(size, with_history=with_history)
         return messages
@@ -340,10 +331,11 @@ class SessionModelContext(ModelContext):
         ContextUtils.validate_messages(messages)
         messages = ContextUtils.ensure_context_message_ids(messages)
         self._message_buffer.set_messages(messages, with_history)
+        ContextUtils.invalidate_usage_metadata(self._message_buffer.get_back())
 
     def detect_context_window_change(
-            self,
-            new_window: ContextWindow,
+        self,
+        new_window: ContextWindow,
     ) -> ContextWindowChange | None:
         """
         Compare the current LLM-bound window with the previous tracked window.
@@ -369,10 +361,7 @@ class SessionModelContext(ModelContext):
         # every following conversation token. In that case invalidate the old
         # message suffix following the system prompt. There is no old tool index
         # to use as a legal old-window range for the appended item itself.
-        tools_appended = (
-            len(new_tools) > len(old_tools)
-            and new_tools[:len(old_tools)] == old_tools
-        )
+        tools_appended = len(new_tools) > len(old_tools) and new_tools[: len(old_tools)] == old_tools
         if tools_appended:
             first_context_message = len(old_window.system_messages)
             if first_context_message < len(old_messages):
@@ -403,39 +392,27 @@ class SessionModelContext(ModelContext):
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="window")
     async def get_context_window(
-            self,
-            system_messages: List[BaseMessage] = None,
-            tools: List[ToolInfo] = None,
-            window_size: Optional[int] = None,
-            dialogue_round: Optional[int] = None,
-            **kwargs
+        self,
+        system_messages: List[BaseMessage] = None,
+        tools: List[ToolInfo] = None,
+        window_size: Optional[int] = None,
+        dialogue_round: Optional[int] = None,
+        **kwargs,
     ) -> ContextWindow:
         if window_size is not None and window_size <= 0:
-            raise build_error(
-                StatusCode.CONTEXT_EXECUTION_ERROR,
-                error_msg="window size should be larger than 0"
-            )
+            raise build_error(StatusCode.CONTEXT_EXECUTION_ERROR, error_msg="window size should be larger than 0")
 
         if dialogue_round is not None and dialogue_round <= 0:
-            raise build_error(
-                StatusCode.CONTEXT_EXECUTION_ERROR,
-                error_msg="dialogue round should be larger than 0"
-            )
+            raise build_error(StatusCode.CONTEXT_EXECUTION_ERROR, error_msg="dialogue round should be larger than 0")
 
         async with self._guarded_processor_lock("get_context_window"):
             system_messages = (system_messages or [])[:]
 
             # with specific context size
-            system_messages, context_messages = self._get_window_messages(
-                system_messages,
-                window_size,
-                dialogue_round
-            )
+            system_messages, context_messages = self._get_window_messages(system_messages, window_size, dialogue_round)
 
             window = ContextWindow(
-                system_messages=system_messages,
-                context_messages=context_messages,
-                tools=tools or []
+                system_messages=system_messages, context_messages=context_messages, tools=tools or []
             )
 
             call_window_mutators = kwargs.pop("window_mutators", None) or []
@@ -558,41 +535,29 @@ class SessionModelContext(ModelContext):
             return window
 
     def _get_window_messages(
-            self,
-            system_messages: List[BaseMessage],
-            window_size: Optional[int] = None,
-            dialogue_round: Optional[int] = None
+        self,
+        system_messages: List[BaseMessage],
+        window_size: Optional[int] = None,
+        dialogue_round: Optional[int] = None,
     ) -> Tuple[List[BaseMessage], List[BaseMessage]]:
         if dialogue_round is not None or self._default_dialogue_round is not None:
-            dialogue_round = (
-                dialogue_round
-                if dialogue_round is not None
-                else self._default_dialogue_round
-            )
+            dialogue_round = dialogue_round if dialogue_round is not None else self._default_dialogue_round
             context_messages = self._message_buffer.get_back()
             round_index = ContextUtils.find_last_n_dialogue_round(context_messages, dialogue_round)
-            if round_index >= 0: 
+            if round_index >= 0:
                 context_messages = context_messages[round_index:]
         else:
             context_messages = self._message_buffer.get_back()
 
         # with specific context size
         if window_size is not None or self._default_window_size is not None:
-            window_size = (
-                window_size
-                if window_size is not None
-                else self._default_window_size
-            )
+            window_size = window_size if window_size is not None else self._default_window_size
 
             system_messages_size = min(len(system_messages), window_size)
             system_messages = system_messages[-system_messages_size:]
 
             context_messages_size = window_size - system_messages_size
-            context_messages = (
-                context_messages[-context_messages_size:]
-                if context_messages_size > 0
-                else []
-            )
+            context_messages = context_messages[-context_messages_size:] if context_messages_size > 0 else []
 
         return system_messages, context_messages
 
@@ -668,7 +633,7 @@ class SessionModelContext(ModelContext):
         """
         # Search backwards for the last AssistantMessage
         for msg in reversed(messages):
-            if isinstance(msg, AssistantMessage) and msg.usage_metadata is not None:
+            if ContextUtils.has_valid_usage_metadata(msg):
                 usage = msg.usage_metadata
                 if usage.total_tokens > 0:
                     return usage.total_tokens
@@ -708,23 +673,23 @@ class SessionModelContext(ModelContext):
                 stat.tool_message_tokens += msg_tokens
 
         stat.total_tokens += (
-            stat.assistant_message_tokens +
-            stat.user_message_tokens +
-            stat.system_message_tokens +
-            stat.tool_message_tokens
+            stat.assistant_message_tokens
+            + stat.user_message_tokens
+            + stat.system_message_tokens
+            + stat.tool_message_tokens
         )
 
     def token_counter(self) -> TokenCounter:
         return self._token_counter
 
     async def _run_add_processors(
-            self,
-            messages_to_add: List[BaseMessage],
-            *,
-            force: bool,
-            processor_types: List[str] = None,
-            compression_only: bool = False,
-            **kwargs,
+        self,
+        messages_to_add: List[BaseMessage],
+        *,
+        force: bool,
+        processor_types: List[str] = None,
+        compression_only: bool = False,
+        **kwargs,
     ) -> Tuple[bool, List[BaseMessage]]:
         processors = self._select_processors(
             processor_types=processor_types,
@@ -844,15 +809,14 @@ class SessionModelContext(ModelContext):
                     )
                 )
                 logger.warning(
-                    f"Failed to process ADD messages by using processor {processor.processor_type()},"
-                    f"reason: {str(e)}"
+                    f"Failed to process ADD messages by using processor {processor.processor_type()},reason: {str(e)}"
                 )
         return changed, messages_to_add
 
     async def _run_active_compression_processors(
-            self,
-            processors: List[ContextProcessor],
-            **kwargs,
+        self,
+        processors: List[ContextProcessor],
+        **kwargs,
     ) -> bool:
         changed = False
         window = ContextWindow(
@@ -868,12 +832,8 @@ class SessionModelContext(ModelContext):
             started_emitted = False
             use_window_hook = self._processor_overrides_get_context_window(processor)
             is_offload_processor = ContextUtils.is_offload_processor(processor)
-            should_check_active_trigger = (
-                use_window_hook
-                and (
-                    is_offload_processor
-                    or processor.processor_type() == "DialogueCompressor"
-                )
+            should_check_active_trigger = use_window_hook and (
+                is_offload_processor or processor.processor_type() == "DialogueCompressor"
             )
             try:
                 if should_check_active_trigger:
@@ -1014,24 +974,24 @@ class SessionModelContext(ModelContext):
         return type(processor).on_get_context_window is not ContextProcessor.on_get_context_window
 
     async def _build_and_emit_compression_state(
-            self,
-            state_input: ContextProcessorStateInput,
+        self,
+        state_input: ContextProcessorStateInput,
     ) -> None:
         state = self._processor_state_recorder.build_state(state_input)
         await self._processor_state_recorder.emit(self, state)
 
     async def _build_and_emit_processor_cancelled_state(
-            self,
-            *,
-            operation_id: str,
-            phase: str,
-            trigger: str,
-            processor: ContextProcessor,
-            before_messages: list[BaseMessage],
-            after_messages: list[BaseMessage],
-            started_at: float,
-            force: bool,
-            context_max: Optional[int],
+        self,
+        *,
+        operation_id: str,
+        phase: str,
+        trigger: str,
+        processor: ContextProcessor,
+        before_messages: list[BaseMessage],
+        after_messages: list[BaseMessage],
+        started_at: float,
+        force: bool,
+        context_max: Optional[int],
     ) -> None:
         await self._build_and_emit_compression_state(
             ContextProcessorStateInput(
@@ -1053,11 +1013,11 @@ class SessionModelContext(ModelContext):
         )
 
     def _build_active_compression_result(
-            self,
-            result: str,
-            include_state: bool,
-            *,
-            history_start: int = 0,
+        self,
+        result: str,
+        include_state: bool,
+        *,
+        history_start: int = 0,
     ) -> str | dict[str, Any]:
         if not include_state:
             return result
@@ -1074,7 +1034,7 @@ class SessionModelContext(ModelContext):
 
     @staticmethod
     def _select_active_compression_result_state(
-            history: list[dict[str, Any]],
+        history: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
         for state in reversed(history):
             compact_summary = state.get("compact_summary")
@@ -1083,29 +1043,20 @@ class SessionModelContext(ModelContext):
         return history[-1] if history else None
 
     def _select_processors(
-            self,
-            *,
-            processor_types: List[str] = None,
-            compression_only: bool = False,
-            offload_only: bool = False,
+        self,
+        *,
+        processor_types: List[str] = None,
+        compression_only: bool = False,
+        offload_only: bool = False,
     ) -> List[ContextProcessor]:
         processors = list(self._processors or [])
         if processor_types is not None:
             processor_types = set(processor_types)
-            processors = [
-                processor for processor in processors
-                if processor.processor_type() in processor_types
-            ]
+            processors = [processor for processor in processors if processor.processor_type() in processor_types]
         if offload_only:
-            processors = [
-                processor for processor in processors
-                if ContextUtils.is_offload_processor(processor)
-            ]
+            processors = [processor for processor in processors if ContextUtils.is_offload_processor(processor)]
         if compression_only:
-            processors = [
-                processor for processor in processors
-                if ContextUtils.is_compression_processor(processor)
-            ]
+            processors = [processor for processor in processors if ContextUtils.is_compression_processor(processor)]
         return processors
 
     def offload_messages(self, offload_handle: str, messages: List[BaseMessage]):
@@ -1123,7 +1074,7 @@ class SessionModelContext(ModelContext):
         messages = context_state.get("messages", [])
         ContextUtils.validate_messages(messages)
         messages = ContextUtils.ensure_context_message_ids(messages)
-        self._message_buffer.rebulid(messages)
+        self._message_buffer.rebulid(messages)  # codespell:ignore rebulid
         last_access_at = context_state.get("last_context_window_access_at")
         self._last_context_window_access_at = (
             float(last_access_at) if isinstance(last_access_at, (int, float)) else None

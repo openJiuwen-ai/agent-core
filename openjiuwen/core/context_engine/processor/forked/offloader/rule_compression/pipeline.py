@@ -14,8 +14,9 @@ from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import RuleContext
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, UserMessage
 
-
-CHARACTERS_PER_TOKEN = 3
+# Keep the rule-compression character budget aligned with the repository-wide
+# ``len(text) // 4`` fallback used by the context processors.
+CHARACTERS_PER_TOKEN = 4
 RULE_COMPRESSION_DUMP_DIR_ENV = "OPENJIUWEN_RULE_COMPRESSION_DUMP_DIR"
 
 

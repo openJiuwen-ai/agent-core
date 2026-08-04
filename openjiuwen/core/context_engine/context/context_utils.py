@@ -16,6 +16,7 @@ from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage
 
 CONTEXT_MESSAGE_ID_KEY = "context_message_id"
+CONTEXT_USAGE_STALE_KEY = "context_usage_stale"
 DEFAULT_CONTEXT_MAX_TOKENS = 200000
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_MODEL_CACHE_TTL_SECONDS = 3600
@@ -359,6 +360,30 @@ class ContextUtils:
         return messages
 
     @staticmethod
+    def invalidate_usage_metadata(messages: List[BaseMessage]) -> None:
+        """Mark retained model usage as stale after existing context is rewritten."""
+        for message in messages:
+            if not isinstance(message, AssistantMessage) or message.usage_metadata is None:
+                continue
+            metadata = getattr(message, "metadata", None)
+            if not isinstance(metadata, dict):
+                metadata = {}
+                message.metadata = metadata
+            metadata[CONTEXT_USAGE_STALE_KEY] = True
+
+    @staticmethod
+    def has_valid_usage_metadata(message: BaseMessage) -> bool:
+        """Return whether an assistant usage record still describes its prefix."""
+        metadata = getattr(message, "metadata", None)
+        usage_is_stale = metadata.get(CONTEXT_USAGE_STALE_KEY, False) if isinstance(metadata, dict) else False
+        return (
+            isinstance(message, AssistantMessage)
+            and message.usage_metadata is not None
+            and message.usage_metadata.total_tokens > 0
+            and not bool(usage_is_stale)
+        )
+
+    @staticmethod
     def validate_and_fix_context_window(context_window: ContextWindow) -> None:
         messages: List[BaseMessage] = context_window.context_messages
         if not messages:
@@ -462,8 +487,7 @@ class ContextUtils:
         if start_index < 0 or end_index >= len(messages) or start_index > end_index:
             raise IndexError("Invalid start/end index")
 
-        resume_index = end_index + 1
-        return messages[:start_index] + target_messages + messages[resume_index:]
+        return messages[:start_index] + target_messages + messages[end_index + 1:]  # fmt: skip
 
     @staticmethod
     def find_all_dialogue_round(messages: List[BaseMessage]) -> List[List[Optional[int]]]:
@@ -636,9 +660,13 @@ class ContextUtils:
 
     @staticmethod
     def estimate_tokens(content: Any) -> int:
-        """估计内容的 token 数，使用字符数 // 3 的粗略估算。"""
+        """估计内容的 token 数，使用字符数 // 4 的粗略估算。
+
+        ``// 4`` 与 ``TiktokenCounter`` 自身 fallback 一致，且更接近真实
+        token 量级，可与按真实 context window 标定的阈值对齐。
+        """
         text = sanitize_content_for_text(content)
-        return max(len(text) // 3, 1)
+        return max(len(text) // 4, 1)
 
     @staticmethod
     def estimate_message_tokens(message: BaseMessage) -> int:

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -23,7 +24,6 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation import SysOperation
 
 if TYPE_CHECKING:
@@ -618,6 +618,22 @@ def build_system_prompt_text(messages: List[BaseMessage]) -> str:
     return first_message.content
 
 
+def _load_context_debug_writer():
+    """Lazy import the forked context-debug writer to avoid circular imports.
+
+    ``session_memory_manager`` is imported early by ``processor.base`` and the
+    forked subtree, so a top-level import of ``processor.forked.support.*
+    here would cycle. Resolve it at call time instead.
+    """
+    try:
+        from openjiuwen.core.context_engine.processor.forked.support.context_debug import (
+            write_debug_record,
+        )
+    except Exception:  # pragma: no cover - defensive
+        return None
+    return write_debug_record
+
+
 class SessionMemoryManager:
     def __init__(self, config: SessionMemoryConfig):
         self.config = config
@@ -746,6 +762,21 @@ class SessionMemoryManager:
                 self.config.update_trigger_context_ratio,
                 context_max,
             )
+            write_debug_record = _load_context_debug_writer()
+            if write_debug_record is not None:
+                write_debug_record(
+                    context,
+                    processor_type="SessionMemory",
+                    event="threshold_check",
+                    enabled=bool(getattr(self.config, "enable_debug_dump", False)),
+                    dump_dir=getattr(self.config, "debug_dump_dir", None),
+                    phase="should_update",
+                    total_tokens=current_tokens,
+                    context_max=context_max,
+                    threshold=threshold,
+                    hit=False,
+                    reason="below_threshold",
+                )
             return False
 
         runtime = self._get_runtime_state(session)
@@ -773,6 +804,21 @@ class SessionMemoryManager:
             self.config.update_trigger_context_ratio,
             context_max,
         )
+        write_debug_record = _load_context_debug_writer()
+        if write_debug_record is not None:
+            write_debug_record(
+                context,
+                processor_type="SessionMemory",
+                event="threshold_check",
+                enabled=bool(getattr(self.config, "enable_debug_dump", False)),
+                dump_dir=getattr(self.config, "debug_dump_dir", None),
+                phase="should_update",
+                total_tokens=current_tokens,
+                context_max=context_max,
+                threshold=threshold,
+                hit=True,
+                reason="reached_threshold",
+            )
         return True
 
     async def _update_background(
@@ -907,8 +953,18 @@ class SessionMemoryManager:
         context: ModelContext,
         context_window: ContextWindow,
     ) -> int:
-        token_counter = context.token_counter()
         all_messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])
+        # 优先用末尾 AssistantMessage.usage_metadata.total_tokens 作为整窗口
+        # 基准（已含当时 system+tools），尾部新增消息用 len//4 补算；无
+        # usage 时 fallback 到 token_counter / char 估算。
+        for idx in range(len(all_messages) - 1, -1, -1):
+            message = all_messages[idx]
+            if ContextUtils.has_valid_usage_metadata(message):
+                tail = all_messages[slice(idx + 1, None)]
+                return message.usage_metadata.total_tokens + sum(
+                    SessionMemoryManager._estimate_message_tokens(msg) for msg in tail
+                )
+        token_counter = context.token_counter()
         if token_counter is not None:
             try:
                 return token_counter.count_messages(all_messages)
