@@ -33,6 +33,7 @@ from openjiuwen.agent_evolving.experience.types import (
 )
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
+from openjiuwen.agent_evolving.prompts.sections import build_team_evolution_protocol_section
 from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     SignalDetector,
@@ -66,13 +67,12 @@ from openjiuwen.harness.rails.evolution.contracts import (
     SimplifyRequestResult,
 )
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionTriggerPoint
-from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.review.materials import build_swarm_review_scoped_materials
+from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
     EvolutionReviewScopeBuilder,
     SkillEvolutionRail,
 )
-from openjiuwen.agent_evolving.prompts.sections import build_team_evolution_protocol_section
 
 _TEAM_RECORD_LLM_POLICY = LLMInvokePolicy(
     attempt_timeout_secs=150,
@@ -84,14 +84,19 @@ _TEAM_TASK_NON_TERMINAL_STATES = ("pending", "claimed", "in_progress", "blocked"
 _TEAM_SKILL_KINDS = {"team-skill", "swarm-skill"}
 _AUTO_TEAM_SKILL_EVOLUTION_FOLLOW_UP_TAG = "auto_team_skill_evolution_review_followup"
 _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN = (
-    "这是运行时自动插入的 Team/Swarm Skill 演进 follow-up，不是用户的新需求。\n"
-    "团队任务已经完成。请参考“团队 Skill 演进自检”规则，基于完整团队上下文判断本次任务是否暴露了已使用 Team/Swarm Skill 需要更新。"
+    "这是运行时插入的 Team/Swarm Skill 演进自检，不是用户的新需求。\n"
+    "团队任务已完成；参考常驻“团队 Skill 演进自检”规则，只判断本轮是否存在可复用团队更新，不重新判断"
+    "运行时触发门槛。\n"
+    "如需建议，只在普通最终回复末尾追加一至两句，并同时包含可复用团队更新点和是否发起 Team/Swarm Skill "
+    "演进的确认问题；否则自然回复，不提本提醒或内部判断。"
 )
 _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN = (
-    "This is a runtime-inserted Team/Swarm Skill evolution follow-up; it is not a new user request.\n"
-    'The team task is complete. Refer to the "Team Skill Evolution Self-Check" rules\n'
-    "and, based on the full team context,\n"
-    "decide whether this task exposed that a used Team/Swarm Skill needs updating."
+    "This runtime-inserted Team/Swarm Skill evolution self-check is not a new user request.\n"
+    'The team task is complete. Refer to the standing "Team Skill Evolution Self-Check" rules and judge only whether '
+    "this round contains a reusable team update; do not re-evaluate the runtime trigger threshold.\n"
+    "If suggesting, append only one or two sentences to the normal final reply and include both the reusable team "
+    "update and the Team/Swarm Skill evolution question; otherwise reply naturally without mentioning this reminder "
+    "or internal judgment."
 )
 
 
@@ -156,7 +161,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         trajectory_source: Optional[TrajectorySource] = None,
         trajectory_sink: Optional[TrajectorySink] = None,
         member_role: Optional[str] = None,
-        auto_scan: Optional[bool] = None,
         signal_trigger: Optional[bool] = None,
         auto_save: bool = False,
         review_runtime: EvolutionReviewRuntime,
@@ -170,26 +174,19 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         eval_interval: int = 5,
         evolution_total_timeout_secs: float = _DEFAULT_TEAM_EVOLUTION_TOTAL_TIMEOUT_SECS,
         disabled_skills: Optional[Union[str, list[str]]] = None,
-        fuzzy_review: Optional[bool] = None,
-        fuzzy_review_interval: int = 5,
-        completion_followup_enabled: Optional[bool] = None,
         review_trigger: Optional[bool] = None,
+        review_interval: int = 5,
         review_agent_max_iterations: int = 40,
     ) -> None:
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")
 
         self._record_llm_policy = record_llm_policy
-        resolved_signal_trigger = bool(signal_trigger if signal_trigger is not None else auto_scan or False)
-        resolved_review_trigger = bool(
-            review_trigger if review_trigger is not None else completion_followup_enabled or False
-        )
-
         super().__init__(
             skills_dir,
             llm=llm,
             model=model,
-            signal_trigger=resolved_signal_trigger,
+            signal_trigger=signal_trigger,
             auto_save=auto_save,
             review_runtime=review_runtime,
             language=language,
@@ -204,8 +201,8 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             evolution_trigger=EvolutionTriggerPoint.AFTER_INVOKE,
             async_evolution=async_evolution,
             max_concurrent_evolution=max_concurrent_evolution,
-            fuzzy_review=False if fuzzy_review is None else fuzzy_review,
-            fuzzy_review_interval=fuzzy_review_interval,
+            review_trigger=review_trigger,
+            review_interval=review_interval,
             review_agent_max_iterations=review_agent_max_iterations,
         )
         self._max_concurrent_evolution = max_concurrent_evolution
@@ -214,7 +211,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         self._experience_skill_ops = self._skill_ops
         self._passive_evolution_pending = False
         self._host_completion_pending_session_id: Optional[str] = None
-        self._team_review_trigger = resolved_review_trigger
         self._completion_followup_pending_session_id: Optional[str] = None
         self._team_id = team_id
         self._trajectory_source = trajectory_source
@@ -299,8 +295,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         return self._generator
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject common and team-specific evolution protocol sections."""
-        await super().before_model_call(ctx)
+        """Inject only the team-specific evolution protocol section."""
         builder = getattr(getattr(ctx, "inputs", None), "system_prompt_builder", None)
         if builder is None:
             builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
@@ -342,15 +337,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         }
 
     @property
-    def auto_scan(self) -> bool:
-        """Backward-compatible alias for signal_trigger."""
-        return self._signal_trigger
-
-    @auto_scan.setter
-    def auto_scan(self, value: bool) -> None:
-        self._signal_trigger = bool(value)
-
-    @property
     def signal_trigger(self) -> bool:
         """Whether deterministic team-skill signal triggering is enabled."""
         return self._signal_trigger
@@ -360,22 +346,13 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         self._signal_trigger = bool(value)
 
     @property
-    def completion_followup_enabled(self) -> bool:
-        """Backward-compatible alias for review_trigger."""
-        return self._team_review_trigger
-
-    @completion_followup_enabled.setter
-    def completion_followup_enabled(self, value: bool) -> None:
-        self._team_review_trigger = bool(value)
-
-    @property
     def review_trigger(self) -> bool:
         """Whether team completion enqueues a review follow-up."""
-        return self._team_review_trigger
+        return self._review_trigger
 
     @review_trigger.setter
     def review_trigger(self, value: bool) -> None:
-        self._team_review_trigger = bool(value)
+        self._review_trigger = bool(value)
 
     @property
     def auto_save(self) -> bool:
@@ -433,7 +410,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Reset invoke-local passive completion state on each invoke boundary."""
         self._passive_evolution_pending = False
-        self._skip_auto_scan_this_invoke = False
+        self._skip_signal_trigger_this_invoke = False
 
     async def _snapshot_for_evolution(
         self,
@@ -537,7 +514,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
         await self._record_presented_experience_detail(ctx, inputs)
 
-        if not self._signal_trigger and not self._team_review_trigger:
+        if not self._signal_trigger and not self._review_trigger:
             return
         if self.builder is None:
             return
@@ -566,10 +543,10 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         ctx: AgentCallbackContext,
     ) -> bool:
         """Trigger passive evolution only if this invoke has observed team completion."""
-        if self._skip_auto_scan_this_invoke:
-            logger.info("[TeamSkillEvolutionRail] active evolution activity detected, skip passive auto_scan")
+        if self._skip_signal_trigger_this_invoke:
+            logger.info("[TeamSkillEvolutionRail] active evolution activity detected, skip passive signal scan")
             return False
-        if self._team_review_trigger:
+        if self._review_trigger:
             return False
         return self._signal_trigger and (
             self._passive_evolution_pending
@@ -578,7 +555,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
     async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Enqueue team completion active-review follow-up while the task loop can schedule it."""
-        if not self._team_review_trigger:
+        if not self._review_trigger:
             return
         pending_session_id = self._completion_followup_pending_session_id
         if pending_session_id is None:
@@ -615,8 +592,8 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         ctx: Optional[AgentCallbackContext] = None,
     ) -> bool:
         """Mark the current invoke for configured team completion evolution handling."""
-        if not self._signal_trigger and not self._team_review_trigger:
-            logger.info("[TeamSkillEvolutionRail] notify_team_completed ignored because auto_scan is disabled")
+        if not self._signal_trigger and not self._review_trigger:
+            logger.info("[TeamSkillEvolutionRail] notify_team_completed ignored because signal_trigger is disabled")
             return False
         if self.builder is None:
             logger.warning(
@@ -678,7 +655,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
     ) -> None:
         """Triggered when view_task shows all member tasks completed."""
         if not getattr(self, "_signal_trigger", True):
-            logger.info("[TeamSkillEvolutionRail] auto_scan disabled, skipping")
+            logger.info("[TeamSkillEvolutionRail] signal_trigger disabled, skipping")
             return
         t0 = time.time()
         try:
@@ -774,7 +751,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
     def _mark_team_completion_pending(self) -> None:
         """Mark team completion for either passive scan or active follow-up mode."""
         session_id = self._current_builder_session_id()
-        if self._team_review_trigger:
+        if self._review_trigger:
             self._completion_followup_pending_session_id = session_id
             return
         self._host_completion_pending_session_id = session_id
@@ -783,11 +760,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
     def _build_team_completion_followup_prompt(self) -> str:
         """Build the active team completion review follow-up prompt."""
         prompt = _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN if self._language == "en" else _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN
-        return (
-            f"<{_AUTO_TEAM_SKILL_EVOLUTION_FOLLOW_UP_TAG}>\n"
-            f"{prompt}\n"
-            f"</{_AUTO_TEAM_SKILL_EVOLUTION_FOLLOW_UP_TAG}>"
-        )
+        return f"<{_AUTO_TEAM_SKILL_EVOLUTION_FOLLOW_UP_TAG}>\n{prompt}\n</{_AUTO_TEAM_SKILL_EVOLUTION_FOLLOW_UP_TAG}>"
 
     async def _record_presented_experience_detail(
         self,
@@ -1074,8 +1047,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
         self._emit_progress(
             "detecting_signals",
-            f"aggregated {team_meta.get('member_count', 0)} members, "
-            f"{len(team_steps)} collaborative steps",
+            f"aggregated {team_meta.get('member_count', 0)} members, {len(team_steps)} collaborative steps",
         )
         return team_traj
 

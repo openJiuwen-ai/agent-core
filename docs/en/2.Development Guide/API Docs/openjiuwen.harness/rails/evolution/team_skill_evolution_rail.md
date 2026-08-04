@@ -114,11 +114,10 @@ agent = create_deep_agent(
 
 - Monitors `view_task` tool result, detecting "all tasks completed"
 - Supports a passive signal path and an Agent-decided active review path
-- `signal_trigger` controls passive team completion scanning; `auto_scan` is its compatibility alias. Both default to `False`.
-- `review_trigger` controls team completion self-check follow_up insertion; `completion_followup_enabled` is its compatibility alias. Both default to `False`.
-- During migration, if both the new and legacy names are provided, the new name takes precedence.
+- `signal_trigger` controls passive team completion scanning and defaults to `False`.
+- `review_trigger` controls team completion self-check follow_up insertion and defaults to `False`.
 - When `review_trigger=True`, active review takes precedence over passive signal generation after team completion. The main Agent decides whether evolution is needed and calls the rail-owned `evolve_review_task`, which runs `evolution_reviewer`.
-- `auto_scan=False` disables passive completion scanning and `notify_team_completed()` passive triggering. `notify_team_completed()` may still schedule active review when `review_trigger=True`.
+- `signal_trigger=False` disables passive completion scanning and `notify_team_completed()` passive triggering. `notify_team_completed()` may still schedule active review when `review_trigger=True`.
 - The passive path aggregates collaborative trajectory evidence and uses `SkillExperienceOptimizer(profile="team")`. Team completion, team skill attribution, and runtime role attribution are heuristic host-bridge signals, not strong contracts.
 
 ```text
@@ -132,7 +131,6 @@ class TeamSkillRail(
     trajectory_source: Optional[TrajectorySource] = None,
     trajectory_sink: Optional[TrajectorySink] = None,
     member_role: Optional[str] = None,
-    auto_scan: Optional[bool] = None,
     signal_trigger: Optional[bool] = None,
     auto_save: bool = False,
     review_runtime: EvolutionReviewRuntime,
@@ -144,12 +142,10 @@ class TeamSkillRail(
     evaluate_llm_policy: LLMInvokePolicy = ...,
     simplify_llm_policy: LLMInvokePolicy = ...,
     eval_interval: int = 5,
-    evolution_total_timeout_secs: float = 600.0,
+    evolution_total_timeout_secs: float = 720.0,
     disabled_skills: Optional[Union[str, list[str]]] = None,
-    fuzzy_review: Optional[bool] = None,
-    fuzzy_review_interval: int = 5,
-    completion_followup_enabled: Optional[bool] = None,
     review_trigger: Optional[bool] = None,
+    review_interval: int = 5,
     review_agent_max_iterations: int = 40,
 )
 ```
@@ -164,7 +160,6 @@ class TeamSkillRail(
 * **trajectory_source** (TrajectorySource, optional): Runtime source for aggregated member trajectory evidence.
 * **trajectory_sink** (TrajectorySink, optional): Runtime sink for publishing this member's latest trajectory snapshot.
 * **member_role** (str, optional): Role written to published snapshots. Defaults to `"leader"` for team skill evolution.
-* **auto_scan** (bool, optional): Compatibility alias for `signal_trigger`; ignored when `signal_trigger` is set.
 * **signal_trigger** (bool, optional): Whether to detect passive team completion and trigger passive evolution, defaults to `False`.
 * **auto_save** (bool): Whether to auto-save generated experience records, defaults to `False` (requires user approval).
 * **review_runtime** (EvolutionReviewRuntime): Shared active-review runtime required for review subagent + active approval tools.
@@ -176,12 +171,10 @@ class TeamSkillRail(
 * **evaluate_llm_policy** (LLMInvokePolicy): Experience evaluation LLM invocation policy.
 * **simplify_llm_policy** (LLMInvokePolicy): Experience simplify LLM invocation policy.
 * **eval_interval** (int): Number of presentations between experience scoring checks. Must be at least 1.
-* **evolution_total_timeout_secs** (float): Background evolution total timeout budget, defaults to 600s.
+* **evolution_total_timeout_secs** (float): Background evolution total timeout budget, defaults to 720s.
 * **disabled_skills** (Optional[Union[str, list[str]]], optional): Deny-list of skill names excluded from self-optimization. Supports a single skill name (str) or multiple names (list[str]).
-* **fuzzy_review** (bool, optional): Regular periodic fuzzy review switch inherited from `SkillEvolutionRail`; defaults to disabled for TeamSkillRail.
-* **fuzzy_review_interval** (int): Number of non-follow_up task iterations between inherited fuzzy review checks. Must be at least 1.
-* **completion_followup_enabled** (bool, optional): Compatibility alias for `review_trigger`; ignored when `review_trigger` is set.
 * **review_trigger** (bool, optional): Whether team completion enqueues a short evolution self-check follow_up, defaults to `False`.
+* **review_interval** (int): Review interval accepted by the shared base rail. It must be at least 1 and defaults to 5; Team review follow-ups remain completion-driven.
 * **review_agent_max_iterations** (int): Maximum iterations for `evolution_reviewer`, defaults to 40.
 
 ### Runtime Trajectory Source/Sink

@@ -72,7 +72,6 @@ def ensure_workspace(
         'EMBED_MODEL': model_name,
         'LORA_DEFAULT_POLICY': lora_default_policy,
         'BROWSER_RUNTIME_MCP_ENABLED': '0',
-        'EVOLUTION_AUTO_SCAN': 'false',
     }
     if lora_repo_root:
         updates['LORA_REPO_ROOT'] = lora_repo_root
