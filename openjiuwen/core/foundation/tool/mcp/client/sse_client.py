@@ -332,7 +332,11 @@ class SseClient(McpClient):
                 self._session.call_tool(tool_name, arguments=arguments),
                 timeout=self._resolve_timeout(timeout),
             )
-            result_content = extract_mcp_tool_result_content(tool_result)
+            result_content = extract_mcp_tool_result_content(
+                tool_result,
+                include_image_content=self._include_image_content,
+                tool_name=tool_name,
+            )
             logger.info("[SseClient] Tool '%s' call completed via SSE", tool_name)
             return result_content
         except Exception as e:

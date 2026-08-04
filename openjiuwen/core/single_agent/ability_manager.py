@@ -21,8 +21,8 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.core.foundation.tool.mcp.base import mcp_model_tool_name, mcp_model_tool_prefix
 from openjiuwen.core.session.agent import Session
-from openjiuwen.core.single_agent.rail import AgentCallbackContext
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -862,7 +862,7 @@ class AbilityManager:
                     underlying_tool_name = mcp_tool.name
                     if allowed_tool_names is not None and underlying_tool_name not in allowed_tool_names:
                         continue
-                    mcp_tool_name = f"mcp_{mcp_server_name}_{underlying_tool_name}"
+                    mcp_tool_name = mcp_model_tool_name(mcp_server_name, underlying_tool_name)
                     mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{underlying_tool_name}'
                     mcp_tool.name = mcp_tool_name
                     self._tools[mcp_tool_name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
@@ -1354,7 +1354,7 @@ class AbilityManager:
             resource_prefix = f"{mcp_server.server_id}.{server_name}."
             if tool_name.startswith(resource_prefix):
                 return mcp_server.server_id, tool_name.removeprefix(resource_prefix)
-            model_prefix = f"mcp_{server_name}_"
+            model_prefix = mcp_model_tool_prefix(server_name)
             if tool_name.startswith(model_prefix):
                 return mcp_server.server_id, tool_name.removeprefix(model_prefix)
         return None
