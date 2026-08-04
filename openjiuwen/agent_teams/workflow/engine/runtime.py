@@ -56,7 +56,6 @@ class Runtime:
     # Mutable run state (created/advanced inside the running loop).
     agent_gate: AgentAdmission | None = field(default=None, repr=False)
     spawn_count: int = 0
-    current_phase: str | None = None
     warned_concurrent_scope: bool = False  # one-shot guard for the raw-gather warning
     warned_concurrent_session: bool = False  # one-shot guard for overlapping session sends
 

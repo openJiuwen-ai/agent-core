@@ -447,6 +447,17 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     answer: Optional[str] = Field(
         default=None, description="Person's raw reply text, on human_replied"
     )
+    tokens: Optional[int] = Field(default=None, description="Per-agent token usage from the result loop.")
+    budget: Optional[dict] = Field(
+        default=None, description="Leader shared-pool snapshot {total,spent,remaining,scope,exhausted}."
+    )
+    phase_type: Optional[str] = Field(default=None, description='"child" for nested-workflow child phase declarations.')
+    nested_phase: Optional[str] = Field(
+        default=None, description="Display name (▸ name #N) inside a sub-workflow; prefer over phase for card matching."
+    )
+    parent_phase: Optional[str] = Field(
+        default=None, description="Parent author phase name when this is a child phase declaration."
+    )
 
 
 class WorktreeCreatedEvent(BaseEventMessage):

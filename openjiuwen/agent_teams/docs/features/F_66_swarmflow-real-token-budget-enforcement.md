@@ -131,9 +131,16 @@ budget spent after 9 rounds (remaining=0 < worst_round=1032) — stopping ← �
 
 **回归**：全量 `tests/unit_tests/agent_teams/` **1977 passed / 0 failed**（改动前 1950，新增 27 条即本特性的单测）。
 
+## Progress 可观测（详 `S_18`）
+
+- `AgentResult.tokens` 经 progress 回路对外：`backend` → `_emit_agent_completed` / `_emit_agent_failed`
+- 同帧附带 `_budget_snapshot(rt.budget)` 的 `budget` 字段
+- `BudgetExhausted` 终态：`_exec_loaded` 补发 `WORKFLOW_FAILED`（`budget.exhausted=true`）
+- `SwarmflowTool._publish` 透传至 `WORKFLOW_PROGRESS`，供 Monitor/TUI 展示
+- cache-hit 重放：`tokens=None`，budget 快照仍带
+
 ## 已知遗留
 
 - **`preprocess_swarmflow`（MockBackend 预演）不接账本**，预演永远无界。预演不打真实模型，天花板对它无意义。
-- **`AgentResult.tokens` 目前只有 MockBackend 自己读**（喂它自己的账本）。真实 backend 如实上报单次成本，但暂无消费方——留给后续 journal / 每次调用成本归因用。
 - **`spent` 不落 journal**：resume 命中缓存的调用不重新计费（本就没花钱），但账本从 0 起算，跨 resume 的累计花费无法还原。真要做需要把 `spent` 写进 journal 元信息。
 - **`swarmflow_budget` 只有 leader 级**，无法给单个 run 指定更小的上限。需要时再加 run 级 override，别提前设计。

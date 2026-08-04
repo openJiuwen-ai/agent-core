@@ -25,13 +25,16 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_factory import create_team_tools
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
-from openjiuwen.agent_teams.workflow.engine import run_workflow
+from openjiuwen.agent_teams.workflow.engine import run_workflow, runner
+from openjiuwen.agent_teams.workflow.engine import primitives as _p
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
+from openjiuwen.agent_teams.workflow.engine.runtime import Runtime
 from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
+from openjiuwen.core.single_agent.rail.base import ModelCallInputs
 
 _SCRIPT = '''
 from swarmflow import agent
@@ -345,3 +348,121 @@ def test_ledger_reaches_the_swarmflow_tool_through_the_handle_chain():
 
     swarmflow = next(t for t in tools if t.card.name == "swarmflow")
     assert swarmflow._budget is ledger
+
+
+# ---------------------------------------------------------------------------
+# _exec_loaded — BudgetExhausted terminal
+# ---------------------------------------------------------------------------
+
+
+class _Sink:
+    def __init__(self):
+        self.events = []
+
+    def __call__(self, ev):
+        self.events.append(ev)
+
+
+class _Loaded:
+    meta = {"name": "credit-review", "description": None, "phases": None}
+
+
+@pytest.mark.asyncio
+async def test_budget_exhausted_emits_workflow_failed_with_budget(monkeypatch):
+    led = BudgetLedger(total=500000, spent=500000)  # exhausted
+    sink = _Sink()
+    rt = Runtime(backend=None, journal=None, budget=led)
+    rt.progress_sink = sink
+
+    async def boom(loaded, args):
+        raise BudgetExhausted("token budget exhausted: 500000/500000")
+
+    monkeypatch.setattr(runner, "_invoke_loaded", boom)
+    with pytest.raises(BudgetExhausted):
+        await runner._exec_loaded(_Loaded(), rt)
+
+    failed = [e for e in sink.events if e.kind == ProgressKind.WORKFLOW_FAILED]
+    assert len(failed) == 1
+    ev = failed[0]
+    assert ev.budget is not None
+    assert ev.budget["exhausted"] is True
+    assert ev.budget["spent"] == 500000
+    assert ev.budget["remaining"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Emitter + _BackendCallResult + _attempt_calls token threading
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_emit_agent_completed_carries_tokens_and_budget():
+    sink = _Sink()
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(total=500000, spent=412340))
+    rt.progress_sink = sink
+    _p._emit_agent_completed(
+        rt, {"phase": "review", "label": "analyst"}, "ok",
+        agent_id="k1", tokens=12700, budget_snapshot=_p._budget_snapshot(rt.budget),
+    )
+    ev = sink.events[-1]
+    assert ev.kind == ProgressKind.AGENT_COMPLETED
+    assert ev.tokens == 12700
+    assert ev.budget["spent"] == 412340
+    assert ev.budget["exhausted"] is False
+
+
+@pytest.mark.asyncio
+async def test_emit_agent_failed_carries_tokens_and_budget():
+    sink = _Sink()
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(total=100, spent=100))
+    rt.progress_sink = sink
+    _p._emit_agent_failed(
+        rt, {"phase": "review", "label": "analyst"}, "boom",
+        agent_id="k1", tokens=50, budget_snapshot=_p._budget_snapshot(rt.budget),
+    )
+    ev = sink.events[-1]
+    assert ev.kind == ProgressKind.AGENT_FAILED
+    assert ev.tokens == 50
+    assert ev.budget["exhausted"] is True
+
+
+def test_backend_call_result_has_tokens_field():
+    r = _p._BackendCallResult(result="x", succeeded=True, raw_text="x", tokens=999)
+    assert r.tokens == 999
+    r_default = _p._BackendCallResult()
+    assert r_default.tokens is None
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_threads_tokens_on_success():
+    class _Res:
+        skipped = False
+        text = "hello"
+        structured = None
+        tokens = 4321
+
+    async def make_call():
+        return _Res()
+
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger())
+    out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
+    assert out.succeeded is True
+    assert out.result == "hello"
+    assert out.tokens == 4321
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_skipped_branch_keeps_tokens_none():
+    class _Res:
+        skipped = True
+        text = ""
+        structured = None
+        tokens = 0  # not meaningful on a skip
+
+    async def make_call():
+        return _Res()
+
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger())
+    out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
+    assert out.succeeded is False
+    assert out.tokens is None
