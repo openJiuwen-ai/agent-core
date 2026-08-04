@@ -6,10 +6,12 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
+import yaml
 
 from openjiuwen.agent_evolving.evaluator.evaluator_pipeline.adapters.agents.jiuwenswarm import (
     JiuWenSwarmAgent,
 )
+from openjiuwen.agent_evolving.evaluator.evaluator_pipeline.models import ExecResult
 
 
 class TestJiuWenSwarmAgentInit:
@@ -80,6 +82,49 @@ class TestJiuWenSwarmAgentValidateConfig:
         errors = agent.validate_config()
         
         assert len(errors) == 0
+
+
+class TestJiuWenSwarmAgentSetup:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("evolution_enabled", [True, False])
+    async def test_setup_writes_canonical_evolution_yaml_without_legacy_env(
+        self,
+        evolution_enabled,
+    ):
+        copied: dict[str, str] = {}
+
+        async def exec_command(command: str, timeout: int) -> ExecResult:
+            stdout = "OK" if "import jiuwenswarm" in command else ""
+            return ExecResult(stdout=stdout, returncode=0)
+
+        async def copy_to(source: Path, destination: str) -> bool:
+            copied[destination] = Path(source).read_text(encoding="utf-8")
+            return True
+
+        env = MagicMock()
+        env.exec = AsyncMock(side_effect=exec_command)
+        env.copy_to = AsyncMock(side_effect=copy_to)
+        agent = JiuWenSwarmAgent(
+            {
+                "api_key": "test-key",
+                "api_base": "https://api.example.com",
+                "evolution_enabled": evolution_enabled,
+            }
+        )
+
+        assert await agent.setup(env) is True
+
+        env_content = copied[f"{agent.CONFIG_DIR}/.env"]
+        assert "EVOLUTION_AUTO_SCAN" not in env_content
+        assert "EVOLUTION_AUTO_SAVE" not in env_content
+
+        config = yaml.safe_load(copied[f"{agent.CONFIG_DIR}/config.yaml"])
+        evolution = config["react"]["evolution"]
+        assert evolution["skill_evolution"] is evolution_enabled
+        assert evolution["auto_save"] is evolution_enabled
+        assert "enabled" not in evolution
+        assert "auto_scan" not in evolution
+        assert "skill_base_dir" not in evolution
 
 
 class TestJiuWenSwarmAgentGetSourceFiles:
