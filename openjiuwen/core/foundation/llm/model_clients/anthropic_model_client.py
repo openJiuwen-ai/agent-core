@@ -483,10 +483,23 @@ class AnthropicModelClient(BaseModelClient):
             params["system"] = system_blocks
         if anthropic_tools:
             params["tools"] = anthropic_tools
-        if openai_params.get("temperature") is not None:
-            params["temperature"] = openai_params["temperature"]
-        if openai_params.get("top_p") is not None:
-            params["top_p"] = openai_params["top_p"]
+        # Anthropic rejects temperature and top_p together (400 invalid_request
+        # for models such as Claude Haiku 4.5). Both carry non-None defaults in
+        # ModelRequestConfig, so we cannot rely on the caller to unset one:
+        # prefer temperature and only forward top_p when temperature is absent.
+        temperature = openai_params.get("temperature")
+        top_p = openai_params.get("top_p")
+        if temperature is not None:
+            params["temperature"] = temperature
+            if top_p is not None:
+                llm_logger.debug(
+                    "Anthropic: dropping top_p because temperature is set "
+                    "(the API forbids specifying both)."
+                )
+        elif top_p is not None and top_p != 1.0:
+            # top_p=1.0 is the default (no nucleus truncation); skip it so we
+            # send the API only meaningful overrides.
+            params["top_p"] = top_p
         if openai_params.get("stop"):
             stop_val = openai_params["stop"]
             params["stop_sequences"] = stop_val if isinstance(stop_val, list) else [stop_val]
