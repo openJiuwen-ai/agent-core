@@ -43,9 +43,6 @@ from openjiuwen.agent_evolving.signal import (
     SignalDetector,
     make_signal_fingerprint,
 )
-from openjiuwen.agent_evolving.skill_self_evolution import (
-    resolve_skill_evolution_action,
-)
 from openjiuwen.agent_evolving.tools import create_main_evolution_tools
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
 from openjiuwen.agent_evolving.updater import SingleDimUpdater
@@ -941,54 +938,24 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 )
 
             # Evolve existing skills (when signals are attributed to known skills)
-            skills_dirs = self._resolve_skills_dirs_for_self_evolution()
             deferred_cancelled: List[tuple[str, str]] = []
             for skill_name, skill_signals in skill_groups.items():
-                action = resolve_skill_evolution_action(
-                    skill_name,
-                    default_auto_save=self._auto_save,
-                    skills_dirs=skills_dirs,
-                )
-                if action == "off":
-                    logger.info(
-                        "[SkillEvolutionRail] selfEvolution=off after attribution, skipping skill=%s",
-                        skill_name,
-                    )
-                    deferred_cancelled.append(
-                        (
-                            skill_name,
-                            f"selfEvolution=off for '{skill_name}'; skipping online evolution",
-                        )
-                    )
-                    continue
-                evolved = await self._evolve_skill_with_sharing(
+                generated = await self._evolve_skill_with_sharing(
                     skill_name=skill_name,
                     skill_signals=skill_signals,
                     messages=messages,
                     trajectory=trajectory,
                     ctx=ctx,
                     shared_records=downloaded_per_skill.get(skill_name, []),
-                    requires_approval=False,
-                    # Same as enterprise-dev: review_status mirrors selfEvolution action.
-                    review_status=action,
+                    requires_approval=not self._auto_save,
                 )
-                if evolved.status in {"staged", "auto_approved", "persistence_failed"}:
-                    continue
-                if evolved.status == "generation_failed":
+                if not generated:
                     deferred_cancelled.append(
                         (
                             skill_name,
-                            f"generation failed for '{skill_name}'",
+                            f"attributed optimizer signal for '{skill_name}' produced no reusable evolution records",
                         )
                     )
-                    continue
-                deferred_cancelled.append(
-                    (
-                        skill_name,
-                        f"attributed optimizer signal for '{skill_name}' "
-                        "produced no reusable evolution records",
-                    )
-                )
 
             # Score presented experiences before any terminal cancelled progress
             # (host watcher treats cancelled as cycle end).
@@ -1337,7 +1304,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         trajectory: Optional[Trajectory] = None,
         user_query: str = "",
         requires_approval: bool,
-        review_status: Optional[str] = None,
     ) -> OnlineEvolutionResult:
         """Generate and stage skill experiences through the unified updater flow.
 
@@ -1352,7 +1318,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             user_query=user_query,
             metadata={"language": self._language},
             source="experience_updater",
-            review_status=review_status,
         )
 
     async def _handle_evolution_from_signals(
@@ -1366,7 +1331,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         user_query: str = "",
         requires_approval: bool,
         emit_host_events: bool = True,
-        review_status: Optional[str] = None,
     ) -> OnlineEvolutionResult:
         """Handle optimizer-driven evolution and return the structured orchestration status."""
         if emit_host_events:
@@ -1382,7 +1346,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             trajectory=trajectory,
             user_query=user_query,
             requires_approval=requires_approval,
-            review_status=review_status,
         )
         request = result.request
         if result.status in ONLINE_EVOLUTION_OUTCOME_STATUSES:
