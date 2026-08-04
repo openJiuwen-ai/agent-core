@@ -43,6 +43,92 @@ _PS_VARIABLE_PATTERN = re.compile(r"(^|[\s;(])\$[A-Za-z_][A-Za-z0-9_]*")
 _POWERSHELL_EXECUTABLE_PATTERN = re.compile(r"^\s*(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b", re.IGNORECASE)
 _POWERSHELL_COMMAND_ARG_PATTERN = re.compile(r"(?is)(?:^|\s)-(?:command|c)\s+(?P<script>.+)\s*$")
 _POWERSHELL_CANDIDATES = ("pwsh", "powershell", "powershell.exe")
+_BG_PIPE_MAX_BYTES = 512 * 1024
+_DEFAULT_BACKGROUND_GRACE_SECONDS = 5.0
+_BACKGROUND_PIPE_DISCARD_TASKS: set[asyncio.Task[None]] = set()
+
+
+def _resolve_background_grace_seconds(grace: Optional[float]) -> float:
+    if grace is not None and grace > 0:
+        return grace
+    try:
+        raw = os.getenv("BASH_BACKGROUND_GRACE_SECONDS")
+        if raw is not None and raw.strip():
+            return max(1.0, float(raw))
+    except ValueError:
+        pass
+    return _DEFAULT_BACKGROUND_GRACE_SECONDS
+
+
+def _close_pipe_reader(stream: Optional[asyncio.StreamReader], *, context: str) -> None:
+    """Best-effort close; log failure type only (no exception message/stack)."""
+    if stream is None:
+        return
+    try:
+        stream.close()
+    except Exception as e:
+        sys_operation_logger.debug(
+            "Failed to close subprocess pipe reader",
+            event_type=LogEventType.SYS_OP_ERROR,
+            metadata={"context": context, "error_type": type(e).__name__},
+        )
+
+
+async def _read_pipe_text(stream: Optional[asyncio.StreamReader]) -> str:
+    """Drain a pipe into memory; truncation is handled by harness tools."""
+    if stream is None:
+        return ""
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while total < _BG_PIPE_MAX_BYTES:
+            try:
+                chunk = await asyncio.wait_for(stream.read(8192), timeout=2.0)
+            except asyncio.TimeoutError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    finally:
+        _close_pipe_reader(stream, context="read_pipe_text")
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+async def _collect_exited_pipe_output(process: asyncio.subprocess.Process) -> Dict[str, str]:
+    stdout, stderr = await asyncio.gather(
+        _read_pipe_text(process.stdout),
+        _read_pipe_text(process.stderr),
+    )
+    return {"stdout": stdout, "stderr": stderr}
+
+
+def _start_background_pipe_discard(process: asyncio.subprocess.Process) -> None:
+    async def _discard(stream: Optional[asyncio.StreamReader]) -> None:
+        if stream is None:
+            return
+        try:
+            while await stream.read(65536):
+                pass
+        except Exception as e:
+            sys_operation_logger.debug(
+                "Background pipe discard interrupted",
+                event_type=LogEventType.SYS_OP_ERROR,
+                metadata={"error_type": type(e).__name__},
+            )
+        finally:
+            _close_pipe_reader(stream, context="background pipe discard")
+
+    if process.stdout is not None:
+        task = asyncio.create_task(_discard(process.stdout), name=f"bg-discard-stdout-{process.pid}")
+        _BACKGROUND_PIPE_DISCARD_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_PIPE_DISCARD_TASKS.discard)
+    if process.stderr is not None:
+        task = asyncio.create_task(_discard(process.stderr), name=f"bg-discard-stderr-{process.pid}")
+        _BACKGROUND_PIPE_DISCARD_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_PIPE_DISCARD_TASKS.discard)
+
+
 _POSIX_COMMANDS = frozenset({
     "ls", "grep", "egrep", "fgrep", "cat", "head", "tail", "find", "rm",
     "cp", "mv", "touch", "chmod", "chown", "sed", "awk", "gawk", "cut",
@@ -372,7 +458,7 @@ class ShellOperation(BaseShellOperation):
             cwd: Working directory.
             env: Environment variables.
             shell_type: Shell selection (auto/cmd/powershell/bash/sh).
-            background: If True, redirect all I/O to DEVNULL (no output capture).
+            background: If True, capture stdout/stderr during grace only; discard after success.
             stream: If True, apply OS-specific buffering wrapper for
                 real-time line output (e.g. ``script`` on macOS).  Only
                 meaningful for streaming execution; one-shot
@@ -393,14 +479,9 @@ class ShellOperation(BaseShellOperation):
             if _jw_start_new_session not in ("0", "false", "no", "off"):
                 subprocess_kw["start_new_session"] = True
 
-        if background:
-            stdout = asyncio.subprocess.DEVNULL
-            stderr = asyncio.subprocess.DEVNULL
-            stdin = asyncio.subprocess.DEVNULL
-        else:
-            stdout = asyncio.subprocess.PIPE
-            stderr = asyncio.subprocess.PIPE
-            stdin = asyncio.subprocess.DEVNULL
+        stdout = asyncio.subprocess.PIPE
+        stderr = asyncio.subprocess.PIPE
+        stdin = asyncio.subprocess.DEVNULL
 
         if use_shell:
             cmd = self._wrap_command_with_buffering(args) if (stream and not background) else args
@@ -757,7 +838,7 @@ class ShellOperation(BaseShellOperation):
             *,
             cwd: Optional[str] = None,
             environment: Optional[Dict[str, str]] = None,
-            grace: float = 3.0,
+            grace: Optional[float] = None,
             shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> ExecuteCmdBackgroundResult:
         """
@@ -767,7 +848,8 @@ class ShellOperation(BaseShellOperation):
             command: Command to execute.
             cwd: Working directory for command execution (default: current directory).
             environment: Key-value dict of custom environment variables.
-            grace: Seconds to wait for early failure detection (default: 3.0).
+            grace: Seconds to wait for early failure detection. When omitted, uses
+                ``BASH_BACKGROUND_GRACE_SECONDS`` or 5.0 seconds.
             shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
 
         Returns:
@@ -828,6 +910,7 @@ class ShellOperation(BaseShellOperation):
                 )
 
             exec_env = OperationUtils.prepare_environment(environment)
+            grace = _resolve_background_grace_seconds(grace)
             process = await self._create_subprocess(
                 command, actual_cwd, exec_env, shell_type=shell_type_enum, background=True
             )
@@ -837,10 +920,20 @@ class ShellOperation(BaseShellOperation):
             pid, err = await process_handler.background(grace=grace)
             if err:
                 _untrack_shell_process(track_sid, process)
+                pipe_out = await _collect_exited_pipe_output(process)
                 return _create_exec_cmd_background_err(
                     error_msg=f"background command failed: {err}",
-                    data=ExecuteCmdBackgroundData(command=command, cwd=str(actual_cwd)))
+                    data=ExecuteCmdBackgroundData(
+                        command=command,
+                        cwd=str(actual_cwd),
+                        pid=pid,
+                        stdout=pipe_out["stdout"],
+                        stderr=pipe_out["stderr"],
+                        exit_code=process.returncode,
+                        status="exited",
+                    ))
 
+            _start_background_pipe_discard(process)
             success_result = ExecuteCmdBackgroundResult(
                 code=StatusCode.SUCCESS.code,
                 message="Background command started successfully",
@@ -848,6 +941,7 @@ class ShellOperation(BaseShellOperation):
                     command=command,
                     cwd=str(actual_cwd),
                     pid=pid,
+                    status="started",
                 )
             )
             sys_operation_logger.info("End to execute cmd background", event=self._create_sys_operation_event(
