@@ -10,21 +10,24 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.session_memory_manager import (
+    group_completed_api_rounds as group_completed_api_round_ranges,
+)
 from openjiuwen.core.context_engine.processor.forked.compressor.reinjection import (
     ReinjectContext,
-    StateReinjector as FullCompactStateReinjector,
     build_file_reinjected_content,
     build_plan_mode_reinjected_content,
     build_plan_reinjected_content,
-    build_skill_reinjected_content,
     build_single_reinjected_state_message,
+    build_skill_reinjected_content,
     build_task_status_reinjected_content,
     build_todo_reinjected_content,
     build_tool_result_hint_reinjected_content,
 )
-from openjiuwen.core.context_engine.context.session_memory_manager import (
-    group_completed_api_rounds as group_completed_api_round_ranges,
+from openjiuwen.core.context_engine.processor.forked.compressor.reinjection import (
+    StateReinjector as FullCompactStateReinjector,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage, UserMessage
 
@@ -235,12 +238,7 @@ def extract_tool_result_hint(
 
 def message_to_text(message: BaseMessage) -> str:
     content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except TypeError:
-        return str(content)
+    return sanitize_content_for_text(content)
 
 
 def is_summary_message(message: BaseMessage, summary_marker: str) -> bool:
@@ -259,12 +257,8 @@ def collect_summary_indices(messages: List[BaseMessage], summary_marker: str) ->
 
 def estimate_content_tokens(content: Any) -> int:
     """Approximate token count when no token counter is available."""
-    if isinstance(content, str):
-        return len(content) // 3
-    try:
-        return len(json.dumps(content, ensure_ascii=False)) // 3
-    except TypeError:
-        return len(str(content)) // 3
+    text = sanitize_content_for_text(content)
+    return max(len(text) // 3, 1)
 
 
 def count_messages_tokens(messages: List[BaseMessage], token_counter, processor_type: str = "") -> int:
