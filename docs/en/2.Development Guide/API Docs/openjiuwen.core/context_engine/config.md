@@ -13,15 +13,18 @@ Complete context-engine configuration.
 - `max_context_message_num` (`int | None`): Hard message-count limit for one
   context. Default: `None`, meaning unlimited.
 - `default_window_message_num` (`int | None`): Number of recent messages kept
-  when no explicit window size is supplied. Default: `None`; when set, it must
-  be greater than `0`.
+  when no explicit window size is supplied. Default: `None`, meaning no
+  message-count truncation; when set, it must be greater than `0`.
 - `default_window_round_num` (`int | None`): Number of recent complete dialogue
-  rounds kept in the window. When set, round-based truncation takes precedence
-  over message-count truncation. Default: `None`.
+  rounds kept in the window. When set, round-based truncation is applied before
+  message-count truncation. Default: `None`, meaning no round-based truncation.
+
+When both are `None`, `get_context_window()` performs no window truncation and
+returns the full conversation history (subject only to the
+`max_context_message_num` buffer limit and to offload/compression by context
+processors).
 - `enable_reload` (`bool`): Whether to enable the reload protocol for offloaded
   content. Default: `False`.
-- `enable_tiktoken_counter` (`bool`): Whether to use tiktoken for token
-  accounting. Default: `False`.
 - `context_window_tokens` (`int | None`): Total context-window capacity of the
   runtime model, used by threshold calculations and compression telemetry.
   Default: `None`.
@@ -44,6 +47,5 @@ from openjiuwen.core.context_engine import ContextEngineConfig
 config = ContextEngineConfig(
     default_window_round_num=10,
     context_window_tokens=128_000,
-    enable_tiktoken_counter=True,
 )
 ```
