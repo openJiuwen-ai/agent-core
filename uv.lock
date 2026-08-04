@@ -3047,6 +3047,7 @@ dev = [
     { name = "pytest-mock" },
     { name = "ruff" },
     { name = "sse-starlette" },
+    { name = "types-pyyaml" },
     { name = "uvicorn" },
 ]
 docs = [
@@ -3061,6 +3062,7 @@ lint = [
     { name = "mypy" },
     { name = "pylint" },
     { name = "ruff" },
+    { name = "types-pyyaml" },
 ]
 test = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -3181,6 +3183,7 @@ dev = [
     { name = "pytest-mock", specifier = ">=3.14.0" },
     { name = "ruff", specifier = ">=0.11.2" },
     { name = "sse-starlette", specifier = ">=2.1.3" },
+    { name = "types-pyyaml", specifier = ">=6.0.12" },
     { name = "uvicorn", specifier = ">=0.32.0" },
 ]
 docs = [{ name = "autodoc-pydantic", specifier = ">=2.2.0" }]
@@ -3191,6 +3194,7 @@ lint = [
     { name = "mypy", specifier = ">=1.12.0" },
     { name = "pylint", specifier = ">=3.0.0" },
     { name = "ruff", specifier = ">=0.11.2" },
+    { name = "types-pyyaml", specifier = ">=6.0.12" },
 ]
 test = [
     { name = "a2a-sdk", extras = ["http-server"], specifier = "==1.0.0" },
@@ -5564,6 +5568,15 @@ dependencies = [
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/a7/a7/e6aecc4b4eb59598829a3b5076a93aff291b4fdaa2ded25efc4e1f4d219c/typer_slim-0.24.0.tar.gz", hash = "sha256:f0ed36127183f52ae6ced2ecb2521789995992c521a46083bfcdbb652d22ad34" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/a7/24/5480c20380dfd18cf33d14784096dca45a24eae6102e91d49a718d3b6855/typer_slim-0.24.0-py3-none-any.whl", hash = "sha256:d5d7ee1ee2834d5020c7c616ed5e0d0f29b9a4b1dd283bdebae198ec09778d0e" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260724"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/3f/6f/a28f44bcd56bebed42b028a2894c79853e2f5e6b5279e633cb3f287a05e7/types_pyyaml-6.0.12.20260724.tar.gz", hash = "sha256:3c1ce1bb73cd5ec02e90390c2b1f00e810d241d8825fd73ff359696839271b6b" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/8b/42/0337fefc615e20ee55d1c8f71b774a9b2b734a04669139c20753b27a2a3a/types_pyyaml-6.0.12.20260724-py3-none-any.whl", hash = "sha256:d57db930a4b2efbc57cf430ec8882765d246929432fa253092f383902329a453" },
 ]
 
 [[package]]

@@ -1,6 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Public Symphony fingerprint, evaluation, graph, and orchestration APIs."""
 
+from __future__ import annotations
+
+from importlib import import_module
+from types import ModuleType
+from typing import TYPE_CHECKING
+
 from openjiuwen.symphony.evaluation import EvaluationContext, EvaluationSuite, EvaluationWindow, Evaluator
 from openjiuwen.symphony.interfaces import (
     AtomicCapabilityProvider,
@@ -58,8 +64,14 @@ from openjiuwen.symphony.shared.fingerprint import (
     SkillManifestParser,
 )
 
+if TYPE_CHECKING:
+    from openjiuwen.symphony import agent as agent
+    from openjiuwen.symphony import retrieval as retrieval
+    from openjiuwen.symphony import shared as shared
+
 CapabilityInput = ParameterSpec
 CapabilityOutput = ArtifactSpec
+_LAZY_MODULES = frozenset({"agent", "retrieval", "shared"})
 
 __all__ = [
     "FINGERPRINT_ARTIFACT_FILENAME",
@@ -118,4 +130,15 @@ __all__ = [
     "SuggestionPriority",
     "SymphonyLLM",
     "SymphonyRuntime",
+    "agent",
+    "retrieval",
+    "shared",
 ]
+
+
+def __getattr__(name: str) -> ModuleType:
+    if name in _LAZY_MODULES:
+        module = import_module(f"{__name__}.{name}")
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
