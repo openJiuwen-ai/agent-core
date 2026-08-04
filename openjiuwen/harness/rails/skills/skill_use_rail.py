@@ -11,7 +11,7 @@ import yaml
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.runner.runner import Runner
+from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.sections import SectionName
@@ -27,11 +27,22 @@ from openjiuwen.harness.rails._multimodal import should_enable_read_image_multim
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool, ListSkillTool, SkillTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 
+# Lines read when probing a SKILL.md for its YAML front matter. Bodies run to
+# tens of KB while the front matter is a handful of lines; a file whose front
+# matter does not fit within this budget falls back to a full read.
+_FRONT_MATTER_PROBE_LINES = 64
+
 
 class SkillUseRail(DeepAgentRail):
     """Rail that manages skill prompt injection and tool registration."""
 
-    priority = 100
+    # Below the filesystem toolset tier (SysOperationRail / WorktreeRail, 100)
+    # on purpose: ``init`` checks whether read_file / code / bash already have
+    # an owner before contributing its own fallback copies, and that check only
+    # means anything once the rails that own them for real have initialized.
+    # Level with McpRail / SubagentRail, which register their own tools and
+    # neither read nor write anything this rail touches.
+    priority = 95
 
     SKILL_MODE_ALL = "all"
     SKILL_MODE_AUTO_LIST = "auto_list"
@@ -98,9 +109,12 @@ class SkillUseRail(DeepAgentRail):
         # Cache evolution experience texts per skill name.
         self._evolution_texts: Dict[str, str] = {}
 
-        # Track tools added by this rail only.
-        self._owned_tool_names: Set[str] = set()
-        self._owned_tool_ids: Set[str] = set()
+        # Abilities this rail actually registered, mapped from tool name to the
+        # exact card that was stored. The name is the ability-manager key
+        # (``add_ability`` rewrites card ids, so an id is not a stable handle),
+        # while the card identity tells uninit whether this rail is still the
+        # owner or another rail has since taken the name over.
+        self._owned_tool_cards: Dict[str, ToolCard] = {}
 
         # Snapshot of visible skill directories and SKILL.md mtimes.
         self._skills_snapshot_signature: Optional[Tuple[Tuple[str, float], ...]] = None
@@ -249,7 +263,13 @@ class SkillUseRail(DeepAgentRail):
         return filtered
 
     def init(self, agent):
-        """Register tool cards into agent and concrete tools into resource manager."""
+        """Register this rail's tools through the agent ability manager.
+
+        Every tool is registered with ``AbilityManager.add_ability`` (card plus
+        concrete instance) so the ability-manager card id and the
+        resource-manager key stay consistent. Abilities already owned by another
+        rail are left untouched; see the loop comment for why.
+        """
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
@@ -294,65 +314,62 @@ class SkillUseRail(DeepAgentRail):
                 )
             )
 
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is None:
+            logger.warning(
+                "[SkillUseRail] agent has no ability_manager; skill tools are not registered"
+            )
+            return
+
         for tool in tools:
+            # ``include_tools`` only provides a *fallback* read_file / code /
+            # bash set for hosts that mount no filesystem rail. When another
+            # rail (typically SysOperationRail) already owns the ability, that
+            # owner's instance carries policy this rail cannot reproduce
+            # (read-only mode, bash deny patterns, an explicit multimodal
+            # override), so defer to it instead of rebinding the shared
+            # resource-manager entry behind its back.
+            if ability_manager.get(tool.card.name) is not None:
+                logger.debug(
+                    "[SkillUseRail] ability '%s' is already registered by another "
+                    "owner; skip the fallback registration",
+                    tool.card.name,
+                )
+                continue
             try:
-                existing_tool = Runner.resource_mgr.get_tool(tool.card.id)
-                if existing_tool is not None:
-                    Runner.resource_mgr.remove_tool(tool.card.id)
-                Runner.resource_mgr.add_tool(tool)
-                self._owned_tool_ids.add(tool.card.id)
+                # Register card + instance through the single entry point so the
+                # ability-manager card id and the resource-manager key stay
+                # consistent (stateful tools get an agent-qualified id).
+                result = ability_manager.add_ability(tool.card, tool)
+                if result.added:
+                    self._owned_tool_cards[tool.card.name] = tool.card
             except Exception as exc:
                 logger.warning(
-                    f"[SkillUseRail] failed to add tool resource '{tool.card.id}' "
-                    f"to resource_mgr: {exc}"
+                    f"[SkillUseRail] failed to register tool '{tool.card.name}' "
+                    f"on ability_manager: {exc}"
                 )
 
-        if hasattr(agent, "ability_manager"):
-            for tool in tools:
-                try:
-                    result = agent.ability_manager.add(tool.card)
-                    if result.added:
-                        self._owned_tool_names.add(tool.card.name)
-                except Exception as exc:
-                    logger.warning(
-                        f"[SkillUseRail] failed to add tool card '{tool.card.name}' "
-                        f"to ability_manager: {exc}"
-                    )
-
     def uninit(self, agent):
-        """Remove tool cards from agent ability manager and resource manager."""
-        if hasattr(agent, "ability_manager"):
-            for tool_name in list(self._owned_tool_names):
+        """Remove the abilities this rail still owns from the agent."""
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is not None:
+            for tool_name, tool_card in list(self._owned_tool_cards.items()):
+                if ability_manager.get(tool_name) is not tool_card:
+                    # Another rail re-registered the name after this rail did
+                    # and now owns both the card and the live instance; tearing
+                    # it down here would unregister that rail's tool.
+                    continue
                 try:
-                    agent.ability_manager.remove(tool_name)
+                    # remove_ability mirrors add_ability: it drops the card and,
+                    # for stateful tools, the agent-qualified resource entry.
+                    ability_manager.remove_ability(tool_name)
                 except Exception as exc:
                     logger.warning(
                         f"[SkillUseRail] failed to remove tool '{tool_name}' "
                         f"from ability_manager: {exc}"
                     )
 
-        for tool_id in list(self._owned_tool_ids):
-            if Runner.resource_mgr.get_tool(tool_id) is None:
-                continue
-            try:
-                result = Runner.resource_mgr.remove_tool(tool_id)
-                if hasattr(result, "is_err") and result.is_err():
-                    logger.warning(
-                        "[SkillUseRail] failed to remove tool resource '%s' "
-                        "from resource_mgr: %s",
-                        tool_id,
-                        result,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "[SkillUseRail] failed to remove tool resource '%s' "
-                    "from resource_mgr: %s",
-                    tool_id,
-                    exc,
-                )
-
-        self._owned_tool_names.clear()
-        self._owned_tool_ids.clear()
+        self._owned_tool_cards.clear()
 
     async def refresh_skill_prompt(self, ctx: AgentCallbackContext) -> None:
         """Regenerate the skills system prompt"""
@@ -704,12 +721,88 @@ class SkillUseRail(DeepAgentRail):
         """Normalize skill names into a set."""
         return set(cls._normalize_name_list(raw))
 
+    async def _read_skill_text(self, path: Path, *, head: Optional[int] = None) -> str:
+        """Read SKILL.md text, optionally only its first *head* lines.
+
+        Args:
+            path: Path to the SKILL.md file.
+            head: When set, read only that many leading lines. Skill metadata is
+                read-only, so the cross-process file lock is waived.
+
+        Returns:
+            The file text that was read.
+
+        Raises:
+            FileNotFoundError: The read failed or returned no content.
+        """
+        result = await self.sys_operation.fs().read_file(
+            str(path),
+            mode="text",
+            encoding="utf-8",
+            head=head,
+            only_read=True,
+        )
+
+        if getattr(result, "code", 0) != 0:
+            raise FileNotFoundError(
+                getattr(result, "message", f"read_file failed: {path}")
+            )
+
+        data = getattr(result, "data", None)
+        content = getattr(data, "content", None) if data is not None else None
+        if content is None:
+            raise FileNotFoundError(f"read_file content is None: {path}")
+
+        return content if isinstance(content, str) else str(content)
+
+    @staticmethod
+    def _split_front_matter(text: str) -> Optional[Tuple[dict, str]]:
+        """Split YAML front matter from the markdown body.
+
+        Args:
+            text: File text starting at the top of the file.
+
+        Returns:
+            The parsed front matter and the remaining body, or None when the
+            text does not open with a complete ``---`` delimited block.
+        """
+        if not text.startswith("---"):
+            return None
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            return None
+        _, yaml_block, body = parts
+        return yaml.safe_load(yaml_block) or {}, body.lstrip()
+
+    async def _load_front_matter(self, path: Path) -> Optional[dict]:
+        """Load only the YAML front matter of a SKILL.md.
+
+        A SKILL.md body can be tens of KB while the front matter is a handful of
+        lines, so a bounded head read is tried first and only a file whose front
+        matter does not fit falls back to reading the whole file.
+
+        Args:
+            path: Path to the SKILL.md file.
+
+        Returns:
+            The parsed front matter mapping, or None when the file has none.
+        """
+        head_text = await self._read_skill_text(path, head=_FRONT_MATTER_PROBE_LINES)
+        parsed = self._split_front_matter(head_text)
+        if parsed is not None:
+            return parsed[0]
+        if not head_text.startswith("---"):
+            return None
+        yaml_data, _ = await self._load_yaml(path)
+        return yaml_data
+
     async def _load_yaml(self, path: Path) -> Tuple[Optional[dict], str]:
         """Load YAML front matter and markdown body from SKILL.md."""
         result = await self.sys_operation.fs().read_file(
             str(path),
             mode="text",
             encoding="utf-8",
+            only_read=True,
         )
 
         if getattr(result, "code", 0) != 0:
@@ -735,7 +828,7 @@ class SkillUseRail(DeepAgentRail):
 
     async def _load_description(self, path: Path) -> str:
         """Load description from YAML front matter."""
-        yaml_data, _ = await self._load_yaml(path)
+        yaml_data = await self._load_front_matter(path)
         if yaml_data is None or "description" not in yaml_data:
             raise KeyError("SKILL.md file does not contain a description field")
         return str(yaml_data["description"])

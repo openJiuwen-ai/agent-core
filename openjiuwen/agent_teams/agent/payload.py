@@ -81,6 +81,7 @@ class SpawnPayloadBuilder:
         return TeamRuntimeContext(
             role=member_spec.role_type,
             member_name=member_spec.member_name,
+            display_name=member_spec.display_name,
             desc=member_spec.desc,
             prompt=member_spec.prompt,
             team_spec=self._ctx.team_spec,

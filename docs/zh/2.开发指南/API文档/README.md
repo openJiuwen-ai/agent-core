@@ -9,4 +9,5 @@
 | [`openjiuwen.dev_tools`](./openjiuwen.dev_tools.README.md) | 开发工具：prompt_builder、tune（提示词生成/优化与调优）、[agent_builder](./openjiuwen.dev_tools/agent_builder.README.md)（Agent 构建）。 |
 | [`openjiuwen.harness`](./openjiuwen.harness.README.md) | Agent Harness 框架：DeepAgent，内置规划、上下文管理、子智能体生成、Rails、工具和长期记忆。 |
 | [`openjiuwen.extensions`](./openjiuwen.extensions.README.md) | 可选扩展：如 message_queue。 |
+| [`openjiuwen.auto_harness`](./openjiuwen.auto_harness.README.md) | 自主优化 harness 框架的编码 agent：orchestrator、pipeline、阶段、护栏与经验库。 |
 

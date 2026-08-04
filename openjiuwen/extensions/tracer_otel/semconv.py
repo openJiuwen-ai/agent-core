@@ -62,6 +62,7 @@ OJ_AGENT_ERROR_MESSAGE = "openjiuwen.agent.error_message"
 # ---------------------------------------------------------------------------
 
 OJ_TRACE_ID = "openjiuwen.trace.id"
+OJ_SESSION_ID = "openjiuwen.session_id"
 
 
 # ---------------------------------------------------------------------------

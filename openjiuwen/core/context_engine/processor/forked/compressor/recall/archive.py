@@ -1,3 +1,6 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """Filesystem archive for messages replaced by forked context compressors."""
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
     INTERNAL_USER_PREFIXES,
 )
@@ -331,11 +335,11 @@ def _is_real_user_message(message: BaseMessage) -> bool:
 
 
 def _content_to_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
+    # Sanitized: this text is BM25-indexed and re-rendered into context on
+    # recall — raw base64 would poison the index and balloon retrieved chunks.
     if content is None:
         return ""
-    return json.dumps(content, ensure_ascii=False, default=str)
+    return sanitize_content_for_text(content)
 
 
 def _message_to_json(message: BaseMessage) -> dict[str, Any]:

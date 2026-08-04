@@ -464,6 +464,12 @@ class AgentConfigurator:
             mode=OperationMode.LOCAL,
             work_config=LocalWorkConfig(shell_allowlist=None),
         )
+        # Members default to metadata-only read_file images: the modality probe
+        # costs a full LLM round-trip per member on every team start. A blueprint
+        # that wants native image input says so explicitly on the agent spec.
+        enable_read_image_multimodal = agent_spec.enable_read_image_multimodal
+        if enable_read_image_multimodal is None:
+            enable_read_image_multimodal = False
         build_spec = agent_spec.model_copy(
             update={
                 "card": self._card,
@@ -475,6 +481,7 @@ class AgentConfigurator:
                 "tools": list(agent_spec.tools or []),
                 "enable_skill_discovery": True,
                 "enable_task_loop": True,
+                "enable_read_image_multimodal": enable_read_image_multimodal,
             }
         )
 
@@ -537,6 +544,8 @@ class AgentConfigurator:
                 type=TEAM_POLICY,
                 params={
                     "prompt": ctx.prompt or "",
+                    "display_name": ctx.display_name or "",
+                    "member_workspace_path": workspace_root_path,
                     "lifecycle": spec.lifecycle,
                     "teammate_mode": teammate_mode,
                     "team_mode": _resolve_team_mode(spec),

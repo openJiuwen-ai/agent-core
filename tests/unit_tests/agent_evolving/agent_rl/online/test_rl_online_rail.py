@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from openjiuwen.agent_evolving.trajectory import LLMCallDetail, TrajectoryStep, trajectory_from_steps
@@ -14,16 +16,58 @@ class _CollectingUploader:
         self.batches.append(batch)
 
 
+class _FakeLoRARepo:
+    def __init__(self, latest=None) -> None:
+        self.latest = latest
+
+    def get_latest(self, user_id: str):
+        del user_id
+        return self.latest
+
+
+class _FakeGatewayResponse:
+    def __init__(self, payload: dict, status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.text = str(payload)
+
+    def json(self):
+        return dict(self._payload)
+
+
+class _FakeLoRAGatewayClient:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.calls: list[dict] = []
+
+    async def post(self, url: str, **kwargs):
+        self.calls.append({"url": url, **kwargs})
+        return _FakeGatewayResponse(self.payload)
+
+
 class _Config:
-    llm_return_token_ids = False
-    llm_logprobs = False
-    llm_top_logprobs = 0
-    custom_headers = None
+    def __init__(self) -> None:
+        self.model_name = "base-model"
+        self.model_config_obj = SimpleNamespace(model_name="base-model")
+        self.llm_return_token_ids = False
+        self.llm_logprobs = False
+        self.llm_top_logprobs = 0
+        self.custom_headers = None
+
+
+class _ReactAgent:
+    def __init__(self) -> None:
+        self.config = _Config()
 
 
 class _Agent:
-    class react_agent:
-        config = _Config()
+    def __init__(self) -> None:
+        self.react_agent = _ReactAgent()
+
+
+class _DirectReactAgent:
+    def __init__(self) -> None:
+        self._config = _Config()
 
 
 @pytest.mark.asyncio
@@ -45,6 +89,123 @@ async def test_rl_online_rail_before_invoke_enables_token_capture():
     assert config.llm_logprobs is True
     assert config.llm_top_logprobs == 1
     assert config.custom_headers["x-user-id"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_rl_online_rail_supports_direct_react_agent_config():
+    from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
+
+    rail = RLOnlineRail(
+        session_id="s1",
+        gateway_endpoint="http://gateway.local",
+        tenant_id="user-1",
+        uploader=_CollectingUploader(),
+        lora_default_policy="latest_by_user",
+        lora_gateway_client=_FakeLoRAGatewayClient({
+            "enabled": True,
+            "model_id": "user-1",
+            "lora_id": "user-1:v2",
+            "version": "v2",
+            "path": "/tmp/lora/v2",
+        }),
+    )
+    agent = _DirectReactAgent()
+    ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs())
+
+    await rail._on_before_invoke(ctx)
+    await rail.before_model_call(ctx)
+
+    assert agent._config.llm_return_token_ids is True
+    assert agent._config.model_name == "user-1"
+    assert agent._config.custom_headers["x-user-id"] == "user-1"
+
+    await rail.after_model_call(ctx)
+
+    assert agent._config.model_name == "base-model"
+    assert agent._config.custom_headers == {"x-user-id": "user-1"}
+
+
+@pytest.mark.asyncio
+async def test_rl_online_rail_uses_latest_lora_model_for_one_call():
+    from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
+
+    lora_client = _FakeLoRAGatewayClient({
+        "enabled": True,
+        "model_id": "user-1",
+        "lora_id": "user-1:v2",
+        "version": "v2",
+        "path": "/tmp/lora/v2",
+    })
+    rail = RLOnlineRail(
+        session_id="s1",
+        gateway_endpoint="http://gateway.local",
+        tenant_id="user-1",
+        uploader=_CollectingUploader(),
+        lora_default_policy="latest_by_user",
+        gateway_api_key="gw-token",
+        lora_gateway_client=lora_client,
+    )
+    agent = _Agent()
+    ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs())
+
+    await rail.before_model_call(ctx)
+
+    assert agent.react_agent.config.model_name == "user-1"
+    assert agent.react_agent.config.model_config_obj.model_name == "user-1"
+    assert ctx.extra["rl_online_lora_id"] == "user-1:v2"
+    assert ctx.extra["rl_online_lora_version"] == "v2"
+    assert lora_client.calls == [{
+        "url": "http://gateway.local/v1/rl/lora/effective",
+        "json": {"model_id": "user-1", "ensure_loaded": True},
+        "headers": {"Authorization": "Bearer gw-token"},
+    }]
+
+    await rail.after_model_call(ctx)
+
+    assert agent.react_agent.config.model_name == "base-model"
+
+
+@pytest.mark.asyncio
+async def test_rl_online_rail_skips_lora_when_gateway_has_no_effective_adapter():
+    from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
+
+    rail = RLOnlineRail(
+        session_id="s1",
+        gateway_endpoint="http://gateway.local",
+        tenant_id="user-1",
+        uploader=_CollectingUploader(),
+        lora_default_policy="latest_by_user",
+        lora_gateway_client=_FakeLoRAGatewayClient({
+            "enabled": False,
+            "reason": "latest_lora_not_found",
+        }),
+    )
+    agent = _Agent()
+    ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs())
+
+    await rail.before_model_call(ctx)
+
+    assert agent.react_agent.config.model_name == "base-model"
+    assert agent.react_agent.config.model_config_obj.model_name == "base-model"
+
+
+@pytest.mark.asyncio
+async def test_rl_online_rail_lora_fallback_disabled_by_default():
+    from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
+
+    rail = RLOnlineRail(
+        session_id="s1",
+        gateway_endpoint="http://gateway.local",
+        tenant_id="user-1",
+        uploader=_CollectingUploader(),
+        lora_repo=_FakeLoRARepo(SimpleNamespace(version="v2", path="/tmp/lora/v2")),
+    )
+    agent = _Agent()
+    ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs())
+
+    await rail.before_model_call(ctx)
+
+    assert agent.react_agent.config.model_name == "base-model"
 
 
 @pytest.mark.asyncio

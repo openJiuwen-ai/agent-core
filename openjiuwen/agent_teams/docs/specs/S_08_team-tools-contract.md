@@ -188,6 +188,9 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     行为相反的描述。`ReportToLeaderTool` 的 enum 是给宿主 LLM 的契约，
     `_dispatch` 里的白名单是给 MCP 客户端的执法（`mcp/server.py` 直接
     `invoke`，不校验 schema）——两层都必须有，不是重复。
+    `SendMessageTool` 还在工具边界拒绝 leader `to = "user"`：leader 的普通文本输出
+    已直接展示给用户，写入 user pseudo-recipient mailbox 会产生无人标记已读的消息。
+    teammate / human_agent 发给 `user` 的既有语义保持不变。
     参数描述的**复用是免费的**（形态同 `name` → `t(tool, "param")` 同 key），
     **扩展就是加 key**；语义变了的同名参数用新的 desc_key 命名空间
     （`send_message_scheduled.to`）。**绝不让 resolver 学会 variant**。

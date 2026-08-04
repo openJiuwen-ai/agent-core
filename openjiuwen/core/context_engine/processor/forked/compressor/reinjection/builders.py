@@ -1,3 +1,6 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 from __future__ import annotations
 
 import ast
@@ -7,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds as group_completed_api_round_ranges,
 )
@@ -181,7 +185,7 @@ def _render_team_tool_calls_section(ctx: ReinjectContext, team_status: dict) -> 
     keep_signatures = {message_signature(message) for message in ctx.messages_to_keep}
     max_calls = int(getattr(ctx.config, "reinject_team_tool_call_max", 20) or 0)
 
-    lines: list[str] = ["Team collaboration state:", f'- Team: {team_status.get("team_name", "unknown")}']
+    lines: list[str] = ["Team collaboration state:", f"- Team: {team_status.get('team_name', 'unknown')}"]
 
     # Static snapshot from session state: active members, open tasks, unread
     # flag. This survives regardless of whether the dialogue carried team tool
@@ -219,8 +223,8 @@ def _render_team_static_snapshot(team_status: dict) -> list[str]:
         for member in members:
             if isinstance(member, dict):
                 lines.append(
-                    f'- {member.get("member_name", "unknown")}: '
-                    f'role={member.get("role", "")}, status={member.get("status", "unknown")}'
+                    f"- {member.get('member_name', 'unknown')}: "
+                    f"role={member.get('role', '')}, status={member.get('status', 'unknown')}"
                 )
     open_tasks = team_status.get("open_tasks") or []
     if open_tasks:
@@ -229,8 +233,8 @@ def _render_team_static_snapshot(team_status: dict) -> list[str]:
             if isinstance(task, dict):
                 assignee = task.get("assignee") or "unassigned"
                 lines.append(
-                    f'- #{task.get("task_id", "unknown")} [{task.get("status", "unknown")}] '
-                    f'{task.get("title", "")} (assignee: {assignee})'
+                    f"- #{task.get('task_id', 'unknown')} [{task.get('status', 'unknown')}] "
+                    f"{task.get('title', '')} (assignee: {assignee})"
                 )
     if team_status.get("has_unread_messages"):
         lines.extend(["", "Team signals:", "- Unread team messages exist."])
@@ -601,7 +605,8 @@ def render_read_file_snapshots(
         content = snapshot.content
         if len(content) > per_file_chars:
             head = content[: max(per_file_chars // 2, 0)]
-            tail = content[-max(per_file_chars - len(head), 0):]
+            tail_chars = max(per_file_chars - len(head), 0)
+            tail = content[-tail_chars:]
             content = f"{head}\n...[READ_FILE_TRUNCATED]...\n{tail}"
         lines = [
             f"Recently read file: {snapshot.file_path}",
@@ -658,9 +663,4 @@ def extract_argument_value(parsed_arguments: dict[str, Any], arguments_text: str
 
 def message_to_text(message: BaseMessage) -> str:
     content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except TypeError:
-        return str(content)
+    return sanitize_content_for_text(content)

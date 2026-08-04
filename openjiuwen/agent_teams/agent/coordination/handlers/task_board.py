@@ -487,7 +487,15 @@ class TaskBoardHandler(BaseCoordinationHandler):
         for task in board_tasks:
             lines.append(render_task_line(task, now_ms=now_ms))
 
-        await self._round.deliver_input(render_event(kind="task-board", body="\n".join(lines)))
+        # A board survey is a reminder, not a reason to drop what the member is
+        # doing (decision dimension 3): it never says "the work you are on is
+        # void", so it goes to the follow-up queue and is read when the current
+        # round ends. Steering it in used to interrupt the member's reasoning
+        # with a survey it had no reason to act on yet.
+        await self._round.deliver_input(
+            render_event(kind="task-board", body="\n".join(lines)),
+            use_steer=False,
+        )
 
 
 class ScheduledTaskBoardHandler(TaskBoardHandler):

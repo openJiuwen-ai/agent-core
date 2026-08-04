@@ -15,22 +15,6 @@ from openjiuwen.harness.prompts.tools.base import (
 TODO_CREATE_DESCRIPTION_CN = """
 创建当前会话的待办事项列表，用于跟踪进度、组织复杂任务，帮助用户了解整体执行情况。
 
-## 何时使用
-
-主动在以下场景调用：
-- 任务需要 3 个或更多步骤
-- 用户提供多个待完成事项（编号列表、逗号或分号分隔）
-- 用户明确要求使用待办清单
-- 任务具有规划性质（多步骤实现、功能开发等）
-
-识别到规划需求后，立即调用本工具。
-
-## 何时不使用
-
-- 单个简单任务
-- 纯信息查询或对话
-- 可在 3 步以内完成的琐碎任务
-
 ## 使用方式
 
 入参为 JSON 数组（每个任务必须包含 id 字段）：
@@ -48,22 +32,6 @@ TODO_CREATE_DESCRIPTION_CN = """
 
 TODO_CREATE_DESCRIPTION_EN = """
 Create a todo list for the current session to track progress, organize complex tasks, and help the user understand overall execution status.
-
-## When to Use
-
-Call proactively in these scenarios:
-- Task requires 3 or more distinct steps
-- User provides multiple items to complete (numbered list, comma- or semicolon-separated)
-- User explicitly requests a todo list
-- Task has planning nature (multi-step implementation, feature development, etc.)
-
-Once you identify a planning need, call this tool immediately.
-
-## When NOT to Use
-
-- Single, straightforward task
-- Pure informational queries or conversation
-- Tasks completable in fewer than 3 trivial steps
 
 ## Usage
 
@@ -125,18 +93,17 @@ TODO_LIST_DESCRIPTION: Dict[str, str] = {
 # Todo-modify description
 # ---------------------------------------------------------------------------
 TODO_MODIFY_DESCRIPTION_CN = """
-修改当前会话的待办事项。支持批量操作，尽量将多个变更合并为一次调用。
-
-核心用途：更新（update）、删除（delete）、取消（cancel）、追加（append）、在其后插入（insert_after）、在其前插入（insert_before）
+修改当前会话的待办事项，包括：更新（update）、删除（delete）、取消（cancel）、追加（append）、在其后插入（insert_after）、在其前插入（insert_before）
 
 重要说明：
 - 若需重新规划整个任务列表，请调用 todo_create
-- 支持批量操作，尽量将多个变更合并为一次调用，避免连续多次调用
+- 支持批量处理同一时点发生的结构变更，避免连续多次调用。状态流转应随执行进度即时更新：单次 update 的状态变更通常只涉及当前任务和下一任务，不要将多个 pending 任务批量改为 completed
 - **id 使用你在 todo_create 时自定义的语义 ID**（如 "translate_doc"），不要使用 UUID
+- **只传入发生变化的字段**：update 每次调用只需给出 id 加上实际改变的字段（通常只是 status），不要把 content、description、activeForm 等未变化的字段重新完整传一遍
 
 action 支持的操作类型：
 
-update：修改现有任务的状态或标题（id 不可修改，支持部分字段更新）：
+update：修改现有任务的状态或标题（id 不可修改，只需传入发生变化的字段，其余字段保持不传即可）：
     {
         "action": "update",
         "todos": [
@@ -186,26 +153,25 @@ insert_before：在指定任务之前插入新任务（目标任务状态须为 
     }
 
 核心规则：
-- 同一时间只能有一个任务处于 in_progress 状态
 - update 操作：id 字段不可修改，其他字段支持部分更新
+- 同一时间只能有一个任务处于 in_progress
 - insert_after：目标任务状态必须为 in_progress 或 pending
 - insert_before：目标任务状态必须为 pending
 - 如果任务的 selected_model_id 为空时，任何操作都不要更改 selected_model_id 字段
 """
 
 TODO_MODIFY_DESCRIPTION_EN = """
-Modify todo items for the current session. Supports batch operations — consolidate multiple changes into a single call whenever possible.
-
-Core purpose: update, delete, cancel, append, insert_after, insert_before.
+Modify todo items for the current session, including: update, delete, cancel, append, insert_after, and insert_before.
 
 Important notes:
 - To re-plan the entire task list, call todo_create instead
-- Batch multiple changes into one call; avoid calling todo_modify repeatedly in succession
+- Batch structural changes that occur at the same time to avoid repeated calls. Status transitions should be updated immediately as execution progresses: a single update should normally change only the current task and the next task; do not change multiple pending tasks to completed in one call
 - **Use the semantic id you assigned in todo_create** (e.g. "translate_doc"); never use UUIDs
+- **Only send the fields that changed**: for update, each call only needs the id plus the fields that actually changed (usually just status) — do not resend unchanged fields like content, description, or activeForm
 
 Supported action types:
 
-update: Modify status or content of existing tasks (id cannot be changed; partial field updates supported):
+update: Modify status or content of existing tasks (id cannot be changed; only send the fields that changed, omit the rest):
     {
         "action": "update",
         "todos": [
@@ -255,8 +221,8 @@ insert_before: Insert new tasks before the specified task (target must be pendin
     }
 
 Core rules:
+- update: the id field cannot be modified; all other fields support partial updates
 - Only one task can be in_progress at a time
-- update action: id field cannot be modified; other fields support partial updates
 - insert_after: target task status must be in_progress or pending
 - insert_before: target task status must be pending
 - If the task's selected_model_id is empty, do not modify the selected_model_id field in any operation.

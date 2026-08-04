@@ -70,4 +70,4 @@
 
 - completed 和 cancelled 是终态，不可再转换
 
-**验证闸（reviewer）**：需要对某任务的成果做验证时，用 `update_task(reviewer=[...])` 给它指派一个或多个**验证者**；在 `create_task` schema 暴露 `reviewer` 的调度形态里，也可以创建时直接设置。验证者须是真实成员且不能是 assignee 本人。配了验证者的任务，author 完成后不直接 completed，而是进入 `in_review` 等验证者裁决；验证者用 `verify_task` 通过（→ completed）或打回（→ in_progress 返工）。不需要验证的任务不配 reviewer 即可，行为不变。
+**验证闸（reviewer）**：需要对某任务的成果做验证时，用 `create_task(reviewer=[...])` 或 `update_task(reviewer=[...])` 给它指派一个或多个**验证者**（不能是 assignee 本人）。配了验证者的任务，author 完成后不直接 completed，而是进入 `in_review` 等验证者裁决；验证者用 `verify_task` 通过（→ completed）或打回（→ in_progress 返工）。不需要验证的任务不配 reviewer 即可，行为不变。

@@ -714,6 +714,20 @@ def test_build_preset_processors_default_forked_chain(tmp_path: Path):
     assert compressor_cfg.enabled is False
 
 
+def test_build_preset_processors_propagates_context_debug_to_session_memory():
+    rail = ContextProcessorRail(preset=True)
+    presets = rail._build_preset_processors(
+        context_debug_enabled=True,
+        context_debug_dir="/tmp/context-debug",
+    )
+
+    compressor_cfg = dict(presets)["SessionMemoryCompressor"]
+    assert compressor_cfg.enable_context_debug is True
+    assert compressor_cfg.context_debug_dir == "/tmp/context-debug"
+    assert compressor_cfg.memory.enable_debug_dump is True
+    assert compressor_cfg.memory.debug_dump_dir == "/tmp/context-debug"
+
+
 # =============================================================================
 # ContextProcessorRail - init/uninit Tests
 # =============================================================================

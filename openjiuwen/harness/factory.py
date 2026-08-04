@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Factory function for creating DeepAgent instances."""
 
 from __future__ import annotations
@@ -165,6 +165,7 @@ def resolve_deep_agent_parts(
     model: Model,
     *,
     card: Optional[AgentCard] = None,
+    tool_owner_id: Optional[str] = None,
     system_prompt: Optional[str] = None,
     tools: Optional[List[Tool | ToolCard]] = None,
     mcps: Optional[List[McpServerConfig]] = None,
@@ -188,7 +189,9 @@ def resolve_deep_agent_parts(
     default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
+    enable_security_rail: bool = True,
     enable_llm_retry_rail: bool = True,
+    enable_sys_operation: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -199,6 +202,13 @@ def resolve_deep_agent_parts(
     default rails (Security / TaskPlanning / SkillUse / Subagent) that the
     caller did not already provide. Returns a :class:`DeepAgentParts` that
     :func:`apply_deep_agent_parts` materializes onto a target agent.
+
+    Args:
+        enable_sys_operation: Whether to resolve a sys_operation for the agent.
+            Set False for an agent that owns no filesystem / shell / code tools;
+            its ``config.sys_operation`` is then None and no tool resources are
+            registered for it. Other arguments are documented on
+            :func:`create_deep_agent`.
     """
     if card is None:
         card = AgentCard(
@@ -246,7 +256,12 @@ def resolve_deep_agent_parts(
     else:
         workspace_obj = workspace
 
-    if not isinstance(sys_operation, SysOperation):
+    if not enable_sys_operation:
+        # An agent with no filesystem / shell / code surface: skip the
+        # sys_operation entirely rather than registering its ~16 tool resources
+        # only to tear them down again at the end of a one-shot run.
+        sys_operation_obj = None
+    elif not isinstance(sys_operation, SysOperation):
         sysop_id = f"{card.name}_{card.id}"
         # Get-or-create: the id is stable across rebuilds (a member harness is
         # reconstructed on every team resume), and add_sys_operation is a strict
@@ -272,6 +287,7 @@ def resolve_deep_agent_parts(
     config = DeepAgentConfig(
         model=model,
         card=card,
+        tool_owner_id=tool_owner_id,
         system_prompt=system_prompt,
         enable_task_loop=enable_task_loop,
         max_iterations=max_iterations,
@@ -342,7 +358,7 @@ def resolve_deep_agent_parts(
         return TaskPlanningRail(model_selection=model_selection)
 
     default_rails = [
-        (SecurityRail, True, lambda: SecurityRail()),
+        (SecurityRail, enable_security_rail, lambda: SecurityRail()),
         (LLMRetryRail, enable_llm_retry_rail, lambda: LLMRetryRail()),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
@@ -403,6 +419,7 @@ def create_deep_agent(
     model: Model,
     *,
     card: Optional[AgentCard] = None,
+    tool_owner_id: Optional[str] = None,
     system_prompt: Optional[str] = None,
     tools: Optional[List[Tool | ToolCard]] = None,
     mcps: Optional[List[McpServerConfig]] = None,
@@ -426,6 +443,7 @@ def create_deep_agent(
     default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
+    enable_security_rail: bool = True,
     enable_llm_retry_rail: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgent:
@@ -438,7 +456,12 @@ def create_deep_agent(
     Args:
         model: Pre-constructed Model instance.
         card: Agent identity card. If None, a default
-            card is created.
+            card is created. Its id is the persistence identity used in
+            checkpointer keys, so it must stay stable across restarts.
+        tool_owner_id: Owner id qualifying this agent's stateful tool
+            registrations. Defaults to ``card.id``; pass it when several live
+            agents share one card identity (e.g. one adapter per session) so
+            their tool instances do not overwrite each other.
         system_prompt: System prompt for the inner
             ReActAgent.
         tools: Tool instances or tool cards to register on the agent.
@@ -472,6 +495,8 @@ def create_deep_agent(
         restrict_to_work_dir: If True, restrict file access to workspace directory.
             If False, allow access to any path including system root.
         default_mode: Initial agent mode (``AgentMode.NORMAL`` or ``AgentMode.PLAN``).
+        enable_security_rail: Enable the default SecurityRail that injects the
+            safety prompt section. Explicitly supplied security rails are kept.
         enable_llm_retry_rail: Enable default LLMRetryRail for stream frame timeout and repeated-output retries.
         model_selection: Optional model selection config for TaskPlanningRail.
             Dict mapping Model instance to description string. When provided along with
@@ -487,6 +512,7 @@ def create_deep_agent(
     parts = resolve_deep_agent_parts(
         model,
         card=card,
+        tool_owner_id=tool_owner_id,
         system_prompt=system_prompt,
         tools=tools,
         mcps=mcps,
@@ -510,6 +536,7 @@ def create_deep_agent(
         default_mode=default_mode,
         model_selection=model_selection,
         parallel_tool_calls=parallel_tool_calls,
+        enable_security_rail=enable_security_rail,
         enable_llm_retry_rail=enable_llm_retry_rail,
         **config_kwargs,
     )

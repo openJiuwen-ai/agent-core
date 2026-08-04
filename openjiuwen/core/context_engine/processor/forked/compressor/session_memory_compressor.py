@@ -16,6 +16,9 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
     count_messages_tokens,
     resolve_context_max,
 )
+from openjiuwen.core.context_engine.processor.forked.support.context_debug import (
+    write_debug_record,
+)
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 
 SESSION_MEMORY_BLOCK_OPEN = "<memory_block_session>"
@@ -28,6 +31,8 @@ class SessionMemoryCompressorConfig(BaseModel):
     session_memory_path: str | None = Field(default=None)
     max_notes_chars: int = Field(default=120_000, gt=0)
     memory: SessionMemoryConfig = Field(default_factory=SessionMemoryConfig)
+    enable_context_debug: bool = Field(default=False)
+    context_debug_dir: str | None = Field(default=None)
 
 
 class SessionMemoryCompressor(ContextProcessor):
@@ -122,10 +127,28 @@ class SessionMemoryCompressor(ContextProcessor):
         messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])
         token_counter_factory = getattr(context, "token_counter", None)
         token_counter = token_counter_factory() if callable(token_counter_factory) else None
-        current_tokens = count_messages_tokens(messages, token_counter, self.processor_type())
+        current_tokens = count_messages_tokens(
+            messages,
+            token_counter,
+            self.processor_type(),
+            usage_aware=True,
+        )
         context_max = resolve_context_max(context)
         threshold = max(int(context_max * self.config.trigger_context_ratio), 1)
         reached = current_tokens >= threshold
+        write_debug_record(
+            context,
+            processor_type=self.processor_type(),
+            event="threshold_check",
+            enabled=bool(getattr(self.config, "enable_context_debug", False)),
+            dump_dir=getattr(self.config, "context_debug_dir", None),
+            phase="get_context_window",
+            total_tokens=current_tokens,
+            context_max=context_max,
+            threshold=threshold,
+            hit=reached,
+            reason="reached_threshold" if reached else "below_threshold",
+        )
         if not reached:
             return False
         return True

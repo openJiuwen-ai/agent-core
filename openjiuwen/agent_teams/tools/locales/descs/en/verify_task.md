@@ -2,7 +2,7 @@ Verify a task (reviewers only).
 
 ## When to use
 
-- After the leader assigns you as a reviewer on a task, once its author finishes the work the task enters `in_review` and you decide its outcome.
+- You are a reviewer for a task. Once its author finishes the work and the task enters `in_review`, you decide its outcome.
 - Use `view_task(action=in_review)` to see the tasks assigned to you for verification; read the deliverable, then call this tool with your verdict.
 
 ## Decision

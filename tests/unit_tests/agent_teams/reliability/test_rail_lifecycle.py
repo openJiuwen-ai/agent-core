@@ -138,7 +138,7 @@ async def test_reliability_rail_observes_real_model_and_tool_success_lifecycle(a
     tool_before = next(signal for signal in monitor.signals if signal.kind == SignalKind.BEFORE_TOOL_CALL)
     tool_after = next(signal for signal in monitor.signals if signal.kind == SignalKind.AFTER_TOOL_CALL)
     assert tool_before.tool_name == "reliability_mock_add"
-    assert tool_before.tool_args is None
+    assert tool_before.tool_args == {"a": 1, "b": 2}
     assert tool_after.tool_result == 3
     assert monitor.signals[-1].text_len == 1
 
@@ -262,10 +262,6 @@ async def test_reliability_rail_tool_retry_skips_intermediate_after_signal(agent
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="AbilityManager emits JSON-string args while ReliabilityRail only retains dict args",
-)
 @pytest.mark.asyncio
 async def test_real_tool_lifecycle_preserves_args_for_repeat_detection(agent_factory):
     agent = agent_factory("reliability_mock_args", lambda a, b: a + b)

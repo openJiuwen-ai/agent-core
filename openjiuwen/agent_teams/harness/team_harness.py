@@ -108,6 +108,15 @@ class TeamHarness:
         )
 
     # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def build_context(self) -> "BuildContext | None":
+        """Return the assembly context this harness was built with."""
+        return self._build_context
+
+    # ------------------------------------------------------------------
     # Lifecycle (HarnessProtocol-aligned, one cycle per coordination.start)
     # ------------------------------------------------------------------
 

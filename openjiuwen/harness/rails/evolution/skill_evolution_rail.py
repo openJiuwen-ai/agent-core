@@ -77,7 +77,6 @@ from openjiuwen.harness.rails.evolution.review.subagent import (
     remove_evolution_review_agent_config,
 )
 from openjiuwen.harness.rails.evolution.skill_evolution_sharing import SkillEvolutionSharingMixin
-from openjiuwen.harness.rails.subagent import SubagentRail
 
 _MAX_PROCESSED_SIGNAL_KEYS = 500
 _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
@@ -383,7 +382,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         self._agent = agent
         self._evolution_tools = self._register_evolution_tools(agent)
         self._register_evolution_review_agent(agent)
-        self._refresh_initialized_subagent_rails(agent)
 
     def uninit(self, agent) -> None:
         """Unregister rail-owned evolution tools."""
@@ -435,15 +433,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 agent_id=agent_id,
             ),
         )
-
-    @staticmethod
-    def _refresh_initialized_subagent_rails(agent) -> None:
-        """Refresh already-initialized SubagentRail available-agents metadata."""
-        subagent_rails = [rail for rail in getattr(agent, "_registered_rails", []) if isinstance(rail, SubagentRail)]
-        for rail in subagent_rails:
-            refresh_available_agents = getattr(rail, "refresh_available_agents", None)
-            if callable(refresh_available_agents):
-                refresh_available_agents(agent)
 
     @staticmethod
     def _is_evolve_review_task_available(agent) -> bool:

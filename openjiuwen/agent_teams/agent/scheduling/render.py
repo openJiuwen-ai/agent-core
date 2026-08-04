@@ -19,6 +19,8 @@ Two audiences, two mechanisms:
 
 from __future__ import annotations
 
+from typing import Any
+
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.message_template import build_meta
 from openjiuwen.agent_teams.schema.status import TaskStatus
@@ -107,3 +109,21 @@ def format_fail_feedback(fail_feedback: dict[str, str]) -> str:
     """Join per-reviewer fail feedback into an attributed block."""
     lines = [f"- {reviewer}: {feedback}" for reviewer, feedback in fail_feedback.items()]
     return "\n".join(lines)
+
+
+async def render_review_request_for_harness(task: Any, *, language: str = "cn") -> str:
+    """Render the review request as a plain user prompt for a temp reviewer harness."""
+    from openjiuwen.agent_teams.prompts.loader import load_template
+
+    template = load_template(_REVIEW_REQUEST, language)
+    # Simple task field substitution for the common `{{task.*}}` placeholders.
+    body = template.content
+    body = body.replace("{{task.task_id}}", str(getattr(task, "task_id", "")))
+    body = body.replace("{{task.title}}", getattr(task, "title", "") or "")
+    body = body.replace("{{task.content}}", getattr(task, "content", "") or "")
+    body = body.replace("{{task.status}}", str(getattr(task, "status", "")))
+    body = body.replace("{{task.assignee}}", getattr(task, "assignee", "") or "")
+    body = body.replace("{{task.review_round}}", str(getattr(task, "review_round", 0)))
+    body = body.replace("{{task.max_review_rounds}}", str(getattr(task, "max_review_rounds") or ""))
+    body = body.replace("{{task.reviewer}}", ", ".join(getattr(task, "reviewers", lambda: [])() or []))
+    return body

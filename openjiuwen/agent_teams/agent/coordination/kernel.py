@@ -93,7 +93,12 @@ class CoordinationKernel:
         if role == TeamRole.LEADER and blueprint.spec.dispatch_mode == "scheduled":
             from openjiuwen.agent_teams.agent.scheduling import TeamScheduler
 
-            self._scheduler = TeamScheduler(host, blueprint=blueprint, infra=infra)
+            self._scheduler = TeamScheduler(
+                host,
+                blueprint=blueprint,
+                infra=infra,
+                build_context=host.build_context,
+            )
 
     @property
     def event_bus(self) -> Optional[EventBus]:

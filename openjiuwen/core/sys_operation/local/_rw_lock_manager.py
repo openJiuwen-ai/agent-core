@@ -37,6 +37,20 @@ class ReadWriteLockManager:
     _idle_deadlines: dict[pathlib.Path, float] = {}
     _idle_ttl = 2 * 60
     _cleanup_interval = 60
+    # Databases left behind by an earlier process are only reclaimed once they
+    # have been untouched for far longer than any live process leaves its own
+    # lock idle. The mtime is a *candidate filter*, never proof of death:
+    # SQLite refreshes it on write, so a process holding a database for reads
+    # alone looks idle while still using it. Deleting such a database would put
+    # it and the surviving process on different inodes and silently end the
+    # mutual exclusion this module exists to provide, so the threshold is a
+    # full day rather than ``_idle_ttl``. Exclusive-lock probing in
+    # ``_try_delete_database`` is what actually decides.
+    _orphan_ttl = 24 * 60 * 60
+    # Candidates are collected a batch at a time, so a directory that
+    # accumulated many databases drains over several ticks instead of stalling
+    # a single one on thousands of SQLite probes.
+    _orphan_sweep_batch = 200
 
     @classmethod
     def get_lock_file(cls, file_path: pathlib.Path) -> pathlib.Path:
@@ -107,7 +121,82 @@ class ReadWriteLockManager:
     async def _run_cleanup(cls) -> None:
         while True:
             await asyncio.sleep(cls._cleanup_interval)
+            await cls._sweep_orphan_databases()
             await cls.cleanup_expired_locks()
+
+    @classmethod
+    def _collect_orphan_candidates(cls, known: frozenset[pathlib.Path]) -> tuple[list[pathlib.Path], int]:
+        """Scan the lock directory for databases left behind by dead processes.
+
+        Runs off the event loop: a directory listing plus one ``stat`` per
+        entry is blocking syscall work, and the directories worth sweeping are
+        exactly the ones with enough entries to make that measurable. The scan
+        stops as soon as a full batch is collected, so a backlog costs a
+        bounded number of syscalls per tick rather than one per file.
+
+        Args:
+            known: Lock files this process already tracks. Their lifecycle
+                belongs to :meth:`cleanup_expired_locks`, so they are skipped.
+
+        Returns:
+            Up to ``_orphan_sweep_batch`` candidate paths, and the number of
+            directory entries examined before the scan stopped.
+        """
+        candidates: list[pathlib.Path] = []
+        scanned = 0
+        cutoff = time.time() - cls._orphan_ttl
+        try:
+            with os.scandir(cls.ensure_lock_dir()) as entries:
+                for entry in entries:
+                    if len(candidates) >= cls._orphan_sweep_batch:
+                        break
+                    scanned += 1
+                    if not entry.name.endswith(".db"):
+                        continue
+                    lock_file = pathlib.Path(entry.path)
+                    if lock_file in known:
+                        continue
+                    try:
+                        if entry.stat().st_mtime > cutoff:
+                            continue
+                    except OSError:
+                        continue
+                    candidates.append(lock_file)
+        except OSError as exc:
+            sys_operation_logger.warning(
+                "Failed to scan read-write lock directory for orphans, error=%s", exc
+            )
+        return candidates, scanned
+
+    @classmethod
+    async def _sweep_orphan_databases(cls) -> None:
+        """Queue lock databases left behind by earlier processes for cleanup.
+
+        ``_idle_heap`` only tracks locks this process leased, so a database
+        whose owning process was hard-killed would otherwise stay on disk
+        forever.
+
+        Age only selects candidates (see ``_orphan_ttl``); whether a database
+        is genuinely unused is decided by :meth:`_try_delete_database`, which
+        removes only what it can lock exclusively -- one another live process
+        is holding is skipped rather than pulled out from under it.
+        """
+        # Snapshot before the thread hop: these dicts belong to the event loop.
+        known = frozenset(cls._idle_deadlines) | frozenset(cls._locks)
+        candidates, scanned = await asyncio.to_thread(cls._collect_orphan_candidates, known)
+        if not candidates:
+            return
+
+        # Already past ``_orphan_ttl``, so they are due on this same tick.
+        due_now = asyncio.get_running_loop().time()
+        for lock_file in candidates:
+            cls._schedule_idle_lock(lock_file, due_now)
+
+        sys_operation_logger.info(
+            "Queued orphaned read-write lock databases for cleanup, count=%s, scanned_entries=%s",
+            len(candidates),
+            scanned,
+        )
 
     @classmethod
     def _schedule_idle_lock(cls, lock_file: pathlib.Path, deadline: float) -> None:

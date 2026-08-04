@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Set
+from typing import Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
+from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.memory.lite.config import create_memory_settings
 from openjiuwen.core.memory.lite.memory_tool_context import MemoryToolContext
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
@@ -35,7 +36,7 @@ class MemoryRail(DeepAgentRail):
     Attributes:
         priority: Execution priority (80 = medium-high).
         _initialized: Flag indicating if the rail has been initialized.
-        _owned_tool_names: Set of tool names owned by this rail.
+        _owned_tool_cards: Tool cards owned by this rail, keyed by tool name.
         _manager_initialized: Flag indicating if memory manager is initialized.
         _embedding_config: EmbeddingConfig for embedding API.
         _language: Language for prompt ('cn' or 'en').
@@ -55,7 +56,11 @@ class MemoryRail(DeepAgentRail):
         """
         super().__init__()
         self._initialized = False
-        self._owned_tool_names: Set[str] = set()
+        # Abilities this rail actually registered, mapped from tool name to the
+        # exact card that was stored. The name is the ability-manager key, while
+        # the card identity tells uninit whether this rail is still the owner or
+        # another rail has since taken the name over.
+        self._owned_tool_cards: dict[str, ToolCard] = {}
         self._manager_initialized = False
         self._embedding_config = embedding_config
         self._is_proactive = is_proactive
@@ -76,7 +81,12 @@ class MemoryRail(DeepAgentRail):
     def uninit(self, agent) -> None:
         """Clean up the rail resources."""
         if hasattr(agent, "ability_manager"):
-            for tool_name in list(self._owned_tool_names):
+            for tool_name, tool_card in list(self._owned_tool_cards.items()):
+                if agent.ability_manager.get(tool_name) is not tool_card:
+                    # Another rail re-registered the name after this rail did
+                    # and now owns both the card and the live instance; tearing
+                    # it down here would unregister that rail's tool.
+                    continue
                 try:
                     agent.ability_manager.remove_ability(tool_name)
                 except Exception as exc:
@@ -84,7 +94,7 @@ class MemoryRail(DeepAgentRail):
                         f"[MemoryRail] Failed to remove tool '{tool_name}' "
                         f"from ability_manager: {exc}"
                     )
-        self._owned_tool_names.clear()
+        self._owned_tool_cards.clear()
         self._initialized = False
         self._manager_initialized = False
         self._tool_ctx = None
@@ -268,7 +278,7 @@ class MemoryRail(DeepAgentRail):
 
                     result = agent.ability_manager.add_ability(tool_card, tool)
                     if result.added:
-                        self._owned_tool_names.add(tool_card.name)
+                        self._owned_tool_cards[tool_card.name] = tool_card
                         logger.info(f"[MemoryRail] Registered tool: {tool_card.name}")
 
                 except Exception as exc:

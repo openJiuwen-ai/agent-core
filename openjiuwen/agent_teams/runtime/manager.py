@@ -596,6 +596,8 @@ class TeamRuntimeManager:
                         await agent.auto_start_all()
                     else:
                         await agent.auto_start_member(payload.target)
+                elif payload.sender is not None:
+                    await agent.auto_start_member(payload.sender)
                 inbox = HumanAgentInbox(
                     backend,
                     backend.message_manager,

@@ -73,6 +73,9 @@ def test_format_message_direct_for_teammate():
     assert 'message_id="m-1"' in out
     assert "please review the PR" in out
     assert '<team-note kind="reply-hint"' in out
+    # The hint sits inside the message it is about, not after it.
+    assert out.rstrip().endswith("</team-inbound>")
+    assert out.index("<team-note") < out.index("</team-inbound>")
     # A normal teammate is never framed as a controller notification.
     assert 'for="controller"' not in out
     logger.info("direct teammate inbound: %s", out)

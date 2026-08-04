@@ -1372,7 +1372,7 @@ class TestMappedToolOutput:
             success=True,
             data={"type": "message", "from": "leader", "to": "dev-1", "summary": None},
         )
-        assert tool.map_result(output) == "Message sent from leader to dev-1"
+        assert tool.map_result(output) == "Message Already sent from leader to dev-1 Success"
 
     @pytest.mark.level1
     def test_send_message_map_result_broadcast(self, agent_team, t):
@@ -1382,7 +1382,7 @@ class TestMappedToolOutput:
             success=True,
             data={"type": "broadcast", "from": "leader", "summary": None},
         )
-        assert tool.map_result(output) == "Broadcast sent from leader"
+        assert tool.map_result(output) == "Broadcast Already sent from leader Success"
 
     @pytest.mark.level1
     def test_default_map_result_json(self, agent_team, t):

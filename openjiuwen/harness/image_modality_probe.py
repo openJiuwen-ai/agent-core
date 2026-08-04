@@ -13,7 +13,28 @@ from typing import Any, Iterable, List, Optional
 from openjiuwen.core.common.logging import logger
 
 _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
-_IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS = 30.0
+_IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS = 5.0
+# The probe only needs the model to name one color, so the budget stays small
+# enough to cap what a reasoning model can burn here. It is not squeezed down
+# to the one token the answer needs, though: a model that prefaces the color
+# with a few words would otherwise be cut off before saying it and get cached
+# as image-blind forever. Truncated answers are treated as inconclusive on top
+# of that -- see ``_interpret_probe_response``.
+_IMAGE_MODALITY_PROBE_MAX_TOKENS = 32
+# ``finish_reason`` value meaning the answer hit the token budget.
+_LENGTH_FINISH_REASON = "length"
+# Vendor-specific switches for turning reasoning off, merged into one body.
+# Lenient gateways drop the keys they do not know; strict ones reject the whole
+# request, which is why ``_run_probe`` retries once without the body.
+_THINKING_DISABLED_EXTRA_BODY = {
+    "thinking": {"type": "disabled"},
+    "enable_thinking": False,
+    "reasoning": {"enabled": False},
+}
+# Probe verdicts keyed by (api_base, model_name): one round-trip per endpoint
+# and model for the lifetime of the process.
+_probe_results: dict[tuple[str, str], bool] = {}
+_probe_tasks: dict[tuple[str, str], "asyncio.Task[None]"] = {}
 _IMAGE_INPUT_UNSUPPORTED_ERROR_CODES = (
     "invalid_image_input",
     "image_input_unsupported",
@@ -133,41 +154,121 @@ def is_image_modality_rejection(exc: BaseException) -> bool:
     return False
 
 
-async def probe_image_support(llm) -> Optional[bool]:
-    """Detect whether *llm* accepts native image input.
+def probe_cache_key(llm) -> Optional[tuple[str, str]]:
+    """Return the (api_base, model_name) cache key for *llm*, if resolvable."""
+    client_config = getattr(llm, "model_client_config", None)
+    model_config = getattr(llm, "model_config", None)
+    model_name = str(getattr(model_config, "model_name", "") or "").strip()
+    if not model_name:
+        return None
+    api_base = str(getattr(client_config, "api_base", "") or "").strip()
+    return api_base, model_name
 
-    Returns:
-        True if the model named the color it was shown, False if it responded
-        without naming it, deterministically rejected the image (e.g. a 404
-        "no endpoints found that support image input"), or the probe timed out,
-        and None if the call failed for some other reason (auth, rate limit,
-        5xx) and the result is therefore inconclusive and should not be cached.
+
+def get_cached_image_support(llm) -> Optional[bool]:
+    """Return the cached probe verdict for *llm*, or None when not probed yet."""
+    key = probe_cache_key(llm)
+    if key is None:
+        return None
+    return _probe_results.get(key)
+
+
+def reset_image_support_cache() -> None:
+    """Drop cached verdicts and pending probes. For tests and reconfiguration."""
+    _probe_results.clear()
+    for task in list(_probe_tasks.values()):
+        task.cancel()
+    _probe_tasks.clear()
+
+
+def schedule_image_support_probe(llm) -> None:
+    """Probe *llm* in the background, at most once per (api_base, model_name).
+
+    The caller is not meant to wait for the result: until the verdict lands,
+    read_file stays in metadata-only mode, and the next agent built on the same
+    endpoint and model picks the answer up from the cache.
+
+    The probe is an ``asyncio`` task, so it lives and dies with the loop that
+    scheduled it. A process that runs one ``asyncio.run`` and exits therefore
+    never sees a verdict at all -- it stays metadata-only throughout. Such a
+    caller should either set ``enable_read_image_multimodal`` explicitly or
+    await :func:`probe_image_support` once during startup.
+
+    Args:
+        llm: The model to probe.
     """
+    key = probe_cache_key(llm)
+    if key is None or key in _probe_results or key in _probe_tasks:
+        return
+
     try:
-        response = await asyncio.wait_for(
-            llm.invoke(
-                [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{DUMMY_IMAGE_B64}",
-                                },
-                            },
-                            {
-                                "type": "text",
-                                "text": "What color is this image? Reply with one word.",
-                            },
-                        ],
-                    }
-                ],
-                max_tokens=1024,
-                temperature=0,
-            ),
-            timeout=_IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS,
+        task = asyncio.get_running_loop().create_task(_probe_and_cache(llm, key))
+    except RuntimeError:
+        # Configured outside a running loop; there is nothing to schedule onto
+        # and nothing waiting on the verdict either.
+        logger.debug(
+            "[ImageModalityProbe] no running event loop; skipping background probe for %s",
+            key,
         )
+        return
+    _probe_tasks[key] = task
+    task.add_done_callback(lambda _task: _probe_tasks.pop(key, None))
+
+
+async def _probe_and_cache(llm, key: tuple[str, str]) -> None:
+    """Run one probe for *key* and cache a conclusive verdict."""
+    # Cancellation needs no clause of its own: CancelledError derives from
+    # BaseException, so the handler below never swallows it.
+    try:
+        supported = await _run_probe(llm)
+    except Exception as exc:
+        logger.warning("[ImageModalityProbe] background image modality probe failed: %s", exc)
+        return
+    if supported is None:
+        return
+    _probe_results[key] = supported
+    logger.info(
+        "[ImageModalityProbe] image modality probed: api_base=%s model=%s supported=%s",
+        key[0],
+        key[1],
+        supported,
+    )
+
+
+async def _invoke_probe(llm, *, extra_body: Optional[dict]):
+    """Send the probe request, optionally carrying reasoning-off switches."""
+    kwargs = {"extra_body": extra_body} if extra_body else {}
+    return await asyncio.wait_for(
+        llm.invoke(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{DUMMY_IMAGE_B64}",
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": "What color is this image? Reply with one word.",
+                        },
+                    ],
+                }
+            ],
+            max_tokens=_IMAGE_MODALITY_PROBE_MAX_TOKENS,
+            temperature=0,
+            **kwargs,
+        ),
+        timeout=_IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS,
+    )
+
+
+async def _run_probe(llm) -> Optional[bool]:
+    """Send the probe request and interpret its outcome."""
+    try:
+        response = await _invoke_probe(llm, extra_body=_THINKING_DISABLED_EXTRA_BODY)
     except asyncio.TimeoutError:
         logger.warning(
             "[ImageModalityProbe] image modality probe timed out after %.0fs; "
@@ -183,8 +284,97 @@ async def probe_image_support(llm) -> Optional[bool]:
                 exc,
             )
             return False
-        logger.warning("[ImageModalityProbe] image modality probe call failed: %s", exc)
+        # A strict gateway rejects the reasoning-off switches themselves; retry
+        # once with a plain request before giving up on the probe. Common
+        # enough on gateways that validate their request body, so it is not
+        # worth a warning.
+        logger.debug(
+            "[ImageModalityProbe] probe with reasoning disabled failed, retrying "
+            "without vendor switches: %s",
+            exc,
+        )
+        try:
+            response = await _invoke_probe(llm, extra_body=None)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[ImageModalityProbe] image modality probe timed out after %.0fs; "
+                "treating read_file image multimodal as unsupported",
+                _IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS,
+            )
+            return False
+        except Exception as retry_exc:
+            if is_image_modality_rejection(retry_exc):
+                logger.info(
+                    "[ImageModalityProbe] model rejected image input; treating read_file "
+                    "image multimodal as unsupported: %s",
+                    retry_exc,
+                )
+                return False
+            logger.warning(
+                "[ImageModalityProbe] image modality probe call failed: %s",
+                retry_exc,
+            )
+            return None
+
+    return _interpret_probe_response(response)
+
+
+def _interpret_probe_response(response) -> Optional[bool]:
+    """Map a probe response to a verdict, or None when it says nothing.
+
+    A verdict is cached for the rest of the process, so anything short of a
+    real answer has to stay undetermined: caching ``False`` off a truncated or
+    empty reply would leave a perfectly capable model image-blind for good.
+
+    Args:
+        response: The assistant message the probe request returned.
+
+    Returns:
+        True when the model named the color it was shown, False when it
+        answered without naming it, and None when the reply carries no verdict
+        either way.
+    """
+    content = response.content if isinstance(response.content, str) else str(response.content)
+    if "red" in content.lower():
+        return True
+
+    if not content.strip():
+        # A reasoning model that spent the whole (tiny) budget thinking says
+        # nothing about image support.
+        logger.warning(
+            "[ImageModalityProbe] image modality probe returned no content; "
+            "leaving image support undetermined",
+        )
         return None
 
-    content = response.content if isinstance(response.content, str) else str(response.content)
-    return "red" in content.lower()
+    if getattr(response, "finish_reason", None) == _LENGTH_FINISH_REASON:
+        # Cut off mid-answer: the color may well have been the next word.
+        logger.warning(
+            "[ImageModalityProbe] image modality probe answer hit the %s token budget "
+            "before naming a color; leaving image support undetermined",
+            _IMAGE_MODALITY_PROBE_MAX_TOKENS,
+        )
+        return None
+
+    return False
+
+
+async def probe_image_support(llm) -> Optional[bool]:
+    """Detect whether *llm* accepts native image input, reusing the cache.
+
+    Returns:
+        True if the model named the color it was shown, False if it responded
+        without naming it, deterministically rejected the image (e.g. a 404
+        "no endpoints found that support image input"), or the probe timed out,
+        and None if the result is inconclusive (call failed for some other
+        reason such as auth / rate limit / 5xx, or the model answered nothing)
+        and should therefore not be cached.
+    """
+    key = probe_cache_key(llm)
+    if key is not None and key in _probe_results:
+        return _probe_results[key]
+
+    supported = await _run_probe(llm)
+    if supported is not None and key is not None:
+        _probe_results[key] = supported
+    return supported

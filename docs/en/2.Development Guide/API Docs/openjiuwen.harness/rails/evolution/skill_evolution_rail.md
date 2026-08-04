@@ -12,18 +12,20 @@ Public rail for collecting agent trajectories, detecting reusable regular-skill 
 
 ```python
 from openjiuwen.harness.rails import (
+    EvolutionInterruptRail,
     EvolutionReviewRuntime,
     SkillEvolutionRail,
-    SubagentRail,
     configure_skill_evolution,
 )
 ```
 
-The active evolution review flow in `SkillEvolutionRail` delegates to the `evolution_reviewer` subagent, so register it together with `SubagentRail`. Synchronous subagent mode registers `task_tool`, which the follow-up prompt uses to call the review subagent.
+The active evolution review flow delegates to the stable `evolution_reviewer` subagent through the rail-owned
+`evolve_review_task` tool. It does not require the global `task_tool` or `SubagentRail`.
 
 `SkillEvolutionRail.init()` now only registers the active review tools and stable review subagent; it does not configure `EvolutionInterruptRail`.
 
-Stable review subagent registration is deduplicated by name (`evolution_reviewer`). Re-registering it with different `runtime`, `query_service`, or `store` fails fast.
+Stable review subagent registration is deduplicated by name (`evolution_reviewer`). Rail initialization replaces a
+stale reviewer binding with the current runtime, query service, and store.
 
 ### 推荐优先 / Recommended Construction
 
@@ -40,7 +42,7 @@ configure_skill_evolution(
 )
 ```
 
-The configuration API adds `SubagentRail` when needed and wires `EvolutionInterruptRail` with the regular `SkillEvolutionRail`.
+The configuration API wires `EvolutionInterruptRail` with the regular `SkillEvolutionRail`.
 
 Manual wiring requires explicit shared objects:
 
@@ -60,7 +62,7 @@ interrupt_rail = EvolutionInterruptRail(
 agent = create_deep_agent(
     model=model_client,
     tools=tools,
-    rails=[SubagentRail(), interrupt_rail, skill_rail],
+    rails=[interrupt_rail, skill_rail],
 )
 ```
 
@@ -73,7 +75,7 @@ When manual configuring, only one shared `EvolutionInterruptRail` should be used
 - `review_trigger` controls periodic self-check follow_up insertion; `fuzzy_review` is its compatibility alias. Both default to `False`.
 - During migration, if both the new and legacy names are provided, the new name takes precedence.
 - `auto_scan=False` disables passive signal scanning and async snapshot creation for passive evolution.
-- Active evolution is available through `request_user_evolution()`; the returned prompt asks the main agent to call `prepare_skill_evolution(user_confirmed=true)` first, then delegate `evolution_reviewer` with the returned `evolution_review_ref`. The prepare tool collects the current rail's execution/conversation trajectory as default review materials, and `user_intent` only adds optimization direction.
+- Active evolution is available through `request_user_evolution()`; the returned prompt asks the main agent to call `prepare_skill_evolution(user_confirmed=true)` first, then call `evolve_review_task(evolution_review_ref=...)`. The prepare tool collects the current rail's execution/conversation trajectory as default review materials, and `user_intent` only adds optimization direction.
 - Regular skill evolution ignores `kind: team-skill` skills; team skills use `TeamSkillEvolutionRail` / `TeamSkillRail`.
 
 ```text
@@ -97,6 +99,7 @@ class SkillEvolutionRail(
     fuzzy_review: Optional[bool] = None,
     review_trigger: Optional[bool] = None,
     fuzzy_review_interval: int = 5,
+    review_agent_max_iterations: int = 25,
     disabled_skills: Optional[Union[str, list[str]]] = None,
 )
 ```
@@ -121,6 +124,7 @@ class SkillEvolutionRail(
 * **fuzzy_review** (bool, optional): Compatibility alias for `review_trigger`; ignored when `review_trigger` is set.
 * **review_trigger** (bool, optional): Whether to periodically enqueue a short evolution self-check follow_up. Defaults to `False`.
 * **fuzzy_review_interval** (int): Number of non-follow_up task iterations between self-check checks. Must be at least 1.
+* **review_agent_max_iterations** (int): Maximum iterations for `evolution_reviewer`, defaults to 25.
 * **disabled_skills** (Optional[Union[str, list[str]]], optional): Deny-list of skill names excluded from self-optimization. Supports a single skill name (str) or multiple names (list[str]).
 
 ### Priority
@@ -236,15 +240,16 @@ Effective LLM policies, timeout, `auto_scan`, `auto_save`, and `eval_interval`.
 
 ## Methods
 
-### async request_user_evolution(skill_name, user_intent, *, max_index_records=20) -> EvolutionRequestResult
+### async request_user_evolution(skill_name, user_intent="", *, auto_approve=None, max_index_records=None) -> EvolutionRequestResult
 
-Build a host-delivered active evolution command prompt for a regular skill. The prompt does not create a review scope directly; it instructs the main agent to call `prepare_skill_evolution(user_confirmed=true)` and then use `task_tool(subagent_type="evolution_reviewer")` with the returned `evolution_review_ref`.
+Build a host-delivered active evolution command prompt for a regular skill. The prompt does not create a review scope directly; it instructs the main agent to call `prepare_skill_evolution(user_confirmed=true)` and then use `evolve_review_task(evolution_review_ref=...)` with the returned `evolution_review_ref`.
 
 **Parameters**:
 
 * **skill_name** (str): Target regular skill name.
-* **user_intent** (str): User improvement intent.
-* **max_index_records** (int): Maximum experience index entries to inline in the prompt preview.
+* **user_intent** (str): User improvement intent, defaults to `""`.
+* **auto_approve** (bool, optional): Accepted for compatibility and ignored by the active-review path.
+* **max_index_records** (int, optional): Accepted for compatibility and ignored by the active-review path.
 
 **Returns**:
 
@@ -286,22 +291,25 @@ Compatibility wrapper for `drain_pending_host_events()`.
 
 ```python
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails import SkillEvolutionRail, SubagentRail
+from openjiuwen.harness.rails import EvolutionInterruptRail, EvolutionReviewRuntime, SkillEvolutionRail
 
+runtime = EvolutionReviewRuntime()
 skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    review_runtime=runtime,
     auto_save=False,
+)
+interrupt_rail = EvolutionInterruptRail(
+    review_runtime=runtime,
+    submission_service=skill_rail.experience_manager.experience_submission_service,
 )
 
 agent = create_deep_agent(
     model=model_client,
     tools=tools,
-    rails=[
-        skill_rail,
-        SubagentRail(),
-    ],
+    rails=[interrupt_rail, skill_rail],
 )
 
 result = await skill_rail.request_user_evolution(

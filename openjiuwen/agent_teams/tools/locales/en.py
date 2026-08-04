@@ -316,20 +316,21 @@ STRINGS: dict[str, str] = {
     "update_task.error_human_agent_locked_cancel": (
         "Task {task_id} is claimed by a human member still on the team; it "
         "cannot be cancelled. Use send_message to coordinate with that human. "
-        "If they truly cannot continue, shutdown_member removes them from the "
-        "team, after which the task can be cancelled or reassigned"
+        "If they truly cannot continue, shutdown_member (without force) removes "
+        "them from the team, after which the task can be cancelled or reassigned"
     ),
     "update_task.error_human_agent_locked_reassign": (
         "Task {task_id} is claimed by a human member still on the team; it "
         "cannot be reassigned to {new_assignee} and must be completed by that "
-        "human. If they truly cannot continue, shutdown_member removes them "
-        "from the team, after which the task can be reassigned"
+        "human. If they truly cannot continue, shutdown_member (without force) "
+        "removes them from the team, after which the task can be reassigned"
     ),
     "update_task.error_human_agent_locked_edit": (
         "Task {task_id} is claimed by a human member still on the team; its "
         "title/content cannot be edited. Use send_message to coordinate with "
-        "that human. If they truly cannot continue, shutdown_member removes "
-        "them from the team, after which the task can be cancelled or reassigned"
+        "that human. If they truly cannot continue, shutdown_member (without "
+        "force) removes them from the team, after which the task can be "
+        "cancelled or reassigned"
     ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/en/claim_task.md
@@ -360,11 +361,14 @@ STRINGS: dict[str, str] = {
         "as separate messages to each member, cost is linear in recipient count and "
         "MORE expensive than broadcast for the same audience, use only when truly needed "
         'and cannot mix with "*"/"user"; '
-        '"user" (teammates only, to reply to the user); '
+        '"user" (teammates only, to reply to the user; leader calls are rejected); '
         '"*" to broadcast on the team channel, visible to all members'
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
+    "send_message.error_leader_to_user": (
+        "Leader cannot send_message to 'user'. Reply to the user directly in your assistant output instead."
+    ),
     "send_message.error_content_too_long": (
         "'content' is too long ({actual} chars, limit {limit}): a body this size is an "
         "artifact, not a message. Write it to a file under the shared team workspace "

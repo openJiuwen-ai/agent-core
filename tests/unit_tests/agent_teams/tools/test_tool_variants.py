@@ -645,8 +645,8 @@ async def test_create_task_rejects_reviewer_equal_assignee(db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_create_task_rejects_unknown_reviewer(db):
-    """A scheduled reviewer must be a real team member."""
+async def test_create_task_allows_role_based_reviewer(db):
+    """Reviewer names in scheduled dispatch may be role labels — the scheduler handles them."""
     backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
     tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
     create_task = _by_name(tools, "create_task")
@@ -654,8 +654,7 @@ async def test_create_task_rejects_unknown_reviewer(db):
     result = await create_task.invoke(
         {"tasks": [{"task_id": "r1", "title": "t", "content": "c", "assignee": DEV_1, "reviewer": ["ghost"]}]}
     )
-    assert not result.success
-    assert "not found" in result.error
+    assert result.success
 
 
 @pytest.mark.asyncio

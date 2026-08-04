@@ -55,6 +55,8 @@ team system prompt 与入站消息有两个长期痛点，本特性一并解决�
   `render_event`（`<team-event>` + 可选 `<team-note>`）。**零 i18n 依赖**——动态数据 + 已本地化的
   文案片段由 handler 传入，结构层只负责 XML 标签 + `html.escape`。`type`/`kind`/`for` 是稳定英文
   契约 token（永不本地化），由 §5.2 说明 section（`team_inbound_tags`，P:18）按名解释。
+  （本次 note 渲染成紧跟被修饰块之后的**平级**块，已由
+  [[F_72_nested-team-note-inside-annotated-block]] 改为嵌进块内部；本节其余描述仍然有效。）
 - handler 全量接线：`MessageHandler._format_message`（普通成员 → `<team-inbound>` + `reply-hint`
   note；human_agent → `for="controller"` + `hitt-silence` note）；`TaskBoardHandler` 的
   task-assigned / plan-approved|rejected / all-done / task-board；`StaleTaskHandler` 的

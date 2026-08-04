@@ -64,3 +64,23 @@ async def test_forwarder_keeps_structured_tool_calls_unchanged():
     assert result == payload
     assert upstream_client.calls[0]["json_body"]["model"] == "m1"
     assert upstream_client.calls[0]["json_body"]["logprobs"] is True
+
+
+@pytest.mark.asyncio
+async def test_forwarder_flattens_extra_body_for_vllm():
+    upstream_client = _FakeUpstreamClient(_FakeResponse({"choices": []}))
+    forwarder = Forwarder(upstream_client=upstream_client, model_id="base")
+
+    await forwarder.forward(
+        {
+            "model": "user-1",
+            "messages": [{"role": "user", "content": "hi"}],
+            "extra_body": {"return_token_ids": True},
+        },
+        {},
+    )
+
+    sent = upstream_client.calls[0]["json_body"]
+    assert sent["model"] == "user-1"
+    assert sent["return_token_ids"] is True
+    assert "extra_body" not in sent

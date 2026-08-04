@@ -35,15 +35,18 @@ Section layout (aligned with ``prompt_design.md``):
   P:15  team_dispatch    — how tasks reach members: autonomous claim vs
                           scheduled assignment (LEADER + TEAMMATE)
   P:17  team_extra       — user-supplied base prompt (when set)
-  P:65  team_info        — team metadata (after capabilities)
-  P:66  team_members     — relationships with peers
+
+Team *state* (team metadata, peer roster) is not a section at all: it is
+delivered into the member's conversation history as it appears, rendered by
+``prompts/messages.py`` and driven by ``agent_teams/team_context.py``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from typing import Literal, Optional
 
 from openjiuwen.agent_teams.prompts.loader import load_template
+from openjiuwen.agent_teams.prompts.messages import build_identity_text
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.single_agent.prompts.builder import PromptSection, SystemPromptBuilder
 
@@ -63,10 +66,7 @@ class TeamSectionName:
     DISPATCH = "team_dispatch"
     LIFECYCLE = "team_lifecycle"
     EXTRA = "team_extra"
-    ATTACHMENT_NOTICE = "team_attachment_notice"
     INBOUND_TAGS = "team_inbound_tags"
-    INFO = "team_info"
-    MEMBERS = "team_members"
 
 
 # ---------------------------------------------------------------------------
@@ -75,24 +75,10 @@ class TeamSectionName:
 
 _LABELS: dict[str, dict[str, str]] = {
     "cn": {
-        "member_name_line": "你的 member_name",
-        "identity_heading": "# 成员身份",
         "role_heading": "# 团队角色",
         "workflow_heading": "# 工作流程",
         "dispatch_heading": "# 任务下发与获取",
         "lifecycle_heading": "# 团队生命周期",
-        "private_prompt_heading": "## 私有工作约定",
-        "info_heading": "# 团队信息",
-        "team_name_label": "team_name（团队唯一标识）",
-        "display_name_label": "display_name（团队展示名）",
-        "team_desc": "团队目标与指令",
-        "team_workspace": "团队共享工作空间",
-        "team_workspace_purpose": (
-            "用于存放团队共享文件（方案、设计、交付成果），"
-            "所有成员通过该路径前缀读写同一份文件，系统自动管理版本和文件锁"
-        ),
-        "team_workspace_abs": "绝对路径",
-        "members_heading": "# 成员关系",
         "leader_mode_plan": (
             "团队成员执行模式: plan_mode（成员选择或接到任务后需直接通过 submit_plan 提交计划，"
             "由你通过 approve_plan 审批后才能执行）"
@@ -106,25 +92,10 @@ _LABELS: dict[str, dict[str, str]] = {
         "teammate_mode_build": ("你的执行模式: build_mode（领取任务后可自主执行并直接标记完成，无需 leader 审批计划）"),
     },
     "en": {
-        "member_name_line": "Your member_name",
-        "identity_heading": "# Member Identity",
         "role_heading": "# Team Role",
         "workflow_heading": "# Workflow",
         "dispatch_heading": "# Task Dispatch",
         "lifecycle_heading": "# Team Lifecycle",
-        "private_prompt_heading": "## Private Working Agreement",
-        "info_heading": "# Team Info",
-        "team_name_label": "team_name (unique identifier)",
-        "display_name_label": "display_name (human-readable label)",
-        "team_desc": "Team Goal & Directives",
-        "team_workspace": "Team Shared Workspace",
-        "team_workspace_purpose": (
-            "Holds team-shared files (plans, designs, deliverables); "
-            "all members read/write the same files through this path prefix. "
-            "Versioning and file locks are managed automatically"
-        ),
-        "team_workspace_abs": "Absolute path",
-        "members_heading": "# Relationships",
         "leader_mode_plan": (
             "Teammate execution mode: plan_mode (teammates must submit a plan "
             "with submit_plan after selecting or receiving a task; "
@@ -161,42 +132,47 @@ def _labels_for(language: str) -> dict[str, str]:
 def build_team_identity_section(
     *,
     member_name: str | None,
+    display_name: str | None = None,
+    member_workspace_path: str | None = None,
     member_prompt: str | None = None,
     language: str = "cn",
 ) -> Optional[PromptSection]:
-    """Build the member's own-identity section.
+    """Build the member's own-identity section (external CLI members only).
 
-    Carries everything that is specific to this one member: its
-    ``member_name`` and its private working agreement (the member-private
-    counterpart to the public ``desc``, never shared into any peer's roster or
-    ``list_members`` output). Both are fixed at spawn time, but they are the
-    only content that differs *between* members of a team — so they are kept
-    out of the system prompt for in-process members and delivered as a single
-    prompt attachment instead, letting the whole team share one cacheable
-    prefix. External CLI members, whose prompt is a standalone snapshot rather
-    than a shared prefix, inline it statically (see
-    ``build_team_static_sections(include_member_specific=True)``).
+    Carries everything specific to this one member: its ``member_name`` and its
+    private working agreement (the member-private counterpart to the public
+    ``desc``, never shared into any peer's roster or ``list_members`` output).
+    Both are fixed at spawn time, but they are the only content that differs
+    *between* members of a team, so they must stay out of the shared system
+    prompt for in-process members — those receive the same body as a history
+    message (see ``prompts/messages.build_identity_text``).
+
+    External CLI members are the exception this section exists for: their prompt
+    is a standalone per-member snapshot rather than a prefix shared with sibling
+    members, and at launch they have no conversation to write into. They inline
+    it via ``build_team_static_sections(include_member_specific=True)``.
 
     Args:
         member_name: Semantic member identifier.
-        member_prompt: The member's private working agreement; blank (the
-            leader, or a member spawned without one) drops that subsection.
+        display_name: Human-readable member label.
+        member_workspace_path: The member's own artifact directory.
+        member_prompt: The member's private working agreement; blank (a member
+            spawned without one) drops that subsection.
         language: Prompt language ('cn' or 'en').
 
     Returns:
-        PromptSection carrying the member_name line and, when set, the private
-        working agreement; ``None`` when neither is set.
+        PromptSection carrying the member's names and, when set, the private
+        working agreement; ``None`` when none of them is set.
     """
-    private_prompt = member_prompt.strip() if member_prompt else ""
-    if not member_name and not private_prompt:
+    body = build_identity_text(
+        member_name=member_name,
+        display_name=display_name,
+        member_workspace_path=member_workspace_path,
+        member_prompt=member_prompt,
+        language=language,
+    )
+    if body is None:
         return None
-    labels = _labels_for(language)
-    lines = [labels["identity_heading"], ""]
-    if member_name:
-        lines.append(f"{labels['member_name_line']}: {member_name}")
-    if private_prompt:
-        lines.extend(["", labels["private_prompt_heading"], "", private_prompt])
-    body = "\n".join(lines) + "\n"
     return PromptSection(
         name=TeamSectionName.IDENTITY,
         content={language: body},
@@ -392,32 +368,6 @@ def build_team_extra_section(
     )
 
 
-def build_team_attachment_notice_section(*, language: str = "cn") -> PromptSection:
-    """Build the static notice explaining team-state prompt attachments (§5.1).
-
-    Tells the LLM that roster / team-info / HITT state is delivered as
-    ``<prompt-attachment>`` blocks at the message tail (rather than in the
-    system prompt) and reflects the current round's latest state. The bilingual
-    body lives in ``<lang>/attachment_notice.md``.
-
-    Args:
-        language: Prompt language ('cn' or 'en').
-
-    Returns:
-        PromptSection with the bilingual attachment-notice body.
-    """
-    del language  # content carries both languages; selection happens at render
-    content = {
-        "cn": load_template("attachment_notice", "cn").content,
-        "en": load_template("attachment_notice", "en").content,
-    }
-    return PromptSection(
-        name=TeamSectionName.ATTACHMENT_NOTICE,
-        content=content,
-        priority=17,
-    )
-
-
 def build_team_inbound_tags_section(*, language: str = "cn") -> PromptSection:
     """Build the static notice explaining inbound message XML tags (§5.2).
 
@@ -441,67 +391,6 @@ def build_team_inbound_tags_section(*, language: str = "cn") -> PromptSection:
         name=TeamSectionName.INBOUND_TAGS,
         content=content,
         priority=18,
-    )
-
-
-def build_team_info_section(
-    *,
-    team_info: dict[str, Any] | None,
-    team_workspace_mount: str | None = None,
-    team_workspace_path: str | None = None,
-    language: str = "cn",
-) -> Optional[PromptSection]:
-    """Build the team metadata section.
-
-    Args:
-        team_info: Mapping with optional ``team_name``, ``display_name``
-            and ``desc`` keys (the shape returned by
-            ``TeamBackend.get_team_info``).
-        team_workspace_mount: Agent-relative mount point of the team
-            shared workspace (e.g. ``.team/{team_name}/``).  When set,
-            the section appends a bullet telling the LLM how to
-            read/write team-shared files from its own workspace.
-        team_workspace_path: Absolute path of the team shared
-            workspace on disk.  Purely informational; appended as a
-            nested bullet when ``team_workspace_mount`` is provided, or
-            as a standalone workspace bullet when only the absolute path
-            is available.
-        language: Prompt language.
-
-    Returns:
-        PromptSection listing team_name, display_name, goal and (when
-        configured) the shared workspace mount/path, or ``None`` when no
-        usable fields are present.
-    """
-    labels = _labels_for(language)
-    team_name = team_info.get("team_name") if team_info else None
-    display_name = team_info.get("display_name") if team_info else None
-    desc = team_info.get("desc") if team_info else None
-    mount = team_workspace_mount.strip() if team_workspace_mount else ""
-    path = team_workspace_path.strip() if team_workspace_path else ""
-    if not any([team_name, display_name, desc, mount, path]):
-        return None
-
-    lines = [labels["info_heading"], ""]
-    if team_name:
-        lines.append(f"- {labels['team_name_label']}: {team_name}")
-    if display_name:
-        lines.append(f"- {labels['display_name_label']}: {display_name}")
-    if desc:
-        lines.append(f"- {labels['team_desc']}: {desc}")
-    if mount:
-        lines.append(f"- {labels['team_workspace']}: `{mount}`")
-        lines.append(f"  - {labels['team_workspace_purpose']}")
-        if path:
-            lines.append(f"  - {labels['team_workspace_abs']}: `{path}`")
-    elif path:
-        lines.append(f"- {labels['team_workspace']}: `{path}`")
-        lines.append(f"  - {labels['team_workspace_purpose']}")
-    body = "\n".join(lines) + "\n"
-    return PromptSection(
-        name=TeamSectionName.INFO,
-        content={language: body},
-        priority=65,
     )
 
 
@@ -632,64 +521,12 @@ def build_team_bridge_section(
     )
 
 
-def build_team_members_section(
-    *,
-    team_members: list[dict[str, str]] | None,
-    self_member_name: str | None,
-    mark_humans: bool = False,
-    language: str = "cn",
-) -> Optional[PromptSection]:
-    """Build the unified team relationships section.
-
-    Lists every peer member (teammates, bridge / external-CLI avatars and human
-    agents alike) as ordinary members. Human agents are tagged ``[human]`` only
-    when ``mark_humans`` is True — the caller gates this on the viewer role +
-    ``expose_human_agents_to_teammates`` so a teammate's peers stay
-    role-anonymous by default. Bridge / external-CLI members are never tagged;
-    their remote backing is not something peers need to perceive.
-
-    Args:
-        team_members: List of member dicts with ``member_name``,
-            ``display_name``, optional ``desc`` and ``role``.
-        self_member_name: Excluded from the listing if present.
-        mark_humans: When True, append ``[human]`` to members whose ``role`` is
-            ``human_agent``.
-        language: Prompt language.
-
-    Returns:
-        PromptSection listing peer members, or ``None`` when the list
-        is empty after self exclusion.
-    """
-    if not team_members:
-        return None
-    labels = _labels_for(language)
-    rows = []
-    for member in team_members:
-        member_name = member.get("member_name", "")
-        if member_name == self_member_name:
-            continue
-        display_name = member.get("display_name", "unknown")
-        desc = member.get("desc", "")
-        line = f"- member_name={member_name} display_name={display_name}"
-        if mark_humans and member.get("role") == TeamRole.HUMAN_AGENT.value:
-            line += " [human]"
-        if desc:
-            line += f" :: {desc}"
-        rows.append(line)
-    if not rows:
-        return None
-    body = labels["members_heading"] + "\n\n" + "\n".join(rows) + "\n"
-    return PromptSection(
-        name=TeamSectionName.MEMBERS,
-        content={language: body},
-        priority=66,
-    )
-
-
 def build_team_static_sections(
     *,
     role: TeamRole,
     member_name: str | None,
+    display_name: str = "",
+    member_workspace_path: str | None = None,
     member_prompt: str = "",
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
@@ -699,7 +536,6 @@ def build_team_static_sections(
     language: str = "cn",
     hitt_enabled: bool = False,
     expose_human_agents_to_teammates: bool = False,
-    include_attachment_notice: bool = False,
     include_member_specific: bool = False,
     workspace_prompt_variant: Literal["native", "external"] = "native",
 ) -> list[PromptSection]:
@@ -709,12 +545,12 @@ def build_team_static_sections(
     members call this through :class:`TeamPolicyRail`; external CLI members call
     it directly to build a standalone prompt snapshot. Every section here is
     static — HITT is gated on ``hitt_enabled``, bridge on ``role ==
-    BRIDGE_AGENT``. The dynamic roster (``team_members``, tagged ``[human]``)
-    and ``team_info`` are NOT built here; they are prompt attachments
-    (in-process) or pulled via MCP tools (external CLI). The two per-member
-    per-member section (``team_identity``: member_name + private working
-    agreement) is likewise an attachment for in-process members, and only
-    inlined here when ``include_member_specific`` is set.
+    BRIDGE_AGENT``. Team state (metadata, peer roster) is NOT built here: it is
+    delivered into the member's conversation as it appears (see
+    ``agent_teams/team_context.py``). The one per-member section
+    (``team_identity``: member_name + private working agreement) is delivered
+    the same way for in-process members, and only inlined here when
+    ``include_member_specific`` is set.
 
     Args:
         role: LEADER or TEAMMATE (other roles get the role-appropriate slices).
@@ -725,7 +561,7 @@ def build_team_static_sections(
             delivered only to this member as part of the identity section;
             rendered here only when ``include_member_specific`` is set. The
             public ``desc`` is intentionally NOT rendered here — it belongs
-            only in peers' roster section.
+            only in peers' roster.
         lifecycle: Team lifecycle ("temporary" / "persistent").
         teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
         team_mode: Team mode ("default" / "predefined" / "hybrid").
@@ -736,15 +572,10 @@ def build_team_static_sections(
             HITT collaboration contract.
         expose_human_agents_to_teammates: Whether teammates get the roster-aware
             HITT variant (and, via the caller, the ``[human]`` roster tag).
-        include_attachment_notice: When True, append the prompt-attachment
-            notice (team state delivered as ``<prompt-attachment>`` at the
-            message tail). The inbound tag notice is always appended — every
-            member reads inbound messages and events as ``<team-inbound>`` /
-            ``<team-event>`` XML.
         include_member_specific: When True, inline the per-member section
             (``team_identity``) as a static section. Only external CLI members
-            set this; in-process members receive it as a prompt attachment so
-            the system-prompt prefix stays identical across the team.
+            set this; in-process members receive it as a history message so the
+            system-prompt prefix stays identical across the team.
         workspace_prompt_variant: Workspace wording variant forwarded to the
             teammate role policy section.
 
@@ -755,6 +586,8 @@ def build_team_static_sections(
     if include_member_specific:
         identity_section = build_team_identity_section(
             member_name=member_name,
+            display_name=display_name,
+            member_workspace_path=member_workspace_path,
             member_prompt=member_prompt,
             language=language,
         )
@@ -799,14 +632,10 @@ def build_team_static_sections(
         ),
     ]
     sections = [section for section in builders if section is not None]
-    # Every team member — in-process or external CLI — receives inbound messages
-    # and framework events as <team-inbound> / <team-event> XML, so the inbound
-    # tag notice is always included. The attachment notice is gated by caller:
-    # native members receive prompt attachments from PromptAttachmentManager,
-    # while external members receive the same rendered blocks through their
-    # runtime input channel.
-    if include_attachment_notice:
-        sections.append(build_team_attachment_notice_section(language=language))
+    # Every team member — in-process or external CLI — receives inbound
+    # messages, framework events and team-state updates as <team-inbound> /
+    # <team-event> / <team-context> XML, so the inbound tag notice is always
+    # included.
     sections.append(build_team_inbound_tags_section(language=language))
     return sections
 
@@ -815,6 +644,8 @@ def build_team_member_system_prompt(
     *,
     role: TeamRole,
     member_name: str | None,
+    display_name: str = "",
+    member_workspace_path: str | None = None,
     member_prompt: str = "",
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
@@ -836,8 +667,8 @@ def build_team_member_system_prompt(
 
     The per-member section IS inlined here (``include_member_specific``):
     an external CLI prompt is a standalone per-member snapshot, not a prefix
-    shared with sibling members, so there is no cache to protect and no
-    attachment channel available at startup.
+    shared with sibling members, so there is no cache to protect — and at launch
+    there is no conversation yet to deliver it into.
 
     Args mirror :func:`build_team_static_sections`.
 
@@ -847,6 +678,8 @@ def build_team_member_system_prompt(
     sections = build_team_static_sections(
         role=role,
         member_name=member_name,
+        display_name=display_name,
+        member_workspace_path=member_workspace_path,
         member_prompt=member_prompt,
         lifecycle=lifecycle,
         teammate_mode=teammate_mode,
@@ -856,7 +689,6 @@ def build_team_member_system_prompt(
         language=language,
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=expose_human_agents_to_teammates,
-        include_attachment_notice=True,
         include_member_specific=True,
         workspace_prompt_variant=workspace_prompt_variant,
     )
@@ -868,16 +700,14 @@ def build_team_member_system_prompt(
 
 __all__ = [
     "TeamSectionName",
-    "build_team_attachment_notice_section",
     "build_team_bridge_section",
+    "build_team_dispatch_section",
     "build_team_extra_section",
     "build_team_hitt_section",
     "build_team_identity_section",
     "build_team_inbound_tags_section",
-    "build_team_info_section",
     "build_team_lifecycle_section",
     "build_team_member_system_prompt",
-    "build_team_members_section",
     "build_team_role_section",
     "build_team_static_sections",
     "build_team_workflow_section",

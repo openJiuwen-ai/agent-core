@@ -47,18 +47,18 @@ New team skill creation remains owned by `TeamSkillCreateRail`; this rail only e
 
 ```python
 from openjiuwen.harness.rails import (
+    EvolutionInterruptRail,
     EvolutionReviewRuntime,
-    SubagentRail,
     TeamSkillRail,
     configure_skill_evolution,
 )
 ```
 
-`TeamSkillEvolutionRail` also registers the stable `evolution_reviewer` flow through `SubagentRail`; active review tools depend on shared `EvolutionReviewRuntime`.
+`TeamSkillEvolutionRail` registers the stable `evolution_reviewer` and exposes it through the rail-owned `evolve_review_task`. The active review path does not require a global `task_tool` or `SubagentRail`; its tools share `EvolutionReviewRuntime`.
 
 `TeamSkillEvolutionRail` / `SkillEvolutionRail` `init()` does not configure `EvolutionInterruptRail`. Add one shared interrupt rail explicitly if you do not use the factory.
 
-Stable review subagent registration is deduplicated by `evolution_reviewer`; inconsistent runtime/query/store on re-register raises a fast failure.
+Stable review subagent registration is deduplicated by `evolution_reviewer`; a stale binding is replaced with the current runtime/query/store.
 
 ### 推荐优先 / 推荐构建方式
 
@@ -76,7 +76,7 @@ configure_skill_evolution(
 )
 ```
 
-The configuration API adds `SubagentRail` when needed and wires `EvolutionInterruptRail` with `TeamSkillRail`.
+The configuration API wires `EvolutionInterruptRail` with `TeamSkillRail`.
 
 Manual assembly requires explicit shared dependencies:
 
@@ -97,7 +97,7 @@ interrupt_rail = EvolutionInterruptRail(
 agent = create_deep_agent(
     model=model_client,
     tools=team_tools,
-    rails=[SubagentRail(), interrupt_rail, team_rail],
+    rails=[interrupt_rail, team_rail],
 )
 ```
 
@@ -113,12 +113,13 @@ agent = create_deep_agent(
 ### Trigger Mechanism
 
 - Monitors `view_task` tool result, detecting "all tasks completed"
-- Supports passive trajectory analysis and active user request evolution paths
+- Supports a passive signal path and an Agent-decided active review path
 - `signal_trigger` controls passive team completion scanning; `auto_scan` is its compatibility alias. Both default to `False`.
 - `review_trigger` controls team completion self-check follow_up insertion; `completion_followup_enabled` is its compatibility alias. Both default to `False`.
 - During migration, if both the new and legacy names are provided, the new name takes precedence.
-- `auto_scan=False` disables passive completion scanning and `notify_team_completed()` passive triggering.
-- Passive evolution uses aggregated collaborative trajectory evidence. Team completion, team skill attribution, and runtime role attribution are heuristic host-bridge signals, not strong contracts.
+- When `review_trigger=True`, active review takes precedence over passive signal generation after team completion. The main Agent decides whether evolution is needed and calls the rail-owned `evolve_review_task`, which runs `evolution_reviewer`.
+- `auto_scan=False` disables passive completion scanning and `notify_team_completed()` passive triggering. `notify_team_completed()` may still schedule active review when `review_trigger=True`.
+- The passive path aggregates collaborative trajectory evidence and uses `SkillExperienceOptimizer(profile="team")`. Team completion, team skill attribution, and runtime role attribution are heuristic host-bridge signals, not strong contracts.
 
 ```text
 class TeamSkillRail(
@@ -139,8 +140,6 @@ class TeamSkillRail(
     max_concurrent_evolution: int = 1,
     team_id: Optional[str] = None,
     trajectories_dir: Optional[Path] = None,
-    user_request_llm_policy: LLMInvokePolicy = ...,
-    trajectory_issue_llm_policy: LLMInvokePolicy = ...,
     record_llm_policy: LLMInvokePolicy = ...,
     evaluate_llm_policy: LLMInvokePolicy = ...,
     simplify_llm_policy: LLMInvokePolicy = ...,
@@ -151,6 +150,7 @@ class TeamSkillRail(
     fuzzy_review_interval: int = 5,
     completion_followup_enabled: Optional[bool] = None,
     review_trigger: Optional[bool] = None,
+    review_agent_max_iterations: int = 40,
 )
 ```
 
@@ -172,8 +172,6 @@ class TeamSkillRail(
 * **max_concurrent_evolution** (int): Max concurrent background evolution tasks, defaults to 1.
 * **team_id** (str, optional): Team ID.
 * **trajectories_dir** (Path, optional): Trajectory directory path.
-* **user_request_llm_policy** (LLMInvokePolicy): User intent detection LLM invocation policy.
-* **trajectory_issue_llm_policy** (LLMInvokePolicy): Trajectory issue detection LLM invocation policy.
 * **record_llm_policy** (LLMInvokePolicy): Experience record generation LLM invocation policy.
 * **evaluate_llm_policy** (LLMInvokePolicy): Experience evaluation LLM invocation policy.
 * **simplify_llm_policy** (LLMInvokePolicy): Experience simplify LLM invocation policy.
@@ -184,6 +182,7 @@ class TeamSkillRail(
 * **fuzzy_review_interval** (int): Number of non-follow_up task iterations between inherited fuzzy review checks. Must be at least 1.
 * **completion_followup_enabled** (bool, optional): Compatibility alias for `review_trigger`; ignored when `review_trigger` is set.
 * **review_trigger** (bool, optional): Whether team completion enqueues a short evolution self-check follow_up, defaults to `False`.
+* **review_agent_max_iterations** (int): Maximum iterations for `evolution_reviewer`, defaults to 40.
 
 ### Runtime Trajectory Source/Sink
 
@@ -225,9 +224,9 @@ Evolution store instance.
 
 Experience scorer.
 
-### generator -> TeamSkillExperienceOptimizer
+### generator -> SkillExperienceOptimizer
 
-Team skill experience optimizer.
+Shared experience optimizer configured with `profile="team"` for the passive signal path.
 
 ### evolution_config -> dict
 
@@ -249,7 +248,7 @@ Bind or replace the runtime `TrajectorySink` used to publish this rail's member 
 
 ## Lifecycle and Contracts
 
-The observable lifecycle matches regular skill evolution:
+The passive signal lifecycle matches regular skill evolution:
 
 ```text
 team trajectory aggregated
@@ -260,9 +259,20 @@ team trajectory aggregated
 -> evolutions.json and evolution/*.md projection
 ```
 
+The active-review lifecycle is separate:
+
+```text
+team completion or user request
+-> main Agent decides/prepares a bounded review scope
+-> evolve_review_task runs evolution_reviewer
+-> reviewer submits a proposal through review tools
+-> interrupt-governed approval and persistence
+```
+
 Stable ownership boundaries:
 
 * `TeamSkillEvolutionRail` owns team-specific host bridge behavior: `view_task` completion detection, `notify_team_completed()`, team trajectory aggregation, and used team-skill detection.
+* The rail-owned `evolve_review_task` is the only task wrapper for the dedicated `evolution_reviewer`.
 * `OnlineEvolutionOrchestrator` coordinates context build, update generation, and local preview.
 * `ExperienceManager + PendingChange` owns pending approval state.
 * `EvolutionStore` owns durable writes and projection.
@@ -316,7 +326,7 @@ Team evolution also uses the normalized subject contract:
 
 ### async notify_team_completed(ctx) -> bool
 
-Trigger skill evolution (when all tasks complete).
+Mark team completion for the enabled passive signal and/or active-review trigger.
 
 **Parameters**:
 
@@ -324,23 +334,24 @@ Trigger skill evolution (when all tasks complete).
 
 **Returns**:
 
-* `bool`: Whether evolution was successfully triggered.
+* `bool`: Whether team completion was accepted for configured evolution handling.
 
 ---
 
-### async request_user_evolution(skill_name, user_intent="", *, auto_approve=False) -> EvolutionRequestResult
+### async request_user_evolution(skill_name, user_intent="", *, auto_approve=None, max_index_records=None) -> EvolutionRequestResult
 
-User-initiated evolution request. The method trusts the provided `skill_name` as the evolution subject and uses the current rail trajectory, or the aggregated team trajectory from `trajectory_source`, as the evidence window; `user_intent` only adds direction.
+Build a host-delivered active-review prompt for a team skill. Current rail trajectory or aggregated team trajectory becomes the default review evidence; `user_intent` only adds direction.
 
 **Parameters**:
 
 * **skill_name** (str): Target skill name.
-* **user_intent** (str): User improvement intent description. Defaults to `""`; when empty, team trajectory evidence can still trigger evolution if it contains actionable signals.
-* **auto_approve** (bool): Whether to auto-approve, defaults to `False`.
+* **user_intent** (str): User improvement intent description, defaults to `""`.
+* **auto_approve** (bool, optional): Accepted for compatibility and ignored by the active-review path.
+* **max_index_records** (int, optional): Accepted for compatibility and ignored by the active-review path.
 
 **Returns**:
 
-* `EvolutionRequestResult`: request id, generated records, optional approval event, and `auto_approved` status when records were generated; otherwise an empty result object is returned.
+* `EvolutionRequestResult`: `mode="agent_prompt"` and a `followup_prompt` for the host to deliver to the main Agent. An unknown or non-team skill returns an empty result.
 
 ---
 

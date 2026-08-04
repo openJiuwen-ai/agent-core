@@ -132,6 +132,6 @@ class InstructionOptimizer(
 
 ---
 
-## 团队技能优化器
+## Skill 经验优化器
 
-详见 [team_skill_experience_optimizer](./skill_call/team_skill_experience_optimizer.md)。
+普通/团队 Skill 共用的经验优化器详见 [experience_optimizer](./skill_call/experience_optimizer.md)。

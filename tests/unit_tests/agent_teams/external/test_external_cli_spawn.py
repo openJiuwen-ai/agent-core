@@ -267,6 +267,7 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
     assert isinstance(runtime, CodexSdkRuntime)
     assert runtime._thread_options == {
         "ephemeral": False,
+        "config": {"model_reasoning_summary": "detailed"},
         "cwd": "/workspace",
         "developer_instructions": "ROLE: isolated developer",
         "approval_mode": "deny-all",

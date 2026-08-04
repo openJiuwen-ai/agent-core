@@ -390,6 +390,11 @@ class TeamBackend:
         if isolation is not None and isolation != "worktree":
             return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
 
+        if not await self.db.team.team_exists(self.team_name):
+            return MemberOpResult.fail(
+                f"Team {self.team_name} does not exist; call build_team first"
+            )
+
         from openjiuwen.agent_teams.tools.member_options import build_member_options
 
         options = build_member_options(
@@ -676,6 +681,28 @@ class TeamBackend:
                 else f"Member {member_name} is shutting down"
             )
             return MemberOpResult.success()
+
+        # Guard: reject shutdown of a live human agent who still holds active
+        # tasks, unless force=True. Models sometimes confuse "cancel this
+        # human's task" with "shutdown the human" — without this guard the
+        # mistake silently succeeds and the tasks are orphaned.  Regular
+        # teammates are intentionally not gated here: their shutdown is a
+        # normal lifecycle operation and the leader already expects to
+        # manage any leftover tasks afterwards.
+        if not force and await self.is_live_human_agent(member_name):
+            active_statuses = {
+                TaskStatus.PLANNING.value,
+                TaskStatus.IN_PROGRESS.value,
+                TaskStatus.IN_REVIEW.value,
+            }
+            owned_tasks = await self.task_manager.get_tasks_by_assignee(member_name=member_name)
+            active_tasks = [t for t in owned_tasks if t.status in active_statuses]
+            if active_tasks:
+                task_ids = ", ".join(t.task_id for t in active_tasks)
+                return MemberOpResult.fail(
+                    t("team.shutdown_human_active_tasks",
+                      member_name=member_name, count=str(len(active_tasks)), task_ids=task_ids)
+                )
 
         # Validate state transition
         from openjiuwen.agent_teams.schema.status import (

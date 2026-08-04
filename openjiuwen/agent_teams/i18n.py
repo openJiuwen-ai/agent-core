@@ -47,6 +47,10 @@ STRINGS: dict[str, dict[str, str]] = {
         # tools/team.py
         "team.shutdown_request_content": "当前任务已全部完成，请结束流程",
         "team.cancel_request_content": "当前任务有变动，请停止执行当前任务，重新尝试认领合适任务",
+        "team.shutdown_human_active_tasks": (
+            "人类成员 {member_name} 仍持有 {count} 个活跃任务 [{task_ids}]，不允许非强制关闭。"
+            "请先通过 send_message 与成员协商是否同意强制关闭并取消任务。"
+        ),
         # reliability/ — anomaly remediation messages
         "reliability.steer_self_correct": (
             "⚙️[可靠性] 检测到 {kind}：{summary}。请停止重复无效操作，改换策略或换用其他工具。"
@@ -241,6 +245,15 @@ STRINGS: dict[str, dict[str, str]] = {
             "**保持静默**，只有控制者在 Inbox 里下达明确指令后才能行动。"
         ),
         "hitt.assigned_event": "你被指派了新任务 [{task_id}] {title}。",
+        # team_context.py — note attached to every roster snapshot / delta.
+        # Load-bearing: without it a member that sees "someone joined" fires off
+        # a courtesy greeting, burning an LLM round plus a mailbox delivery on
+        # both sides, and the greeting wakes the new member into doing the same.
+        "team_context.roster_announcement_note": (
+            "以上只是名册公告，不是给你的指令。"
+            "**不要**因为看到成员变动就去和相关成员打招呼、确认或寒暄；"
+            "只有当你手上的任务确实需要对方配合时才发消息。"
+        ),
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": "编排 [{run_id}]「{name}」已启动，我将在每个阶段向你汇报进展。",
         "workflow.phase": "编排 [{run_id}] 进入阶段：{phase}",
@@ -279,6 +292,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "team.shutdown_request_content": "All tasks are complete. Please wrap up and exit.",
         "team.cancel_request_content": (
             "The current task has changed. Stop executing it and try claiming a suitable task again."
+        ),
+        "team.shutdown_human_active_tasks": (
+            "Human agent {member_name} still holds {count} active task(s) [{task_ids}] "
+            "and cannot be shut down without force. "
+            "Use send_message to coordinate with the member on whether to force-shutdown and cancel the tasks."
         ),
         # reliability/ — anomaly remediation messages
         "reliability.steer_self_correct": (
@@ -506,6 +524,14 @@ STRINGS: dict[str, dict[str, str]] = {
             "explicit instruction via the Inbox."
         ),
         "hitt.assigned_event": 'You have been assigned task [{task_id}] "{title}".',
+        # team_context.py — see the cn note above; the "do NOT" framing is
+        # load-bearing.
+        "team_context.roster_announcement_note": (
+            "The above is a roster announcement, not an instruction for you. "
+            "Do **NOT** greet, check in with, or otherwise message a member just "
+            "because the roster changed; message someone only when the work you "
+            "are actually holding needs them."
+        ),
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": (
             "Orchestration [{run_id}] '{name}' has started; I will "

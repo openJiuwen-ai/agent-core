@@ -12,18 +12,20 @@ public Rail，用于采集 agent 轨迹、检测普通 skill 的可复用改进�
 
 ```python
 from openjiuwen.harness.rails import (
+    EvolutionInterruptRail,
     EvolutionReviewRuntime,
     SkillEvolutionRail,
-    SubagentRail,
     configure_skill_evolution,
 )
 ```
 
-`SkillEvolutionRail` 的主动演进 review 流程会委托 `evolution_reviewer` 子智能体，因此必须与 `SubagentRail` 一起注册。同步子智能体模式会注册 `task_tool`，供 follow-up prompt 调用 review 子智能体。
+`SkillEvolutionRail` 的主动演进 review 流程通过 Rail 自有的 `evolve_review_task` 工具委托稳定的
+`evolution_reviewer` 子智能体，不依赖全局 `task_tool` 或 `SubagentRail`。
 
 `SkillEvolutionRail.init()` 不再配置 `EvolutionInterruptRail`，它只负责注册 review 工具与稳定 review subagent。
 
-稳定 review subagent 名称为 `evolution_reviewer`，重复注册时若 `runtime` / `query_service` / `store` 不一致会直接报错（fail fast）。
+稳定 review subagent 名称为 `evolution_reviewer`。Rail 初始化时会用当前 runtime、query service 和 store
+替换旧的 reviewer 绑定。
 
 ### 推荐优先 / 推荐构建方式
 
@@ -40,7 +42,7 @@ configure_skill_evolution(
 )
 ```
 
-配置 API 会在缺少 `SubagentRail` 时自动补齐，并将 `EvolutionInterruptRail` 与普通 `SkillEvolutionRail` 正确绑定。
+配置 API 会将 `EvolutionInterruptRail` 与普通 `SkillEvolutionRail` 正确绑定。
 
 手工组装时必须显式共享：
 
@@ -60,7 +62,7 @@ interrupt_rail = EvolutionInterruptRail(
 agent = create_deep_agent(
     model=model_client,
     tools=tools,
-    rails=[SubagentRail(), interrupt_rail, skill_rail],
+    rails=[interrupt_rail, skill_rail],
 )
 ```
 
@@ -73,7 +75,7 @@ agent = create_deep_agent(
 - `review_trigger` 控制周期性自检 follow_up 注入；`fuzzy_review` 是兼容别名。二者默认关闭。
 - 迁移期如果同时传入新旧参数名，以新参数名的值为准。
 - `auto_scan=False` 会关闭被动信号扫描，也会跳过被动演进的 async snapshot。
-- 主动演进通过 `request_user_evolution()` 触发；返回的 prompt 会要求主 agent 先调用 `prepare_skill_evolution(user_confirmed=true)`，再用返回的 `evolution_review_ref` 委托 `evolution_reviewer`。prepare tool 会把当前 rail 已采集到的执行/对话轨迹作为默认 review materials，`user_intent` 只补充优化方向。
+- 主动演进通过 `request_user_evolution()` 触发；返回的 prompt 会要求主 agent 先调用 `prepare_skill_evolution(user_confirmed=true)`，再用返回的 `evolution_review_ref` 调用 `evolve_review_task(evolution_review_ref=...)`。prepare tool 会把当前 rail 已采集到的执行/对话轨迹作为默认 review materials，`user_intent` 只补充优化方向。
 - 普通 skill 演进会忽略 `kind: team-skill`；team skill 使用 `TeamSkillEvolutionRail` / `TeamSkillRail`。
 
 ```text
@@ -97,6 +99,7 @@ class SkillEvolutionRail(
     fuzzy_review: Optional[bool] = None,
     review_trigger: Optional[bool] = None,
     fuzzy_review_interval: int = 5,
+    review_agent_max_iterations: int = 25,
     disabled_skills: Optional[Union[str, list[str]]] = None,
 )
 ```
@@ -121,6 +124,7 @@ class SkillEvolutionRail(
 * **fuzzy_review** (bool, 可选): `review_trigger` 的兼容别名；已设置 `review_trigger` 时忽略该值。
 * **review_trigger** (bool, 可选): 是否周期性注入简短演进自检 follow_up，默认 `False`。
 * **fuzzy_review_interval** (int): 两次自检检查之间的非 follow_up task iteration 数，必须大于等于 1。
+* **review_agent_max_iterations** (int): `evolution_reviewer` 的最大迭代次数，默认 25。
 * **disabled_skills** (Optional[Union[str, list[str]]], 可选): 排除自优化范围的技能拒绝列表。支持单个技能名（字符串）或多个技能名（字符串列表）。
 
 ### 优先级
@@ -133,7 +137,6 @@ class SkillEvolutionRail(
 
 ```python
 from openjiuwen.harness.rails import (
-    SubagentRail,
     EvolutionInterruptRail,
     EvolutionReviewRuntime,
     SkillEvolutionRail,
@@ -158,7 +161,7 @@ interrupt_rail = EvolutionInterruptRail(
     review_runtime=runtime,
     submission_service=skill_rail.experience_manager.experience_submission_service,
 )
-rails = [SubagentRail(), interrupt_rail, skill_rail, team_rail]
+rails = [interrupt_rail, skill_rail, team_rail]
 ```
 
 ---
@@ -272,15 +275,16 @@ skill 数据的演进存储，与 `trajectory_store` 不同。
 
 ## 方法
 
-### async request_user_evolution(skill_name, user_intent, *, max_index_records=20) -> EvolutionRequestResult
+### async request_user_evolution(skill_name, user_intent="", *, auto_approve=None, max_index_records=None) -> EvolutionRequestResult
 
-为普通 skill 构造由 host 投递的主动演进 command prompt。该 prompt 不直接创建 review scope，而是要求主 agent 调用 `prepare_skill_evolution(user_confirmed=true)`，再用返回的 `evolution_review_ref` 调 `task_tool(subagent_type="evolution_reviewer")`。
+为普通 skill 构造由 host 投递的主动演进 command prompt。该 prompt 不直接创建 review scope，而是要求主 agent 调用 `prepare_skill_evolution(user_confirmed=true)`，再用返回的 `evolution_review_ref` 调用 `evolve_review_task(evolution_review_ref=...)`。
 
 **参数**：
 
 * **skill_name** (str): 目标普通 skill 名称。
-* **user_intent** (str): 用户改进意图。
-* **max_index_records** (int): prompt 预览中最多内联的经验索引条目数。
+* **user_intent** (str): 用户改进意图，默认 `""`。
+* **auto_approve** (bool, 可选): 为兼容旧调用保留，主动审核链路会忽略该值。
+* **max_index_records** (int, 可选): 为兼容旧调用保留，主动审核链路会忽略该值。
 
 **返回**：
 
@@ -322,22 +326,25 @@ skill 数据的演进存储，与 `trajectory_store` 不同。
 
 ```python
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails import SkillEvolutionRail, SubagentRail
+from openjiuwen.harness.rails import EvolutionInterruptRail, EvolutionReviewRuntime, SkillEvolutionRail
 
+runtime = EvolutionReviewRuntime()
 skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    review_runtime=runtime,
     auto_save=False,
+)
+interrupt_rail = EvolutionInterruptRail(
+    review_runtime=runtime,
+    submission_service=skill_rail.experience_manager.experience_submission_service,
 )
 
 agent = create_deep_agent(
     model=model_client,
     tools=tools,
-    rails=[
-        skill_rail,
-        SubagentRail(),
-    ],
+    rails=[interrupt_rail, skill_rail],
 )
 
 result = await skill_rail.request_user_evolution(

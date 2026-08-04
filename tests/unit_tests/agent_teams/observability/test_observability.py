@@ -650,6 +650,58 @@ async def test_llm_response_with_content_and_tool_calls(
 
 
 @pytest.mark.asyncio
+async def test_prompt_includes_tool_calls_for_assistant_message(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Assistant messages with tool_calls get gen_ai.prompt.{i}.tool_calls attributes."""
+    fw = Runner.callback_framework
+    _create_team_span("test_team")
+
+    # Simulate an LLM round where the context includes a prior assistant tool call.
+    tool_call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+            "name": "send_message",
+            "arguments": '{"to":"user","content":"task done"}',
+        },
+    }
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "do the task"},
+        {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+        {"role": "tool", "content": "Message sent", "tool_call_id": "call_1"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=messages,
+        result=_FakeAssistantMessage(content="ok"),
+    )
+
+    span = _spans_by_name(in_memory_exporter, "llm.call")[0]
+
+    # Assistant message at index 2 should have tool_calls attribute.
+    tc_attr = _attr(span, "langfuse.gen_ai.prompt.2.tool_calls", "")
+    assert tc_attr, "assistant message with tool_calls should have tool_calls attribute"
+    assert "send_message" in tc_attr
+    assert "task done" in tc_attr
+
+    # Messages without tool_calls should NOT have the attribute.
+    for i in (0, 1, 3, 4):
+        assert _attr(span, f"langfuse.gen_ai.prompt.{i}.tool_calls", "") == "", (
+            f"message {i} ({_attr(span, f'langfuse.gen_ai.prompt.{i}.role', '')}) "
+            f"should not have tool_calls attribute"
+        )
+
+
+@pytest.mark.asyncio
 async def test_llm_call_error_marks_span_error(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:

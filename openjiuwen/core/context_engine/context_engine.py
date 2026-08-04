@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from typing import Any, Awaitable, Callable, List, Dict, Optional, Tuple
 import asyncio
@@ -115,8 +115,10 @@ class ContextEngine:
             token_counter = TiktokenCounter()
 
         if self._config.enable_openrouter_model_context_window_tokens:
-            await asyncio.to_thread(
-                ContextUtils.fetch_openrouter_model_context_window_tokens,
+            # Scheduled, not awaited: this is the first-turn critical path and the
+            # fetch is a ~600KB cross-region download. This context falls back to
+            # the built-in window table; later contexts pick up the fetched values.
+            ContextUtils.prefetch_openrouter_model_context_window_tokens(
                 self._config.openrouter_request_timeout,
             )
 

@@ -22,20 +22,10 @@ from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordina
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.prompts import (
-    TeamSectionName,
-    build_team_info_section,
-    build_team_members_section,
-)
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.single_agent.prompts.builder import PromptSection
-from openjiuwen.harness.prompts.prompt_attachment_manager import (
-    PromptAttachment,
-    PromptAttachmentManager,
-)
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import DispatcherHost, PollController
@@ -126,17 +116,26 @@ class MemberHandler(BaseCoordinationHandler):
             return
 
     async def _deliver_external_team_context(self, event: CoordinationEvent) -> None:
-        """Steer current team metadata into external members after roster changes."""
+        """Announce team state to an external CLI member after a roster change."""
         if event.event_type not in self.TEAM_CONTEXT_EVENTS:
             return
-        await self._deliver_external_team_context_snapshot()
+        await self._announce_external_team_context()
 
     async def on_refresh_team_context(self, _event: CoordinationEvent) -> None:
-        """Refresh this member's team context from current state."""
-        await self._deliver_external_team_context_snapshot()
+        """Announce any team state this member has not been told about yet."""
+        await self._announce_external_team_context()
 
-    async def _deliver_external_team_context_snapshot(self) -> None:
-        """Steer current team metadata into external members."""
+    async def _announce_external_team_context(self) -> None:
+        """Push pending team state to an external CLI member as its own message.
+
+        An external CLI member has no rail and no reachable context, so its
+        runtime normally folds team state into the next message something else
+        sends it. That can lag a roster change by a whole turn, so roster events
+        prod the runtime to send the announcement on its own instead. The
+        runtime's tracker decides whether there is anything to say, which makes
+        this a no-op for a member that is already up to date -- and keeps the
+        two paths from announcing the same change twice.
+        """
         runtime = self._external_runtime()
         if runtime is None:
             return
@@ -146,11 +145,8 @@ class MemberHandler(BaseCoordinationHandler):
                 self._blueprint.member_name,
             )
             return
-
         try:
-            text = await self._build_team_context_event()
-            if text:
-                await self._round.deliver_input(text, use_steer=True)
+            await runtime.announce_team_context()
         except Exception as exc:
             team_logger.warning(
                 "[{}] failed to refresh external team context: {}",
@@ -166,99 +162,6 @@ class MemberHandler(BaseCoordinationHandler):
         if isinstance(runtime, CliRuntimeBase):
             return runtime
         return None
-
-    async def _build_team_context_event(self) -> str | None:
-        """Build the external team-context event from native attachment sections."""
-        language = self._blueprint.language
-        info_section = await self._build_team_info_section(language)
-        members_section = await self._build_team_members_section(language)
-        attachments = [
-            self._prompt_attachment(TeamSectionName.INFO, info_section, language),
-            self._prompt_attachment(TeamSectionName.MEMBERS, members_section, language),
-        ]
-        present_attachments: list[PromptAttachment] = []
-        for attachment in attachments:
-            if attachment is not None:
-                present_attachments.append(attachment)
-        return PromptAttachmentManager().render(present_attachments) or None
-
-    async def _build_team_info_section(self, language: str) -> PromptSection | None:
-        """Build the same team_info section used by TeamPolicyRail."""
-        backend = self._infra.team_backend
-        if backend is None:
-            return None
-
-        info = await backend.get_team_info()
-        info_dict: dict[str, Any] | None = None
-        if info is not None:
-            info_dict = {
-                "team_name": info.team_name,
-                "display_name": info.display_name,
-                "desc": info.desc or "",
-            }
-
-        workspace_manager = self._infra.workspace_manager
-        team_workspace_path = None
-        if workspace_manager is not None:
-            team_workspace_path = workspace_manager.workspace_path
-
-        return build_team_info_section(
-            team_info=info_dict,
-            team_workspace_mount=None,
-            team_workspace_path=team_workspace_path,
-            language=language,
-        )
-
-    async def _build_team_members_section(self, language: str) -> PromptSection | None:
-        """Build the same team_members section used by TeamPolicyRail."""
-        backend = self._infra.team_backend
-        if backend is None:
-            return None
-
-        members = await backend.list_members()
-        members_list: list[dict[str, str]] | None = None
-        if members:
-            members_list = [
-                {
-                    "member_name": member.member_name,
-                    "display_name": member.display_name,
-                    "desc": member.desc or "",
-                    "role": member.role,
-                }
-                for member in members
-            ]
-
-        mark_humans = (
-            self._blueprint.role in (TeamRole.LEADER, TeamRole.HUMAN_AGENT)
-            or self._blueprint.spec.expose_human_agents_to_teammates
-        )
-        return build_team_members_section(
-            team_members=members_list,
-            self_member_name=self._blueprint.member_name,
-            mark_humans=mark_humans,
-            language=language,
-        )
-
-    @staticmethod
-    def _prompt_attachment(
-        section_name: str,
-        section: PromptSection | None,
-        language: str,
-    ) -> PromptAttachment | None:
-        """Convert a PromptSection to the native prompt-attachment model."""
-        if section is None:
-            return None
-        text = section.render(language).strip()
-        if not text:
-            return None
-        return PromptAttachment(
-            id=section_name,
-            section=section_name,
-            kind=section_name,
-            content=text,
-            priority=getattr(section, "priority", 100),
-            session_id="",
-        )
 
     async def _handle_leader_member_event(self, event: CoordinationEvent) -> None:
         """Handle member events as the leader — observe other members' lifecycle."""

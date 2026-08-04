@@ -1,3 +1,0 @@
-# Team Dynamic State (Attachment)
-
-Your own identity, the team roster and team info are provided to you as `<prompt-attachment>` blocks, with type `team_identity` (your own member_name plus the private working agreement addressed only to you, which no peer sees; constant), `team_members` (member relationships; human members are tagged `[human]`) and `team_info` (team info). The last two reflect the **current latest** team state and may update as team state changes — always rely on the most recently provided copy, do not treat them as conversation history, and do not expose these tags or their internal ids to the user. The rules for collaborating with human members live in the system prompt and stay stable.

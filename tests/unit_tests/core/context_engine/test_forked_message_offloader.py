@@ -167,7 +167,7 @@ class TestMessageOffloaderAddTrigger:
             )
         )
 
-        assert processor._rule_pipeline.compress.call_args.kwargs["max_chars"] == 30
+        assert processor._rule_pipeline.compress.call_args.kwargs["max_chars"] == 40
 
     @pytest.mark.asyncio
     async def test_does_not_trigger_below_default_token_capacity(self):
@@ -336,6 +336,7 @@ class TestMessageOffloaderAddTrigger:
         assert message.content == "x" * 100
         assert not isinstance(message, OffloadMixin)
 
+
 class TestMessageOffloaderTtl:
     @pytest.mark.asyncio
     async def test_ttl_uses_token_thresholds_for_context_and_each_message(self):
@@ -355,7 +356,7 @@ class TestMessageOffloaderTtl:
         await context.add_messages(
             [
                 ToolMessage(
-                    content=character * 31,
+                    content=character * 41,
                     tool_call_id=f"tc-{character}",
                     metadata={"test_token_count": 25},
                 )
@@ -487,7 +488,7 @@ class TestMessageOffloaderTtl:
         )
         processor = context._processors[0]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
-        content = "x" * 100
+        content = "x" * 120
         await context.add_messages(ToolMessage(content=content, tool_call_id="tc-ttl"))
         await context.get_context_window()
 
@@ -541,10 +542,7 @@ class TestMessageOffloaderTtl:
 
         log_path = debug_dir / "message_offloader_debug.jsonl"
         assert log_path.is_absolute()
-        records = [
-            json.loads(line)
-            for line in log_path.read_text(encoding="utf-8").splitlines()
-        ]
+        records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
         assert [record["event"] for record in records] == [
             "add_message_triggered_offload",
             "rule_compression_triggered",

@@ -598,46 +598,6 @@ def test_skill_rail_init_without_evolution_interrupt_rail_still_registers_tools(
     assert {call.args[0].name for call in ability_manager.add_ability.call_args_list} == tool_names
 
 
-def test_skill_rail_init_refreshes_existing_subagent_rail_after_review_agent_registration(tmp_path):
-    rail = _make_rail(tmp_path)
-    subagent_rail = SubagentRail()
-    subagent_rail.refresh_available_agents = Mock()
-    agent = SimpleNamespace(
-        card=SimpleNamespace(id="agent-1"),
-        deep_config=SimpleNamespace(subagents=[]),
-        ability_manager=SimpleNamespace(add=Mock(), remove=Mock()),
-        find_rails_by_type=_find_rails_by_type(subagent_rail),
-        _registered_rails=[subagent_rail],
-    )
-
-    with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool"):
-        rail.init(agent)
-
-    assert any(
-        getattr(getattr(spec, "agent_card", None), "name", None) == "evolution_reviewer"
-        for spec in agent.deep_config.subagents
-    )
-    subagent_rail.refresh_available_agents.assert_called_once_with(agent)
-
-
-def test_skill_rail_init_does_not_refresh_pending_subagent_rail(tmp_path):
-    rail = _make_rail(tmp_path)
-    subagent_rail = SubagentRail()
-    subagent_rail.refresh_available_agents = Mock()
-    agent = SimpleNamespace(
-        card=SimpleNamespace(id="agent-1"),
-        deep_config=SimpleNamespace(subagents=[]),
-        ability_manager=SimpleNamespace(add=Mock(), remove=Mock()),
-        find_rails_by_type=_find_rails_by_type(subagent_rail),
-        _registered_rails=[],
-    )
-
-    with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool"):
-        rail.init(agent)
-
-    subagent_rail.refresh_available_agents.assert_not_called()
-
-
 def test_skill_rail_init_registers_evolve_review_task_without_subagent_rail(tmp_path):
     rail = _make_rail(tmp_path)
     ability_manager = _RuntimeAbilityManager()

@@ -28,6 +28,7 @@ class GatewayConfig:
     dump_token_ids: bool = False
 
     lora_repo_root: str = ""
+    lora_default_policy: str = "disabled"
     redis_url: str = ""
 
     upstream_max_retries: int = 2

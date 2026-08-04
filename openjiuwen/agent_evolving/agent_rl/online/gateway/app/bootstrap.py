@@ -51,6 +51,7 @@ def _build_config_from_env() -> GatewayConfig:
         log_level=_env("LOG_LEVEL", "INFO"),
         dump_token_ids=_env("DUMP_TOKEN_IDS", "").lower() in ("1", "true"),
         lora_repo_root=_env("LORA_REPO_ROOT", ""),
+        lora_default_policy=_env("LORA_DEFAULT_POLICY", "disabled"),
         redis_url=_env("REDIS_URL", ""),
         upstream_max_retries=int(_env("UPSTREAM_MAX_RETRIES", "2")),
         upstream_retry_backoff_sec=float(_env("UPSTREAM_RETRY_BACKOFF_SEC", "0.2")),

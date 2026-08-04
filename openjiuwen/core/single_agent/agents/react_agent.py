@@ -68,6 +68,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
     ModelCallInputs,
+    UserMessageInputs,
     rail,
 )
 from openjiuwen.core.single_agent.prompts.builder import (
@@ -81,6 +82,12 @@ _SKILLS_SECTION = "legacy_skills"
 _IDENTITY_SECTION_PRIORITY = 10
 _SKILLS_SECTION_PRIORITY = 90
 _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
+# Above this, the per-stage breakdown of invoke preparation is reported at INFO
+# so a slow start shows up without having to enable debug logging. Preparation
+# loads interruption state and builds the prompt, which is normal work worth a
+# few hundred milliseconds; the bar sits above that so an INFO line means a
+# genuine stall. Kept in step with ``SLOW_RAIL_CHAIN_SECONDS``.
+SLOW_INVOKE_PREP_SECONDS = 1.0
 _IMAGE_INPUT_UNSUPPORTED_ERROR_CODES = (
     "invalid_image_input",
     "image_input_unsupported",
@@ -719,6 +726,61 @@ class ReActAgent(BaseAgent):
             self._skill_util.get_skill_prompt(),
             priority=_SKILLS_SECTION_PRIORITY,
         )
+
+    async def _admit_user_message(
+            self,
+            ctx: AgentCallbackContext,
+            context: ModelContext,
+            parts: List[str],
+            *,
+            source: str,
+            prefix: str = "",
+    ) -> None:
+        """Join one batch of consumed inputs into the conversation, rails first.
+
+        Every input the agent consumes -- a new round's query, the follow-ups
+        that queued up while it was busy, a batch of steering messages, a
+        resumed workflow interrupt -- lands here. ON_USER_MESSAGE fires on the
+        list, *before* it is joined, so a rail still sees the individual inputs
+        and can drop a whole one that a later entry supersedes. This is the one
+        moment a rail can treat them as *inputs*: joined and written, they are
+        ordinary history, subject to compaction, and can no longer be located by
+        position.
+
+        Args:
+            ctx: Callback context; ``inputs`` carries the part list for rails.
+            context: Model context the joined message is written into.
+            parts: The queued inputs, oldest first. Handed to rails as a mutable
+                list and consumed afterwards, so rails may reorder, drop or
+                prepend entries.
+            source: Which input path this came from (see UserMessageInputs).
+            prefix: Literal text put in front of the joined body (the steering
+                marker). It is not a part, so a rail prepending at index 0
+                lands after it rather than displacing it.
+        """
+        previous_inputs = ctx.inputs
+        ctx.inputs = UserMessageInputs(parts=parts, source=source)
+        try:
+            await ctx.fire(AgentCallbackEvent.ON_USER_MESSAGE)
+        finally:
+            ctx.inputs = previous_inputs
+        if not parts:
+            return
+        body = "\n".join(parts)
+        await context.add_messages(UserMessage(content=f"{prefix}{body}"))
+
+    def _extract_user_parts(self, ctx: AgentCallbackContext, user_input: Any) -> List[str]:
+        """Normalize a round's query into the input list ON_USER_MESSAGE sees.
+
+        A round may be driven by several inputs that queued up together; the
+        caller hands those over unjoined so rails still see the seams. The
+        query itself is the same content already joined, and is the single
+        input in every other case.
+        """
+        parts = ctx.extra.get("_input_parts")
+        if parts:
+            return [str(part) for part in parts]
+        return [self._extract_user_text(user_input)]
 
     def _build_preview_messages(self, context: ModelContext) -> List[Any]:
         """Build a lightweight preview of the current model input messages."""
@@ -1728,6 +1790,11 @@ class ReActAgent(BaseAgent):
             # loop over the existing context, without a new user turn.
             if inputs.get("_resume_continuation"):
                 ctx.extra["_resume_continuation"] = True
+            # Several inputs queued up together and drive this one round. The
+            # query is already their joined text; these are the same content
+            # unjoined, so ON_USER_MESSAGE rails still see the seams.
+            if inputs.get("_input_parts"):
+                ctx.extra["_input_parts"] = list(inputs["_input_parts"])
 
         try:
             async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
@@ -1737,6 +1804,11 @@ class ReActAgent(BaseAgent):
                 resume_continuation = bool(ctx.extra.get("_resume_continuation"))
                 if not user_input and not resume_continuation:
                     raise ValueError("Input must contain 'query'")
+
+                # Invoke preparation runs between BEFORE_INVOKE and the first
+                # ReAct iteration with no events of its own; stage timings turn
+                # that window into something a slow-start report can name.
+                prep_started_at = time.monotonic()
 
                 hitl_state = self._hitl_handler.load(session)
                 interruption_state = hitl_state or self._load_interruption_state(session)
@@ -1748,8 +1820,11 @@ class ReActAgent(BaseAgent):
                     # Restore original query so MemoryRail.after_invoke writes the right UserMessage
                     ctx.extra["_original_query"] = interruption_state.original_query
 
+                state_loaded_at = time.monotonic()
+
                 context = await self._init_context(session)
                 ctx.context = context
+                context_ready_at = time.monotonic()
 
                 rendered_system_prompt = self._build_rendered_system_prompt(
                     inputs,
@@ -1760,9 +1835,27 @@ class ReActAgent(BaseAgent):
                     rendered_system_prompt,
                     priority=_IDENTITY_SECTION_PRIORITY,
                 )
+                system_prompt_ready_at = time.monotonic()
+
                 await self._update_skill_prompt_builder_section(rendered_system_prompt)
+                skills_ready_at = time.monotonic()
 
                 tools = await self.ability_manager.list_tool_info()
+                tools_ready_at = time.monotonic()
+
+                prep_elapsed = tools_ready_at - prep_started_at
+                if prep_elapsed >= SLOW_INVOKE_PREP_SECONDS:
+                    logger.info(
+                        "[InvokePrep] slow invoke preparation, total_ms=%.1f "
+                        "(interruption_state=%.1f context=%.1f system_prompt=%.1f "
+                        "skills=%.1f tools=%.1f)",
+                        prep_elapsed * 1000,
+                        (state_loaded_at - prep_started_at) * 1000,
+                        (context_ready_at - state_loaded_at) * 1000,
+                        (system_prompt_ready_at - context_ready_at) * 1000,
+                        (skills_ready_at - system_prompt_ready_at) * 1000,
+                        (tools_ready_at - skills_ready_at) * 1000,
+                    )
 
                 start_iteration = 0
                 if interruption_state is not None:
@@ -1776,7 +1869,12 @@ class ReActAgent(BaseAgent):
                         start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
                     else:
                         # Workflow Interrupt
-                        await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                        await self._admit_user_message(
+                            ctx,
+                            context,
+                            [self._extract_user_text(user_input)],
+                            source="resume",
+                        )
                         resume_result = await self._handle_resume(
                             interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
                         )
@@ -1785,7 +1883,12 @@ class ReActAgent(BaseAgent):
                         else:
                             start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
                 elif not resume_continuation:
-                    await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                    await self._admit_user_message(
+                        ctx,
+                        context,
+                        self._extract_user_parts(ctx, user_input),
+                        source="query",
+                    )
 
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
@@ -1805,14 +1908,12 @@ class ReActAgent(BaseAgent):
                         # before the next model call.
                         steering = ctx.drain_steering()
                         if steering:
-                            combined = "\n".join(steering)
-                            await context.add_messages(
-                                UserMessage(
-                                    content=(
-                                        f"[STEERING] "
-                                        f"{combined}"
-                                    )
-                                )
+                            await self._admit_user_message(
+                                ctx,
+                                context,
+                                list(steering),
+                                source="steering",
+                                prefix="[STEERING] ",
                             )
 
                         ai_message = await self._call_model(
@@ -1906,12 +2007,22 @@ class ReActAgent(BaseAgent):
             # 若整轮 clear 会把用户问题一并抹掉，下一轮同 session 就丢上下文。
             try:
                 await asyncio.shield(self._cleanup_context_on_cancel(session))
+            except asyncio.CancelledError:
+                logger.info(
+                    "Context cleanup was shielded but the caller was cancelled again for session %s",
+                    session.get_session_id(),
+                )
             except Exception:
                 logger.warning(
                     "Failed to cleanup context on cancel for session %s",
                     session.get_session_id(),
                     exc_info=True,
                 )
+            # 上面的清理只改了内存 buffer，必须同步写回 session state。
+            # 否则下一轮 create_context 会用取消前的旧快照 rebuild 整个
+            # buffer，把本轮保留的 UserMessage 覆盖掉（外部传入 session 时
+            # need_cleanup=False，下面的 finally 不会帮忙保存）。
+            await self._save_contexts_on_cancel(session)
             raise  # Re-raise to propagate cancellation signal
         finally:
             if need_cleanup:
@@ -2030,6 +2141,9 @@ class ReActAgent(BaseAgent):
                     await self._write_invoke_result_to_stream(
                         final_result, session
                     )
+            except asyncio.CancelledError:
+                await self._save_contexts_on_cancel(session)
+                raise
             except Exception as e:
                 logger.error(f"ReActAgent stream error: {e}", exc_info=True)
                 error_result = {"output": str(e), "result_type": "error"}
@@ -2111,6 +2225,22 @@ class ReActAgent(BaseAgent):
 
         kept = self._sanitize_cancelled_turn_messages(current)
         context.set_messages(kept, with_history=False)
+
+    async def _save_contexts_on_cancel(self, session: Session) -> None:
+        """Persist the cleaned context while the caller propagates cancellation."""
+        try:
+            await asyncio.shield(self.context_engine.save_contexts(session))
+        except asyncio.CancelledError:
+            logger.info(
+                "Context save was shielded but the caller was cancelled again for session %s",
+                session.get_session_id(),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to save context on cancel for session %s",
+                session.get_session_id(),
+                exc_info=True,
+            )
 
     @staticmethod
     def _sanitize_cancelled_turn_messages(messages: List[Any]) -> List[Any]:

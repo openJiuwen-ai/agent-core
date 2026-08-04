@@ -600,7 +600,7 @@ async def _depart(backend, member_name: str, status: MemberStatus) -> None:
         member_name, backend.team_name, MemberStatus.READY.value
     )
     assert started
-    result = await backend.shutdown_member(member_name)
+    result = await backend.shutdown_member(member_name, force=True)
     assert result.ok, result.reason
     if status == MemberStatus.SHUTDOWN:
         settled = await backend.db.member.update_member_status(member_name, backend.team_name, status.value)

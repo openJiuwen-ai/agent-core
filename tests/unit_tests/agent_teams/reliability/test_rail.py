@@ -93,10 +93,19 @@ async def test_rail_before_tool_call_emits_signal():
 
 
 @pytest.mark.asyncio
-async def test_rail_before_tool_call_drops_non_dict_args():
+async def test_rail_before_tool_call_parses_json_object_args():
     monitor = _RecordingMonitor()
     rail = ReliabilityRail(monitor=monitor, member_name="m1")
     await rail.before_tool_call(_ctx(ToolCallInputs(tool_name="run", tool_args='{"a": 1}')))
+    assert monitor.signals[0].tool_args == {"a": 1}
+
+
+@pytest.mark.parametrize("tool_args", ["not-json", '["a", 1]', 42])
+@pytest.mark.asyncio
+async def test_rail_before_tool_call_drops_unsupported_args(tool_args):
+    monitor = _RecordingMonitor()
+    rail = ReliabilityRail(monitor=monitor, member_name="m1")
+    await rail.before_tool_call(_ctx(ToolCallInputs(tool_name="run", tool_args=tool_args)))
     assert monitor.signals[0].tool_args is None
 
 

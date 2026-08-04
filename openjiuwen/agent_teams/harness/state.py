@@ -102,8 +102,10 @@ class ActiveRound:
         round_id: Monotonically increasing round identifier (harness-internal).
         task_id: Scheduler task id passed into ``submit_round`` so immediate
             abort/pause can target it via ``task_scheduler.cancel_task``.
-        original_query: The query that started this round (used by pause to
-            cache and by send-while-paused to concatenate). An
+        original_query: What started this round (used by pause to cache and
+            by send-while-paused to concatenate). A **list** is a batch of
+            follow-ups drained together; it stays unjoined so the inner agent's
+            ON_USER_MESSAGE rails see the individual inputs. An
             ``InteractiveInput`` marks a single-round interrupt resume, which
             ``_on_round_done`` settles to IDLE rather than continuing the task
             plan with the resume payload.
@@ -147,7 +149,7 @@ class ActiveRound:
 
     round_id: int
     task_id: str
-    original_query: "str | InteractiveInput"
+    original_query: "str | list[str] | InteractiveInput"
     deep_agent: "DeepAgent"
     task: asyncio.Task
     steering_queue: asyncio.Queue

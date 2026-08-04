@@ -34,6 +34,10 @@ class OnlineTrainingScheduler:
         training_gpu_ids: str = "",
         tmp_root: str = "/tmp/agent_rl_online",
         ppo_config_path: Optional[str] = None,
+        drain_pending_on_train: bool = False,
+        max_samples_per_run: int = 0,
+        ppo_samples_per_step: int = 0,
+        allow_partial_last_step: bool = True,
     ) -> None:
         self.redis_url = redis_url
         self.poll_interval = poll_interval
@@ -45,6 +49,10 @@ class OnlineTrainingScheduler:
         self.training_gpu_ids = training_gpu_ids
         self.tmp_root = tmp_root
         self.ppo_config_path = ppo_config_path
+        self.drain_pending_on_train = bool(drain_pending_on_train)
+        self.max_samples_per_run = max(0, int(max_samples_per_run))
+        self.ppo_samples_per_step = max(0, int(ppo_samples_per_step))
+        self.allow_partial_last_step = bool(allow_partial_last_step)
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -60,6 +68,7 @@ class OnlineTrainingScheduler:
             nproc_per_node=self.nproc_per_node,
             training_gpu_ids=self.training_gpu_ids,
             ppo_config_path=self.ppo_config_path,
+            ppo_samples_per_step=self.ppo_samples_per_step,
         )
 
     def start(self) -> None:
@@ -70,8 +79,16 @@ class OnlineTrainingScheduler:
         self._thread = threading.Thread(target=self._poll_loop, daemon=True, name="OnlineTrainScheduler")
         self._thread.start()
         logger.info(
-            "OnlineTrainingScheduler started: redis=%s min_samples=%d poll=%.0fs",
-            self.redis_url, self.min_samples_for_training, self.poll_interval,
+            "OnlineTrainingScheduler started: redis=%s min_samples=%d poll=%.0fs "
+            "drain_pending=%s max_samples_per_run=%d ppo_samples_per_step=%d "
+            "allow_partial_last_step=%s",
+            self.redis_url,
+            self.min_samples_for_training,
+            self.poll_interval,
+            self.drain_pending_on_train,
+            self.max_samples_per_run,
+            self.ppo_samples_per_step,
+            self.allow_partial_last_step,
         )
 
     def stop(self) -> None:
@@ -131,9 +148,13 @@ class OnlineTrainingScheduler:
             return
 
         for user_id in user_ids:
+            fetch_limit = await self._resolve_fetch_limit(user_id)
+            if fetch_limit <= 0:
+                logger.debug("No trainable full chunk for user=%s", user_id)
+                continue
             samples = await self._trajectory_store.fetch_and_mark_training(
                 user_id,
-                self.min_samples_for_training,
+                fetch_limit,
             )
             if not samples:
                 continue
@@ -150,6 +171,24 @@ class OnlineTrainingScheduler:
                 self._train_batch(user_id=user_id, samples=samples, sample_ids=sample_ids),
             )
             return
+
+    async def _resolve_fetch_limit(self, user_id: str) -> int:
+        if self._trajectory_store is None:
+            return 0
+        if not self.drain_pending_on_train:
+            return self.min_samples_for_training
+
+        pending_count = await self._trajectory_store.get_pending_count(user_id)
+        limit = pending_count
+        if self.max_samples_per_run > 0:
+            limit = min(limit, self.max_samples_per_run)
+
+        step_size = self.ppo_samples_per_step
+        if step_size > 0 and not self.allow_partial_last_step:
+            limit = (limit // step_size) * step_size
+        if limit < self.min_samples_for_training:
+            return 0
+        return max(0, limit)
 
     async def _reap_training_task(self, *, wait: bool = False) -> None:
         if self._active_training_task is None:
