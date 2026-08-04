@@ -21,27 +21,9 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 # ========== Task Management ==========
 
 
-def _task_node_schema(
-    t: Translator,
-    *,
-    extra_properties: dict[str, Any] | None = None,
-    extra_required: list[str] | None = None,
-) -> dict:
-    """Build the per-task node schema shared by every ``create_task`` variant.
-
-    Property descriptions resolve against the shared ``create_task.*`` locale
-    keys, so a variant reuses them for free and only has to add a key for the
-    properties it introduces (e.g. ``create_task.task.assignee``).
-
-    Args:
-        t: Locale resolver.
-        extra_properties: Variant-specific properties merged into the node.
-        extra_required: Variant-specific required property names.
-
-    Returns:
-        A JSON-schema object describing one task node.
-    """
-    properties: dict[str, Any] = {
+def _base_task_node_properties(t: Translator) -> dict[str, Any]:
+    """Build the task fields shared by every ``create_task`` variant."""
+    return {
         "task_id": {"type": "string", "description": t("create_task", "task.task_id")},
         "title": {"type": "string", "description": t("create_task", "task.title")},
         "content": {"type": "string", "description": t("create_task", "task.content")},
@@ -55,18 +37,80 @@ def _task_node_schema(
             "items": {"type": "string"},
             "description": t("create_task", "task.depended_by"),
         },
-        "reviewer": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": t("create_task", "task.reviewer"),
-        },
     }
-    properties.update(extra_properties or {})
+
+
+def _task_node_schema(
+    properties: dict[str, Any],
+    *,
+    extra_required: list[str] | None = None,
+) -> dict:
+    """Build a per-task JSON schema from mode-specific properties.
+
+    The mode-specific wrapper decides which properties exist. This keeps the
+    schema readable at the call site instead of hiding dispatch semantics behind
+    boolean flags.
+    """
     return {
         "type": "object",
         "properties": properties,
         "required": ["title", "content", *(extra_required or [])],
     }
+
+
+def _autonomous_task_node_schema(t: Translator) -> dict:
+    """Build the autonomous create_task node schema."""
+    properties = _base_task_node_properties(t)
+    properties["assignee"] = {"type": "string", "description": t("create_task", "task.assignee")}
+    return _task_node_schema(properties)
+
+
+def _scheduled_task_node_schema(t: Translator) -> dict:
+    """Build the scheduled create_task node schema."""
+    properties = _base_task_node_properties(t)
+    properties.update(
+        {
+            "assignee": {"type": "string", "description": t("create_task", "task.assignee")},
+            "reviewer": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": t("create_task", "task.reviewer"),
+            },
+            "max_review_rounds": {
+                "type": "integer",
+                "minimum": 1,
+                "description": t("create_task", "task.max_review_rounds"),
+            },
+        }
+    )
+    return _task_node_schema(properties, extra_required=["assignee"])
+
+
+async def _validate_assignees(
+    agent_team: TeamBackend,
+    tasks: list[dict],
+    *,
+    required: bool,
+) -> str | None:
+    """Reject assignees that are missing, unknown, or point to the leader."""
+    leader_member_name = await agent_team.resolve_leader_member_name()
+    for spec in tasks:
+        assignee = (spec.get("assignee") or "").strip()
+        if not assignee:
+            if required:
+                return (
+                    f"Task {_spec_label(spec)!r} missing required 'assignee' — "
+                    f"assigned tasks must name a non-leader team member"
+                )
+            continue
+        if leader_member_name and assignee == leader_member_name:
+            return (
+                f"Task {_spec_label(spec)!r}: assignee {assignee!r} is the team leader; "
+                f"assign the task to a non-leader member"
+            )
+        if not await agent_team.member_exists(assignee):
+            return f"Task {_spec_label(spec)!r}: member {assignee!r} not found in the team"
+    return None
 
 
 def _spec_label(spec: dict) -> str:
@@ -110,11 +154,11 @@ def _clean_reviewers(spec: dict) -> list[str]:
 
 
 async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str | None:
-    """Reject a batch whose reviewer names a non-member or the task's own author.
+    """Reject a batch whose reviewer equals the task's own author.
 
-    Reviewers are untrusted input crossing the tool boundary; the DB column has
-    no FK. A member may not review their own task (self-verification), so a
-    reviewer equal to the task's ``assignee`` is rejected.
+    Reviewers no longer must be pre-existing team members — the scheduler
+    spawns a temporary harness for any reviewer name not found in the roster.
+    Only the self-review guard remains.
     """
     for spec in tasks:
         reviewers = _clean_reviewers(spec)
@@ -122,8 +166,6 @@ async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str
             continue
         assignee = (spec.get("assignee") or "").strip()
         for reviewer in reviewers:
-            if not await agent_team.member_exists(reviewer):
-                return f"Task {_spec_label(spec)!r}: reviewer {reviewer!r} not found in the team"
             if assignee and reviewer == assignee:
                 return (
                     f"Task {_spec_label(spec)!r}: reviewer {reviewer!r} cannot review their own task "
@@ -133,13 +175,15 @@ async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str
 
 
 class TaskCreateTool(TeamTool):
-    """Create team tasks; tasks land unassigned and claimable (autonomous dispatch).
+    """Create autonomous-dispatch team tasks, optionally pre-assigned.
 
     The whole call is one atomic graph mutation via ``add_graph``: edges
     among tasks of the same call are expressed with ``depends_on`` only
     (forward references allowed), while ``depended_by`` is reserved for
     wiring *existing* tasks to depend on a new task. In-batch ``depended_by``
-    targets are rejected at this boundary as redundant.
+    targets are rejected at this boundary as redundant. Tasks without an
+    ``assignee`` are claimable from the shared board; tasks with an assignee
+    are reserved for that non-leader member.
     """
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
@@ -157,7 +201,7 @@ class TaskCreateTool(TeamTool):
             "properties": {
                 "tasks": {
                     "type": "array",
-                    "items": _task_node_schema(t),
+                    "items": _autonomous_task_node_schema(t),
                     "description": t("create_task", "tasks"),
                 },
             },
@@ -172,7 +216,7 @@ class TaskCreateTool(TeamTool):
         error = _validate_task_batch(tasks)
         if error:
             return ToolOutput(success=False, error=error)
-        error = await _validate_reviewers(self.agent_team, tasks)
+        error = await _validate_assignees(self.agent_team, tasks, required=False)
         if error:
             return ToolOutput(success=False, error=error)
 
@@ -187,7 +231,7 @@ class TaskCreateTool(TeamTool):
                     task_id=spec.get("task_id"),
                     depends_on=tuple(spec.get("depends_on") or ()),
                     depended_by=tuple(spec.get("depended_by") or ()),
-                    reviewer=tuple(_clean_reviewers(spec)),
+                    assignee=(spec.get("assignee") or "").strip() or None,
                 )
                 for spec in tasks
             ]
@@ -195,11 +239,12 @@ class TaskCreateTool(TeamTool):
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
 
-        if len(result.tasks) == 1:
-            return ToolOutput(success=True, data=result.tasks[0].brief())
+        briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
+        if len(briefs) == 1:
+            return ToolOutput(success=True, data=briefs[0])
         return ToolOutput(
             success=True,
-            data={"tasks": [task.brief() for task in result.tasks], "count": len(result.tasks)},
+            data={"tasks": briefs, "count": len(briefs)},
         )
 
     def map_result(self, output: ToolOutput) -> str:
@@ -207,8 +252,16 @@ class TaskCreateTool(TeamTool):
             return output.error or "Operation failed"
         d = output.data
         if "task_id" in d and "title" in d:
-            return f"Task created: task_id={d['task_id']} title={d['title']}"
-        lines = [f"task_id={task['task_id']} title={task['title']}" for task in d.get("tasks", [])]
+            line = f"Task created: task_id={d['task_id']} title={d['title']}"
+            if d.get("assignee"):
+                line += f" -> {d['assignee']}"
+            return line
+        lines = []
+        for task in d.get("tasks", []):
+            line = f"task_id={task['task_id']} title={task['title']}"
+            if task.get("assignee"):
+                line += f" -> {task['assignee']}"
+            lines.append(line)
         lines.append(f"Created {d['count']}")
         return "\n".join(lines)
 
@@ -249,41 +302,12 @@ class ScheduledTaskCreateTool(TeamTool):
             "properties": {
                 "tasks": {
                     "type": "array",
-                    "items": _task_node_schema(
-                        t,
-                        extra_properties={
-                            "assignee": {"type": "string", "description": t("create_task", "task.assignee")},
-                            "max_review_rounds": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "description": t("create_task", "task.max_review_rounds"),
-                            },
-                        },
-                        extra_required=["assignee"],
-                    ),
+                    "items": _scheduled_task_node_schema(t),
                     "description": t("create_task", "tasks"),
                 },
             },
             "required": ["tasks"],
         }
-
-    async def _validate_assignees(self, tasks: list[dict]) -> str | None:
-        """Reject a batch that names an assignee the roster does not have.
-
-        The DB column carries no FK to team_member, and the whole batch is
-        one transaction — catching a typo here keeps the graph from landing
-        bound to a member nobody serves.
-        """
-        for spec in tasks:
-            assignee = (spec.get("assignee") or "").strip()
-            if not assignee:
-                return (
-                    f"Task {_spec_label(spec)!r} missing required 'assignee' — "
-                    f"scheduled tasks are never claimed, so every task must name its owner"
-                )
-            if not await self.agent_team.member_exists(assignee):
-                return f"Task {_spec_label(spec)!r}: member {assignee!r} not found in the team"
-        return None
 
     @staticmethod
     def _validate_review_rounds(tasks: list[dict]) -> str | None:
@@ -309,7 +333,7 @@ class ScheduledTaskCreateTool(TeamTool):
         error = _validate_task_batch(tasks)
         if error:
             return ToolOutput(success=False, error=error)
-        error = await self._validate_assignees(tasks)
+        error = await _validate_assignees(self.agent_team, tasks, required=True)
         if error:
             return ToolOutput(success=False, error=error)
         error = self._validate_review_rounds(tasks)
@@ -565,6 +589,24 @@ class UpdateTaskTool(TeamTool):
         if not task:
             return ToolOutput(success=False, error="Task not found")
 
+        if status == "completed":
+            return ToolOutput(
+                success=False,
+                error=(
+                    "update_task cannot mark a task completed. Assign or reassign the task to a non-leader member "
+                    "with update_task(task_id=..., assignee=...), then that member must complete it with their "
+                    "task-completion tool."
+                ),
+            )
+        if status and status != "cancelled":
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"Invalid status {status!r}; omit status unless you want to cancel the task "
+                    "with status='cancelled'"
+                ),
+            )
+
         # Cancel single task
         if status == "cancelled":
             if await self._is_human_agent_locked(task):
@@ -643,8 +685,6 @@ class UpdateTaskTool(TeamTool):
             reviewer_names = [str(r).strip() for r in reviewer if str(r).strip()]
             current_assignee = (assignee or task.assignee or "").strip()
             for name in reviewer_names:
-                if not await self.agent_team.member_exists(name):
-                    return ToolOutput(success=False, error=f"Reviewer '{name}' not found in the team")
                 if current_assignee and name == current_assignee:
                     return ToolOutput(
                         success=False,

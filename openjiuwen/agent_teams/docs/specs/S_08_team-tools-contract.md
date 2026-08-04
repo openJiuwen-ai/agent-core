@@ -19,7 +19,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-07-16 |
+| 最近一次修订日期 | 2026-07-28 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md |
 
 ## 范围 / 边界
@@ -97,7 +97,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
       调度模式的成员。
     - human_agent = 显式枚举的 `HUMAN_AGENT_TOOLS`，**不沿用** `SHARED_TOOLS`。
     Human agent 不得拿到 `claim_task`——它属于**自主认领模式**的 teammate 路径，
-    人类化身只能等 leader 通过 `update_task(assignee=...)` 显式指派。同理
+    人类化身只能等 leader 通过 `create_task(..., assignee=...)` / `update_task(assignee=...)`
+    显式指派；可运行的人类预指派任务由后端进入执行态，不要求人类自行认领。同理
     `scheduled` 的 teammate 也拿不到 `claim_task`：那里根本没有认领这回事。
     Human agent **可以**拿到 `send_message`，但其使用规则由 `team_hitt`
     prompt section 强约束：仅在用户当轮 Inbox 输入里明确下达「转告 /
@@ -187,19 +188,27 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     行为相反的描述。`ReportToLeaderTool` 的 enum 是给宿主 LLM 的契约，
     `_dispatch` 里的白名单是给 MCP 客户端的执法（`mcp/server.py` 直接
     `invoke`，不校验 schema）——两层都必须有，不是重复。
+    `SendMessageTool` 还在工具边界拒绝 leader `to = "user"`：leader 的普通文本输出
+    已直接展示给用户，写入 user pseudo-recipient mailbox 会产生无人标记已读的消息。
+    teammate / human_agent 发给 `user` 的既有语义保持不变。
     参数描述的**复用是免费的**（形态同 `name` → `t(tool, "param")` 同 key），
     **扩展就是加 key**；语义变了的同名参数用新的 desc_key 命名空间
     （`send_message_scheduled.to`）。**绝不让 resolver 学会 variant**。
 19. **`create_task` 的 `assignee` 与任务图同一事务落库**（F_57 / F_59 / F_62）。scheduled
-    形态的 `assignee` **必填**（成员不自主认领，无主任务永远不会执行），随 `TaskGraphSpec` →
+    形态的 `assignee` **必填**（scheduled 成员不自主认领，未指定 assignee 的 scheduled 任务不会被调度），随 `TaskGraphSpec` →
     `NewTaskSpec` 进同一次 `mutate_dependency_graph`。**每个任务一律 seed `PENDING`**
     （携带 assignee）：无依赖 → 停在 `PENDING(assignee)`（"已指派未开始"），带依赖 →
     refresh pass 翻成 `BLOCKED(assignee)`。指派与开工是两个事件，故创建期**不再** seed
-    执行态。禁止「建图后逐个 `assign()`、失败的记为 deferred」——那会给原子的
+    执行态。**例外**：`assignee` 是仍在队的人类成员且任务经 refresh 后可运行时，
+    `TeamTaskManager` 在图事务提交后立即调用 `start_task()`，让任务进入 `IN_PROGRESS`
+    （或 plan-mode 的 `PLANNING`）；依赖解除时同样由 `TeamTaskManager._handle_unblocked_tasks`
+    对刚解锁的人类预指派任务执行这一步，且保留 `TASK_UNBLOCKED` 作为依赖解除事实。
+    DAO 仍只负责 `BLOCKED <-> PENDING` 的依赖图刷新。
+    禁止「建图后逐个 `assign()`、失败的记为 deferred」——那会给原子的
     `create_task` 引入不可回滚的部分成功态。`PENDING(assignee)` 的开工（build 成员 →
     `IN_PROGRESS`、plan 成员 → `PLANNING`，DAO `start_task(to_status=...)` 参数化）由
     `TeamTaskManager.start_task` 完成，调用方是 `agent/scheduling/` 的 `TeamScheduler`
-    （见 `S_22`）。scheduled 形态额外带可选 `max_review_rounds`（整数 ≥1，验证返工轮数
+    （见 `S_22`），或上述 human-agent 后端编排路径。scheduled 形态额外带可选 `max_review_rounds`（整数 ≥1，验证返工轮数
     上限，须伴随 `reviewer`，亦可经 `update_task` 事后设置）。
 20. **verify 闸：reviewer 由 leader 指派，裁决策略按生效分发模式二分**（F_59 / F_62）。任务的
     `reviewer` 列（JSON member 名列表）经 `create_task` / `update_task` 由 leader 指派，可多个，

@@ -7,6 +7,7 @@ import asyncio
 import os
 
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
     OperationMode,
@@ -65,6 +66,20 @@ class _Agent:
                 "vision_model_config": vision_model_config,
             },
         )()
+
+
+def test_sys_operation_rail_adds_no_invoke_callbacks():
+    """The rail is init-time only: it adds no hook of its own.
+
+    ``get_callbacks`` collects every hook a subclass overrides -- including one
+    overridden with an empty body -- so an empty ``before_invoke`` stub would
+    put a no-op back into every round's callback chain. This rail's priority is
+    there to order its *init* against other rails', not its callbacks.
+    """
+    callbacks = SysOperationRail().get_callbacks()
+
+    assert AgentCallbackEvent.BEFORE_INVOKE not in callbacks
+    assert AgentCallbackEvent.AFTER_INVOKE not in callbacks
 
 
 def test_sys_operation_rail_registers_base_tools(tmp_path):

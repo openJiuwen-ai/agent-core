@@ -11,6 +11,7 @@ from openjiuwen.core.session.tracer.handler import (
     TraceExtWorkflowHandler,
 )
 from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
+from openjiuwen.core.session.tracer.workflow_tracer import TracerWorkflowUtils
 
 pytestmark = pytest.mark.asyncio
 
@@ -356,6 +357,98 @@ class TestWorkflowSpanManagerIntegration:
         tracer.register_workflow_span_manager("node_b")
         wf_handler_dict = tracer._workflow_handlers[TracerHandlerName.TRACER_WORKFLOW.value]
         assert len(wf_handler_dict) == 3  # tracer_workflow (root) + tracer_workflow.node_a + tracer_workflow.node_b
+
+
+# ------------------------------------------------------------------
+# session_id propagation
+# ------------------------------------------------------------------
+
+class _StubConfig:
+    @staticmethod
+    def get_workflow_config(_workflow_id):
+        return None
+
+
+class _StubWorkflowSession:
+    """Minimal session surface used by TracerWorkflowUtils.trace_workflow_start."""
+
+    def __init__(self, tracer, session_id):
+        self._tracer = tracer
+        self._session_id = session_id
+
+    def tracer(self):
+        return self._tracer
+
+    def session_id(self):
+        return self._session_id
+
+    def workflow_id(self):
+        return "wf_root"
+
+    def config(self):
+        return _StubConfig()
+
+
+class TestSessionIdPropagation:
+
+    async def test_agent_span_carries_session_id(self):
+        tracer = Tracer(session_id="sess-1")
+        tracer.init(StreamWriterManager(StreamEmitter()))
+
+        span = tracer.tracer_agent_span_manager.create_agent_span()
+        child = tracer.tracer_agent_span_manager.create_agent_span(span)
+
+        assert span.session_id == "sess-1"
+        assert child.session_id == "sess-1"
+        assert span.model_dump(by_alias=True)["sessionId"] == "sess-1"
+
+    async def test_workflow_span_carries_session_id(self):
+        tracer = Tracer(session_id="sess-1")
+        tracer.init(StreamWriterManager(StreamEmitter()))
+        tracer.register_workflow_span_manager("node_a")
+
+        root_span = tracer.tracer_workflow_span_manager_dict[""].create_workflow_span("wf_root")
+        node_span = tracer.tracer_workflow_span_manager_dict["node_a"].create_workflow_span("invoke_1")
+
+        assert root_span.session_id == "sess-1"
+        assert node_span.session_id == "sess-1"
+
+    async def test_span_session_id_is_none_without_session(self):
+        """Tracers built without a session keep session_id unset, and the workflow
+        TraceSchema payload (exclude_none) stays byte-identical to before."""
+        tracer = _create_tracer()
+
+        agent_span = tracer.tracer_agent_span_manager.create_agent_span()
+        workflow_span = tracer.tracer_workflow_span_manager_dict[""].create_workflow_span("wf_root")
+
+        assert agent_span.session_id is None
+        assert workflow_span.session_id is None
+        assert "sessionId" not in workflow_span.model_dump(exclude_none=True, by_alias=True)
+
+    async def test_tracer_init_injects_session_id_into_ext_handlers(self):
+        agent_handler = MockExtAgentHandler()
+        workflow_handler = MockExtWorkflowHandler()
+        TracerHandlerRegistry.register_handler("otel_agent", agent_handler)
+        TracerHandlerRegistry.register_handler("otel_workflow", workflow_handler)
+
+        tracer = Tracer(session_id="sess-1")
+        tracer.init(StreamWriterManager(StreamEmitter()))
+
+        assert agent_handler._session_id == "sess-1"
+        assert workflow_handler._session_id == "sess-1"
+
+    async def test_workflow_trigger_forwards_session_id_to_ext_handler(self):
+        """Workflow events carry no Span object, so the id must ride along as a kwarg."""
+        handler = MockExtWorkflowHandler()
+        TracerHandlerRegistry.register_handler("otel_workflow", handler)
+        tracer = Tracer(session_id="sess-1")
+        tracer.init(StreamWriterManager(StreamEmitter()))
+
+        session = _StubWorkflowSession(tracer, "sess-1")
+        await TracerWorkflowUtils.trace_workflow_start(session, inputs={"a": 1})
+
+        assert handler._calls[0][0] == "on_call_start"
+        assert handler._calls[0][1]["session_id"] == "sess-1"
 
 
 # ------------------------------------------------------------------

@@ -93,6 +93,7 @@ class TaskLoopEventExecutor(TaskExecutor):
 
         query: Any = task_id
         raw_input: Any = None
+        input_parts: list[str] | None = None
 
         if tasks:
             core_task = tasks[0]
@@ -104,6 +105,7 @@ class TaskLoopEventExecutor(TaskExecutor):
                 for evt in core_task.inputs:
                     if isinstance(evt, InputEvent):
                         raw_input = self._extract_interactive_input(evt)
+                        input_parts = self._extract_input_parts(evt)
                         if raw_input is not None:
                             break
 
@@ -183,6 +185,10 @@ class TaskLoopEventExecutor(TaskExecutor):
         effective: Dict[str, Any] = {
             "query": effective_query,
         }
+        # Only when a rail did not rewrite the query out from under them: the
+        # parts describe the original batch, so a replaced query wins.
+        if input_parts is not None and iter_inputs.query == query:
+            effective["_input_parts"] = input_parts
         if cid:
             effective["conversation_id"] = cid
         if tasks and tasks[0].metadata:
@@ -390,6 +396,22 @@ class TaskLoopEventExecutor(TaskExecutor):
                 if isinstance(query, InteractiveInput):
                     return query
         return None
+
+    @staticmethod
+    def _extract_input_parts(event: Any) -> list[str] | None:
+        """Return the round's inputs unjoined, when there is more than one.
+
+        Inputs that queued up together drive one round and reach the model as
+        one message, but the inner loop hands them to ON_USER_MESSAGE rails as
+        a list first — a rail can then drop a whole input that a later one
+        supersedes instead of parsing a joined body. One input needs no list;
+        the inner loop derives it from the query itself.
+        """
+        if not isinstance(event, InputEvent):
+            return None
+        texts = [str(getattr(df, "text", "")) for df in event.input_data]
+        texts = [text for text in texts if text]
+        return texts if len(texts) > 1 else None
 
 
 def build_deep_executor(

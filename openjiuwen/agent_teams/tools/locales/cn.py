@@ -173,12 +173,11 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
     "create_task.task.content": "任务详细内容，包含目标和验收标准",
-    # Only the scheduled create_task variant exposes this property; the
-    # description lives under the shared create_task.* key namespace so both
-    # variants read the same strings for the properties they have in common.
+    # Both create_task variants expose assignee. Autonomous treats it as
+    # optional; scheduled requires it.
     "create_task.task.assignee": (
-        "承担该任务的成员名称（必填）；该成员必须已存在。成员不自主认领，无主任务永远不会执行——"
-        "无依赖的任务由调度框架自动开工，有依赖的任务在依赖完成后自动转交承担者"
+        "承担该任务的成员名称；该成员必须已存在且不能是 leader。自主模式可选，未填写则进入公共认领池；"
+        "调度模式必填，成员不会自主认领"
     ),
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
@@ -219,15 +218,15 @@ STRINGS: dict[str, str] = {
     "update_task.add_blocked_by": "要添加为新依赖的任务 ID 列表（本任务将被阻塞直到这些任务完成）",
     "update_task.error_human_agent_locked_cancel": (
         "任务 {task_id} 由仍在团队中的人类成员认领，不允许取消；请通过 send_message 与其协商。"
-        "若其确实无法继续，可先用 shutdown_member 让其退出团队，退出后该任务即可取消或改派"
+        "若其确实无法继续，可先用 shutdown_member(force=false) 让其退出团队，退出后该任务即可取消或改派"
     ),
     "update_task.error_human_agent_locked_reassign": (
         "任务 {task_id} 由仍在团队中的人类成员认领，不能改派给 {new_assignee}；该任务须由这位人类本人完成。"
-        "若其确实无法继续，可先用 shutdown_member 让其退出团队，退出后该任务即可改派"
+        "若其确实无法继续，可先用 shutdown_member(force=false) 让其退出团队，退出后该任务即可改派"
     ),
     "update_task.error_human_agent_locked_edit": (
         "任务 {task_id} 由仍在团队中的人类成员认领，不允许修改其标题/内容；请通过 send_message 与其协商。"
-        "若其确实无法继续，可先用 shutdown_member 让其退出团队，退出后该任务即可取消或改派"
+        "若其确实无法继续，可先用 shutdown_member(force=false) 让其退出团队，退出后该任务即可取消或改派"
     ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/cn/claim_task.md
@@ -249,10 +248,11 @@ STRINGS: dict[str, str] = {
         '填成员名数组（如 ["m1","m2"]）多播——同一份内容分别发给每个成员，'
         "开销随接收人数线性增长，同等规模下比广播更贵，仅在必要时使用，"
         '禁止与 "*"/"user" 混用；'
-        '填 "user"（仅 teammate 用于回复用户）；填 "*" 广播到团队频道 channel，所有成员可见'
+        '填 "user"（仅 teammate 用于回复用户，leader 调用会被拒绝）；填 "*" 广播到团队频道 channel，所有成员可见'
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
+    "send_message.error_leader_to_user": "Leader 不能 send_message 给 'user'。请直接用普通回复输出给用户。",
     "send_message.error_content_too_long": (
         "'content' 过长（{actual} 字符，上限 {limit}）：这个体量的内容是产物，不是消息。"
         "先用 write_file 把正文写到团队共享工作空间 .team/ 下的文件，再重发本消息，"

@@ -12,7 +12,6 @@ other DeepAgent rails.
 import pytest
 
 from openjiuwen.agent_teams.prompts import (
-    build_team_info_section,
     build_team_member_system_prompt,
     build_team_static_sections,
 )
@@ -21,7 +20,28 @@ from openjiuwen.agent_teams.schema.team import TeamRole
 
 
 @pytest.mark.level0
-def test_static_sections_teammate_has_role_and_private_prompt():
+def test_static_sections_teammate_has_role_and_identity():
+    sections = build_team_static_sections(
+        role=TeamRole.TEAMMATE,
+        member_prompt="follow the backend conventions",
+        member_name="dev-1",
+        language="en",
+        include_member_specific=True,
+    )
+    names = {section.name for section in sections}
+    assert TeamSectionName.ROLE in names
+    # identity carries both the member_name and the private working agreement.
+    assert TeamSectionName.IDENTITY in names
+    # workflow / lifecycle are leader-only and absent for a teammate.
+    assert TeamSectionName.WORKFLOW not in names
+    assert TeamSectionName.LIFECYCLE not in names
+
+
+@pytest.mark.level0
+def test_static_sections_omit_member_specific_by_default():
+    # In-process members get the identity section (member_name + private
+    # working agreement) as a prompt attachment, so the shared system-prompt
+    # prefix stays identical across the team.
     sections = build_team_static_sections(
         role=TeamRole.TEAMMATE,
         member_prompt="follow the backend conventions",
@@ -29,11 +49,7 @@ def test_static_sections_teammate_has_role_and_private_prompt():
         language="en",
     )
     names = {section.name for section in sections}
-    assert TeamSectionName.ROLE in names
-    assert TeamSectionName.PRIVATE_PROMPT in names
-    # workflow / lifecycle are leader-only and absent for a teammate.
-    assert TeamSectionName.WORKFLOW not in names
-    assert TeamSectionName.LIFECYCLE not in names
+    assert TeamSectionName.IDENTITY not in names
 
 
 @pytest.mark.level0
@@ -44,28 +60,30 @@ def test_static_sections_leader_includes_workflow_and_lifecycle():
         member_name="leader",
         lifecycle="temporary",
         language="en",
+        include_member_specific=True,
     )
     names = {section.name for section in sections}
     assert TeamSectionName.ROLE in names
     assert TeamSectionName.WORKFLOW in names
     assert TeamSectionName.LIFECYCLE in names
-    # empty private prompt produces no private-prompt section.
-    assert TeamSectionName.PRIVATE_PROMPT not in names
+    # A leader has a member_name but no private prompt, so identity is present
+    # and carries the name alone.
+    assert TeamSectionName.IDENTITY in names
 
 
 @pytest.mark.level0
-def test_static_sections_exclude_dynamic_info_and_members():
-    # Dynamic info / members sections depend on live DB state and are NOT part
-    # of static sections; they are attached at delivery time.
+def test_static_sections_exclude_team_state():
+    # Team metadata and the roster depend on live DB state and are not sections
+    # at all — they are delivered into the member's conversation as they appear.
     sections = build_team_static_sections(
         role=TeamRole.LEADER,
         member_prompt="x",
         member_name="leader",
         language="en",
     )
-    names = {section.name for section in sections}
-    assert TeamSectionName.INFO not in names
-    assert TeamSectionName.MEMBERS not in names
+    bodies = "\n".join(section.render("en") for section in sections)
+    assert "# Team Info" not in bodies
+    assert "# Relationships" not in bodies
 
 
 @pytest.mark.level0
@@ -94,16 +112,19 @@ def test_member_system_prompt_nonempty_without_private_prompt():
 
 
 @pytest.mark.level0
-def test_member_system_prompt_includes_attachment_notice():
+def test_member_system_prompt_documents_the_team_state_tags():
+    # Team state reaches an external CLI member as XML inside the messages it
+    # receives, so the tag notice — not a prompt-attachment notice — is what
+    # has to be there.
     prompt = build_team_member_system_prompt(
         role=TeamRole.TEAMMATE,
         member_prompt="",
         member_name="dev-1",
         language="en",
     )
-    assert "prompt-attachment" in prompt
-    assert "team_members" in prompt
-    assert "team_info" in prompt
+    assert "prompt-attachment" not in prompt
+    assert "<team-context>" in prompt
+    assert "roster-change" in prompt
 
 
 @pytest.mark.level0
@@ -128,32 +149,5 @@ def test_member_system_prompt_uses_external_workspace_policy():
         workspace_prompt_variant="external",
     )
     assert "under `.team/`" not in prompt
-    assert "provided by the latest `team_info` attachment" in prompt
+    assert "given in the team info (`<team-context>`)" in prompt
     assert "workspace_meta" in prompt
-
-
-@pytest.mark.level0
-def test_team_info_section_keeps_native_workspace_mount():
-    section = build_team_info_section(
-        team_info={"team_name": "demo", "display_name": "Demo", "desc": "Ship it"},
-        team_workspace_mount=".team/demo/",
-        team_workspace_path="/tmp/demo-workspace",
-        language="en",
-    )
-    assert section is not None
-    content = section.content["en"]
-    assert "`.team/demo/`" in content
-    assert "Absolute path: `/tmp/demo-workspace`" in content
-
-
-@pytest.mark.level0
-def test_team_info_section_supports_path_only_workspace():
-    section = build_team_info_section(
-        team_info={"team_name": "demo", "display_name": "Demo", "desc": "Ship it"},
-        team_workspace_path="/tmp/demo-workspace",
-        language="en",
-    )
-    assert section is not None
-    content = section.content["en"]
-    assert "`.team/" not in content
-    assert "Team Shared Workspace: `/tmp/demo-workspace`" in content

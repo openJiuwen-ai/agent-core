@@ -10,8 +10,19 @@ from openjiuwen.harness.prompts.tools.base import (
 )
 
 DESCRIPTION: Dict[str, str] = {
-    "cn": "使用此工具查看特定技能的内容",
-    "en": "Use this tool to view the skill contents of a certain skill",
+    "cn": (
+        "使用此工具查看特定技能的内容。"
+        "成功时默认附带技能根目录的 ASCII 目录树（directory_tree）"
+        "以及嵌套子技能相对路径列表（discovered_skill_names，含 SKILL.md 的子目录）；"
+        "加载子技能请再次调用本工具，并设置 relative_file_path（如 designer/SKILL.md）。"
+    ),
+    "en": (
+        "Use this tool to view the skill contents of a certain skill. "
+        "On success it always includes an ASCII directory_tree of the skill root "
+        "and discovered_skill_names (relative paths of nested dirs that contain SKILL.md). "
+        "To load a nested skill, call again with relative_file_path "
+        "(e.g. designer/SKILL.md)."
+    ),
 }
 
 SKILL_TOOL_PARAMS: Dict[str, Dict[str, str]] = {

@@ -110,7 +110,7 @@ async def test_single_char_repetition_raises_model_error():
 
 @pytest.mark.asyncio
 async def test_repeat_exception_retries_twice_then_resets():
-    rail = LLMRetryRail(max_retries=2)
+    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.5, 1.0, 2.0])
     ctx = _make_ctx()
     ctx.request_retry = MagicMock()
     ctx.exception = build_error(
@@ -123,12 +123,28 @@ async def test_repeat_exception_retries_twice_then_resets():
     await rail.on_model_exception(ctx)
 
     assert ctx.request_retry.call_count == 2
+    # Backoff applied before each retry (exact schedule).
+    assert [call.kwargs["delay_seconds"] for call in ctx.request_retry.call_args_list] == [0.5, 1.0]
     assert rail.repeat_retry_count == 0
 
 
 @pytest.mark.asyncio
+async def test_backoff_delay_follows_schedule_and_clamps():
+    rail = LLMRetryRail(backoff_seconds=[0.5, 1.0, 2.0])
+    assert rail.backoff_delay(0) == 0.5
+    assert rail.backoff_delay(1) == 1.0
+    assert rail.backoff_delay(2) == 2.0
+    # Indices beyond the schedule clamp to the last entry.
+    assert rail.backoff_delay(5) == 2.0
+
+    # Default schedule matches the documented (0.5, 1.0, 2.0).
+    default_rail = LLMRetryRail()
+    assert [default_rail.backoff_delay(i) for i in range(3)] == [0.5, 1.0, 2.0]
+
+
+@pytest.mark.asyncio
 async def test_stream_timeout_exception_retries_twice_then_resets():
-    rail = LLMRetryRail(max_retries=2)
+    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.5, 1.0, 2.0])
     ctx = _make_ctx()
     ctx.request_retry = MagicMock()
     ctx.exception = build_error(
@@ -141,6 +157,7 @@ async def test_stream_timeout_exception_retries_twice_then_resets():
     await rail.on_model_exception(ctx)
 
     assert ctx.request_retry.call_count == 2
+    assert [call.kwargs["delay_seconds"] for call in ctx.request_retry.call_args_list] == [0.5, 1.0]
     assert rail.stream_timeout_retry_count == 0
 
 
@@ -159,7 +176,7 @@ async def test_before_invoke_resets_retry_counters():
 @pytest.mark.asyncio
 async def test_rail_retries_repeated_stream_output_in_agent_streaming_path():
     agent = _make_agent()
-    rail = LLMRetryRail(max_retries=2)
+    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.0])
     await agent.register_rail(rail)
     model = _RetryStreamModel("loop")
     agent.set_llm(model)
@@ -174,7 +191,7 @@ async def test_rail_retries_repeated_stream_output_in_agent_streaming_path():
 @pytest.mark.asyncio
 async def test_rail_retries_stream_timeout_in_agent_streaming_path():
     agent = _make_agent()
-    rail = LLMRetryRail(max_retries=2)
+    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.0])
     await agent.register_rail(rail)
     model = _RetryStreamModel("timeout")
     agent.set_llm(model)
@@ -189,7 +206,7 @@ async def test_rail_retries_stream_timeout_in_agent_streaming_path():
 @pytest.mark.asyncio
 async def test_rail_propagates_repeated_stream_output_after_retry_exhaustion():
     agent = _make_agent()
-    rail = LLMRetryRail(max_retries=2)
+    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.0])
     await agent.register_rail(rail)
     model = _RetryStreamModel("loop_exhausted")
     agent.set_llm(model)
@@ -204,7 +221,7 @@ async def test_rail_propagates_repeated_stream_output_after_retry_exhaustion():
 @pytest.mark.asyncio
 async def test_rail_propagates_stream_timeout_after_retry_exhaustion():
     agent = _make_agent()
-    rail = LLMRetryRail(max_retries=2)
+    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.0])
     await agent.register_rail(rail)
     model = _RetryStreamModel("timeout_exhausted")
     agent.set_llm(model)

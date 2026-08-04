@@ -23,7 +23,6 @@ from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tiny_agent import (
-    TinyAgent,
     create_summary_agent,
     create_tiny_agent,
     create_title_agent,
@@ -89,6 +88,7 @@ class _FakeHarness:
         self.spec = spec
         self.rails: list[Any] = []
         self.sent: list[str] = []
+        self.run_sessions: list[Any] = []
         self.started = False
         self.disposed = False
         self.ability_manager = _FakeAbilityManager()
@@ -112,6 +112,7 @@ class _FakeHarness:
 
     async def run_once(self, content: str, *, session: Any = None) -> dict[str, Any]:
         self.sent.append(content)
+        self.run_sessions.append(session)
         await self._maybe_submit()
         return {"output": _FakeHarness.output_text}
 
@@ -214,10 +215,72 @@ async def test_run_uses_unique_card_id_per_call(fake_harness) -> None:
     assert len(ids) == 2 and ids[0] != ids[1]
 
 
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_run_hands_run_once_an_unprimed_session(fake_harness) -> None:
+    """A single-shot run has nothing to restore or persist.
+
+    ``run`` passes its own session in, which puts the harness on its
+    ``owns_session=False`` path and skips the pre_run / post_run checkpointer
+    pair. The session must therefore reach ``run_once`` un-primed -- a session
+    this side had already pre_run would mean the round trip happened anyway.
+    The other half of the contract (that ``run_once`` really does skip both
+    hooks for a caller-owned session) is covered in
+    ``tests/unit_tests/agent_teams/harness/test_run_once.py``.
+    """
+    agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
+
+    await agent.run("one")
+
+    session = fake_harness.instances[0].run_sessions[0]
+    assert session is not None
+    assert session._pre_run_done is False
+
+
+@pytest.mark.level0
+def test_create_tiny_agent_keeps_a_minimal_footprint() -> None:
+    """A tiny agent carries no machinery beyond its prompt and submit tool."""
+    agent = create_tiny_agent(
+        system_prompt="p",
+        model_name="m",
+        model_resolver=_model_resolver,
+        default_schema=_DICT_SCHEMA,
+    )
+    spec = agent._spec_for_run(_DICT_SCHEMA)
+
+    # No filesystem / shell / code surface, so no sys_operation is resolved and
+    # none of its tool resources get registered.
+    assert spec.enable_sys_operation is False
+    # No image reading either, so the modality probe never runs.
+    assert spec.enable_read_image_multimodal is False
+    # Only the caller's prompt reaches the model — no harness sections.
+    assert spec.prompt_mode == "none"
+    # The submit tool is the only tool it owns.
+    assert [type(tool).__name__ for tool in (spec.tools or [])] == ["StructuredOutputTool"]
+
+
 @pytest.mark.level0
 def test_create_tiny_agent_raises_when_model_unresolved() -> None:
     with pytest.raises(Exception):
         create_tiny_agent(system_prompt="p", model_name="missing", model_resolver=_none_resolver)
+
+
+@pytest.mark.level0
+def test_create_tiny_agent_disables_security_rail_by_default_and_can_enable_it() -> None:
+    default_agent = create_tiny_agent(
+        system_prompt="p",
+        model_name="m",
+        model_resolver=_model_resolver,
+    )
+    secured_agent = create_tiny_agent(
+        system_prompt="p",
+        model_name="m",
+        model_resolver=_model_resolver,
+        enable_security_rail=True,
+    )
+
+    assert default_agent._spec.enable_security_rail is False
+    assert secured_agent._spec.enable_security_rail is True
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +399,23 @@ def test_get_tiny_agent_supports_multiple_independent_agents() -> None:
     assert summ is not None and title is not None and summ is not title
     assert summ._spec.system_prompt == "summarize"
     assert title._spec.system_prompt == "title"
+
+
+@pytest.mark.level0
+def test_get_tiny_agent_propagates_security_rail_setting() -> None:
+    agent = _make_leader(
+        {
+            "secured": TinyAgentSpec(
+                system_prompt="classify",
+                model_name="m",
+                enable_security_rail=True,
+            )
+        }
+    )
+
+    tiny_agent = agent.get_tiny_agent("secured")
+    assert tiny_agent is not None
+    assert tiny_agent._spec.enable_security_rail is True
 
 
 @pytest.mark.asyncio

@@ -74,6 +74,12 @@ class _FakeRedis:
     async def zcard(self, key: str):
         return len(self._zsets[key])
 
+    async def zrange(self, key: str, start: int, end: int):
+        members = [member for member, _ in sorted(self._zsets[key].items(), key=lambda item: item[1])]
+        if end == -1:
+            end = len(members) - 1
+        return members[start:end + 1]
+
     async def zrem(self, key: str, *members: Any):
         removed = 0
         for member in members:
@@ -97,6 +103,11 @@ class _FakeRedis:
 
     async def smembers(self, key: str):
         return set(self._sets[key])
+
+    async def delete(self, key: str):
+        existed = key in self._hashes
+        self._hashes.pop(key, None)
+        return int(existed)
 
 
 def _sample(sample_id: str, *, user_id: str = "online") -> dict[str, Any]:
@@ -193,11 +204,35 @@ async def test_redis_trajectory_store_update_status_tolerates_missing_payload():
     assert stats["training_samples"] == 1
     assert stats["trained_samples"] == 0
 
+
+@pytest.mark.asyncio
+async def test_redis_trajectory_store_management_crud():
+    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+
+    store = RedisTrajectoryStore(_FakeRedis())
+    await store.save_sample({**_sample("s1", user_id="u1"), "task_id": "coding", "source": "api"})
+
+    listed = await store.list_samples(user_id="u1", status="pending")
+    assert [item["sample_id"] for item in listed] == ["s1"]
+
+    patched = await store.patch_sample("s1", {"status": "failed", "metadata": {"reviewed": True}})
+    assert patched is not None
+    assert patched["_store_status"] == "failed"
+    assert patched["metadata"]["reviewed"] is True
+
+    stats = await store.management_stats(user_id="u1")
+    assert stats["by_status"]["failed"] == 1
+    assert stats["by_source"]["api"] == 1
+
+    assert await store.delete_sample("s1") is True
+    assert await store.get_sample("s1") is None
+
 class TestLoRARepository:
     def setup_method(self):
         import tempfile
+        from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRAPublishRequest, LoRARepository
+        self.publish_request_cls = LoRAPublishRequest
         self.tmpdir = tempfile.mkdtemp()
-        from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
         self.repo = LoRARepository(self.tmpdir)
 
     def teardown_method(self):
@@ -212,10 +247,13 @@ class TestLoRARepository:
             f.write("dummy")
         return d
 
+    def _publish(self, user_id: str, lora_path: str, **kwargs):
+        return self.repo.publish(self.publish_request_cls(user_id=user_id, lora_path=lora_path, **kwargs))
+
     def test_publish_and_get_latest(self):
         import shutil
         lora_dir = self._make_lora_dir()
-        v = self.repo.publish("user1", lora_dir, metadata={"trajectory_count": 10, "reward_avg": 0.6})
+        v = self._publish("user1", lora_dir, metadata={"trajectory_count": 10, "reward_avg": 0.6})
         shutil.rmtree(lora_dir)
 
         assert v.version == "v1"
@@ -224,16 +262,44 @@ class TestLoRARepository:
         latest = self.repo.get_latest("user1")
         assert latest is not None
         assert latest.version == "v1"
+        assert latest.availability_status == "pending"
 
     def test_latest_points_to_newest(self):
         import shutil
         for i in range(3):
             d = self._make_lora_dir()
-            self.repo.publish("user1", d, metadata={"trajectory_count": i, "reward_avg": 0.0})
+            self._publish("user1", d, metadata={"trajectory_count": i, "reward_avg": 0.0})
             shutil.rmtree(d)
 
         latest = self.repo.get_latest("user1")
         assert latest.version == "v3"
+
+    def test_latest_available_skips_unavailable_versions_and_persists(self):
+        import shutil
+
+        d1 = self._make_lora_dir()
+        d2 = self._make_lora_dir()
+        d3 = self._make_lora_dir()
+        v1 = self._publish("user1", d1)
+        v2 = self._publish("user1", d2)
+        v3 = self._publish("user1", d3)
+        shutil.rmtree(d1)
+        shutil.rmtree(d2)
+        shutil.rmtree(d3)
+
+        self.repo.set_availability("user1", v1.version, available=True, reason="eval passed")
+        self.repo.set_availability("user1", v2.version, available=False, reason="eval failed")
+        assert self.repo.get_latest_available("user1").version == "v1"
+        assert self.repo.get_latest("user1").version == "v3"
+
+        from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
+        reloaded = LoRARepository(self.tmpdir)
+        latest_available = reloaded.get_latest_available("user1")
+        assert latest_available is not None
+        assert latest_available.version == "v1"
+        assert latest_available.availability_status == "available"
+        assert latest_available.availability_reason == "eval passed"
+        assert reloaded.get_version("user1", v3.version).availability_status == "pending"
 
     def test_get_latest_returns_none_for_new_user(self):
         assert self.repo.get_latest("no_such_user") is None
@@ -242,7 +308,7 @@ class TestLoRARepository:
         import shutil
 
         lora_dir = self._make_lora_dir()
-        v = self.repo.publish("user1", lora_dir, metadata={"sample_count": 12, "avg_score": 0.75})
+        v = self._publish("user1", lora_dir, metadata={"sample_count": 12, "avg_score": 0.75})
         shutil.rmtree(lora_dir)
 
         assert v.trajectory_count == 12
@@ -256,7 +322,23 @@ class TestLoRARepository:
         (user_dir / "v_test").mkdir()
 
         lora_dir = self._make_lora_dir()
-        v = self.repo.publish("user1", lora_dir)
+        v = self._publish("user1", lora_dir)
         shutil.rmtree(lora_dir)
 
         assert v.version == "v1"
+
+    def test_manage_specific_lora_version(self):
+        import shutil
+
+        d1 = self._make_lora_dir()
+        d2 = self._make_lora_dir()
+        v1 = self._publish("user1", d1)
+        v2 = self._publish("user1", d2)
+        shutil.rmtree(d1)
+        shutil.rmtree(d2)
+
+        assert self.repo.get_version("user1", v1.version).version == "v1"
+        self.repo.set_latest("user1", v1.version)
+        assert self.repo.get_latest("user1").version == "v1"
+        self.repo.delete_version("user1", v2.version)
+        assert self.repo.get_version("user1", v2.version) is None

@@ -19,6 +19,21 @@ harness/
 └── async_tools.py     # 异步后台工具框架（AsyncTool / AsyncToolRuntime / render_result_text）
 ```
 
+## 输入队列：steering 与 follow-up
+
+两条队列，同一个语义——**攒住的东西整批喂给下一次模型调用**：
+
+- `send(immediate=True)` 推进当前 round 的 steering 队列，inner loop 在下一次 model call
+  之前 drain 整批；
+- `send(immediate=False)` 进 follow-up 队列，round 结束时**整批** drain 出来驱动下一轮
+  （[[F_71]]）。曾经是 `pop(0)` 一条一轮——两条队列本该同义却不同义，代价是每条排队输入
+  各烧一个完整 round，而且成员对最旧那条动手时看不见后面还排着什么。
+
+两条批次都**不在本层拼接**：整批以列表往下走（`InputEvent.input_data` 每条一个 text frame），
+由 inner `ReActAgent._admit_user_message` 先把列表交给 `ON_USER_MESSAGE` rail、rail 增删完
+才拼成一条 user message。拼早了 rail 就只能对着正文做字符串解析——team 侧正是靠这个整条剔除
+被后来者覆盖的任务看板。
+
 ## pause / abort / resume（两个正交动词）
 
 停止点一律落在 **inner ReAct iteration 边界**。`abort` 丢弃当前 round（→ IDLE，下次 `send` 起

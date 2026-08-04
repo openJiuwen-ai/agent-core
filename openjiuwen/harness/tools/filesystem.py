@@ -765,20 +765,30 @@ class ReadFileTool(Tool):
             return "\n\n".join(parts).strip()
 
     @staticmethod
-    def _compress_image_bytes(raw: bytes, size: Tuple[int, int], quality: int) -> Optional[bytes]:
-        try:
-            from PIL import Image
-        except ImportError as exc:
-            logger.debug("Pillow is unavailable for image compression: %s", exc)
-            return None
+    def _estimate_base64_tokens(byte_length: int) -> int:
+        """Token estimate for base64-encoding `byte_length` bytes, without encoding.
 
+        Computes the exact base64.b64encode() output length (3 raw bytes -> 4
+        encoded chars, rounded up to a multiple of 4) from the byte count
+        alone, so budget checks don't need to pay for a real encode just to
+        measure size.
+        """
+        encoded_length = ((byte_length + 2) // 3) * 4
+        return max(1, int(encoded_length * 0.125))
+
+    @staticmethod
+    def _compress_image(img: Any, size: Tuple[int, int], quality: int) -> Optional[bytes]:
+        """Render an isolated, downsized JPEG copy of an already-decoded PIL image.
+
+        `img.convert("RGB")` returns a new image object, so `img` itself is
+        never mutated and stays reusable by other compression tiers.
+        """
         try:
-            with Image.open(io.BytesIO(raw)) as img:
-                out = io.BytesIO()
-                img = img.convert("RGB")
-                img.thumbnail(size)
-                img.save(out, format="JPEG", quality=quality)
-                return out.getvalue()
+            out = io.BytesIO()
+            tier = img.convert("RGB")
+            tier.thumbnail(size)
+            tier.save(out, format="JPEG", quality=quality)
+            return out.getvalue()
         except (OSError, ValueError) as exc:
             logger.debug("Failed to compress image bytes: %s", exc)
             return None
@@ -797,43 +807,45 @@ class ReadFileTool(Tool):
         _, ext = os.path.splitext(file_path.lower())
         image_type = ext.lstrip(".") or "png"
         dimensions: str | None = None
-
-        # Step 1: standard resize (thumbnail to 1536×1536).
         resized = raw
+
         try:
             from PIL import Image
         except ImportError as exc:
             logger.debug("Pillow is unavailable for image metadata extraction (%s): %s", file_path, exc)
         else:
             try:
+                # Decode once; every compression tier below works off this same
+                # image object (via .copy()/.convert(), which never mutate it).
                 with Image.open(io.BytesIO(raw)) as img:
                     detected_format = (img.format or "PNG").lower()
                     image_type = detected_format  # prefer format detected from buffer
                     dimensions = f"{img.width}x{img.height}"
-                    img.thumbnail((1536, 1536))
+
+                    # Tier 1: standard resize, same format as the source (thumbnail to 1536×1536).
+                    tier1 = img.copy()
+                    tier1.thumbnail((1536, 1536))
                     out = io.BytesIO()
-                    img.save(out, format=detected_format.upper())
+                    tier1.save(out, format=detected_format.upper())
                     candidate = out.getvalue()
                     if candidate and len(candidate) < len(raw):
                         resized = candidate
+
+                    # Tier 2/3: only pay for further compression if tier 1 still busts the budget.
+                    # Token budget check uses a byte-length estimate, not a real base64 encode.
+                    if self._estimate_base64_tokens(len(resized)) > self.MAX_TOKENS:
+                        compressed = self._compress_image(img, size=(800, 800), quality=40)
+                        if compressed and self._estimate_base64_tokens(len(compressed)) <= self.MAX_TOKENS:
+                            resized = compressed
+                            image_type = "jpeg"
+                        else:
+                            # Final fallback: 400×400 JPEG q=20 (mirrors TS Sharp fallback).
+                            fallback = self._compress_image(img, size=(400, 400), quality=20)
+                            if fallback:
+                                resized = fallback
+                                image_type = "jpeg"
             except (OSError, ValueError) as exc:
                 logger.debug("Failed to parse image metadata (%s): %s", file_path, exc)
-
-        # Step 2: token budget check — base64 byte count × 0.125 ≈ tokens.
-        estimated_tokens = max(1, int(len(base64.b64encode(resized)) * 0.125))
-        if estimated_tokens > self.MAX_TOKENS:
-            # Aggressive compression from the same buffer.
-            compressed = self._compress_image_bytes(raw, size=(800, 800), quality=40)
-
-            if compressed and int(len(base64.b64encode(compressed)) * 0.125) <= self.MAX_TOKENS:
-                resized = compressed
-                image_type = "jpeg"
-            else:
-                # Final fallback: 400×400 JPEG q=20 (mirrors TS Sharp fallback).
-                fallback = self._compress_image_bytes(raw, size=(400, 400), quality=20)
-                if fallback:
-                    resized = fallback
-                    image_type = "jpeg"
 
         mime_type = f"image/{image_type}"
         parts = [

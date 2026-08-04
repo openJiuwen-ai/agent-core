@@ -18,6 +18,63 @@ class OperationMode(str, Enum):
     SANDBOX = "sandbox"
 
 
+# A sys_operation event records what an operation did, not the payload it moved:
+# read_file/write_file results carry whole file bodies, and serializing those into
+# every log sink costs far more than the operation itself. Values longer than this
+# are recorded as a clipped preview plus the omitted size.
+LOG_PAYLOAD_MAX_CHARS = 1024
+# Guard against pathological nesting while walking params/results.
+_LOG_PAYLOAD_MAX_DEPTH = 6
+# A listing result (list_files on a large tree) is a long sequence of short
+# entries, which no per-value length limit catches. Recording the head and the
+# dropped count keeps both the walk and the serialization bounded.
+_LOG_PAYLOAD_MAX_ITEMS = 50
+
+
+def _clip_log_payload(value: Any, depth: int = 0) -> Any:
+    """Return *value* with oversized payloads replaced by clipped previews.
+
+    Sequences are rebuilt as plain lists rather than their original type: this
+    output is headed for a log sink, not back into the operation, and
+    reconstructing an arbitrary sequence subclass from a list is not something
+    the type system promises (``namedtuple`` takes its fields positionally and
+    would raise here).
+
+    Args:
+        value: Arbitrary params/result payload headed for a log event.
+        depth: Current recursion depth; nesting beyond
+            ``_LOG_PAYLOAD_MAX_DEPTH`` is summarized instead of walked.
+
+    Returns:
+        A structurally similar value whose long strings, long byte strings and
+        long sequences are replaced by ``...omitted`` markers.
+    """
+    if depth > _LOG_PAYLOAD_MAX_DEPTH:
+        return f"<{type(value).__name__} omitted at depth {depth}>"
+
+    if isinstance(value, str):
+        if len(value) <= LOG_PAYLOAD_MAX_CHARS:
+            return value
+        return f"{value[:LOG_PAYLOAD_MAX_CHARS]}...(+{len(value) - LOG_PAYLOAD_MAX_CHARS} chars omitted)"
+
+    if isinstance(value, (bytes, bytearray)):
+        if len(value) <= LOG_PAYLOAD_MAX_CHARS:
+            return value
+        return f"<{len(value)} bytes omitted>"
+
+    if isinstance(value, dict):
+        return {key: _clip_log_payload(item, depth + 1) for key, item in value.items()}
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = list(value)
+        clipped = [_clip_log_payload(item, depth + 1) for item in items[:_LOG_PAYLOAD_MAX_ITEMS]]
+        if len(items) > _LOG_PAYLOAD_MAX_ITEMS:
+            clipped.append(f"...(+{len(items) - _LOG_PAYLOAD_MAX_ITEMS} items omitted)")
+        return clipped
+
+    return value
+
+
 class BaseOperation:
     """BaseOperation for file, code, shell and so on."""
 
@@ -73,6 +130,10 @@ class BaseOperation:
             **kwargs) -> SysOperationEvent | None:
         """Creates a system operation log event with contextual information.
 
+        Params and results are clipped to ``LOG_PAYLOAD_MAX_CHARS`` per value, so
+        an operation that moves a large file body does not pay to serialize it
+        into every log sink.
+
         Args:
             event_type: Type of the system operation event (enum or string)
             method_name: Name of the method/function being logged
@@ -94,8 +155,8 @@ class BaseOperation:
             operation_mode=self.mode,
             operation_desc=self.description,
             method_name=method_name,
-            method_params=method_params,
-            method_result=method_result,
+            method_params=_clip_log_payload(method_params),
+            method_result=_clip_log_payload(method_result),
             method_exec_time_ms=method_exec_time_ms,
             **kwargs
         )

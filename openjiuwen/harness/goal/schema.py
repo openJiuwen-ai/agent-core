@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
 
@@ -40,6 +41,44 @@ def _optional_positive_int(value: Any, field_name: str) -> Optional[int]:
     if parsed <= 0:
         raise ValueError(f"invalid persisted GoalRecord {field_name}")
     return parsed
+
+
+def _non_negative_int(value: Any, field_name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid persisted GoalRecord {field_name}") from exc
+    if parsed < 0:
+        raise ValueError(f"invalid persisted GoalRecord {field_name}")
+    return parsed
+
+
+def _parse_timestamp(value: Any, field_name: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"invalid persisted GoalRecord {field_name}")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid persisted GoalRecord {field_name}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"invalid persisted GoalRecord {field_name}")
+    return parsed
+
+
+def _optional_timestamp(value: Any, field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    _parse_timestamp(value, field_name)
+    return str(value)
+
+
+def _required_timestamp(value: Any, field_name: str) -> str:
+    _parse_timestamp(value, field_name)
+    return str(value)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(tz=timezone.utc).isoformat()
 
 
 class GoalOperationError(RuntimeError):
@@ -137,10 +176,33 @@ class GoalRecord:
     token_budget: Optional[int] = None
     last_assessment: Optional[GoalAssessment] = None
     last_stop_reason: Optional[str] = None
+    time_used_seconds: int = 0
+    active_started_at: Optional[str] = None
+    created_at: str = field(default_factory=_utc_now_iso)
+    updated_at: str = field(default_factory=_utc_now_iso)
 
     def touch(self, *, bump_revision: bool = False) -> None:
+        self.updated_at = _utc_now_iso()
         if bump_revision:
             self.revision += 1
+
+    def start_timing(self) -> None:
+        now = _utc_now_iso()
+        if self.active_started_at is None:
+            self.active_started_at = now
+        self.updated_at = now
+
+    def settle_active_time(self, *, keep_active: bool) -> None:
+        now = datetime.now(tz=timezone.utc)
+        now_iso = now.isoformat()
+        if self.active_started_at is not None:
+            started_at = _parse_timestamp(self.active_started_at, "active_started_at")
+            elapsed_seconds = int((now - started_at).total_seconds())
+            self.time_used_seconds += max(0, elapsed_seconds)
+            self.active_started_at = now_iso if keep_active else None
+        elif keep_active and self.status is GoalStatus.ACTIVE:
+            self.active_started_at = now_iso
+        self.updated_at = now_iso
 
     def copy_for_response(self) -> GoalRecord:
         return copy.deepcopy(self)
@@ -158,6 +220,10 @@ class GoalRecord:
             "token_budget": self.token_budget,
             "last_assessment": self.last_assessment.to_dict() if self.last_assessment else None,
             "last_stop_reason": self.last_stop_reason,
+            "time_used_seconds": self.time_used_seconds,
+            "active_started_at": self.active_started_at,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
     @classmethod
@@ -173,6 +239,23 @@ class GoalRecord:
             raise ValueError("invalid persisted GoalRecord status") from exc
         usage_data = data.get("token_usage")
         assessment_data = data.get("last_assessment")
+        # Session ``update_dict`` treats nested ``None`` as key deletion. After
+        # pause/complete, ``active_started_at`` may be absent rather than null.
+        time_used_raw = data.get("time_used_seconds", 0)
+        active_started_at = _optional_timestamp(data.get("active_started_at"), "active_started_at")
+        now = _utc_now_iso()
+        created_raw = data.get("created_at")
+        updated_raw = data.get("updated_at")
+        created_at = (
+            _required_timestamp(created_raw, "created_at") if created_raw is not None else now
+        )
+        updated_at = (
+            _required_timestamp(updated_raw, "updated_at") if updated_raw is not None else created_at
+        )
+        # ACTIVE records should keep a start mark for further accumulation; heal
+        # rather than reject when persistence dropped the optional timestamp.
+        if status is GoalStatus.ACTIVE and active_started_at is None:
+            active_started_at = updated_at
         return cls(
             goal_id=goal_id,
             session_id=session_id,
@@ -187,6 +270,10 @@ class GoalRecord:
             if isinstance(assessment_data, dict)
             else None,
             last_stop_reason=data.get("last_stop_reason") or None,
+            time_used_seconds=_non_negative_int(time_used_raw, "time_used_seconds"),
+            active_started_at=active_started_at,
+            created_at=created_at,
+            updated_at=updated_at,
         )
 
     @classmethod
@@ -198,12 +285,16 @@ class GoalRecord:
         max_attempts: Optional[int] = None,
         token_budget: Optional[int] = None,
     ) -> "GoalRecord":
+        now = _utc_now_iso()
         return cls(
             goal_id=uuid.uuid4().hex[:12],
             session_id=session_id,
             objective=objective,
             max_attempts=max_attempts,
             token_budget=token_budget,
+            active_started_at=now,
+            created_at=now,
+            updated_at=now,
         )
 
 

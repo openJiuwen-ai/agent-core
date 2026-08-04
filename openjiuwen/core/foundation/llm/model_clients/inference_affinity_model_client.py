@@ -650,6 +650,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cache_tokens=self._extract_cache_tokens(usage),
+                reasoning_tokens=self._extract_reasoning_tokens(usage),
             )
 
         # Apply output parser (only parse content field)
@@ -839,6 +840,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                         output_tokens=usage.get("completion_tokens", 0) or 0,
                         total_tokens=usage.get("total_tokens", 0) or 0,
                         cache_tokens=self._extract_cache_tokens(usage),
+                        reasoning_tokens=self._extract_reasoning_tokens(usage),
                     )
 
                 # Skip empty chunks

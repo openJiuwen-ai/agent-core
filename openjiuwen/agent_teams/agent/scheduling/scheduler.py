@@ -25,6 +25,8 @@ leader itself receives direct input injections (digests / escalations).
 
 from __future__ import annotations
 
+import asyncio
+
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -42,6 +44,8 @@ from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.agent_teams.prompts.loader import load_template
+
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
@@ -88,10 +92,12 @@ class TeamScheduler:
         *,
         blueprint: "TeamAgentBlueprint",
         infra: "TeamInfra",
+        build_context: Any = None,
     ) -> None:
         self._host = host
         self._blueprint = blueprint
         self._infra = infra
+        self._build_context: Any = build_context
         spec = blueprint.spec
         self._threshold: float = spec.verify_vote_threshold
         self._default_max_rounds: int = spec.default_max_review_rounds
@@ -123,7 +129,7 @@ class TeamScheduler:
         self._active = True
         self._all_done_announced = False
         if first:
-            team_logger.info("[scheduler] activated for team %s", self._blueprint.team_name or "?")
+            team_logger.info("[scheduler] activated for team %s", self._blueprint.spec.team_name or "?")
         await self._scan()
 
     def deactivate(self) -> None:
@@ -222,9 +228,9 @@ class TeamScheduler:
 
             round_key = (task.task_id, task.review_round)
             if round_key not in self._review_dispatched:
-                for reviewer in reviewers:
-                    await self._send_as_leader(reviewer, render.meta_review_request(task))
                 self._review_dispatched.add(round_key)
+                for reviewer in reviewers:
+                    await self._dispatch_to_reviewer(reviewer, task)
 
             tally = await task_manager.get_review_tally(task)
             verdict = judge(
@@ -233,6 +239,9 @@ class TeamScheduler:
                 tally["reviewer_count"],
                 self._threshold,
             )
+            team_logger.info("[judge] task=%s round=%d verdict=%s tally(pass=%d fail=%d total=%d threshold=%.2f)", 
+                 task.task_id, task.review_round, verdict, 
+                 tally["pass_count"], tally["fail_count"], tally["reviewer_count"], self._threshold)
             if verdict == VERDICT_PASS:
                 acted = await self._settle_pass(task_manager, task) or acted
             elif verdict == VERDICT_FAIL:
@@ -295,6 +304,115 @@ class TeamScheduler:
     # ------------------------------------------------------------------
     # Delivery primitives
     # ------------------------------------------------------------------
+
+    async def _dispatch_to_reviewer(self, reviewer: str, task: Any) -> None:
+        """Send a review request to one reviewer, spawning a temp harness if needed.
+
+        When ``reviewer`` names an existing team member the legacy
+        ``_send_as_leader`` path applies: a mailbox message is sent and the
+        member is lazily started.  When the reviewer does *not* match any
+        member row it is treated as a role label — the scheduler builds a
+        one-shot ``TeamHarness``, runs the review, and disposes it.
+        """
+        team_logger.info("[scheduler] spawning temp harness", reviewer)
+        asyncio.create_task(self._spawn_temp_reviewer(reviewer, task))
+
+    async def _spawn_temp_reviewer(self, reviewer: str, task: Any) -> None:
+        """Build a one-shot reviewer harness and run ``verify_task`` on it.
+
+        The reviewer inherits the team's base agent spec (model, filesystem
+        tools, etc.) and gets two extra team tools — ``verify_task`` +
+        ``view_task`` — so it can inspect the deliverable and cast a vote.
+        The harness is disposed immediately after ``run_once``, regardless of
+        outcome; a crash is logged and retried on the next scan.
+        """
+        from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+        from openjiuwen.agent_teams.tools.locales import make_translator
+        from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
+        from openjiuwen.agent_teams.tools.tool_task import VerifyTaskTool, ViewTaskToolV2
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        spec = self._blueprint.spec
+        agents = getattr(spec, "agents", None) or {}
+        base_agent_spec = agents.get("teammate") or agents.get("leader")
+        if base_agent_spec is None:
+            team_logger.error("[scheduler] no base agent spec for temp reviewer")
+            return
+
+        backend = self._infra.team_backend
+        task_manager = self._infra.task_manager
+        if backend is None or task_manager is None:
+            team_logger.error("[scheduler] missing backend/task_manager for temp reviewer")
+            return
+
+        # Build a reviewer-scoped TeamTaskManager so that ``verify_task``'s
+        # identity guard (``member_name in task.reviewers()``) passes against
+        # the reviewer name stored on the task row.
+        reviewer_tm = TeamTaskManager(
+            team_name=backend.team_name,
+            member_name=reviewer,
+            db=backend.db,
+            messager=self._infra.messager,
+            dispatch_mode=self._blueprint.spec.dispatch_mode,
+        )
+        language = self._blueprint.language or "cn"
+        t = make_translator(language)
+
+        verify_tool = VerifyTaskTool(reviewer_tm, t, desc_key="verify_task_scheduled")
+        view_tool = ViewTaskToolV2(backend, t)
+
+        member_name = reviewer
+        harness = None
+        try:
+            reviewer_spec = base_agent_spec.model_copy(
+                update={
+                    "system_prompt": load_template("reviewer", language).content.format(reviewer=reviewer), 
+                    "tools": list(base_agent_spec.tools or []) + [verify_tool, view_tool],
+                }
+            )
+            reviewer_ctx = self._build_context.derive(
+                member_name=member_name,
+                role=TeamRole.TEAMMATE.value,
+                language=language,
+            ) if self._build_context is not None else None
+
+            harness = TeamHarness.build(
+                agent_spec=reviewer_spec,
+                role=TeamRole.TEAMMATE,
+                member_name=member_name,
+                build_context=reviewer_ctx,
+            )
+            team_logger.info(
+                "[reviewer_built] temp reviewer harness built for %s, task=%s",
+                reviewer,
+                task.task_id,
+            )
+            # Use the review request message as the prompt: template
+            # rendered at delivery-time against the current task row.
+            review_prompt = await render.render_review_request_for_harness(
+                task, language=language,
+            )
+            result = await harness.run_once(review_prompt)
+            team_logger.info(
+                "[reviewer_finish] reviewer %s, task=%s, output=%s",
+                reviewer,
+                task.task_id,
+                str(result)[:2000]
+            )
+        except Exception:
+            team_logger.error(
+                "[reviewer_fail] temp reviewer %s failed for task %s",
+                reviewer,
+                task.task_id,
+                exc_info=True,
+            )
+            self._review_dispatched.discard((task.task_id, task.review_round))
+        finally:
+            if harness is not None:
+                try:
+                    await harness.dispose()
+                except Exception:
+                    team_logger.debug("[scheduler] temp reviewer dispose failed for %s", reviewer)
 
     async def _send_as_leader(self, member_name: str, meta: dict) -> None:
         """Leader-identity mailbox handoff + idempotent lazy member startup.

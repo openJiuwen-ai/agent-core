@@ -250,14 +250,12 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
     "create_task.task.content": "Task details including goals and acceptance criteria",
-    # Only the scheduled create_task variant exposes this property; the
-    # description lives under the shared create_task.* key namespace so both
-    # variants read the same strings for the properties they have in common.
+    # Both create_task variants expose assignee. Autonomous treats it as
+    # optional; scheduled requires it.
     "create_task.task.assignee": (
-        "Member name that carries this task (required); the member must already exist. "
-        "Members never claim, so an unowned task would never run — a dependency-free task "
-        "is started by the scheduling runtime, and a blocked one transfers automatically "
-        "once its dependencies complete"
+        "Member name that carries this task; the member must already exist and must not be the leader. "
+        "Optional in autonomous mode (omitted tasks enter the shared claim pool); required in scheduled mode "
+        "because members never claim there"
     ),
     "create_task.task.depends_on": (
         "Prerequisite task IDs; may reference tasks created in this same call "
@@ -300,7 +298,8 @@ STRINGS: dict[str, str] = {
     "update_task.title": "New task title",
     "update_task.content": "New task content",
     "update_task.assignee": (
-        "member_name to assign this task to (only when currently unassigned). A notification is sent to the assignee"
+        "member_name to assign or reassign this task to; the target must already exist and must not be the leader. "
+        "A notification is sent to the assignee"
     ),
     "update_task.reviewer": (
         "Set this task's reviewer member names (an empty list clears the verify gate); reviewers must "
@@ -317,20 +316,21 @@ STRINGS: dict[str, str] = {
     "update_task.error_human_agent_locked_cancel": (
         "Task {task_id} is claimed by a human member still on the team; it "
         "cannot be cancelled. Use send_message to coordinate with that human. "
-        "If they truly cannot continue, shutdown_member removes them from the "
-        "team, after which the task can be cancelled or reassigned"
+        "If they truly cannot continue, shutdown_member (without force) removes "
+        "them from the team, after which the task can be cancelled or reassigned"
     ),
     "update_task.error_human_agent_locked_reassign": (
         "Task {task_id} is claimed by a human member still on the team; it "
         "cannot be reassigned to {new_assignee} and must be completed by that "
-        "human. If they truly cannot continue, shutdown_member removes them "
-        "from the team, after which the task can be reassigned"
+        "human. If they truly cannot continue, shutdown_member (without force) "
+        "removes them from the team, after which the task can be reassigned"
     ),
     "update_task.error_human_agent_locked_edit": (
         "Task {task_id} is claimed by a human member still on the team; its "
         "title/content cannot be edited. Use send_message to coordinate with "
-        "that human. If they truly cannot continue, shutdown_member removes "
-        "them from the team, after which the task can be cancelled or reassigned"
+        "that human. If they truly cannot continue, shutdown_member (without "
+        "force) removes them from the team, after which the task can be "
+        "cancelled or reassigned"
     ),
     # ===== claim_task =========================================================
     # claim_task._desc lives in descs/en/claim_task.md
@@ -361,11 +361,14 @@ STRINGS: dict[str, str] = {
         "as separate messages to each member, cost is linear in recipient count and "
         "MORE expensive than broadcast for the same audience, use only when truly needed "
         'and cannot mix with "*"/"user"; '
-        '"user" (teammates only, to reply to the user); '
+        '"user" (teammates only, to reply to the user; leader calls are rejected); '
         '"*" to broadcast on the team channel, visible to all members'
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
+    "send_message.error_leader_to_user": (
+        "Leader cannot send_message to 'user'. Reply to the user directly in your assistant output instead."
+    ),
     "send_message.error_content_too_long": (
         "'content' is too long ({actual} chars, limit {limit}): a body this size is an "
         "artifact, not a message. Write it to a file under the shared team workspace "

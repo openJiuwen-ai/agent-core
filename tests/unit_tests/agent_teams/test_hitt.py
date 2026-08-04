@@ -48,6 +48,7 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     TaskStatus,
 )
+from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
@@ -381,6 +382,119 @@ async def test_leader_role_tools_exclude_human_agent_only(team_backend):
 
 
 # ---------------------------------------------------------------------------
+# Human-agent task start semantics
+# ---------------------------------------------------------------------------
+
+
+def _tool_by_name(tools, name: str):
+    return next(tool for tool in tools if tool.card.name == name)
+
+
+def _published_events(backend, event_type: TeamEvent):
+    return [
+        call.kwargs["message"]
+        for call in backend.messager.publish.call_args_list
+        if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == event_type
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_assigned_to_human_starts_immediately(built_team, db):
+    """A ready human-assigned task starts without requiring claim_task."""
+    from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
+
+    create_task = _tool_by_name(create_team_tools(role="leader", agent_team=built_team), "create_task")
+
+    result = await create_task.invoke(
+        {
+            "tasks": [
+                {
+                    "task_id": "t-human-ready",
+                    "title": "Human task",
+                    "content": "Do the human-owned work.",
+                    "assignee": HUMAN_AGENT_MEMBER_NAME,
+                }
+            ]
+        }
+    )
+
+    assert result.success, result.error
+    task = await built_team.task_manager.get("t-human-ready")
+    assert task.status == TaskStatus.IN_PROGRESS.value
+    assert task.assignee == HUMAN_AGENT_MEMBER_NAME
+    started = _published_events(built_team, TeamEvent.TASK_STARTED)
+    assert len(started) == 1
+    assert started[0].payload["task_id"] == "t-human-ready"
+    assert started[0].payload["member_name"] == HUMAN_AGENT_MEMBER_NAME
+
+    human_task_manager = TeamTaskManager(
+        team_name=built_team.team_name,
+        member_name=HUMAN_AGENT_MEMBER_NAME,
+        db=db,
+        messager=built_team.messager,
+    )
+    complete = await human_task_manager.complete("t-human-ready")
+    assert complete.ok, complete.reason
+    assert (await built_team.task_manager.get("t-human-ready")).status == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_unblocked_task_assigned_to_human_starts_immediately(built_team, db):
+    """A blocked human-assigned task starts when its dependencies resolve."""
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+    from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name=built_team.team_name,
+        display_name="Dev",
+        agent_card=AgentCard(name="Dev").model_dump_json(),
+        status=MemberStatus.READY.value,
+    )
+
+    graph = await built_team.task_manager.add_graph(
+        [
+            TaskGraphSpec(task_id="t-upstream", title="Upstream", content="Finish first", assignee="dev-1"),
+            TaskGraphSpec(
+                task_id="t-human-blocked",
+                title="Human after dependency",
+                content="Continue after upstream.",
+                assignee=HUMAN_AGENT_MEMBER_NAME,
+                depends_on=("t-upstream",),
+            ),
+        ]
+    )
+    assert graph.ok, graph.reason
+    blocked = await built_team.task_manager.get("t-human-blocked")
+    assert blocked.status == TaskStatus.BLOCKED.value
+    assert blocked.assignee == HUMAN_AGENT_MEMBER_NAME
+
+    start_upstream = await built_team.task_manager.start_task("t-upstream")
+    assert start_upstream.ok, start_upstream.reason
+
+    dev_task_manager = TeamTaskManager(
+        team_name=built_team.team_name,
+        member_name="dev-1",
+        db=db,
+        messager=built_team.messager,
+    )
+    complete = await dev_task_manager.complete("t-upstream")
+    assert complete.ok, complete.reason
+
+    unblocked = await built_team.task_manager.get("t-human-blocked")
+    assert unblocked.status == TaskStatus.IN_PROGRESS.value
+    assert unblocked.assignee == HUMAN_AGENT_MEMBER_NAME
+    started = _published_events(built_team, TeamEvent.TASK_STARTED)
+    assert [event.payload["task_id"] for event in started] == ["t-upstream", "t-human-blocked"]
+    unblocked_events = _published_events(built_team, TeamEvent.TASK_UNBLOCKED)
+    assert len(unblocked_events) == 1
+    assert unblocked_events[0].payload["task_id"] == "t-human-blocked"
+
+
+# ---------------------------------------------------------------------------
 # Task lock (UpdateTaskTool) — leader cannot cancel/reassign human_agent tasks
 # ---------------------------------------------------------------------------
 
@@ -486,7 +600,7 @@ async def _depart(backend, member_name: str, status: MemberStatus) -> None:
         member_name, backend.team_name, MemberStatus.READY.value
     )
     assert started
-    result = await backend.shutdown_member(member_name)
+    result = await backend.shutdown_member(member_name, force=True)
     assert result.ok, result.reason
     if status == MemberStatus.SHUTDOWN:
         settled = await backend.db.member.update_member_status(member_name, backend.team_name, status.value)
@@ -517,16 +631,22 @@ async def test_cancel_task_owned_by_departed_human_agent_is_allowed(built_team, 
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_reassign_task_owned_by_departed_human_agent_is_allowed(built_team, db):
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
     from openjiuwen.agent_teams.tools.locales import make_translator
     from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
 
     await _create_and_assign(built_team, db, "t-gone", HUMAN_AGENT_MEMBER_NAME)
     await _depart(built_team, HUMAN_AGENT_MEMBER_NAME, MemberStatus.SHUTDOWN_REQUESTED)
+    await built_team.spawn_member(
+        member_name="dev-1",
+        display_name="Dev",
+        agent_card=AgentCard(name="Dev"),
+    )
 
     tool = UpdateTaskTool(built_team, make_translator("cn"))
-    out = await tool.invoke({"task_id": "t-gone", "assignee": "team_leader"})
+    out = await tool.invoke({"task_id": "t-gone", "assignee": "dev-1"})
     assert out.success is True, out.error
-    assert (await built_team.task_manager.get("t-gone")).assignee == "team_leader"
+    assert (await built_team.task_manager.get("t-gone")).assignee == "dev-1"
 
 
 @pytest.mark.asyncio

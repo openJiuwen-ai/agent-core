@@ -88,6 +88,7 @@ mem0 = ["mem0ai>=1.0.0"]
 jiuwen-memory = ["JiuwenMemory>=0.1.0", "httpx>=0.24"]
 agentarts = ["agentarts-sdk>=0.1.2,<0.2"]
 claude = ["claude-agent-sdk>=0.2.115"]
+codex = ["openai-codex>=0.144.4"]
 ssh = ["asyncssh>=2.24.0"]
 observability = [
     "opentelemetry-api>=1.25.0",

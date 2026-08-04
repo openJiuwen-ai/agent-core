@@ -397,6 +397,58 @@ async def test_retry_on_locked_succeeds_first_try() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_retry_on_locked_retries_pool_timeout(monkeypatch) -> None:
+    """A pool-exhausted op (QueuePool checkout TimeoutError) is retried, not raised.
+
+    Under burst write concurrency several writers can race for the small
+    write pool at once; a write checkout can hit ``QueuePool limit of size N
+    overflow 0 reached`` (``sqlalchemy.exc.TimeoutError``). That contention
+    is transient — a checked-out connection frees up shortly — so
+    ``retry_on_locked`` must back off and retry it just like a locked DB,
+    instead of letting it bubble up and crash the member.
+    """
+    from sqlalchemy.exc import TimeoutError as SATimeoutError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> bool:
+        nonlocal calls
+        calls += 1
+        raise SATimeoutError("QueuePool limit of size 2 overflow 0 reached")
+
+    result = await retry_on_locked(op, on_locked_result=False, label="test_op")
+    assert result is False
+    assert calls == engine_module._DB_RETRY_ATTEMPTS
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retry_on_locked_recovers_after_transient_pool_timeout(monkeypatch) -> None:
+    """A pool timeout that clears on retry succeeds and returns the real value."""
+    from sqlalchemy.exc import TimeoutError as SATimeoutError
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+    calls = 0
+
+    async def op() -> str:
+        nonlocal calls
+        calls += 1
+        if calls < 2:
+            raise SATimeoutError("QueuePool limit of size 2 overflow 0 reached")
+        return "delivered"
+
+    result = await retry_on_locked(op, on_locked_result="fallback", label="test_op")
+    assert result == "delivered"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_mark_messages_read_batch(file_db: TeamDatabase) -> None:
     """The batch mark-read API marks a whole mailbox drain in one call."""
     db = file_db

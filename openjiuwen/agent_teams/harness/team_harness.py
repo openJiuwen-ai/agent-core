@@ -108,6 +108,15 @@ class TeamHarness:
         )
 
     # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def build_context(self) -> "BuildContext | None":
+        """Return the assembly context this harness was built with."""
+        return self._build_context
+
+    # ------------------------------------------------------------------
     # Lifecycle (HarnessProtocol-aligned, one cycle per coordination.start)
     # ------------------------------------------------------------------
 
@@ -200,6 +209,8 @@ class TeamHarness:
         (idempotent) and drops its ``sys_operation`` so a discarded
         member/session does not leak it. No-op when no native was ever built.
         """
+        if self._active_agent_session is not None:
+            await self._active_agent_session.commit()
         if self._native is not None:
             await self._native.dispose()
 

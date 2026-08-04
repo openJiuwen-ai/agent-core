@@ -129,8 +129,9 @@ c = await parallel([... for x in b])
 - 校验失败由模型自动重试；耗尽返回 `None`。用 `compact()` / `.filter` 过滤 `None` 再用。
 
 ## 预算 budget（硬天花板）
-- `budget.total`（用户本轮 token 目标，未设为 `None`）、`budget.spent()`（已花输出 token，跨主循环 + 所有工作流共享，非按工作流独立）、`budget.remaining()`（`max(0, total - spent())`，无目标时为无穷）。
-- **硬天花板**：一旦 `spent()` 达到 `total`，后续 `agent()` 报错。据此动态决定深度（`while budget.total and budget.remaining() > N`）或静态伸缩扇出（`FLEET = budget.total // 100_000 if budget.total else 5`）。没设 `total` 时 `remaining()` 是无穷——动态循环必须 `guard budget.total`，否则会一直跑到 1000 上限。（注：调用前硬拦截实现推进中，当前为计数 + 脚本自检。）
+- `budget.total`（用户本轮 token 目标，由部署方配置，未设为 `None`）、`budget.spent()`（已花 token，**取自模型返回的真实用量**、含输入+输出；跨主循环 + 所有工作流共享，非按工作流独立）、`budget.remaining()`（`max(0, total - spent())`，无目标时为 `None`）。
+- **硬天花板**：`spent()` 达到 `total` 后，在跑的 agent 会在它下一次模型调用处被就地终止，后续 `agent()` 直接报错终止整个运行（该错误 `except Exception` 拦不住）。据此动态决定深度（`while budget.total and budget.remaining() > N`）或静态伸缩扇出（`FLEET = budget.total // 100_000 if budget.total else 5`）。没设 `total` 时 `remaining()` 是 `None`——动态循环必须 `guard budget.total`，否则会一直跑到 1000 上限。
+- `spent()` 是**实时**的：并发 agent 的消耗一返回就入账，所以轮询到的是全局真账，不是上一轮的旧值。天花板是兜底——**脚本自己按 `remaining()` 收尾**才能干净结束；撞上天花板则整个运行判失败。单次调用的用量只有返回后才入账，故 `spent()` 允许小幅越过 `total`。
 
 ## 断点续跑（resume）
 - `resume_id` = 上次运行的 **run_id**（即本工具调用返回的句柄）。续跑时**内容寻址**：未变的 `agent()` 调用瞬时复用缓存结果；**上游 prompt 改 → 下游签名变 → 自动重跑**（无需手动标记）。**同脚本 + 同 args → 100% 缓存命中**。

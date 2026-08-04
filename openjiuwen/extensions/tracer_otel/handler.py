@@ -54,6 +54,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_META_DATA,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
+    OJ_SESSION_ID,
     OJ_SOURCE_IDS,
     OJ_START_TIME,
     OJ_STATUS,
@@ -176,6 +177,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
         otel_span.set_attribute(GEN_AI_SYSTEM, GEN_AI_SYSTEM_VALUE)
         # Span base fields — use span value if present, otherwise set ourselves
         otel_span.set_attribute(OJ_TRACE_ID, agent_span.trace_id)
+        # Absent for tracers not bound to a Session, so old consumers see no new key.
+        session_id = agent_span.session_id or self._session_id
+        if session_id:
+            otel_span.set_attribute(OJ_SESSION_ID, session_id)
         otel_span.set_attribute(OJ_INVOKE_ID, agent_span.invoke_id or "")
         otel_span.set_attribute(OJ_PARENT_INVOKE_ID, agent_span.parent_invoke_id or "")
         start_time = agent_span.start_time or datetime.now(tz=tzlocal()).replace(tzinfo=None)
@@ -642,6 +647,11 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             start_time = datetime.now(tz=tzlocal()).replace(tzinfo=None)
             otel_span.set_attribute(GEN_AI_SYSTEM, GEN_AI_SYSTEM_VALUE)
             otel_span.set_attribute(OJ_TRACE_ID, self._trace_id)
+            # Workflow events carry no TraceWorkflowSpan, so the session id arrives
+            # per-event; fall back to the tracer-injected one for direct callers.
+            session_id = kwargs.get("session_id") or self._session_id
+            if session_id:
+                otel_span.set_attribute(OJ_SESSION_ID, session_id)
             otel_span.set_attribute(OJ_INVOKE_ID, invoke_id)
             otel_span.set_attribute(OJ_PARENT_NODE_ID, parent_node_id)
             otel_span.set_attribute(OJ_START_TIME, str(start_time))

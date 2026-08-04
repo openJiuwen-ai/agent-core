@@ -17,6 +17,11 @@ import pytest
 
 from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+from openjiuwen.agent_teams.context import (
+    get_session_id,
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     TeamAgentSpec,
@@ -1456,18 +1461,37 @@ class TestTeamRuntimeManagerStopTeam:
         fake_agent = FakeTeamAgent(team_name, stream_label="team.chunk")
         await _activate_pool_entry(manager, team_name, session_id, fake_agent)
 
-        with patch("openjiuwen.agent_teams.runtime.manager.create_monitor", return_value="monitor") as mocked:
-            assert await manager.get_monitor(team_name=team_name, session_id=session_id) == "monitor"
-            mocked.assert_called_once_with(fake_agent, hide_dm=False)
+        observed_session_ids = []
 
-        with patch("openjiuwen.agent_teams.runtime.manager.create_monitor", return_value="dm_hidden") as mocked:
-            assert (
-                await manager.get_monitor(team_name=team_name, session_id=session_id, hide_dm=True) == "dm_hidden"
-            )
-            mocked.assert_called_once_with(fake_agent, hide_dm=True)
+        def _create_monitor(_agent, *, hide_dm=False):
+            observed_session_ids.append(get_session_id())
+            return "dm_hidden" if hide_dm else "monitor"
+
+        caller_token = set_session_id("caller-session")
+        try:
+            with patch(
+                "openjiuwen.agent_teams.runtime.manager.create_monitor",
+                side_effect=_create_monitor,
+            ) as mocked:
+                assert await manager.get_monitor(team_name=team_name, session_id=session_id) == "monitor"
+                mocked.assert_called_once_with(fake_agent, hide_dm=False)
+                assert get_session_id() == "caller-session"
+
+            with patch(
+                "openjiuwen.agent_teams.runtime.manager.create_monitor",
+                side_effect=_create_monitor,
+            ) as mocked:
+                assert (
+                    await manager.get_monitor(team_name=team_name, session_id=session_id, hide_dm=True) == "dm_hidden"
+                )
+                mocked.assert_called_once_with(fake_agent, hide_dm=True)
+                assert get_session_id() == "caller-session"
+        finally:
+            reset_session_id(caller_token)
 
         assert await manager.get_monitor(team_name=team_name, session_id="other") is None
         assert await manager.get_monitor(team_name="missing", session_id=session_id) is None
+        assert observed_session_ids == [session_id, session_id]
 
     @pytest.mark.asyncio
     @pytest.mark.level0

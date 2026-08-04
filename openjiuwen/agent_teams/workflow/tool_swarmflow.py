@@ -26,6 +26,7 @@ from openjiuwen.agent_teams.i18n import STRINGS
 from openjiuwen.agent_teams.id_generator import generate_id
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor
+from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -64,6 +65,7 @@ class SwarmflowTool(AsyncTool):
         worker_base_spec: Any = None,
         human_base_spec: Any = None,
         concurrency_governor: ConcurrencyGovernor | None = None,
+        budget: BudgetLedger | None = None,
         t: Translator | None = None,
         language: str = "cn",
     ) -> None:
@@ -84,6 +86,7 @@ class SwarmflowTool(AsyncTool):
         self._worker_base_spec = worker_base_spec
         self._human_base_spec = human_base_spec
         self._governor = concurrency_governor
+        self._budget = budget
         # Four script sources mirror the reference tool's surface
         # (script_path / script / name / resume_id). "At least one" is enforced
         # in ``invoke`` rather than via JSON-Schema ``required`` because the rule
@@ -274,7 +277,11 @@ class SwarmflowTool(AsyncTool):
             TeamTopic,
             WorkflowProgressTeamEvent,
         )
-        from openjiuwen.agent_teams.workflow.engine.errors import WorkflowAborted
+        from openjiuwen.agent_teams.workflow.engine.errors import (
+            BackendError,
+            BudgetExhausted,
+            WorkflowAborted,
+        )
         from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
         from openjiuwen.agent_teams.workflow.runner import run_swarmflow
 
@@ -371,7 +378,14 @@ class SwarmflowTool(AsyncTool):
                 on_backend_ready=_on_backend_ready,
                 run_id=run_id,
                 agent_gate=agent_gate,
+                budget=self._budget,
             )
+        except BudgetExhausted as exc:
+            # Terminal, unlike a pause: re-raise as an ordinary exception so the
+            # async-tool runtime injects a failure the leader can read and act on
+            # (a BaseException would kill the task silently). Not resumable —
+            # relaunching would only hit the same gate.
+            raise BackendError(str(exc)) from exc
         except WorkflowAborted as exc:
             # Paused at an abort checkpoint: the WAL holds the completed prefix.
             # Re-raise as CancelledError so the async-tool runtime treats it as a

@@ -122,6 +122,14 @@ class TeamAgent(BaseAgent):
         return self._configurator.resources
 
     @property
+    def build_context(self):
+        """Return the assembly BuildContext, or None before configure()."""
+        harness = self.harness
+        if harness is not None:
+            return harness.build_context
+        return None
+
+    @property
     def tiny_agent_model_resolver(self):
         """Return the team's model-name resolver used to build tiny agents.
 
@@ -170,6 +178,7 @@ class TeamAgent(BaseAgent):
             name=tiny_spec.name,
             language=language,
             max_iterations=tiny_spec.max_iterations,
+            enable_security_rail=tiny_spec.enable_security_rail,
         )
         infra.tiny_agents[name] = agent
         return agent
@@ -689,6 +698,7 @@ class TeamAgent(BaseAgent):
                 if raw_query:
                     await self._coordination.enqueue_user_input(inputs)
                 await self._coordination.enqueue_initial_mailbox_poll()
+                await self._coordination.enqueue_initial_task_poll()
             last_result = None
             while True:
                 chunk = await self._stream_controller.stream_queue.get()
@@ -745,6 +755,7 @@ class TeamAgent(BaseAgent):
                 if raw_query:
                     await self._coordination.enqueue_user_input(inputs)
                 await self._coordination.enqueue_initial_mailbox_poll()
+                await self._coordination.enqueue_initial_task_poll()
             while True:
                 chunk = await self._stream_controller.stream_queue.get()
                 if chunk is None:

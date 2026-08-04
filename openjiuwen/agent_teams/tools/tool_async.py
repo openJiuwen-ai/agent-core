@@ -59,6 +59,12 @@ class AsyncTasksListTool(TeamTool):
                 description=t("async_tasks_list"),
             )
         )
+        # Takes no arguments — which in JSON Schema is an object with no
+        # properties, NOT the empty schema ``ToolCard`` defaults to. An empty
+        # dict carries no ``type``, and a strict OpenAI-compatible endpoint
+        # rejects the whole request over it ("schema must be a JSON Schema of
+        # 'type: object', got 'type: null'"), taking every other tool in the
+        # same call down with it.
         self.card.input_params = {
             "type": "object",
             "properties": {},

@@ -3,6 +3,7 @@
 
 import json
 import os
+import random
 from abc import abstractmethod
 from typing import Optional
 
@@ -42,6 +43,43 @@ _PPO_RAY_RUNTIME_ENV = {
 }
 
 
+def _load_actor_rollout_ref_worker():
+    try:
+        from verl.workers.engine_workers import ActorRolloutRefWorker
+    except ModuleNotFoundError:
+        from verl.workers.fsdp_workers import ActorRolloutRefWorker
+    return ActorRolloutRefWorker
+
+
+def _seed_online_rl_process() -> None:
+    deterministic_seed = os.getenv("ONLINE_RL_DETERMINISTIC_SEED", "").strip()
+    if not deterministic_seed:
+        return
+    seed = int(deterministic_seed)
+    _seed_training_libraries(seed)
+
+
+def _seed_training_libraries(seed: int) -> None:
+    random.seed(seed)
+    try:
+        import numpy as np
+        np.random.seed(seed)
+    except Exception as exc:
+        logger.debug("Failed to seed numpy for online RL deterministic mode: %s", exc)
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        if os.getenv("ONLINE_RL_TORCH_DETERMINISTIC", "0") == "1":
+            torch.use_deterministic_algorithms(True, warn_only=True)
+            if hasattr(torch.backends, "cudnn"):
+                torch.backends.cudnn.benchmark = False
+                torch.backends.cudnn.deterministic = True
+    except Exception as exc:
+        logger.debug("Failed to seed torch for online RL deterministic mode: %s", exc)
+
+
 def get_ppo_ray_runtime_env() -> dict:
     working_dir = (
         json.loads(os.environ.get(RAY_JOB_CONFIG_JSON_ENV_VAR, "{}"))
@@ -66,6 +104,18 @@ def get_ppo_ray_runtime_env() -> dict:
             if normalized not in path_parts:
                 path_parts.append(normalized)
     env_vars["PYTHONPATH"] = ":".join(path_parts)
+    deterministic_env_keys = (
+        "ONLINE_RL_DETERMINISTIC_SEED",
+        "ONLINE_RL_TORCH_DETERMINISTIC",
+        "PYTHONHASHSEED",
+        "CUBLAS_WORKSPACE_CONFIG",
+        "NCCL_ALGO",
+        "NCCL_PROTO",
+    )
+    for key in deterministic_env_keys:
+        value = os.environ.get(key)
+        if value is not None:
+            env_vars[key] = value
 
     runtime_env: dict = {
         "env_vars": env_vars,
@@ -73,6 +123,8 @@ def get_ppo_ray_runtime_env() -> dict:
     }
     for key in list(runtime_env["env_vars"].keys()):
         if key == "PYTHONPATH":
+            continue
+        if key in deterministic_env_keys:
             continue
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
@@ -247,9 +299,8 @@ class OfflineTaskRunner(BaseTaskRunner):
 class OnlineTaskRunner(BaseTaskRunner):
     @classmethod
     def _init_worker_mapping(cls, config):
-        from verl.workers.fsdp_workers import ActorRolloutRefWorker
-
-        actor_remote = ray.remote(ActorRolloutRefWorker)
+        actor_rollout_ref_worker_cls = _load_actor_rollout_ref_worker()
+        actor_remote = ray.remote(actor_rollout_ref_worker_cls)
         worker_pairs = [
             (Role.ActorRollout, actor_remote),
             (Role.RefPolicy, actor_remote),
@@ -325,6 +376,9 @@ class OnlineTaskRunner(BaseTaskRunner):
         trainer.checkpoint_manager = None
 
     def init_trainer(self, config) -> None:
+        deterministic_seed = os.getenv("ONLINE_RL_DETERMINISTIC_SEED", "").strip()
+        if deterministic_seed:
+            _seed_training_libraries(int(deterministic_seed))
         logger.info("OnlineTaskRunner init_trainer: %s", OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
         self._config = config

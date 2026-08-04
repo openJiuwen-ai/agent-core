@@ -11,6 +11,7 @@
 | **Model** | 大模型封装类，提供统一的调用接口。 |
 | **BaseModelClient** | 大模型客户端抽象基类。 |
 | **OpenAIModelClient** | OpenAI兼容的大模型客户端实现。 |
+| **OpenAIAccountModelClient** | OpenAI账户OAuth大模型客户端实现，通过OAuth凭据免密登录，无需配置`api_key`。 |
 | **DashScopeModelClient** | DashScope（通义千问）大模型客户端实现，支持对话、图像生成、语音合成和视频生成等多模态功能。 |
 | **BaseOutputParser** | 输出解析器抽象基类。 |
 | **JsonOutputParser** | JSON格式输出解析器。 |

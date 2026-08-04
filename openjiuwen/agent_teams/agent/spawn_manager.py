@@ -128,9 +128,15 @@ class SpawnManager:
             # third-party CLI binary is the subprocess driven via stdin.
             from openjiuwen.agent_teams.spawn.external_cli_spawn import external_cli_spawn
 
+            team_backend = self._configurator.team_backend
+            if team_backend is not None:
+                hitt_enabled = team_backend.hitt_enabled()
+            else:
+                hitt_enabled = False
             handle = await external_cli_spawn(
-                team_agent=self._get_team_agent(),
+                spec=spec,
                 ctx=ctx,
+                hitt_enabled=hitt_enabled,
                 initial_message=initial_message,
                 session_id=get_session_id() or session,
                 resume_external_backend=resume_external_backend,
@@ -359,6 +365,7 @@ class SpawnManager:
         return TeamRuntimeContext(
             role=role,
             member_name=teammate.member_name,
+            display_name=teammate.display_name or "",
             desc=teammate.desc or "",
             prompt=teammate.prompt or "",
             team_spec=ctx.team_spec if ctx else None,

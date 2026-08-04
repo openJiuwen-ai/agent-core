@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Set
 
+from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -60,8 +60,8 @@ class AutoHarnessExperienceRail(DeepAgentRail):
         super().__init__()
         self._experience_dir = experience_dir
         self._language = language
-        self._owned_tool_names: Set[str] = set()
-        self._owned_tool_ids: Set[str] = set()
+        self._owned_tool_cards: dict[str, ToolCard] = {}
+        self._owned_tool_ids: set[str] = set()
         self.system_prompt_builder = None
 
     def init(self, agent) -> None:
@@ -76,7 +76,12 @@ class AutoHarnessExperienceRail(DeepAgentRail):
     def uninit(self, agent) -> None:
         if hasattr(agent, "ability_manager"):
             ability_mgr = agent.ability_manager
-            for tool_name in list(self._owned_tool_names):
+            for tool_name, tool_card in list(self._owned_tool_cards.items()):
+                if ability_mgr.get(tool_name) is not tool_card:
+                    # Another rail re-registered the name after this rail did
+                    # and now owns the card; dropping it here would unregister
+                    # that rail's live tool.
+                    continue
                 ability_mgr.remove(tool_name)
         for tool_id in list(self._owned_tool_ids):
             if Runner.resource_mgr.get_tool(tool_id) is None:
@@ -88,7 +93,7 @@ class AutoHarnessExperienceRail(DeepAgentRail):
                     tool_id,
                 )
         self._owned_tool_ids.clear()
-        self._owned_tool_names.clear()
+        self._owned_tool_cards.clear()
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section(
                 SectionName.MEMORY
@@ -124,4 +129,4 @@ class AutoHarnessExperienceRail(DeepAgentRail):
             self._owned_tool_ids.add(tool.card.id)
         result = agent.ability_manager.add(tool.card)
         if result.added:
-            self._owned_tool_names.add(tool.card.name)
+            self._owned_tool_cards[tool.card.name] = tool.card

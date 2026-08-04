@@ -181,10 +181,12 @@ class SandboxGateway:
             isolation_key: Optional[str] = None,
     ) -> None:
         launcher = SandboxRegistry.create_launcher(record.launcher_type)
+        resolved_isolation_key = isolation_key or (record.metadata or {}).get("isolation_key")
         await launcher.delete(
             record.sandbox_id or "",
-            isolation_key=isolation_key,
+            isolation_key=resolved_isolation_key,
             base_url=record.base_url,
+            sandbox_type=record.sandbox_type,
         )
 
     async def _get_endpoint(
@@ -267,6 +269,7 @@ class SandboxGateway:
             last_used_ts=now,
             metadata={
                 "lifecycle_hook": config.launcher_config.extra_params.get("lifecycle_hook"),
+                "isolation_key": key,
             },
         )
         await self._store.set(key, record)
@@ -281,4 +284,6 @@ class SandboxGateway:
             await launcher.delete(
                 record.sandbox_id or "",
                 base_url=record.base_url,
+                isolation_key=(record.metadata or {}).get("isolation_key"),
+                sandbox_type=record.sandbox_type,
             )

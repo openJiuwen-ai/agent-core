@@ -710,7 +710,7 @@ class Workflow(metaclass=_WorkflowMeta):
             workflow_session.set_stream_writer_manager(
                 StreamWriterManager(stream_emitter=StreamEmitter(), modes=stream_modes))
             if workflow_session.tracer() is None:
-                tracer = Tracer()
+                tracer = Tracer(session_id=workflow_session.session_id())
                 tracer.init(workflow_session.stream_writer_manager())
                 workflow_session.set_tracer(tracer)
             return workflow_session

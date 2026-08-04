@@ -313,3 +313,72 @@ async def test_review_vote_key_is_scheduled_only(db, bus):
     assert ScheduledTaskBoardHandler.EVENT_METHOD_MAP[TeamEvent.TASK_REVIEW_VOTE] == "on_task_board_event"
     for key in (TeamEvent.TASK_SUBMITTED_FOR_REVIEW, TeamEvent.TASK_VERIFIED, TeamEvent.TASK_REVISION_REQUESTED):
         assert ScheduledTaskBoardHandler.EVENT_METHOD_MAP[key] == "on_task_board_event"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_startup_survey_surfaces_work_assigned_while_member_was_down(db, bus):
+    """A teammate coming up sees the task assigned to it before it started.
+
+    Assignment at creation time is announced only by a transient
+    TASK_CLAIMED event, which a member still UNSTARTED can never receive.
+    The startup survey is what closes that gap (F_69).
+    """
+    host, poll = FakeHost(), FakePoll()
+    blueprint = _blueprint("dev-1", TeamRole.TEAMMATE)
+    infra = _infra(db, bus, "dev-1")
+    graph = await infra.task_manager.add_graph(
+        [TaskGraphSpec(title="ship it", content="c", task_id="t1", assignee="dev-1")]
+    )
+    assert graph.ok
+
+    handler = TaskBoardHandler(host, blueprint, infra, poll)
+    await handler.on_initial_task_poll(InnerEventMessage(event_type=InnerEventType.INITIAL_POLL_TASK))
+
+    assert len(host.delivered) == 1
+    assert "t1" in host.delivered[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_startup_survey_is_silent_when_nothing_is_for_this_member(db, bus):
+    """Starting into a board holding only other members' work burns no round."""
+    host, poll = FakeHost(), FakePoll()
+    blueprint = _blueprint("dev-1", TeamRole.TEAMMATE)
+    infra = _infra(db, bus, "dev-1")
+    graph = await infra.task_manager.add_graph(
+        [TaskGraphSpec(title="not yours", content="c", task_id="t2", assignee="rev-1")]
+    )
+    assert graph.ok
+
+    handler = TaskBoardHandler(host, blueprint, infra, poll)
+    await handler.on_initial_task_poll(InnerEventMessage(event_type=InnerEventType.INITIAL_POLL_TASK))
+
+    assert host.delivered == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_startup_survey_defers_to_the_scheduler(db, bus):
+    """Scheduled dispatch has its own delivery for this — a survey double-sends.
+
+    The scheduler's start scan runs on every wake and its handoff lands in
+    the mailbox as a durable row, which the startup mailbox sweep drains.
+    """
+    host, poll = FakeHost(), FakePoll()
+    blueprint = _blueprint("dev-1", TeamRole.TEAMMATE)
+    infra = _infra(db, bus, "dev-1")
+    graph = await infra.task_manager.add_graph(
+        [TaskGraphSpec(title="ship it", content="c", task_id="t3", assignee="dev-1")]
+    )
+    assert graph.ok
+    tick = InnerEventMessage(event_type=InnerEventType.INITIAL_POLL_TASK)
+
+    autonomous = TaskBoardHandler(host, blueprint, infra, poll)
+    await autonomous.on_initial_task_poll(tick)
+    assert len(host.delivered) == 1
+
+    host.delivered.clear()
+    scheduled = ScheduledTaskBoardHandler(host, blueprint, infra, poll)
+    await scheduled.on_initial_task_poll(tick)
+    assert host.delivered == []

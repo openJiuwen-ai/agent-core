@@ -27,6 +27,7 @@ rail's constructor. Returning ``None`` gates the rail out for this member.
 """
 from __future__ import annotations
 
+from importlib.util import find_spec
 from typing import Any, Optional
 
 from openjiuwen.agent_teams.harness.manifest import (
@@ -41,6 +42,7 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_model_allocator,
     get_on_teammate_created,
     get_reliability_components,
+    get_swarmflow_budget,
     get_swarmflow_concurrency_governor,
     get_swarmflow_human_base_spec,
     get_swarmflow_model_resolver,
@@ -60,6 +62,27 @@ TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
 TEAM_RELIABILITY = "core.team.reliability"
 OBSERVABILITY = "core.observability"
+
+
+def observability_dependency_installed() -> bool:
+    """Report whether the optional ``observability`` extra is importable.
+
+    ``opentelemetry`` ships only in the ``observability`` extra, so a
+    default install has no tracing stack at all. Every module of the
+    observability package imports it at module scope — including
+    ``maybe_observability_rail``, the "is observability on" guard itself —
+    so the dependency must be probed *before* the package is touched;
+    catching the failure inside it is not possible. Probing the SDK covers
+    the API too (the SDK depends on it) and matches what
+    ``setup.is_initialized`` needs.
+
+    Returns:
+        True when the tracing stack can be imported, False otherwise.
+    """
+    try:
+        return find_spec("opentelemetry.sdk") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +143,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         swarmflow_worker_base_spec=get_swarmflow_worker_base_spec(context),
         swarmflow_human_base_spec=get_swarmflow_human_base_spec(context),
         swarmflow_concurrency_governor=get_swarmflow_concurrency_governor(context),
+        swarmflow_budget=get_swarmflow_budget(context),
         team_permissions_enabled=inp.team_permissions_enabled,
     )
 
@@ -135,6 +159,11 @@ class TeamPolicyInput(ConstructionInput):
     role: str = context_field(attr="role", default="leader", description="Team role value.")
     member_name: str = context_field(attr="member_name", default="", description="Member name.")
     language: str = context_field(attr="language", default="cn", description="Resolved language code.")
+    display_name: str = param_field(default="", description="Human-readable member label (own identity).")
+    member_workspace_path: Optional[str] = param_field(
+        default=None,
+        description="The member's own artifact directory (own identity).",
+    )
     prompt: str = param_field(default="", description="Member-private working agreement (own prompt only).")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle.")
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
@@ -165,6 +194,8 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         role=TeamRole(inp.role),
         member_prompt=inp.prompt,
         member_name=inp.member_name or None,
+        display_name=inp.display_name,
+        member_workspace_path=inp.member_workspace_path,
         lifecycle=inp.lifecycle,
         teammate_mode=inp.teammate_mode,
         language=inp.language,
@@ -332,13 +363,18 @@ def build_team_reliability_rail(params: dict[str, Any], context: Any) -> Any:
     description="Creates per-iteration agent spans for observability tracing.",
 )
 def build_observability_rail(params: dict[str, Any], context: Any) -> Any:
-    """Build an ObservabilityRail when observability is initialized.
+    """Build an ObservabilityRail when observability is available and on.
 
-    Delegates to ``maybe_observability_rail`` so the "is observability on"
-    guard lives in one place. Returns ``None`` when observability is not
-    initialized, making this a safe unconditional addition to any spec's
-    ``rails`` list — the provider handles the on/off logic itself.
+    Two gates, in order: the optional ``observability`` extra must be
+    installed (``observability_dependency_installed``), and observability
+    must be initialized (``maybe_observability_rail``, the shared guard).
+    Returns ``None`` for either, making this a safe unconditional addition
+    to any spec's ``rails`` list — the provider handles the on/off logic
+    itself.
     """
+    if not observability_dependency_installed():
+        return None
+
     from openjiuwen.agent_teams.observability.rail import maybe_observability_rail
 
     return maybe_observability_rail()
@@ -352,4 +388,5 @@ __all__ = [
     "TEAM_PLAN_MODE",
     "TEAM_RELIABILITY",
     "OBSERVABILITY",
+    "observability_dependency_installed",
 ]

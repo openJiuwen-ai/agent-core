@@ -120,7 +120,7 @@ class OtelRail(AgentRail):
 
         inputs_dict = {}
         if hasattr(ctx.inputs, "messages") and ctx.inputs.messages is not None:
-            inputs_dict = {"messages": str(ctx.inputs.messages)}
+            inputs_dict = {"messages": ctx.inputs.messages}
 
         await tracer.trigger(
             TracerHandlerName.TRACE_AGENT.value,
@@ -149,7 +149,7 @@ class OtelRail(AgentRail):
         tracer = session.tracer()
         outputs_dict = {}
         if hasattr(ctx.inputs, "response") and ctx.inputs.response is not None:
-            outputs_dict = {"outputs": str(ctx.inputs.response)}
+            outputs_dict = {"outputs": ctx.inputs.response}
 
         await tracer.trigger(
             TracerHandlerName.TRACE_AGENT.value,

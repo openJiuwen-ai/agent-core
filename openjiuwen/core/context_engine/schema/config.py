@@ -2,7 +2,22 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from typing import Dict, Optional
-from pydantic import BaseModel, Field
+
+from pydantic import BaseModel, Field, model_validator
+
+
+class CompressionRecallConfig(BaseModel):
+    """Global configuration for archiving and recalling compressed context."""
+
+    enabled: bool = Field(default=False)
+    chunk_size_tokens: int = Field(default=3000, gt=0)
+    chunk_overlap_tokens: int = Field(default=300, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_chunk_tokens(self) -> "CompressionRecallConfig":
+        if self.chunk_overlap_tokens >= self.chunk_size_tokens:
+            raise ValueError("chunk_overlap_tokens must be smaller than chunk_size_tokens")
+        return self
 
 
 class ContextEngineConfig(BaseModel):
@@ -58,6 +73,10 @@ class ContextEngineConfig(BaseModel):
 
     openrouter_request_timeout : float, default 3.0
         Timeout in seconds for fetching OpenRouter model metadata.
+
+    compression_recall_config : CompressionRecallConfig
+        Context-wide policy for archiving source messages replaced by
+        compression and making those archives available for recall.
     """
 
     max_context_message_num: Optional[int] = Field(default=None, gt=0)
@@ -70,3 +89,6 @@ class ContextEngineConfig(BaseModel):
     model_context_window_tokens: Optional[Dict[str, int]] = Field(default=None)
     enable_openrouter_model_context_window_tokens: bool = Field(default=False)
     openrouter_request_timeout: float = Field(default=3.0, gt=0)
+    compression_recall_config: CompressionRecallConfig = Field(
+        default_factory=CompressionRecallConfig,
+    )

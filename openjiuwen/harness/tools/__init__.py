@@ -2,8 +2,20 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from importlib import import_module
 from typing import Any
+
+from openjiuwen.harness.prompts.tools.lsp_tool import LspToolMetadataProvider
+from openjiuwen.harness.tools.agent_mode_tools import (
+    EnterPlanModeTool,
+    ExitPlanModeTool,
+    SwitchModeTool,
+    generate_word_slug,
+    get_or_create_plan_slug,
+    resolve_plan_file_path,
+)
+from openjiuwen.harness.tools.ask_user import AskUserTool
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.code import CodeTool
+from openjiuwen.harness.tools.compression_recall import CompressionRecallTool
 from openjiuwen.harness.tools.cron import (
     CronToolContext,
     create_cron_tools,
@@ -16,27 +28,39 @@ from openjiuwen.harness.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
-from openjiuwen.harness.tools.skills import ListSkillTool, SkillTool
-from openjiuwen.harness.tools.tool_discovery import LoadToolsTool, SearchToolsTool
-from openjiuwen.harness.tools.shell import BashTool, PowerShellTool
-from openjiuwen.harness.tools.todo import (
-    TodoCreateTool,
-    TodoListTool,
-    TodoModifyTool,
-    TodoTool,
-    TodoGetTool,
-    create_todos_tool,
-)
+from openjiuwen.harness.tools.lsp_tool import LspTool
 from openjiuwen.harness.tools.multimodal import (
     AudioMetadataTool,
     AudioQuestionAnsweringTool,
     AudioTranscriptionTool,
-    create_audio_tools,
-    VideoUnderstandingTool,
     ImageOCRTool,
+    VideoUnderstandingTool,
     VisualQuestionAnsweringTool,
+    create_audio_tools,
     create_vision_tools,
 )
+from openjiuwen.harness.tools.shell import BashTool, PowerShellTool
+from openjiuwen.harness.tools.skills import ListSkillTool, SkillTool
+from openjiuwen.harness.tools.subagent import (
+    SESSION_SPAWN_TASK_TYPE,
+    SessionsCancelTool,
+    SessionsListTool,
+    SessionsSpawnTool,
+    SessionTaskRow,
+    SessionToolkit,
+    TaskTool,
+    build_session_tools,
+    create_task_tool,
+)
+from openjiuwen.harness.tools.todo import (
+    TodoCreateTool,
+    TodoGetTool,
+    TodoListTool,
+    TodoModifyTool,
+    TodoTool,
+    create_todos_tool,
+)
+from openjiuwen.harness.tools.tool_discovery import LoadToolsTool, SearchToolsTool
 from openjiuwen.harness.tools.web import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
@@ -45,34 +69,12 @@ from openjiuwen.harness.tools.web import (
     is_free_search_enabled,
     is_paid_search_enabled,
 )
-from openjiuwen.harness.tools.subagent import (
-    SESSION_SPAWN_TASK_TYPE,
-    SessionTaskRow,
-    SessionToolkit,
-    SessionsListTool,
-    SessionsSpawnTool,
-    SessionsCancelTool,
-    build_session_tools,
-    TaskTool,
-    create_task_tool,
-)
-from openjiuwen.harness.tools.agent_mode_tools import (
-    SwitchModeTool,
-    EnterPlanModeTool,
-    ExitPlanModeTool,
-    generate_word_slug,
-    get_or_create_plan_slug,
-    resolve_plan_file_path,
-)
-from openjiuwen.harness.tools.lsp_tool import LspTool
-from openjiuwen.harness.tools.ask_user import AskUserTool
 from openjiuwen.harness.tools.worktree import (
     EnterWorktreeTool,
     ExitWorktreeTool,
     WorktreeConfig,
     WorktreeManager,
 )
-from openjiuwen.harness.prompts.tools.lsp_tool import LspToolMetadataProvider
 
 __all__ = [
     "AudioMetadataTool",
@@ -81,6 +83,7 @@ __all__ = [
     "BashTool",
     "PowerShellTool",
     "CodeTool",
+    "CompressionRecallTool",
     "CronToolContext",
     "ReadFileTool",
     "WriteFileTool",

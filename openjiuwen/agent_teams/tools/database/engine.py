@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -144,12 +144,28 @@ async def retry_on_locked(
     on_locked_result: _T,
     label: str,
 ) -> _T:
-    """Run a write ``op`` with exponential back-off on ``database is locked``.
+    """Run a write ``op`` with exponential back-off on transient DB errors.
+
+    Retries two kinds of transient failure:
+
+    - ``OperationalError`` ("database is locked") — SQLite write contention
+      (WAL checkpoint edges or a foreign process touching the same file).
+    - ``TimeoutError`` (pool exhausted) — a write checkout hit the
+      ``AsyncAdaptedQueuePool`` ``size`` cap with ``overflow=0`` and timed
+      out (``pool_timeout``). This surfaces under burst write concurrency
+      where several writers race for the small write pool at once; the
+      contention is transient, so a short back-off lets a checked-out
+      connection free up and the retry succeed.
 
     The back-off sleep runs *between* ``op`` calls, never inside the session
     ``op`` opens: ``op`` must fully exit its ``async with write()`` block
     (releasing the connection) before returning, so a retry wait never pins
     a checked-out connection and starves the pool.
+
+    Note: a *persistent* timeout (a checked-out connection never released,
+    i.e. a real leak) is not cured by retry — the back-off only buys time
+    for transient contention to clear; after the budget it still returns
+    ``on_locked_result``.
 
     Args:
         op: Zero-arg coroutine factory performing one write attempt.
@@ -157,18 +173,24 @@ async def retry_on_locked(
         label: Human-readable operation name for logs.
 
     Returns:
-        The ``op`` result, or ``on_locked_result`` when every attempt hit a
-        locked database.
+        The ``op`` result, or ``on_locked_result`` when every attempt hit
+        a transient error.
     """
     for attempt in range(_DB_RETRY_ATTEMPTS):
         try:
             return await op()
-        except OperationalError as e:
+        except (OperationalError, SATimeoutError) as e:
             if attempt >= _DB_RETRY_ATTEMPTS - 1:
                 team_logger.error("%s failed after %d attempts: %s", label, _DB_RETRY_ATTEMPTS, e)
                 return on_locked_result
             delay = _DB_RETRY_BASE_DELAY * (2**attempt)
-            team_logger.warning("%s hit a locked DB (attempt %d), retrying in %ss", label, attempt + 1, delay)
+            team_logger.warning(
+                "%s hit a transient DB error (%s); retrying in %ss (attempt %d)",
+                label,
+                type(e).__name__,
+                delay,
+                attempt + 1,
+            )
             await asyncio.sleep(delay)
     return on_locked_result
 

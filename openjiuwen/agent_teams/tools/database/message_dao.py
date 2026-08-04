@@ -10,6 +10,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database.engine import (
     DbSessions,
     get_current_time,
@@ -245,9 +246,10 @@ class MessageDao:
     async def has_unread_messages(self, team_name: str, *, include_broadcast: bool = True) -> bool:
         """Return True if any team message is still unread by its intended reader.
 
-        Direct messages: unread when ``is_read`` is False. Broadcast messages:
+        Direct messages: unread when ``is_read`` is False and the recipient
+        has not already reached SHUTDOWN. Broadcast messages:
         read state is a per-member high-water mark in MessageReadStatus, so a
-        broadcast is unread by member M when M is not its sender and M's
+        broadcast is unread by reachable member M when M is not its sender and M's
         watermark does not yet cover the broadcast timestamp. This honors
         ``is_read`` as-is — messages addressed to consumer-less members (the
         ``user`` pseudo-member, human_agent) are marked read on write or
@@ -267,12 +269,22 @@ class MessageDao:
         read_status_model = _get_message_read_status_model()
         async with self._sessions.read() as session:
             # Direct messages: a single unread row is enough.
+            recipient_is_shutdown = (
+                select(TeamMember.member_name)
+                .where(
+                    TeamMember.team_name == message_model.team_name,
+                    TeamMember.member_name == message_model.to_member_name,
+                    TeamMember.status == MemberStatus.SHUTDOWN.value,
+                )
+                .exists()
+            )
             direct_unread = await session.execute(
                 select(message_model.message_id)
                 .where(
                     message_model.team_name == team_name,
                     message_model.broadcast.is_(False),
                     message_model.is_read.is_(False),
+                    ~recipient_is_shutdown,
                 )
                 .limit(1)
             )
@@ -305,6 +317,7 @@ class MessageDao:
                 .where(
                     message_model.team_name == team_name,
                     message_model.broadcast.is_(True),
+                    TeamMember.status != MemberStatus.SHUTDOWN.value,
                     TeamMember.member_name != message_model.from_member_name,
                     ~covered_by_watermark,
                 )
