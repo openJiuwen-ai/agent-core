@@ -496,7 +496,9 @@ class AnthropicModelClient(BaseModelClient):
                     "Anthropic: dropping top_p because temperature is set "
                     "(the API forbids specifying both)."
                 )
-        elif top_p is not None:
+        elif top_p is not None and top_p != 1.0:
+            # top_p=1.0 is the default (no nucleus truncation); skip it so we
+            # send the API only meaningful overrides.
             params["top_p"] = top_p
         if openai_params.get("stop"):
             stop_val = openai_params["stop"]

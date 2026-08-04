@@ -483,3 +483,11 @@ class TestSamplingParams:
         params = self._params(client, top_p=0.8)
         assert params["top_p"] == 0.8
         assert "temperature" not in params
+
+    def test_default_top_p_dropped_when_temperature_absent(self):
+        # top_p=1.0 is the default (no nucleus truncation); skip it entirely.
+        client = _make_client()
+        client.model_config.temperature = None
+        params = self._params(client, top_p=1.0)
+        assert "top_p" not in params
+        assert "temperature" not in params
