@@ -13,6 +13,8 @@
 
 **约束**：`model` 与 `model_client` 必须同时配置，否则该处理器永远不会触发。保留消息边界会自动向前扩展，保证 tool call 与其 tool 结果不被拆散。
 
+**迁移说明**：旧版 `DialogueCompressor`（`processor.compressor.dialogue_compressor`）按完整 tool-call 对话轮逐轮压缩，配置字段为 `messages_threshold`、`tokens_threshold`、`messages_to_keep`、`keep_last_round` 等；当前实现改为将「当前轮之前的全部历史」压缩为一条摘要，触发条件由消息数/token 数阈值改为上下文容量比例，配置字段不兼容。从旧版迁移时需按上表字段重新配置。
+
 ## class openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor.DialogueCompressor
 
 ```python
@@ -82,3 +84,9 @@ DialogueCompressor(config: DialogueCompressorConfig)
 >>> asyncio.run(main())
 4
 ```
+
+> 示例输出 `4` 为未触发压缩时的原始消息数。触发压缩时，当前轮之前的全部
+> 历史会被一条 `<memory_block_dialogue>` 摘要替换，`get_messages()` 的长度
+> 变为「1 条摘要 + 当前轮消息数」。注意上例只有一轮对话，当前轮即全部消息，
+> 因此即使达到阈值也没有可压缩的历史；真实场景中历史包含多个已完成对话轮时
+> 压缩效果才会体现。

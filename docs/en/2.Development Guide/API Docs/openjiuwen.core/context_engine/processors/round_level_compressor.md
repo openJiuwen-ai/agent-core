@@ -82,3 +82,9 @@ RoundLevelCompressor(config: RoundLevelCompressorConfig)
 >>> asyncio.run(main())
 8
 ```
+
+> The example output `8` is the original message count when compression does
+> not trigger. When compression triggers, the most recent `keep_recent_messages`
+> messages (4 in the example) are kept and earlier history is replaced by a
+> single `<memory_block_round>` summary, so `get_messages()` becomes "1 summary
+> + keep_recent_messages".

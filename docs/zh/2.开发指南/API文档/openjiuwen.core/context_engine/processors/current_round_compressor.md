@@ -84,3 +84,8 @@ CurrentRoundCompressor(config: CurrentRoundCompressorConfig)
 >>> asyncio.run(main())
 4
 ```
+
+> 示例输出 `4` 为未触发压缩时的原始消息数。触发压缩时，用户请求保留不动，
+> 当前轮内除尾部 `keep_recent_messages` 条（上例为 2 条）之外的消息被一条
+> `<memory_block_current>` 摘要替换，`get_messages()` 的长度变为
+> 「1 条用户消息 + 1 条摘要 + keep_recent_messages」。

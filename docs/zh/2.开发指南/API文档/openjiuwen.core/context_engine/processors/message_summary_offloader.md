@@ -1,5 +1,12 @@
 # openjiuwen.core.context_engine.processor.forked.offloader.message_offloader
 
+> **迁移说明**：本文档描述默认处理链使用的实现。旧模块路径
+> `openjiuwen.core.context_engine.processor.offloader.message_summary_offloader`
+> 下的同名类仍然存在，但配置字段与行为不同（旧版经 LLM 生成摘要后 offload，
+> 使用 `large_message_threshold`、`offload_message_type` 等字段），两者不能
+> 混用。从旧版迁移时请按本文档的模块路径导入，并按 `MessageSummaryOffloaderConfig`
+> 的新字段重新配置。
+
 ## class openjiuwen.core.context_engine.processor.forked.offloader.message_offloader.MessageSummaryOffloaderConfig
 
 `MessageSummaryOffloader` 的配置类。该处理器不依赖 LLM：当 tool 消息过大时，先按内置规则压缩，再将原始内容 offload 到文件系统，上下文中仅保留头尾预览与 `[[OFFLOAD: ...]]` 占位符，需要时可按占位符中的句柄/路径取回原文。
@@ -72,3 +79,7 @@ MessageSummaryOffloader(config: MessageSummaryOffloaderConfig)
 >>> asyncio.run(main())
 3
 ```
+
+> 示例输出 `3` 为未触发 offload 时的原始消息数。当 tool 消息超过
+> `add_message_threshold_ratio` 时，该消息会被规则压缩并 offload 到文件系统，
+> 上下文中替换为头尾预览加 `[[OFFLOAD: ...]]` 占位符（消息条数不变，内容变短）。

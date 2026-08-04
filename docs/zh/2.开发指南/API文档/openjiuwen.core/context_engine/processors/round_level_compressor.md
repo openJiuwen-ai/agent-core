@@ -82,3 +82,8 @@ RoundLevelCompressor(config: RoundLevelCompressorConfig)
 >>> asyncio.run(main())
 8
 ```
+
+> 示例输出 `8` 为未触发压缩时的原始消息数。触发压缩时，最近
+> `keep_recent_messages` 条（上例为 4 条）保留，更早的历史被一条
+> `<memory_block_round>` 摘要替换，`get_messages()` 的长度变为
+> 「1 条摘要 + keep_recent_messages」。

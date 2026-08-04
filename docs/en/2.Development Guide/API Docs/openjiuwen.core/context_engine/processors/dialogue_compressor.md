@@ -13,6 +13,8 @@ Configuration class for `DialogueCompressor`. When the context token count reach
 
 **Constraints**: `model` and `model_client` must both be configured, otherwise the processor never triggers. The kept-message boundary is automatically extended backwards so that a tool call and its tool result are never split apart.
 
+**Migration note**: The legacy `DialogueCompressor` (`processor.compressor.dialogue_compressor`) compressed complete tool-call dialogue rounds one by one, configured via `messages_threshold`, `tokens_threshold`, `messages_to_keep`, `keep_last_round`, etc. The current implementation instead compresses all history before the current round into a single summary, and its trigger changed from message/token count thresholds to a context-capacity ratio; the configuration fields are not compatible. Reconfigure with the fields above when migrating from the legacy version.
+
 ## class openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor.DialogueCompressor
 
 ```python
@@ -82,3 +84,11 @@ DialogueCompressor(config: DialogueCompressorConfig)
 >>> asyncio.run(main())
 4
 ```
+
+> The example output `4` is the original message count when compression does
+> not trigger. When compression triggers, all history before the current round
+> is replaced by a single `<memory_block_dialogue>` summary, so
+> `get_messages()` becomes "1 summary + current-round messages". Note the
+> example contains only one dialogue round, whose messages all belong to the
+> current round, so there is nothing to compress even at threshold; the effect
+> shows up with multiple completed rounds in history.

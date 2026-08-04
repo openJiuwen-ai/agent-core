@@ -84,3 +84,9 @@ CurrentRoundCompressor(config: CurrentRoundCompressorConfig)
 >>> asyncio.run(main())
 4
 ```
+
+> The example output `4` is the original message count when compression does
+> not trigger. When compression triggers, the user request is kept intact and
+> all current-round messages except the trailing `keep_recent_messages` (2 in
+> the example) are replaced by a single `<memory_block_current>` summary, so
+> `get_messages()` becomes "1 user message + 1 summary + keep_recent_messages".

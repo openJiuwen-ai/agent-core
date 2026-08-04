@@ -81,3 +81,7 @@ config = ContextEngineConfig(
     ),
 )
 ```
+
+> **说明**：`enable_kv_cache_release` 已不属于 `ContextEngineConfig`，KV cache
+> 释放请通过 Agent 侧配置开启：
+> `ReActAgentConfig.configure_kv_cache_affinity(enable_kv_cache_release=True)`。

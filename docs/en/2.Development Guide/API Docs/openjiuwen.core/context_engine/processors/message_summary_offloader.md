@@ -1,5 +1,15 @@
 # openjiuwen.core.context_engine.processor.forked.offloader.message_offloader
 
+> **Migration note**: This page documents the implementation used by the default
+> processor chain. The same-named class under the old module path
+> `openjiuwen.core.context_engine.processor.offloader.message_summary_offloader`
+> still exists, but its configuration fields and behavior differ (the old
+> implementation summarizes via an LLM before offloading, using fields such as
+> `large_message_threshold` and `offload_message_type`), and the two are not
+> interchangeable. When migrating from the old version, import from the module
+> path shown on this page and reconfigure with the new
+> `MessageSummaryOffloaderConfig` fields.
+
 ## class openjiuwen.core.context_engine.processor.forked.offloader.message_offloader.MessageSummaryOffloaderConfig
 
 Configuration class for `MessageSummaryOffloader`. This processor does not rely on an LLM: when a tool message is too large, it first applies built-in rule-based compression, then offloads the original content to the filesystem, keeping only a head/tail preview plus an `[[OFFLOAD: ...]]` placeholder in the context; the original content can be retrieved later via the handle/path in the placeholder.
@@ -72,3 +82,9 @@ Interface is consistent with the base class, see [ContextProcessor](base.md#clas
 >>> asyncio.run(main())
 3
 ```
+
+> The example output `3` is the original message count when offload does not
+> trigger. When a tool message exceeds `add_message_threshold_ratio`, it is
+> rule-compressed and offloaded to the filesystem, replaced in the context by a
+> head/tail preview plus an `[[OFFLOAD: ...]]` placeholder (message count stays
+> the same, content gets shorter).
