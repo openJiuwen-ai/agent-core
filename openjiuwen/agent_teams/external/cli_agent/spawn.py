@@ -271,6 +271,7 @@ async def build_cli_runtime(
             resume_external_backend=resume_external_backend,
             member_agent_id=member_agent_id,
             team_context_tracker=team_context_tracker,
+            team_name=descriptor.team_name,
         )
     if ctx.cli_agent == "codex":
         if command_override is not None:

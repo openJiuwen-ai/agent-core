@@ -18,9 +18,6 @@ from openjiuwen.auto_harness.infra.runtime_extension_loader import (
     load_runtime_rails,
     load_runtime_tools,
 )
-from openjiuwen.auto_harness.infra.runtime_manifest import (
-    load_runtime_manifest,
-)
 from openjiuwen.auto_harness.schema import (
     RuntimeExtensionArtifact,
 )
@@ -191,7 +188,7 @@ async def test_runtime_extension_skills_are_refreshed_and_preferred(
     await agent.register_rail(old_rail)
     await old_rail.reload_skills()
 
-    record = await agent.load_expert_harness(
+    record = await agent.load_plugin(
         artifact.config_path
     )
 
@@ -215,10 +212,10 @@ async def test_runtime_extension_skills_are_refreshed_and_preferred(
 
 
 @pytest.mark.asyncio
-async def test_load_expert_harness_raises_for_missing_file(
+async def test_load_plugin_raises_for_missing_file(
     tmp_path: Path,
 ):
-    """load_expert_harness must raise AgentError for a missing manifest."""
+    """load_plugin must raise AgentError for a missing manifest."""
     agent = DeepAgent(
         AgentCard(name="deep", description="test")
     ).configure(
@@ -227,21 +224,21 @@ async def test_load_expert_harness_raises_for_missing_file(
 
     missing_config = tmp_path / "missing" / "harness_config.yaml"
     with pytest.raises(AgentError, match="not found") as exc_info:
-        await agent.load_expert_harness(str(missing_config))
+        await agent.load_plugin(str(missing_config))
 
     err = exc_info.value
     message = str(err)
-    assert err.status == StatusCode.DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR
+    assert err.status == StatusCode.DEEPAGENT_LOAD_PLUGIN_ERROR
     assert isinstance(err.__cause__, FileNotFoundError)
     assert "harness_config.yaml" in message
     assert str(missing_config) in message
 
 
 @pytest.mark.asyncio
-async def test_unload_expert_harness_removes_skill_dirs_from_shared_rail(
+async def test_unload_extension_removes_skill_dirs_from_shared_rail(
     tmp_path: Path,
 ):
-    """unload_expert_harness drops the runtime skill dir from a shared rail."""
+    """unload_extension drops the runtime skill dir from a shared rail."""
     # Create existing skill rail with one skill dir
     old_root = tmp_path / "old_skills"
     (old_root / "shared_skill").mkdir(parents=True)
@@ -280,8 +277,8 @@ async def test_unload_expert_harness_removes_skill_dirs_from_shared_rail(
     await agent.register_rail(old_rail)
     await old_rail.reload_skills()
 
-    # Load through the canonical ExpertHarness interface (merges skill dirs).
-    record = await agent.load_expert_harness(artifact.config_path)
+    # Load through the canonical Plugin interface (merges skill dirs).
+    record = await agent.load_plugin(artifact.config_path)
     assert any(ref.kind.value == "skill" for ref in record.refs)
 
     skill_rail = next(
@@ -293,7 +290,7 @@ async def test_unload_expert_harness_removes_skill_dirs_from_shared_rail(
     assert len(skill_dirs) >= 2  # old_root + runtime skill dir
 
     # Unload via the load record (no fragile re-parse of the manifest).
-    unloaded = await agent.unload_expert_harness(record)
+    unloaded = await agent.unload_extension(record)
     assert any(item.startswith("skill:") for item in unloaded)
 
     # Verify runtime skill dir is removed but old_root remains
@@ -306,16 +303,16 @@ async def test_unload_expert_harness_removes_skill_dirs_from_shared_rail(
 
 
 # ---------------------------------------------------------------------------
-# Regression: the new ``load_expert_harness`` interface must keep the runtime
-# extension support that the legacy ``load_harness_config`` provided. The
-# critical contract is intra-package relative imports (``from .helper import
-# VALUE``) inside a runtime extension whose modules are declared under the
+# Regression: the ``load_plugin`` interface must keep the runtime extension
+# support that the legacy ``load_harness_config`` provided. The critical
+# contract is intra-package relative imports (``from .helper import VALUE``)
+# inside a runtime extension whose modules are declared under the
 # ``openjiuwen.extensions.harness.<ext>`` namespace.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_load_expert_harness_loads_runtime_extension(
+async def test_load_plugin_loads_runtime_extension(
     tmp_path: Path,
 ):
     tool_id = f"demo_tool_{uuid.uuid4().hex[:8]}"
@@ -334,8 +331,9 @@ async def test_load_expert_harness_loads_runtime_extension(
     ).configure(
         DeepAgentConfig(enable_task_loop=False)
     )
+    await agent.register_rail(SkillUseRail(skills_dir=[], skill_mode="all"))
 
-    record = await agent.load_expert_harness(artifact.config_path)
+    record = await agent.load_plugin(artifact.config_path)
 
     ref_identities = {ref.identity for ref in record.refs}
     assert "DemoRail" in ref_identities
@@ -359,7 +357,7 @@ async def test_load_expert_harness_loads_runtime_extension(
 
 
 @pytest.mark.asyncio
-async def test_load_expert_harness_resolves_relative_import(
+async def test_load_plugin_resolves_relative_import(
     tmp_path: Path,
 ):
     """Directly assert the relative-import path that the legacy loader handled."""
@@ -379,7 +377,7 @@ async def test_load_expert_harness_resolves_relative_import(
     )
 
     # Must not raise ImportError("attempted relative import with no known parent package").
-    record = await agent.load_expert_harness(artifact.config_path)
+    record = await agent.load_plugin(artifact.config_path)
 
     assert record.refs
     tool = next(
@@ -391,7 +389,7 @@ async def test_load_expert_harness_resolves_relative_import(
 
 
 @pytest.mark.asyncio
-async def test_load_expert_harness_ignores_stale_official_extension_modules(
+async def test_load_plugin_ignores_stale_official_extension_modules(
     tmp_path: Path,
 ):
     """Runtime loads must prefer the current package root over stale official aliases."""
@@ -417,7 +415,7 @@ async def test_load_expert_harness_ignores_stale_official_extension_modules(
             DeepAgentConfig(enable_task_loop=False)
         )
 
-        record = await agent.load_expert_harness(artifact.config_path)
+        record = await agent.load_plugin(artifact.config_path)
 
         assert record.refs
         tool = next(
@@ -435,7 +433,7 @@ async def test_load_expert_harness_ignores_stale_official_extension_modules(
 
 
 @pytest.mark.asyncio
-async def test_unload_expert_harness_reverts_runtime_extension(
+async def test_unload_extension_reverts_runtime_extension(
     tmp_path: Path,
 ):
     tool_id = f"demo_tool_{uuid.uuid4().hex[:8]}"
@@ -453,13 +451,13 @@ async def test_unload_expert_harness_reverts_runtime_extension(
         DeepAgentConfig(enable_task_loop=False)
     )
 
-    record = await agent.load_expert_harness(artifact.config_path)
+    record = await agent.load_plugin(artifact.config_path)
     assert any(
         type(rail).__name__ == "DemoRail"
         for rail in agent._registered_rails
     )
 
-    unloaded = await agent.unload_expert_harness(record)
+    unloaded = await agent.unload_extension(record)
 
     assert unloaded
     assert not any(

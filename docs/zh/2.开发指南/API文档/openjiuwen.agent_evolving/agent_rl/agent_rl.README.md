@@ -1,4 +1,4 @@
-﻿# openjiuwen.agent_evolving.agent_rl
+# openjiuwen.agent_evolving.agent_rl
 
 `openjiuwen.agent_evolving.agent_rl` 是 openJiuwen 中的**强化学习（RL）训练扩展模块**，负责：
 
@@ -41,6 +41,23 @@
 | [RuntimeExecutor](./offline/runtime.md) | 自包含的单任务执行器。 |
 | [ParallelRuntimeExecutor](./offline/runtime.md) | 并行 rollout 执行引擎。 |
 | [AgentFactory](./offline/runtime.md) | 为每个 RL 任务创建 **DeepAgent** 的可调用工厂。 |
+
+**Online RL 模块**（`agent_rl.online`）：
+
+| CLASS / FUNCTION | DESCRIPTION |
+|------------------|-------------|
+| [GatewayConfig](./online/gateway.md) | Online-RL Gateway 运行时配置 dataclass。 |
+| [build_app_from_config](./online/gateway.md) | 从 `GatewayConfig` 装配 FastAPI 应用的生产入口。 |
+| [build_gateway_app](./online/gateway.md) | FastAPI 装配，注册路由（`/health`、`/v1/gateway/stats`、`/v1/gateway/upload/batch`、`/v1/chat/completions`、全量代理）。 |
+| [InferenceNotifier](./online/inference.md) | vLLM LoRA 热加载通知器。 |
+| [JudgeScorer](./online/judge.md) | LLM-as-a-Judge 高层异步评分客户端。 |
+| [evaluate_judge_scores](./online/judge.md) | 核心评分入口，多投票平均并归一化到 `[-1, 1]`。 |
+| [LauncherPaths](./online/launcher.md) | 在线 RL 循环编排的路径布局 dataclass。 |
+| [run_online_rl_loop](./online/launcher.md) | 顶层编排入口，拉起并监管各服务进程。 |
+| [RLOnlineRail](./online/rail.md) | 钩入智能体生命周期的在线 RL 轨迹采集 Rail。 |
+| [TrajectoryUploader](./online/rail.md) | 异步上传 rail-v1 批次到 gateway 的上传器。 |
+| [OnlineTrainingScheduler](./online/scheduler.md) | 后台线程轮询 Redis 并触发 PPO 训练批次的调度器。 |
+| [PPOTrainingExecutor](./online/scheduler.md) | Ray/verl PPO runner 生命周期与批次执行器。 |
 
 **Functions**：
 

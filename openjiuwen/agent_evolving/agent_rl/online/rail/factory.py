@@ -29,6 +29,8 @@ def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
     - ``TRAJECTORY_GATEWAY_URL`` — default ``http://127.0.0.1:18080``.
     - ``TRAJECTORY_GATEWAY_API_KEY`` — optional Bearer token for the gateway.
     - ``RL_ONLINE_TENANT_ID`` — optional tenant / user namespace for LoRA routing.
+    - ``LORA_DEFAULT_POLICY`` — optional; ``latest_by_user`` makes Rail ask the gateway for the
+      effective LoRA. The gateway owns latest-version lookup and vLLM runtime loading.
 
     On import failure (optional extras not installed), logs a warning and returns None.
     """
@@ -48,6 +50,7 @@ def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
     api_key = os.getenv("TRAJECTORY_GATEWAY_API_KEY", "") or ""
     tenant_raw = os.getenv("RL_ONLINE_TENANT_ID", "").strip()
     tenant_id: str | None = tenant_raw or None
+    lora_default_policy = os.getenv("LORA_DEFAULT_POLICY", "disabled").strip() or "disabled"
 
     uploader = TrajectoryUploader(gw, api_key=api_key)
     rail = RLOnlineRail(
@@ -55,6 +58,12 @@ def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
         gateway_endpoint=gw,
         tenant_id=tenant_id,
         uploader=uploader,
+        lora_default_policy=lora_default_policy,
+        gateway_api_key=api_key,
     )
-    logger.info("build_rl_online_rail_from_env: RLOnlineRail ready (rail-v1), gateway=%s", gw)
+    logger.info(
+        "build_rl_online_rail_from_env: RLOnlineRail ready (rail-v1), gateway=%s, lora_policy=%s",
+        gw,
+        lora_default_policy,
+    )
     return rail

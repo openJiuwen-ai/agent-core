@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds as group_completed_api_round_ranges,
@@ -237,12 +238,7 @@ def extract_tool_result_hint(
 
 def message_to_text(message: BaseMessage) -> str:
     content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except TypeError:
-        return str(content)
+    return sanitize_content_for_text(content)
 
 
 def is_summary_message(message: BaseMessage, summary_marker: str) -> bool:
@@ -265,12 +261,8 @@ def estimate_content_tokens(content: Any) -> int:
     Uses ``len // 4`` to mirror ``TiktokenCounter``'s own fallback and align
     with thresholds scaled to real context-window token counts.
     """
-    if isinstance(content, str):
-        return len(content) // 4
-    try:
-        return len(json.dumps(content, ensure_ascii=False)) // 4
-    except TypeError:
-        return len(str(content)) // 4
+    text = sanitize_content_for_text(content)
+    return max(len(text) // 4, 1)
 
 
 def count_messages_tokens(
@@ -331,12 +323,7 @@ def _len4(message: BaseMessage) -> int:
     """Estimate a single message's tokens with ``len // 4`` (mirrors the
     fallback coefficient used elsewhere in this module)."""
     content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return len(content) // 4
-    try:
-        return len(json.dumps(content, ensure_ascii=False)) // 4
-    except TypeError:
-        return len(str(content)) // 4
+    return len(sanitize_content_for_text(content)) // 4
 
 
 def resolve_context_max(context: ModelContext, model_name: str | None = None) -> int:

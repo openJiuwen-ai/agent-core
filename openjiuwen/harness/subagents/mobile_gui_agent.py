@@ -19,16 +19,12 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.schema.config import SubAgentConfig
-
 from openjiuwen.harness.tools.mobile_gui.config import MobileGuiRuntimeSettings
 from openjiuwen.harness.tools.mobile_gui.rails_factory import (
     build_mobile_gui_rails,
     resolve_mobile_skill_root,
 )
 from openjiuwen.harness.tools.mobile_gui.runtime_tools import build_mobile_gui_tool_instances
-from openjiuwen.harness.tools.mobile_gui.tiktoken_multimodal_patch import (
-    apply_tiktoken_counter_multimodal_patch,
-)
 from openjiuwen.harness.tools.mobile_gui.vlm_grounding_prompt import (
     build_vlm_grounding_system_prompt,
 )
@@ -36,6 +32,7 @@ from openjiuwen.harness.tools.mobile_gui.vlm_grounding_prompt import (
 try:
     from openjiuwen.harness.prompts import resolve_language
 except ImportError:
+
     def resolve_language(language: Optional[str] = None) -> str:  # type: ignore[misc]
         return language if language in {"cn", "en"} else "cn"
 
@@ -86,7 +83,8 @@ def build_mobile_gui_agent_config(
     resolved_settings = _resolve_runtime_settings(model, settings)
     default_prompt = build_vlm_grounding_system_prompt(resolved_settings)
     return SubAgentConfig(
-        agent_card=card or AgentCard(
+        agent_card=card
+        or AgentCard(
             name="mobile_gui_agent",
             description=DEFAULT_MOBILE_GUI_DESCRIPTION.get(
                 resolved_language,
@@ -132,7 +130,6 @@ def create_mobile_gui_agent(
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create a DeepAgent with Android VLM grounding tools and rails."""
-    apply_tiktoken_counter_multimodal_patch()
     resolved_language = resolve_language(language)
     resolved_settings = _resolve_runtime_settings(model, settings)
 

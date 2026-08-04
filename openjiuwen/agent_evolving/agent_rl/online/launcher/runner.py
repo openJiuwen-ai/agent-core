@@ -214,17 +214,21 @@ def run_online_rl_loop(
         else:
             ensure_workspace(
                 config_env=paths.workspace_env,
-                gateway_url=runtime.gateway_api_url,
+                gateway_url=f'{runtime.inference_url}/v1',
                 model_name=cfg.inference.model_name,
                 model_path=cfg.inference.model_path,
                 trajectory_mode=cfg.trajectory.mode,
                 trajectory_gateway_url=runtime.gateway_base_url,
                 trajectory_batch_size=cfg.trajectory.batch_size,
+                lora_repo_root=runtime.lora_repo,
+                lora_default_policy=cfg.gateway.lora_default_policy,
             )
             claw_proc, web_proc = start_jiuwenclaw(
                 jiuwenclaw_repo=paths.jiuwenclaw_repo,
                 workspace_root=paths.workspace_root,
                 trajectory_gateway_url=runtime.gateway_base_url,
+                lora_repo_root=runtime.lora_repo,
+                lora_default_policy=cfg.gateway.lora_default_policy,
                 model_path=cfg.inference.model_path,
                 trajectory_mode=cfg.trajectory.mode,
                 trajectory_batch_size=cfg.trajectory.batch_size,

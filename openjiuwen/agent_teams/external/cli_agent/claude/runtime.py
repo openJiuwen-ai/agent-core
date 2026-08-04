@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import nullcontext
+from dataclasses import dataclass
 import json
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, ContextManager
 
 from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_options, load_claude_sdk
 from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import (
@@ -18,6 +21,14 @@ from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
+
+
+@dataclass(frozen=True, slots=True)
+class _ClaudeToolMetadata:
+    """Metadata retained until the matching Claude tool result arrives."""
+
+    tool_name: str = ""
+    is_team_tool: bool = False
 
 
 class ClaudeSdkRuntime(CliRuntimeBase):
@@ -33,6 +44,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         mcp_server_name: str = "openjiuwen-team",
         member_agent_id: str | None = None,
         team_context_tracker: Any = None,
+        span_bridge: Any | None = None,
     ):
         """Bind SDK options; the SDK client is connected on start."""
         super().__init__(
@@ -47,7 +59,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         self._sdk_mcp_tool_set: ClaudeSdkMcpToolSet | None = None
         self._client: Any | None = None
         self._abort_requested = False
-        self._tool_names_by_id: dict[str, str] = {}
+        self._tool_metadata_by_id: dict[str, _ClaudeToolMetadata] = {}
+        self._span_bridge = span_bridge or _NoopClaudeSpanBridge()
 
     def bind_team_tools(
         self,
@@ -96,6 +109,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             concurrency_governor=concurrency_governor,
             swarmflow_budget=swarmflow_budget,
             team_permissions_enabled=team_permissions_enabled,
+            span_bridge=self._span_bridge,
         )
         self._sdk_mcp_tool_set = tool_set
         self._options.mcp_servers = {self._mcp_server_name: tool_set.server}
@@ -119,17 +133,43 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         query = inputs.get("query")
         text = query if isinstance(query, str) else str(query)
         self._abort_requested = False
-        self._tool_names_by_id.clear()
-        await client.query(text)
-        chunk_index = 0
-        async for message in client.receive_response():
+        self._tool_metadata_by_id.clear()
+        self._span_bridge.start_turn(prompt=text)
+        status = "ok"
+        error: BaseException | None = None
+        try:
+            await client.query(text)
+            chunk_index = 0
+            async for message in client.receive_response():
+                if self._abort_requested:
+                    team_logger.debug("[{}] claude sdk turn aborted", self._member_name)
+                    status = "cancelled"
+                    return
+                for chunk in _iter_sdk_chunks(
+                    message,
+                    chunk_index,
+                    self._tool_metadata_by_id,
+                    mcp_server_name=self._mcp_server_name,
+                    team_tool_names=set(self._sdk_mcp_tool_set.tools) if self._sdk_mcp_tool_set is not None else set(),
+                ):
+                    team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
+                    self._span_bridge.record_chunk(chunk)
+                    yield chunk
+                    chunk_index = chunk.index + 1
             if self._abort_requested:
-                team_logger.debug("[{}] claude sdk turn aborted", self._member_name)
-                return
-            for chunk in _iter_sdk_chunks(message, chunk_index, self._tool_names_by_id):
-                team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
-                yield chunk
-                chunk_index = chunk.index + 1
+                status = "cancelled"
+        except GeneratorExit:
+            status = "cancelled"
+            raise
+        except BaseException as exc:
+            error = exc
+            if self._abort_requested or isinstance(exc, asyncio.CancelledError):
+                status = "cancelled"
+            else:
+                status = "failed"
+            raise
+        finally:
+            self._span_bridge.finish_turn(status=status, error=error)
 
     async def steer(self, content: str) -> None:
         """Send content into the active Claude SDK conversation."""
@@ -175,6 +215,7 @@ def build_claude_runtime(
     resume_external_backend: bool,
     member_agent_id: str | None = None,
     team_context_tracker: Any = None,
+    team_name: str | None = None,
 ) -> ClaudeSdkRuntime:
     """Build a Claude SDK runtime, using an SSH SDK transport when configured."""
     _ = mcp_server_command
@@ -191,6 +232,12 @@ def build_claude_runtime(
     if ssh_transport is not None:
         team_logger.info("[external-cli] using claude sdk ssh transport for member {}", member_name)
         transport = build_claude_sdk_ssh_transport(prompt=_empty_prompt(), options=options, config=ssh_transport)
+    span_bridge = _build_claude_span_bridge(
+        member_name=member_name,
+        member_agent_id=member_agent_id,
+        team_name=team_name,
+        session_id=team_session_id,
+    )
     return ClaudeSdkRuntime(
         member_name=member_name,
         options=options,
@@ -199,6 +246,7 @@ def build_claude_runtime(
         mcp_server_name=mcp_server_name,
         member_agent_id=member_agent_id,
         team_context_tracker=team_context_tracker,
+        span_bridge=span_bridge,
     )
 
 
@@ -208,17 +256,74 @@ async def _empty_prompt() -> AsyncIterator[dict[str, Any]]:
     yield {}  # type: ignore[unreachable]
 
 
+class _NoopClaudeSpanBridge:
+    """Runtime-local no-op bridge for optional observability dependencies."""
+
+    @staticmethod
+    def start_turn(**_: Any) -> None:
+        """Ignore turn start."""
+
+    @staticmethod
+    def record_chunk(_: OutputSchema) -> None:
+        """Ignore one Claude stream chunk."""
+
+    @staticmethod
+    def finish_turn(*, status: str, error: Any | None = None) -> None:
+        """Ignore turn completion."""
+
+    @staticmethod
+    def tool_execution_context() -> ContextManager[None]:
+        """Return a no-op context for local tool execution."""
+        return nullcontext()
+
+
+def _build_claude_span_bridge(
+    *,
+    member_name: str,
+    member_agent_id: str | None,
+    team_name: str | None,
+    session_id: str | None,
+) -> Any:
+    """Build the optional Claude OTel bridge without making runtime import depend on OTel."""
+    try:
+        from openjiuwen.agent_teams.observability.setup import is_initialized
+    except ImportError:
+        return _NoopClaudeSpanBridge()
+    if not is_initialized():
+        return _NoopClaudeSpanBridge()
+    try:
+        from openjiuwen.agent_teams.observability.claude import ClaudeSpanBridge
+    except ImportError as exc:
+        team_logger.warning("[{}] Claude observability bridge unavailable: {}", member_name, exc)
+        return _NoopClaudeSpanBridge()
+    return ClaudeSpanBridge.build(
+        member_name=member_name,
+        member_agent_id=member_agent_id,
+        team_name=team_name,
+        session_id=session_id,
+    )
+
+
 def _iter_sdk_chunks(
     message: Any,
     start_index: int,
-    tool_names_by_id: dict[str, str],
+    tool_metadata_by_id: dict[str, _ClaudeToolMetadata],
+    *,
+    mcp_server_name: str,
+    team_tool_names: set[str],
 ) -> list[OutputSchema]:
     """Convert one Claude SDK message into native team stream chunks."""
     sdk = load_claude_sdk()
     if isinstance(message, sdk.AssistantMessage):
-        return _assistant_chunks(message.content, start_index, tool_names_by_id)
+        return _assistant_chunks(
+            message.content,
+            start_index,
+            tool_metadata_by_id,
+            mcp_server_name=mcp_server_name,
+            team_tool_names=team_tool_names,
+        )
     if isinstance(message, sdk.UserMessage):
-        return _user_chunks(message, start_index, tool_names_by_id)
+        return _user_chunks(message, start_index, tool_metadata_by_id)
     if isinstance(message, sdk.SystemMessage) or isinstance(message, sdk.ResultMessage):
         return []
     return []
@@ -227,7 +332,10 @@ def _iter_sdk_chunks(
 def _assistant_chunks(
     content: Any,
     start_index: int,
-    tool_names_by_id: dict[str, str],
+    tool_metadata_by_id: dict[str, _ClaudeToolMetadata],
+    *,
+    mcp_server_name: str,
+    team_tool_names: set[str],
 ) -> list[OutputSchema]:
     """Convert assistant content blocks into stream chunks."""
     if not isinstance(content, list):
@@ -245,8 +353,16 @@ def _assistant_chunks(
                 chunks.append(_text_chunk("llm_reasoning", block.thinking, index))
                 index += 1
         elif isinstance(block, sdk.ToolUseBlock):
+            is_team_tool = _is_team_mcp_tool(
+                block.name,
+                mcp_server_name=mcp_server_name,
+                team_tool_names=team_tool_names,
+            )
             if block.id:
-                tool_names_by_id[block.id] = block.name
+                tool_metadata_by_id[block.id] = _ClaudeToolMetadata(
+                    tool_name=block.name,
+                    is_team_tool=is_team_tool,
+                )
             chunks.append(
                 OutputSchema(
                     type="tool_call",
@@ -255,6 +371,7 @@ def _assistant_chunks(
                         "name": block.name,
                         "arguments": _json_arguments(block.input),
                         "tool_call_id": block.id,
+                        "is_team_tool": is_team_tool,
                     },
                 ),
             )
@@ -265,24 +382,26 @@ def _assistant_chunks(
 def _user_chunks(
     message: Any,
     start_index: int,
-    tool_names_by_id: dict[str, str],
+    tool_metadata_by_id: dict[str, _ClaudeToolMetadata],
 ) -> list[OutputSchema]:
     """Convert user-side tool results into stream chunks without replaying text."""
     chunks: list[OutputSchema] = []
     index = start_index
-    content_chunks = _tool_result_content_chunks(message.content, index, tool_names_by_id)
+    content_chunks = _tool_result_content_chunks(message.content, index, tool_metadata_by_id)
     chunks.extend(content_chunks)
     index += len(content_chunks)
     if not content_chunks and message.tool_use_result is not None:
         tool_call_id = message.parent_tool_use_id or ""
+        tool_metadata = _pop_tool_metadata(tool_metadata_by_id, tool_call_id)
         chunks.append(
             OutputSchema(
                 type="tool_result",
                 index=index,
                 payload={
-                    "tool_name": _pop_tool_name(tool_names_by_id, tool_call_id),
+                    "tool_name": tool_metadata.tool_name,
                     "result": _normalize_tool_result(message.tool_use_result),
                     "tool_call_id": tool_call_id,
+                    "is_team_tool": tool_metadata.is_team_tool,
                 },
             ),
         )
@@ -292,7 +411,7 @@ def _user_chunks(
 def _tool_result_content_chunks(
     content: Any,
     start_index: int,
-    tool_names_by_id: dict[str, str],
+    tool_metadata_by_id: dict[str, _ClaudeToolMetadata],
 ) -> list[OutputSchema]:
     """Convert tool result content blocks into stream chunks."""
     if not isinstance(content, list):
@@ -302,14 +421,16 @@ def _tool_result_content_chunks(
     index = start_index
     for block in content:
         if isinstance(block, sdk.ToolResultBlock):
+            tool_metadata = _pop_tool_metadata(tool_metadata_by_id, block.tool_use_id)
             chunks.append(
                 OutputSchema(
                     type="tool_result",
                     index=index,
                     payload={
-                        "tool_name": _pop_tool_name(tool_names_by_id, block.tool_use_id),
+                        "tool_name": tool_metadata.tool_name,
                         "result": _normalize_tool_result(block.content),
                         "tool_call_id": block.tool_use_id,
+                        "is_team_tool": tool_metadata.is_team_tool,
                     },
                 ),
             )
@@ -317,11 +438,23 @@ def _tool_result_content_chunks(
     return chunks
 
 
-def _pop_tool_name(tool_names_by_id: dict[str, str], tool_call_id: str) -> str:
-    """Return and forget the tool name matched by a Claude tool-use id."""
+def _pop_tool_metadata(
+    tool_metadata_by_id: dict[str, _ClaudeToolMetadata],
+    tool_call_id: str,
+) -> _ClaudeToolMetadata:
+    """Return and forget metadata matched by a Claude tool-use id."""
     if not tool_call_id:
-        return ""
-    return tool_names_by_id.pop(tool_call_id, "")
+        return _ClaudeToolMetadata()
+    return tool_metadata_by_id.pop(tool_call_id, _ClaudeToolMetadata())
+
+
+def _is_team_mcp_tool(tool_name: str, *, mcp_server_name: str, team_tool_names: set[str]) -> bool:
+    """Return whether the SDK tool label belongs to the local team MCP server."""
+    prefix = f"mcp__{mcp_server_name}__"
+    if not tool_name.startswith(prefix):
+        return False
+    real_tool_name = tool_name[len(prefix):]
+    return real_tool_name in team_tool_names
 
 
 def _text_chunk(chunk_type: str, content: str, index: int) -> OutputSchema:
