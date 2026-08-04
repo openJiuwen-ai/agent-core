@@ -37,8 +37,8 @@ With the default `preset=True`, the processor chain runs in this order:
 ### Defaults
 
 The default chain enables offload and compression out of the box, while
-Session Memory stays disabled, so its background model calls add no overhead
-until explicitly enabled.
+Session Memory and compression recall stay disabled, so their background model
+calls and archives add no overhead until explicitly enabled.
 
 ### Enabling Session Memory
 
@@ -74,6 +74,32 @@ Session notes are stored by default at:
 ```text
 {workspace}/context/{session_id}_context/session_memory/session_context.md
 ```
+
+### Enabling compression recall
+
+```python
+from openjiuwen.core.context_engine import (
+    CompressionRecallConfig,
+    ContextEngineConfig,
+)
+
+context_engine_config = ContextEngineConfig(
+    compression_recall_config=CompressionRecallConfig(enabled=True),
+)
+```
+
+Pass `context_engine_config` to `DeepAgentConfig`. Once enabled:
+
+- Compressors in the default chain (`DialogueCompressor`,
+  `CurrentRoundCompressor`, `RoundLevelCompressor`) archive the source messages
+  they replace under `compression_recall/` in the workspace session context
+  directory, and the summary carries a `[[COMPRESSION_RECALL: id=...]]` marker;
+- The Harness automatically registers the `recall_compressed_context` tool, so
+  the model can retrieve the archived content on demand using the `memory_id`
+  from the marker.
+
+The switch is disabled by default and is independent of Session Memory; the
+two can be enabled separately or together.
 
 ## Agent Using Context
 

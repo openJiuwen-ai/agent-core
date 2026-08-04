@@ -1,5 +1,29 @@
 # openjiuwen.core.context_engine.config
 
+## `CompressionRecallConfig`
+
+```python
+class openjiuwen.core.context_engine.CompressionRecallConfig(
+    enabled: bool = False,
+    chunk_size_tokens: int = 3000,
+    chunk_overlap_tokens: int = 300,
+)
+```
+
+ContextEngine-wide configuration for archiving and recalling compressed source
+messages. When enabled, compressors archive the source messages they replace,
+and the Harness registers the `recall_compressed_context` tool so the model can
+retrieve compressed content on demand.
+
+**Parameters:**
+
+- `enabled`: Whether to archive replaced source messages and enable recall.
+  Default: `False`.
+- `chunk_size_tokens`: Target token count of an archive retrieval chunk. Must
+  be greater than `0`. Default: `3000`.
+- `chunk_overlap_tokens`: Token overlap between adjacent chunks. Must be
+  greater than `0` and smaller than `chunk_size_tokens`. Default: `300`.
+
 ## `ContextEngineConfig`
 
 ```python
@@ -35,6 +59,15 @@ processors).
   model-window metadata from OpenRouter. Default: `False`.
 - `openrouter_request_timeout` (`float`): OpenRouter metadata request timeout
   in seconds. Default: `3.0`; must be greater than `0`.
+- `compression_recall_config` (`CompressionRecallConfig`): Compressed-source
+  archive and recall policy. Defaults to a disabled `CompressionRecallConfig`.
+- `enable_context_debug` (`bool`): Unified debug toggle for context processors.
+  When on, processors persist JSONL records at each pipeline stage (threshold
+  checks, span splits, compression retries, before/after diffs). Default:
+  `False`; zero overhead when off.
+- `context_debug_dir` (`str | None`): Directory for context-debug records. When
+  `None`, falls back to the `OPENJIUWEN_CONTEXT_DEBUG_DIR` env var, then to
+  `{workspace}/context/{session_id}_context/context_debug/`. Default: `None`.
 
 Explicit `context_window_tokens` and `model_context_window_tokens` values take
 precedence over remote OpenRouter metadata.
@@ -42,10 +75,18 @@ precedence over remote OpenRouter metadata.
 **Example:**
 
 ```python
-from openjiuwen.core.context_engine import ContextEngineConfig
+from openjiuwen.core.context_engine import (
+    CompressionRecallConfig,
+    ContextEngineConfig,
+)
 
 config = ContextEngineConfig(
     default_window_round_num=10,
     context_window_tokens=128_000,
+    compression_recall_config=CompressionRecallConfig(
+        enabled=True,
+        chunk_size_tokens=3000,
+        chunk_overlap_tokens=300,
+    ),
 )
 ```
