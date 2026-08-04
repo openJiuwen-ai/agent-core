@@ -416,11 +416,17 @@ class ExperienceBank:
             )
             return False
         # Snapshot served its purpose; clear it so we don't silently restore
-        # a stale snapshot next time after a successful persist.
+        # a stale snapshot next time after a successful persist. A leftover
+        # backup is not fatal — next persist will overwrite it — so only
+        # warn on the rare OSError rmtree(ignore_errors=True) still raises.
         try:
             shutil.rmtree(backup_dir, ignore_errors=True)
-        except Exception:
-            pass
+        except OSError:
+            LOGGER.warning(
+                "ExperienceBank: failed to remove backup dir %s; "
+                "leftover snapshot will be overwritten on next persist",
+                backup_dir, exc_info=True,
+            )
         return True
 
     @staticmethod
@@ -517,8 +523,20 @@ class ExperienceBank:
            back to ``_backup/`` when the live files fail integrity.
         """
         if self._faiss_index is None or self._embedding_matrix is None:
-            LOGGER.error("faiss index or embedding matrix is None")
-            return
+            # No vector index to persist. If _items is empty this is the
+            # normal "KB is empty" state and there is nothing to write at
+            # all — silently return. But if _items is non-empty, every item
+            # lacks an embedding (e.g. caller appended a hand-built item
+            # without one); silently returning here would drop all scalar
+            # metadata on the floor and the caller (add/add_batch/remove)
+            # would believe the persist succeeded. Surface it instead.
+            if not self._items:
+                return
+            raise RuntimeError(
+                "ExperienceBank._persist: items are present but no FAISS "
+                "index / embedding matrix exists (items without embeddings "
+                "cannot be persisted). Refusing to silently drop metadata."
+            )
         self._dir.mkdir(parents=True, exist_ok=True)
 
         scalar_dir = self._dir / _SCALAR_DIR
@@ -679,8 +697,14 @@ class ExperienceBank:
     # ------------------------------------------------------------------
 
     def generate_id(self) -> str:
-        cid = self._next_id_counter
-        self._next_id_counter += 1
+        # _next_id_counter is shared mutable state; the read-modify-write
+        # must be under the lock so concurrent callers (e.g. a multi-threaded
+        # pipeline calling create_item) cannot both observe the same value
+        # and produce duplicate ids — duplicates would make _id_index assign
+        # silently overwrite one item with the other.
+        with self._write_lock:
+            cid = self._next_id_counter
+            self._next_id_counter += 1
         return f"exp_{cid:04d}"
 
     def create_item(

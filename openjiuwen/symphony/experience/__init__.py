@@ -42,7 +42,13 @@ __all__ = [
 
 
 def __getattr__(name):
-    """Lazy import for modules that depend on optional packages (faiss, etc.)."""
+    """Lazy import for modules that depend on optional packages (faiss, etc.).
+
+    Raises ``AttributeError`` (not ``ImportError``) when the underlying
+    optional dependency is missing, so callers' ``hasattr`` / ``except
+    AttributeError`` checks behave correctly and the error names the missing
+    package rather than confusing the user with a raw ModuleNotFoundError.
+    """
     lazy = {
         "ExperienceBank": ".bank",
         "TraceDistiller": ".distiller",
@@ -54,6 +60,15 @@ def __getattr__(name):
     }
     if name in lazy:
         import importlib
-        mod = importlib.import_module(lazy[name], __package__)
+        try:
+            mod = importlib.import_module(lazy[name], __package__)
+        except ImportError as exc:
+            missing = getattr(exc, "name", None) or "an optional dependency"
+            raise AttributeError(
+                f"cannot import {name!r} from {__name__!r}: "
+                f"optional dependency {missing!r} is not installed "
+                f"({type(exc).__name__}: {exc}). "
+                f"Install the missing package and retry."
+            ) from exc
         return getattr(mod, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

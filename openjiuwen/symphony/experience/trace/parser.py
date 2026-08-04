@@ -27,8 +27,15 @@ def _read_json(path: Path) -> object | None:
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        LOGGER.error("Failed to read trace file")
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        # Narrow to the failure modes that mean "file present but unreadable":
+        # corrupt JSON, wrong encoding, or a permission/IO error. Log the
+        # path + exception so this is distinguishable from "file missing"
+        # (which returns None without logging) in production.
+        LOGGER.error(
+            "Failed to read trace file %s: %s: %s",
+            path, type(exc).__name__, exc,
+        )
         return None
 
 

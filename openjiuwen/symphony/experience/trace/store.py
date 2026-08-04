@@ -66,6 +66,13 @@ def parse_and_store(sessions_dir: Path) -> list[TraceRecord]:
     session); the parsed-record cache lives next to it under ``trace_store``.
 
     Returns the list of newly parsed TraceRecords.
+
+    Idempotency: trace_id is the per-record unique key. Before appending, we
+    load the set of trace_ids already in records.jsonl and drop any new
+    record whose trace_id is already present. This survives the crash window
+    between writing records.jsonl and updating processed_index — a re-run
+    would otherwise re-append the same traces and pollute downstream
+    clustering/distillation with duplicates.
     """
     all_ids = set(list_session_ids(sessions_dir))
     already_processed = _load_processed_index(sessions_dir)
@@ -82,17 +89,50 @@ def parse_and_store(sessions_dir: Path) -> list[TraceRecord]:
             new_records.extend(traces)
 
     if new_records:
-        # Append to records.jsonl
         records_path = _records_path(sessions_dir)
-        with open(records_path, "a", encoding="utf-8") as f:
-            for record in new_records:
-                f.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
-        LOGGER.info("parse_and_store: stored %d new traces from %d sessions", len(new_records), len(new_ids))
+        # Dedup against trace_ids already persisted so a crash-and-rerun
+        # cannot append the same record twice.
+        existing_ids = _existing_trace_ids(sessions_dir)
+        fresh = [r for r in new_records if r.trace_id not in existing_ids]
+        if fresh:
+            with open(records_path, "a", encoding="utf-8") as f:
+                for record in fresh:
+                    f.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+            LOGGER.info(
+                "parse_and_store: stored %d new traces from %d sessions "
+                "(%d skipped as duplicates)", len(fresh), len(new_ids),
+                len(new_records) - len(fresh),
+            )
 
-    # Update processed index
+    # Update processed index AFTER records are on disk. Even if this is
+    # interrupted, the dedup above makes the next run idempotent.
     _save_processed_index(sessions_dir, already_processed | set(new_ids))
 
     return new_records
+
+
+def _existing_trace_ids(sessions_dir: Path) -> set[str]:
+    """Return the set of trace_ids already present in records.jsonl."""
+    records_path = _records_path(sessions_dir)
+    if not records_path.exists():
+        return set()
+    ids: set[str] = set()
+    try:
+        with open(records_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    tid = data.get("trace_id")
+                    if tid:
+                        ids.add(tid)
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        LOGGER.warning("parse_and_store: failed to read existing records for dedup", exc_info=True)
+    return ids
 
 
 def load_all_records(sessions_dir: Path) -> list[TraceRecord]:

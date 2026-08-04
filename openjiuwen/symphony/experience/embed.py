@@ -37,7 +37,9 @@ class EmbeddingClient:
         # than 10 (HTTP 400 "batch size ... should not be larger than 10"); a
         # self-hosted OpenAI-compatible server (e.g. local bge-m3) typically has
         # no such cap, so callers using those should pass api_batch_size=64+.
-        self._api_batch_size = 10 if api_batch_size is None else int(api_batch_size)
+        # Floor at 1 — range(0, n, 0) raises ValueError, so a 0/negative batch
+        # would crash embed()/embed_batch() on the first call.
+        self._api_batch_size = max(1, 10 if api_batch_size is None else int(api_batch_size))
         self._api_max_retries = 5
         self._api_timeout = float(api_timeout)
 
