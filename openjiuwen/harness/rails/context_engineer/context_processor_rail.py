@@ -220,6 +220,10 @@ class ContextProcessorRail(DeepAgentRail):
                 "SessionMemoryCompressor",
                 SessionMemoryCompressorConfig(
                     enabled=False,
+                    memory=SessionMemoryConfig(
+                        enable_debug_dump=context_debug_enabled,
+                        debug_dump_dir=context_debug_dir,
+                    ),
                     enable_context_debug=context_debug_enabled,
                     context_debug_dir=context_debug_dir,
                 ),

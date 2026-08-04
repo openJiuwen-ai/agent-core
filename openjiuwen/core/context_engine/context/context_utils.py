@@ -487,7 +487,7 @@ class ContextUtils:
         if start_index < 0 or end_index >= len(messages) or start_index > end_index:
             raise IndexError("Invalid start/end index")
 
-        return messages[:start_index] + target_messages + messages[end_index + 1 :]
+        return messages[:start_index] + target_messages + messages[end_index + 1:]  # fmt: skip
 
     @staticmethod
     def find_all_dialogue_round(messages: List[BaseMessage]) -> List[List[Optional[int]]]:
