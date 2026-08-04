@@ -1,9 +1,12 @@
-"""Minimal capability fingerprint model required by graph construction."""
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Graph-compatible fingerprint contracts retained during component migration."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+
+from openjiuwen.symphony.models import CapabilityFingerprint
 
 
 @dataclass(frozen=True)
@@ -116,55 +119,12 @@ class Fingerprint:
         )
 
 
-@dataclass(frozen=True)
-class CapabilityFingerprint:
-    """Public capability-first fingerprint contract."""
-
-    capability_id: str
-    capability_type: str
-    name: str
-    description: str
-    version: str
-    inputs: list[ParameterSpec] = field(default_factory=list)
-    outputs: list[ArtifactSpec] = field(default_factory=list)
-    static_data: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def id(self) -> str:
-        return self.capability_id
-
-    @property
-    def type(self) -> str:
-        return self.capability_type
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "capability_id": self.capability_id,
-            "capability_type": self.capability_type,
-            "name": self.name,
-            "description": self.description,
-            "version": self.version,
-            "inputs": [item.to_dict() for item in self.inputs],
-            "outputs": [item.to_dict() for item in self.outputs],
-            "static_data": self.static_data,
-        }
-
-    def to_internal_dict(self) -> dict[str, Any]:
-        payload = self.to_dict()
-        payload["id"] = payload.pop("capability_id")
-        payload["type"] = payload.pop("capability_type")
-        return payload
-
-    def graph_identity_dict(self) -> dict[str, Any]:
-        """Return only fields that affect graph construction and matching."""
-
-        return _graph_identity(self)
+# Graph internals operate only on the normalized legacy shape.  Canonical
+# fingerprints are accepted at explicit boundaries and coerced before use.
+FingerprintLike = Fingerprint
 
 
-FingerprintLike = Fingerprint | CapabilityFingerprint
-
-
-def _graph_identity(value: FingerprintLike) -> dict[str, Any]:
+def _graph_identity(value: Fingerprint) -> dict[str, Any]:
     return {
         "type": value.type,
         "id": value.id,
@@ -176,14 +136,18 @@ def _graph_identity(value: FingerprintLike) -> dict[str, Any]:
     }
 
 
-def coerce_fingerprint(value: FingerprintLike | dict[str, Any] | Any) -> Fingerprint:
+def coerce_fingerprint(value: object) -> Fingerprint:
     if isinstance(value, Fingerprint):
         return value
     if isinstance(value, CapabilityFingerprint):
-        return Fingerprint.from_dict(value.to_dict())
+        validated = CapabilityFingerprint.model_validate(value)
+        return Fingerprint.from_dict(validated.to_dict())
     if isinstance(value, dict):
         return Fingerprint.from_dict(value)
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
         return Fingerprint.from_dict(to_dict())
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return Fingerprint.from_dict(model_dump(mode="python"))
     raise TypeError(f"Unsupported capability fingerprint: {type(value).__name__}")

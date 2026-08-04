@@ -14,7 +14,13 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from openjiuwen.symphony.orchestration.graph.models import LLMMatch, RelationCandidate, SkillRegistry
-from openjiuwen.symphony.shared.fingerprint import FingerprintLike
+from openjiuwen.symphony.shared.fingerprint import (
+    CapabilityFingerprint,
+    Fingerprint,
+    coerce_fingerprint,
+)
+
+FingerprintInput = Fingerprint | CapabilityFingerprint | dict[str, Any]
 
 CACHE_RECORD_SCHEMA = "Symphony-relation-match-cache-v1"
 CACHE_INDEX_SCHEMA = "Symphony-relation-match-cache-index-v1"
@@ -49,7 +55,7 @@ class CachedOntologyMatcher:
         matcher: Any,
         cache_path: str | Path,
         *,
-        fingerprints: Iterable[FingerprintLike],
+        fingerprints: Iterable[FingerprintInput],
     ) -> None:
         self.matcher = matcher
         self.cache = RelationMatchCache(
@@ -132,15 +138,13 @@ class RelationMatchCache:
         path: str | Path,
         *,
         matcher_signature: dict[str, Any],
-        fingerprints: Iterable[FingerprintLike],
+        fingerprints: Iterable[FingerprintInput],
     ) -> None:
         self.path = Path(path).resolve()
         self._lock = _path_lock(self.path)
         self.matcher_signature = _sanitize_matcher_metadata(dict(matcher_signature))
-        self.fingerprint_hashes = {
-            item.id: _stable_sha256(item.graph_identity_dict())
-            for item in fingerprints
-        }
+        normalized = (coerce_fingerprint(item) for item in fingerprints)
+        self.fingerprint_hashes = {item.id: _stable_sha256(item.graph_identity_dict()) for item in normalized}
         with self._lock:
             self._records = self._load()
         self._pending: dict[str, dict[str, Any]] = {}
@@ -246,10 +250,7 @@ def _sanitize_matcher_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, dict):
             sanitized[key] = _sanitize_matcher_metadata(value)
         elif isinstance(value, (list, tuple)):
-            sanitized[key] = [
-                _sanitize_matcher_metadata(item) if isinstance(item, dict) else item
-                for item in value
-            ]
+            sanitized[key] = [_sanitize_matcher_metadata(item) if isinstance(item, dict) else item for item in value]
         else:
             sanitized[key] = value
     return sanitized
@@ -257,8 +258,7 @@ def _sanitize_matcher_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 
 def _is_secret_field(normalized_key: str) -> bool:
     return normalized_key in _SECRET_MATCHER_FIELDS or any(
-        normalized_key.endswith(f"_{suffix}")
-        for suffix in _SECRET_MATCHER_FIELDS
+        normalized_key.endswith(f"_{suffix}") for suffix in _SECRET_MATCHER_FIELDS
     )
 
 

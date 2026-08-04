@@ -1,11 +1,15 @@
-"""Integration protocols for :mod:`openjiuwen.symphony`."""
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Public dependency-inversion protocols for Symphony integrations."""
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Awaitable, Protocol, Sequence
+from typing import Any, Protocol
 
+from openjiuwen.symphony.interfaces.capability import AtomicCapabilityProvider, CapabilityProvider
+from openjiuwen.symphony.interfaces.llm import SymphonyLLM, SymphonyMessage, SymphonyMessages
 
 _LLM_USAGE_CONTEXT: ContextVar[tuple[str, str | None]] = ContextVar(
     "symphony_llm_usage_context",
@@ -17,13 +21,15 @@ class LLMClient(Protocol):
     """Minimal JSON-completion contract used by graph and plan algorithms."""
 
     async def complete_json_async(self, **kwargs: Any) -> str:
+        """Return one structured model response as JSON text."""
         ...
 
 
-class CapabilityProvider(Protocol):
-    """Return the current capability inventory."""
+class OrchestrationCapabilityProvider(Protocol):
+    """Callable inventory source accepted by the orchestration service."""
 
     def __call__(self) -> Sequence[Any] | Awaitable[Sequence[Any]]:
+        """Return the current orchestration capability inventory."""
         ...
 
 
@@ -63,13 +69,17 @@ def thinking_disabled_request_overrides() -> dict[str, Any]:
 
 LLMConfig = Any
 
-
 __all__ = [
+    "AtomicCapabilityProvider",
     "CapabilityProvider",
     "LLMClient",
     "LLMConfig",
-    "current_llm_usage_context",
+    "OrchestrationCapabilityProvider",
+    "SymphonyLLM",
+    "SymphonyMessage",
+    "SymphonyMessages",
     "create_llm_client",
+    "current_llm_usage_context",
     "llm_usage_context",
     "thinking_disabled_request_overrides",
 ]

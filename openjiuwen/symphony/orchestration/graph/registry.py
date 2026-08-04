@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List
+from typing import Any, Iterable, List
 
 from openjiuwen.symphony.orchestration.graph.models import GraphDiagnostic, SkillRegistry
-from openjiuwen.symphony.shared.fingerprint import FingerprintLike
+from openjiuwen.symphony.shared.fingerprint import (
+    CapabilityFingerprint,
+    Fingerprint,
+    coerce_fingerprint,
+)
 
 
 class SkillRegistryBuilder:
     """Register normalized Skill fingerprints by stable ID."""
 
     @staticmethod
-    def register(fingerprints: Iterable[FingerprintLike]) -> SkillRegistry:
+    def register(
+        fingerprints: Iterable[Fingerprint | CapabilityFingerprint | dict[str, Any]],
+    ) -> SkillRegistry:
         skills = {}
         diagnostics: List[GraphDiagnostic] = []
+        normalized = [coerce_fingerprint(item) for item in fingerprints]
 
-        for fingerprint in sorted(fingerprints, key=lambda item: item.id):
+        for fingerprint in sorted(normalized, key=lambda item: item.id):
             if fingerprint.type not in {"skill", "subagent", "agent"}:
                 diagnostics.append(
                     GraphDiagnostic(
