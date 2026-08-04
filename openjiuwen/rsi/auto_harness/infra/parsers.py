@@ -1,0 +1,498 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Agent 输出解析工具集。
+
+提供从 agent 文本输出中提取结构化数据的通用函数：
+- ``parse_tasks``: 解析 JSON 任务列表
+- ``parse_learnings``: 解析 JSON 经验列表
+- ``parse_pr_draft``: 解析 PR draft JSON
+- ``parse_gaps``: 解析 markdown 表格中的竞品差距
+- ``parse_extension_designs``: 解析 JSON 扩展设计方案
+- ``extract_text``: 从 OutputSchema chunk 提取文本
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import uuid
+from typing import Any, List
+
+from openjiuwen.rsi.auto_harness.pipelines import (
+    normalize_pipeline_name,
+)
+from openjiuwen.rsi.auto_harness.schema import (
+    ExtensionDesign,
+    Gap,
+    OptimizationTask,
+    PipelineSelectionArtifact,
+    PullRequestDraft,
+)
+
+logger = logging.getLogger(__name__)
+_ALLOWED_PR_KINDS = {
+    "bug",
+    "task",
+    "feature",
+    "refactor",
+    "clean_code",
+}
+
+
+def _raw_decode_json_object(
+    text: str,
+    *,
+    start: int = 0,
+) -> tuple[dict[str, Any] | None, str]:
+    """Decode the first JSON object starting at or after ``start``.
+
+    This intentionally avoids regex-based closing fence detection. PR bodies
+    may contain Markdown code fences, so a non-greedy ```json ... ``` regex
+    can stop inside a JSON string and produce a truncated object.
+    """
+    decoder = json.JSONDecoder()
+    index = start
+    while index < len(text):
+        brace_index = text.find("{", index)
+        if brace_index < 0:
+            return None, "未找到 JSON 对象"
+        try:
+            item, _ = decoder.raw_decode(text[brace_index:])
+        except json.JSONDecodeError as exc:
+            index = brace_index + 1
+            last_error = exc
+            continue
+        if isinstance(item, dict):
+            return item, ""
+        index = brace_index + 1
+    if "last_error" in locals():
+        return None, f"JSON 解析失败: {last_error}"
+    return None, "未找到 JSON 对象"
+
+
+def _decode_json_object_from_markdown(
+    raw: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Decode a JSON object from fenced Markdown or surrounding prose."""
+    fence_match = re.search(r"```(?:json|JSON)?\s*", raw)
+    if fence_match:
+        item, error = _raw_decode_json_object(
+            raw,
+            start=fence_match.end(),
+        )
+        if item is not None:
+            return item, ""
+        # Fall through to a full-text scan. Some models include prose inside
+        # the fence before the object, or nest code fences in body text.
+    return _raw_decode_json_object(raw)
+
+
+def _unescape_loose_json_string(value: str) -> str:
+    """Best-effort unescape for model text that is almost JSON."""
+    return (
+        value.replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace('\\"', '"')
+        .replace("\\\\", "\\")
+    )
+
+
+def _parse_pr_draft_fields_loose(
+    raw: str,
+) -> dict[str, str] | None:
+    """Extract PR draft fields from malformed JSON-like text.
+
+    Some model outputs are wrapped in ```json but contain unescaped quotes
+    inside the long Markdown body. Strict JSON parsing is correct to reject
+    that, but for PR creation we only need title/kind/body, so recover those
+    fields directly.
+    """
+    title_match = re.search(
+        r'"title"\s*:\s*"(?P<title>(?:\\.|[^"\\])*)"',
+        raw,
+        re.DOTALL,
+    )
+    kind_match = re.search(
+        r'"kind"\s*:\s*"(?P<kind>[a-z_]+)"',
+        raw,
+        re.DOTALL,
+    )
+    body_start = re.search(
+        r'"body"\s*:\s*"',
+        raw,
+        re.DOTALL,
+    )
+    if not title_match or not body_start:
+        return None
+    body_start_index = body_start.end()
+    body_text = raw[body_start_index:]
+    body_end = re.search(
+        r'"\s*\}\s*(?:```)?',
+        body_text,
+        re.DOTALL,
+    )
+    if not body_end:
+        return None
+    body_end_index = body_end.start()
+    body = body_text[:body_end_index]
+    return {
+        "title": _unescape_loose_json_string(title_match.group("title")).strip(),
+        "kind": (kind_match.group("kind").strip() if kind_match else ""),
+        "body": _unescape_loose_json_string(body).strip(),
+    }
+
+
+def parse_tasks(raw: str) -> List[OptimizationTask]:
+    """从 agent 输出中解析 JSON 任务列表。
+
+    支持 ```json ... ``` 包裹和裸 JSON 数组。
+
+    Args:
+        raw: agent 输出的原始文本。
+
+    Returns:
+        解析后的 OptimizationTask 列表。
+    """
+    match = re.search(
+        r"```json\s*(.*?)\s*```",
+        raw,
+        re.DOTALL,
+    )
+    json_str: str
+    if match:
+        json_str = match.group(1)
+    else:
+        arr_match = re.search(r"\[.*]", raw, re.DOTALL)
+        if not arr_match:
+            return []
+        json_str = arr_match.group(0)
+
+    try:
+        items = json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse plan JSON")
+        return []
+
+    tasks: List[OptimizationTask] = []
+    for item in items:
+        if isinstance(item, dict) and "topic" in item:
+            tasks.append(
+                OptimizationTask(
+                    topic=item["topic"],
+                    description=item.get(
+                        "description",
+                        "",
+                    ),
+                    files=item.get("files", []),
+                    expected_effect=item.get(
+                        "expected_effect",
+                        "",
+                    ),
+                    pipeline_name=normalize_pipeline_name(str(item.get("pipeline_name", ""))),
+                )
+            )
+    return tasks
+
+
+def parse_learnings(raw: str) -> List[dict]:
+    """从 learnings agent 输出中解析 JSON 经验列表。
+
+    Args:
+        raw: agent 输出的原始文本。
+
+    Returns:
+        字典列表，每个包含 type/topic/summary/details。
+    """
+    match = re.search(
+        r"```json\s*(.*?)\s*```",
+        raw,
+        re.DOTALL,
+    )
+    json_str: str
+    if match:
+        json_str = match.group(1)
+    else:
+        arr_match = re.search(r"\[.*]", raw, re.DOTALL)
+        if not arr_match:
+            return []
+        json_str = arr_match.group(0)
+
+    try:
+        items = json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse learnings JSON")
+        return []
+
+    if not isinstance(items, list):
+        return []
+    return [item for item in items if isinstance(item, dict) and "topic" in item]
+
+
+def parse_pr_draft_with_error(
+    raw: str,
+) -> tuple[PullRequestDraft | None, str]:
+    """Parse a PR draft JSON response with detailed errors."""
+    item, error = _decode_json_object_from_markdown(raw)
+    if item is None:
+        item = _parse_pr_draft_fields_loose(raw)
+    if item is None:
+        logger.warning("Failed to parse PR draft JSON: %s", error)
+        return None, error or "JSON 解析失败"
+
+    title = str(item.get("title", "")).strip()
+    body = str(item.get("body", "")).strip()
+    kind = str(item.get("kind", "")).strip()
+    if not kind and body:
+        match = re.search(
+            r"(?m)^/kind\s+([a-z_]+)\s*$",
+            body,
+        )
+        if match:
+            kind = match.group(1).strip()
+    if not title or not body:
+        return None, "缺少 title 或 body"
+    if kind not in _ALLOWED_PR_KINDS:
+        return (
+            None,
+            "kind 必须是 bug/task/feature/refactor/clean_code 之一",
+        )
+    return PullRequestDraft(
+        title=title,
+        body=body,
+        kind=kind,
+    ), ""
+
+
+def parse_pr_draft(
+    raw: str,
+) -> PullRequestDraft | None:
+    """Parse a PR draft JSON response."""
+    draft, _ = parse_pr_draft_with_error(raw)
+    return draft
+
+
+def parse_pipeline_selection(
+    raw: str,
+) -> PipelineSelectionArtifact | None:
+    """Parse a selector agent JSON response."""
+    match = re.search(r"```json\s*(.*?)\s*```", raw, re.DOTALL)
+    json_str: str
+    if match:
+        json_str = match.group(1)
+    else:
+        obj_match = re.search(r"\{.*}", raw, re.DOTALL)
+        if not obj_match:
+            return None
+        json_str = obj_match.group(0)
+
+    try:
+        item = json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse pipeline selection JSON")
+        return None
+    if not isinstance(item, dict):
+        return None
+    pipeline_name = normalize_pipeline_name(str(item.get("pipeline_name", "")).strip())
+    if not pipeline_name:
+        return None
+    alternatives = item.get("alternatives", [])
+    if not isinstance(alternatives, list):
+        alternatives = []
+    required_inputs = item.get("required_inputs", [])
+    if not isinstance(required_inputs, list):
+        required_inputs = []
+    try:
+        confidence = float(item.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return PipelineSelectionArtifact(
+        pipeline_name=pipeline_name,
+        reason=str(item.get("reason", "")),
+        alternatives=[normalize_pipeline_name(str(v)) for v in alternatives],
+        confidence=confidence,
+        risk_level=str(item.get("risk_level", "")),
+        required_inputs=[str(v) for v in required_inputs],
+        fallback_pipeline=normalize_pipeline_name(str(item.get("fallback_pipeline", ""))),
+    )
+
+
+def extract_text(chunk: Any) -> str:
+    """从 OutputSchema chunk 中提取文本内容。
+
+    Args:
+        chunk: OutputSchema 实例。
+
+    Returns:
+        提取的文本，无内容时返回空字符串。
+    """
+    if hasattr(chunk, "payload"):
+        payload = chunk.payload
+        if isinstance(payload, dict):
+            return str(payload.get("content", "") or payload.get("output", ""))
+        if isinstance(payload, str):
+            return payload
+    return ""
+
+
+def parse_gaps(raw_text: str) -> List[Gap]:
+    """Parse structured text into ``Gap`` objects.
+
+    Accepts a markdown table where each row has columns:
+    ``competitor | feature | current_state |
+    gap_description | impact | feasibility |
+    suggested_approach | target_files``
+
+    Args:
+        raw_text: Markdown table or similar text.
+
+    Returns:
+        Gaps sorted by priority descending.
+    """
+    gaps: list[Gap] = []
+    lines = raw_text.strip().splitlines()
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("|--"):
+            continue
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.split("|")[1:-1]]
+        if len(cells) < 8:
+            continue
+        # Skip header row
+        if cells[0].lower() in ("competitor", "竞品"):
+            continue
+        gap = _row_to_gap(cells)
+        if gap:
+            gaps.append(gap)
+
+    gaps.sort(key=lambda g: g.priority, reverse=True)
+    logger.info("Parsed %d gaps from raw text", len(gaps))
+    return gaps
+
+
+def _row_to_gap(cells: list[str]) -> Gap | None:
+    """Convert a table row (8 cells) into a Gap.
+
+    Args:
+        cells: List of cell strings from a markdown row.
+
+    Returns:
+        A ``Gap`` instance, or ``None`` on parse error.
+    """
+    try:
+        target_files = [f.strip() for f in cells[7].split(",") if f.strip()]
+        return Gap(
+            id=uuid.uuid4().hex[:8],
+            competitor=cells[0],
+            feature=cells[1],
+            current_state=cells[2],
+            gap_description=cells[3],
+            impact=float(cells[4]),
+            feasibility=float(cells[5]),
+            suggested_approach=cells[6],
+            target_files=target_files,
+        )
+    except (ValueError, IndexError):
+        logger.warning(
+            "Skipping malformed gap row: %s",
+            " | ".join(cells[:4]),
+        )
+        return None
+
+
+def parse_extension_designs(
+    raw: str,
+) -> tuple[str | None, List[ExtensionDesign]]:
+    """从 agent 输出中解析 ExtensionDesign JSON 列表。
+
+    支持两种格式（向后兼容）：
+    - 新格式：{"package_name": "...", "designs": [...]}
+    - 旧格式：[{"gap_id": ...}, ...] 或单个 design 对象
+
+    支持 ```json ... ``` 包裹和裸 JSON。
+
+    Args:
+        raw: agent 输出的原始文本。
+
+    Returns:
+        (package_name, designs) 元组。旧格式返回 (None, designs)。
+    """
+    match = re.search(
+        r"```json\s*(.*?)\s*```",
+        raw,
+        re.DOTALL,
+    )
+    json_str: str
+    if match:
+        json_str = match.group(1)
+    else:
+        # 尝试匹配完整 JSON 对象（新格式）或数组（旧格式）
+        obj_match = re.search(r"\{.*\}", raw, re.DOTALL)
+        arr_match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if obj_match:
+            json_str = obj_match.group(0)
+        elif arr_match:
+            json_str = arr_match.group(0)
+        else:
+            return None, []
+
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse extension designs JSON")
+        return None, []
+
+    # 判断格式类型
+    package_name: str | None = None
+    items: List[Any] = []
+    if isinstance(data, dict) and "designs" in data:
+        # 新格式：顶层对象包含 package_name 和 designs
+        package_name_raw = data.get("package_name")
+        if package_name_raw and isinstance(package_name_raw, str):
+            package_name = package_name_raw.strip()
+        items = data.get("designs", [])
+        if not isinstance(items, list):
+            items = [items]
+    elif isinstance(data, list):
+        # 旧格式：裸数组
+        items = data
+    elif isinstance(data, dict):
+        # 兼容：单个 design 对象（无 package_name）
+        items = [data]
+    else:
+        return None, []
+
+    designs: List[ExtensionDesign] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        extension_name = str(item.get("extension_name", "")).strip()
+        if not extension_name:
+            continue
+        kind = str(item.get("kind", "capability")).strip() or "capability"
+        if kind not in {"capability", "constraint"}:
+            kind = "capability"
+        depends_on = item.get("depends_on", []) or []
+        if not isinstance(depends_on, list):
+            depends_on = []
+        applies_to = item.get("applies_to", []) or []
+        if not isinstance(applies_to, list):
+            applies_to = []
+        designs.append(
+            ExtensionDesign(
+                gap_id=str(item.get("gap_id", "")),
+                extension_name=extension_name,
+                kind=kind,
+                depends_on=list(depends_on),
+                applies_to=list(applies_to),
+                components=item.get("components", []),
+                file_plan=item.get("file_plan", {}),
+                harness_config_patch=item.get("harness_config_patch", {}),
+                skill_source=str(item.get("skill_source", "")),
+            )
+        )
+    return package_name, designs
