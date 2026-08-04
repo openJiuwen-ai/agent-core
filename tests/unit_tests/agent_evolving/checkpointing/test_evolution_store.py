@@ -206,6 +206,57 @@ class TestEvolutionStoreBasics:
         assert [record.id for record in persisted_swarm_log.entries] == ["ev_swarm"]
 
     @staticmethod
+    @pytest.mark.asyncio
+    async def test_append_record_allows_symlink_into_configured_skill_root(tmp_path: Path):
+        team_root = tmp_path / "team-skills"
+        global_root = tmp_path / "global-skills"
+        global_skill = prepare_skill(
+            global_root,
+            "shared-skill",
+            "---\nname: shared-skill\nkind: swarm-skill\n---\n\n# Shared Skill\n",
+        )
+        team_root.mkdir()
+        try:
+            (team_root / "shared-skill").symlink_to(global_skill, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("directory symlinks are unavailable")
+        store = EvolutionStore([str(team_root), str(global_root)])
+
+        await store.append_record(
+            "shared-skill",
+            make_record("ev_shared"),
+            subject_kind="swarm-skill",
+        )
+
+        assert "ev_shared" in (global_skill / "evolutions.json").read_text(encoding="utf-8")
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_append_record_rejects_symlink_outside_configured_roots(tmp_path: Path):
+        team_root = tmp_path / "team-skills"
+        outside_skill = prepare_skill(
+            tmp_path / "outside",
+            "shared-skill",
+            "---\nname: shared-skill\nkind: swarm-skill\n---\n\n# Shared Skill\n",
+        )
+        team_root.mkdir()
+        try:
+            (team_root / "shared-skill").symlink_to(outside_skill, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pytest.skip("directory symlinks are unavailable")
+        store = EvolutionStore(str(team_root))
+
+        with pytest.raises(BaseError) as exc_info:
+            await store.append_record(
+                "shared-skill",
+                make_record("ev_rejected"),
+                subject_kind="swarm-skill",
+            )
+
+        assert exc_info.value.status == StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR
+        assert not (outside_skill / "evolutions.json").exists()
+
+    @staticmethod
     def test_subject_kind_none_preserves_name_only_resolution_order(tmp_path: Path):
         first_root = tmp_path / "first"
         second_root = tmp_path / "second"
