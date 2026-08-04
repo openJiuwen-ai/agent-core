@@ -30,40 +30,18 @@ _NORMAL_REPLY_CREATION_ACTION_TERMS = (
 _NORMAL_REPLY_SKILL_TERMS = ("skill", "技能")
 
 _SKILL_CREATION_FOLLOW_UP_CN = (
-    "这是运行时自动插入的 Skill 创建 follow-up，不是用户的新需求。\n"
-    "系统已检测到本段执行达到技能沉淀自检触发条件；请参考常驻提示词中的“技能沉淀自检”规则，"
-    "基于当前可见上下文和刚完成的执行过程，直接判断是否包含可复用内容，"
-    "不需要重新判断是否达到自检触发门槛。\n"
-    "如果能提炼出可复用流程、错误恢复路径、稳定验证方式、环境注意事项、用户偏好、协作方式或检查清单，"
-    "即可在本条普通回复末尾追加创建询问。\n"
-    "\n"
-    "如果判断应创建：最多追加两句。第一句简短说明发现的可复用流程；"
-    "第二句询问用户是否创建 Skill。\n"
-    "如果只能关联当前一次性上下文，或已被现有 Skill 覆盖：不要提及自检、沉淀、无需创建、已检查、内部判断或本提醒；"
-    "回复应自然承接刚完成的任务，优先询问与该任务相关的下一步需求。\n"
-    "\n"
-    "无需展开证据，不要重新总结任务结果、产物内容、完整执行步骤、长证据列表或判断过程。"
+    "这是运行时插入的 Skill 创建自检，不是用户的新需求。\n"
+    "参考常驻“技能沉淀自检”规则，只判断本轮是否形成可复用方法，不重新判断运行时触发门槛。\n"
+    "如需建议，只在普通最终回复末尾追加一至两句，并同时包含可复用方法和是否创建 Skill 的确认问题；"
+    "否则自然回复，不提本提醒或内部判断。"
 )
 
 _SKILL_CREATION_FOLLOW_UP_EN = (
-    "This is a runtime-inserted Skill creation follow-up; it is not a new user request.\n"
-    "The system has detected that this execution reached the skill capture self-check trigger. "
-    'Refer to the standing "Skill Capture Self-Check" rules and, based on the visible context and the '
-    "recently completed execution, directly decide whether it contains reusable content; do not "
-    "re-decide whether the self-check trigger was reached.\n"
-    "If you can extract a reusable workflow, error recovery path, stable validation method, "
-    "environment note, user preference, collaboration pattern, or checklist, you may append a creation "
-    "question to the end of this normal reply.\n"
-    "\n"
-    "If creation is appropriate: append at most two short sentences. The first sentence should briefly "
-    "state the reusable workflow found; the second should ask whether to create a Skill.\n"
-    "If it only applies to the current one-off context, or is already covered by an existing Skill: "
-    "do not mention self-checks, capture, no need to create, checked status, internal judgment, or this "
-    "reminder; naturally continue from the completed task and preferably ask about a task-related next "
-    "step.\n"
-    "\n"
-    "No need to expand the evidence; do not recap the task result, artifact content, full execution "
-    "steps, a long evidence list, or your reasoning process."
+    "This runtime-inserted Skill creation self-check is not a new user request.\n"
+    'Refer to the standing "Skill Capture Self-Check" rules and judge only whether this round produced a reusable '
+    "method; do not re-evaluate the runtime trigger threshold.\n"
+    "If suggesting, append only one or two sentences to the normal final reply and include both the reusable method "
+    "and the Skill creation question; otherwise reply naturally without mentioning this reminder or internal judgment."
 )
 
 

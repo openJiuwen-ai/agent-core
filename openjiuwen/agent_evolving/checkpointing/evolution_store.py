@@ -449,14 +449,7 @@ class EvolutionStore:
         the host accepts the suggestion.
         """
         async with self._get_skill_lock(name):
-            evo_log = await self._records.append_record_transactional(
-                name,
-                record,
-                subject_kind=subject_kind,
-                update_skill_md=update_skill_md,
-            )
-            if evo_log is None:
-                return
+            evo_log = await self._records.append_record_transactional(name, record, subject_kind=subject_kind)
             logger.info(
                 "[EvolutionStore] wrote %s/%s (id=%s, target=%s, update_skill_md=%s)",
                 name,
