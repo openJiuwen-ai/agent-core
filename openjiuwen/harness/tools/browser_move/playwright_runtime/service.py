@@ -267,16 +267,18 @@ class BrowserService:
             else f"profile:{self._profile_name}"
         )
         server_id = (self.mcp_cfg.server_id or "").strip() or self.mcp_cfg.server_name
-        return (
-            browser_key,
-            self._profile_name,
-            self._driver_mode,
-            display_mode,
-            managed_args,
-            self._normalize_browser_binary(self._configured_browser_binary()),
-            normalized_user_data_dir,
-            self._configured_cdp_endpoint(),
-            server_id,
+        return BrowserServiceIdentity(
+            browser_key=browser_key,
+            profile_name=self._profile_name,
+            driver_mode=self._driver_mode,
+            display_mode=display_mode,
+            managed_args=managed_args,
+            browser_binary=self.normalize_browser_binary(
+                self._configured_browser_binary()
+            ),
+            user_data_dir=normalized_user_data_dir,
+            cdp_endpoint=self._configured_cdp_endpoint(),
+            server_id=server_id,
         )
 
     @property
@@ -371,7 +373,7 @@ class BrowserService:
                 candidates.append(named)
 
         _expected_extra_args = parse_command_args(os.getenv("BROWSER_MANAGED_ARGS") or "")
-        expected_binary = self._normalize_browser_binary(self._configured_browser_binary())
+        expected_binary = self.normalize_browser_binary(self._configured_browser_binary())
         for profile in candidates:
             endpoint = str(profile.cdp_url or "").strip()
             if not endpoint or not self._is_cdp_endpoint_ready(endpoint):
@@ -380,7 +382,7 @@ class BrowserService:
             # BROWSER_MANAGED_ARGS — e.g. a headed Chrome when headless is now on.
             if profile.extra_args != _expected_extra_args:
                 continue
-            if self._normalize_browser_binary(profile.browser_binary) != expected_binary:
+            if self.normalize_browser_binary(profile.browser_binary) != expected_binary:
                 continue
             try:
                 self._profile_store.upsert_profile(profile, select=True)
@@ -410,7 +412,7 @@ class BrowserService:
         return str(instance_binary or os.getenv("BROWSER_MANAGED_BINARY") or "").strip()
 
     @staticmethod
-    def _normalize_browser_binary(value: str) -> str:
+    def normalize_browser_binary(value: str) -> str:
         raw = str(value or "").strip()
         if not raw:
             return ""
@@ -928,8 +930,38 @@ class BrowserService:
 
         next_owner = release.next_heartbeat_owner
         if next_owner is not None and next_owner.started:
-            next_owner._start_heartbeat()
+            next_owner.start_heartbeat_if_started()
         return True
+
+    @property
+    def managed_driver(self) -> Optional[ManagedBrowserDriver]:
+        """Return the managed driver coordinated by the process registry."""
+        return self._managed_driver
+
+    def start_heartbeat_if_started(self) -> None:
+        """Start heartbeat after registry ownership is transferred."""
+        if self.started:
+            self._start_heartbeat()
+
+    async def detach_lifecycle_resources(self) -> Optional[ManagedBrowserDriver]:
+        """Detach this task binding while preserving the driver for reset."""
+        driver = self._managed_driver
+        await self._stop_heartbeat()
+        self.started = False
+        self._registered_cdp_endpoint = ""
+        self._browser_agent = None
+        self._connection_healthy = False
+        self._last_heartbeat_ok = None
+        return driver
+
+    async def remove_registered_mcp_binding(self) -> None:
+        """Remove this service's MCP binding during coordinated reset."""
+        await self._remove_registered_mcp_server()
+
+    def clear_managed_browser_resources(self) -> None:
+        """Forget stopped managed resources after a coordinated reset."""
+        self._managed_driver = None
+        self._active_profile = None
 
     @classmethod
     async def _reset_lifecycle_resources(
@@ -944,20 +976,14 @@ class BrowserService:
             services = (fallback_service,)
         drivers = list(snapshot.managed_drivers)
         for service in services:
-            driver = service._managed_driver
+            driver = await service.detach_lifecycle_resources()
             if driver is not None and all(existing is not driver for existing in drivers):
                 drivers.append(driver)
-            await service._stop_heartbeat()
-            service.started = False
-            service._registered_cdp_endpoint = ""
-            service._browser_agent = None
-            service._connection_healthy = False
-            service._last_heartbeat_ok = None
 
         representative = services[0] if services else fallback_service
         if representative is not None:
             try:
-                await representative._remove_registered_mcp_server()
+                await representative.remove_registered_mcp_binding()
             except Exception:
                 pass
 
@@ -972,8 +998,7 @@ class BrowserService:
                     driver,
                 )
         for service in services:
-            service._managed_driver = None
-            service._active_profile = None
+            service.clear_managed_browser_resources()
         return bool(services or drivers)
 
     async def reset(self) -> None:
@@ -997,7 +1022,7 @@ class BrowserService:
             browser_key=str(browser_key or "").strip(),
             profile_name=str(profile_name or "").strip(),
             display_mode=str(display_mode or "").strip().lower(),
-            browser_binary=cls._normalize_browser_binary(browser_binary),
+            browser_binary=cls.normalize_browser_binary(browser_binary),
         )
         reset_count = 0
         for identity in identities:

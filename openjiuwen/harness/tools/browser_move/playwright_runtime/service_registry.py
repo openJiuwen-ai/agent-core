@@ -7,10 +7,22 @@ from __future__ import annotations
 import threading
 import weakref
 from dataclasses import dataclass, field
-from typing import Any, Hashable, Optional
+from typing import Any, Optional
 
 
-BrowserServiceIdentity = tuple[Hashable, ...]
+@dataclass(frozen=True)
+class BrowserServiceIdentity:
+    """Stable process-level identity for one logical browser instance."""
+
+    browser_key: str
+    profile_name: str
+    driver_mode: str
+    display_mode: str
+    managed_args: tuple[str, ...]
+    browser_binary: str
+    user_data_dir: str
+    cdp_endpoint: str
+    server_id: str
 
 
 @dataclass(frozen=True)
@@ -157,7 +169,7 @@ class BrowserServiceRegistry:
             services = tuple(entry.services)
             drivers = list(entry.managed_drivers)
             for service in services:
-                driver = getattr(service, "_managed_driver", None)
+                driver = getattr(service, "managed_driver", None)
                 if driver is not None and all(existing is not driver for existing in drivers):
                     drivers.append(driver)
 
@@ -200,17 +212,24 @@ class BrowserServiceRegistry:
     ) -> tuple[BrowserServiceIdentity, ...]:
         """Find preserved drivers for one exact logical browser identity."""
         with self._lock:
-            return tuple(
-                identity
-                for identity, entry in self._entries.items()
-                if entry.managed_drivers
-                and len(identity) >= 6
-                and identity[0] == browser_key
-                and identity[1] == profile_name
-                and identity[2] == "managed"
-                and identity[3] == display_mode
-                and identity[5] == browser_binary
-            )
+            matches: list[BrowserServiceIdentity] = []
+            for identity, entry in self._entries.items():
+                if not entry.managed_drivers:
+                    continue
+                if not isinstance(identity, BrowserServiceIdentity):
+                    continue
+                if identity.browser_key != browser_key:
+                    continue
+                if identity.profile_name != profile_name:
+                    continue
+                if identity.driver_mode != "managed":
+                    continue
+                if identity.display_mode != display_mode:
+                    continue
+                if identity.browser_binary != browser_binary:
+                    continue
+                matches.append(identity)
+            return tuple(matches)
 
     def clear(self) -> None:
         """Clear metadata for isolated tests after their resources are stopped."""

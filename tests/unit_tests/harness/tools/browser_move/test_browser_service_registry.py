@@ -295,5 +295,5 @@ def test_display_mode_is_part_of_lifecycle_identity(monkeypatch) -> None:
     headed = _make_service()
 
     assert headless.lifecycle_identity != headed.lifecycle_identity
-    assert "headless" in headless.lifecycle_identity
-    assert "headed" in headed.lifecycle_identity
+    assert headless.lifecycle_identity.display_mode == "headless"
+    assert headed.lifecycle_identity.display_mode == "headed"

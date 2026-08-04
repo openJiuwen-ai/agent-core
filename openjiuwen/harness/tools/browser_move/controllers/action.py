@@ -202,19 +202,22 @@ def _validate_batch_op_requirements(
     if op in {"fill", "type", "autocomplete"} and "value" not in step:
         suffix = "; use value, not text" if "text" in step else ""
         errors.append(f"steps[{index}] op={op} requires value{suffix}")
-    if op == "select_option" and not any(
-        step.get(key) is not None
-        for key in (
-            "value",
-            "values",
-            "option_value",
-            "option_text",
-            "option_label",
-            "label_value",
-            "choose_text",
-            "index",
-        )
-    ):
+    option_value_keys = (
+        "value",
+        "values",
+        "option_value",
+        "option_text",
+        "option_label",
+        "label_value",
+        "choose_text",
+        "index",
+    )
+    has_option_value = False
+    for key in option_value_keys:
+        if step.get(key) is not None:
+            has_option_value = True
+            break
+    if op == "select_option" and not has_option_value:
         errors.append(f"steps[{index}] select_option requires an option value")
     if op == "press" and not str(step.get("key") or "").strip():
         errors.append(f"steps[{index}] press requires key")
@@ -1206,7 +1209,9 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "        const previousText = String(step.previous_text ?? step.initial_text ?? '');\n"
         "        const observation = await pollUntil(async () => {\n"
         "          if (await locator.count() !== 1) return { ok: false, value: '' };\n"
-        "          const value = compactText(await firstLocator(locator).innerText(), Number(step.max_chars || 1000));\n"
+        "          const value = compactText(\n"
+        "            await firstLocator(locator).innerText(), Number(step.max_chars || 1000)\n"
+        "          );\n"
         "          return { ok: value !== previousText, value };\n"
         "        }, timeout, step.poll_interval_ms, Number(step.stable_ms || 0));\n"
         "        item.text = observation.value;\n"
@@ -1894,12 +1899,11 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
         after_each = max(0, min(5000, after_each))
 
         if global_timeout_ms is None:
-            condition_steps = sum(
-                1
-                for step in safe_steps
-                if str(step.get("op") or "").strip().lower()
-                in _BATCH_CONDITION_OPS
-            )
+            condition_steps = 0
+            for step in safe_steps:
+                op = str(step.get("op") or "").strip().lower()
+                if op in _BATCH_CONDITION_OPS:
+                    condition_steps += 1
             action_steps = len(safe_steps) - condition_steps
             computed_timeout_ms = (
                 action_steps * (per_step_timeout + after_each + 250)
@@ -2139,11 +2143,11 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
                     item.get("error") or "-",
                 )
 
-        compact_steps = [
-            compact
-            for item in completed_steps
-            if (compact := _compact_batch_step(item)) is not None
-        ]
+        compact_steps = []
+        for item in completed_steps:
+            compact = _compact_batch_step(item)
+            if compact is not None:
+                compact_steps.append(compact)
         extracted = parsed.get("extracted")
         compact_result = {
             "ok": bool(parsed.get("ok", False)),

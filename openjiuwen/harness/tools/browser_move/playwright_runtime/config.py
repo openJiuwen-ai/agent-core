@@ -39,12 +39,14 @@ from ..utils.env import (
 )
 
 
-PLAYWRIGHT_MCP_CAPABILITY_NAMES: tuple[str, ...] = tuple(
-    capability.name
-    for capability in DEFAULT_BROWSER_CAPABILITIES
-    if capability.name != CORE_BROWSER_CAPABILITY_NAME
-    and capability.name not in POLICY_ONLY_BROWSER_CAPABILITY_NAMES
-)
+_playwright_mcp_capability_names: list[str] = []
+for capability_spec in DEFAULT_BROWSER_CAPABILITIES:
+    if capability_spec.name == CORE_BROWSER_CAPABILITY_NAME:
+        continue
+    if capability_spec.name in POLICY_ONLY_BROWSER_CAPABILITY_NAMES:
+        continue
+    _playwright_mcp_capability_names.append(capability_spec.name)
+PLAYWRIGHT_MCP_CAPABILITY_NAMES = tuple(_playwright_mcp_capability_names)
 
 
 @dataclass

@@ -169,6 +169,35 @@ _BROWSER_PHASE_DEFINITIONS = {
 }
 
 
+def _contains_any_token(value: str, tokens: Iterable[str]) -> bool:
+    for token in tokens:
+        if token in value:
+            return True
+    return False
+
+
+def _has_non_empty_mapping_value(
+    value: Dict[str, Any],
+    keys: Iterable[str],
+) -> bool:
+    for key in keys:
+        if value.get(key) not in (None, ""):
+            return True
+    return False
+
+
+def _copy_non_none_values(
+    value: Dict[str, Any],
+    keys: Iterable[str],
+) -> Dict[str, Any]:
+    copied: Dict[str, Any] = {}
+    for key in keys:
+        item = value.get(key)
+        if item is not None:
+            copied[key] = item
+    return copied
+
+
 class BrowserAgentRuntime:
     """Runtime kernel for browser lifecycle and deterministic helper actions."""
 
@@ -299,7 +328,7 @@ class BrowserAgentRuntime:
             self._last_observed_url = normalized
 
     @classmethod
-    def _extract_result_url(cls, value: Any) -> str:
+    def extract_result_url(cls, value: Any) -> str:
         if isinstance(value, dict):
             direct = value.get("url")
             if direct:
@@ -308,12 +337,12 @@ class BrowserAgentRuntime:
             if isinstance(page, dict) and page.get("url"):
                 return str(page["url"])
             for nested in value.values():
-                resolved = cls._extract_result_url(nested)
+                resolved = cls.extract_result_url(nested)
                 if resolved:
                     return resolved
         elif isinstance(value, (list, tuple)):
             for nested in value:
-                resolved = cls._extract_result_url(nested)
+                resolved = cls.extract_result_url(nested)
                 if resolved:
                     return resolved
         elif isinstance(value, str):
@@ -355,7 +384,7 @@ class BrowserAgentRuntime:
         return ""
 
     @staticmethod
-    def _tool_result_succeeded(value: Any) -> bool:
+    def tool_result_succeeded(value: Any) -> bool:
         if hasattr(value, "success") and getattr(value, "success", None) is False:
             return False
         if isinstance(value, dict):
@@ -377,14 +406,12 @@ class BrowserAgentRuntime:
 
     def validate_reference_values(self, values: Iterable[str]) -> None:
         page_state = self._ensure_page_state()
-        stale = sorted(
-            {
-                ref_value
-                for ref_value in values
-                if ref_value in page_state.reference_generations
-                and page_state.reference_generations[ref_value] != page_state.generation
-            }
-        )
+        stale_values: set[str] = set()
+        for ref_value in values:
+            ref_generation = page_state.reference_generations.get(ref_value)
+            if ref_generation is not None and ref_generation != page_state.generation:
+                stale_values.add(ref_value)
+        stale = sorted(stale_values)
         if stale:
             raise ValueError(
                 "Stale browser snapshot reference(s) "
@@ -401,17 +428,13 @@ class BrowserAgentRuntime:
         tool_result: Any,
     ) -> None:
         normalized_name = str(tool_name or "").strip().lower()
-        if not self._tool_result_succeeded(tool_result):
+        if not self.tool_result_succeeded(tool_result):
             return
-        result_url = self._extract_result_url(tool_result)
+        result_url = self.extract_result_url(tool_result)
         result_title = self._extract_result_title(tool_result)
-        navigation_like = any(
-            token in normalized_name
-            for token in (
-                "browser_navigate",
-                "browser_navigate_back",
-                "browser_tabs",
-            )
+        navigation_like = _contains_any_token(
+            normalized_name,
+            ("browser_navigate", "browser_navigate_back", "browser_tabs"),
         )
         if "browser_tabs" in normalized_name and isinstance(tool_args, dict):
             navigation_like = str(tool_args.get("action") or "").lower() in {
@@ -457,7 +480,7 @@ class BrowserAgentRuntime:
         if isinstance(tool_args, str):
             try:
                 parsed = json.loads(tool_args)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except ValueError:
                 return ""
         else:
             parsed = tool_args
@@ -891,12 +914,18 @@ class BrowserAgentRuntime:
                 f"Target {target.target_id} has primary_link={target.href}; "
                 "call browser_navigate directly instead of clicking it in a batch"
             )
-        if (
-            op in _BATCH_MUTATING_TARGET_OPS
-            and target.source != "ax"
-            and (not target.visible or not target.enabled or not target.actionable)
-        ):
-            raise ValueError(f"PageState target {target.target_id} is not actionable in {target.generation_id}")
+        requires_actionability = (
+            op in _BATCH_MUTATING_TARGET_OPS and target.source != "ax"
+        )
+        if requires_actionability:
+            is_unavailable = (
+                not target.visible or not target.enabled or not target.actionable
+            )
+            if is_unavailable:
+                raise ValueError(
+                    f"PageState target {target.target_id} is not actionable "
+                    f"in {target.generation_id}"
+                )
         if target.locator.get("ref"):
             target = await self._materialize_ax_target(target)
 
@@ -950,17 +979,15 @@ class BrowserAgentRuntime:
                 generation_id=generation_id,
                 allow_navigation_rewrite=allow_navigation_rewrite,
             )
-            if any(
-                step.get(key) not in (None, "")
-                for key in (
-                    "option_target_id",
-                    "choose_target_id",
-                    "option_ref",
-                    "choose_ref",
-                    "option_selector",
-                    "choose_selector",
-                )
-            ):
+            option_target_keys = (
+                "option_target_id",
+                "choose_target_id",
+                "option_ref",
+                "choose_ref",
+                "option_selector",
+                "choose_selector",
+            )
+            if _has_non_empty_mapping_value(step, option_target_keys):
                 await self._resolve_batch_target(
                     step,
                     generation_id=generation_id,
@@ -1047,7 +1074,7 @@ class BrowserAgentRuntime:
             return None
         try:
             tool_result = await tool.invoke(tool_args)
-            success = self._tool_result_succeeded(tool_result)
+            success = self.tool_result_succeeded(tool_result)
             error = str(getattr(tool_result, "error", "") or "").strip()
             payload = getattr(tool_result, "data", None)
             if payload is None:
@@ -1073,7 +1100,7 @@ class BrowserAgentRuntime:
                 tool_result=recorded_payload,
             )
 
-        runtime_url = self._extract_result_url(payload)
+        runtime_url = self.extract_result_url(payload)
         if tool_name == "browser_navigate" and success:
             runtime_url = runtime_url or str(tool_args.get("url") or "")
         runtime_title = self._extract_result_title(payload)
@@ -1412,7 +1439,7 @@ async def reset_managed_browser_runtime(
     browser_binary: str = "",
 ) -> int:
     """Reset only the configured managed browser, including its idle handle."""
-    normalized_binary = BrowserService._normalize_browser_binary(browser_binary)
+    normalized_binary = BrowserService.normalize_browser_binary(browser_binary)
     normalized_key = str(browser_key or "").strip()
     normalized_profile = str(profile_name or "").strip()
     normalized_mode = str(display_mode or "").strip().lower()
@@ -1420,14 +1447,15 @@ async def reset_managed_browser_runtime(
     reset_count = 0
     for runtime in list(_ACTIVE_BROWSER_RUNTIMES):
         identity = runtime.service.lifecycle_identity
-        if not (
-            len(identity) >= 6
-            and identity[0] == normalized_key
-            and identity[1] == normalized_profile
-            and identity[2] == "managed"
-            and identity[3] == normalized_mode
-            and identity[5] == normalized_binary
-        ):
+        matches_browser = identity.browser_key == normalized_key
+        matches_profile = identity.profile_name == normalized_profile
+        matches_mode = identity.display_mode == normalized_mode
+        matches_binary = identity.browser_binary == normalized_binary
+        if identity.driver_mode != "managed":
+            continue
+        if not matches_browser or not matches_profile:
+            continue
+        if not matches_mode or not matches_binary:
             continue
         try:
             await runtime.reset()
@@ -1704,17 +1732,15 @@ class BrowserRuntimeRail(AgentRail):
         tool_result: Any,
     ) -> None:
         normalized_name = str(tool_name or "").strip().lower()
-        if not any(
-            token in normalized_name
-            for token in (
-                "browser_navigate",
-                "browser_tabs",
-                "browser_snapshot",
-                "browser_find",
-                "browser_probe_",
-                "browser_batch_interact",
-            )
-        ):
+        page_state_tokens = (
+            "browser_navigate",
+            "browser_tabs",
+            "browser_snapshot",
+            "browser_find",
+            "browser_probe_",
+            "browser_batch_interact",
+        )
+        if not _contains_any_token(normalized_name, page_state_tokens):
             return
 
         page_state = self._runtime.export_page_state()
@@ -1842,7 +1868,7 @@ class BrowserRuntimeRail(AgentRail):
         if original_is_json:
             try:
                 parsed = json.loads(tool_args)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except ValueError:
                 return tool_args
         elif isinstance(tool_args, dict):
             parsed = dict(tool_args)
@@ -1874,7 +1900,7 @@ class BrowserRuntimeRail(AgentRail):
         if isinstance(tool_args, str):
             try:
                 parsed = json.loads(tool_args)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except ValueError:
                 return ()
         else:
             parsed = tool_args
@@ -2052,7 +2078,7 @@ class BrowserRuntimeRail(AgentRail):
         if isinstance(tool_args, str):
             try:
                 parsed = json.loads(tool_args)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except ValueError:
                 return {}
             return parsed if isinstance(parsed, dict) else {}
         return {}
@@ -2093,13 +2119,15 @@ class BrowserRuntimeRail(AgentRail):
             for token in ("fill", "type", "select", "press", "file_upload")
         ):
             return "form"
-        if any(
-            token in name
-            for token in (
-                "probe", "snapshot", "evaluate", "run_code",
-                "console", "network_request",
-            )
-        ):
+        extraction_tokens = (
+            "probe",
+            "snapshot",
+            "evaluate",
+            "run_code",
+            "console",
+            "network_request",
+        )
+        if _contains_any_token(name, extraction_tokens):
             return "extraction"
         current = str(state.get("current_phase") or "navigation")
         return current if current in _BROWSER_PHASE_DEFINITIONS else "navigation"
@@ -2111,35 +2139,36 @@ class BrowserRuntimeRail(AgentRail):
         tool_args: Any,
     ) -> str:
         args = cls._coerce_tool_args(tool_args)
-        targets = {
-            key: args.get(key)
-            for key in (
-                "url", "href", "selector", "target", "ref",
-                "role", "name", "text", "query",
-            )
-            if args.get(key) is not None
-        }
+        target_keys = (
+            "url",
+            "href",
+            "selector",
+            "target",
+            "ref",
+            "role",
+            "name",
+            "text",
+            "query",
+        )
+        targets = _copy_non_none_values(args, target_keys)
         steps = args.get("steps")
         if isinstance(steps, list):
-            targets["steps"] = [
-                {
-                    key: step.get(key)
-                    for key in (
-                        "op",
-                        "url",
-                        "selector",
-                        "role",
-                        "name",
-                        "label",
-                        "placeholder",
-                        "text",
-                        "field",
-                    )
-                    if step.get(key) is not None
-                }
-                for step in steps
-                if isinstance(step, dict)
-            ]
+            step_keys = (
+                "op",
+                "url",
+                "selector",
+                "role",
+                "name",
+                "label",
+                "placeholder",
+                "text",
+                "field",
+            )
+            compact_steps = []
+            for step in steps:
+                if isinstance(step, dict):
+                    compact_steps.append(_copy_non_none_values(step, step_keys))
+            targets["steps"] = compact_steps
         return (
             str(tool_name or "").strip().lower()
             + ":"
@@ -2240,7 +2269,7 @@ class BrowserRuntimeRail(AgentRail):
         details = phases.get(phase)
         if not isinstance(details, dict):
             return
-        if not BrowserAgentRuntime._tool_result_succeeded(tool_result):
+        if not BrowserAgentRuntime.tool_result_succeeded(tool_result):
             details["status"] = "pending"
             if isinstance(tool_result, dict):
                 details["last_error"] = str(tool_result.get("error") or "")[:300]
@@ -2254,7 +2283,7 @@ class BrowserRuntimeRail(AgentRail):
         result = tool_result if isinstance(tool_result, dict) else {}
         completion_evidence = ""
         if phase == "navigation":
-            result_url = BrowserAgentRuntime._extract_result_url(tool_result)
+            result_url = BrowserAgentRuntime.extract_result_url(tool_result)
             if result_url or "navigate" in name:
                 completion_evidence = result_url or "navigation tool succeeded"
         elif phase == "form":
@@ -2308,15 +2337,19 @@ class BrowserRuntimeRail(AgentRail):
             details["status"] = "completed"
             details["completion_evidence"] = completion_evidence[:300]
             phase_order = list(phases)
+            next_phase = phase
             try:
-                next_phase = next(
-                    candidate
-                    for candidate in phase_order[phase_order.index(phase) + 1:]
-                    if isinstance(phases.get(candidate), dict)
-                    and phases[candidate].get("status") != "completed"
-                )
-            except (ValueError, StopIteration):
-                next_phase = phase
+                remaining_phases = phase_order[phase_order.index(phase) + 1:]
+            except ValueError:
+                remaining_phases = []
+            for candidate in remaining_phases:
+                candidate_state = phases.get(candidate)
+                if not isinstance(candidate_state, dict):
+                    continue
+                if candidate_state.get("status") == "completed":
+                    continue
+                next_phase = candidate
+                break
             state["current_phase"] = next_phase
         else:
             details["status"] = "in_progress"

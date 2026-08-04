@@ -111,7 +111,7 @@ class BrowserOffloadRecallTool(Tool):
                 offset=offset,
                 limit=limit,
             )
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             return ToolOutput(success=False, error=str(exc))
         return ToolOutput(success=True, data=data)
 
@@ -226,7 +226,7 @@ class BrowserOffloadRecallTool(Tool):
                 }
             fragment_offset = max(0, match_offset - _QUERY_CONTEXT_CHARS)
 
-        fragment = content[fragment_offset : fragment_offset + limit]
+        fragment = content[fragment_offset:fragment_offset + limit]
         next_offset = fragment_offset + len(fragment)
         return {
             "handle": handle,
