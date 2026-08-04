@@ -9,6 +9,7 @@ the model calling ``structured_output`` (schema path) and settling a chat round
 back to IDLE. Team-scoped wiring (get-or-create + dispose) is covered against a
 configured leader ``TeamAgent`` with the model resolver stubbed.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -62,9 +63,11 @@ class _FakeAbilityManager:
 
     def __init__(self) -> None:
         self.added: dict[str, Any] = {}
+        self.add_history: list[str] = []
 
     def add_ability(self, card: Any, resource: Any) -> None:
         self.added[card.name] = resource
+        self.add_history.append(card.name)
 
     def remove_ability(self, name: str) -> None:
         self.added.pop(name, None)
@@ -77,12 +80,14 @@ class _FakeHarness:
     - ``captured_payload``: what the "model" submits to structured_output.
     - ``output_text``: the free-text round output.
     - ``submit``: whether the model calls structured_output at all.
+    - ``submit_after_attempt``: which round first calls structured_output.
     """
 
     instances: list["_FakeHarness"] = []
     captured_payload: dict[str, Any] | None = None
     output_text: str = "fake-output"
     submit: bool = True
+    submit_after_attempt: int = 1
 
     def __init__(self, spec: Any, build_context: Any = None, extra_rails: Any = None) -> None:
         self.spec = spec
@@ -94,6 +99,7 @@ class _FakeHarness:
         self.ability_manager = _FakeAbilityManager()
         self._on_state = None
         self._on_round = None
+        self._submission_attempts = 0
         _FakeHarness.instances.append(self)
 
     def add_rail(self, rail: Any) -> None:
@@ -106,8 +112,13 @@ class _FakeHarness:
         return self.ability_manager.added.get("structured_output")
 
     async def _maybe_submit(self) -> None:
+        self._submission_attempts += 1
         tool = self._capture_tool()
-        if tool is not None and _FakeHarness.submit:
+        if (
+            tool is not None
+            and _FakeHarness.submit
+            and self._submission_attempts >= _FakeHarness.submit_after_attempt
+        ):
             await tool.invoke(_FakeHarness.captured_payload or {})
 
     async def run_once(self, content: str, *, session: Any = None) -> dict[str, Any]:
@@ -143,6 +154,7 @@ def fake_harness(monkeypatch: pytest.MonkeyPatch):
     _FakeHarness.captured_payload = {"answer": "42"}
     _FakeHarness.output_text = "fake-output"
     _FakeHarness.submit = True
+    _FakeHarness.submit_after_attempt = 1
     monkeypatch.setattr(tiny_mod, "NativeHarness", _FakeHarness)
     return _FakeHarness
 
@@ -191,7 +203,25 @@ async def test_run_raises_when_structured_output_not_submitted(fake_harness) -> 
     agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
     with pytest.raises(Exception):
         await agent.run("question", schema=_DICT_SCHEMA)
+    assert len(fake_harness.instances[-1].sent) == tiny_mod._STRUCTURED_OUTPUT_MAX_ATTEMPTS
     assert fake_harness.instances[-1].disposed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_run_retries_in_same_session_when_structured_output_is_not_submitted(fake_harness) -> None:
+    fake_harness.submit_after_attempt = 2
+    agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
+
+    out = await agent.run("question", schema=_DICT_SCHEMA)
+
+    assert out == {"answer": "42"}
+    harness = fake_harness.instances[-1]
+    assert len(harness.sent) == 2
+    assert harness.sent[0].startswith("question\n\n")
+    assert harness.sent[1] == agent._t("structured_output", key="reminder")
+    assert harness.run_sessions[0] is harness.run_sessions[1]
+    assert harness.ability_manager.add_history == ["structured_output"]
 
 
 @pytest.mark.asyncio
@@ -257,6 +287,13 @@ def test_create_tiny_agent_keeps_a_minimal_footprint() -> None:
     assert spec.prompt_mode == "none"
     # The submit tool is the only tool it owns.
     assert [type(tool).__name__ for tool in (spec.tools or [])] == ["StructuredOutputTool"]
+    # A schema turn requires the model to call that tool on its first response.
+    assert spec.model.model_request_config.tool_choice == {
+        "type": "function",
+        "function": {"name": "structured_output"},
+    }
+    # The shared base spec remains unchanged for later free-text calls.
+    assert agent._spec.model.model_request_config is None
 
 
 @pytest.mark.level0
@@ -312,6 +349,38 @@ async def test_chat_with_schema_captures_and_detaches_tool(fake_harness) -> None
     assert out == {"answer": "chat"}
     # Tool was detached at turn end.
     assert "structured_output" not in fake_harness.instances[0].ability_manager.added
+    await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_chat_retries_with_user_reminder_when_structured_output_is_not_submitted(fake_harness) -> None:
+    fake_harness.submit_after_attempt = 2
+    agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
+
+    out = await agent.chat("question", schema=_DICT_SCHEMA)
+
+    assert out == {"answer": "42"}
+    harness = fake_harness.instances[0]
+    assert len(harness.sent) == 2
+    assert harness.sent[0].startswith("question\n\n")
+    assert harness.sent[1] == agent._t("structured_output", key="reminder")
+    assert "structured_output" not in harness.ability_manager.added
+    await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_chat_raises_after_structured_output_retry_is_exhausted(fake_harness) -> None:
+    fake_harness.submit = False
+    agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
+
+    with pytest.raises(Exception):
+        await agent.chat("question", schema=_DICT_SCHEMA)
+
+    harness = fake_harness.instances[0]
+    assert len(harness.sent) == tiny_mod._STRUCTURED_OUTPUT_MAX_ATTEMPTS
+    assert "structured_output" not in harness.ability_manager.added
     await agent.aclose()
 
 
