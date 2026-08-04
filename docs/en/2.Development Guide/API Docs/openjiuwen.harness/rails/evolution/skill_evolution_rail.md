@@ -70,9 +70,11 @@ When manual configuring, only one shared `EvolutionInterruptRail` should be used
 
 ### Trigger Mechanism
 
-- Mounting `SkillEvolutionRail` always enables passive evolution: passive signal scanning runs after `DeepAgent.invoke()` completes. The product-level master switch is whether the rail is mounted / `evolution.enabled`.
-- `review_trigger` controls periodic self-check follow_up insertion; `fuzzy_review` is its compatibility alias. Both default to `False`.
-- During migration, if both `review_trigger` and `fuzzy_review` are provided, `review_trigger` takes precedence.
+- Passive evolution runs after `DeepAgent.invoke()` completes.
+- `signal_trigger` controls passive signal scanning and defaults to `False`.
+- `review_trigger` controls periodic self-check follow_up insertion and defaults to `False`.
+- `review_interval` controls the number of non-follow_up task iterations between review checks and must be at least 1.
+- `signal_trigger=False` disables passive signal scanning and async snapshot creation for passive evolution.
 - Active evolution is available through `request_user_evolution()`; the returned prompt asks the main agent to call `prepare_skill_evolution(user_confirmed=true)` first, then call `evolve_review_task(evolution_review_ref=...)`. The prepare tool collects the current rail's execution/conversation trajectory as default review materials, and `user_intent` only adds optimization direction.
 - Regular skill evolution ignores `kind: team-skill` skills; team skills use `TeamSkillEvolutionRail` / `TeamSkillRail`.
 
@@ -82,8 +84,9 @@ class SkillEvolutionRail(
     *,
     llm: Model,
     model: str,
-    review_runtime: EvolutionReviewRuntime,
+    signal_trigger: Optional[bool] = None,
     auto_save: bool = False,
+    review_runtime: EvolutionReviewRuntime,
     subject_kind: str = "skill",
     language: str = "cn",
     trajectory_store: Optional[TrajectoryStore] = None,
@@ -92,11 +95,15 @@ class SkillEvolutionRail(
     generate_records_llm_policy: LLMInvokePolicy = ...,
     evaluate_llm_policy: LLMInvokePolicy = ...,
     simplify_llm_policy: LLMInvokePolicy = ...,
-    fuzzy_review: Optional[bool] = None,
-    review_trigger: Optional[bool] = None,
-    fuzzy_review_interval: int = 5,
+    two_stage: bool = False,
     review_agent_max_iterations: int = 25,
+    sharing_config: Optional[Dict[str, Any]] = None,
     disabled_skills: Optional[Union[str, list[str]]] = None,
+    evolution_trigger: EvolutionTriggerPoint = EvolutionTriggerPoint.AFTER_INVOKE,
+    async_evolution: bool = True,
+    max_concurrent_evolution: int = 1,
+    review_trigger: Optional[bool] = None,
+    review_interval: int = 5,
 )
 ```
 
@@ -105,8 +112,9 @@ class SkillEvolutionRail(
 * **skills_dir** (Union[str, list[str]]): Skill directory path or path list.
 * **llm** (Model): LLM client instance used by signal, record, scoring, and governance stages.
 * **model** (str): Model name.
-* **review_runtime** (EvolutionReviewRuntime): Shared active-review state for review subagent bindings.
+* **signal_trigger** (bool, optional): Whether to run passive signal scanning after invoke. Defaults to `False`.
 * **auto_save** (bool): Whether generated passive records are auto-approved and persisted. Defaults to `False`.
+* **review_runtime** (EvolutionReviewRuntime): Shared active-review state for review subagent bindings.
 * **subject_kind** (str): Subject kind used by this rail (`"skill"` or `"swarm-skill"` normalized).
 * **language** (str): Prompt language, commonly `"cn"` or `"en"`.
 * **trajectory_store** (TrajectoryStore, optional): Store for captured execution trajectories.
@@ -115,11 +123,15 @@ class SkillEvolutionRail(
 * **generate_records_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for record generation.
 * **evaluate_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for experience scoring.
 * **simplify_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for simplify governance.
-* **fuzzy_review** (bool, optional): Compatibility alias for `review_trigger`; ignored when `review_trigger` is set.
-* **review_trigger** (bool, optional): Whether to periodically enqueue a short evolution self-check follow_up. Defaults to `False`.
-* **fuzzy_review_interval** (int): Number of non-follow_up task iterations between self-check checks. Must be at least 1.
+* **two_stage** (bool): Whether record generation uses the analyzer + formatter pipeline. Defaults to `False`.
 * **review_agent_max_iterations** (int): Maximum iterations for `evolution_reviewer`, defaults to 25.
+* **sharing_config** (dict, optional): Cross-user sharing settings such as `enabled` and `hub_path`.
 * **disabled_skills** (Optional[Union[str, list[str]]], optional): Deny-list of skill names excluded from self-optimization. Supports a single skill name (str) or multiple names (list[str]).
+* **evolution_trigger** (EvolutionTriggerPoint): Rail callback point for passive evolution. Defaults to `AFTER_INVOKE`.
+* **async_evolution** (bool): Whether passive evolution runs asynchronously. Defaults to `True`.
+* **max_concurrent_evolution** (int): Maximum concurrent passive evolution tasks. Defaults to 1.
+* **review_trigger** (bool, optional): Whether to periodically enqueue a short evolution self-check follow_up. Defaults to `False`.
+* **review_interval** (int): Number of non-follow_up task iterations between review checks. Must be at least 1; defaults to 5.
 
 ### Priority
 
@@ -228,7 +240,7 @@ Regular skill experience optimizer.
 
 ### evolution_config -> dict
 
-Effective LLM policies, timeout, and `two_stage`.
+Effective record-generation, evaluation, and simplify LLM policies, the total timeout, and `two_stage` mode.
 
 ---
 
@@ -269,7 +281,7 @@ Build a host-delivered simplify command prompt. The prompt contains a bounded ex
 
 ### async request_rebuild(skill_name, user_intent=None, min_score=0.5) -> Optional[str]
 
-Archive current skill assets (`SKILL.md` plus an empty paired `evolutions.v*.json` marker) and return a rebuild follow-up prompt using filtered live evolution records. The host or command handler must inject the returned prompt into the agent loop; the rail does not directly write the rebuilt `SKILL.md`.
+Archive current skill assets and return a rebuild follow-up prompt using filtered evolution records. The host or command handler must inject the returned prompt into the agent loop; the rail does not directly write the rebuilt `SKILL.md`.
 
 ### async rollback_skill(skill_name, version=None) -> bool
 

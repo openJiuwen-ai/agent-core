@@ -88,18 +88,11 @@ def _assert_team_follow_up_contract(prompt: str) -> None:
     assert prompt.startswith("<auto_team_skill_creation_followup>\n")
     assert prompt.endswith("\n</auto_team_skill_creation_followup>")
     assert "不是用户的新需求" in prompt
-    assert "常驻提示词中的“团队技能沉淀自检”规则" in prompt
-    assert "可复用团队流程" in prompt
-    assert "协作流程" in prompt
-    assert "角色分工" in prompt
-    assert "交接方式" in prompt
-    assert "并行推进方式" in prompt
-    assert "汇总整合方式" in prompt
-    assert "验收方式" in prompt
-    assert "最多追加两句" in prompt
+    assert "参考常驻“团队技能沉淀自检”规则" in prompt
+    assert "不重新判断运行时触发门槛" in prompt
+    assert "普通最终回复末尾追加一至两句" in prompt
+    assert "同时包含可复用团队方法" in prompt
     assert "是否创建 Team/Swarm Skill" in prompt
-    assert "不要提及自检、沉淀、无需创建、已检查、内部判断或本提醒" in prompt
-    assert "自然承接刚完成的团队任务" in prompt
     assert "ask_user" not in prompt
     assert "swarmskill-creator" not in prompt
     assert "自动创建" not in prompt
@@ -184,7 +177,7 @@ class TestTeamSkillCreateRailPrompts:
         prompt = section.render("cn")
 
         assert "团队技能沉淀自检" in prompt
-        assert str(tmp_path / "skills") in prompt
+        assert "skills_dir" not in prompt
         assert "ask_user" not in prompt
         assert "swarmskill-creator" not in prompt
         assert "“是”“创建”“需要”" not in prompt
@@ -195,37 +188,27 @@ class TestTeamSkillCreateRailPrompts:
         agent = _make_agent_with_team_skill_creation_capability(tmp_path)
         ctx = _make_invoke_ctx(agent)
 
+        assert agent._registered_rails[0].skills[0].name == "swarmskill-creator"
         await rail.before_model_call(ctx)
 
         section = agent.system_prompt_builder.get_section(SectionName.TEAM_SKILL_CREATION_GUIDANCE)
         assert section is not None
         prompt = section.render("cn")
         assert "## 团队技能沉淀自检" in prompt
-        for heading in (
-            "### 判断场景",
-            "#### 应考虑创建",
-            "#### 不应创建",
-            "### 用户意图信号",
-            "### 回复与确认规则",
-            "#### 最终回复",
-            "#### 用户确认",
-            "#### 创建执行",
-        ):
-            assert heading in prompt
-        assert "### 核心原则" not in prompt
-        assert "Team/Swarm Skill creation 只沉淀未来同类团队任务可复用的协作方法" in prompt
-        assert "不需要创建时保持静默并正常回复" in prompt
-        assert "以后做 xxx 团队任务时按这次分工推进。" in prompt
-        assert "下次 xxx 仍按这种角色 / 成员职责安排。" in prompt
-        assert "以后 xxx 的交接、汇总和验收沿用这个流程。" in prompt
-        assert "类似 xxx 的用户反馈以后也这样分派给成员处理。" in prompt
-        assert "最多追加两句" in prompt
+        for heading in ("目标与边界", "决策顺序", "用户可见输出", "用户确认", "能力交接"):
+            assert prompt.count(f"### {heading}") == 1
+        assert "只沉淀未来同类团队任务可复用的新协作方法" in prompt
+        assert "高优先级用户意图" in prompt
+        assert "任务拆解、成员路由" in prompt
+        assert "自检不得打断团队任务" in prompt
         assert "Team/Swarm Skill" in prompt
-        assert "swarmskill-creator" in prompt
-        assert "ask_user" in prompt
-        assert "prepare_skill_evolution" in prompt
-        assert "evolve_review_task" in prompt
-        assert "evolve_skill_experiences" in prompt
+        assert "确认后交给团队技能创建能力" in prompt
+        assert "只在普通最终回复末尾追加一至两句" in prompt
+        assert "必须同时包含" in prompt
+        assert "创建确认不等于 Swarm Skill 演进确认" in prompt
+        assert "prepare_skill_evolution" not in prompt
+        assert "evolve_review_task" not in prompt
+        assert "evolve_skill_experiences" not in prompt
 
     @pytest.mark.asyncio
     async def test_before_model_call_keeps_guidance_when_auto_trigger_false(self, tmp_path):
@@ -245,10 +228,10 @@ class TestTeamSkillCreateRailPrompts:
         prompt = builder.build()
 
         assert prompt.index("## 团队 Skill 演进自检") < prompt.index("## 团队技能沉淀自检")
-        assert "用户确认创建后，使用 `swarmskill-creator`" in prompt
-        assert "用户确认创建新团队技能不是确认 Swarm Skill 演进" in prompt
-        assert "不要调用 `prepare_skill_evolution`、`evolve_review_task`" in prompt
-        assert "或 `evolve_skill_experiences`" in prompt
+        assert "确认后交给团队技能创建能力" in prompt
+        assert "只在普通最终回复末尾追加一至两句" in prompt
+        assert "创建确认不等于 Swarm Skill 演进确认" in prompt
+        assert "prepare_skill_evolution" not in prompt
 
     def test_english_team_creation_guidance_overrides_evolution_confirmation_when_combined(self):
         builder = SystemPromptBuilder(language="en")
@@ -258,11 +241,10 @@ class TestTeamSkillCreateRailPrompts:
         prompt = builder.build()
 
         assert prompt.index("## Team Skill Evolution Self-Check") < prompt.index("## Team Skill Capture Self-Check")
-        assert "use `swarmskill-creator` or a compatible team skill creation capability" in prompt
-        assert "User confirmation to create a new team skill is not consent for" in prompt
-        assert "Swarm Skill evolution" in prompt
-        assert "do not call `prepare_skill_evolution`, `evolve_review_task`, or" in prompt
-        assert "`evolve_skill_experiences`" in prompt
+        assert "After confirmation, hand the team context to the team Skill creation capability" in prompt
+        assert "append only one or two sentences" in prompt
+        assert "Creation confirmation is not Swarm Skill evolution confirmation" in prompt
+        assert "prepare_skill_evolution" not in prompt
 
 
 class TestTeamSkillCreateRailFollowUp:
