@@ -28,9 +28,9 @@ _OPENROUTER_PREFETCH_THREAD: Optional[threading.Thread] = None
 
 MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     # GLM
-    "glm-5.2": 202752,
-    "glm-5.1": 202752,
-    "glm-5": 202752,
+    "glm-5.2": 1048576,
+    "glm-5.1": 204800,
+    "glm-5": 204800,
     "glm-5-turbo": 202752,
     "glm-4.7": 204800,
     "glm-4.7-flash": 202752,
