@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.harness.tools.browser_move.playwright_runtime.agents import (
+    build_browser_worker_system_prompt,
     build_browser_worker_agent,
+)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    CORE_BROWSER_TOOL_NAMES,
 )
 
 
@@ -55,10 +59,21 @@ def test_worker_installs_task_allowlist_for_playwright_server() -> None:
     )
 
 
-def test_worker_with_none_allowlist_preserves_legacy_unrestricted_mode() -> None:
+def test_worker_with_none_allowlist_defaults_to_core() -> None:
     config = _mcp_config()
 
     worker = _build_with_mocked_agent(config, None)
 
     worker.ability_manager.add.assert_called_once_with(config)
-    worker.ability_manager.set_mcp_tool_allowlist.assert_not_called()
+    worker.ability_manager.set_mcp_tool_allowlist.assert_called_once_with(
+        config,
+        CORE_BROWSER_TOOL_NAMES,
+    )
+
+
+def test_worker_prompt_only_mentions_conditionally_visible_run_code() -> None:
+    prompt = build_browser_worker_system_prompt("screenshots", "artifacts")
+
+    assert "browser_run_code_unsafe" not in prompt
+    assert "only when it is present" in prompt
+    assert "do not create screenshots through run-code" in prompt

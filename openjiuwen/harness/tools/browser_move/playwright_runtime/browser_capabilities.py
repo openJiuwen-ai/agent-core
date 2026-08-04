@@ -15,7 +15,6 @@ CORE_BROWSER_CAPABILITY_NAME = "core"
 CORE_BROWSER_TOOL_NAMES: tuple[str, ...] = (
     "browser_click",
     "browser_close",
-    "browser_console_messages",
     "browser_drag",
     "browser_drop",
     "browser_evaluate",
@@ -26,17 +25,23 @@ CORE_BROWSER_TOOL_NAMES: tuple[str, ...] = (
     "browser_hover",
     "browser_navigate",
     "browser_navigate_back",
-    "browser_network_request",
-    "browser_network_requests",
     "browser_press_key",
-    "browser_resize",
-    "browser_run_code_unsafe",
     "browser_select_option",
     "browser_snapshot",
     "browser_tabs",
     "browser_take_screenshot",
     "browser_type",
     "browser_wait_for",
+)
+
+ADVANCED_CODE_BROWSER_TOOL_NAMES: tuple[str, ...] = ("browser_run_code",)
+
+UNSAFE_DEV_BROWSER_TOOL_NAMES: tuple[str, ...] = ("browser_run_code_unsafe",)
+
+# These are model-facing policy categories, not Playwright MCP --caps values.
+POLICY_ONLY_BROWSER_CAPABILITY_NAMES: tuple[str, ...] = (
+    "advanced_code",
+    "unsafe_dev",
 )
 
 PDF_BROWSER_TOOL_NAMES: tuple[str, ...] = ("browser_pdf_save",)
@@ -52,8 +57,10 @@ VISION_BROWSER_TOOL_NAMES: tuple[str, ...] = (
 
 DEVTOOLS_BROWSER_TOOL_NAMES: tuple[str, ...] = (
     "browser_annotate",
+    "browser_console_messages",
     "browser_hide_highlight",
     "browser_highlight",
+    "browser_resize",
     "browser_resume",
     "browser_start_tracing",
     "browser_start_video",
@@ -67,6 +74,8 @@ DEVTOOLS_BROWSER_TOOL_NAMES: tuple[str, ...] = (
 CONFIG_BROWSER_TOOL_NAMES: tuple[str, ...] = ("browser_get_config",)
 
 NETWORK_BROWSER_TOOL_NAMES: tuple[str, ...] = (
+    "browser_network_request",
+    "browser_network_requests",
     "browser_network_state_set",
     "browser_route",
     "browser_route_list",
@@ -126,6 +135,22 @@ DEFAULT_BROWSER_CAPABILITIES: tuple[BrowserCapability, ...] = (
         name=CORE_BROWSER_CAPABILITY_NAME,
         description="Navigate, inspect, and interact with web pages using the standard Playwright browser tools.",
         tool_names=CORE_BROWSER_TOOL_NAMES,
+    ),
+    BrowserCapability(
+        name="advanced_code",
+        description=(
+            "Run a preplanned Playwright code snippet only when deterministic browser tools, "
+            "compact probes, evaluate, snapshot, and batch are insufficient."
+        ),
+        tool_names=ADVANCED_CODE_BROWSER_TOOL_NAMES,
+    ),
+    BrowserCapability(
+        name="unsafe_dev",
+        description=(
+            "Enable unrestricted browser code execution only for explicitly requested local "
+            "development or debugging; this replaces advanced_code when both are requested."
+        ),
+        tool_names=UNSAFE_DEV_BROWSER_TOOL_NAMES,
     ),
     BrowserCapability(
         name="pdf",
@@ -220,6 +245,9 @@ def resolve_browser_capabilities(
         if name not in selected:
             selected.append(name)
 
+    if "unsafe_dev" in selected and "advanced_code" in selected:
+        selected.remove("advanced_code")
+
     allowed_tool_names = _stable_unique(
         tool_name for capability_name in selected for tool_name in catalog[capability_name].tool_names
     )
@@ -233,6 +261,7 @@ def resolve_browser_capabilities(
 
 
 __all__ = [
+    "ADVANCED_CODE_BROWSER_TOOL_NAMES",
     "CONFIG_BROWSER_TOOL_NAMES",
     "CORE_BROWSER_CAPABILITY_NAME",
     "CORE_BROWSER_TOOL_NAMES",
@@ -240,8 +269,10 @@ __all__ = [
     "DEVTOOLS_BROWSER_TOOL_NAMES",
     "NETWORK_BROWSER_TOOL_NAMES",
     "PDF_BROWSER_TOOL_NAMES",
+    "POLICY_ONLY_BROWSER_CAPABILITY_NAMES",
     "STORAGE_BROWSER_TOOL_NAMES",
     "TESTING_BROWSER_TOOL_NAMES",
+    "UNSAFE_DEV_BROWSER_TOOL_NAMES",
     "VISION_BROWSER_TOOL_NAMES",
     "BrowserCapability",
     "ResolvedBrowserCapabilities",

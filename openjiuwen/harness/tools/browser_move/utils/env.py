@@ -18,9 +18,9 @@ SUPPORTED_MODEL_PROVIDERS = frozenset({"openai", "openrouter", "siliconflow", "d
 TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 DEFAULT_MODEL_NAME = "anthropic/claude-sonnet-4.5"
-DEFAULT_BROWSER_TIMEOUT_S = 180
-DEFAULT_GUARDRAIL_MAX_STEPS = 20
-DEFAULT_GUARDRAIL_MAX_FAILURES = 2
+DEFAULT_BROWSER_TIMEOUT_S = 600
+DEFAULT_GUARDRAIL_MAX_STEPS = 100
+DEFAULT_GUARDRAIL_MAX_FAILURES = 4
 DEFAULT_GUARDRAIL_RETRY_ONCE = True
 DEFAULT_PLAYWRIGHT_MCP_COMMAND = "npx"
 DEFAULT_PLAYWRIGHT_MCP_ARGS = "-y @playwright/mcp@latest"
@@ -162,7 +162,6 @@ def resolve_model_settings() -> tuple[str, str, str]:
             "Supported: openai, openrouter, siliconflow, dashscope."
         )
 
-    explicit_api_key = first_non_empty_env("API_KEY", "MODEL_API_KEY")
     explicit_api_base = first_non_empty_env("API_BASE", "MODEL_API_BASE")
 
     if provider_mode:

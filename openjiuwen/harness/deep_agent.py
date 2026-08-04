@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
-import importlib
 import os
 import sys
 import uuid
@@ -17,6 +16,8 @@ from typing import (
     TYPE_CHECKING,
     Any,
     AsyncIterator,
+    Awaitable,
+    Callable,
     Dict,
     List,
     Optional,
@@ -247,11 +248,38 @@ class DeepAgent(BaseAgent):
         self._interaction_send_lock = asyncio.Lock()
         self._interaction_wakeup = asyncio.Event()
         self._interaction_started = False
+        self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
+        self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
         """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
+
+    def register_task_resource_cleanup(
+        self,
+        cleanup: Callable[[], Awaitable[None]],
+        *,
+        prepare: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> None:
+        """Register an idempotent cleanup for ephemeral subagent resources."""
+        if prepare is not None and prepare not in self._task_resource_prepares:
+            self._task_resource_prepares.append(prepare)
+        if cleanup not in self._task_resource_cleanups:
+            self._task_resource_cleanups.append(cleanup)
+
+    async def prepare_task_resources(self) -> None:
+        """Acquire task-scoped resource references before subagent invocation."""
+        for prepare in self._task_resource_prepares:
+            await prepare()
+
+    async def cleanup_task_resources(self) -> None:
+        """Release task-scoped resources without discarding persistent data."""
+        for cleanup in reversed(self._task_resource_cleanups):
+            try:
+                await cleanup()
+            except Exception:
+                logger.exception("[DeepAgent] task resource cleanup failed")
 
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
@@ -1258,6 +1286,25 @@ class DeepAgent(BaseAgent):
                 )
 
                 factory_kwargs = dict(spec.factory_kwargs or {})
+                browser_model = create_kwargs["model"]
+                browser_parent_model = getattr(
+                    browser_model,
+                    "_browser_agent_parent_model",
+                    None,
+                )
+                if (
+                    browser_model is self._deep_config.model
+                    or browser_parent_model is self._deep_config.model
+                ):
+                    parent_image_support = getattr(
+                        self._deep_config,
+                        "enable_read_image_multimodal",
+                        None,
+                    )
+                    factory_kwargs.setdefault(
+                        "enable_read_image_multimodal",
+                        parent_image_support is True,
+                    )
                 if browser_capabilities is not None:
                     factory_kwargs["browser_capabilities"] = list(browser_capabilities)
                 return self._bind_inherited_artifact_root(

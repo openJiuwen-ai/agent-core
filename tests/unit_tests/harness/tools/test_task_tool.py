@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -12,11 +13,15 @@ from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelReques
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.harness.tools import TaskTool, create_task_tool
+from openjiuwen.harness.tools.subagent.task_tool import (
+    DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+)
 
 
 def _create_dummy_model() -> Model:
@@ -40,6 +45,8 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
 
     async def test_task_tool_invoke_success(self) -> None:
         called_inputs: dict[str, str] = {}
+        prepare_calls = 0
+        cleanup_calls = 0
 
         class FakeSubAgent:
             def __init__(self):
@@ -48,6 +55,14 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
                 called_inputs.update(inputs)
                 return {"output": "done"}
+
+            async def prepare_task_resources(self) -> None:
+                nonlocal prepare_calls
+                prepare_calls += 1
+
+            async def cleanup_task_resources(self) -> None:
+                nonlocal cleanup_calls
+                cleanup_calls += 1
 
         # Match production: subagent_type must correspond to a SubAgentConfig.agent_card.name
         code_spec = SubAgentConfig(
@@ -80,6 +95,8 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.data, {"output": "done", 'agent_id': 'test_id'})
         self.assertIsNone(result.error)
         self.assertEqual(called_inputs["query"], "run task")
+        self.assertEqual(prepare_calls, 1)
+        self.assertEqual(cleanup_calls, 1)
         # task_tool: f"{parent_session_id}_sub_{subagent_type}_{uuid.uuid4().hex[:8]}"
         self.assertIsNotNone(
             re.fullmatch(
@@ -87,6 +104,93 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
                 called_inputs["conversation_id"],
             ),
         )
+
+    async def test_task_tool_cleans_up_after_subagent_failure(self) -> None:
+        cleanup_calls = 0
+
+        class FakeSubAgent:
+            card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, _inputs):
+                raise RuntimeError("subagent failed")
+
+            async def cleanup_task_resources(self) -> None:
+                nonlocal cleanup_calls
+                cleanup_calls += 1
+
+        parent_agent = SimpleNamespace(
+            create_subagent=lambda *_args, **_kwargs: FakeSubAgent(),
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+
+        with self.assertRaisesRegex(Exception, "subagent failed"):
+            await tool.invoke(
+                {"subagent_type": "code", "task_description": "run task"},
+                session=Session(session_id="parent_session"),
+            )
+        self.assertEqual(cleanup_calls, 1)
+
+    async def test_task_tool_cleans_up_after_cancellation(self) -> None:
+        cleanup_calls = 0
+
+        class FakeSubAgent:
+            card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, _inputs):
+                raise asyncio.CancelledError
+
+            async def cleanup_task_resources(self) -> None:
+                nonlocal cleanup_calls
+                cleanup_calls += 1
+
+        parent_agent = SimpleNamespace(
+            create_subagent=lambda *_args, **_kwargs: FakeSubAgent(),
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+
+        with self.assertRaises(asyncio.CancelledError):
+            await tool.invoke(
+                {"subagent_type": "code", "task_description": "run task"},
+                session=Session(session_id="parent_session"),
+            )
+        self.assertEqual(cleanup_calls, 1)
+
+    async def test_task_tool_cleans_up_when_outer_timeout_cancels_invoke(self) -> None:
+        cleanup_calls = 0
+
+        class FakeSubAgent:
+            card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, _inputs):
+                await asyncio.sleep(60)
+
+            async def cleanup_task_resources(self) -> None:
+                nonlocal cleanup_calls
+                cleanup_calls += 1
+
+        parent_agent = SimpleNamespace(
+            create_subagent=lambda *_args, **_kwargs: FakeSubAgent(),
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(
+                tool.invoke(
+                    {"subagent_type": "code", "task_description": "run task"},
+                    session=Session(session_id="parent_session"),
+                ),
+                timeout=0.01,
+            )
+        self.assertEqual(cleanup_calls, 1)
 
     async def test_task_tool_invoke_invalid_session(self) -> None:
         parent_agent = SimpleNamespace(deep_config=None)
@@ -169,6 +273,14 @@ class TestTaskToolSync(unittest.TestCase):
 
         self.assertEqual(len(tools), 1)
         self.assertIsInstance(tools[0], TaskTool)
+        self.assertEqual(
+            tools[0].card.properties["resilience"]["timeout_s"],
+            DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+        )
+        self.assertEqual(
+            AbilityManager._resolve_call_timeout(tools[0].card),
+            DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+        )
 
     def test_general_purpose_subagent_inherits_parent_mcps(self) -> None:
         tools = [ToolCard(id="parent_tool", name="read_file", description="read file")]

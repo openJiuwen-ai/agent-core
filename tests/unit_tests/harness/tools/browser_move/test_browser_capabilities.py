@@ -9,8 +9,12 @@ import pytest
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.harness.subagents.browser_agent import create_browser_agent
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    ADVANCED_CODE_BROWSER_TOOL_NAMES,
     CORE_BROWSER_TOOL_NAMES,
+    DEVTOOLS_BROWSER_TOOL_NAMES,
+    NETWORK_BROWSER_TOOL_NAMES,
     PDF_BROWSER_TOOL_NAMES,
+    UNSAFE_DEV_BROWSER_TOOL_NAMES,
     VISION_BROWSER_TOOL_NAMES,
     resolve_browser_capabilities,
 )
@@ -23,6 +27,42 @@ def test_core_only_selection_exposes_exactly_core_tools() -> None:
     assert resolved.selected_names == ("core",)
     assert resolved.rejected_names == ()
     assert resolved.allowed_tool_names == CORE_BROWSER_TOOL_NAMES
+    assert len(CORE_BROWSER_TOOL_NAMES) == 19
+    assert "browser_run_code" not in CORE_BROWSER_TOOL_NAMES
+    assert "browser_run_code_unsafe" not in CORE_BROWSER_TOOL_NAMES
+    assert "browser_console_messages" not in CORE_BROWSER_TOOL_NAMES
+    assert "browser_network_requests" not in CORE_BROWSER_TOOL_NAMES
+    assert "browser_resize" not in CORE_BROWSER_TOOL_NAMES
+
+
+def test_diagnostic_tools_are_available_through_existing_optional_categories() -> None:
+    assert "browser_console_messages" in DEVTOOLS_BROWSER_TOOL_NAMES
+    assert "browser_resize" in DEVTOOLS_BROWSER_TOOL_NAMES
+    assert "browser_network_request" in NETWORK_BROWSER_TOOL_NAMES
+    assert "browser_network_requests" in NETWORK_BROWSER_TOOL_NAMES
+
+
+def test_advanced_code_exposes_only_safe_run_code_variant() -> None:
+    resolved = resolve_browser_capabilities(["advanced_code"])
+
+    assert resolved.selected_names == ("core", "advanced_code")
+    assert resolved.allowed_tool_names == (
+        CORE_BROWSER_TOOL_NAMES + ADVANCED_CODE_BROWSER_TOOL_NAMES
+    )
+    assert "browser_run_code" in resolved.allowed_tool_names
+    assert "browser_run_code_unsafe" not in resolved.allowed_tool_names
+
+
+def test_unsafe_dev_replaces_advanced_code_when_both_are_requested() -> None:
+    resolved = resolve_browser_capabilities(["advanced_code", "unsafe_dev"])
+
+    assert resolved.requested_names == ("advanced_code", "unsafe_dev")
+    assert resolved.selected_names == ("core", "unsafe_dev")
+    assert resolved.allowed_tool_names == (
+        CORE_BROWSER_TOOL_NAMES + UNSAFE_DEV_BROWSER_TOOL_NAMES
+    )
+    assert "browser_run_code" not in resolved.allowed_tool_names
+    assert "browser_run_code_unsafe" in resolved.allowed_tool_names
 
 
 def test_pdf_selection_adds_pdf_tools_to_core() -> None:

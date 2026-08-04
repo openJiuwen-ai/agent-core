@@ -36,7 +36,10 @@ from openjiuwen.harness.rails.subagent.verification_rail import VerificationRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
-from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
+from openjiuwen.harness.subagents.browser_agent import (
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+    build_browser_agent_config,
+)
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
@@ -305,6 +308,10 @@ def _common_kwargs(inp: SubAgentInput) -> dict[str, Any]:
 class BrowserSubAgentInput(SubAgentInput):
     """Browser sub-agent inputs: per-instance browser identity."""
 
+    max_iterations: int = param_field(
+        default=DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
+        description="Maximum task-loop iterations for the browser sub-agent.",
+    )
     browser_key: str = param_field(default="", description="Browser identity key.")
     browser_port: int = param_field(default=0, description="Managed Chrome debug port; 0 auto-allocates.")
     browser_profile: str = param_field(default="", description="Managed browser profile name.")
