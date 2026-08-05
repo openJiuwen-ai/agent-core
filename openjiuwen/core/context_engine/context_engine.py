@@ -2,7 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from typing import Any, Awaitable, Callable, List, Dict, Optional, Tuple
-import asyncio
 import functools
 
 from pydantic import BaseModel
@@ -212,6 +211,32 @@ class ContextEngine:
                 await self.save_contexts(effective_session, context_ids=[context_id])
                 await effective_session.commit()
         return result
+
+    async def recover_from_model_exception(
+            self,
+            *,
+            context_id: str = "default_context_id",
+            session: Session = None,
+            context: ModelContext = None,
+            exception: Exception = None,
+            streaming: bool = False,
+            stream_chunks_emitted: int = 0,
+            **kwargs,
+    ) -> bool:
+        """Hook for recovering from a model-call exception before retrying.
+
+        This is intentionally a no-op extension point. ReAct agents call it
+        after the model-call rail retries are exhausted. A context module may
+        override or replace this hook later to recognize a provider context
+        window error, actively compress the context, and return ``True`` when
+        the model call is safe to retry.
+
+        Returning ``False`` preserves the original model exception. The
+        ``streaming`` and ``stream_chunks_emitted`` arguments allow a future
+        implementation to avoid retrying after partial stream output.
+        """
+        del context_id, session, context, exception, streaming, stream_chunks_emitted, kwargs
+        return False
 
     async def clear_context(
             self,

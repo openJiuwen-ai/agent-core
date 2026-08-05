@@ -817,7 +817,39 @@ class ReActAgent(BaseAgent):
             model_context=context,
         )
 
-        ai_message = await self._railed_model_call(ctx)
+        try:
+            ai_message = await self._railed_model_call(ctx)
+        except Exception as exc:
+            if ctx.extra.get("_model_exception_recovery_attempted"):
+                raise
+
+            try:
+                recovered = await self._recover_from_model_exception(
+                    ctx,
+                    context=context,
+                    exception=exc,
+                )
+            except Exception as recovery_exc:
+                logger.warning(
+                    "Model exception recovery hook failed; preserving the original "
+                    "model exception: %s",
+                    recovery_exc,
+                    exc_info=True,
+                )
+                raise exc from recovery_exc
+
+            if not recovered:
+                raise
+
+            # The recovery hook is allowed to mutate the context. Rebuild the
+            # preview before running BEFORE_MODEL_CALL rails for the retry.
+            ctx.extra["_model_exception_recovery_attempted"] = True
+            ctx.inputs = ModelCallInputs(
+                messages=self._build_preview_messages(context),
+                tools=list(tools) if tools else None,
+                model_context=context,
+            )
+            ai_message = await self._railed_model_call(ctx)
 
         if not isinstance(ai_message, AssistantMessage):
             return ai_message
@@ -825,6 +857,33 @@ class ReActAgent(BaseAgent):
         log_llm_response(logger, ai_message)
 
         return ai_message
+
+    async def _recover_from_model_exception(
+            self,
+            ctx: AgentCallbackContext,
+            *,
+            context: ModelContext,
+            exception: Exception,
+    ) -> bool:
+        """Extension point for context-aware recovery before one model retry.
+
+        The default ContextEngine implementation is a no-op. A future context
+        integration can recognize a provider context-window error, actively
+        compress the context, and return ``True`` to retry the same ReAct model
+        step. Returning ``False`` leaves the original exception untouched.
+        """
+        recover = getattr(type(self.context_engine), "recover_from_model_exception", None)
+        if not callable(recover):
+            return False
+
+        return bool(await recover(self.context_engine,
+            context_id=context.context_id(),
+            session=ctx.session,
+            context=context,
+            exception=exception,
+            streaming=bool(ctx.extra.get("_streaming")),
+            stream_chunks_emitted=int(ctx.extra.get("_stream_chunks_emitted", 0) or 0),
+        ))
 
     def _build_context_window_kwargs(
             self,
@@ -949,6 +1008,7 @@ class ReActAgent(BaseAgent):
         call_first_token_time = None
         call_last_token_time = None
         call_chunk_count = 0
+        ctx.extra["_stream_chunks_emitted"] = 0
         try:
             async for chunk in llm.stream(
                     model=self._config.model_name,
@@ -965,6 +1025,7 @@ class ReActAgent(BaseAgent):
                     call_first_token_time = time.monotonic()
                 call_last_token_time = time.monotonic()
                 call_chunk_count += 1
+                ctx.extra["_stream_chunks_emitted"] = call_chunk_count
 
                 inspectors = ctx.extra.get("_stream_chunk_inspectors") or []
                 if isinstance(inspectors, dict):
@@ -1780,6 +1841,7 @@ class ReActAgent(BaseAgent):
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
         abort_persisted = False
+        commit_on_abort = self._session_supports_agent_lifecycle(session)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
         if isinstance(inputs, dict):
             ctx.extra["user_id"] = inputs.get("user_id", "")
@@ -2006,6 +2068,7 @@ class ReActAgent(BaseAgent):
             abort_persisted = await self._handle_context_abort(
                 session,
                 marker="[Request cancelled by user]",
+                commit_session=commit_on_abort,
             )
             raise  # Re-raise to propagate cancellation signal
         except Exception:
@@ -2016,6 +2079,7 @@ class ReActAgent(BaseAgent):
             abort_persisted = await self._handle_context_abort(
                 session,
                 marker="[Request interrupted by an unexpected error]",
+                commit_session=commit_on_abort,
             )
             raise  # Preserve the original ReAct failure for the caller
         finally:
@@ -2111,11 +2175,7 @@ class ReActAgent(BaseAgent):
             need_cleanup = True
 
         # Only manage agent-session stream lifecycle, not workflow sessions.
-        self.is_agent_session = (
-            hasattr(session, "pre_run")
-            and hasattr(session, "close_stream")
-            and hasattr(session, "commit")
-        )
+        self.is_agent_session = self._session_supports_agent_lifecycle(session)
         # self.is_agent_session = isinstance(session, AgentSession)
         if self.is_agent_session:
             await session.pre_run(
@@ -2127,7 +2187,10 @@ class ReActAgent(BaseAgent):
 
     @with_session()
     async def _inner_stream(self, session, inputs, need_cleanup):
+        abort_persisted = False
+
         async def stream_process():
+            nonlocal abort_persisted
             try:
                 final_result = await self.invoke(inputs, session, _streaming=True)
                 if isinstance(final_result, list):
@@ -2138,15 +2201,17 @@ class ReActAgent(BaseAgent):
                         final_result, session
                     )
             except asyncio.CancelledError:
-                await self._handle_context_abort(
+                abort_persisted = await self._handle_context_abort(
                     session,
                     marker="[Request cancelled by user]",
+                    commit_session=self.is_agent_session,
                 )
                 raise
             except Exception as e:
-                await self._handle_context_abort(
+                abort_persisted = await self._handle_context_abort(
                     session,
                     marker="[Request interrupted by an unexpected error]",
+                    commit_session=self.is_agent_session,
                 )
                 logger.error(f"ReActAgent stream error: {e}", exc_info=True)
                 error_result = {"output": str(e), "result_type": "error"}
@@ -2154,11 +2219,12 @@ class ReActAgent(BaseAgent):
                     error_result, session
                 )
             finally:
-                if need_cleanup:
+                if need_cleanup and not abort_persisted:
                     await self.context_engine.save_contexts(session)
                 if self.is_agent_session:
                     await session.close_stream()
-                    await session.commit()
+                    if not abort_persisted:
+                        await session.commit()
 
         if self.is_agent_session:
             # Agent sessions use stream_iterator for consuming output
@@ -2210,7 +2276,21 @@ class ReActAgent(BaseAgent):
         await context.clear_messages(with_history=False)
         return True
 
-    async def _handle_context_abort(self, session: Session, *, marker: str) -> bool:
+    @staticmethod
+    def _session_supports_agent_lifecycle(session: Session) -> bool:
+        """Return whether ReAct owns the agent-session persistence lifecycle."""
+        return session is not None and all(
+            callable(getattr(session, method_name, None))
+            for method_name in ("pre_run", "close_stream", "commit")
+        )
+
+    async def _handle_context_abort(
+            self,
+            session: Session,
+            *,
+            marker: str,
+            commit_session: Optional[bool] = None,
+    ) -> bool:
         """Clean and persist the current turn after cancellation or failure.
 
         The context is cleaned before persistence so a subsequent invocation
@@ -2234,7 +2314,10 @@ class ReActAgent(BaseAgent):
                 exc_info=True,
             )
 
-        return await self._persist_context_after_abort(session)
+        return await self._persist_context_after_abort(
+            session,
+            commit_session=commit_session,
+        )
 
     async def _cleanup_context_after_abort(
             self,
@@ -2267,8 +2350,19 @@ class ReActAgent(BaseAgent):
             marker="[Request cancelled by user]",
         )
 
-    async def _persist_context_after_abort(self, session: Session) -> bool:
-        """Persist cleaned context and commit it when the session supports it."""
+    async def _persist_context_after_abort(
+            self,
+            session: Session,
+            *,
+            commit_session: Optional[bool] = None,
+    ) -> bool:
+        """Persist cleaned context and commit only agent-owned sessions.
+
+        An externally supplied agent session is still committed on abort: the
+        Runner commits it on the normal path, but does not reach ``post_run``
+        when the agent raises. Workflow/custom sessions remain caller-owned and
+        are never committed here.
+        """
         try:
             await asyncio.shield(self.context_engine.save_contexts(session))
         except asyncio.CancelledError:
@@ -2284,6 +2378,11 @@ class ReActAgent(BaseAgent):
                 exc_info=True,
             )
             return False
+
+        if commit_session is None:
+            commit_session = self._session_supports_agent_lifecycle(session)
+        if not commit_session:
+            return True
 
         commit = getattr(session, "commit", None)
         if not callable(commit):
@@ -2311,7 +2410,15 @@ class ReActAgent(BaseAgent):
 
     async def _save_contexts_on_cancel(self, session: Session) -> None:
         """Compatibility wrapper for cancellation-specific callers."""
-        await self._persist_context_after_abort(session)
+        try:
+            await self._persist_context_after_abort(session)
+        except asyncio.CancelledError:
+            # Preserve the historical contract of this compatibility helper:
+            # repeated cancellation must not make its task fail.
+            logger.info(
+                "Cancellation-specific context persistence was cancelled for session %s",
+                session.get_session_id(),
+            )
 
     @staticmethod
     def _sanitize_cancelled_turn_messages(

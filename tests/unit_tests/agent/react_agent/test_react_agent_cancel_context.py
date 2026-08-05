@@ -10,6 +10,7 @@ import pytest
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 from tests.unit_tests.fixtures.mock_llm import MockLLMModel
@@ -217,7 +218,59 @@ async def test_stream_unexpected_exception_saves_context_and_emits_error():
     assert error_schema.payload["result_type"] == "error"
     assert "insufficient_quota" in error_schema.payload["output"]
     agent.context_engine.save_contexts.assert_awaited_once_with(session)
+    # This stream was explicitly marked as workflow-owned, so the agent must
+    # not commit the caller's session in the abort path.
+    session.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_abort_commits_owned_agent_session_once():
+    """An owned agent-session abort commits once and skips finally duplication."""
+    agent = ReActAgent(card=AgentCard(name="owned_stream_agent", description="stream commit ownership"))
+    agent.context_engine = MagicMock()
+    agent.context_engine.save_contexts = AsyncMock()
+    agent.is_agent_session = True
+    agent.invoke = AsyncMock(side_effect=RuntimeError("insufficient_quota"))
+    session = MagicMock()
+    session.write_stream = AsyncMock()
+    session.close_stream = AsyncMock()
+
+    async for _ in agent._inner_stream(
+            session=session,
+            inputs={"query": "查一下热搜"},
+            need_cleanup=True,
+    ):
+        pass
+
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
     session.commit.assert_called_once()
+    session.close_stream.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_model_exception_recovery_hook_retries_the_same_model_step_once():
+    """A future context recovery hook can mutate context and request one retry."""
+    agent = ReActAgent(card=AgentCard(name="recovery_hook_agent", description="recovery hook"))
+    context = MagicMock()
+    context.context_id.return_value = "context"
+    context.get_messages.return_value = []
+    session = MagicMock()
+    ctx = AgentCallbackContext(agent=agent, session=session)
+    recovery = AsyncMock(return_value=True)
+    agent._recover_from_model_exception = recovery
+    agent._railed_model_call = AsyncMock(
+        side_effect=[
+            RuntimeError("context length exceeded"),
+            AssistantMessage(content="重试成功"),
+        ]
+    )
+
+    result = await agent._call_model(ctx, context, tools=None)
+
+    assert result.content == "重试成功"
+    assert agent._railed_model_call.await_count == 2
+    recovery.assert_awaited_once()
+    assert ctx.extra["_model_exception_recovery_attempted"] is True
 
 
 @pytest.mark.asyncio
@@ -244,3 +297,15 @@ async def test_shielded_context_save_continues_after_repeated_cancel():
 
     allow_save_to_finish.set()
     await asyncio.wait_for(save_finished.wait(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_save_contexts_on_cancel_keeps_legacy_cancel_swallowing_contract():
+    """The compatibility wrapper must absorb cancellation from its delegate."""
+    agent = ReActAgent(card=AgentCard(name="cancel_wrapper_agent", description="cancel wrapper"))
+    session = MagicMock()
+    agent._persist_context_after_abort = AsyncMock(side_effect=asyncio.CancelledError())
+
+    await agent._save_contexts_on_cancel(session)
+
+    agent._persist_context_after_abort.assert_awaited_once_with(session)
