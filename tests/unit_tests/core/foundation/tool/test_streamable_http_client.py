@@ -378,6 +378,8 @@ class TestMcpToolResultMultiBlockExtraction(unittest.TestCase):
 
 class TestMcpToolResultImageBridge(unittest.TestCase):
     def test_image_bridged_to_multimodal_when_opted_in(self):
+        from openjiuwen.core.foundation.tool import McpToolResult
+
         tool_result = SimpleNamespace(
             content=[
                 SimpleNamespace(text="tree summary"),
@@ -389,11 +391,12 @@ class TestMcpToolResultImageBridge(unittest.TestCase):
             tool_result, include_image_content=True, tool_name="get_window_state"
         )
 
+        self.assertIsInstance(result, McpToolResult)
         self.assertEqual(
-            result["content"],
+            result.data["content"],
             "tree summary\n\n1 image(s) attached as multimodal input.",
         )
-        (item,) = result["multimodal"]
+        (item,) = result.data["multimodal"]
         self.assertEqual(item["type"], "image")
         self.assertEqual(item["source"], "mcp")
         self.assertEqual(item["source_path"], "get_window_state")
@@ -422,28 +425,40 @@ class TestMcpToolInvokeMultimodalWrapping(unittest.IsolatedAsyncioTestCase):
         )
         return MCPTool(client, card)
 
-    async def test_multimodal_dict_is_wrapped_into_mcp_tool_result(self):
+    async def test_mcp_tool_result_passes_through_unwrapped(self):
         from openjiuwen.core.foundation.tool import McpToolResult
 
-        bridged = {
-            "content": "tree summary\n\n1 image(s) attached as multimodal input.",
-            "multimodal": [
-                {
-                    "type": "image",
-                    "source": "mcp",
-                    "source_path": "get_window_state",
-                    "mime_type": "image/png",
-                    "data_url": "data:image/png;base64,abc123",
-                }
-            ],
-        }
+        bridged = McpToolResult(
+            data={
+                "content": "tree summary\n\n1 image(s) attached as multimodal input.",
+                "multimodal": [
+                    {
+                        "type": "image",
+                        "source": "mcp",
+                        "source_path": "get_window_state",
+                        "mime_type": "image/png",
+                        "data_url": "data:image/png;base64,abc123",
+                    }
+                ],
+            }
+        )
         tool = self._make_tool(bridged)
 
         result = await tool.invoke({})
 
-        self.assertIsInstance(result, McpToolResult)
+        self.assertIs(result, bridged)
         self.assertTrue(result.success)
-        self.assertEqual(result.data, bridged)
+
+    async def test_plain_dict_result_is_not_mistaken_for_multimodal(self):
+        # A server-returned dict that happens to contain "content" and
+        # "multimodal" keys must keep the legacy {"result": ...} shape;
+        # only the McpToolResult sentinel type triggers the bridge.
+        lookalike = {"content": "x", "multimodal": []}
+        tool = self._make_tool(lookalike)
+
+        result = await tool.invoke({})
+
+        self.assertEqual(result, {"result": lookalike})
 
     async def test_plain_result_keeps_legacy_shape(self):
         tool = self._make_tool("snapshotted")

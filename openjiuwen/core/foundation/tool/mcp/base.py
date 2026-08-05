@@ -40,9 +40,9 @@ def extract_mcp_tool_result_content(
 
     Image blocks become text placeholders by default. Servers whose images
     the model must see opt in via ``McpServerConfig.include_image_content``;
-    the result then becomes ``{"content": <text>, "multimodal": [...]}``
-    with data-URL image items, which ``MCPTool.invoke`` bridges into the
-    multimodal tool-result convention.
+    the result is then an ``McpToolResult`` whose ``data`` holds the text
+    plus data-URL image items, which the multimodal tool-result pipeline
+    delivers to the model.
     """
     content = getattr(tool_result, "content", None)
     if not content:
@@ -85,19 +85,21 @@ def extract_mcp_tool_result_content(
 
     if images:
         note = f"{len(images)} image(s) attached as multimodal input."
-        return {
-            "content": f"{text}\n\n{note}" if text else note,
-            "multimodal": [
-                {
-                    "type": "image",
-                    "source": "mcp",
-                    "source_path": tool_name or "mcp_tool",
-                    "mime_type": mime_type,
-                    "data_url": f"data:{mime_type};base64,{data}",
-                }
-                for mime_type, data in images
-            ],
-        }
+        return McpToolResult(
+            data={
+                "content": f"{text}\n\n{note}" if text else note,
+                "multimodal": [
+                    {
+                        "type": "image",
+                        "source": "mcp",
+                        "source_path": tool_name or "mcp_tool",
+                        "mime_type": mime_type,
+                        "data_url": f"data:{mime_type};base64,{data}",
+                    }
+                    for mime_type, data in images
+                ],
+            }
+        )
     return text
 
 
@@ -182,8 +184,8 @@ class MCPTool(Tool):
                     formatted_inputs=arguments)
 
             result = await self._mcp_client.call_tool(tool_name=self._card.name, arguments=arguments)
-            if isinstance(result, dict) and "content" in result and isinstance(result.get("multimodal"), list):
-                return McpToolResult(data=result)
+            if isinstance(result, McpToolResult):
+                return result
             return {"result": result}
 
         except Exception as e:
