@@ -31,6 +31,7 @@
     - [TeamRuntime and CommunicableAgent](2.Development%20Guide/Multi-Agent/TeamRuntime-and-CommunicableAgent.md)
     - [BaseTeam](2.Development%20Guide/Multi-Agent/BaseTeam.md)
     - [Agent as Tool](2.Development%20Guide/Multi-Agent/AgentAsTool.md)
+    - [Preset Collaboration Patterns](2.Development%20Guide/Multi-Agent/Preset%20Collaboration%20Patterns.md)
   - [Agent Teams](2.Development%20Guide/Agent%20Teams/README.md)
     - [Overview](2.Development%20Guide/Agent%20Teams/Overview.md)
     - [AgentTeams](2.Development%20Guide/Agent%20Teams/AgentTeams.md)
