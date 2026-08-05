@@ -309,6 +309,7 @@ def _arm_kernel_for_start(host: SimpleNamespace) -> CoordinationKernel:
     host.session_manager.bind_session = AsyncMock()
     host.resources.harness.start = AsyncMock()
     host.stream_controller.start = AsyncMock()
+    host.seed_member_registry = AsyncMock()
     host.update_status = AsyncMock()
     host.refresh_idle_baseline = MagicMock()
     host.infra.workspace_manager = None

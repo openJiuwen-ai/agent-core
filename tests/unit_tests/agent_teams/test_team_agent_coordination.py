@@ -2123,7 +2123,9 @@ def _make_member_status_handler(
     backend.list_members = AsyncMock(return_value=members)
     backend.clean_team = AsyncMock(return_value=True)
     handler = MemberHandler(
-        host=SimpleNamespace(),
+        # The leader folds every observed member status into its activity
+        # registry before doing anything else with the event.
+        host=SimpleNamespace(observe_member_status=AsyncMock()),
         blueprint=SimpleNamespace(
             role=TeamRole.LEADER,
             lifecycle=lifecycle,

@@ -45,6 +45,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
 )
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.schema.events import TeamEvent
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback import AsyncCallbackFramework
@@ -110,12 +111,19 @@ class TeamLifecycleController(Protocol):
     ``shutdown_self`` is invoked when the team has been dissolved and a
     non-leader member must abandon its loop. ``conclude_completed_round``
     ends a completed persistent team's leader stream so the Runner finally
-    can pause it. Both coordinate across stream / session / member state,
-    so they belong here rather than on the round controller.
+    can pause it. ``observe_member_status`` folds an observed member status
+    into the leader's activity view, which may in turn emit a team-idle
+    marker on the leader's stream. All three coordinate across stream /
+    session / member state, so they belong here rather than on the round
+    controller.
     """
 
     async def shutdown_self(self) -> None:
         """Force-shutdown this agent in response to team dissolution."""
+        ...
+
+    async def observe_member_status(self, member_name: str, status: MemberStatus) -> None:
+        """Record a member's status into the leader's activity view."""
         ...
 
     async def conclude_completed_round(self, member_count: int, task_count: int) -> None:

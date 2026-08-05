@@ -162,6 +162,37 @@ MEMBER_SETTLED_STATUSES = frozenset(
 )
 
 
+# Statuses in which nothing is running on a member's behalf: it is at rest
+# and will not move again until something external nudges it. Consumed by the
+# leader's in-memory activity registry to decide when the whole team has gone
+# quiet ("team idle").
+#
+# This is NOT the same question MEMBER_SETTLED_STATUSES answers, and the two
+# sets must not be merged. Settled means "this member finished its share of the
+# work" and feeds the team-*completion* verdict, so it deliberately excludes
+# UNSTARTED (never did anything) and ERROR (stopped without finishing).
+# Quiescent means "this member is not moving *right now*", which both of those
+# plainly are — a team where one member errored out is idle, it is just not
+# complete. Keeping one set for both questions would either let a completed
+# team be declared over a crashed member, or leave the idle signal permanently
+# suppressed by a member that will never run again.
+#
+# The complement — STARTING / BUSY / RESTARTING / SHUTDOWN_REQUESTED — is the
+# active set: each of them means work is either running or about to run
+# without further input (SHUTDOWN_REQUESTED members may still be finishing a
+# last round; they settle to SHUTDOWN when actually gone).
+MEMBER_QUIESCENT_STATUSES: frozenset[MemberStatus] = frozenset(
+    {
+        MemberStatus.UNSTARTED,
+        MemberStatus.READY,
+        MemberStatus.PAUSED,
+        MemberStatus.STOPPED,
+        MemberStatus.SHUTDOWN,
+        MemberStatus.ERROR,
+    }
+)
+
+
 class ExecutionStatus(str, Enum):
     """Execution status enum - detailed status for task execution
 

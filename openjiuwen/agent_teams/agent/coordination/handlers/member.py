@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.coordination.event_bus import CoordinationEvent, InnerEventType
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
 from openjiuwen.agent_teams.agent.infra import TeamInfra
+from openjiuwen.agent_teams.agent.member_activity import parse_member_status
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
@@ -64,6 +65,13 @@ class MemberHandler(BaseCoordinationHandler):
             TeamEvent.MEMBER_SHUTDOWN,
         }
     )
+    # Member events that imply a status without carrying one. Both mean the
+    # member is on its way up, i.e. active — the status it settles into
+    # arrives later as its own MEMBER_STATUS_CHANGED.
+    _ACTIVITY_STATUS_BY_EVENT: ClassVar[dict[str, MemberStatus]] = {
+        TeamEvent.MEMBER_SPAWNED: MemberStatus.STARTING,
+        TeamEvent.MEMBER_RESTARTED: MemberStatus.RESTARTING,
+    }
 
     def __init__(
         self,
@@ -168,6 +176,7 @@ class MemberHandler(BaseCoordinationHandler):
         payload = event.payload
         target_id = payload.get("member_name", "")
         event_type = event.event_type
+        await self._observe_member_activity(event_type, target_id, payload)
         if event_type == TeamEvent.MEMBER_SPAWNED:
             text = t("dispatcher.member_online", target_id=target_id)
         elif event_type == TeamEvent.MEMBER_RESTARTED:
@@ -198,6 +207,34 @@ class MemberHandler(BaseCoordinationHandler):
             return
 
         team_logger.debug(text)
+
+    async def _observe_member_activity(
+        self,
+        event_type: str,
+        target_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Feed the leader's activity view from this member event.
+
+        The leader tracks whether anything in the team is still moving, and
+        these events are the only channel carrying other members' transitions
+        into this process (its own arrive locally — the messager self-filter
+        drops self-published events). ``MEMBER_STATUS_CHANGED`` carries the
+        status; the two spawn-side events do not, but their meaning is a fixed
+        status each, so they are mapped rather than round-tripped through the
+        database. Everything else is either redundant (``MEMBER_SHUTDOWN`` is
+        preceded by a status change to SHUTDOWN_REQUESTED) or not a status
+        transition at all.
+        """
+        if not target_id:
+            return
+        if event_type == TeamEvent.MEMBER_STATUS_CHANGED:
+            status = parse_member_status(payload.get("new_status"))
+        else:
+            status = self._ACTIVITY_STATUS_BY_EVENT.get(event_type)
+        if status is None:
+            return
+        await self._lifecycle.observe_member_status(target_id, status)
 
     async def _maybe_clean_team_after_shutdown(self, new_status: str | None) -> None:
         """Clean the team once every non-leader member has shut down.

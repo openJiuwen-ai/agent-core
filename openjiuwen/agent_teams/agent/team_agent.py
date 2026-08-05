@@ -21,6 +21,11 @@ from openjiuwen.agent_teams.agent.coordination import (
     EventBus,
 )
 from openjiuwen.agent_teams.agent.member import TeamMember
+from openjiuwen.agent_teams.agent.member_activity import (
+    IdleSignal,
+    MemberActivityRegistry,
+    parse_member_status,
+)
 from openjiuwen.agent_teams.agent.member_factory import create_member_handle
 from openjiuwen.agent_teams.agent.recovery_manager import RecoveryManager
 from openjiuwen.agent_teams.agent.session_manager import SessionManager
@@ -33,6 +38,7 @@ from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
 )
+from openjiuwen.agent_teams.schema.stream import is_team_event_marker
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
@@ -587,6 +593,12 @@ class TeamAgent(BaseAgent):
                 agent_card=self.card,
             )
 
+        # Only the leader keeps the team-wide activity view: it is the one
+        # role that observes every member's transitions, and the one whose
+        # stream the team-idle marker belongs on.
+        if ctx.role == TeamRole.LEADER and ctx.member_name:
+            self._state.member_registry = MemberActivityRegistry(ctx.member_name)
+
         self._coordination.setup(role=ctx.role)
         self._register_team_completion_callbacks()
         self._register_reliability_local_sink()
@@ -704,6 +716,11 @@ class TeamAgent(BaseAgent):
                 chunk = await self._stream_controller.stream_queue.get()
                 if chunk is None:
                     break
+                # Team markers (team.idle / team.completed / ...) carry no
+                # agent content; a non-streaming caller wants the last thing
+                # the agent actually produced, not the framework's bookkeeping.
+                if is_team_event_marker(chunk):
+                    continue
                 last_result = chunk
             return last_result
         finally:
@@ -914,6 +931,65 @@ class TeamAgent(BaseAgent):
     async def _update_status(self, status: MemberStatus) -> None:
         if self._state.team_member:
             await self._state.team_member.update_status(status)
+        # The leader's own transitions never come back as events (the
+        # messager self-filter drops them), so this is the only place they
+        # can enter the activity view. Fold them in even when the DB write
+        # above was a no-op: before ``build_team`` the leader has no row, but
+        # it is still a member of its own team as far as idleness goes.
+        await self.observe_member_status(self._member_name() or "", status)
+
+    async def observe_member_status(self, member_name: str, status: MemberStatus) -> None:
+        """Record a member's status and drive the debounced team-idle marker.
+
+        The single decision point for team idleness, fed from two sides: this
+        agent's own status transitions (``_update_status``) and every other
+        member's ``MEMBER_*`` events (``MemberHandler``). The registry decides
+        whether a marker is owed; the stream controller owns the timer that
+        delivers it after the quiet has held. No-op on non-leader roles, which
+        hold no registry.
+
+        Args:
+            member_name: The member whose status is being observed.
+            status: Its current status.
+        """
+        registry = self._state.member_registry
+        if registry is None or not member_name:
+            return
+        signal = registry.record(member_name, status)
+        if signal is IdleSignal.SCHEDULE:
+            self._stream_controller.schedule_team_idle()
+        elif signal is IdleSignal.CANCEL:
+            self._stream_controller.cancel_team_idle()
+
+    async def seed_member_registry(self) -> None:
+        """Re-baseline the leader's activity view from the team database.
+
+        Called once per run cycle before this agent reports itself READY, so
+        a cold start, a resume and a recover all begin from what the database
+        actually holds rather than from whatever the previous cycle left in
+        memory. A team that has not been built yet, or one with no member rows,
+        seeds an empty roster — that is an ordinary state, not an error, and
+        the leader itself is kept in the roster regardless.
+        """
+        registry = self._state.member_registry
+        backend = self.team_backend
+        if registry is None or backend is None:
+            return
+        try:
+            rows = await backend.db.member.get_team_members(backend.team_name)
+        except Exception as e:
+            team_logger.warning(
+                "[{}] failed to seed member activity registry: {}",
+                self._member_name() or "?",
+                e,
+            )
+            return
+        seeded: dict[str, MemberStatus] = {}
+        for row in rows:
+            status = parse_member_status(row.status)
+            if status is not None:
+                seeded[row.member_name] = status
+        registry.seed(seeded)
 
     async def _update_execution(self, status: ExecutionStatus) -> None:
         if self._state.team_member:
