@@ -7,8 +7,8 @@ from typing import Any, Callable, Dict, Iterable, List, Protocol, Set
 
 from openjiuwen.symphony.orchestration.graph.candidates import CandidateGenerator
 from openjiuwen.symphony.orchestration.graph.lexicon import (
-    ArtifactLexicon,
     DEFAULT_GRAPH_STOP_TERMS,
+    ArtifactLexicon,
 )
 from openjiuwen.symphony.orchestration.graph.models import (
     BuildManifest,
@@ -46,9 +46,13 @@ class _RelationResolver(Protocol):
         self,
         registry: SkillRegistry,
         candidates: Iterable[RelationCandidate],
-    ) -> list[LLMMatch]: ...
+    ) -> list[LLMMatch]:
+        """Resolve relation candidates for one graph construction run."""
+        raise NotImplementedError
 
-    def manifest_metadata(self) -> dict[str, Any]: ...
+    def manifest_metadata(self) -> dict[str, Any]:
+        """Return safe resolver metadata for the graph manifest."""
+        raise NotImplementedError
 
 
 class GraphBuildPipeline:
@@ -239,7 +243,7 @@ def _materialize_graph(registry: SkillRegistry, llm_matches: Iterable[LLMMatch])
         )
         edges.setdefault(edge.key, edge)
     return SkillGraph(
-        nodes=[nodes[node_id] for node_id in sorted(nodes)],
+        nodes=sorted(nodes.values(), key=lambda node: node.id),
         edges=sorted(edges.values(), key=lambda edge: edge.key),
     )
 

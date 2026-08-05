@@ -14,19 +14,6 @@ from typing import Any, Awaitable, Callable, Sequence
 from uuid import uuid4
 
 from openjiuwen.core.foundation.llm import Model
-from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
-from openjiuwen.symphony.orchestration.graph.candidates import CandidateGenerator
-from openjiuwen.symphony.orchestration.graph.matcher.cache import (
-    CACHE_INDEX_SCHEMA,
-    CACHE_RECORD_SCHEMA,
-    sanitize_matcher_metadata,
-)
-from openjiuwen.symphony.orchestration.graph.matcher.ontology import (
-    DEFAULT_PROMPT_VERSION,
-    MATCH_SCHEMA_VERSION,
-    MATCHER_VERSION,
-    OntologyMatcher,
-)
 from openjiuwen.symphony.orchestration.artifacts import (
     SCHEMA_VERSION,
     GraphArtifactStore,
@@ -42,6 +29,19 @@ from openjiuwen.symphony.orchestration.contracts import (
     OrchestrationProgress,
 )
 from openjiuwen.symphony.orchestration.execution_graph import build_execution_graph
+from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
+from openjiuwen.symphony.orchestration.graph.candidates import CandidateGenerator
+from openjiuwen.symphony.orchestration.graph.matcher.cache import (
+    CACHE_INDEX_SCHEMA,
+    CACHE_RECORD_SCHEMA,
+    sanitize_matcher_metadata,
+)
+from openjiuwen.symphony.orchestration.graph.matcher.ontology import (
+    DEFAULT_PROMPT_VERSION,
+    MATCH_SCHEMA_VERSION,
+    MATCHER_VERSION,
+    OntologyMatcher,
+)
 from openjiuwen.symphony.orchestration.language import resolve_orchestration_language
 from openjiuwen.symphony.orchestration.model import ModelResponseObserver
 from openjiuwen.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
@@ -131,13 +131,16 @@ class OrchestrationService:
             def graph_progress(stage: str, **details: Any) -> None:
                 progress_dispatcher.enqueue(stage, **details)
 
-            matcher.progress = lambda event, current, total, details: graph_progress(
-                "graph.resolve.progress",
-                matcher_event=event,
-                current=current,
-                total=total,
-                details=details,
-            )
+            def matcher_progress(event: str, current: int, total: int, details: dict[str, Any]) -> None:
+                graph_progress(
+                    "graph.resolve.progress",
+                    matcher_event=event,
+                    current=current,
+                    total=total,
+                    details=details,
+                )
+
+            matcher.progress = matcher_progress
             candidate_generator = CandidateGenerator(
                 max_candidates_per_skill_relation=matcher.graph_config["max_candidates_per_skill_relation"],
                 max_port_mappings_per_candidate=matcher.graph_config["max_port_mappings_per_candidate"],
@@ -315,12 +318,9 @@ class OrchestrationService:
     ) -> dict[str, Any]:
         normalized_graph_config = _normalized_graph_config(self.graph_config)
         candidate_generation = {
-            key: normalized_graph_config[key]
-            for key in (
-                "max_candidates_per_skill_relation",
-                "max_port_mappings_per_candidate",
-                "max_exact_io_pair_fanout",
-            )
+            "max_candidates_per_skill_relation": normalized_graph_config.get("max_candidates_per_skill_relation"),
+            "max_port_mappings_per_candidate": normalized_graph_config.get("max_port_mappings_per_candidate"),
+            "max_exact_io_pair_fanout": normalized_graph_config.get("max_exact_io_pair_fanout"),
         }
         return sanitize_matcher_metadata(
             {

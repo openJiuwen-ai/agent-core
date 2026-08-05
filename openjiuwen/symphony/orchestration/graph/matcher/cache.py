@@ -156,14 +156,10 @@ def diagnostics_by_candidate(
 ) -> dict[str, list[GraphDiagnostic]]:
     output: dict[str, list[GraphDiagnostic]] = {candidate.key: [] for candidate in candidates}
     by_key = {candidate.key: candidate for candidate in candidates}
-    by_pair = {
-        (source_id, target_id): candidate.key
-        for candidate in candidates
-        for source_id, target_id in (
-            (candidate.source_id, candidate.target_id),
-            (candidate.target_id, candidate.source_id),
-        )
-    }
+    by_pair: dict[tuple[str, str], str] = {}
+    for candidate in candidates:
+        by_pair[(candidate.source_id, candidate.target_id)] = candidate.key
+        by_pair[(candidate.target_id, candidate.source_id)] = candidate.key
     for diagnostic in diagnostics:
         details = diagnostic.details
         match = details.get("match") if isinstance(details.get("match"), dict) else {}

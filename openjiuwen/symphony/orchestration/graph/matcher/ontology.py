@@ -10,8 +10,8 @@ from typing import Any, Awaitable, Dict, Iterable, List, Optional, Protocol
 
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.orchestration.graph.matcher.cache import (
-    CACHE_RECORD_SCHEMA,
     CACHE_INDEX_SCHEMA,
+    CACHE_RECORD_SCHEMA,
     RelationCacheStats,
     RelationMatchCache,
     chunked,
@@ -52,7 +52,9 @@ class MatchProgress(Protocol):
         current: int,
         total: int,
         details: Dict[str, Any],
-    ) -> None: ...
+    ) -> None:
+        """Report one relation-matching progress event."""
+        raise NotImplementedError
 
 
 class OntologyMatcher:
