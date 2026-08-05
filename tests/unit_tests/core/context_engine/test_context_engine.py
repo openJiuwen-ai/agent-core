@@ -145,6 +145,82 @@ class TestContextEngine:
 
         assert ctx1 is ctx2
 
+    def test_context_overflow_matcher_reads_wrapped_provider_error(self):
+        provider_error = RuntimeError("invalid_request_error")
+        provider_error.body = {
+            "error": {
+                "type": "invalid_request_error",
+                "message": (
+                    "This model's maximum context length is 1048576 tokens. "
+                    "Please reduce the length of the messages."
+                ),
+            }
+        }
+        wrapped_error = RuntimeError("model call failed")
+        wrapped_error.__cause__ = provider_error
+
+        assert ContextEngine.is_context_overflow_error(wrapped_error) is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "insufficient_quota: billing limit reached",
+            "maximum output tokens exceeded",
+            "output token limit reached",
+            "network timeout",
+        ],
+    )
+    def test_context_overflow_matcher_ignores_unrelated_model_errors(self, message):
+        assert ContextEngine.is_context_overflow_error(RuntimeError(message)) is False
+
+    @pytest.mark.asyncio
+    async def test_recover_from_model_exception_compresses_context_once(self, engine, session):
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(replacement="[RECOVERED]"),
+            )],
+            history_messages=[UserMessage(content="large historical context")],
+        )
+        session.commit = AsyncMock()
+        provider_error = RuntimeError("invalid_request_error")
+        provider_error.body = {
+            "error": {
+                "message": "This model's maximum context length is 1048576 tokens.",
+            }
+        }
+
+        recovered = await engine.recover_from_model_exception(
+            context_id="ctx",
+            session=session,
+            context=context,
+            exception=provider_error,
+        )
+
+        assert recovered is True
+        assert context.get_messages()[0].content == "[RECOVERED]"
+        session.commit.assert_awaited_once_with()
+        assert any(
+            state["status"] == "completed"
+            for state in context._processor_state_recorder.history()
+        )
+
+    @pytest.mark.asyncio
+    async def test_recover_from_model_exception_does_not_retry_partial_stream(self, engine):
+        provider_error = RuntimeError(
+            "This model's maximum context length is 1048576 tokens."
+        )
+
+        recovered = await engine.recover_from_model_exception(
+            exception=provider_error,
+            streaming=True,
+            stream_chunks_emitted=1,
+        )
+
+        assert recovered is False
+
     @pytest.mark.asyncio
     async def test_create_context_isolated_per_session(self, engine, session, another_session):
         ctx1 = await engine.create_context(context_id="ctx", session=session)

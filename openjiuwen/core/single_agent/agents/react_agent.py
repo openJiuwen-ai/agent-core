@@ -867,10 +867,10 @@ class ReActAgent(BaseAgent):
     ) -> bool:
         """Extension point for context-aware recovery before one model retry.
 
-        The default ContextEngine implementation is a no-op. A future context
-        integration can recognize a provider context-window error, actively
-        compress the context, and return ``True`` to retry the same ReAct model
-        step. Returning ``False`` leaves the original exception untouched.
+        ContextEngine recognizes provider context-window errors, actively
+        compresses the context when a configured processor can change it, and
+        returns ``True`` to retry the same ReAct model step. Returning
+        ``False`` leaves the original exception untouched.
         """
         recover = getattr(type(self.context_engine), "recover_from_model_exception", None)
         if not callable(recover):
