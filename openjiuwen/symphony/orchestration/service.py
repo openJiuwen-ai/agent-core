@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 
-from openjiuwen.symphony.orchestration.graph import CandidateGenerator, GraphBuilder, OntologyMatcher
-from openjiuwen.symphony.interfaces import CapabilityProvider, LLMClient
+from openjiuwen.symphony.interfaces import LLMClient, OrchestrationCapabilityProvider
 from openjiuwen.symphony.orchestration.artifacts import (
     SCHEMA_VERSION,
     GraphArtifactStore,
@@ -30,6 +29,7 @@ from openjiuwen.symphony.orchestration.contracts import (
     OrchestrationProgress,
 )
 from openjiuwen.symphony.orchestration.execution_graph import build_execution_graph
+from openjiuwen.symphony.orchestration.graph import CandidateGenerator, GraphBuilder, OntologyMatcher
 from openjiuwen.symphony.orchestration.language import resolve_orchestration_language
 from openjiuwen.symphony.orchestration.matcher import LLMRelationMatcher
 from openjiuwen.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
@@ -48,7 +48,7 @@ class OrchestrationService:
         self,
         *,
         graph_artifact_root: str | Path,
-        capability_provider: CapabilityProvider | Sequence[Any],
+        capability_provider: OrchestrationCapabilityProvider | Sequence[Any],
         llm_client: LLMClient | None,
         config: OrchestrationConfig | None = None,
         matcher: OntologyMatcher | None = None,

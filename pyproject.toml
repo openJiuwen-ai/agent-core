@@ -59,6 +59,7 @@ dependencies = [
     "oauthlib>=3.3.1",
     "python-dotenv>=1.2.1",
     "json-repair>=0.55.0",
+    "PyYAML>=6.0.2",
     "tenacity>=9.1.2",
     "alembic>=1.13.1",
     "anyio>=4.0.0",
@@ -191,6 +192,8 @@ openjiuwen = [
     "**/locales/**/*.md",
     "**/auto_harness/resources/*.yaml",
     "**/auto_harness/skills/**/*.md",
+    "symphony/README.md",
+    "symphony/shared/fingerprint/resources/*.yaml",
 ]
 
 [tool.coverage.run]
