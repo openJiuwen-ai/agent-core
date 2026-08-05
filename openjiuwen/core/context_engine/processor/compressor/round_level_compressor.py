@@ -15,7 +15,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
-from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor, _invoke_via_stream
 from openjiuwen.core.context_engine.processor._protected import (
     is_protected,
     msg_in_window,
@@ -610,7 +610,7 @@ class RoundLevelCompressor(ContextProcessor):
             return None
 
         try:
-            response = await self._get_model().invoke(model_messages, output_parser=JsonOutputParser())
+            response = await _invoke_via_stream(self._get_model(), model_messages, output_parser=JsonOutputParser())
         except Exception as exc:
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,

@@ -12,11 +12,43 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.context_engine import ModelContext, ContextWindow
 from openjiuwen.core.context_engine.context.session_memory_manager import group_completed_api_rounds
 from openjiuwen.core.context_engine.schema.messages import create_offload_message
-from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, Model
 from openjiuwen.core.sys_operation import SysOperation
 
 
 _PROCESSOR_TYPE_ATTR: str = "__processor_type"
+
+
+async def _invoke_via_stream(
+    model: Model,
+    messages: List[BaseMessage],
+    **kwargs,
+) -> AssistantMessage:
+    """用流式调用替代非流式 invoke，收集所有 chunk 后聚合为 AssistantMessage 返回。
+
+    底层 HTTP 使用 stream=True，保持 invoke 的返回类型和调用方接口不变。
+    """
+    accumulated = None
+    async for chunk in model.stream(messages=messages, **kwargs):
+        if accumulated is None:
+            accumulated = chunk
+        else:
+            accumulated = accumulated + chunk
+
+    if accumulated is None:
+        return AssistantMessage(role="assistant", content="")
+
+    return AssistantMessage(
+        role="assistant",
+        content=getattr(accumulated, "content", None) or "",
+        tool_calls=getattr(accumulated, "tool_calls", None) or [],
+        usage_metadata=getattr(accumulated, "usage_metadata", None),
+        finish_reason=getattr(accumulated, "finish_reason", None),
+        parser_content=getattr(accumulated, "parser_content", None),
+        reasoning_content=getattr(accumulated, "reasoning_content", None),
+    )
+
+
 _OFFLOAD_MESSAGE_HANDLE: str = "[[OFFLOAD: handle={handle}, type={type}]]"
 _OFFLOAD_MESSAGE_HANDLE_WITH_PATH: str = "[[OFFLOAD: type={type}, path={path}]]"
 _OFFLOAD_MESSAGE_HANDLE_WITH_PATH_AND_HANDLE: str = (

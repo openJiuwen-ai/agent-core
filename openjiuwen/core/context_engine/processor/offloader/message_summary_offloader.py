@@ -16,7 +16,7 @@ from openjiuwen.core.foundation.llm import (
 )
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
-from openjiuwen.core.context_engine.processor.base import ContextEvent
+from openjiuwen.core.context_engine.processor.base import ContextEvent, _invoke_via_stream
 from openjiuwen.core.context_engine.processor._protected import (
     is_protected,
     msg_in_window,
@@ -370,7 +370,8 @@ class MessageSummaryOffloader(MessageOffloader):
         """
         prompt = self.config.customized_summary_prompt or DEFAULT_OFFLOAD_SUMMARY_PROMPT
         system_message = SystemMessage(content=prompt)
-        response = await self._model.invoke(
+        response = await _invoke_via_stream(
+            self._model,
             [
                 system_message,
                 UserMessage(content=message.content)
@@ -605,7 +606,8 @@ class MessageSummaryOffloader(MessageOffloader):
                     f"{(message.content if isinstance(message.content, str) else str(message.content))[:2000]}"
                     for message in messages_to_use
                 )
-                response = await self._model.invoke(
+                response = await _invoke_via_stream(
+                    self._model,
                     [UserMessage(content=STEP_SUMMARY_PROMPT.format(context=context_text))]
                 )
                 if isinstance(response.content, str):
@@ -703,7 +705,7 @@ class MessageSummaryOffloader(MessageOffloader):
         for index, content_to_compress in enumerate(attempts, start=1):
             try:
                 prompt = self._build_compression_prompt(step, function_call, content_to_compress)
-                response = await self._model.invoke([UserMessage(content=prompt)])
+                response = await _invoke_via_stream(self._model, [UserMessage(content=prompt)])
                 if isinstance(response.content, str):
                     response_content = response.content
                 else:

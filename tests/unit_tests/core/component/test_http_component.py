@@ -120,13 +120,20 @@ async def test_start_http_request_end_in_workflow():
     """Test a workflow with Start -> HTTPRequest -> End components"""
     logger.info("Testing Start -> HTTPRequest -> End workflow...")
 
-    # Store original environment variable value to restore later
-    original_ssl_verify = os.environ.get('HTTP_SSL_VERIFY')
+    # Build a mock 200 response with JSON body (avoid real network call)
+    mock_response = _create_mock_http_response(
+        status=200,
+        content=b'{"args": {"test": "value"}, "url": "https://example.test/get"}',
+    )
+    mock_response.headers = {"Content-Type": "application/json"}
+    mock_response.reason = "OK"
+    mock_session = _create_mock_client_session(mock_response)
 
-    # Set environment variable to disable SSL verification
-    os.environ['HTTP_SSL_VERIFY'] = 'false'
-
-    try:
+    with (
+        patch(f"{_HTTP_COMPONENT_MODULE}.aiohttp.TCPConnector"),
+        patch(f"{_HTTP_COMPONENT_MODULE}.aiohttp.ClientSession", return_value=mock_session),
+        patch(f"{_HTTP_COMPONENT_MODULE}.SslUtils.get_ssl_config", return_value=(False, None)),
+    ):
         # Create a workflow
         flow = Workflow()
 
@@ -157,18 +164,13 @@ async def test_start_http_request_end_in_workflow():
         context = create_workflow_session()
 
         # Invoke the workflow with a test URL
-        result = await flow.invoke(inputs={"query": "https://httpbin.org/get?test=value"}, session=context)
+        result = await flow.invoke(inputs={"query": "https://example.test/get?test=value"}, session=context)
         logger.info(f"Workflow invoke result: {result}")
 
         # Basic assertions to verify the workflow ran successfully
         assert result is not None
+        assert mock_session.request.call_count == 1
         logger.info("✓ Start -> HTTPRequest -> End workflow executed successfully!")
-    finally:
-        # Restore original environment variable value
-        if original_ssl_verify is not None:
-            os.environ['HTTP_SSL_VERIFY'] = original_ssl_verify
-        else:
-            del os.environ['HTTP_SSL_VERIFY']
 
 
 @pytest.mark.asyncio
