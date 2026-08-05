@@ -13,17 +13,17 @@ Symphony 的最终设计围绕 Agent 能力资产提供以下核心能力：
 
 ## 实施状态
 
-本文档同时描述最终设计和当前实现。除“当前可运行”章节明确列出的接口外，其余代码示例均为最终目标，不代表当前已有可导入的 Python API。
+本文档同时描述最终设计和当前实现。“当前可运行接口”描述已接入 `SymphonyRuntime` 的编排能力；已迁入但尚未接入 Runtime 的经验模块见 [`experience/API.md`](experience/API.md)。“最终 Runtime 与统一接口蓝图”中标注为未接入的代码示例不代表当前可导入的 Python API。
 
 | 能力域 | 当前状态 | 说明 |
 | --- | --- | --- |
-| 能力指纹 | 编排所需部分已实现 | 已提供能力标识、类型、输入和输出等编排所需模型；完整资产扫描和跨领域画像仍待迁入。 |
-| 能力检索 | 待迁入 | 最终提供能力树构建、浏览和自然语言检索。 |
-| 能力编排 | 本次已实现 | 已提供关系图构建、版本化产物、Fast/Beam Planner 和执行图。 |
-| 经验沉淀 | 待迁入 | 最终提供轨迹评估、经验库构建和经验检索。 |
-| 能力评估 | 待迁入 | 最终提供能力、技能质量和能力组合效果评估。 |
-| Agent Toolkit | 待迁入 | 最终组合检索和编排，供 Agent 调用。 |
-| 公共 `models` | 待迁入 | 待其他能力域迁入后，再统一提取跨领域公共模型；本次不创建该目录。 |
+| 能力指纹 | 部分实现 | 已提供能力标识、类型、输入和输出等编排所需模型；完整资产扫描和跨领域画像尚未实现。 |
+| 能力检索 | 尚未实现 | 最终提供能力树构建、浏览和自然语言检索。 |
+| 能力编排 | 已实现 | 已提供关系图构建、版本化产物、Fast/Beam Planner 和执行图。 |
+| 经验沉淀 | 部分实现 | 独立模块已提供轨迹解析、评估、经验库构建和检索；尚未接入 `SymphonyRuntime`。 |
+| 能力评估 | 尚未实现 | 最终提供能力、技能质量和能力组合效果评估。 |
+| Agent Toolkit | 尚未实现 | 最终组合检索和编排，供 Agent 调用。 |
+| 公共 `models` | 尚未实现 | 其他能力域接入后，再统一提取跨领域公共模型。 |
 
 ## 功能边界
 
@@ -97,16 +97,16 @@ agent-core
 │       ├── __init__.py
 │       ├── runtime.py
 │       ├── interfaces
-│       ├── agent                         # 待迁入
-│       ├── retrieval                     # 待迁入
+│       ├── agent                         # 尚未实现
+│       ├── retrieval                     # 尚未实现
 │       ├── orchestration
 │       │   ├── graph
 │       │   │   ├── candidates
 │       │   │   └── matcher              # 内部实现，不作为公共 API
 │       │   └── planning
-│       ├── experience                    # 待迁入
-│       ├── evaluation                    # 待迁入
-│       ├── models                        # 待迁入，本次不创建
+│       ├── experience                    # 独立模块已实现，Runtime 接入待完成
+│       ├── evaluation                    # 尚未实现
+│       ├── models                        # 尚未实现
 │       └── shared
 ├── tests
 │   └── unit_tests
@@ -118,51 +118,14 @@ agent-core
 
 - Python 源码进入 `openjiuwen/symphony/`。
 - 图构建模型和内部关系匹配实现属于编排领域，保留在 `orchestration/graph/`。
-- 跨领域公共模型待其他模块迁入后统一提取到 `models/`。
+- 跨领域公共模型在其他能力域接入后统一提取到 `models/`。
 - 单元测试进入 `tests/unit_tests/symphony/`，示例进入 `examples/symphony/`。
 - 完整的中英文使用指南进入 agent-core 的 `docs` 文档体系。
 - 依赖、构建和发布配置由 agent-core 根目录的 `pyproject.toml` 统一管理。
 
-### 当前编排实现目录
-
-本次已落地的编排代码按领域职责组织如下。`graph`、`graph.matcher` 和
-`planning` 都是 `OrchestrationService` 的内部实现，不聚合或公开其中的算法类型：
-
-```text
-openjiuwen/symphony/
-├── runtime.py
-├── interfaces/
-├── shared/
-│   ├── fingerprint.py
-│   ├── data_types.py
-│   └── identity.py
-└── orchestration/
-    ├── artifacts.py
-    ├── config.py
-    ├── contracts.py
-    ├── model.py                    # Model.invoke、JSON 修复、observer 和模型身份
-    ├── service.py                  # 公共编排服务
-    ├── graph/
-    │   ├── build.py                # 注册、候选、关系解析、图和 lookup 物化
-    │   ├── candidates/
-    │   ├── models.py               # 编排图构建内部模型
-    │   └── matcher/
-    │       ├── ontology.py         # 唯一内部 OntologyMatcher
-    │       ├── protocol.py         # 请求构造、响应修复和阈值验证
-    │       ├── cache.py
-    │       └── consensus.py
-    └── planning/
-        ├── fast.py
-        └── beam.py
-```
-
-使用方只从 `openjiuwen.symphony` 或
-`openjiuwen.symphony.orchestration` 导入 Runtime、Service、配置、进度和公共图契约。
-候选生成器、Matcher、构建 Pipeline、Planner 以及内部图模型均不属于公共 Interface。
-
 ## 当前可运行接口
 
-当前 `SymphonyRuntime` 只组合 `OrchestrationService`。配置、能力清单、LLM 和产物目录都由使用方显式注入；关系匹配由 Runtime 内部完成。
+当前 `SymphonyRuntime` 只组合 `OrchestrationService`。配置、能力清单、LLM 和产物目录都由使用方显式注入；关系匹配由 Runtime 内部完成。`openjiuwen.symphony.experience` 已提供可单独导入的领域能力，但尚未组合到 Runtime。
 
 ```python
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
@@ -243,53 +206,43 @@ service = OrchestrationService(
 ```
 
 `capability_provider` 可以直接传入能力序列，也可以是返回能力序列的同步或异步函数。
+构造器还可以通过 `model_response_observer` 观测模型响应，通过 `source_snapshot` 补充使用方的构建身份，并通过 `prepare_artifact` 在原子发布前准备版本目录中的附加产物。
 
 ### 复用 agent-core Model
 
-Symphony 直接使用 agent-core 的 `Model`，复用统一的 provider、连接池和回调，不增加额外 LLM 包装层：
-
-```python
-from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
-
-model = Model(
-    model_client_config=ModelClientConfig(
-        client_provider="OpenAI",
-        api_base="https://example.com/v1",
-        api_key="...",
-    ),
-    model_config=ModelRequestConfig(
-        model="example-model",
-        temperature=0,
-    ),
-)
-```
-
-Symphony 内部统一将编排请求转换为 `Model.invoke()`，并处理 timeout、请求覆盖、错误上下文和 JSON 修复；
-模型账号及默认模型的选择仍由使用方显式注入。
+Symphony 直接使用上例中 agent-core 的 `Model`，复用统一的 provider、连接池和回调，不增加额外 LLM 包装层。Symphony 内部统一将编排请求转换为 `Model.invoke()`，并处理 timeout、请求覆盖、错误上下文和 JSON 修复；模型账号及默认模型的选择仍由使用方显式注入。
 
 ### OrchestrationService
 
 当前服务接口为：
 
 ```python
-status = service.status()
-build_result = await service.build(force=False, progress=on_progress)
+status = service.status(expected_snapshot=None)
+build_result = await service.build(
+    force=False,
+    progress=on_progress,
+    prepare_artifact=None,
+)
 cancel_status = await service.cancel_build()
-graph = service.read()
+graph = service.read(version=None)
 plan = await service.plan(
     query,
     candidate_ids,
     language="cn",
     progress=on_progress,
+    disabled_capability_ids=None,
+    dynamic_overlay=None,
+    mode=None,
 )
 ```
 
 - `status()` 返回 `GraphArtifactStatus`。同步 provider 会参与 source snapshot 新鲜度判断；异步 provider 可通过 `expected_snapshot=...` 查询新鲜度。
 - `build()` 返回 `GraphBuildResult`，完成暂存后才原子切换 `current.json`。
 - `cancel_build()` 请求取消当前构建，并返回取消请求后的图产物状态。
-- `read()` 返回映射兼容的 `CapabilityGraph`。
+- `read()` 返回映射兼容的 `CapabilityGraph`；传入 `version` 可读取指定的不可变版本。
 - `plan()` 返回映射兼容的 `OrchestrationPlan`。
 - `progress` 接收 `OrchestrationProgress`；该类型保持字典兼容。旧参数名 `progress_callback` 仍可使用。
+- `model=None` 时仍可查询状态和读取已发布图；构建或规划会明确报错。
 
 ### 图产物生命周期
 
@@ -297,6 +250,8 @@ plan = await service.plan(
 
 ```text
 graph_artifact_root/
+├── cache/
+│   └── relation_matches.json
 ├── current.json
 ├── versions/
 │   └── <version>/
@@ -309,6 +264,7 @@ graph_artifact_root/
 - 读取时校验 schema 主版本；不支持的版本会被拒绝。
 - 构建失败或取消不会切换当前指针，最后一次成功发布的版本保持可读。
 - `force=False` 且 source snapshot 未变化时复用当前产物；能力清单变化后状态会标记为不新鲜。
+- `force=False` 时可复用 `cache/relation_matches.json` 中身份匹配的关系判断；`force=True` 完全绕过该缓存。缓存不属于已发布的版本化图产物。
 - 同一服务实例的构建互斥，避免并发发布互相覆盖。
 
 ### 图构建配置
@@ -345,9 +301,9 @@ service = OrchestrationService(
 
 动态 overlay 默认关闭。只有 `OrchestrationConfig(dynamic_graph_enabled=True)` 时，传给 `plan(dynamic_overlay=...)` 的运行时边权覆盖才会参与 Fast 规划；overlay 不改写离线图产物。
 
-## 最终目标接口（当前不可运行）
+## 最终 Runtime 与统一接口蓝图（部分尚未接入）
 
-以下接口展示 Symphony 完整迁入后的目标形态，当前版本尚不存在 `runtime.retrieval`、`runtime.experience`、`runtime.evaluation` 或 `runtime.agent_toolkit(...)`，调用方不应在现阶段依赖它们。
+以下接口展示 Symphony 多能力域统一接入 Runtime 后的目标形态。当前版本尚不存在 `runtime.retrieval`、`runtime.experience`、`runtime.evaluation` 或 `runtime.agent_toolkit(...)`；经验能力当前通过独立的 `openjiuwen.symphony.experience` 包使用。
 
 ### Adapter 协议
 
@@ -358,6 +314,7 @@ service = OrchestrationService(
 from pathlib import Path
 from typing import Protocol, Sequence
 
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony import CapabilityFingerprint
 
 
@@ -367,14 +324,16 @@ class CapabilityInventoryProvider(Protocol):
     def list_capabilities(self) -> Sequence[CapabilityFingerprint]: ...
 
 
-class LLMConfigProvider(Protocol):
-    def default_llm_config(self) -> "LLMConfig": ...
+class ModelProvider(Protocol):
+    def model(self) -> Model: ...
 
 
 class ArtifactPathProvider(Protocol):
     def tree_artifact_root(self) -> Path: ...
 
     def graph_artifact_root(self) -> Path: ...
+
+    def experience_artifact_root(self) -> Path: ...
 ```
 
 能力清单使用 `capability_id` 作为统一标识，并通过 `capability_type` 区分不同资产类型。
@@ -416,9 +375,10 @@ symphony = SymphonyRuntime(
     inventory_provider=adapter.capability_inventory_provider(),
     tree_artifact_root=adapter.tree_artifact_root(),
     graph_artifact_root=adapter.graph_artifact_root(),
+    experience_artifact_root=adapter.experience_artifact_root(),
     retrieval_settings=adapter.retrieval_settings(),
     orchestration_settings=adapter.orchestration_settings(),
-    llm_config=adapter.default_llm_config(),
+    model=adapter.model(),
 )
 
 retrieval_result = await symphony.retrieval.search(
@@ -436,7 +396,7 @@ plan = await symphony.orchestration.plan(
 
 ### 经验沉淀
 
-最终经验模块从会话轨迹中提取能力使用模式，构建可检索的经验知识库，为能力分发提供历史依据：
+当前独立的 [`openjiuwen.symphony.experience`](experience/API.md) 包已提供轨迹解析、评估、经验库构建和检索。下例展示未来统一 Runtime facade 的目标形态，当前不可运行：
 
 ```python
 # 最终目标示例；当前不可运行。
@@ -448,7 +408,7 @@ experience_result = await symphony.experience.search(
 candidate_ids = experience_result.candidate_ids
 ```
 
-目标领域对象包括轨迹记录、轨迹评估器、经验库、经验库构建器和经验检索器；具体接口将在模块迁入时以实现和测试为准。
+现有领域对象包括轨迹记录、轨迹评估器、经验库、经验库构建器和经验检索器；统一 Runtime 接口将在集成时以现有实现和测试为准。
 
 ### 能力评估
 
@@ -489,7 +449,7 @@ plan = await toolkit.orchestration.plan(
 
 ## 最终运行时产物
 
-检索和编排使用调用方指定的独立产物目录：
+检索、编排和当前独立的经验模块使用调用方指定的产物目录：
 
 ```text
 tree_artifact_root/
@@ -497,34 +457,48 @@ tree_artifact_root/
 └── versions/<version>/tree.json
 
 graph_artifact_root/
+├── cache/relation_matches.json
 ├── current.json
 ├── versions/<version>/graph.json
 └── .build_runs/
+
+experience_kb/
+├── meta.json
+├── scalar/metadata.jsonl
+└── vector/
+    ├── faiss_index.bin
+    └── embeddings.npy
+
+<session-parent>/trace_store/
+├── processed_index.json
+└── records.jsonl
 ```
 
 - `tree.json` 最终保存能力树索引、能力资产清单快照和版本信息。
-- `graph.json` 当前已保存能力节点、关系边、在线计划 lookup 和版本信息。
+- `graph.json` 当前已保存能力节点、关系边、在线规划 lookup 和版本信息。
+- `experience_kb` 是当前独立经验库的调用方指定目录；`trace_store` 位于调用方传入的 session 目录同级。
 - 机器读写产物使用 JSON；YAML 用于配置、prompt 或人工维护的说明文件。
 
 ## 开发与验证
 
 Symphony 使用 agent-core 的统一开发环境和质量检查入口：
 
-```powershell
+```bash
 uv sync
 make test TESTFLAGS="tests/unit_tests/symphony"
-make check
-make type-check
+make check COMMITS=1
+make type-check COMMITS=1
 ```
 
 - `pyproject.toml` 是 Python、依赖和工具配置的唯一事实来源。
 - `Makefile` 定义常用测试和检查入口。
+- `COMMITS=1` 选择最近一个提交中变更的 Python 文件；不传时默认检查已暂存的 Python 文件。
 - 可选依赖由 agent-core 的依赖体系统一管理。
 
 ## 模块约定
 
 - 公开导入路径以 `openjiuwen.symphony` 开头。
-- 公共领域模型和示例统一使用 `capability_id`、`capability_type` 和 `candidate_ids`。
+- 编排公共领域模型及 Symphony 最终统一契约使用 `capability_id`、`capability_type` 和 `candidate_ids`。当前独立 experience API 中的 `skills` 和 `skill_ids` 是待 Runtime 集成时统一的过渡命名。
 - 运行时资源随 `openjiuwen.symphony` 一同打包。
 - Symphony 保持使用方无关，不包含使用方专属的 gateway、Web/TUI、卡片类型或 prompt rail。
 - 使用方负责将 Symphony 服务或最终 Toolkit 接入自己的调用体系，并将内部标识映射为公共能力标识。
