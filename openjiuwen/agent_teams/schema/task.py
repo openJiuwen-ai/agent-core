@@ -161,7 +161,7 @@ class TaskGraphSpec:
     depends_on: tuple[str, ...] = ()
     depended_by: tuple[str, ...] = ()
     assignee: str | None = None
-    reviewer: tuple[str, ...] = ()
+    reviewer: tuple[dict, ...] = ()
     # Per-task review-round ceiling (F_62, scheduled dispatch); None uses the
     # team default. Meaningful only when ``reviewer`` is non-empty.
     max_review_rounds: int | None = None

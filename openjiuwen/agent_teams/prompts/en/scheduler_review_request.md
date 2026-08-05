@@ -1,5 +1,7 @@
 [Review Assigned] {{task.assignee}} submitted the deliverable of task [{{task.task_id}}] "{{task.title}}" (review round {{task.review_round}}). You are one of its reviewers — verify it now.
 
+{{task.reviewer_description}}
+
 ## Goal and acceptance criteria
 
 {{task.content}}

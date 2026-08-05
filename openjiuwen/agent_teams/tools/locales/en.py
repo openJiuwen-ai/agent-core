@@ -267,10 +267,15 @@ STRINGS: dict[str, str] = {
         "on the dependent task"
     ),
     "create_task.task.reviewer": (
-        "Reviewer member names for this task (optional, may be several); they must already exist "
-        "and none may be the assignee. A task with reviewers enters in_review when the assignee "
-        "completes, and only reaches completed once a reviewer passes it"
+        "Reviewer entries for this task (optional, may be several); each entry is an object with "
+        "type/reviewer_id/description. type: verifier (checks against criteria), inspector (scores "
+        "by dimensions), challenger (finds blind spots). reviewer_id must differ from assignee. "
+        "Reviewers do NOT need to be pre-spawned — the scheduling framework creates temporary "
+        "verification agents on demand."
     ),
+    "create_task.task.reviewer_type": "Reviewer type: verifier / inspector / challenger",
+    "create_task.task.reviewer_id": "Reviewer identifier name, e.g. \"functional correctness review\"",
+    "create_task.task.reviewer_desc": "Supplementary description of verification focus (verifier type only)",
     "create_task.task.max_review_rounds": (
         "Review-round ceiling for this task's rework loop (optional, integer >= 1, requires "
         "'reviewer'); omitted uses the team default. Each failed verification sends the task "
@@ -302,9 +307,13 @@ STRINGS: dict[str, str] = {
         "A notification is sent to the assignee"
     ),
     "update_task.reviewer": (
-        "Set this task's reviewer member names (an empty list clears the verify gate); reviewers must "
-        "already exist and none may be the assignee. Once set, the assignee's completion enters in_review"
+        "Set this task's reviewer entries (empty list clears the verify gate); each entry is an "
+        "object with type/reviewer_id/description. type: verifier / inspector / challenger. "
+        "reviewer_id must differ from assignee."
     ),
+    "update_task.reviewer_type": "Reviewer type: verifier / inspector / challenger",
+    "update_task.reviewer_id": "Reviewer identifier name",
+    "update_task.reviewer_desc": "Supplementary description of verification focus (verifier type only)",
     "update_task.max_review_rounds": (
         "Set this task's review-round ceiling (integer >= 1; the task must carry reviewers, or set "
         "'reviewer' in the same call). Beyond the ceiling a failed verification escalates to you "

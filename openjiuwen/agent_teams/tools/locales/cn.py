@@ -182,9 +182,14 @@ STRINGS: dict[str, str] = {
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
     "create_task.task.reviewer": (
-        "该任务的验证者 member_name 列表（可选，可多个）；这些成员必须已存在且不能是 assignee 本人。"
-        "配了验证者的任务在 assignee 完成后进入 in_review 等验证，验证通过才 completed"
+        "该任务的验证者列表（可选，可多个），每一项为包含 type/reviewer_id/description "
+        "的对象。type 可选值：verifier（验证者，逐项对照验收标准）、inspector（检视者，按维度打分）、"
+        "challenger（挑战者，发现盲区和弱点）。reviewer_id 不能等于 assignee 本人。"
+        "reviewer 不需要提前 spawn——调度框架会自动创建临时验证智能体。"
     ),
+    "create_task.task.reviewer_type": "验证者类型：verifier / inspector / challenger",
+    "create_task.task.reviewer_id": "验证者标识名称，如「功能正确性审查」",
+    "create_task.task.reviewer_desc": "验证侧重点的补充描述（仅 verifier 类型需要）",
     "create_task.task.max_review_rounds": (
         "该任务验证返工的轮数上限（可选，整数 ≥1，需同时配 reviewer）；不传用团队默认值。"
         "验证不通过会打回重做开新一轮，超过上限后不再自动打回，而是升级给你处置"
@@ -208,9 +213,12 @@ STRINGS: dict[str, str] = {
     "update_task.content": "新任务内容",
     "update_task.assignee": "指派任务的目标 member_name（仅当任务当前无 assignee 时生效）。系统会向被指派成员发送通知",
     "update_task.reviewer": (
-        "设置该任务的验证者 member_name 列表（传空列表清除验证）；验证者必须已存在且不能是 assignee。"
-        "配了验证者后，assignee 完成任务会进入 in_review 等验证"
+        "设置该任务的验证者列表（传空列表清除验证），每一项为包含 type/reviewer_id/description "
+        "的对象。type 可选值：verifier / inspector / challenger。reviewer_id 不能等于 assignee。"
     ),
+    "update_task.reviewer_type": "验证者类型：verifier / inspector / challenger",
+    "update_task.reviewer_id": "验证者标识名称",
+    "update_task.reviewer_desc": "验证侧重点的补充描述（仅 verifier 类型需要）",
     "update_task.max_review_rounds": (
         "设置该任务验证返工的轮数上限（整数 ≥1，任务需已配或同时配 reviewer）。"
         "超过上限后验证失败不再自动打回，而是升级给你处置"

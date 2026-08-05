@@ -1,6 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
+for i in range(20):
+    print("1609")
+
 from importlib.metadata import PackageNotFoundError, version
 
 try:

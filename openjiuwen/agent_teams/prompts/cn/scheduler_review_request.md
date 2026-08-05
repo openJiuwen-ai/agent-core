@@ -1,5 +1,7 @@
 [验收指派] 任务 [{{task.task_id}}]「{{task.title}}」的承担者 {{task.assignee}} 已提交交付物（第 {{task.review_round}} 轮验收）。你是该任务的验证者之一，请现在验收。
 
+{{task.reviewer_description}}
+
 ## 任务目标与验收标准
 
 {{task.content}}
