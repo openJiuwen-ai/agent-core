@@ -21,9 +21,10 @@ from .admission import AgentAdmission
 from .backends import MockBackend
 from .backends.base import AgentBackend
 from .budget import BudgetLedger
+from .errors import BudgetExhausted
 from .journal import Journal
 from .loader import load_workflow_source
-from .primitives import _fresh_holder, _invoke_loaded, _path, _preview, _rt, _seq
+from .primitives import _budget_snapshot, _fresh_holder, _invoke_loaded, _path, _preview, _rt, _seq
 from .progress import PhasePlan, ProgressKind, ProgressSink, WorkflowProgressEvent, noop_progress_sink
 from .provider import ENGINE_PROVIDER
 from .runtime import Runtime
@@ -86,6 +87,15 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
             message=f"Workflow completed, result: {result_text}",
         ))
         return result
+    except BudgetExhausted as exc:
+        rt.progress_sink(WorkflowProgressEvent(
+            kind=ProgressKind.WORKFLOW_FAILED,
+            name=name,
+            description=description,
+            message=f"Workflow failed, exception: {exc}",
+            budget=_budget_snapshot(rt.budget),
+        ))
+        raise
     except Exception as exc:
         rt.progress_sink(WorkflowProgressEvent(
             kind=ProgressKind.WORKFLOW_FAILED,

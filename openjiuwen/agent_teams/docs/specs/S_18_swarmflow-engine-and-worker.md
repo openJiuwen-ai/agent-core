@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-07-28 |
+| 最近一次修订日期 | 2026-08-04 |
 | 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md` |
 
 ## 范围 / 边界
@@ -37,7 +37,16 @@
   `timeout` / `isolation`。`isolation` 当前只允许 `None` 或 `"worktree"`；
   engine 只校验与透传，具体隔离语义由 backend 实现。
 - **可观测性**：`Runtime` 有两个 sink。`log_sink: Callable[[str], None]`（诊断文本，默认 no-op）；`progress_sink: Callable[[WorkflowProgressEvent], None]`（结构化进度，默认 no-op）。`phase()`/`log()`/`agent()` 起止发 `WorkflowProgressEvent`；引擎不读 wall-clock（保持 resume 确定性），事件**无时间戳**——消费方在 agent_teams 层补时。
-- **嵌套 workflow 的深度守卫是 per-task，不是全局**：`workflow()` 的递归封顶用 `primitives._wf_depth`（**contextvar**，`_MAX_WORKFLOW_DEPTH=1`），不是共享 `Runtime` 计数器。contextvar 随 asyncio Task 按值拷贝，故 `parallel`/`pipeline` 各分支继承父深度、推进自己的副本——**同层并发的多个 `workflow()` 全部放行**（并发子工作流），而真正的递归（子工作流 `run()` 内再调 `workflow()`，同一 Task）看到已自增的深度被拦（返回 `None` + 日志）。曾用共享 int 会把"嵌套深度"与"并发数"混为一谈，导致并发兄弟 `workflow()` 被静默跳过。详见 `F_39`。
+- **嵌套 workflow 的深度守卫是 per-task，不是全局**：`workflow()` 递归封顶用 `primitives._wf_depth`（contextvar，`_MAX_WORKFLOW_DEPTH=1`），非共享 `Runtime` 计数器。
+  - contextvar 随 asyncio Task 拷贝：`parallel`/`pipeline` 各分支继承父深度 → **同层并发 `workflow()` 全部放行**
+  - 真递归（子流 `run()` 内再调 `workflow()`，同一 Task）→ 返回 `None` + progress `LOG`（`[wf] nested workflow depth > 1 not allowed; skipping`）
+  - 详见 `F_39`
+- **嵌套 workflow 可观测性（child phase 声明）**：`workflow()` 入口在 push `("wf", k, name)` 之前发一条 `ProgressKind.PHASE` 声明，供下游 Monitor 建独立 child 卡（**不**改 author `phase()` 的 seal 语义）。
+  - `phase_type="child"`；`phase` = 子脚本 `META["name"]`（原始名）
+  - `nested_phase` = 展示名 `▸ {name}` 或 `▸ {name} #{N}`（`N` 取 `_path` 最深 branch 段 `i`；无 branch 时无 `#N`）
+  - `parent_phase` = 进入子流前的 author phase（`_parent_phase` contextvar）
+  - 子流内 agent/human 事件携带 `nested_phase`；消费方**优先**用它挂卡，而非 author `phase`
+  - child 声明复用 `PHASE`；`log_sink` 另打 `[wf] child phase declared: …`（默认 no-op）
 - **单次 fan-out 上限**：`parallel(thunks)` / `pipeline(items, ...)` 入口校验长度 ≤ `_MAX_FANOUT`（4096），超出抛 `WorkflowError`——显式报错而非静默截断（对齐参考工具的单次上限）。
 - **`agent()` 的 CC 对齐参数（接口就位、执行留空）**：`agent(..., isolation='worktree', agent_type=...)` 经 `_ENGINE_OPTIONS` 接受并透传至 backend，但参考引擎暂不据其改变执行（不起 worktree 隔离、不解析具名专家 agent），`call_signature` 暂不纳入二者。对齐 Claude Code Workflow 工具表面，便于脚本针对完整 API 编写。详见 `F_42`。
 
@@ -52,6 +61,11 @@
 - **`BudgetExhausted` 是 `BaseException`**（与 `WorkflowAborted` 同理由：能被 `except Exception` 吞掉的天花板不叫天花板，须穿透 `parallel` / `pipeline` 分支体）。但语义相反——abort 可恢复（resume 重跑），exhausted 是**终态**（重跑只会撞同一个 gate），故 `SwarmflowTool.run_background` 单独捕获它转成 `BackendError`，让 async-tool runtime 注入 leader 读得到的失败；直接放 `BaseException` 上去会静默杀掉 task。
 - **允许小幅越界**：一次调用的用量只有返回后才入账，最后那次可以把 `spent` 顶过 `total`；`remaining()` 因此 clamp 到 0，不返回负数。要不越界就得预知成本——不可能。
 - **作用域是 leader，不是 run**：账本由 `agent_configurator` 在 `role==LEADER and enable_swarmflow` 时建一个，经 `inject_team_handles(SWARMFLOW_BUDGET)` → `TeamToolRail` → `create_team_tools` → `SwarmflowTool` → `run_swarmflow(budget=)` 下发（与 `swarmflow_concurrency` 完全平行的链路）。并发 run 抽同一个池，对齐工具描述里 `spent()`「跨主循环 + 所有工作流共享」的语义。配置入口是 `TeamAgentSpec.swarmflow_budget: int | None`（build 期校验 `>= 1`，与 `validate_swarmflow_concurrency` 同层）；**不是 `swarmflow()` 工具入参**——花钱上限是部署方的决定，不该由 leader 每次现编。
+- **Progress 可观测（结果回路与终态）**：
+  - per-agent `tokens`：`AgentResult.tokens` → `_BackendCallResult.tokens` → `_emit_agent_completed` / `_emit_agent_failed`（cache-hit 时 `tokens=None`，budget 快照仍带）
+  - `budget`：`_budget_snapshot(rt.budget)` → `{total, spent, remaining, scope="leader", exhausted}`
+  - rail 撞顶 force-finish **不走** `_emit_agent_completed`；`BudgetExhausted` 由 `_exec_loaded` 补发 `WORKFLOW_FAILED`（`budget.exhausted=true`）后 re-raise
+  - `SwarmflowTool._publish` 显式拷贝 `tokens`/`budget`/`phase_type`/`nested_phase`/`parent_phase`
 
 ## WORKER 不变量（`TeamRole.WORKER`）
 
@@ -177,7 +191,11 @@ rebuild 回灌）→ `NativeHarness.background_task_controller`；SwarmflowTool 
 
 与单轮 worker 正交的多轮执行单位（见 `F_37`）。引擎层业务无关，会话实现落 `workflow/backends/avatar_session_backend.py`。
 
-1. **DSL**：`agent_session(*, label, phase, instructions, options)` / `human_session(...)` 返回 `AgentSession`；`AgentSession.send(prompt, *, schema=None, notify=False, options=None)` 推进一轮；`human(prompt, *, schema=None, label=None, phase=None, options=None)` 是单次 human 问答的语法糖（开一个临时 `AgentSession(_human=True, label=, phase=)`、问一次、关）。`label`/`phase` 与 `agent()`/`*_session()` 对称——转发给临时会话,使一次性 human turn 也带确定性 corr `{phase}:{label}:{turn}` 与可读进度标签（缺省时 corr 退回 `{member}:{turn}`）。`HumanSession` 是 `AgentSession` 的类型别名（`_human=True`）。详见 `F_39`。
+1. **DSL**：`agent_session(...)` / `human_session(...)` 返回 `AgentSession`；`send()` 推进一轮；`human(...)` 是单次 human 语法糖（临时 `AgentSession(_human=True)`，问一次即关）。`label`/`phase` 与 `agent()` 对称。
+   **corr 格式**：
+   - 串行：`{phase}:{label}:{turn}`
+   - 有 branch：`{phase}#{disambig}:{label}:{turn}`（`disambig` = `_branch_disambig(_path)`，`par`→`p{i}`，`pipe`→`i{i}s{s}`，`.` 连接）
+   - `HumanSession` 是 `AgentSession` 别名。详见 `F_39`。
 2. **句柄 + 懒开 + history 镜像**：`AgentSession` 在引擎层维护轻量 `_history`（`(user, assistant)` 对，**不进 journal**，靠脚本重放重建，仅供 resume 签名 / 未来 fork）。首个 cache-miss 的 `send` 才调 `backend.open_session` 建会话；前序 cache hit 全程不开、不驱动后端。
 3. **journal 兼容**：`call_signature(prompt, opts, schema_json, history=None)` **仅 history 非空时**把 history 折入哈希——`agent()`（history 恒空）签名逐字节不变，worker resume 零回归；会话 turn 折入 history，使上游 turn 变更级联重跑下游。
 4. **options bag**：会话原语经 `options` dict 传调优参数，`_build_opts` 校验键 ∈ `_ENGINE_OPTIONS{label,phase,schema,model,timeout,isolation,agent_type} | backend.KNOWN_OPTIONS`，未知键 fail-fast；`agent()` 保持显式 kwargs（含新增的 `isolation` / `agent_type`，CC 对齐、执行留空，见引擎契约段）。
@@ -185,7 +203,11 @@ rebuild 回灌）→ `NativeHarness.background_task_controller`；SwarmflowTool 
 6. **后端 = 有状态 avatar harness（`AvatarSessionManager`）**：从 base spec 派生（agent → `worker_base_spec`；human → `human_base_spec`）经 `_member_spec.derive_member_spec`（与 worker 共享）建唯一 card + 多轮 role prompt → `TeamHarness.build(role=WORKER)` → `start()` **一次** → 多轮 `send`。`role=WORKER` 隔离级别同 worker（不进 coordination），但**保活多轮**、`dispose` 于 `close_session`/`aclose`。
 7. **send-等-收**：`harness.send(prompt, immediate=False)` 起一轮；`subscribe(on_round, on_state)` 的回调（跑在 supervisor 协程，仅 set future / cache result）在 `RUNNING→IDLE` settle 时 resolve 本轮 future，取**最后一轮 finished 的 `output`**（一次 send 可能驱动多轮 task-loop continuation）。`result_type=="interrupt"`（avatar 内部 HITL）→ 抛 `BackendError` + error 日志（后续特性），不返回半截。
 8. **schema 多轮注入**：会话 IDLE 间隙 per-turn `harness.add_tool(StructuredOutputTool)` + user prompt 追加 nudge，轮末 `remove_tool`（ability_manager 按 owner re-qualify，并发会话不撞）。`TeamHarness.add_tool/remove_tool` 是转 `ability_manager.add_ability/remove_ability` 的 passthrough。
-9. **human 输入源**：`human` 会话 `send_turn` 推问题（`on_human_prompt(member, corr, prompt)` 回调 → `observer.emit(HUMAN_PROMPT)` → leader 播报）→ `_pending_human[corr]`（**实例字段，非全局 registry**）等真人 raw 回复 → avatar 用 LLM 把"问题+回复"格式化（schema 时结构化）。`submit_human_reply(corr, answer)` 是入向口；`opts["timeout"]`（默认 `_DEFAULT_HUMAN_TIMEOUT`）超时 → `AgentResult(skipped=True)` → `send` 返回 `None`；`aclose` 取消所有未决 future。**等真人不占 LLM permit、不计 spawn 预算**（agent 会话 turn 则占）。**外部链路（已接线，seam B）**：corr 由**引擎确定性生成** `{phase}:{label}:{turn}`（`turn = len(history)//2`，hit/miss 都推进），跨 resume 稳定——"等真人期间中断 → resume"后同一交互点 corr 不变，真人回复仍有效；非法 corr（不匹配 pending）被 `submit_human_reply` 拒绝。出向 `HUMAN_PROMPT`/`HUMAN_REPLIED` progress 事件带 `correlation_id`（只从 backend 等待路径发，cache-hit 重放不出现，progress 不进 journal）；human avatar base spec 经 `SWARMFLOW_HUMAN_BASE_SPEC` handle 链注入（`agent_configurator` 取 `human_agent` spec 缺省回退 worker spec）；入向真人回复经 `interact_agent_team(HumanAgentMessage(target="swarmflow:<corr>"))` → `TeamRuntimeManager.interact` 在 `resolve_targets` 前薄路由 publish 到专用 `swarmflow_human_reply_topic`（`TeamEvent.WORKFLOW_HUMAN_REPLY`，独立于 `TeamTopic.TEAM`）→ `AvatarSessionManager` 订阅过滤 → `submit_human_reply`。详见 `F_37`。
+9. **human 输入源**：`send_turn` 推问题 → `_pending_human[corr]` 等真人回复 → avatar 格式化输出。`submit_human_reply(corr, answer)` 为入向口；超时 → `AgentResult(skipped=True)` → `send` 返 `None`。**等真人不占 LLM permit、不计 spawn 预算**。
+   - corr 由引擎确定性生成（见上条格式），跨 resume 稳定；非法 corr 被 `submit_human_reply` 拒绝
+   - 出向 `HUMAN_PROMPT`/`HUMAN_REPLIED` 带 `correlation_id`（仅 backend 等待路径；cache-hit 不重放）
+   - 入向：`interact_agent_team(HumanAgentMessage(target="swarmflow:<corr>"))` → `swarmflow_human_reply_topic` → `submit_human_reply`
+   - human base spec 经 `SWARMFLOW_HUMAN_BASE_SPEC` 注入。详见 `F_37`。
 10. **run 收口**：`run_workflow` finally 调 `backend.aclose()` 释放本 run 开过的所有会话。
 
 ## 结构化输出工具协议（`StructuredOutputTool`）
@@ -198,10 +220,22 @@ rebuild 回灌）→ `NativeHarness.background_task_controller`；SwarmflowTool 
 
 ## 进度事件与 leader 旁观（`WORKFLOW_PROGRESS`）
 
-- 单一事件类型 `TeamEvent.WORKFLOW_PROGRESS` + `WorkflowProgressTeamEvent(kind, workflow_name, phase, label, prompt, model, outcome, text, phases, correlation_id, run_id)`，`kind` 取引擎 `ProgressKind` 字符串值（一个 handler 方法渲染全部）。`correlation_id` 仅 `human_prompt` / `human_replied` 携带；`run_id` 标识并行 run（`wf_{12hex}`，`F_47`），`workflow_started` / `phase` 播报含 `{run_id}`。
-- swarmflow 在 leader 进程内后台跑（NativeHarness 异步工具框架的后台任务，见 `S_20`）；`SwarmflowTool.run_background` 的 observer 把进度 republish 成该事件，`sender_id="swarmflow"`（≠ leader member_name），故 `kernel` 的 self-filter 不拦截，leader 自己的 coordination 循环收到。
-- `WorkflowHandler`（coordination 第 7 个 handler，仅监听 `WORKFLOW_PROGRESS`，leader-only）渲染**中途里程碑**（`workflow_started` / `phase`，含 `run_id`）+ **human 等待**（`human_prompt` 带 question+corr / `human_replied`，**不带 `run_id`**——人工交互靠 `correlation_id` 路由，`corr` 跨 resume 稳定、与人一一对应，run_id 在此无价值）→ `deliver_input(use_steer=True)`；per-agent 事件不播报（太频繁，归 4 层结构）。符合 coordination 铁律：事件只作为 leader 输入，不做决策。**完成 / 失败结果不在此叙述**——终态经 `format_completed` / `format_failed` 闭包 + `swarmflow.completed` / `swarmflow.failed` i18n，由 async 框架 `harness.send(immediate=False)` 回灌（`summarize_run` + 脚本结果在 completion 闭包内组装，见 `S_20` / `S_21`）。
-- **leader stream 生命周期**：swarmflow 场景 leader 不建任务 → `is_team_completed` 首条「无任务返回 None」→ team 永不 auto-complete → leader stream 保持 idle 等 event，直到外部停止。
+- 单一事件：`TeamEvent.WORKFLOW_PROGRESS` + `WorkflowProgressTeamEvent`（镜像 `WorkflowProgressEvent`），`kind` 取 `ProgressKind` 字符串值。
+- **核心字段**（按 kind 填充）：
+  - workflow：`name` / `description` / `phases`
+  - agent/phase/log：`phase` / `label` / `prompt` / `model` / `outcome` / `message`
+  - human：`correlation_id` / `answer`（格式见有状态会话段）
+  - 节点匹配：`node_type` / `agent_id`
+  - 并行 run：`run_id`（`wf_{12hex}`，`F_47`）；`workflow_started` / `phase` 播报含 `{run_id}`
+- **可观测扩展**（`SwarmflowTool._publish` 显式透传）：
+  - `tokens`：`agent_completed` / `agent_failed`（cache-hit 为 `None`）
+  - `budget`：`_budget_snapshot` 冻结 dict（完成/失败帧与 `BudgetExhausted` 终态均可带）
+  - `phase_type` / `nested_phase` / `parent_phase`：嵌套 child 声明与子流内挂卡
+- republish：`SwarmflowTool.run_background` observer → `sender_id="swarmflow"`（见 `S_20`）；kernel self-filter 不拦截。
+- `WorkflowHandler`（leader-only）：narrate 中途 milestone + human 等待。
+- per-agent 归 Monitor / 4 层结构；终态走 async 闭包（`S_20`/`S_21`）。
+- `BudgetExhausted` 另经 `_exec_loaded` 发 `workflow_failed`（`budget.exhausted=true`）。
+- **leader stream 生命周期**：无任务时不 auto-complete，保持 idle 等 event，直到外部停止。
 
 ## 4 层数据模型（`WorkflowRun`）
 
