@@ -41,7 +41,10 @@ def test_react_agent_builds_multimodal_user_message_from_tool_result() -> None:
 
     assert len(messages) == 1
     assert messages[0].role == "user"
-    assert messages[0].content[0]["type"] == "text"
+    assert messages[0].content[0] == {
+        "type": "text",
+        "text": "Image loaded from tool: /tmp/a.png",
+    }
     assert messages[0].content[1] == {
         "type": "image_url",
         "image_url": {"url": "data:image/png;base64,abc"},

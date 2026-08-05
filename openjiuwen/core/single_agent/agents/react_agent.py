@@ -1373,7 +1373,7 @@ class ReActAgent(BaseAgent):
 
         for tool_result in tool_results:
             for item in ReActAgent._iter_multimodal_image_items(tool_result):
-                source = str(item.get("source") or "read_file")
+                source = str(item.get("source") or "tool")
                 source_path = str(item.get("source_path") or "unknown image")
                 data_url = item["data_url"]
                 loaded_paths.append(source_path)
