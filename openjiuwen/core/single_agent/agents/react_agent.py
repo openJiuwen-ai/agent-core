@@ -9,10 +9,11 @@ Author: huenrui1@huawei.com
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
+import inspect
 import json
-import asyncio
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
@@ -1778,6 +1779,7 @@ class ReActAgent(BaseAgent):
     async def _inner_invoke(self, session, inputs, query, need_cleanup, conversation_id, **kwargs):
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+        abort_persisted = False
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
         if isinstance(inputs, dict):
             ctx.extra["user_id"] = inputs.get("user_id", "")
@@ -1999,36 +2001,30 @@ class ReActAgent(BaseAgent):
             # after_invoke rails have fired; return result (possibly adapted by rails via ctx.extra)
             return ctx.extra.get("invoke_result", invoke_inputs.result)
         except asyncio.CancelledError:
-            # 外部取消（非工具级 CancelledError）。
-            # Fix 1 确保工具级 CancelledError 在 asyncio.gather 中被捕获并转为
-            # ToolMessage，不会传播到这里。
-            # 只丢弃本轮残缺的 tool_call / 部分 ToolMessage，保留 UserMessage 与
-            # 已完成的 tool 对，以及历史对话（with_history=False）。
-            # 若整轮 clear 会把用户问题一并抹掉，下一轮同 session 就丢上下文。
-            try:
-                await asyncio.shield(self._cleanup_context_on_cancel(session))
-            except asyncio.CancelledError:
-                logger.info(
-                    "Context cleanup was shielded but the caller was cancelled again for session %s",
-                    session.get_session_id(),
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to cleanup context on cancel for session %s",
-                    session.get_session_id(),
-                    exc_info=True,
-                )
-            # 上面的清理只改了内存 buffer，必须同步写回 session state。
-            # 否则下一轮 create_context 会用取消前的旧快照 rebuild 整个
-            # buffer，把本轮保留的 UserMessage 覆盖掉（外部传入 session 时
-            # need_cleanup=False，下面的 finally 不会帮忙保存）。
-            await self._save_contexts_on_cancel(session)
+            # 外部取消（非工具级 CancelledError）。工具级 CancelledError
+            # 在 AbilityManager.execute 中会被转成 ToolMessage，不会传播到这里。
+            abort_persisted = await self._handle_context_abort(
+                session,
+                marker="[Request cancelled by user]",
+            )
             raise  # Re-raise to propagate cancellation signal
+        except Exception:
+            # A model/rail/context failure may happen after the current turn has
+            # already been appended to the in-memory context. Preserve the same
+            # safe prefix used for cancellation instead of falling back to the
+            # last persisted snapshot on the next invocation.
+            abort_persisted = await self._handle_context_abort(
+                session,
+                marker="[Request interrupted by an unexpected error]",
+            )
+            raise  # Preserve the original ReAct failure for the caller
         finally:
             if need_cleanup:
-                await self.context_engine.save_contexts(session)
+                if not abort_persisted:
+                    await self.context_engine.save_contexts(session)
                 await session.close_stream()
-                await session.commit()
+                if not abort_persisted:
+                    await session.commit()
 
     async def write_invoke_result_to_stream(
             self,
@@ -2142,9 +2138,16 @@ class ReActAgent(BaseAgent):
                         final_result, session
                     )
             except asyncio.CancelledError:
-                await self._save_contexts_on_cancel(session)
+                await self._handle_context_abort(
+                    session,
+                    marker="[Request cancelled by user]",
+                )
                 raise
             except Exception as e:
+                await self._handle_context_abort(
+                    session,
+                    marker="[Request interrupted by an unexpected error]",
+                )
                 logger.error(f"ReActAgent stream error: {e}", exc_info=True)
                 error_result = {"output": str(e), "result_type": "error"}
                 await self._write_invoke_result_to_stream(
@@ -2207,12 +2210,43 @@ class ReActAgent(BaseAgent):
         await context.clear_messages(with_history=False)
         return True
 
-    async def _cleanup_context_on_cancel(self, session: Session) -> None:
-        """Keep the cancelled turn's user query; drop incomplete tool debris.
+    async def _handle_context_abort(self, session: Session, *, marker: str) -> bool:
+        """Clean and persist the current turn after cancellation or failure.
+
+        The context is cleaned before persistence so a subsequent invocation
+        can continue from the current turn rather than restoring the previous
+        checkpoint. The original exception/cancellation is still propagated by
+        the caller.
+        """
+        try:
+            await asyncio.shield(
+                self._cleanup_context_after_abort(session, marker=marker)
+            )
+        except asyncio.CancelledError:
+            logger.info(
+                "Context cleanup was shielded but the caller was cancelled again for session %s",
+                session.get_session_id(),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to cleanup context after ReAct abort for session %s",
+                session.get_session_id(),
+                exc_info=True,
+            )
+
+        return await self._persist_context_after_abort(session)
+
+    async def _cleanup_context_after_abort(
+            self,
+            session: Session,
+            *,
+            marker: str,
+    ) -> None:
+        """Keep the aborted turn's user query; drop incomplete tool debris.
 
         Unlike ``clear_context_messages``, this preserves the current-turn
         ``UserMessage`` (and any fully completed tool pairs) so the next turn
-        in the same session still sees what the user asked before cancelling.
+        in the same session still sees what the user asked before the abort.
         """
         session_id = session.get_session_id()
         context = self.context_engine.get_context(session_id=session_id)
@@ -2223,11 +2257,18 @@ class ReActAgent(BaseAgent):
         if not current:
             return
 
-        kept = self._sanitize_cancelled_turn_messages(current)
+        kept = self._sanitize_cancelled_turn_messages(current, marker=marker)
         context.set_messages(kept, with_history=False)
 
-    async def _save_contexts_on_cancel(self, session: Session) -> None:
-        """Persist the cleaned context while the caller propagates cancellation."""
+    async def _cleanup_context_on_cancel(self, session: Session) -> None:
+        """Compatibility wrapper for cancellation-specific callers."""
+        await self._cleanup_context_after_abort(
+            session,
+            marker="[Request cancelled by user]",
+        )
+
+    async def _persist_context_after_abort(self, session: Session) -> bool:
+        """Persist cleaned context and commit it when the session supports it."""
         try:
             await asyncio.shield(self.context_engine.save_contexts(session))
         except asyncio.CancelledError:
@@ -2235,20 +2276,53 @@ class ReActAgent(BaseAgent):
                 "Context save was shielded but the caller was cancelled again for session %s",
                 session.get_session_id(),
             )
+            return False
         except Exception:
             logger.warning(
-                "Failed to save context on cancel for session %s",
+                "Failed to save context after ReAct abort for session %s",
                 session.get_session_id(),
                 exc_info=True,
             )
+            return False
+
+        commit = getattr(session, "commit", None)
+        if not callable(commit):
+            return True
+
+        try:
+            commit_result = commit()
+            if inspect.isawaitable(commit_result):
+                await asyncio.shield(commit_result)
+        except asyncio.CancelledError:
+            logger.info(
+                "Session commit was shielded but the caller was cancelled again for session %s",
+                session.get_session_id(),
+            )
+            return False
+        except Exception:
+            logger.warning(
+                "Failed to commit session after ReAct abort for session %s",
+                session.get_session_id(),
+                exc_info=True,
+            )
+            return False
+
+        return True
+
+    async def _save_contexts_on_cancel(self, session: Session) -> None:
+        """Compatibility wrapper for cancellation-specific callers."""
+        await self._persist_context_after_abort(session)
 
     @staticmethod
-    def _sanitize_cancelled_turn_messages(messages: List[Any]) -> List[Any]:
-        """Return a LLM-safe prefix of the cancelled turn's messages.
+    def _sanitize_cancelled_turn_messages(
+            messages: List[Any],
+            marker: str = "[Request cancelled by user]",
+    ) -> List[Any]:
+        """Return a LLM-safe prefix of an aborted turn's messages.
 
         Keeps user text and completed assistant/tool pairs. Drops incomplete
         tool_call blocks. Ensures the turn does not end on a bare UserMessage
-        by appending a short cancelled marker when needed.
+        by appending the supplied abort marker when needed.
         """
         kept: List[Any] = []
         i = 0
@@ -2285,9 +2359,7 @@ class ReActAgent(BaseAgent):
             i += 1
 
         if kept and isinstance(kept[-1], UserMessage):
-            kept.append(
-                AssistantMessage(content="[Request cancelled by user]")
-            )
+            kept.append(AssistantMessage(content=marker))
         return kept
 
 

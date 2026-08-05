@@ -116,6 +116,58 @@ async def test_cancel_saves_cleaned_context_to_external_session():
     # 关键回归断言：即使 need_cleanup=False，取消后也要把清理后的 context
     # 写回 session state，否则下一轮会被旧快照 rebuild 覆盖。
     mock_context_engine.save_contexts.assert_awaited()
+    session.commit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_exception_saves_cleaned_context_to_external_session():
+    """Unexpected model failures must preserve the current turn and checkpoint it."""
+    card = AgentCard(name="error_agent", description="error save test")
+    config = ReActAgentConfig().configure_model("gpt-4").configure_max_iterations(3)
+
+    user_msg = UserMessage(content="查一下热搜")
+    mock_context_window = MagicMock(
+        get_messages=MagicMock(return_value=[]),
+        get_tools=MagicMock(return_value=None),
+    )
+    mock_context = MagicMock()
+    mock_context.add_messages = AsyncMock()
+    mock_context.get_context_window = AsyncMock(return_value=mock_context_window)
+    mock_context.get_messages = MagicMock(return_value=[user_msg])
+    mock_context.set_messages = MagicMock()
+
+    mock_context_engine = MagicMock()
+    mock_context_engine.create_context = AsyncMock(return_value=mock_context)
+    mock_context_engine.get_context = MagicMock(return_value=mock_context)
+    mock_context_engine.save_contexts = AsyncMock()
+
+    agent = ReActAgent(card=card)
+    agent.configure(config)
+    agent.context_engine = mock_context_engine
+
+    mock_llm = MockLLMModel()
+    mock_llm.invoke = AsyncMock(side_effect=RuntimeError("insufficient_quota"))
+
+    session = MagicMock()
+    session.get_state.return_value = None
+    session.write_stream = AsyncMock()
+
+    with patch.object(agent, "_get_llm", return_value=mock_llm):
+        with pytest.raises(RuntimeError, match="insufficient_quota"):
+            await agent.invoke(
+                {"conversation_id": "sess", "query": "查一下热搜"},
+                session=session,
+            )
+
+    kept = mock_context.set_messages.call_args.args[0]
+    assert any(isinstance(m, UserMessage) and m.content == "查一下热搜" for m in kept)
+    assert any(
+        isinstance(m, AssistantMessage)
+        and "unexpected error" in m.content
+        for m in kept
+    )
+    mock_context_engine.save_contexts.assert_awaited()
+    session.commit.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -133,6 +185,39 @@ async def test_stream_cancel_saves_context_to_external_session():
             pass
 
     agent.context_engine.save_contexts.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_stream_unexpected_exception_saves_context_and_emits_error():
+    """A stream-side model failure must checkpoint the cleaned current turn."""
+    agent = ReActAgent(card=AgentCard(name="stream_error_agent", description="stream error save test"))
+    user_msg = UserMessage(content="查一下热搜")
+    context = MagicMock()
+    context.get_messages = MagicMock(return_value=[user_msg])
+    context.set_messages = MagicMock()
+    agent.context_engine = MagicMock()
+    agent.context_engine.get_context = MagicMock(return_value=context)
+    agent.context_engine.save_contexts = AsyncMock()
+    agent.is_agent_session = False
+    agent.invoke = AsyncMock(side_effect=RuntimeError("insufficient_quota"))
+    session = MagicMock()
+    session.write_stream = AsyncMock()
+
+    async for _ in agent._inner_stream(
+            session=session,
+            inputs={"query": "查一下热搜"},
+            need_cleanup=False,
+    ):
+        pass
+
+    kept = context.set_messages.call_args.args[0]
+    assert any(isinstance(m, UserMessage) and m.content == "查一下热搜" for m in kept)
+    assert session.write_stream.await_count == 1
+    error_schema = session.write_stream.call_args.args[0]
+    assert error_schema.payload["result_type"] == "error"
+    assert "insufficient_quota" in error_schema.payload["output"]
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+    session.commit.assert_called_once()
 
 
 @pytest.mark.asyncio
