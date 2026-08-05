@@ -16,6 +16,28 @@ from opentelemetry.trace import Span
 from openjiuwen.core.common.logging import team_logger
 
 
+def _is_root_span(span: Span, root_span: Span | None) -> bool:
+    """Report whether *span* is the trace's root span, which a flush must spare.
+
+    Identity against the resolved root span is the reliable test, and the only
+    one that works for a host whose root is not a ``team.<name>`` span (a
+    single-agent run names it after the mode and session). The name prefix
+    stays as a second test for the flush paths that run with no root span in
+    reach — shutdown, or another context's trace.
+
+    Args:
+        span: Candidate span from the tracker's active set.
+        root_span: Root span resolved for the current context, if any.
+
+    Returns:
+        True when the span must be left for its owner to end.
+    """
+    if root_span is not None and span is root_span:
+        return True
+    name = getattr(span, "name", "")
+    return isinstance(name, str) and name.startswith("team.")
+
+
 class ActiveSpanTracker(SpanProcessor):
     """SpanProcessor that tracks all active spans for reliable cleanup.
 
@@ -88,7 +110,7 @@ class ActiveSpanTracker(SpanProcessor):
         """
         from opentelemetry.trace import Status, StatusCode
 
-        team_span = _team_span_ctx.get()
+        team_span = _resolve_team_span()
         if team_span is None:
             return 0
         trace_id = team_span.context.trace_id
@@ -129,7 +151,7 @@ class ActiveSpanTracker(SpanProcessor):
         agent_span = _current_agent_span.get()
         if agent_span is not None and agent_span.is_recording():
             return agent_span.context.span_id
-        team_span = _team_span_ctx.get()
+        team_span = _resolve_team_span()
         if team_span is not None and team_span.is_recording():
             return team_span.context.span_id
         return None
@@ -144,7 +166,7 @@ class ActiveSpanTracker(SpanProcessor):
         parent matching yields no result (cross-task streaming callback,
         or pre-iteration calls like image probes).
         """
-        team_span = _team_span_ctx.get()
+        team_span = _resolve_team_span()
         if team_span is None:
             return None
         trace_id = team_span.context.trace_id
@@ -203,10 +225,15 @@ class ActiveSpanTracker(SpanProcessor):
         close callback never fired — logged at error level.  Other spans
         (tool / task / event) reaching this path are also unexpected and
         logged as errors.
+
+        The trace's root span is spared when *exclude_team_span* is set: it is
+        the caller's to end, and closing it here would both steal its end time
+        and report it as leaked.
         """
         from opentelemetry.trace import Status, StatusCode
 
         closed_count = 0
+        root_span = _resolve_team_span() if exclude_team_span else None
 
         with self._lock:
             spans_to_close = list(self._spans_by_trace.pop(trace_id, set()))
@@ -216,7 +243,7 @@ class ActiveSpanTracker(SpanProcessor):
                 if not span.is_recording():
                     continue
 
-                if exclude_team_span and hasattr(span, 'name') and span.name.startswith("team."):
+                if exclude_team_span and _is_root_span(span, root_span):
                     continue
 
                 # Spans with _llm_state are leaked LLM spans — log, don't
@@ -247,6 +274,7 @@ class ActiveSpanTracker(SpanProcessor):
         from opentelemetry.trace import Status, StatusCode
 
         closed_count = 0
+        root_span = _resolve_team_span() if exclude_team_span else None
 
         with self._lock:
             all_traces = list(self._spans_by_trace.items())
@@ -264,7 +292,7 @@ class ActiveSpanTracker(SpanProcessor):
                     if not span.is_recording():
                         continue
 
-                    if exclude_team_span and hasattr(span, 'name') and span.name.startswith("team."):
+                    if exclude_team_span and _is_root_span(span, root_span):
                         continue
 
                     state = getattr(span, "otel_llm_state", None)
@@ -337,9 +365,54 @@ class LlmSpanState:
 
 _team_span_ctx: ContextVar[Span | None] = ContextVar("_team_span_ctx", default=None)
 
+# Process-wide fallback for the trace's root span, used only when the
+# ContextVar carries nothing in the calling context.
+#
+# A team run has no need for it: ``team_runner`` opens the ``team.<name>`` span
+# and every member task is created from that context, so the ContextVar is
+# visible everywhere the callbacks run. A single-agent host is the opposite
+# case — it opens its root span per request, while the agent executes in a
+# supervisor task created earlier (at session setup), which therefore never
+# inherits the binding. Without a fallback every lookup below returns None in
+# that task: llm/tool spans get no parent, the rail skips the agent tier, and
+# ``_find_llm_span`` cannot even locate an already-open ``llm.call`` span to
+# write its completion onto.
+#
+# Registered by the host around one run (see ``set_ambient_team_span``); a
+# single active run is assumed, matching the one-root-span-per-process shape of
+# such hosts.
+_ambient_team_span: Span | None = None
+
+
+def set_ambient_team_span(span: Span | None) -> None:
+    """Register the trace's root span as the process-wide fallback.
+
+    For hosts whose root span cannot be reached through the ContextVar from
+    the task the agent runs in. Pair with :func:`clear_ambient_team_span`.
+
+    Args:
+        span: Root span of the run, or None to clear.
+    """
+    global _ambient_team_span
+    _ambient_team_span = span
+
+
+def clear_ambient_team_span() -> None:
+    """Drop the process-wide root-span fallback registered for a run."""
+    global _ambient_team_span
+    _ambient_team_span = None
+
+
+def _resolve_team_span() -> Span | None:
+    """Return the trace's root span: context binding first, ambient fallback second."""
+    span = _team_span_ctx.get()
+    if span is not None:
+        return span
+    return _ambient_team_span
+
 
 def get_team_span(team_name: str | None = None) -> Span | None:
-    return _team_span_ctx.get()
+    return _resolve_team_span()
 
 
 def set_team_span(span: Span, team_name: str | None = None) -> None:
@@ -596,6 +669,7 @@ def reset_all() -> None:
     _team_span_ctx.set(None)
     _current_agent_span.set(None)
     _tool_span_map.set({})
+    clear_ambient_team_span()
 
 
 def flush_child_spans(*, trace_id: int | None = None) -> None:
@@ -605,10 +679,10 @@ def flush_child_spans(*, trace_id: int | None = None) -> None:
     ``finalize_trace``), only that trace's spans are closed — other
     teams' spans are never touched.
 
-    When *trace_id* is ``None``, the call site must be operating while
-    ``_team_span_ctx`` is still valid (e.g. ``cascade_close_children``
-    during an agent-span close).  In that case the trace_id is
-    discovered from the current team span.
+    When *trace_id* is ``None``, the call site must be operating while the
+    trace's root span is still resolvable — its ContextVar binding, or the
+    ambient registration (e.g. ``cascade_close_children`` during an
+    agent-span close).  In that case the trace_id is discovered from it.
 
     The previous ``flush_all_spans`` fallback (when ``_team_span_ctx``
     was ``None``) has been **removed** — it caused one team's finalize
@@ -621,7 +695,7 @@ def flush_child_spans(*, trace_id: int | None = None) -> None:
     try:
         effective_trace_id: int | None = trace_id
         if effective_trace_id is None:
-            team_span = _team_span_ctx.get()
+            team_span = _resolve_team_span()
             if team_span is not None and hasattr(team_span, 'context') and team_span.context:
                 effective_trace_id = team_span.context.trace_id
 

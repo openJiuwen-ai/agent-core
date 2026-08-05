@@ -2012,3 +2012,99 @@ async def test_subagent_invoke_span_nests_under_leader_iteration(
     set_current_agent_span(None)
     leader_span.end()
     remove_team_span("test_team")
+
+
+# ---------------------------------------------------------------------------
+# Ambient root span: hosts whose root span is unreachable via the ContextVar
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ambient_root_span_keeps_llm_span_findable_across_tasks(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """LLM callbacks fired from a context without the ContextVar still close the span.
+
+    A single-agent host opens its root span per request while the agent runs in
+    a task created earlier, which never inherits ``_team_span_ctx``. With the
+    root span registered as ambient, the tracker still resolves the trace, so
+    ``LLM_OUTPUT`` finds the open ``llm.call`` span and writes its completion
+    instead of leaving it to the orphan sweep.
+    """
+    import contextvars
+
+    from openjiuwen.agent_teams.observability import (
+        clear_ambient_team_span,
+        set_ambient_team_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+
+    fw = Runner.callback_framework
+    # Snapshot a context taken before the root span exists — the supervisor task.
+    supervisor_ctx = contextvars.copy_context()
+
+    root_span = get_tracer("test").start_span(name="agent.code.normal.sess-1")
+    set_ambient_team_span(root_span)
+
+    async def _agent_side() -> None:
+        await fw.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "ping"}],
+            model="fake-llm-1",
+        )
+        await fw.trigger(LLMCallEvents.LLM_OUTPUT, response="pong")
+
+    try:
+        task = asyncio.get_running_loop().create_task(
+            _agent_side(), context=supervisor_ctx
+        )
+        await task
+    finally:
+        root_span.end()
+        clear_ambient_team_span()
+
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert llm_spans, "no llm.call span captured"
+    span = llm_spans[0]
+    assert span.parent is not None
+    assert span.parent.span_id == root_span.context.span_id
+    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "pong"
+    assert _attr(span, LANGFUSE_OBSERVATION_OUTPUT), "llm span exported without output"
+
+
+@pytest.mark.asyncio
+async def test_flush_spares_a_non_team_named_root_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """The trace's root span is spared by identity, not by a ``team.`` name prefix.
+
+    A host whose root span is named after its mode and session used to be swept
+    up as a leaked child: reported as an ORPHAN, force-ended by the tracker, and
+    ended a second time by its actual owner.
+    """
+    from openjiuwen.agent_teams.observability import (
+        clear_ambient_team_span,
+        set_ambient_team_span,
+    )
+    from opentelemetry import context as otel_context
+    from opentelemetry.trace import set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.span_context import flush_child_spans
+
+    tracer = get_tracer("test")
+    root_span = tracer.start_span(name="agent.code.normal.sess-1")
+    set_ambient_team_span(root_span)
+    child = tracer.start_span(
+        name="tool.bash",
+        context=set_span_in_context(root_span, otel_context.get_current()),
+    )
+
+    try:
+        flush_child_spans()
+        assert root_span.is_recording(), "root span must survive the child flush"
+        assert not child.is_recording(), "leaked child span must be closed"
+    finally:
+        if root_span.is_recording():
+            root_span.end()
+        clear_ambient_team_span()
