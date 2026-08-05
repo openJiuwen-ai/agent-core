@@ -17,6 +17,9 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
+from openjiuwen.harness.prompts.sections.prompt_attachments import (
+    get_prompt_attachment_guidance,
+)
 
 
 class PromptAttachmentKind(str, Enum):
@@ -226,9 +229,10 @@ class PromptAttachmentContextWriter:
 class PromptAttachmentManager:
     """DeepAgent-private in-memory prompt attachment manager."""
 
-    def __init__(self) -> None:
+    def __init__(self, language: str = "en") -> None:
         self._items: dict[str, dict[str, PromptAttachment]] = {}
         self._lock = asyncio.Lock()
+        self.language = language
 
     def bind_context(self, ctx: Any) -> PromptAttachmentContextWriter:
         """Return a context-aware writer for rail prompt attachment migration."""
@@ -491,8 +495,7 @@ class PromptAttachmentManager:
 
         truncated_ids: list[str] = []
         blocks = [
-            "The following context is automatically attached for this model call only.",
-            "It may or may not be relevant to your tasks. Do not respond to it unless it highly relevant to your task.",
+            get_prompt_attachment_guidance(self.language),
             "",
         ]
         for item in items:

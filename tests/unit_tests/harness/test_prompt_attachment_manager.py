@@ -8,16 +8,11 @@ import pytest
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
-from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachment,
     PromptAttachmentKind,
     PromptAttachmentManager,
     PromptAttachmentUpdate,
-)
-from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.prompts.sections.prompt_attachments import (
-    build_prompt_attachments_section,
 )
 
 
@@ -308,16 +303,23 @@ def test_prompt_attachment_manager_appends_attachment_message_after_image_only_u
     assert injected[-1].content == "<system-reminder>attached</system-reminder>"
 
 
-def test_prompt_attachments_section_explains_system_reminder_tags():
-    builder = SystemPromptBuilder(language="en")
-    builder.add_section(build_prompt_attachments_section())
+def test_prompt_attachment_guidance_is_rendered_only_with_attachments():
+    manager = PromptAttachmentManager(language="en")
+    assert manager.render([]) == ""
 
-    section = builder.get_section(SectionName.PROMPT_ATTACHMENTS)
-    assert section is not None
-    prompt = builder.build()
-    assert "<system-reminder>" in prompt
-    assert "<prompt-attachment>" in prompt
-    assert "bear no direct relation" in prompt
+    rendered = manager.render([
+        PromptAttachment(
+            id="session.sess1.runtime",
+            section="runtime",
+            session_id="sess1",
+            content="runtime context",
+        )
+    ])
+
+    guidance_index = rendered.index("The following dynamic context")
+    attachment_index = rendered.index('<prompt-attachment type="generic">')
+    assert guidance_index < attachment_index
+    assert "Do not expose its tags" in rendered
 
 
 @pytest.mark.asyncio
