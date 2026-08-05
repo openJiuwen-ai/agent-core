@@ -8,10 +8,12 @@ from __future__ import annotations
 import pytest
 
 from openjiuwen.agent_teams.inbound_render import (
+    CONTROLLER_SENDER,
     INBOUND_TYPE_BROADCAST,
     INBOUND_TYPE_DIRECT,
     SNAPSHOT_EVENT_KINDS,
     drop_superseded_snapshots,
+    render_controller_input,
     render_event,
     render_inbound,
     snapshot_kind_of,
@@ -43,6 +45,34 @@ def test_render_inbound_carries_core_attributes_and_body():
     assert "hello there" in out
     assert out.rstrip().endswith("</team-inbound>")
     logger.info("rendered inbound: %s", out)
+
+
+@pytest.mark.level0
+def test_render_controller_input_marks_the_sender():
+    """A controller instruction is tagged as such, body verbatim.
+
+    Without the marker it is indistinguishable from the harness's ordinary
+    user turn, and the avatar replies to its controller by messaging
+    ``user`` — a different real person on the leader's side.
+    """
+    out = render_controller_input(content="check task 3 for me")
+    assert out.startswith("<team-inbound ")
+    assert f'from="{CONTROLLER_SENDER}"' in out
+    assert 'type="direct"' in out
+    assert "check task 3 for me" in out
+    assert out.rstrip().endswith("</team-inbound>")
+    # No bus identity: a controller instruction is not a stored message.
+    assert "message_id=" not in out
+    assert "time=" not in out
+    logger.info("rendered controller input: %s", out)
+
+
+@pytest.mark.level0
+def test_render_controller_input_escapes_body():
+    out = render_controller_input(content="diff a < b & c > d")
+    assert "&lt;" in out
+    assert "&gt;" in out
+    assert "&amp;" in out
 
 
 @pytest.mark.level0

@@ -135,7 +135,12 @@ async def test_human_agent_message_drives_avatar_when_no_target():
     )
 
     assert result.ok
-    agent._avatar.interact.assert_awaited_once_with("please summarise design.md")
+    agent._avatar.interact.assert_awaited_once()
+    # Body verbatim inside a controller-tagged inbound block, so the avatar
+    # can tell its controller from the team (which speaks as ``user``).
+    delivered = agent._avatar.interact.await_args.args[0]
+    assert 'from="controller"' in delivered
+    assert "please summarise design.md" in delivered
     agent._avatar.deliver_input.assert_not_called()
     agent.team_backend.message_manager.send_message.assert_not_called()
 
@@ -220,7 +225,8 @@ async def test_interact_str_dollar_prefix_drives_human_agent():
     result = await manager.interact("$alice please summarise", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent._avatar.interact.assert_awaited_once_with("please summarise")
+    agent._avatar.interact.assert_awaited_once()
+    assert "please summarise" in agent._avatar.interact.await_args.args[0]
     agent._avatar.deliver_input.assert_not_called()
     agent.deliver_input.assert_not_called()
 
@@ -319,7 +325,8 @@ async def test_interact_str_unknown_member_dollar_drives_avatar():
     result = await manager.interact("$alice @ghost hi", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent._avatar.interact.assert_awaited_once_with("@ghost hi")
+    agent._avatar.interact.assert_awaited_once()
+    assert "@ghost hi" in agent._avatar.interact.await_args.args[0]
     agent.team_backend.message_manager.send_message.assert_not_called()
 
 

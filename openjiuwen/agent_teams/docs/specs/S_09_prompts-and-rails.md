@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-07-31 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md` |
+| 最近一次修订日期 | 2026-08-05 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md` |
 
 ## 范围 / 边界
 
@@ -30,7 +30,7 @@
 ### 装配路径
 
 1. **唯一装配路径 `sections.build_team_*_section`**：每片内容独立产出 `PromptSection`，读 `prompts/<lang>/*.md`。由 `TeamPolicyRail` 合并进 `SystemPromptBuilder`（进程内成员），或经 `build_team_member_system_prompt` 渲染成独立字符串（外部 CLI 成员）。模板正文修改即时生效。
-2. **role policy 由 `build_team_role_section` 直接读**：`sections.build_team_role_section` 按角色 `load_template` 出 `leader_policy` / `teammate_policy` markdown 塞进 role section。没有独立的 policy 装配层（`policy.py` 已删）。
+2. **role policy 由 `build_team_role_section` 直接读**：`sections.build_team_role_section` 按角色 `load_template` 出 `leader_policy`（LEADER）/ `human_agent_policy`（HUMAN_AGENT）/ `teammate_policy`（TEAMMATE、BRIDGE_AGENT；`workspace_prompt_variant="external"` 时为 `teammate_policy_external`）markdown 塞进 role section。没有独立的 policy 装配层（`policy.py` 已删）。**HUMAN_AGENT 必须有自己的一份，不能落回 teammate 版**：teammate 契约里"收到 `from="user"` 必须 `send_message(to="user")` 作答"是无条件义务，而 avatar 的对话对方是**控制者**（另一个真人，纯文本输出即可直达）——复用会让 avatar 把控制者的问话答给团队侧的 `user`。同理执行模式行（plan/build）对 HUMAN_AGENT 不渲染：avatar 从不自主规划或认领。
 3. **生产路径就是 rail 注入**：`TeamHarness.build` 走 `TeamPolicyRail`。早期的 `policy.build_system_prompt` + `system_prompt.md` 壳模板老路径与 `role_policy` 中间层都仅测试在用，已随 desc/prompt 归一移除（测试迁移到 `load_template` / `build_team_member_system_prompt`）。
 
 ### Section / 文件落位
@@ -134,7 +134,7 @@ def load_shared_template(name: str) -> PromptTemplate:
 
 ### `prompts/sections.py`
 
-`build_team_role_section` 按角色 `load_template` 出 `leader_policy`（LEADER）/ `teammate_policy`（其它角色）塞进 role section。`team_mode`（`{"default","predefined","hybrid"}` → `leader_workflow*.md`）与 `lifecycle`（`{"temporary","persistent"}` → `lifecycle_*.md`）的映射由 `build_team_workflow_section` / `build_team_lifecycle_section` 承担（`sections.py` 自己的 `_WORKFLOW_TEMPLATES`），非法值走 `"default"` / `lifecycle_temporary`。
+`build_team_role_section` 按角色 `load_template` 出 `leader_policy`（LEADER）/ `human_agent_policy`（HUMAN_AGENT，且不渲染执行模式行）/ `teammate_policy`（其它角色）塞进 role section。`team_mode`（`{"default","predefined","hybrid"}` → `leader_workflow*.md`）与 `lifecycle`（`{"temporary","persistent"}` → `lifecycle_*.md`）的映射由 `build_team_workflow_section` / `build_team_lifecycle_section` 承担（`sections.py` 自己的 `_WORKFLOW_TEMPLATES`），非法值走 `"default"` / `lifecycle_temporary`。
 
 
 每个 builder 返回 `PromptSection | None`，`None` 表示该角色下不应出现该 section。

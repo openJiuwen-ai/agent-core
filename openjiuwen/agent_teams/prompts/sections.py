@@ -193,8 +193,17 @@ def build_team_role_section(
     the only per-member value and lives in the ``team_identity`` section, so
     this section stays byte-identical across every member sharing a role.
 
+    HUMAN_AGENT takes its own policy instead of the teammate one: an avatar's
+    counterparts and output channels differ from a teammate's on the point that
+    matters most. Its controller reads the avatar's plain text output directly,
+    while the teammate policy makes ``send_message(to="user")`` the mandatory
+    reply channel — handing that contract to an avatar makes it answer its
+    controller by messaging ``user``, a different real person. BRIDGE_AGENT
+    keeps the teammate policy: it is a full teammate whose content happens to
+    come from a remote executor.
+
     Args:
-        role: LEADER or TEAMMATE.
+        role: The role whose policy to load.
         teammate_mode: Execution mode applied to teammates in this team
             (``"plan_mode"`` or ``"build_mode"``). For LEADER, rendered
             as a description of how teammates execute; for TEAMMATE,
@@ -211,18 +220,26 @@ def build_team_role_section(
     labels = _labels_for(language)
     if role == TeamRole.LEADER:
         policy_name = "leader_policy"
+    elif role == TeamRole.HUMAN_AGENT:
+        policy_name = "human_agent_policy"
     elif workspace_prompt_variant == "external":
         policy_name = "teammate_policy_external"
     else:
         policy_name = "teammate_policy"
     role_text = load_template(policy_name, language).content.strip()
 
-    is_plan_mode = teammate_mode == "plan_mode"
-    if role == TeamRole.LEADER:
-        mode_label_key = "leader_mode_plan" if is_plan_mode else "leader_mode_build"
+    # The execution mode describes how a member plans and completes work it
+    # took on itself. An avatar never does — it acts only on its controller's
+    # instruction — so the mode line says nothing to it.
+    if role == TeamRole.HUMAN_AGENT:
+        mode_line = ""
     else:
-        mode_label_key = "teammate_mode_plan" if is_plan_mode else "teammate_mode_build"
-    mode_line = f"{labels[mode_label_key]}\n\n"
+        is_plan_mode = teammate_mode == "plan_mode"
+        if role == TeamRole.LEADER:
+            mode_label_key = "leader_mode_plan" if is_plan_mode else "leader_mode_build"
+        else:
+            mode_label_key = "teammate_mode_plan" if is_plan_mode else "teammate_mode_build"
+        mode_line = f"{labels[mode_label_key]}\n\n"
     body = f"{labels['role_heading']}\n\n{mode_line}{role_text}\n"
     return PromptSection(
         name=TeamSectionName.ROLE,
