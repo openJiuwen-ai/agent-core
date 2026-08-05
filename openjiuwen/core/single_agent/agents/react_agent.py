@@ -925,6 +925,10 @@ class ReActAgent(BaseAgent):
             extra_kwargs["logprobs"] = True
             extra_kwargs["top_logprobs"] = self._config.llm_top_logprobs
 
+        _max_tokens_override = ctx.extra.get("_max_tokens_override")
+        if _max_tokens_override is not None:
+            extra_kwargs["max_tokens"] = _max_tokens_override
+
         if not ctx.extra.get("_streaming"):
             try:
                 ai_message = await llm.invoke(
@@ -1648,6 +1652,34 @@ class ReActAgent(BaseAgent):
         ctx.extra[RESUME_START_ITERATION_KEY] = resume_iteration + 1
         return None
 
+    async def _inject_truncation_notice(
+        self,
+        ai_message: AssistantMessage,
+        context: ModelContext,
+    ) -> None:
+        """Inject the truncated AssistantMessage and a TRUNCATION_NOTICE
+        UserMessage into context so the model knows its previous response
+        was truncated and can adjust accordingly."""
+        await context.add_messages(
+            AssistantMessage(
+                content=ai_message.content or "",
+                tool_calls=ai_message.tool_calls,
+                reasoning_content=getattr(ai_message, "reasoning_content", None),
+                usage_metadata=ai_message.usage_metadata,
+                finish_reason=ai_message.finish_reason,
+            )
+        )
+        await context.add_messages(
+            UserMessage(
+                content=(
+                    "[TRUNCATION_NOTICE] Your previous response was "
+                    "truncated due to output length limits. Please "
+                    "continue from where you left off, or provide a "
+                    "more concise response."
+                ),
+            )
+        )
+
     def _extract_user_text(self, user_input: Any) -> str:
         """Extract plain text from user_input (supports InteractiveInput or str)."""
         from openjiuwen.core.session import InteractiveInput
@@ -1891,6 +1923,7 @@ class ReActAgent(BaseAgent):
                     )
 
                 if invoke_inputs.result is None:
+                    _truncation_retry_count = 0
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
@@ -1932,6 +1965,76 @@ class ReActAgent(BaseAgent):
                             invoke_inputs.result = ai_message if isinstance(ai_message, dict) else {}
                             break
 
+                        _truncation_detected = (
+                            ai_message is not None
+                            and getattr(ai_message, "finish_reason", "null") == "length"
+                        )
+
+                        if _truncation_detected and _truncation_retry_count < 1:
+                            _truncation_retry_count += 1
+                            logger.info(
+                                "[ReActAgent] truncation detected session_id=%s iteration=%s, "
+                                "retrying with increased max_tokens",
+                                session.get_session_id(),
+                                iteration + 1,
+                            )
+                            await session.write_stream(OutputSchema(
+                                type="truncation_retry",
+                                index=0,
+                                payload={
+                                    "finish_reason": "length",
+                                    "truncated_content": (ai_message.content or "")[:200],
+                                    "phase": "retry_attempt",
+                                },
+                            ))
+                            _truncated_output_tokens = (
+                                getattr(ai_message.usage_metadata, "output_tokens", None)
+                                or 16384
+                            )
+                            ctx.extra["_max_tokens_override"] = _truncated_output_tokens
+                            await self._inject_truncation_notice(ai_message, context)
+                            ai_message = await self._call_model(
+                                ctx,
+                                context,
+                                tools,
+                            )
+                            ctx.extra.pop("_max_tokens_override", None)
+                            logger.debug(
+                                "[ReActAgent] truncation_retry done session_id=%s iteration=%s "
+                                "finish_reason=%s",
+                                session.get_session_id(),
+                                iteration + 1,
+                                getattr(ai_message, "finish_reason", "null"),
+                            )
+                            finish = ctx.consume_force_finish()
+                            if finish:
+                                await self.context_engine.save_contexts(session)
+                                invoke_inputs.result = finish.result
+                                break
+                            _truncation_detected = (
+                                ai_message is not None
+                                and getattr(ai_message, "finish_reason", "null") == "length"
+                            )
+
+                        if _truncation_detected:
+                            logger.info(
+                                "[ReActAgent] truncation persists session_id=%s iteration=%s, "
+                                "continuing to next iteration with truncation notice",
+                                session.get_session_id(),
+                                iteration + 1,
+                            )
+                            await self._inject_truncation_notice(ai_message, context)
+                            await session.write_stream(OutputSchema(
+                                type="truncation_retry",
+                                index=0,
+                                payload={
+                                    "finish_reason": "length",
+                                    "truncated_content": (ai_message.content or "")[:200],
+                                    "phase": "persist",
+                                },
+                            ))
+                            continue
+
                         await context.add_messages(
                             AssistantMessage(
                                 content=ai_message.content,
@@ -1950,7 +2053,11 @@ class ReActAgent(BaseAgent):
                             if ctx.has_pending_steering():
                                 continue
                             await self.context_engine.save_contexts(session)
-                            result = {"output": ai_message.content, "result_type": "answer"}
+                            result = {
+                                "output": ai_message.content,
+                                "result_type": "answer",
+                                "finish_reason": getattr(ai_message, "finish_reason", "null"),
+                            }
                             invoke_inputs.result = result
                             break
 
@@ -2072,7 +2179,11 @@ class ReActAgent(BaseAgent):
             await session.write_stream(OutputSchema(
                 type="answer",
                 index=0,
-                payload={"output": result.get("output", ""), "result_type": result_type},
+                payload={
+                    "output": result.get("output", ""),
+                    "result_type": result_type,
+                    "finish_reason": result.get("finish_reason"),
+                },
             ))
 
     async def stream(
