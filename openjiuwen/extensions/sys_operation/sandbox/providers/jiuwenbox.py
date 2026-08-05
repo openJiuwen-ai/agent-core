@@ -1790,6 +1790,47 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         super().__init__(endpoint, config)
         self._init_jiuwenbox(endpoint, config)
 
+    @staticmethod
+    def _collect_npmrc_env(cwd: Optional[str]) -> Dict[str, str]:
+        """解析 cwd 下 .npmrc 的自定义键, 按 npm 公开约定转成 ``npm_config_*`` env.
+
+        背景: npm 只在 ``npm script`` 上下文把 .npmrc 自定义键以
+        ``npm_config_<key>`` 注入子进程 env. 沙箱里经 ``bash -lc npx ...`` 直接
+        调 npx 时不走 npm 的 env 注入 → .npmrc 里的键 (如
+        ``playwright_download_host``) 不进子进程 → 对应工具 (Playwright
+        ``getFromENV`` 回退查 ``npm_config_playwright_download_host``) 读不到
+        → 回退默认源 → 命中沙箱 egress 白名单外的域名被拒/卡死.
+
+        本方法在调用方 (非 npm-script 路径) 还原该注入: 读 .npmrc, 把所有
+        ``key=value`` 转成 ``npm_config_<key>``. 这是 npm 的公开约定而非沙箱
+        知识, 调用方负责工具语义.
+
+        返回 dict (可能为空). 不解析 inline-env / @scope:registry 等复杂规则,
+        只做朴素 key=value (覆盖 playwright_download_host / registry 等常见项).
+        """
+        if not cwd:
+            return {}
+        try:
+            npmrc_path = Path(cwd) / ".npmrc"
+            if not npmrc_path.is_file():
+                return {}
+            text = npmrc_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {}
+        result: Dict[str, str] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith(";") or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                result[f"npm_config_{key}"] = value
+        return result
+
     async def execute_cmd(
         self,
         command: str,
@@ -1807,6 +1848,20 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         exclude_patterns = _read_excluded_commands(extra)
         fallback_on_failure = bool(extra.get("fallback_on_failure", False)) if isinstance(extra, dict) else False
 
+        # 解析 cwd/.npmrc → npm_config_* env (npm 公开约定). 沙箱经 bash -lc npx
+        # 直接调 npx 时不走 npm 的 env 注入, 这里还原它. 见 _collect_npmrc_env 注释.
+        npmrc_env = self._collect_npmrc_env(workdir)
+        # 沙箱路径: 经约定键 JIUWENBOX_INJECT_ENV 声明注入 (沙箱解析后删键, 不泄漏).
+        sandbox_env: Optional[Dict[str, str]] = dict(environment or {}) if npmrc_env else environment
+        if npmrc_env and sandbox_env is not None:
+            sandbox_env = dict(sandbox_env)
+            sandbox_env["JIUWENBOX_INJECT_ENV"] = json.dumps(npmrc_env)
+        # 本地路径: 直接并入 env dict (本地子进程不需要约定键).
+        local_env: Optional[Dict[str, str]] = environment
+        if npmrc_env:
+            local_env = dict(environment or {})
+            local_env.update(npmrc_env)
+
         # (a) Pre-route excluded commands to local execution
         if _command_matches_exclude(command, exclude_patterns):
             logger.info(
@@ -1816,7 +1871,7 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
             local_result = await _run_local_subprocess(
                 ["bash", "-lc", command],
                 cwd=workdir,
-                env=environment,
+                env=local_env,
                 timeout=exec_timeout,
             )
             return self._wrap_shell_local_result(command, cwd, timeout, local_result)
@@ -1827,12 +1882,12 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
                 ["bash", "-lc", command],
                 cwd=workdir,
                 timeout=exec_timeout,
-                environment=environment,
+                environment=sandbox_env,
             ),
             local_op=lambda: _run_local_subprocess(
                 ["bash", "-lc", command],
                 cwd=workdir,
-                env=environment,
+                env=local_env,
                 timeout=exec_timeout,
             ),
             fallback_on_failure=fallback_on_failure,
