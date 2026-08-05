@@ -13,6 +13,7 @@ from openjiuwen.harness.workspace.workspace import WorkspaceNode, Workspace
 
 from .manager import MemoryIndexManager, MemoryManagerParams
 from .config import MemorySettings, create_memory_settings, is_memory_enabled
+from .internal import current_session_id
 
 if TYPE_CHECKING:
     from openjiuwen.core.sys_operation.sys_operation import SysOperation
@@ -27,16 +28,16 @@ _global_sys_operation: Optional["SysOperation"] = None
 
 def _validate_memory_path(path: str) -> tuple[bool, str]:
     """Validate that path is within memory directory.
-    
+
     Returns:
         (is_valid, resolved_path_or_error)
     """
     if ".." in path or path.startswith("/"):
         return (False, "Invalid path: directory traversal not allowed")
-    
+
     if _global_workspace is None:
         return (False, "Workspace not initialized")
-    
+
     basename = os.path.basename(path)
     memory_dir = _global_workspace.get_node_path("memory")
 
@@ -46,8 +47,17 @@ def _validate_memory_path(path: str) -> tuple[bool, str]:
         memory_rel = _global_workspace.get_directory("MEMORY.md")
         resolved_path = os.path.join(memory_dir, memory_rel) if memory_dir and memory_rel else None
     elif re.match(r'^\d{4}-\d{2}-\d{2}\.md$', basename):
+        # Per-session isolation: <memory>/daily_memory/<session_id>/<basename>
+        # Legacy fallback:     <memory>/daily_memory/<basename>
         daily_rel = _global_workspace.get_directory("daily_memory")
-        resolved_path = os.path.join(memory_dir, daily_rel, basename) if memory_dir and daily_rel else None
+        if memory_dir and daily_rel:
+            daily_segments = [daily_rel]
+            session_id = current_session_id()
+            if session_id:
+                daily_segments.append(session_id)
+            resolved_path = os.path.join(memory_dir, *daily_segments, basename)
+        else:
+            resolved_path = None
     else:
         resolved_path = os.path.join(memory_dir, basename) if memory_dir else None
 

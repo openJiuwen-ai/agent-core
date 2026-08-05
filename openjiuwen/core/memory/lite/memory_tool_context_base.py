@@ -27,6 +27,7 @@ class LiteMemoryToolContextBase:
     sys_operation: Optional["SysOperation"] = None
     manager: Optional[MemoryIndexManager] = None
     node_name: str = "memory"
+    session_id: Optional[str] = None
 
     async def ensure_manager(self) -> bool:
         """Lazy-initialize ``manager`` when ``workspace`` is set."""

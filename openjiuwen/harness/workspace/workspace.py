@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -630,8 +630,81 @@ def get_workspace_schema(language: str = "cn") -> List[DirectoryNode]:
     return deepcopy(DEFAULT_WORKSPACE_SCHEMA)
 
 
+def get_daily_memory_parent_dir(workspace: "Workspace") -> Optional[str]:
+    """Return the absolute path of the shared ``daily_memory`` parent directory.
+
+    The parent directory contains both legacy ``YYYY-MM-DD.md`` files and
+    per-session subdirectories (``<session_id>/YYYY-MM-DD.md``). Use this when
+    you need to enumerate or watch all daily-memory files across sessions
+    (e.g. for indexing or filesystem watching).
+
+    Returns:
+        Absolute path string, or None if the ``memory`` node or
+        ``daily_memory`` directory is not configured.
+    """
+    memory_dir = workspace.get_node_path("memory")
+    if memory_dir is None:
+        return None
+    daily_rel = workspace.get_directory("daily_memory")
+    if not daily_rel:
+        return None
+    return os.path.join(str(memory_dir), daily_rel)
+
+
+def resolve_daily_memory_file(
+    workspace: "Workspace",
+    basename: str,
+    session_id: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve the absolute path of a daily_memory ``basename``.
+
+    When *session_id* is provided (non-empty), returns the per-session path
+    ``<memory_dir>/<daily_memory>/<session_id>/<basename>`` so that daily
+    memory written by one session is not visible to other sessions sharing
+    the same workspace (cross-session isolation).
+
+    When *session_id* is None or empty, falls back to the legacy shared path
+    ``<memory_dir>/<daily_memory>/<basename>`` for backward compatibility
+    (used by tests and any caller that does not bind a session).
+
+    Args:
+        workspace: Workspace instance.
+        basename: File name such as ``"2026-08-03.md"``.
+        session_id: Optional session identifier for per-session isolation.
+
+    Returns:
+        Absolute path string, or None if ``memory`` node or
+        ``daily_memory`` directory is not configured.
+    """
+    parent = get_daily_memory_parent_dir(workspace)
+    if parent is None:
+        return None
+    if session_id:
+        return os.path.join(parent, session_id, basename)
+    return os.path.join(parent, basename)
+
+
+def get_session_daily_memory_dir(
+    workspace: "Workspace",
+    session_id: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve the daily_memory directory, scoped to *session_id* when provided.
+
+    Equivalent to ``resolve_daily_memory_file`` without the trailing basename.
+    """
+    parent = get_daily_memory_parent_dir(workspace)
+    if parent is None:
+        return None
+    if session_id:
+        return os.path.join(parent, session_id)
+    return parent
+
+
 __all__ = [
     "Workspace",
     "WorkspaceNode",
     "get_workspace_schema",
+    "get_daily_memory_parent_dir",
+    "resolve_daily_memory_file",
+    "get_session_daily_memory_dir",
 ]

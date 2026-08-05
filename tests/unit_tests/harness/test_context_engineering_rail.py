@@ -29,7 +29,11 @@ from openjiuwen.harness import Workspace, DeepAgentConfig, DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.rails.context_engineering_rail import ContextEngineeringRail
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section
-from openjiuwen.harness.prompts.sections.context import build_context_section, build_tools_content
+from openjiuwen.harness.prompts.sections.context import (
+    build_context_section,
+    build_tools_content,
+    ContextBuildConfig,
+)
 from openjiuwen.core.foundation.llm.model import init_model
 
 
@@ -231,9 +235,12 @@ async def test_build_context_section(tmp_path: Path):
     await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/{date}.md", "# Today")
 
     workspace = Workspace(root_path=str(tmp_path))
-    section_cn = await build_context_section(
-        sys_operation, workspace, "cn", timezone="Asia/Shanghai"
-    )
+    section_cn = await build_context_section(ContextBuildConfig(
+        sys_operation=sys_operation,
+        workspace=workspace,
+        language="cn",
+        timezone="Asia/Shanghai",
+    ))
     assert section_cn.priority == 80
     cn_content = section_cn.render("cn")
     assert "## AGENT.md - 智能体配置" in cn_content
@@ -241,9 +248,12 @@ async def test_build_context_section(tmp_path: Path):
     assert "# Agent Config" in cn_content
     assert "## SOUL.md" in cn_content
     assert "## daily_memory/" in cn_content
-    section_en = await build_context_section(
-        sys_operation, workspace, "en", timezone="Asia/Shanghai"
-    )
+    section_en = await build_context_section(ContextBuildConfig(
+        sys_operation=sys_operation,
+        workspace=workspace,
+        language="en",
+        timezone="Asia/Shanghai",
+    ))
     en_content = section_en.render("en")
     assert "## AGENT.md - Agent Configuration" in en_content
     assert "already loaded into context" in en_content
@@ -251,7 +261,9 @@ async def test_build_context_section(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_build_context_section_returns_none_when_workspace_is_none():
-    assert await build_context_section(None, None, "cn") is None
+    assert await build_context_section(ContextBuildConfig(
+        sys_operation=None, workspace=None, language="cn",
+    )) is None
 
 
 @pytest.mark.asyncio
@@ -261,9 +273,12 @@ async def test_build_context_section_skips_empty_daily_memory_dir(tmp_path: Path
     (tmp_path / "memory" / "daily_memory").mkdir(parents=True, exist_ok=True)
 
     workspace = Workspace(root_path=str(tmp_path))
-    section_cn = await build_context_section(
-        sys_operation, workspace, "cn", timezone="Asia/Shanghai"
-    )
+    section_cn = await build_context_section(ContextBuildConfig(
+        sys_operation=sys_operation,
+        workspace=workspace,
+        language="cn",
+        timezone="Asia/Shanghai",
+    ))
     cn_content = section_cn.render("cn")
     assert "# Agent Config" in cn_content
     assert "## daily_memory/" not in cn_content
@@ -276,13 +291,103 @@ async def test_build_context_section_skips_when_today_daily_memory_missing(tmp_p
     await sys_operation.fs().write_file(f"{tmp_path}/memory/daily_memory/2026-04-02.md", "# Yesterday")
 
     workspace = Workspace(root_path=str(tmp_path))
-    section_cn = await build_context_section(
-        sys_operation, workspace, "cn", timezone="Asia/Shanghai"
-    )
+    section_cn = await build_context_section(ContextBuildConfig(
+        sys_operation=sys_operation,
+        workspace=workspace,
+        language="cn",
+        timezone="Asia/Shanghai",
+    ))
     cn_content = section_cn.render("cn")
     assert "# Agent Config" in cn_content
     assert "# Yesterday" not in cn_content
     assert "## daily_memory/" not in cn_content
+
+
+@pytest.mark.asyncio
+async def test_build_context_section_isolates_daily_memory_by_session(tmp_path: Path):
+    """With session_id, only the per-session subdir is read; other sessions' content
+    written into the same shared workspace cannot leak into auto-injected context."""
+    sys_operation = _make_sys_operation(tmp_path)
+    date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent\nreal body")
+    # Session A writes to its own subdir
+    await sys_operation.fs().write_file(
+        f"{tmp_path}/memory/daily_memory/sessA/{date}.md",
+        "# Movie recommendation for today",
+    )
+    # Session B writes to a different subdir
+    await sys_operation.fs().write_file(
+        f"{tmp_path}/memory/daily_memory/sessB/{date}.md",
+        "# Cute pet wallpaper for today",
+    )
+    # A legacy shared file (no session_id) — must NOT leak when session_id is set
+    await sys_operation.fs().write_file(
+        f"{tmp_path}/memory/daily_memory/{date}.md",
+        "# Shared legacy content",
+    )
+
+    workspace = Workspace(root_path=str(tmp_path))
+
+    section_a = await build_context_section(ContextBuildConfig(
+        sys_operation=sys_operation,
+        workspace=workspace,
+        language="cn",
+        timezone="Asia/Shanghai",
+        session_id="sessA",
+    ))
+    content_a = section_a.render("cn")
+    assert "# Movie recommendation for today" in content_a
+    assert "# Cute pet wallpaper for today" not in content_a
+    assert "# Shared legacy content" not in content_a
+
+    section_b = await build_context_section(ContextBuildConfig(
+        sys_operation=sys_operation,
+        workspace=workspace,
+        language="cn",
+        timezone="Asia/Shanghai",
+        session_id="sessB",
+    ))
+    content_b = section_b.render("cn")
+    assert "# Cute pet wallpaper for today" in content_b
+    assert "# Movie recommendation for today" not in content_b
+    assert "# Shared legacy content" not in content_b
+
+    # Without session_id we fall back to the legacy shared path (backward compat).
+    section_legacy = await build_context_section(ContextBuildConfig(
+        sys_operation=sys_operation,
+        workspace=workspace,
+        language="cn",
+        timezone="Asia/Shanghai",
+    ))
+    content_legacy = section_legacy.render("cn")
+    assert "# Shared legacy content" in content_legacy
+    assert "# Movie recommendation for today" not in content_legacy
+    assert "# Cute pet wallpaper for today" not in content_legacy
+
+
+@pytest.mark.asyncio
+async def test_build_context_section_skips_when_session_subdir_missing(tmp_path: Path):
+    """If the session-specific subdir doesn't have today's file, nothing is injected
+    (even if other sessions or the legacy shared file do have content for today)."""
+    sys_operation = _make_sys_operation(tmp_path)
+    date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent\nreal body")
+    await sys_operation.fs().write_file(
+        f"{tmp_path}/memory/daily_memory/otherSession/{date}.md",
+        "# Other session content",
+    )
+    # Session A's subdir does not exist; should skip silently.
+    workspace = Workspace(root_path=str(tmp_path))
+    section = await build_context_section(ContextBuildConfig(
+        sys_operation=sys_operation,
+        workspace=workspace,
+        language="cn",
+        timezone="Asia/Shanghai",
+        session_id="sessA",
+    ))
+    content = section.render("cn")
+    assert "# Other session content" not in content
+    assert "## daily_memory/" not in content
 
 
 # =============================================================================
@@ -391,13 +496,12 @@ async def test_build_context_section_without_tools(tmp_path: Path):
     sys_operation = _make_sys_operation(tmp_path)
     await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# AGENT\nreal body")
     workspace = Workspace(root_path=str(tmp_path))
-    section = await build_context_section(
-        sys_operation,
-        workspace,
-        "cn",
-        tools_content=None,
+    section = await build_context_section(ContextBuildConfig(
+        sys_operation=sys_operation,
+        workspace=workspace,
+        language="cn",
         timezone="Asia/Shanghai",
-    )
+    ))
     content = section.render("cn")
     assert "## AGENT.md" in content
     assert "# 可用工具" not in content
@@ -475,8 +579,12 @@ async def test_uninit_removes_sections(tmp_path: Path):
     builder = agent.system_prompt_builder
     builder.add_section(await build_workspace_section(
         sys_operation, workspace, "cn"))
-    builder.add_section(await build_context_section(
-        sys_operation, workspace, "cn", timezone="Asia/Shanghai"))
+    builder.add_section(await build_context_section(ContextBuildConfig(
+        sys_operation=sys_operation,
+        workspace=workspace,
+        language="cn",
+        timezone="Asia/Shanghai",
+    )))
     assert builder.has_section("workspace")
     assert builder.has_section("context")
 
@@ -485,6 +593,180 @@ async def test_uninit_removes_sections(tmp_path: Path):
     rail.uninit(agent)
     assert not builder.has_section("workspace")
     assert not builder.has_section("context")
+
+
+# =============================================================================
+# session_id contextvar pairing Tests (spec S_16 invariant 9)
+# =============================================================================
+
+class _FakeSession:
+    """Minimal Session stub exposing get_session_id."""
+
+    def __init__(self, sid: str = "sess-1"):
+        self._sid = sid
+
+    def get_session_id(self) -> str:
+        return self._sid
+
+
+@pytest.fixture
+def _isolate_session_id_contextvar():
+    """Reset the agent_teams session_id contextvar around each test.
+
+    The contextvar is process-global; without reset, a leak in one test
+    would silently poison the next. We capture the previous value, set
+    the default, yield, then restore — mirroring set/reset pairing.
+    """
+    from openjiuwen.agent_teams.context import (
+        get_session_id,
+        reset_session_id,
+        set_session_id,
+    )
+
+    token = set_session_id("")  # known clean baseline
+    try:
+        yield get_session_id
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+async def test_before_invoke_binds_session_id_to_contextvar(
+        tmp_path: Path, _isolate_session_id_contextvar):
+    """before_invoke sets the agent_teams session_id contextvar from ctx.session."""
+    get_session_id = _isolate_session_id_contextvar
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+
+    ctx = _make_model_call_context(agent)
+    ctx.session = _FakeSession("sess-bind-test")
+
+    rail = ContextEngineeringRail()
+    await agent.register_rail(rail)
+    await rail.before_invoke(ctx)
+
+    assert get_session_id() == "sess-bind-test"
+    # Token is stored on the rail for the matching reset in after_invoke.
+    assert rail._session_id_token is not None
+
+    await rail.after_invoke(ctx)
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_resets_session_id_contextvar(
+        tmp_path: Path, _isolate_session_id_contextvar):
+    """after_invoke must call reset_session_id(token) — spec S_16 invariant 9."""
+    get_session_id = _isolate_session_id_contextvar
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+
+    ctx = _make_model_call_context(agent)
+    ctx.session = _FakeSession("sess-after-reset")
+
+    rail = ContextEngineeringRail()
+    await agent.register_rail(rail)
+    await rail.before_invoke(ctx)
+    assert get_session_id() == "sess-after-reset"
+
+    await rail.after_invoke(ctx)
+
+    # After reset, the contextvar is restored to whatever was set before
+    # before_invoke — here the fixture's clean baseline of "".
+    assert get_session_id() == ""
+    assert rail._session_id_token is None
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_noop_when_no_token_stored(
+        tmp_path: Path, _isolate_session_id_contextvar):
+    """after_invoke must be safe when before_invoke never bound a token."""
+    get_session_id = _isolate_session_id_contextvar
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+
+    ctx = _make_model_call_context(agent)
+    rail = ContextEngineeringRail()
+    await agent.register_rail(rail)
+
+    # No before_invoke — token stays None.
+    assert rail._session_id_token is None
+    baseline = get_session_id()
+    await rail.after_invoke(ctx)  # should not raise
+    assert get_session_id() == baseline
+
+
+@pytest.mark.asyncio
+async def test_before_invoke_clears_previous_session_id_when_ctx_has_no_session(
+        tmp_path: Path, _isolate_session_id_contextvar):
+    """When ctx.session is None, before_invoke must NOT leak a stale session_id.
+
+    Previously _bind_session_id_contextvar early-returned on empty sid, leaving
+    any prior session_id in the contextvar so tool path resolution used the
+    wrong per-session daily_memory subdirectory. Now we always call
+    set_session_id(sid or "") so the prior value is cleared for this invocation.
+    """
+    get_session_id = _isolate_session_id_contextvar
+    from openjiuwen.agent_teams.context import set_session_id
+
+    # Simulate an outer context that bound a different session_id before us.
+    outer_token = set_session_id("outer-session-leak")
+    try:
+        assert get_session_id() == "outer-session-leak"
+
+        sys_operation = _make_sys_operation(tmp_path)
+        workspace = Workspace(root_path=str(tmp_path))
+        agent = _make_agent(sys_operation, workspace)
+        await agent.ensure_initialized()
+
+        ctx = _make_model_call_context(agent)
+        ctx.session = None  # no session for this invocation
+
+        rail = ContextEngineeringRail()
+        await agent.register_rail(rail)
+        await rail.before_invoke(ctx)
+
+        # The leak is fixed: the contextvar is now the empty-string sentinel
+        # (spec invariant 7), NOT the outer session id.
+        assert get_session_id() == ""
+
+        await rail.after_invoke(ctx)
+        # Reset restores the outer session id (proper set/reset pairing).
+        assert get_session_id() == "outer-session-leak"
+    finally:
+        from openjiuwen.agent_teams.context import reset_session_id
+        reset_session_id(outer_token)
+
+
+@pytest.mark.asyncio
+async def test_uninit_resets_outstanding_session_id_token(
+        tmp_path: Path, _isolate_session_id_contextvar):
+    """uninit must defensively reset any token still stored on the rail."""
+    get_session_id = _isolate_session_id_contextvar
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+
+    ctx = _make_model_call_context(agent)
+    ctx.session = _FakeSession("sess-uninit-test")
+
+    rail = ContextEngineeringRail()
+    await agent.register_rail(rail)
+    await rail.before_invoke(ctx)
+    assert rail._session_id_token is not None
+    assert get_session_id() == "sess-uninit-test"
+
+    # uninit between before_invoke and after_invoke must still release the token.
+    rail.uninit(agent)
+
+    assert get_session_id() == ""
+    assert rail._session_id_token is None
 
 
 # =============================================================================

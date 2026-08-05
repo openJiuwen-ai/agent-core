@@ -9,13 +9,26 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import memory_logger as logger
 from openjiuwen.core.memory.lite.memory_tool_context import MemoryToolContext
+from openjiuwen.core.memory.lite.internal import current_session_id
 
 if TYPE_CHECKING:
     from openjiuwen.harness.workspace.workspace import Workspace
 
 
-def validate_memory_path(path: str, workspace: "Workspace") -> tuple[bool, str]:
-    """Validate that path is within the memory directory. ``workspace`` is required."""
+def validate_memory_path(
+    path: str,
+    workspace: "Workspace",
+    session_id: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Validate that path is within the memory directory. ``workspace`` is required.
+
+    When *session_id* is provided, daily-memory files matching
+    ``YYYY-MM-DD.md`` are resolved to the per-session subdirectory
+    ``<memory_dir>/daily_memory/<session_id>/<basename>`` so that writes and
+    reads from one session cannot leak into another session sharing the same
+    workspace. When *session_id* is None/empty, the legacy shared path
+    ``<memory_dir>/daily_memory/<basename>`` is used (backward compatible).
+    """
     if workspace is None:
         return (False, "Workspace not initialized")
     if ".." in path or path.startswith("/"):
@@ -28,8 +41,16 @@ def validate_memory_path(path: str, workspace: "Workspace") -> tuple[bool, str]:
         memory_rel = workspace.get_directory("MEMORY.md")
         resolved_path = os.path.join(memory_dir, memory_rel) if memory_dir and memory_rel else None
     elif re.match(r"^\d{4}-\d{2}-\d{2}\.md$", basename):
+        # Per-session isolation: <memory>/daily_memory/<session_id>/<basename>
+        # Legacy fallback:     <memory>/daily_memory/<basename>
         daily_rel = workspace.get_directory("daily_memory")
-        resolved_path = os.path.join(memory_dir, daily_rel, basename) if memory_dir and daily_rel else None
+        if memory_dir and daily_rel:
+            daily_segments = [daily_rel]
+            if session_id:
+                daily_segments.append(session_id)
+            resolved_path = os.path.join(memory_dir, *daily_segments, basename)
+        else:
+            resolved_path = None
     else:
         resolved_path = os.path.join(memory_dir, basename) if memory_dir else None
     if resolved_path is None:
@@ -97,7 +118,8 @@ async def memory_get_with_context(
     ws = ctx.workspace if ctx else None
     if ws is None:
         return {"path": path, "text": "", "disabled": True, "error": "Workspace not initialized"}
-    is_valid, result = validate_memory_path(path, ws)
+    sid = (ctx.session_id if ctx else None) or current_session_id()
+    is_valid, result = validate_memory_path(path, ws, session_id=sid)
     if not is_valid:
         return {"path": path, "text": "", "disabled": True, "error": result}
     resolved_path = result
@@ -129,7 +151,8 @@ async def write_memory_with_context(
         ws = ctx.workspace if ctx else None
         if ws is None:
             return {"success": False, "path": path, "error": "Workspace not initialized"}
-        is_valid, result = validate_memory_path(path, ws)
+        sid = (ctx.session_id if ctx else None) or current_session_id()
+        is_valid, result = validate_memory_path(path, ws, session_id=sid)
         if not is_valid:
             return {"success": False, "path": path, "error": result}
         resolved_path = result
@@ -168,7 +191,8 @@ async def edit_memory_with_context(
         ws = ctx.workspace if ctx else None
         if ws is None:
             return {"success": False, "path": path, "error": "Workspace not initialized"}
-        is_valid, result = validate_memory_path(path, ws)
+        sid = (ctx.session_id if ctx else None) or current_session_id()
+        is_valid, result = validate_memory_path(path, ws, session_id=sid)
         if not is_valid:
             return {"success": False, "path": path, "error": result}
         resolved_path = result
@@ -253,7 +277,8 @@ async def read_memory_with_context(
         ws = ctx.workspace if ctx else None
         if ws is None:
             return {"success": False, "path": path, "content": "", "error": "Workspace not initialized"}
-        is_valid, result = validate_memory_path(path, ws)
+        sid = (ctx.session_id if ctx else None) or current_session_id()
+        is_valid, result = validate_memory_path(path, ws, session_id=sid)
         if not is_valid:
             return {"success": False, "path": path, "content": "", "error": result}
         full_path = result

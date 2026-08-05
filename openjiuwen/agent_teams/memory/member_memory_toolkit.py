@@ -31,6 +31,25 @@ if TYPE_CHECKING:
     from openjiuwen.harness.workspace.workspace import Workspace
 
 
+def _current_session_id() -> Optional[str]:
+    """Best-effort lookup of the current session id via the agent_teams contextvar.
+
+    Returns the raw session id string or None when no session is bound (e.g.
+    in tests). The lite memory path resolver uses this to scope daily_memory
+    reads/writes to the calling session so that entries from sibling sessions
+    sharing the same workspace cannot leak across.
+    """
+    try:
+        from openjiuwen.agent_teams.context import get_session_id
+    except Exception:
+        return None
+    try:
+        sid = get_session_id()
+    except Exception:
+        return None
+    return sid or None
+
+
 class MemberMemoryToolkit:
 
     def __init__(
@@ -97,6 +116,7 @@ class MemberMemoryToolkit:
                 manager=self._manager,
                 coding_memory_dir=memory_dir,
                 node_name="coding_memory",
+                session_id=_current_session_id(),
             )
             self._tools = _create_coding_tools(self, self._read_only)
         else:
@@ -107,6 +127,7 @@ class MemberMemoryToolkit:
                 embedding_config=self._embedding_config,
                 sys_operation=self._sys_operation,
                 manager=self._manager,
+                session_id=_current_session_id(),
             )
             self._tools = _create_general_tools(self, self._read_only)
 

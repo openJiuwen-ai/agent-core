@@ -1,11 +1,13 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co. Ltd. 2026. All rights reserved.
 """Context prompt section for DeepAgent - reads config files and daily memory."""
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import re
 
 from zoneinfo import ZoneInfo
@@ -18,6 +20,40 @@ from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     CONTEXT_FILES,
 )
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
+
+
+# ---------------------------------------------------------------------------
+# Build configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ContextBuildConfig:
+    """Bundle of related parameters for building context prompt sections.
+
+    Grouping these avoids long positional parameter lists at every call site
+    and makes the intent clearer — only the optional trailing content varies
+    between ``_build_context_content`` (``extra_content``) and
+    ``build_context_section`` (``tools_content``).
+
+    Attributes:
+        sys_operation: SysOperation instance used for filesystem access.
+        workspace: Workspace instance (or None when no workspace is bound).
+        language: 'cn' or 'en'. Defaults to 'cn'.
+        timezone: IANA timezone name (e.g. 'Asia/Shanghai', 'UTC'). Defaults
+            to local timezone when None.
+        session_id: Optional session identifier. When provided, today's
+            daily memory is read from the per-session subdirectory
+            ``memory/daily_memory/<session_id>/<date>.md`` so that entries
+            written by sibling sessions sharing the same workspace cannot
+            leak into this session's auto-injected context.
+    """
+
+    sys_operation: Any
+    workspace: Any
+    language: str = "cn"
+    timezone: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -113,21 +149,26 @@ async def _read_context_file(
 
 
 async def _read_daily_memory(
-        sys_operation,
-        workspace,
-        timezone: Optional[str] = None,
+        config: ContextBuildConfig,
 ) -> str | None:
     """Read today's daily memory file only when today's file exists.
 
+    When ``config.session_id`` is provided, reads from the per-session
+    subdirectory ``memory/daily_memory/<session_id>/<date>.md`` so that
+    entries written by other sessions sharing the same workspace do not
+    leak into this session's auto-injected context. When ``session_id``
+    is None/empty, falls back to the legacy shared path
+    ``memory/daily_memory/<date>.md``.
+
     Args:
-        sys_operation: SysOperation instance.
-        workspace: Workspace instance.
-        timezone: IANA timezone name for date formatting (e.g. 'Asia/Shanghai', 'UTC').
-                  Defaults to 'Asia/Shanghai' if None.
+        config: Bundled build configuration (sys_operation, workspace,
+            timezone, session_id).
 
     Returns:
         Daily memory content string, or None if today's file doesn't exist.
     """
+    sys_operation = config.sys_operation
+    workspace = config.workspace
     if sys_operation is None:
         return None
 
@@ -135,9 +176,17 @@ async def _read_daily_memory(
     if memory_dir is None:
         return None
 
-    tz = timezone or "Asia/Shanghai"
+    tz = config.timezone or "Asia/Shanghai"
     date = _format_date(tz)
-    daily_memory_dir = memory_dir / WorkspaceNode.DAILY_MEMORY.value
+    daily_rel = workspace.get_directory(WorkspaceNode.DAILY_MEMORY.value)
+    if not daily_rel:
+        return None
+    # Per-session isolation: <memory>/daily_memory/<session_id>/<date>.md
+    # Legacy fallback:     <memory>/daily_memory/<date>.md
+    daily_segments = [daily_rel]
+    if config.session_id:
+        daily_segments.append(config.session_id)
+    daily_memory_dir = memory_dir / os.path.join(*daily_segments)
     list_result = await sys_operation.fs().list_files(path=str(daily_memory_dir))
     if list_result.code != 0 or not list_result.data or not list_result.data.list_items:
         return None
@@ -156,25 +205,20 @@ async def _read_daily_memory(
 
 
 async def _build_context_content(
-        sys_operation,
-        workspace,
-        language: str = "cn",
+        config: ContextBuildConfig,
         extra_content: Optional[str] = None,
-        timezone: Optional[str] = None,
 ) -> str:
     """Build the complete context file contents section.
 
     Args:
-        sys_operation: SysOperation instance.
-        workspace: Workspace instance.
-        language: 'cn' or 'en'.
+        config: Bundled build configuration (sys_operation, workspace,
+            language, timezone, session_id).
         extra_content: Optional content to append at the end (e.g. tools list).
-        timezone: IANA timezone name for date formatting (e.g. 'Asia/Shanghai', 'UTC').
-                  Uses local timezone if None.
 
     Returns:
         Formatted context content string.
     """
+    language = config.language
     header = CONTEXT_HEADER.get(language, CONTEXT_HEADER["cn"])
     titles = CONTEXT_FILE_TITLES.get(language, CONTEXT_FILE_TITLES["cn"])
     daily_title_tpl = DAILY_MEMORY_TITLE.get(language, DAILY_MEMORY_TITLE["cn"])
@@ -182,7 +226,7 @@ async def _build_context_content(
     parts = [header]
 
     for file_key in CONTEXT_FILES:
-        content = await _read_context_file(sys_operation, workspace, file_key)
+        content = await _read_context_file(config.sys_operation, config.workspace, file_key)
         if content is None:
             continue
         title = titles.get(file_key, f"## {file_key}")
@@ -196,9 +240,9 @@ async def _build_context_content(
             "empty files are skipped]\n\n"
         )
 
-    daily_content = await _read_daily_memory(sys_operation, workspace, timezone)
+    daily_content = await _read_daily_memory(config)
     if daily_content:
-        date = _format_date(timezone or "Asia/Shanghai")
+        date = _format_date(config.timezone or "Asia/Shanghai")
         title = daily_title_tpl.format(date=date)
         parts.append(f"{title}\n\n{daily_content}\n\n")
 
@@ -209,37 +253,36 @@ async def _build_context_content(
 
 
 async def build_context_section(
-        sys_operation,
-        workspace,
-        language: str = "cn",
+        config: ContextBuildConfig,
         tools_content: Optional[str] = None,
-        timezone: Optional[str] = None,
 ) -> Optional["PromptSection"]:
     """Build a PromptSection for context files.
 
     Args:
-        sys_operation: SysOperation instance.
-        workspace: Workspace object with root_path attribute.
-        language: 'cn' or 'en'.
-        tools_content: Optional pre-rendered tools content string for the given language.
-        timezone: IANA timezone name for date formatting (e.g. 'Asia/Shanghai', 'UTC').
-                  Uses local timezone if None.
+        config: Bundled build configuration. ``config.workspace`` may be None
+            to short-circuit and return None. When ``config.session_id`` is
+            provided, today's daily memory is read from
+            ``memory/daily_memory/<session_id>/<date>.md`` instead of the
+            shared ``memory/daily_memory/<date>.md``, preventing
+            cross-session leakage of daily memory entries in workspaces
+            shared across sessions.
+        tools_content: Optional pre-rendered tools content string for the
+            configured language.
 
     Returns:
-        A PromptSection instance with context content, or None if workspace is None.
+        A PromptSection instance with context content, or None if
+        ``config.workspace`` is None.
     """
     from openjiuwen.harness.prompts.builder import PromptSection
 
-    if workspace is None:
+    if config.workspace is None:
         return None
 
-    content = await _build_context_content(
-        sys_operation, workspace, language, extra_content=tools_content, timezone=timezone
-    )
+    content = await _build_context_content(config, extra_content=tools_content)
 
     return PromptSection(
         name="context",
-        content={language: content},
+        content={config.language: content},
         priority=80,
     )
 

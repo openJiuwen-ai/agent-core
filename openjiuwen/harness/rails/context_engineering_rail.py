@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Tuple, Union, Dict, Any
+from typing import List, Tuple, Union, Dict, Any, Optional
 
 from pydantic import BaseModel
 
@@ -20,8 +20,11 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.foundation.llm import ModelRequestConfig
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts.sections.workspace import build_workspace_section as _build_workspace
-from openjiuwen.harness.prompts.sections.context import build_context_section as _build_context, \
-    build_tools_section
+from openjiuwen.harness.prompts.sections.context import (
+    build_context_section as _build_context,
+    ContextBuildConfig,
+)
+from openjiuwen.harness.prompts.sections.context import build_tools_section
 from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig, SessionMemoryManager
 from openjiuwen.harness.schema.state import (
     DeepAgentState,
@@ -78,6 +81,12 @@ class ContextEngineeringRail(DeepAgentRail):
 
         self._preset = preset
         self._user_processors: List[Tuple[str, Union[BaseModel, Dict]]] = []
+        # Token returned by agent_teams.context.set_session_id() in
+        # ``_bind_session_id_contextvar``; ``after_invoke`` / ``uninit`` must
+        # call ``reset_session_id`` with this token to honor the
+        # ``set_session_id`` / ``reset_session_id`` pairing invariant
+        # (spec: S_16_top-level-utilities.md, invariant 9).
+        self._session_id_token: Optional[Any] = None
         if processors is not None:
             if isinstance(processors, tuple):
                 self._user_processors = [processors]
@@ -335,8 +344,15 @@ class ContextEngineeringRail(DeepAgentRail):
         if config is not None:
             config.context_processors = []
 
+        # Defensive: pair any outstanding set_session_id() token with
+        # reset_session_id() in case the rail is unmounted mid-invocation
+        # (``after_invoke`` is the canonical reset point, but uninit may
+        # run first if the agent is torn down).
+        self._reset_session_id_contextvar()
+
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         await self.fix_incomplete_tool_context(ctx)
+        self._bind_session_id_contextvar(ctx)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject workspace directory structure and context files into messages before model call."""
@@ -357,11 +373,16 @@ class ContextEngineeringRail(DeepAgentRail):
             lang,
         )
         tools_section = build_tools_section(self._ability_manager, lang)
-        context_section = await _build_context(
-            self.sys_operation,
-            workspace,
-            lang,
+        # Resolve session_id so per-session daily_memory isolation applies to
+        # the auto-injected context (prevents cross-session leakage when the
+        # same workspace is shared by multiple sessions of one agent).
+        context_config = ContextBuildConfig(
+            sys_operation=self.sys_operation,
+            workspace=workspace,
+            language=lang,
+            session_id=self._resolve_session_id(ctx),
         )
+        context_section = await _build_context(context_config)
 
         if workspace_section is not None:
             self.system_prompt_builder.add_section(workspace_section)
@@ -383,6 +404,100 @@ class ContextEngineeringRail(DeepAgentRail):
         if self._session_memory_mgr is not None:
             self._session_memory_mgr.update_inherited_system_prompt(ctx)
         await self._maybe_schedule_session_memory_update(ctx)
+
+    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Tear down per-invocation state bound in ``before_invoke``.
+
+        The framework wraps the invocation body in
+        ``async with ctx.lifecycle(BEFORE_INVOKE, AFTER_INVOKE)``, so this
+        hook runs even when the invocation raises — making it the correct
+        place to pair the ``set_session_id`` call from ``_bind_session_id_contextvar``
+        with ``reset_session_id`` (spec S_16 invariant 9).
+        """
+        self._reset_session_id_contextvar()
+
+    @staticmethod
+    def _resolve_session_id(ctx: AgentCallbackContext) -> Optional[str]:
+        """Best-effort lookup of the current session id from the callback context.
+
+        Returns the raw session id string, or None when no session is bound
+        (e.g. some tests). The caller is responsible for treating None as
+        "no per-session isolation" and falling back to the legacy shared
+        daily_memory path.
+        """
+        session = getattr(ctx, "session", None)
+        if session is None:
+            return None
+        getter = getattr(session, "get_session_id", None)
+        if not callable(getter):
+            return None
+        try:
+            sid = getter()
+        except Exception:
+            return None
+        return sid or None
+
+    def _bind_session_id_contextvar(self, ctx: AgentCallbackContext) -> None:
+        """Bind the current session id to the agent_teams contextvar.
+
+        The contextvar is the single source of truth consumed by lite memory
+        tool path resolvers (``read_memory`` / ``write_memory`` / ``edit_memory``)
+        to scope ``daily_memory`` writes/reads to the current session, so that
+        cross-session leakage cannot happen even when several sessions share
+        the same workspace (e.g. one agent_office serving multiple scheduled
+        tasks).
+
+        Per spec S_16_top-level-utilities.md invariant 9,
+        ``set_session_id`` MUST be paired with ``reset_session_id(token)``.
+        We therefore:
+
+        * Always call ``set_session_id`` (even when *sid* is empty — the
+          spec defines the "unset" sentinel as the empty string, invariant 7),
+          so a sibling rail / outer context that previously bound a different
+          session id cannot leak into this invocation's tool path resolution.
+        * Store the returned ``Token[str]`` on ``self._session_id_token``.
+        * Pair it with ``reset_session_id`` in ``after_invoke`` / ``uninit``
+          via ``_reset_session_id_contextvar``.
+
+        Failing to pair (the previous implementation discarded the token and
+        early-returned on empty *sid*) left the previous invocation's
+        session_id in the contextvar AND in the log ``trace_id`` whenever
+        the current invocation had no session, causing tool path resolution
+        to silently use the wrong per-session ``daily_memory`` subdirectory.
+        """
+        sid = self._resolve_session_id(ctx) or ""
+        try:
+            from openjiuwen.agent_teams.context import set_session_id
+            # Discard any stale token from a prior invocation that crashed
+            # before ``after_invoke`` could reset it; we are about to set a
+            # fresh value, and the previous token is now meaningless.
+            self._session_id_token = set_session_id(sid)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "ContextEngineeringRail: failed to set session_id contextvar: %s", exc
+            )
+            self._session_id_token = None
+
+    def _reset_session_id_contextvar(self) -> None:
+        """Reset the session_id contextvar using the stored token.
+
+        Pairs with ``_bind_session_id_contextvar`` per spec invariant 9.
+        Safe to call when no token is stored (no-op) so it can be invoked
+        from both ``after_invoke`` and ``uninit`` defensively.
+        """
+        token = self._session_id_token
+        if token is None:
+            return
+        try:
+            from openjiuwen.agent_teams.context import reset_session_id
+            reset_session_id(token)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "ContextEngineeringRail: failed to reset session_id contextvar: %s",
+                exc,
+            )
+        finally:
+            self._session_id_token = None
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         self._refresh_task_state_runtime(ctx)

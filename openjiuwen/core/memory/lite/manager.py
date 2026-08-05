@@ -424,10 +424,11 @@ class MemoryIndexManager:
 
     def _setup_file_watcher(self) -> None:
         """Setup file system watcher for memory files.
-        
+
         Watches:
         - workspace_dir (memory directory for *.md files)
-        - workspace_dir/daily_memory (for daily logs)
+        - workspace_dir/daily_memory (recursive, for both legacy flat files
+          and per-session subdirectories like ``<session_id>/YYYY-MM-DD.md``)
         - workspace root (for USER.md at root level)
         """
         try:
@@ -484,7 +485,13 @@ class MemoryIndexManager:
 
             for watch_path in watch_paths:
                 if os.path.isdir(watch_path):
-                    self._file_observer.schedule(handler, watch_path, recursive=False)
+                    # ``daily_memory`` is watched recursively so that per-session
+                    # subdirectories created lazily by new sessions are picked
+                    # up without re-registering the watcher. The memory_dir
+                    # itself stays non-recursive to avoid catching nested
+                    # coding_memory / daily_memory churn twice.
+                    recursive = os.path.basename(watch_path) == daily_rel
+                    self._file_observer.schedule(handler, watch_path, recursive=recursive)
                 self._watcher_paths.add(watch_path)
 
             self._file_observer.start()

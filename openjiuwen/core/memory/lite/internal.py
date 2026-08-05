@@ -35,17 +35,24 @@ def list_memory_files(
     extra_paths: Optional[List[str]] = None
 ) -> List[str]:
     """List all memory files in workspace.
-    
+
+    Daily memory layout supports both the legacy flat path
+    (``memory/daily_memory/YYYY-MM-DD.md``) and the per-session subdirectory
+    layout (``memory/daily_memory/<session_id>/YYYY-MM-DD.md``). All ``.md``
+    files under ``daily_memory`` are enumerated recursively so that
+    ``memory_search`` indexing covers every session's entries while the
+    auto-injection / tool path resolution stays session-scoped.
+
     Args:
         workspace: Workspace instance.
         extra_paths: Extra paths to include.
-    
+
     Returns:
         List of absolute paths to memory files.
     """
     files = []
     extra_paths = extra_paths or []
-    
+
     memory_dir = workspace.get_node_path("memory")
     if memory_dir and os.path.isdir(memory_dir):
         for f in os.listdir(memory_dir):
@@ -53,21 +60,25 @@ def list_memory_files(
                 filepath = os.path.join(memory_dir, f)
                 if os.path.isfile(filepath):
                     files.append(filepath)
-        
+
         daily_rel = workspace.get_directory("daily_memory")
         if daily_rel:
             daily_memory_dir = os.path.join(memory_dir, daily_rel)
             if os.path.isdir(daily_memory_dir):
-                for f in os.listdir(daily_memory_dir):
-                    if f.endswith(".md"):
-                        filepath = os.path.join(daily_memory_dir, f)
-                        if os.path.isfile(filepath):
-                            files.append(filepath)
-    
+                # Walk the daily_memory tree so per-session subdirectories are
+                # included. os.walk yields all files regardless of nesting
+                # depth, which keeps memory_search indexing complete.
+                for root, _subdirs, filenames in os.walk(daily_memory_dir):
+                    for f in filenames:
+                        if f.endswith(".md"):
+                            filepath = os.path.join(root, f)
+                            if os.path.isfile(filepath):
+                                files.append(filepath)
+
     user_md_path = workspace.get_node_path("USER.md")
     if user_md_path and os.path.isfile(user_md_path):
         files.append(str(user_md_path))
-    
+
     for extra in extra_paths:
         if memory_dir:
             full_path = os.path.join(memory_dir, extra)
@@ -81,7 +92,7 @@ def list_memory_files(
                     filepath = os.path.join(full_path, f)
                     if os.path.isfile(filepath):
                         files.append(filepath)
-    
+
     return sorted(set(files))
 
 
@@ -235,5 +246,29 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     
     if norm1 < 1e-10 or norm2 < 1e-10:
         return 0.0
-    
+
     return dot / (norm1 * norm2)
+
+
+def current_session_id() -> Optional[str]:
+    """Best-effort lookup of the current session id via the agent_teams contextvar.
+
+    Returns the raw session id string or None when no session is bound (e.g.
+    in tests). The lite memory path resolver uses this to scope daily_memory
+    reads/writes to the calling session so that entries from sibling sessions
+    sharing the same workspace cannot leak across.
+
+    Lazily imports ``agent_teams.context.get_session_id`` to avoid an import
+    cycle (``agent_teams`` may transitively pull this package). Lookup failures
+    of any kind are swallowed and reported as None so callers can fall back to
+    the legacy shared path.
+    """
+    try:
+        from openjiuwen.agent_teams.context import get_session_id
+    except Exception:
+        return None
+    try:
+        sid = get_session_id()
+    except Exception:
+        return None
+    return sid or None
