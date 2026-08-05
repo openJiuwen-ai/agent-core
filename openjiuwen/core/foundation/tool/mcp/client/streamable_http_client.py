@@ -114,9 +114,16 @@ class StreamableHttpClient(McpClient):
             self._is_disconnected = False
             logger.info(f"Streamable-http client connected successfully to {self._server_path}")
             return True
-        except Exception as e:
+        except BaseException as e:
             logger.error(f"Streamable-http connection failed to {self._server_path}: {e}")
-            await self.disconnect()
+            try:
+                await self.disconnect()
+            except Exception as disconnect_exc:
+                logger.error(
+                    f"Streamable-http disconnect during connect-failure also failed: {disconnect_exc}"
+                )
+            if isinstance(e, KeyboardInterrupt):
+                raise
             return False
 
     async def disconnect(self, *, timeout: float = NO_TIMEOUT) -> bool:
