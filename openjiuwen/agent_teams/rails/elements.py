@@ -59,6 +59,7 @@ TEAM_WORKSPACE = "core.team.workspace"
 TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
 TEAM_RELIABILITY = "core.team.reliability"
+TEAM_DEBATE_ROUND_CAP = "core.team.debate_round_cap"
 OBSERVABILITY = "core.observability"
 
 
@@ -323,6 +324,64 @@ def build_team_reliability_rail(params: dict[str, Any], context: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# team.debate_round_cap — DebateRoundCapRail (teammate-only)
+# ---------------------------------------------------------------------------
+
+
+class TeamDebateRoundCapInput(ConstructionInput):
+    """Construction inputs for the teammate debate round-cap rail."""
+
+    role: str = context_field(attr="role", default="teammate", description="Team role value.")
+    member_name: str = context_field(attr="member_name", default="", description="Member name.")
+    language: str = context_field(attr="language", default="cn", description="Resolved language code.")
+    max_debate_rounds: int = param_field(default=0, description="Per-teammate peer send_message ceiling.")
+    team_name: str = param_field(default="default", description="Team name.")
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_DEBATE_ROUND_CAP,
+    description="Per-teammate peer send_message ceiling for interactive debate.",
+    input_model=TeamDebateRoundCapInput,
+)
+def build_team_debate_round_cap_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build the debate round-cap rail (teammates only; gated on config + handles)."""
+    from openjiuwen.agent_teams.schema.team import TeamRole
+    from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+
+    inp = TeamDebateRoundCapInput.resolve(params, context)
+    if inp.max_debate_rounds < 1:
+        return None
+    try:
+        role = TeamRole(inp.role)
+    except ValueError:
+        return None
+    if role != TeamRole.TEAMMATE:
+        return None
+
+    backend = get_team_backend(context)
+    messager = get_messager(context)
+    if backend is None or messager is None or not inp.member_name:
+        return None
+
+    message_manager = TeamMessageManager(
+        team_name=inp.team_name or backend.team_name,
+        member_name=inp.member_name,
+        db=backend.db,
+        messager=messager,
+    )
+    from openjiuwen.agent_teams.rails.debate_round_cap_rail import DebateRoundCapRail
+
+    return DebateRoundCapRail(
+        max_debate_rounds=inp.max_debate_rounds,
+        team_backend=backend,
+        message_manager=message_manager,
+        member_name=inp.member_name,
+        language=inp.language,
+    )
+
+
+# ---------------------------------------------------------------------------
 # core.observability — ObservabilityRail
 # ---------------------------------------------------------------------------
 
@@ -352,5 +411,6 @@ __all__ = [
     "TEAM_TOOL_APPROVAL",
     "TEAM_PLAN_MODE",
     "TEAM_RELIABILITY",
+    "TEAM_DEBATE_ROUND_CAP",
     "OBSERVABILITY",
 ]

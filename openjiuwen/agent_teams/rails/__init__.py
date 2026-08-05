@@ -25,6 +25,7 @@ from openjiuwen.agent_teams.rails.confirm_payload import (
     TeamConfirmPayload,
     TeamPermissionConfirmResponse,
 )
+from openjiuwen.agent_teams.rails.debate_round_cap_rail import DebateRoundCapRail
 from openjiuwen.agent_teams.rails.team_permission_rail import (
     TeamApprovalOrchestrator,
     TeamPermissionRail,
@@ -38,6 +39,7 @@ from openjiuwen.agent_teams.rails.team_tool_rail import (
 from openjiuwen.agent_teams.rails.tool_approval_rail import TeamToolApprovalRail
 
 __all__ = [
+    "DebateRoundCapRail",
     "TeamApprovalOrchestrator",
     "TeamConfirmPayload",
     "TeamPermissionConfirmResponse",

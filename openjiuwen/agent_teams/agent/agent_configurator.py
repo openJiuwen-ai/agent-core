@@ -512,6 +512,7 @@ class AgentConfigurator:
         # team config (predefined roster, plan-mode, reliability gating) stay
         # here; "can it build" gates (a missing handle) live in the factories.
         from openjiuwen.agent_teams.rails.elements import (
+            TEAM_DEBATE_ROUND_CAP,
             TEAM_PLAN_MODE,
             TEAM_POLICY,
             TEAM_RELIABILITY,
@@ -590,6 +591,24 @@ class AgentConfigurator:
         is_team_plan_leader = ctx.role == TeamRole.LEADER and is_team_plan_enabled(spec)
         if is_team_plan_leader:
             team_rail_specs.append(RailSpec(type=TEAM_PLAN_MODE, params={}))
+
+        # Interactive-debate send_message ceiling — teammates only.
+        # Handle availability (backend/messager/member_name) is gated in the
+        # element factory (returns None); keep this declaration role+config only.
+        if (
+            ctx.role == TeamRole.TEAMMATE
+            and spec.max_debate_rounds is not None
+            and spec.max_debate_rounds >= 1
+        ):
+            team_rail_specs.append(
+                RailSpec(
+                    type=TEAM_DEBATE_ROUND_CAP,
+                    params={
+                        "max_debate_rounds": int(spec.max_debate_rounds),
+                        "team_name": resolved_team_name,
+                    },
+                ),
+            )
 
         reliability_cfg = spec.reliability
         reliability_components = None
