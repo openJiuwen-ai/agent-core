@@ -393,7 +393,7 @@ class IntelliRouterModelClient(BaseModelClient):
                 output_tokens=msg.usage_metadata.output_tokens,
                 total_tokens=msg.usage_metadata.total_tokens,
                 cache_tokens=msg.usage_metadata.cache_tokens,
-                reasoning_tokens=msg.usage_metadata.reasoning_tokens,
+                reasoning_tokens=self._extract_reasoning_tokens(msg.usage_metadata),
                 model_name=msg.usage_metadata.model_name or "",
             )
 
