@@ -16,10 +16,6 @@ SCHEMA_VERSION = "1.0"
 SUPPORTED_SCHEMA_MAJOR = 1
 
 
-ArtifactStatus = GraphArtifactStatus
-ArtifactBuild = GraphBuildResult
-
-
 @dataclass(frozen=True)
 class GraphArtifacts:
     """Internal compatibility view consumed by the migrated planners."""
@@ -40,14 +36,19 @@ class GraphArtifactStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
 
-    def status(self, *, expected_snapshot: dict[str, Any] | None = None, building: bool = False) -> ArtifactStatus:
+    def status(
+        self,
+        *,
+        expected_snapshot: dict[str, Any] | None = None,
+        building: bool = False,
+    ) -> GraphArtifactStatus:
         try:
             current = self._read_current()
             payload = self.read()
         except FileNotFoundError:
-            return ArtifactStatus(exists=False, fresh=False, building=building)
+            return GraphArtifactStatus(exists=False, fresh=False, building=building)
         snapshot = payload.get("source_snapshot")
-        return ArtifactStatus(
+        return GraphArtifactStatus(
             exists=True,
             fresh=expected_snapshot is None or snapshot == expected_snapshot,
             version=str(current.get("version") or "") or None,
@@ -67,7 +68,7 @@ class GraphArtifactStore:
         _validate_schema(payload)
         return payload
 
-    def stage(self, payload: dict[str, Any], *, version: str) -> ArtifactBuild:
+    def stage(self, payload: dict[str, Any], *, version: str) -> GraphBuildResult:
         """Materialize an immutable version without switching ``current.json``."""
 
         self.root.mkdir(parents=True, exist_ok=True)
@@ -82,13 +83,13 @@ class GraphArtifactStore:
         if version_dir.exists():
             raise FileExistsError(f"Symphony graph version already exists: {version}")
         os.replace(run_dir, version_dir)
-        return ArtifactBuild(
+        return GraphBuildResult(
             version=version,
             graph_path=version_dir / "graph.json",
             generated_at=str(payload["generated_at"]),
         )
 
-    def activate(self, artifact: ArtifactBuild) -> ArtifactBuild:
+    def activate(self, artifact: GraphBuildResult) -> GraphBuildResult:
         """Atomically make a fully staged version current."""
 
         if not artifact.graph_path.is_file():
@@ -102,7 +103,7 @@ class GraphArtifactStore:
         _write_json_atomic(self.root / "current.json", current)
         return artifact
 
-    def publish(self, payload: dict[str, Any], *, version: str) -> ArtifactBuild:
+    def publish(self, payload: dict[str, Any], *, version: str) -> GraphBuildResult:
         """Synchronous compatibility helper for callers without cancellation."""
 
         return self.activate(self.stage(payload, version=version))

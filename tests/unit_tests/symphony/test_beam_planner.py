@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,27 +26,34 @@ class _FakeBeamLLM:
         self.active = 0
         self.max_active = 0
 
-    async def complete_json_async(self, **kwargs):
-        self.calls.append(kwargs)
+    async def invoke(self, messages, **kwargs):
+        call = {
+            "system_prompt": messages[0]["content"],
+            "user_content": messages[-1]["content"],
+            **kwargs,
+        }
+        self.calls.append(call)
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
             if self.delay:
                 await asyncio.sleep(self.delay)
-            payload = json.loads(kwargs["user_content"])
+            payload = json.loads(call["user_content"])
             if "candidate_plans" in payload:
-                return json.dumps(self.rerank_selection)
-            return json.dumps(
-                {
-                    "judgements": [
-                        {
-                            "candidate_id": candidate["candidate_id"],
-                            "score": self.scores.get(candidate["skill"]["id"], 0.9),
-                            "reason": f"{candidate['skill']['id']} is useful",
-                        }
-                        for candidate in payload["candidates"]
-                    ]
-                }
+                return SimpleNamespace(content=json.dumps(self.rerank_selection))
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "judgements": [
+                            {
+                                "candidate_id": candidate["candidate_id"],
+                                "score": self.scores.get(candidate["skill"]["id"], 0.9),
+                                "reason": f"{candidate['skill']['id']} is useful",
+                            }
+                            for candidate in payload["candidates"]
+                        ]
+                    }
+                )
             )
         finally:
             self.active -= 1
@@ -531,8 +539,7 @@ def _planner(
 ) -> BidirectionalBeamPlanner:
     return BidirectionalBeamPlanner(
         artifacts,
-        llm_config=None,
-        llm_client=llm,
+        model=llm,
         min_edge_confidence=0.7,
         top_k=top_k,
         max_depth=max_depth,

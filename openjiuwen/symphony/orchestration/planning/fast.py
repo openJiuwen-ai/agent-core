@@ -8,14 +8,15 @@ import re
 from collections import defaultdict
 from typing import Any, Sequence
 
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.orchestration.planning.utils import CAN_FEED, evolution_edge_key
-from openjiuwen.symphony.interfaces import LLMConfig, create_llm_client, llm_usage_context
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
 from openjiuwen.symphony.orchestration.language import (
     default_fast_no_plan_title,
     planner_language_instruction,
 )
 from openjiuwen.symphony.orchestration.planning.plan_builder import edge_plan_item
+from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
 from openjiuwen.symphony.orchestration.planning.utils import (
     eligible_can_feed_edges,
     normalize_known_skill_ids,
@@ -77,8 +78,8 @@ class FastOneShotPlanner:
         self,
         artifacts: GraphArtifacts,
         *,
-        llm_config: LLMConfig | None,
-        llm_client: Any | None,
+        model: Model,
+        model_response_observer: ModelResponseObserver | None = None,
         min_edge_confidence: float,
         max_depth: int = 4,
         candidate_skill_ids: Sequence[str] | None = None,
@@ -86,8 +87,8 @@ class FastOneShotPlanner:
         dynamic_overlay: dict[str, Any] | None = None,
     ) -> None:
         self.artifacts = artifacts
-        self.llm_config = llm_config
-        self.llm_client = llm_client
+        self.model = model
+        self.model_response_observer = model_response_observer
         self.min_edge_confidence = min_edge_confidence
         self.max_depth = max(1, int(max_depth))
         self.language = language
@@ -98,21 +99,22 @@ class FastOneShotPlanner:
         )
 
     async def plan(self, query: str) -> dict[str, Any]:
-        client = self._client()
         subgraph = self._candidate_subgraph(query)
         prompt_payload = {
             "query": query,
             "skills": subgraph["skills"],
             "can_feed_edges": subgraph["edges"],
         }
-        with llm_usage_context("orchestration", "one_shot_fast_planning"):
-            raw = await client.complete_json_async(
+        with model_usage_context("orchestration", "one_shot_fast_planning"):
+            raw = await invoke_json(
+                self.model,
                 system_prompt=(f"{FAST_PLANNER_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
                 user_content=json.dumps(prompt_payload, ensure_ascii=False),
                 error_context="Symphony one-shot fast planning",
                 request_overrides={
                     "extra_body": {"thinking": {"type": "disabled"}},
                 },
+                response_observer=self.model_response_observer,
             )
 
         base = {
@@ -157,13 +159,6 @@ class FastOneShotPlanner:
             "status": plan.get("status", "no_plan") if plan else "no_plan",
             "reason": plan.get("reason", "") if plan else "",
         }
-
-    def _client(self) -> Any:
-        if self.llm_client is not None:
-            return self.llm_client
-        if self.llm_config is None:
-            raise ValueError("fast Symphony planning requires llm_config or llm_client.")
-        return create_llm_client(self.llm_config)
 
     def _candidate_subgraph(self, query: str) -> dict[str, Any]:
         if self.candidate_skill_ids:

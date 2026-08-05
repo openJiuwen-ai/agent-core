@@ -241,7 +241,7 @@ class BuildManifest:
 
 
 @dataclass(frozen=True)
-class GraphBuildResult:
+class GraphConstructionResult:
     """Complete graph build result."""
 
     manifest: BuildManifest
