@@ -377,10 +377,7 @@ class ContextEngine:
             fields = cls._CONTEXT_OVERFLOW_FIELDS
 
         for field in fields:
-            try:
-                nested_value = getattr(value, field, None)
-            except Exception:
-                continue
+            nested_value = getattr(value, field, None)
             if nested_value is None or nested_value is value or callable(nested_value):
                 continue
             yield from cls._iter_exception_texts(
