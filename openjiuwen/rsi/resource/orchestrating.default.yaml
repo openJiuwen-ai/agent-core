@@ -1,10 +1,12 @@
-# Default auto-coordinating harness configuration template.
-# Written by config.loader when the requested config path is missing.
+# Default standalone Harness self-improvement configuration.
 
-workspace_dir: .local/rsi/tui/workspace
+workspace_dir: .local/rsi/workspace
 max_epochs: 1
-freeze_team_skill: false
-freeze_team_members: false
+
+model_configs:
+  evaluation: ""
+  analysis: ""
+  member_optimization: ""
 
 data_loader:
   file_pattern: "*.json"
@@ -15,29 +17,10 @@ data_loader:
     - source
     - task_type
 
-dataset_curation:
-  enabled: true
-  score_threshold: 1.0
-  require_judgeable_reference: true
-  output_filename: replay_cases.json
-  report_filename: curation_report.yaml
-  targeted_seed_filename: targeted_dataset_seed.json
-  source_label: trace_replay
-
-dataset_generator:
-  model_config_ref: mock-model
-  min_cases: 2
-  coverage_dimensions:
-    - diagnosis
-    - explanation
-    - practice
-
 evaluator:
-  default_script: default
-  backend: local
-  evaluation_method: exact_match
-  success_score: 0.85
-  case_lifecycle_timeout_sec: 3600
+  backend: single_harness
+  evaluation_method: script-based
+  transient_case_retry_limit: 2
 
 evaluation_result_analyzer:
   diagnosis_agent_max_retries: 2
@@ -47,31 +30,18 @@ evaluation_result_analyzer:
   evidence_limit_per_issue: 3
   output_filename: issues.yaml
 
-team_skill_optimizer:
-  model_config_ref: mock-model
-  max_candidates: 1
-  freeze: false
-  language: cn
-  auto_approve: true
-
 member_optimizer:
-  model_config_ref: mock-model
   action_group_configs:
     - prompt
     - skill
-  freeze: false
-  max_roles_per_run: 2
-  min_attribution_confidence: 0.1
+    - tool
+  max_roles_per_run: 1
   execution_concurrency: 1
   role_execution_concurrency: 1
   action_execution_concurrency_per_role: 1
-
-optimization_experience_learner:
-  model_config_ref: mock-model
-  output_filename: experience_ref.yaml
-  enabled: true
 
 scheduling:
   evaluation_strategy: hybrid
   coordination_strategy: team_first_single_pass
   promotion_policy: epoch_full_evaluation
+  full_evaluation_enabled: true

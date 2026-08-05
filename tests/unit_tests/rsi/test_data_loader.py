@@ -4,10 +4,7 @@
 
 from __future__ import annotations
 
-import ast
-import inspect
 import json
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -15,9 +12,6 @@ import yaml
 
 from openjiuwen.rsi.config import DataLoaderConfig
 from openjiuwen.rsi.data_loader import DataLoader
-from openjiuwen.rsi.orchestrator.orchestrator import (
-    OptimizationOrchestrator,
-)
 
 
 def _write_json(path: Path, data: object) -> None:
@@ -30,56 +24,6 @@ def _write_json(path: Path, data: object) -> None:
 def _case_ids(batches: list[list[dict[str, object]]]) -> list[list[object]]:
     """Return loaded case IDs grouped by batch."""
     return [[case["case_id"] for case in batch] for batch in batches]
-
-
-def _orchestrator_run_tree() -> ast.Module:
-    """Parse ``OptimizationOrchestrator.run`` for orchestration boundary checks."""
-    return ast.parse(textwrap.dedent(inspect.getsource(OptimizationOrchestrator.run)))
-
-
-def _orchestrator_iter_dataset_batches_tree() -> ast.Module:
-    """Parse ``OptimizationOrchestrator._iter_dataset_batches`` boundary helper."""
-    return ast.parse(textwrap.dedent(inspect.getsource(OptimizationOrchestrator._iter_dataset_batches)))
-
-
-def _is_iter_dataset_batches_call(node: ast.AST) -> bool:
-    """Return whether ``node`` calls ``self._iter_dataset_batches(...)``."""
-    if not isinstance(node, ast.Call):
-        return False
-    func = node.func
-    return (
-        isinstance(func, ast.Attribute)
-        and func.attr == "_iter_dataset_batches"
-        and isinstance(func.value, ast.Name)
-        and func.value.id == "self"
-    )
-
-
-def _is_data_loader_load_call(node: ast.AST) -> bool:
-    """Return whether ``node`` calls ``self.data_loader.load(...)``."""
-    if not isinstance(node, ast.Call):
-        return False
-    func = node.func
-    return (
-        isinstance(func, ast.Attribute)
-        and func.attr == "load"
-        and isinstance(func.value, ast.Attribute)
-        and func.value.attr == "data_loader"
-        and isinstance(func.value.value, ast.Name)
-        and func.value.value.id == "self"
-    )
-
-
-def _is_list_materialized_data_loader_load(node: ast.AST) -> bool:
-    """Return whether ``node`` is ``list(self.data_loader.load(...))``."""
-    if not isinstance(node, ast.Call):
-        return False
-    return (
-        isinstance(node.func, ast.Name)
-        and node.func.id == "list"
-        and len(node.args) == 1
-        and _is_data_loader_load_call(node.args[0])
-    )
 
 
 # JSON 结构加载
@@ -245,30 +189,6 @@ def test_load_ignores_directories_matching_file_pattern(tmp_path: Path) -> None:
 
 
 # Orchestrator 边界测试
-
-
-def test_orchestrator_run_does_not_materialize_data_loader_batches() -> None:
-    """Orchestrator must not wrap ``DataLoader.load`` with ``list``."""
-    tree = _orchestrator_run_tree()
-
-    assert not any(_is_list_materialized_data_loader_load(node) for node in ast.walk(tree))
-
-
-def test_orchestrator_run_recreates_data_loader_iterator_inside_epoch_loop() -> None:
-    """Orchestrator must create a new DataLoader iterator for each epoch."""
-    run_tree = _orchestrator_run_tree()
-    iterator_tree = _orchestrator_iter_dataset_batches_tree()
-    epoch_loops = [
-        node
-        for node in ast.walk(run_tree)
-        if isinstance(node, ast.For)
-        and isinstance(node.iter, ast.Call)
-        and isinstance(node.iter.func, ast.Name)
-        and node.iter.func.id == "range"
-    ]
-
-    assert any(_is_iter_dataset_batches_call(child) for epoch_loop in epoch_loops for child in ast.walk(epoch_loop))
-    assert any(_is_data_loader_load_call(node) for node in ast.walk(iterator_tree))
 
 
 # Iterator 语义

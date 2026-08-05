@@ -43,9 +43,6 @@ from openjiuwen.rsi.member_optimizer.schema import (
     RoleVerificationResult,
     VerificationCheck,
 )
-from openjiuwen.rsi.member_optimizer.skill_acquisition import (
-    scan_skill_directory,
-)
 from openjiuwen.rsi.member_optimizer.worktree_coordinator import (
     resolve_integration_worktree_path,
 )
@@ -71,6 +68,26 @@ _UNREPAIRABLE_CHECK_NAMES = {
     "execution_schema",
     "execution_results_present",
     "execution_results_load",
+}
+
+_FORBIDDEN_SKILL_SUFFIXES = {".bat", ".cmd", ".dll", ".dylib", ".exe", ".ps1", ".sh", ".so"}
+_SKILL_SCRIPT_FORBIDDEN_IMPORT_ROOTS = {"httpx", "requests", "socket", "subprocess", "urllib"}
+_SKILL_SCRIPT_FORBIDDEN_CALLS = {
+    "__import__",
+    "compile",
+    "eval",
+    "exec",
+    "input",
+    "os.popen",
+    "os.spawn",
+    "os.system",
+    "shutil.move",
+    "shutil.rmtree",
+    "subprocess.call",
+    "subprocess.check_call",
+    "subprocess.check_output",
+    "subprocess.Popen",
+    "subprocess.run",
 }
 _UNREPAIRABLE_CHECK_PREFIXES = (
     "action_policy:",
@@ -1365,6 +1382,91 @@ class HarnessChangeVerifier:
     def _write_fix_result(output: Path, result: MemberFixResult) -> None:
         with open(output, "w", encoding="utf-8") as f:
             json.dump(asdict(result), f, ensure_ascii=False, indent=2)
+
+
+def scan_skill_directory(
+    skill_dir: Path,
+    *,
+    max_files: int = 200,
+    max_total_bytes: int = 10 * 1024 * 1024,
+) -> dict[str, object]:
+    """Statically reject unsafe or malformed generated Skill packages."""
+    errors: list[str] = []
+    files: list[str] = []
+    total_bytes = 0
+    root = skill_dir.resolve()
+    if not skill_dir.is_dir():
+        return {"status": "failed", "errors": [f"skill directory not found: {skill_dir}"], "files": []}
+    if not (skill_dir / "SKILL.md").is_file():
+        errors.append("missing SKILL.md")
+
+    for path in sorted(skill_dir.rglob("*")):
+        try:
+            path.resolve().relative_to(root)
+        except (OSError, ValueError):
+            errors.append(f"path escapes skill directory: {path}")
+            continue
+        rel = path.relative_to(skill_dir).as_posix()
+        if any(part.startswith(".") for part in Path(rel).parts):
+            errors.append(f"hidden path not allowed: {rel}")
+        if path.is_symlink():
+            errors.append(f"symlink not allowed: {rel}")
+            continue
+        if path.is_dir():
+            continue
+        files.append(rel)
+        if path.suffix.lower() in _FORBIDDEN_SKILL_SUFFIXES:
+            errors.append(f"forbidden executable file type: {rel}")
+        try:
+            total_bytes += path.stat().st_size
+        except OSError as exc:
+            errors.append(f"cannot stat {rel}: {exc}")
+        if path.suffix == ".py":
+            errors.extend(_scan_python_skill_script(path, rel))
+
+    if len(files) > max_files:
+        errors.append(f"file count {len(files)} exceeds limit {max_files}")
+    if total_bytes > max_total_bytes:
+        errors.append(f"total size {total_bytes} exceeds limit {max_total_bytes}")
+    return {
+        "status": "failed" if errors else "passed",
+        "errors": errors,
+        "files": files,
+        "file_count": len(files),
+        "total_bytes": total_bytes,
+    }
+
+
+def _scan_python_skill_script(path: Path, rel: str) -> list[str]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+    except (OSError, SyntaxError) as exc:
+        return [f"python parse failed in {rel}: {exc}"]
+    errors: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots = [alias.name.split(".", 1)[0] for alias in node.names]
+            errors.extend(
+                f"dangerous import '{root}' in {rel}" for root in roots if root in _SKILL_SCRIPT_FORBIDDEN_IMPORT_ROOTS
+            )
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".", 1)[0]
+            if root in _SKILL_SCRIPT_FORBIDDEN_IMPORT_ROOTS:
+                errors.append(f"dangerous import '{node.module}' in {rel}")
+        elif isinstance(node, ast.Call):
+            call_name = _qualified_call_name(node.func)
+            if call_name in _SKILL_SCRIPT_FORBIDDEN_CALLS:
+                errors.append(f"dangerous call '{call_name}' in {rel}")
+    return errors
+
+
+def _qualified_call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        owner = _qualified_call_name(node.value)
+        return f"{owner}.{node.attr}" if owner else node.attr
+    return ""
 
 
 __all__ = [

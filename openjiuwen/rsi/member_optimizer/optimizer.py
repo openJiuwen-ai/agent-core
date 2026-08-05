@@ -119,7 +119,6 @@ class MemberOptimizer:
     def __init__(
         self,
         config: MemberOptimizerConfig,
-        experience_learner: Any | None = None,
         *,
         role_attributor: RoleAttributor | None = None,
         mechanism_attributor: MechanismAttributor | None = None,
@@ -129,8 +128,6 @@ class MemberOptimizer:
         verifier: HarnessChangeVerifier | None = None,
     ) -> None:
         self.config = config
-        # Reserved for future member experience retrieval; feat_009 v1 does not consume it.
-        self.experience_learner = experience_learner
         self._action_group_config_paths: list[str] = list(config.action_group_configs)
 
         self._role_attributor = role_attributor or RoleAttributor()

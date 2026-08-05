@@ -18,9 +18,7 @@ from openjiuwen.rsi.schema import ActionDefinition
 ALLOWED_ACTION_GROUPS: Final[frozenset[str]] = frozenset(
     {
         "prompt",
-        "rail",
         "skill",
-        "subagent",
         "tool",
     }
 )
@@ -30,7 +28,6 @@ ALLOWED_OPERATIONS: Final[frozenset[str]] = frozenset(
         "add",
         "modify",
         "remove",
-        "search",
     }
 )
 
@@ -50,9 +47,7 @@ GROUP_PATH_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
         "prompt_sections/files/",
     ),
     "tool": ("tools/",),
-    "rail": ("rails/",),
     "skill": ("skills/",),
-    "subagent": ("subagents/", "harness_config.yaml"),
 }
 
 
@@ -81,19 +76,13 @@ Allowed target_path and declared_write_paths by action_group:
 {path_lines}
 
 Current member optimizer actions are limited to local ExpertHarness package file
-changes on prompt, skill, tool, rail, and subagent surfaces.
+changes on prompt, skill, and tool surfaces.
 
 Operation rules:
-- `search` is allowed only for `skill/search`.
-- `skill/search` must set a non-empty English `candidate_query`, keep
-  `install_ref` empty, target `skills/`, and declare `skills/` plus
-  `skills/skills.yaml`.
-- One `skill/search` action acquires at most one selected skill. Use multiple
-  `skill/search` actions when multiple distinct skills are needed.
 - `skill/add` must target `skills/<snake_name>/SKILL.md`, declare that
   `SKILL.md` plus `skills/skills.yaml`, and keep `skills/skills.yaml`
   mounting the parent `skills` directory.
-- For every non-search action, `candidate_query` and `install_ref` must be empty.
+- `candidate_query` and `install_ref` must be empty; RSI generates package-local artifacts.
 - Do not output config, mcp, dependency, test, documentation, memory,
   knowledge, context, workflow, install, or global environment actions.
 Prompt rules:
@@ -119,26 +108,6 @@ Tool rules:
 - `tools/tools.yaml` must register package-local tools as mappings like
   `{{"file": "tools/<name>.py", "class_name": "<ToolClass>"}}`.
 
-Rail rules:
-- `rail/add` must target a loadable Python file under `rails/*.py`, declare
-  both that Python file and `rails/rails.yaml`, and set
-  `constraints.class_name` to the AgentRail subclass name.
-- `rails/rails.yaml` must register package-local rails as mappings like
-  `{{"file": "rails/<name>.py", "class_name": "<AgentRailClass>"}}`.
-- Rails are for lifecycle and action-transition control. Do not use them as a
-  static Prompt or Skill hidden inside Python source.
-
-Subagent rules:
-- Custom `subagent/add` creates a package-local subagent under
-  `subagents/<name>` and must declare `subagents/<name>/config.yaml`,
-  `subagents/subagents.yaml`, and `harness_config.yaml`.
-- Custom subagents use `constraints.inherited_tools` for parent tool
-  inheritance.
-- Custom subagent package-local tools, rails, and skills are declared in
-  `constraints.local_resources`; every referenced file must be included in
-  `declared_write_paths`.
-- Builtin `subagent/add` may target `subagents/subagents.yaml` and must declare
-  `subagents/subagents.yaml` plus `harness_config.yaml`.
 """
 
 
@@ -193,10 +162,7 @@ def validate_action_policy(
     elif action_group and not _operation_allowed(action_group, operation):
         errors.append(f"operation '{operation}' is not allowed for action_group '{action_group}'")
 
-    if action_group == "skill" and operation == "search":
-        if not candidate_query:
-            errors.append("skill/search requires non-empty candidate_query")
-    elif candidate_query:
+    if candidate_query:
         errors.append("candidate_query must be empty")
     if install_ref:
         errors.append("install_ref must be empty")
@@ -231,13 +197,6 @@ def validate_action_policy(
                     int(constraints["priority"])
                 except (TypeError, ValueError):
                     errors.append("constraints.priority must be an integer when provided")
-
-    if action_group == "skill" and operation == "search":
-        if normalized_target_path != "skills":
-            errors.append("skill/search target_path must be skills/")
-        required = {"skills", "skills/skills.yaml"}
-        if not required <= normalized_declared_paths:
-            errors.append("skill/search must declare both skills/ and skills/skills.yaml")
 
     if action_group == "skill" and operation == "add":
         if not _is_skill_entry_path(normalized_target_path):
@@ -285,43 +244,10 @@ def validate_action_policy(
     if action_group == "tool" and operation == "remove" and normalized_target_path == "tools/tools.yaml":
         errors.append("tool/remove must target a package-local tool, not tools/tools.yaml")
 
-    rail_manifest_missing = (
-        normalized_target_path.startswith("rails/")
-        and normalized_target_path != "rails/rails.yaml"
-        and "rails/rails.yaml" not in normalized_declared_paths
-    )
-    if action_group == "rail" and rail_manifest_missing:
-        errors.append("rail implementation changes must also declare rails/rails.yaml so the rail can be mounted")
-
-    if action_group == "rail" and operation == "add":
-        if not _is_python_resource_path(normalized_target_path, "rails"):
-            errors.append("rail/add target_path must be a package-local rails/*.py file")
-        if normalized_target_path not in normalized_declared_paths:
-            errors.append("rail/add must declare its target Python file")
-        if "rails/rails.yaml" not in normalized_declared_paths:
-            errors.append("rail/add must declare rails/rails.yaml")
-        if not str(constraints.get("class_name", "") or "").strip():
-            errors.append("rail/add requires constraints.class_name")
-
-    if action_group == "rail" and operation == "remove" and normalized_target_path == "rails/rails.yaml":
-        errors.append("rail/remove must target a package-local rail, not rails/rails.yaml")
-
-    if action_group == "subagent":
-        errors.extend(
-            _validate_subagent_action(
-                operation=operation,
-                normalized_target_path=normalized_target_path,
-                normalized_declared_paths=normalized_declared_paths,
-                constraints=constraints,
-            )
-        )
-
     return ActionPolicyCheck(valid=not errors, errors=tuple(errors))
 
 
 def _operation_allowed(action_group: str, operation: str) -> bool:
-    if operation == "search":
-        return action_group == "skill"
     return operation in {"add", "modify", "remove"}
 
 
@@ -403,75 +329,6 @@ def _is_snake_name(name: str) -> bool:
         return False
     compact = name.replace("_", "")
     return compact.isalnum() and not compact[0].isdigit()
-
-
-def _validate_subagent_action(
-    *,
-    operation: str,
-    normalized_target_path: str,
-    normalized_declared_paths: set[str],
-    constraints: dict[str, Any],
-) -> list[str]:
-    errors: list[str] = []
-    if operation != "add":
-        return errors
-
-    if "allowed_tools" in constraints:
-        errors.append("subagent/add uses constraints.inherited_tools, not constraints.allowed_tools")
-
-    if constraints.get("builtin"):
-        if normalized_target_path != "subagents/subagents.yaml":
-            errors.append("builtin subagent/add target_path must be subagents/subagents.yaml")
-        required = {"subagents/subagents.yaml", "harness_config.yaml"}
-        if not required <= normalized_declared_paths:
-            errors.append("builtin subagent/add must declare subagents/subagents.yaml and harness_config.yaml")
-        return errors
-
-    parts = Path(normalized_target_path).parts
-    if len(parts) != 2 or parts[0] != "subagents":
-        errors.append("custom subagent/add target_path must be subagents/<name>")
-        return errors
-    subagent_root = normalized_target_path
-    required = {
-        f"{subagent_root}/config.yaml",
-        "subagents/subagents.yaml",
-        "harness_config.yaml",
-    }
-    if not required <= normalized_declared_paths:
-        errors.append(
-            "custom subagent/add must declare subagent config, subagents/subagents.yaml, and harness_config.yaml"
-        )
-    local_resources = constraints.get("local_resources") or {}
-    if local_resources and not isinstance(local_resources, dict):
-        errors.append("constraints.local_resources must be an object")
-        return errors
-    if isinstance(local_resources, dict):
-        for resource_kind, items in local_resources.items():
-            for item in _raw_list_value(items):
-                if not isinstance(item, dict):
-                    continue
-                if "builtin" in item:
-                    errors.append(f"constraints.local_resources.{resource_kind} must not use builtin resources")
-                file_path = item.get("file") or item.get("file_path") or item.get("path")
-                if not file_path and resource_kind == "skills":
-                    name = str(item.get("name") or "").strip()
-                    if name:
-                        file_path = f"{subagent_root}/skills/{name}/SKILL.md"
-                if file_path:
-                    normalized = _normalize_policy_path(str(file_path))
-                    if normalized not in normalized_declared_paths:
-                        errors.append(f"constraints.local_resources.{resource_kind} file {normalized} must be declared")
-    return errors
-
-
-def _raw_list_value(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return value
-    if isinstance(value, tuple):
-        return list(value)
-    return [value]
 
 
 __all__ = [

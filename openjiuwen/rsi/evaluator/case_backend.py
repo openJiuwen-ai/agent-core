@@ -4,9 +4,7 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -15,10 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from openjiuwen.agent_teams.context import reset_session_id, set_session_id
-from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
-from openjiuwen.agent_teams.tools.database import TASK_TERMINAL_STATUSES
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -33,12 +27,6 @@ from openjiuwen.rsi.evaluator.runtime_adapters import (
     RSISkillUseRail,
     RSISysOperationRail,
     run_agent_with_empty_response_recovery,
-)
-from openjiuwen.rsi.evaluator.team_factory import (
-    TeamSkillTeamFactory,
-    apply_team_spec_customizer_during_configure,
-    clear_team_spec_customizer,
-    resolve_team_skill_rail_config,
 )
 from openjiuwen.rsi.evaluator.trajectory_paths import (
     ROLE_TRAJECTORY_DIR_NAME,
@@ -57,7 +45,6 @@ class CaseExecutionResult:
     execution_status: str
     error: str = ""
     judge_result: JudgeResult | None = None
-    team_spec: TeamAgentSpec | None = None
     workspace_dir: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -80,110 +67,6 @@ class CaseExecutionBackend(Protocol):
     async def cleanup(self, team_name: str, session_id: str) -> None:
         """Release case-scoped runtime resources after artifacts are written."""
         ...
-
-
-@dataclass(slots=True)
-class LocalExecutionBackend:
-    """Run an evaluation case through the local in-process Runner."""
-
-    config: EvaluatorConfig
-    team_factory: TeamSkillTeamFactory = field(init=False)
-
-    def __post_init__(self) -> None:
-        self.team_factory = TeamSkillTeamFactory(config=self.config)
-
-    async def execute(
-        self,
-        *,
-        case: dict[str, Any],
-        output_dir: str,
-        session_id: str,
-        team_skill_ref_path: str | Path | None = None,
-        harness_refs: dict[str, str] | None = None,
-    ) -> CaseExecutionResult:
-        """Run the Team locally and leave scoring to CaseRunner."""
-        logger.info("[LocalExecutionBackend] begin to execute case: {}".format(case.get("case_id", "")))
-        resolved_output_dir = str(Path(output_dir).expanduser().resolve())
-        agent_team_spec = self._create_team_spec(
-            output_dir=resolved_output_dir,
-            team_skill_ref_path=team_skill_ref_path,
-            harness_refs=harness_refs or {},
-        )
-        status = "passed"
-        response: Any = None
-        error = ""
-
-        await Runner.start()
-        try:
-            with apply_team_spec_customizer_during_configure(agent_team_spec):
-                run_task = asyncio.create_task(
-                    Runner.run_agent_team(
-                        agent_team=agent_team_spec,
-                        inputs=build_local_team_case_input(case),
-                        session=session_id,
-                    )
-                )
-                response, delivery_metadata = await _await_team_result_or_delivered_artifacts(
-                    run_task=run_task,
-                    case=case,
-                    default_timeout_sec=self.config.case_lifecycle_timeout_sec,
-                    team_name=agent_team_spec.team_name,
-                    session_id=session_id,
-                    db_config=agent_team_spec.resolve_db_config(),
-                )
-        except Exception as exc:
-            status = "failed"
-            error = str(exc)
-        finally:
-            clear_team_spec_customizer(agent_team_spec)
-
-        metadata = dict(delivery_metadata) if status == "passed" else {}
-        logger.info("[LocalExecutionBackend] end to execute case: {}".format(case.get("case_id", "")))
-        return CaseExecutionResult(
-            response=response,
-            execution_status=status,
-            error=error,
-            judge_result=None,
-            team_spec=agent_team_spec,
-            metadata=metadata,
-        )
-
-    async def cleanup(self, team_name: str, session_id: str) -> None:
-        """Release a case-scoped Team runtime after artifacts are written.
-
-        Teardown order mirrors the proven path: delete the team (force=True
-        stops any active runtime in-line) while the Runner is still up, then
-        stop the Runner. ``Runner.stop()`` runs in ``finally`` so the global
-        runtime is always released even if ``delete_agent_team`` fails.
-        """
-        try:
-            try:
-                await Runner.delete_agent_team(
-                    team_name=team_name,
-                    session_ids=[session_id],
-                    force=True,
-                )
-            except AttributeError:
-                await Runner.release(session_id, force=True)
-            except RuntimeError as exc:
-                if "Cannot resolve team session release info" not in str(exc):
-                    raise
-                await Runner.release(session_id, force=True)
-        finally:
-            await Runner.stop()
-
-    def _create_team_spec(
-        self,
-        *,
-        output_dir: str,
-        team_skill_ref_path: str | Path | None,
-        harness_refs: dict[str, str],
-    ) -> TeamAgentSpec:
-        return self.team_factory.create_team_spec(
-            team_skill_ref_path=team_skill_ref_path,
-            harness_refs=harness_refs,
-            output_dir=output_dir,
-        )
 
 
 @dataclass(slots=True)
@@ -290,7 +173,6 @@ class SingleHarnessExecutionBackend:
             execution_status=status,
             error=error,
             judge_result=None,
-            team_spec=None,
             workspace_dir=str(workspace_dir),
             metadata=_single_harness_metadata(
                 role_name=role_name,
@@ -339,16 +221,23 @@ def _single_harness_rails(
     if not team_skill_ref_path:
         return rails
 
-    skill_rail_config = resolve_team_skill_rail_config(team_skill_ref_path)
+    skill_dir = _resolve_skill_dir(team_skill_ref_path)
     rails.append(
         RSISkillUseRail(
-            skills_dir=skill_rail_config.skills_root,
+            skills_dir=str(skill_dir.parent),
             skill_mode=RSISkillUseRail.SKILL_MODE_ALL,
-            enabled_skills=[skill_rail_config.enabled_skill],
+            enabled_skills=[skill_dir.name],
             trigger_at_task_start=True,
         )
     )
     return rails
+
+
+def _resolve_skill_dir(skill_ref_path: str | Path) -> Path:
+    ref_path = Path(skill_ref_path).expanduser().resolve()
+    if ref_path.name.lower() == "skill.md":
+        return ref_path.parent
+    return ref_path if ref_path.is_dir() else ref_path.parent
 
 
 def _controlled_skill_name(case: dict[str, Any]) -> str:
@@ -368,54 +257,6 @@ def _case_inputs(case: dict[str, Any]) -> Any:
                 return _normalize_case_input_for_backend(case, value["user_message"])
             return _normalize_case_input_for_backend(case, value)
     return case
-
-
-def build_local_team_case_input(case: dict[str, Any]) -> str:
-    """Build the positive execution contract for local Team evaluation."""
-    raw_input = _case_inputs(case)
-    if isinstance(raw_input, str):
-        task_text = raw_input
-    else:
-        task_text = json.dumps(raw_input, ensure_ascii=False, indent=2)
-    artifact_hint = _artifact_contract_hint(case, task_text)
-
-    return "\n".join(
-        [
-            "这是一个自动评测 case。请按以下顺序完成团队执行：",
-            "1. 调用 build_team 组建临时团队，并让团队目标对齐本 case 的交付物。",
-            "2. 调用 create_task 创建面向交付物的任务 DAG，每个任务写清验收标准和产物路径。",
-            "3. 使用 team skill 中的预置成员；当任务需要新增能力时，调用 spawn_member 添加成员。",
-            "4. 调用 send_message 启动成员执行任务，并让成员在共享工作区产出可评测交付物。",
-            "5. 检查共享工作区中的交付物，确保最终文件位于 .team/<team_name>/artifacts/。",
-            "6. 质量闭环最多包含一次修复与一次复审；复审完成后写入最终结论。",
-            "7. 调用 shutdown_member 关闭已完成工作的成员。",
-            "8. 调用 clean_team 结束临时团队，让本次 evaluation case 返回给评测器。",
-            "",
-            "交付物路径契约：",
-            "- 最终交付物必须直接写入 .team/<team_name>/artifacts/ 根目录；"
-            "artifacts/code、artifacts/docs、artifacts/reports 仅作为辅助目录，"
-            "最终交付物验收路径以 artifacts 根目录文件为准。",
-            artifact_hint,
-            "",
-            "原始任务：",
-            task_text,
-        ]
-    )
-
-
-def _artifact_contract_hint(case: dict[str, Any], task_text: str) -> str:
-    """Return a case-specific artifact hint without hard-coding one domain."""
-    expected_files = _artifact_files_from_case(case, task_text)
-    if expected_files:
-        root_paths = "、".join(f".team/<team_name>/artifacts/{filename}" for filename in expected_files)
-        return (
-            "本 case 期望的文件包括："
-            + "、".join(expected_files)
-            + "。创建任务 DAG 时必须把这些路径写成最终产物验收路径："
-            + root_paths
-            + "。"
-        )
-    return "具体文件名以原始任务和 case reference 中声明的交付物为准。"
 
 
 def _artifact_files_from_case(case: dict[str, Any], task_text: str) -> list[str]:
@@ -455,143 +296,6 @@ def _artifact_files_from_value(value: Any) -> list[str]:
             files.extend(_artifact_files_from_value(item))
         return files
     return []
-
-
-async def _await_team_result_or_delivered_artifacts(
-    *,
-    run_task: asyncio.Task[Any],
-    case: dict[str, Any],
-    team_name: str,
-    session_id: str,
-    db_config: Any,
-    default_timeout_sec: float = 3600.0,
-) -> tuple[Any, dict[str, Any]]:
-    """Wait for the Team to finish its delivery and lifecycle naturally.
-
-    Files becoming stable is not equivalent to completion: after the final
-    artifact write the leader still has to collect evidence, summarize the
-    result, shut members down, and clean the temporary team.  Stopping the Team
-    from this evaluator path races that final round and turns a valid delivery
-    into ``round_aborted``.  Lifecycle ownership therefore remains entirely
-    with Team; evaluator cleanup runs only after this task returns.
-    """
-
-    _ = case, team_name, session_id, db_config, default_timeout_sec
-    return await run_task, {}
-
-
-async def _team_task_board_terminal_for_delivery(
-    *,
-    db_config: Any,
-    team_name: str,
-    session_id: str,
-) -> bool:
-    """Return True only when artifact cleanup is waiting on lifecycle cleanup.
-
-    Stable expected artifacts are not enough to stop a temporary team: the
-    team may still be running QA, revisions, or final integration. Forced
-    cleanup is only safe once at least one task exists and every task is in a
-    terminal status, which means any remaining wait is shutdown/clean debt.
-    """
-    token = set_session_id(session_id)
-    try:
-        db = get_shared_db(db_config)
-        await db.initialize()
-        tasks = await db.task.get_team_tasks(team_name)
-    except Exception as exc:
-        logger.warning(
-            "failed to inspect task board before artifact delivery cleanup for {} / {}: {}",
-            team_name,
-            session_id,
-            exc,
-        )
-        return False
-    finally:
-        reset_session_id(token)
-
-    if not tasks:
-        return False
-    return all(getattr(task, "status", None) in TASK_TERMINAL_STATUSES for task in tasks)
-
-
-def _expected_artifact_files_for_delivery(case: dict[str, Any]) -> list[str]:
-    raw_input = _case_inputs(case)
-    task_text = raw_input if isinstance(raw_input, str) else json.dumps(raw_input, ensure_ascii=False)
-    return _artifact_files_from_case(case, task_text)
-
-
-def _artifact_delivery_grace_sec(case: dict[str, Any]) -> float:
-    return _positive_float(case.get("artifact_delivery_grace_sec", 90.0), default=90.0)
-
-
-def _artifact_delivery_poll_sec(case: dict[str, Any]) -> float:
-    return _positive_float(case.get("artifact_delivery_poll_sec", 5.0), default=5.0)
-
-
-def _positive_float(value: Any, *, default: float) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = default
-    return max(parsed, 0.001)
-
-
-def _expected_artifact_snapshot(
-    artifacts_dir: Path,
-    expected_files: list[str],
-) -> tuple[tuple[str, int, int], ...] | None:
-    snapshot: list[tuple[str, int, int]] = []
-    for filename in expected_files:
-        path = _find_expected_artifact_file(artifacts_dir, filename)
-        if path is None:
-            return None
-        stat = path.stat()
-        snapshot.append((filename, stat.st_size, stat.st_mtime_ns))
-    return tuple(snapshot)
-
-
-def _find_expected_artifact_file(artifacts_dir: Path, filename: str) -> Path | None:
-    direct = artifacts_dir / filename
-    if direct.is_file():
-        return direct
-    candidates = [path for path in sorted(artifacts_dir.rglob(filename)) if path.is_file() and path.name == filename]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: path.stat().st_size)
-
-
-async def _stop_delivered_temporary_team(*, team_name: str, session_id: str) -> bool:
-    try:
-        return await Runner.stop_agent_team(team_name=team_name, session_id=session_id)
-    except AttributeError:
-        return False
-    except Exception as exc:
-        logger.warning(
-            "temporary team stop after artifact delivery failed for {} / {}: {}",
-            team_name,
-            session_id,
-            exc,
-        )
-        return False
-
-
-async def _finish_or_cancel_team_task(run_task: asyncio.Task[Any]) -> Any:
-    if run_task.done():
-        return run_task.result()
-    try:
-        return await asyncio.wait_for(asyncio.shield(run_task), timeout=10.0)
-    except asyncio.CancelledError:
-        return None
-    except TimeoutError:
-        run_task.cancel()
-        try:
-            await run_task
-        except asyncio.CancelledError:
-            pass
-        return None
-    except Exception as exc:
-        logger.warning("team task ended after delivered artifact cleanup with error: {}", exc)
-        return None
 
 
 def _normalize_case_input_for_backend(case: dict[str, Any], value: Any) -> Any:
@@ -744,13 +448,12 @@ def _single_harness_team_skill_metadata(
     if not team_skill_ref_path:
         return {}
 
-    skill_rail_config = resolve_team_skill_rail_config(team_skill_ref_path)
-    skill_dir = Path(skill_rail_config.skills_root) / skill_rail_config.enabled_skill
+    skill_dir = _resolve_skill_dir(team_skill_ref_path)
     skill_md_path = skill_dir / "SKILL.md"
     metadata = {
         "ref_path": str(Path(team_skill_ref_path)),
-        "skills_root": str(skill_rail_config.skills_root),
-        "enabled_skill": skill_rail_config.enabled_skill,
+        "skills_root": str(skill_dir.parent),
+        "enabled_skill": skill_dir.name,
         "skill_mode": "all",
     }
     try:
@@ -835,7 +538,6 @@ def _is_runtime_workspace_metadata(path: str) -> bool:
 
 
 _BACKEND_REGISTRY: dict[str, type] = {
-    "local": LocalExecutionBackend,
     "single_harness": SingleHarnessExecutionBackend,
 }
 
@@ -843,9 +545,7 @@ _BACKEND_REGISTRY: dict[str, type] = {
 def build_backend(config: EvaluatorConfig) -> CaseExecutionBackend:
     """Instantiate the execution backend named by ``config.backend``.
 
-    Each backend constructs its own ``TeamSkillTeamFactory`` from ``config``.
-    Callers must not pass a separate ``team_factory`` (avoids duplicate
-    construction and redundant parameter threading).
+    RSI deliberately exposes only the standalone Harness backend.
     """
     factory_cls = _BACKEND_REGISTRY.get(config.backend)
     if factory_cls is None:
@@ -856,8 +556,6 @@ def build_backend(config: EvaluatorConfig) -> CaseExecutionBackend:
 __all__ = [
     "CaseExecutionBackend",
     "CaseExecutionResult",
-    "LocalExecutionBackend",
     "SingleHarnessExecutionBackend",
-    "build_local_team_case_input",
     "build_backend",
 ]

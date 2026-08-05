@@ -110,7 +110,6 @@ def _validate_plan(
             errors.append(f"duplicate action_id: {action_id}")
         action_ids_seen.add(action_id)
 
-    errors.extend(_validate_skill_search_add_fallback(plan_data))
     errors.extend(
         _validate_actionable_target_coverage(
             targets or [],
@@ -329,35 +328,6 @@ def _normalize_optimization_surface(surface: Any) -> str:
     return value
 
 
-def _validate_skill_search_add_fallback(plan_data: dict[str, Any]) -> list[str]:
-    """Require explicit failure semantics for skill/add fallback after skill/search."""
-    actions: dict[str, dict[str, Any]] = {}
-    search_action_ids: set[str] = set()
-    for raw_action in plan_data.get("actions", []):
-        if not isinstance(raw_action, dict):
-            continue
-        action_id = str(raw_action.get("action_id", "") or "")
-        actions[action_id] = raw_action
-        if (
-            str(raw_action.get("action_group", "") or "") == "skill"
-            and str(raw_action.get("operation", "") or "") == "search"
-        ):
-            search_action_ids.add(action_id)
-    errors: list[str] = []
-    for action_id, action in actions.items():
-        if str(action.get("action_group", "") or "") != "skill" or str(action.get("operation", "") or "") != "add":
-            continue
-        depends_on = {str(dep) for dep in action.get("depends_on", [])}
-        if not (depends_on & search_action_ids):
-            continue
-        run_if = str(action.get("run_if", "dependency_succeeded") or "dependency_succeeded")
-        if run_if != "dependency_failed":
-            errors.append(
-                f"action {action_id}: skill/add fallback after skill/search must set run_if=dependency_failed"
-            )
-    return errors
-
-
 def _normalize_required_declared_paths(plan_data: dict[str, Any]) -> None:
     """Complete mechanical manifest declarations implied by selected surfaces."""
     for action in plan_data.get("actions", []):
@@ -398,8 +368,6 @@ def _required_declared_paths_for_action(
 ) -> list[str]:
     if action_group == "prompt" and target_path.startswith("prompt_sections/files/"):
         return [target_path, "prompt_sections/sections.yaml"]
-    if action_group == "skill" and operation == "search":
-        return ["skills", "skills/skills.yaml"]
     if action_group == "skill" and target_path.startswith("skills/"):
         return [target_path, "skills/skills.yaml"]
     if action_group == "tool" and target_path.startswith("tools/") and target_path != "tools/tools.yaml":
@@ -957,8 +925,6 @@ def _build_action_contract_text(action_definitions: list[ActionDefinition]) -> s
         "Only the exact action_group/operation pairs listed under Action Definitions are allowed.",
         "Globally documented actions that are absent from Action Definitions are disabled for this run.",
     ]
-    if not any(definition.group == "skill" and definition.operation == "search" for definition in filtered_definitions):
-        strict_lines.append("skill/search is disabled for this run; use an offered local skill action instead.")
     parts.append("\n".join(strict_lines))
     if filtered_definitions:
         lines = ["## Action Definitions"]
@@ -1600,18 +1566,6 @@ class MemberActionPlanner:
             action_definitions = [
                 definition for definition in action_definitions if definition.group in restricted_groups
             ]
-        search_disabled_for_single_action = max_actions_per_plan == 1
-        if search_disabled_for_single_action:
-            # A search-only plan cannot recover when every external candidate is
-            # rejected. In one-action mode, spend the action on a bounded local
-            # patch derived from current evidence instead.
-            local_action_definitions = []
-            for definition in action_definitions:
-                is_skill_search = definition.group == "skill" and definition.operation == "search"
-                if not is_skill_search:
-                    local_action_definitions.append(definition)
-            action_definitions = local_action_definitions
-
         plan_data: dict[str, Any] = {}
         validation_errors: list[str] | None = None
         final_errors: list[str] = []
@@ -1715,7 +1669,6 @@ class MemberActionPlanner:
                 "allowed_action_groups": sorted(restricted_groups),
                 "allowed_prompt_surfaces": sorted(restricted_prompt_surfaces),
                 "max_actions_per_plan": max_actions_per_plan,
-                "skill_search_disabled_for_single_action": search_disabled_for_single_action,
                 "capability_requests": deferred_capability_requests,
                 "activation_phase_surface_adaptations": (activation_phase_surface_adaptations),
                 "recovery_surface_adaptations": recovery_surface_adaptations,

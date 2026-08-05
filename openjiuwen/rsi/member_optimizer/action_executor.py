@@ -44,9 +44,6 @@ from openjiuwen.rsi.member_optimizer.schema import (
     MemberOptimizationAction,
     MemberOptimizationPlan,
 )
-from openjiuwen.rsi.member_optimizer.skill_acquisition import (
-    SkillAcquisition,
-)
 from openjiuwen.rsi.member_optimizer.verification import (
     _validate_package_python_source,
 )
@@ -397,14 +394,6 @@ def _action_resource_guidance(action: MemberOptimizationAction) -> str:
             "approximate an available parser, compiler, linter, or test command "
             "with a weaker string heuristic, and do not create a passive validator."
         )
-    if action.action_group == "rail" and action.operation == "add":
-        class_hint = class_name or "a descriptive AgentRail subclass"
-        return (
-            f"Create `{target_path}` with a loadable `{class_hint}` class that "
-            "inherits from `openjiuwen.core.single_agent.rail.base.AgentRail`. "
-            "Also update `rails/rails.yaml` with a `rails` entry containing "
-            "`file` and `class_name`. Keep the rail lightweight and dependency-free."
-        )
     if action.action_group == "skill" and action.operation == "add":
         return (
             f"Create `{target_path}` as a package-local skill. It must be a "
@@ -449,23 +438,8 @@ def _action_resource_guidance(action: MemberOptimizationAction) -> str:
             "`skills/skills.yaml` is declared, keep it valid YAML and mount the "
             "parent `skills` directory."
         )
-    if action.action_group == "subagent" and action.operation == "add":
-        return (
-            "This is a `subagent/add` action, not a `tool/add` action. "
-            f"Create the custom subagent package under `{target_path}`. "
-            "Write the subagent system prompt and any package-local resource "
-            "files declared in `constraints.local_resources`. "
-            "Use `constraints.inherited_tools` to choose parent tools that the "
-            "subagent inherits. For subagent-local tools, create the Python "
-            "Tool classes declared under `constraints.local_resources.tools`; "
-            "ToolCard input_params must be a JSON Schema with top-level "
-            "`type: object`. For subagent-local rails, create AgentRail classes "
-            "with hooks such as `before_model_call`. For local skills, create "
-            "`SKILL.md` files with YAML frontmatter. The executor will write "
-            "the package manifests and config from `constraints.local_resources`."
-        )
-    if action.action_group in {"tool", "rail"}:
-        manifest = "tools/tools.yaml" if action.action_group == "tool" else "rails/rails.yaml"
+    if action.action_group == "tool":
+        manifest = "tools/tools.yaml"
         return (
             f"Keep `{target_path}` loadable and keep `{manifest}` valid YAML "
             "if the manifest is one of the declared write paths."
@@ -917,12 +891,6 @@ class MemberActionExecutorAgent:
         written_files: list[str],
     ) -> list[str]:
         root = action_worktree.resolve()
-        if action.action_group == "subagent":
-            result = _sync_subagent_registries(root, action)
-            if str(result.get("status")) != "succeeded":
-                raise ValueError(str(result.get("error") or "subagent registry sync failed"))
-            return sorted(set([*written_files, *[str(path) for path in result.get("changed_files", [])]]))
-
         written_files = _normalize_skill_frontmatter_name_for_written_files(
             action_worktree=root,
             action=action,
@@ -1065,8 +1033,7 @@ Allowed Tools: []
 2. Do NOT modify files outside the role worktree.
 3. Do NOT modify current_harnesses, current_harness_refs.yaml, or orchestrator artifacts.
 4. Only use the allowed_skills and allowed_tools listed above.
-5. Do NOT search for external resources or install dependencies. skill/search is
-   handled by a deterministic executor path, not by this action agent.
+5. Do NOT search for external resources or install dependencies.
 6. This action may only modify local ExpertHarness package files supported by current auto harness.
 7. {write_constraint}
 8. Use the current file contents above as the source of truth. If the file
@@ -1097,7 +1064,6 @@ class MemberActionExecutor:
         self,
         worktree_coordinator: MemberWorktreeCoordinator | None = None,
         executor_agent: MemberActionExecutorAgent | None = None,
-        skill_acquisition: SkillAcquisition | None = None,
         execution_concurrency: int = 2,
         role_execution_concurrency: int = 2,
         action_execution_concurrency_per_role: int = 2,
@@ -1105,7 +1071,6 @@ class MemberActionExecutor:
     ) -> None:
         self._coordinator = worktree_coordinator or MemberWorktreeCoordinator()
         self._executor_agent = executor_agent
-        self._skill_acquisition = skill_acquisition or SkillAcquisition()
         self._agent_skills_dirs = list(agent_skills_dirs or [])
         self._global_sem = asyncio.Semaphore(execution_concurrency)
         self._role_sem = asyncio.Semaphore(role_execution_concurrency)
@@ -1345,19 +1310,7 @@ class MemberActionExecutor:
         )
 
         try:
-            if action.action_group == "skill" and action.operation == "search":
-                acquisition_result = await asyncio.to_thread(
-                    self._skill_acquisition.acquire,
-                    action_worktree=worktree_dir,
-                    query=action.candidate_query,
-                )
-                exec_result = {
-                    "status": acquisition_result.status,
-                    "declared_write_paths": declared_paths,
-                    "error": acquisition_result.error,
-                    "skill_acquisition": asdict(acquisition_result),
-                }
-            elif action.operation == "remove":
+            if action.operation == "remove":
                 exec_result = await asyncio.to_thread(
                     _execute_deterministic_remove,
                     worktree_dir,
@@ -1391,22 +1344,6 @@ class MemberActionExecutor:
                 "declared_write_paths": declared_paths,
                 "error": str(e),
             }
-
-        if exec_result.get("status", "failed") == "succeeded":
-            if action.action_group == "subagent":
-                sync_result = _sync_subagent_registries(worktree_dir, action)
-                if sync_result["status"] == "succeeded":
-                    exec_result["subagent_registry_sync"] = sync_result
-                else:
-                    exec_result["status"] = "failed"
-                    exec_result["error"] = str(sync_result.get("error") or "subagent registry sync failed")
-            manifest_fix = _normalize_rail_manifest_refs(
-                worktree_dir,
-                action,
-                declared_paths,
-            )
-            if manifest_fix:
-                exec_result["rail_manifest_normalization"] = manifest_fix
 
         after_declared = _snapshot_files(worktree_dir, declared_paths)
         changed_files = _changed_files(before_declared, after_declared)
@@ -1487,8 +1424,6 @@ class MemberActionExecutor:
             "response_text": exec_result.get("response_text", ""),
             "error": exec_result.get("error", ""),
         }
-        if "skill_acquisition" in exec_result:
-            payload["skill_acquisition"] = exec_result["skill_acquisition"]
         if "remove" in exec_result:
             payload["remove"] = exec_result["remove"]
         with open(artifact_path, "w", encoding="utf-8") as f:
@@ -1671,15 +1606,6 @@ def _execute_deterministic_remove(
             target_paths={target_rel},
         ):
             manifest_updates.append("tools/tools.yaml")
-    elif action.action_group == "rail":
-        removed_paths.extend(_remove_path(worktree_dir, target_rel))
-        manifest = worktree_dir / "rails" / "rails.yaml"
-        if manifest.is_file() and _remove_manifest_entries(
-            manifest,
-            list_key="rails",
-            target_paths={target_rel},
-        ):
-            manifest_updates.append("rails/rails.yaml")
     else:
         return {
             "status": "failed",
@@ -1730,7 +1656,7 @@ def _validate_generated_action_resources(
                 errors.append(f"skill_frontmatter:{normalized}: description is required")
         return errors
 
-    if action.action_group not in {"tool", "rail"}:
+    if action.action_group != "tool":
         return errors
 
     for rel_path in changed_files:
@@ -1747,7 +1673,7 @@ def _validate_generated_action_resources(
                 continue
             safety_errors = _validate_package_python_source(source, path=normalized)
             errors.extend(safety_errors)
-        elif normalized in {"tools/tools.yaml", "rails/rails.yaml"}:
+        elif normalized == "tools/tools.yaml":
             try:
                 yaml.safe_load(path.read_text(encoding="utf-8"))
             except Exception as exc:
@@ -1877,18 +1803,11 @@ def _execute_deterministic_add_scaffold(
             "error": "add scaffold requires constraints.class_name",
         }
 
-    if action.action_group == "tool":
-        if not target_rel.startswith("tools/") or not target_rel.endswith(".py"):
-            return {"status": "failed", "scaffold": {}, "error": "tool/add scaffold target must be tools/*.py"}
-        manifest_rel = "tools/tools.yaml"
-        list_key = "tools"
-        content = _tool_scaffold(class_name, action.description)
-    else:
-        if not target_rel.startswith("rails/") or not target_rel.endswith(".py"):
-            return {"status": "failed", "scaffold": {}, "error": "rail/add scaffold target must be rails/*.py"}
-        manifest_rel = "rails/rails.yaml"
-        list_key = "rails"
-        content = _rail_scaffold(class_name, action.description)
+    if action.action_group != "tool" or not target_rel.startswith("tools/") or not target_rel.endswith(".py"):
+        return {"status": "failed", "scaffold": {}, "error": "tool/add scaffold target must be tools/*.py"}
+    manifest_rel = "tools/tools.yaml"
+    list_key = "tools"
+    content = _tool_scaffold(class_name, action.description)
 
     if manifest_rel not in {_normalize_rel_path(path) for path in declared_paths}:
         return {
@@ -1919,77 +1838,11 @@ def _execute_deterministic_add_scaffold(
     }
 
 
-def _normalize_rail_manifest_refs(
-    worktree_dir: Path,
-    action: MemberOptimizationAction,
-    declared_paths: list[str],
-) -> dict[str, object] | None:
-    """Canonicalize generated rail manifest refs to package-local rails/*.py."""
-    if action.action_group != "rail":
-        return None
-    normalized_declared = {_normalize_rel_path(path) for path in declared_paths}
-    if "rails/rails.yaml" not in normalized_declared:
-        return None
-    manifest = worktree_dir / "rails" / "rails.yaml"
-    if not manifest.is_file():
-        return None
-
-    data = _load_yaml_manifest(manifest)
-    if isinstance(data, dict):
-        entries = data.get("rails") or []
-        key = "rails"
-    elif isinstance(data, list):
-        entries = data
-        data = {"rails": entries}
-        key = "rails"
-    else:
-        return None
-    if not isinstance(entries, list):
-        entries = [entries]
-
-    changed = False
-    normalized_entries: list[object] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            normalized_entries.append(entry)
-            continue
-        file_value = entry.get("file") or entry.get("file_path") or entry.get("path")
-        if not file_value:
-            normalized_entries.append(entry)
-            continue
-        normalized_file = _canonical_rail_file_ref(str(file_value))
-        if normalized_file != str(file_value):
-            entry = dict(entry)
-            entry["file"] = normalized_file
-            for alias_key in ("file_path", "path"):
-                entry.pop(alias_key, None)
-            changed = True
-        normalized_entries.append(entry)
-
-    if not changed:
-        return None
-    data[key] = normalized_entries
-    _write_yaml_manifest(manifest, data)
-    return {
-        "manifest_path": "rails/rails.yaml",
-        "normalized_file_refs": [
-            entry.get("file") for entry in normalized_entries if isinstance(entry, dict) and entry.get("file")
-        ],
-    }
-
-
-def _canonical_rail_file_ref(raw_path: str) -> str:
-    normalized = _normalize_rel_path(raw_path)
-    if normalized.startswith("rails/"):
-        return normalized
-    return f"rails/{Path(normalized).name}"
-
-
 def _is_add_like_scaffold_action(
     worktree_dir: Path,
     action: MemberOptimizationAction,
 ) -> bool:
-    if action.action_group not in {"prompt", "skill", "tool", "rail"}:
+    if action.action_group not in {"prompt", "skill", "tool"}:
         return False
     if action.operation == "add":
         return True
@@ -2034,23 +1887,6 @@ def _tool_scaffold(class_name: str, description: str) -> str:
             "    async def stream(self, inputs, **kwargs):",
             "        if False:",
             "            yield inputs",
-            "",
-        ]
-    )
-
-
-def _rail_scaffold(class_name: str, description: str) -> str:
-    _ = description
-    return "\n".join(
-        [
-            "from openjiuwen.core.single_agent.rail.base import AgentRail",
-            "",
-            "",
-            f"class {class_name}(AgentRail):",
-            "    priority = 90",
-            "",
-            "    async def before_model_call(self, ctx):",
-            "        return None",
             "",
         ]
     )
@@ -2348,7 +2184,7 @@ def _manifest_path_matches(raw_path: str, target_rel: str, *, exact_only: bool =
         return True
     if exact_only:
         return False
-    if not normalized.startswith(("skills/", "tools/", "rails/", "prompt_sections/")):
+    if not normalized.startswith(("skills/", "tools/", "prompt_sections/")):
         prefixed = f"prompt_sections/files/{normalized}"
         if prefixed == target:
             return True
@@ -2366,161 +2202,7 @@ def _write_yaml_manifest(path: Path, data: object) -> None:
         yaml.safe_dump(data, file, allow_unicode=True, sort_keys=False)
 
 
-def _sync_subagent_registries(
-    role_dir: Path,
-    action: MemberOptimizationAction,
-) -> dict[str, object]:
-    """Write deterministic manifests/config for a package-local custom subagent."""
-    if action.action_group != "subagent" or action.operation != "add":
-        return {
-            "status": "skipped",
-            "changed_files": [],
-        }
-
-    root = role_dir.resolve()
-    target_rel = _normalize_rel_path(action.target_path)
-    if not target_rel.startswith("subagents/") or len(Path(target_rel).parts) != 2:
-        return {
-            "status": "failed",
-            "changed_files": [],
-            "error": "subagent/add target_path must be subagents/<name>",
-        }
-
-    constraints = dict(action.constraints or {})
-    name = str(constraints.get("name") or Path(target_rel).name).strip()
-    if not name:
-        return {
-            "status": "failed",
-            "changed_files": [],
-            "error": "subagent/add requires constraints.name or subagents/<name> target_path",
-        }
-
-    local_resources = constraints.get("local_resources") or {}
-    if not isinstance(local_resources, dict):
-        return {
-            "status": "failed",
-            "changed_files": [],
-            "error": "constraints.local_resources must be an object",
-        }
-
-    changed: list[str] = []
-    subagent_dir = root / target_rel
-
-    tools = _resource_entries(local_resources.get("tools"))
-    if tools:
-        manifest_rel = f"{target_rel}/tools/tools.yaml"
-        _write_yaml_manifest(root / manifest_rel, {"tools": tools})
-        changed.append(manifest_rel)
-
-    rails = _resource_entries(local_resources.get("rails"))
-    if rails:
-        manifest_rel = f"{target_rel}/rails/rails.yaml"
-        _write_yaml_manifest(root / manifest_rel, {"rails": rails})
-        changed.append(manifest_rel)
-
-    config: dict[str, object] = {
-        "name": name,
-        "description": str(constraints.get("description") or action.description or ""),
-        "system_prompt_file": f"{target_rel}/system_prompt.md",
-    }
-    if "inherited_tools" in constraints:
-        config["inherited_tools"] = [str(tool) for tool in _list_or_empty(constraints.get("inherited_tools"))]
-    if tools:
-        config["local_tools"] = f"{target_rel}/tools/tools.yaml"
-    if rails:
-        config["local_rails"] = f"{target_rel}/rails/rails.yaml"
-    if constraints.get("max_iterations") is not None:
-        config["max_iterations"] = _int_or_default(constraints.get("max_iterations"), 15)
-    if "skills" in constraints:
-        skills = [str(skill) for skill in _list_or_empty(constraints.get("skills"))]
-        for item in _list_or_empty(local_resources.get("skills")):
-            if isinstance(item, dict):
-                skill_name = str(item.get("name") or "").strip()
-            else:
-                skill_name = str(item).strip()
-            if skill_name and skill_name not in skills:
-                skills.append(skill_name)
-        config["skills"] = skills
-
-    config_rel = f"{target_rel}/config.yaml"
-    _write_yaml_manifest(root / config_rel, config)
-    changed.append(config_rel)
-
-    manifest_rel = "subagents/subagents.yaml"
-    _upsert_subagent_manifest(root, manifest_rel, config_rel)
-    changed.append(manifest_rel)
-
-    harness_rel = "harness_config.yaml"
-    harness_path = root / harness_rel
-    harness_data = _load_yaml_manifest(harness_path) if harness_path.is_file() else {}
-    if not isinstance(harness_data, dict):
-        harness_data = {}
-    harness_config = dict(harness_data.get("config") or {})
-    harness_config["enable_subagent"] = True
-    harness_data["config"] = harness_config
-    _write_yaml_manifest(harness_path, harness_data)
-    changed.append(harness_rel)
-
-    subagent_dir.mkdir(parents=True, exist_ok=True)
-    return {
-        "status": "succeeded",
-        "changed_files": sorted(set(changed)),
-        "error": "",
-    }
-
-
-def _resource_entries(raw: object) -> list[dict[str, object]]:
-    entries: list[dict[str, object]] = []
-    for item in _list_or_empty(raw):
-        if not isinstance(item, dict):
-            continue
-        entry: dict[str, object] = {}
-        file_value = item.get("file") or item.get("file_path") or item.get("path")
-        class_name = item.get("class_name")
-        if file_value:
-            entry["file"] = _normalize_rel_path(str(file_value))
-        if class_name:
-            entry["class_name"] = str(class_name)
-        if entry:
-            entries.append(entry)
-    return entries
-
-
-def _list_or_empty(raw: object) -> list[object]:
-    if raw is None:
-        return []
-    if isinstance(raw, list):
-        return raw
-    return [raw]
-
-
-def _upsert_subagent_manifest(root: Path, manifest_rel: str, config_rel: str) -> None:
-    manifest_path = root / manifest_rel
-    data = _load_yaml_manifest(manifest_path) if manifest_path.is_file() else {}
-    if isinstance(data, dict):
-        entries = data.get("subagents") or []
-    elif isinstance(data, list):
-        entries = data
-        data = {"subagents": entries}
-    else:
-        entries = []
-        data = {"subagents": entries}
-    if not isinstance(entries, list):
-        entries = [entries]
-    kept = []
-    for item in entries:
-        if isinstance(item, dict):
-            item_config = _normalize_rel_path(str(item.get("config") or ""))
-            if item_config == config_rel:
-                continue
-        kept.append(item)
-    kept.append({"config": config_rel})
-    data["subagents"] = kept
-    _write_yaml_manifest(manifest_path, data)
-
-
 __all__ = [
     "MemberActionExecutor",
     "MemberActionExecutorAgent",
-    "_sync_subagent_registries",
 ]

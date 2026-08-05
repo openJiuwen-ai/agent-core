@@ -18,9 +18,7 @@ from openjiuwen.rsi.schema import ActionDefinition
 
 _BUILTIN_GROUP_OPERATIONS: dict[str, tuple[str, ...]] = {
     "prompt": ("add", "modify", "remove"),
-    "rail": ("add", "modify", "remove"),
-    "skill": ("add", "modify", "remove", "search"),
-    "subagent": ("add", "modify", "remove"),
+    "skill": ("add", "modify", "remove"),
     "tool": ("add", "modify", "remove"),
 }
 
@@ -34,7 +32,7 @@ def _builtin_action_definitions(group: str) -> list[ActionDefinition]:
             operation=operation,
             function=f"{operation}_{group}",
             purpose=f"{operation.title()} a package-local {group} surface",
-            requires_search=group == "skill" and operation == "search",
+            requires_search=False,
             is_destructive=operation == "remove",
         )
         for operation in _BUILTIN_GROUP_OPERATIONS[group]

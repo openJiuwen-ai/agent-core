@@ -38,7 +38,6 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.rsi.config import (
     EvaluationResultAnalyzerConfig,
-    OptimizationExperienceLearnerConfig,
 )
 from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
     CaseAnalysisInput,
@@ -50,9 +49,6 @@ from openjiuwen.rsi.evaluation_result_analyzer.signal_extractor import (
     build_signal_extractor,
 )
 from openjiuwen.rsi.evaluator.runtime_adapters import RSISysOperationRail
-from openjiuwen.rsi.evaluator.team_factory import (
-    is_team_coordinator_role,
-)
 from openjiuwen.rsi.member_optimizer.model_config import (
     load_model_config_ref,
     without_inner_sdk_retries,
@@ -60,9 +56,6 @@ from openjiuwen.rsi.member_optimizer.model_config import (
 from openjiuwen.rsi.model_call import (
     is_retryable_model_call_failure,
     run_model_call_with_retries,
-)
-from openjiuwen.rsi.optimization_experience_learner import (
-    OptimizationExperienceLearner,
 )
 from openjiuwen.rsi.schema import (
     EvaluationResultAnalysisArtifact,
@@ -78,6 +71,22 @@ _TEXT_SNIPPET_CHARS = 1200
 _METADATA_SNIPPET_CHARS = 2000
 _EXPERIENCE_SNIPPET_CHARS = 2000
 _CANDIDATE_FEEDBACK_CHARS = 8000
+_COORDINATOR_ROLE_KEYS = {
+    "coordinator",
+    "lead",
+    "leader",
+    "team",
+    "team_coordinator",
+    "team_leader",
+}
+
+
+def is_team_coordinator_role(*values: str | None) -> bool:
+    return any(
+        (value or "").strip().lower().replace("-", "_").replace(" ", "_") in _COORDINATOR_ROLE_KEYS for value in values
+    )
+
+
 _SIGNAL_SNIPPET_CHARS = 2500
 _EVIDENCE_SUMMARY_CHARS = 6000
 _AGGREGATION_DIAGNOSIS_CHARS = 1200
@@ -2267,12 +2276,8 @@ class DiagnosisAgentStrategy:
     def __init__(
         self,
         config: EvaluationResultAnalyzerConfig,
-        experience_learner: OptimizationExperienceLearner | None = None,
     ) -> None:
         self._config = config
-        self._experience_learner = experience_learner or OptimizationExperienceLearner(
-            OptimizationExperienceLearnerConfig()
-        )
         self._case_reader = CaseReader()
 
     async def analyze(
@@ -2294,7 +2299,7 @@ class DiagnosisAgentStrategy:
         Returns:
             EvaluationResultAnalysisArtifact with issues and metadata.
         """
-        retrieved_experience = await self._retrieve_experience(invocation)
+        retrieved_experience: dict[str, Any] = {}
 
         eval_ref = self._case_reader.read_eval_ref(invocation.eval_ref_path)
         summary = self._case_reader.read_summary(eval_ref.get("summary_path", ""))
@@ -2364,20 +2369,6 @@ class DiagnosisAgentStrategy:
                 "retrieved_experience": retrieved_experience,
             },
         )
-
-    async def _retrieve_experience(self, invocation: EvaluationResultAnalysisInvocation) -> dict[str, Any]:
-        retrieval = await self._experience_learner.retrieve_member_stage_experience(
-            stage="evaluation_result_analysis",
-            eval_ref_path=invocation.eval_ref_path,
-            analysis_result_path="",
-            harness_refs_path=invocation.harness_refs_path,
-            candidate_modules=["team_skill", "member_harness"],
-        )
-        return {
-            "stage": retrieval.query.stage,
-            "matches": retrieval.matches,
-            "metadata": retrieval.metadata,
-        }
 
     async def _build_agent(self, workspace: str, *, system_prompt: str | None = None) -> "BaseAgent":
         """Resolve model config ref and construct a read-only DeepAgent.
@@ -2742,21 +2733,18 @@ def _dict_to_team_issue(data: dict[str, Any]) -> TeamIssue:
 
 def build_analysis_strategy(
     config: EvaluationResultAnalyzerConfig,
-    experience_learner: OptimizationExperienceLearner | None = None,
 ) -> DiagnosisAgentStrategy:
-    """Create a DiagnosisAgentStrategy from config and optional experience learner.
+    """Create a DiagnosisAgentStrategy from config.
 
     The strategy defers DeepAgent construction to the first ``analyze`` call,
     so this function always succeeds even when ``model_config_ref`` is empty.
 
     Args:
         config: Analyzer configuration.
-        experience_learner: Optional experience learner for retrieving prior knowledge.
-
     Returns:
         DiagnosisAgentStrategy instance.
     """
-    return DiagnosisAgentStrategy(config, experience_learner)
+    return DiagnosisAgentStrategy(config)
 
 
 # ---------------------------------------------------------------------------
@@ -2770,10 +2758,9 @@ class EvaluationResultAnalyzer:
     def __init__(
         self,
         config: EvaluationResultAnalyzerConfig,
-        experience_learner: OptimizationExperienceLearner | None = None,
     ) -> None:
         self.config = config
-        self._strategy = build_analysis_strategy(config, experience_learner)
+        self._strategy = build_analysis_strategy(config)
 
     async def analyze(self, invocation: EvaluationResultAnalysisInvocation) -> str:
         """Analyze evaluation results and return the analysis artifact reference path.
