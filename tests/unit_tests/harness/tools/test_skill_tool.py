@@ -346,3 +346,42 @@ async def test_skill_tool_media_hint_content_keeps_directory_layout(sys_op, temp
     assert "## Directory layout" in model_text
     assert "designer/SKILL.md" in model_text
     assert SKILL_TOOL_MARKDOWN_IMAGES_HINT in model_text
+
+
+@pytest.mark.parametrize(
+    "body, has_media",
+    [
+        # A skill whose SKILL.md happens to name an image file gets data['content'],
+        # which AbilityManager returns on its own, dropping every sibling field.
+        ("Save the rendered chart to output.png before reporting.", True),
+        ("Run scripts/fetch.py, then format per references/report-format.md.", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_skill_tool_always_tells_the_model_the_skill_directory(
+    sys_op, temp_dir, body, has_media
+):
+    """The skill's own absolute path must not depend on media detection.
+
+    Bundled scripts and reference documents are addressed relatively from
+    SKILL.md; without the skill directory the model cannot turn those into
+    paths the filesystem tools accept.
+    """
+    from openjiuwen.core.single_agent.ability_manager import AbilityManager
+    from openjiuwen.harness.tools.skills.skill_tool import skill_markdown_has_media
+
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    skill = _write_skill(skills_root, "repository-activity", "activity report", body)
+
+    assert skill_markdown_has_media(body) is has_media
+
+    skill_tool = SkillTool(sys_op, lambda: [skill], multimodal_skill_mode="hint")
+    skill_res = await skill_tool.invoke({"skill_name": "repository-activity"})
+
+    assert skill_res.success is True
+    assert skill_res.data["skill_directory"] == str(skill.directory)
+    assert ("content" in skill_res.data) is has_media
+
+    model_text = AbilityManager._build_tool_message_content(skill_res)
+    assert str(skill.directory) in model_text

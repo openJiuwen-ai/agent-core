@@ -280,13 +280,37 @@ def _skill_layout_metadata(skill_directory: Path) -> Dict[str, Any]:
     return meta
 
 
-def _format_layout_appendix_for_model(layout: Dict[str, Any]) -> str:
-    """Render directory layout for model-facing tool text.
+SKILL_DIRECTORY_HEADING = "## Skill directory"
 
-    AbilityManager prefers ``data['content']`` when present and drops other fields.
-    Append this block to ``content`` so directory_tree / nested skills stay visible.
+
+def _format_skill_directory_for_model(skill_directory: str) -> str:
+    """Render the skill's own absolute directory for model-facing tool text."""
+    path = str(skill_directory or "").strip()
+    if not path:
+        return ""
+    return (
+        f"{SKILL_DIRECTORY_HEADING}\n"
+        f"{path}\n"
+        "Files bundled with this skill live under that absolute path. Resolve every "
+        "relative path used below against it, then read or execute the result with the "
+        "filesystem tools."
+    )
+
+
+def _format_layout_appendix_for_model(
+    layout: Dict[str, Any],
+    skill_directory: str = "",
+) -> str:
+    """Render skill directory and layout for model-facing tool text.
+
+    AbilityManager prefers ``data['content']`` when present and drops every other
+    field, so the absolute skill directory and the directory tree only reach the
+    model when they are part of ``content`` itself.
     """
     parts: List[str] = []
+    directory_block = _format_skill_directory_for_model(skill_directory)
+    if directory_block:
+        parts.append(directory_block)
     tree = layout.get("directory_tree")
     if isinstance(tree, list) and tree:
         tree_text = str(tree[0]).strip()
@@ -400,8 +424,15 @@ class SkillTool(Tool):
             data.update(layout)
 
             # AbilityManager._build_tool_message_content short-circuits on data['content']
-            # and would otherwise hide directory_tree / discovered_skill_names from the model.
-            appendix = _format_layout_appendix_for_model(layout)
+            # and would otherwise hide skill_directory / directory_tree /
+            # discovered_skill_names from the model. Whether 'content' is set depends on
+            # media detection over the SKILL.md body, so without this the skill's own
+            # absolute path reaches the model only for skills that happen to mention an
+            # image or video file.
+            appendix = _format_layout_appendix_for_model(
+                layout,
+                skill_directory=str(skill.directory),
+            )
             if appendix and data.get("content"):
                 data["content"] = str(data["content"]).rstrip() + "\n\n" + appendix
 
@@ -439,6 +470,7 @@ __all__ = [
     "SKILL_TOOL_MARKDOWN_IMAGES_HINT",
     "SKILL_TOOL_MARKDOWN_IMAGES_VISION_HINT",
     "SKILL_TOOL_MARKDOWN_VIDEOS_HINT",
+    "SKILL_DIRECTORY_HEADING",
     "apply_skill_tool_markdown_images_hint",
     "skill_markdown_has_media",
 ]
