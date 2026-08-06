@@ -5,7 +5,7 @@ from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
 from openjiuwen.core.foundation.tool.mcp.base import (
     MCPTool,
-    McpToolCard, McpServerConfig,
+    McpToolCard, McpServerConfig, McpToolResult,
 )
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
 from openjiuwen.core.foundation.tool.mcp.client.playwright_client import PlaywrightClient
@@ -36,6 +36,7 @@ __all__ = [
     # for mcp tool
     "McpToolCard",
     "McpServerConfig",
+    "McpToolResult",
     # mcp client
     "McpClient",
     "SseClient",
