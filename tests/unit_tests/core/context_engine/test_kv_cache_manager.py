@@ -36,6 +36,8 @@ from openjiuwen.core.context_engine.processor.offloader.message_offloader import
 from openjiuwen.core.foundation.llm import UserMessage, ToolMessage, AssistantMessage, ToolCall
 from openjiuwen.core.foundation.llm.inference_affinity_model import InferenceAffinityModel
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
+from tests.unit_tests.core.context_engine._stream_helpers import make_stream_side_effect
+
 
 pytestmark = pytest.mark.asyncio
 
@@ -200,7 +202,7 @@ class TestKVCacheManager:
             return_value=True,
         ):
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=make_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
 
             # Create ContextEngine with kv_cache enabled
@@ -284,7 +286,7 @@ class TestKVCacheManager:
             return_value=True,
         ):
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=make_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
 
             engine_config = ContextEngineConfig(
