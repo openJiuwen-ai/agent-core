@@ -146,6 +146,7 @@ lint = [
     "pylint>=3.0.0",
     "mypy>=1.12.0",
     "codespell>=2.2.4",
+    "types-PyYAML>=6.0.12",
     "httpx>=0.28.1",
 ]
 # Documentation
@@ -194,6 +195,7 @@ openjiuwen = [
     "**/auto_harness/skills/**/*.md",
     "symphony/README.md",
     "symphony/shared/fingerprint/resources/*.yaml",
+    "symphony/retrieval/common/prompts/*.yaml",
 ]
 
 [tool.coverage.run]
@@ -203,7 +205,8 @@ omit = ["tests/*"]
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["jiuwen"]
-addopts = ["-v", "--html=report/index.html", "--self-contained-html"]
+addopts = ["-v", "--html=report/index.html", "--self-contained-html", "--ignore=build"]
+norecursedirs = [".*", "dist", "CVS", "_darcs", "{arch}", "*.egg", "venv", "node_modules"]
 markers = [
     "level0: smoke / happy-path coverage; PR gate must stay green",
     "level1: feature branches, error paths, and lifecycle edges",
