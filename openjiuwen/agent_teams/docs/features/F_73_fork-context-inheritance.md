@@ -5,7 +5,7 @@
 |---|---|
 | 日期 | 2026-08-06 |
 | 范围 | `agent_teams/fork.py` · `fork_compact.py`（新增），`tools/tool_member.py`（新增 `CheckpointTool` + `SpawnTeammateTool` 扩展），`tools/team.py`（`_pending_forks` / `_checkpoints` + `set_snapshot_length` / `set_store_checkpoint_fn`），`agent/team_agent.py`（`_on_teammate_created` 重写 + `_resolve_fork_native` + `share_checkpoints_with`），`agent/agent_configurator.py`（`_snapshot_length` 回调），`spawn/inprocess_spawn.py`（注入 + compaction 调用），`harness/team_harness.py`（`get_deep_agent`），`tools/tool_factory.py`（注册 `checkpoint`），`tools/tool_permissions.py`（`SHARED_TOOLS` 加 `checkpoint`），`external/`（`client.py` / `sdk_mcp.py` 排除 checkpoint），`tools/locales/`（中英文参数 + 描述），`tools/locales/descs/*/checkpoint.md`（新增）+ `spawn_teammate.md`（fork 文档段） |
-| 测试基线 | `tests/unit_tests/agent_teams/test_fork.py` 25 passed · `test_mcp_server.py` 8 passed；全量 `tests/unit_tests/agent_teams/` 0 新增失败 |
+| 测试基线 | `tests/unit_tests/agent_teams/test_fork.py` 25 passed；全量 `tests/unit_tests/` 0 新增失败 |
 | Refs | — |
 
 ## 背景
@@ -82,5 +82,5 @@ fork 决策在 `_on_teammate_created` 中执行 — `spawn_teammate` 工具仅�
 
 ## 已知遗留
 
-- **Checkpoint 非持久化**：存于内存，进程重启后丢失。后续可接入 session state（约 20 行）。
+- **Checkpoint 非持久化**：存于内存，进程重启后丢失。后续可接入 session state）。
 - **subprocess spawn fork**：跨进程 fork 的 payload 未接线，当前仅支持 `spawn_mode="inprocess"`。
