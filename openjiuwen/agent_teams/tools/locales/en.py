@@ -362,7 +362,9 @@ STRINGS: dict[str, str] = {
         "MORE expensive than broadcast for the same audience, use only when truly needed "
         'and cannot mix with "*"/"user"; '
         '"user" (teammates only, to reply to the user; leader calls are rejected); '
-        '"*" to broadcast on the team channel, visible to all members'
+        '"*" to broadcast on the team channel, visible to all members — one broadcast '
+        "wakes every member for a full LLM turn, so cost scales linearly with team size; "
+        "reserve it for announcements everyone must see and use it sparingly"
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
