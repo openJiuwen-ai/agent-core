@@ -427,31 +427,31 @@ class AgentConfigurator:
         member_name = ctx.member_name
 
         ws_spec = agent_spec.workspace or spec.agents.get("leader", agent_spec).workspace
-        workspace_is_worktree = bool(ctx.worktree_path)
-        if ctx.worktree_path:
-            # Team-managed isolation creates the teammate worktree before this
-            # point. Build the DeepAgent with that worktree as its visible
-            # workspace so shell/file tools start inside the isolated checkout.
-            base_ws_spec = ws_spec or WorkspaceSpec()
-            ws_spec = base_ws_spec.model_copy(
-                update={
-                    "root_path": ctx.worktree_path,
-                    "stable_base": False,
-                }
-            )
-        if ws_spec and ws_spec.stable_base:
+        if ws_spec is None:
+            # A team member always owns a workspace -- it is where its
+            # artifacts, memory and the .team mount live, and DeepAgent keys
+            # its cwd initialisation off it.
+            ws_spec = WorkspaceSpec(stable_base=True)
+        if ws_spec.stable_base:
             team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
             ws_spec = ws_spec.model_copy(
                 update={"root_path": ensure_team_member_workspace_link(team_name, member_name)}
             )
 
+        # cwd is a separate layer from the workspace. The workspace stays the
+        # member's private artifact directory (memory, skills view, .team
+        # mount); cwd is where shell runs and relative paths resolve. Team
+        # isolation moves cwd into the worktree without dragging the workspace
+        # along -- otherwise the member's artifacts and skills view would live
+        # inside an ephemeral checkout and vanish with it.
+        member_cwd = ctx.worktree_path or agent_spec.cwd or None
+        member_project_root = agent_spec.project_root or agent_spec.cwd or None
+
         workspace_root_path = ws_spec.root_path if ws_spec is not None else None
-        should_register_cleanup_path = (
-            bool(workspace_root_path)
-            and self.team_backend is not None
-            and not workspace_is_worktree
-        )
-        if should_register_cleanup_path and workspace_root_path is not None:
+        # The workspace is now always the member's own directory (never the
+        # project dir, never a worktree), so it is unconditionally ours to
+        # clean up.
+        if workspace_root_path and self.team_backend is not None:
             self.team_backend.register_cleanup_path(workspace_root_path)
 
         if self.workspace_manager and ws_spec and ws_spec.root_path:
@@ -464,15 +464,24 @@ class AgentConfigurator:
             mode=OperationMode.LOCAL,
             work_config=LocalWorkConfig(shell_allowlist=None),
         )
+        # Members default to metadata-only read_file images: the modality probe
+        # costs a full LLM round-trip per member on every team start. A blueprint
+        # that wants native image input says so explicitly on the agent spec.
+        enable_read_image_multimodal = agent_spec.enable_read_image_multimodal
+        if enable_read_image_multimodal is None:
+            enable_read_image_multimodal = False
         build_spec = agent_spec.model_copy(
             update={
                 "card": self._card,
                 "model": model_config,
                 "workspace": ws_spec,
+                "cwd": member_cwd,
+                "project_root": member_project_root,
                 "sys_operation": sys_operation_spec,
                 "tools": list(agent_spec.tools or []),
                 "enable_skill_discovery": True,
                 "enable_task_loop": True,
+                "enable_read_image_multimodal": enable_read_image_multimodal,
             }
         )
 
@@ -535,6 +544,8 @@ class AgentConfigurator:
                 type=TEAM_POLICY,
                 params={
                     "prompt": ctx.prompt or "",
+                    "display_name": ctx.display_name or "",
+                    "member_workspace_path": workspace_root_path,
                     "lifecycle": spec.lifecycle,
                     "teammate_mode": teammate_mode,
                     "team_mode": _resolve_team_mode(spec),

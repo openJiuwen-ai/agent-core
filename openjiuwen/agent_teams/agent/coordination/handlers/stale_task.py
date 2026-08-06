@@ -14,11 +14,14 @@ mid-round, so a member actively working its task is never nudged. See F_65.
 Two sweeps, both throttled per task:
 
 - **stale claim (self-only)**: a member idle past the threshold while it
-  still owns a PLANNING / IN_PROGRESS task feeds a nudge into its own agent
-  loop to keep pushing. Consecutive fruitless windows escalate the stall to
-  the leader, who can check in, reassign, or replace the assignee. The
-  leader never reaches across processes to nudge a member directly (F_53) —
-  the stalled member reports its own stall instead.
+  still owes work on a task of its own feeds a nudge into its own agent
+  loop to keep pushing. "Owes work" is the active PLANNING / IN_PROGRESS
+  set, falling back to the assigned-but-unstarted PENDING backlog when the
+  member holds no active task at all — see ``_own_stalled_tasks``.
+  Consecutive fruitless windows escalate the stall to the leader, who can
+  check in, reassign, or replace the assignee. The leader never reaches
+  across processes to nudge a member directly (F_53) — the stalled member
+  reports its own stall instead.
 - **stale pending (leader-only)**: a leader idle past the threshold while
   unassigned PENDING tasks exist *and* at least one member is free
   self-prompts to assign them. The free-member precondition keeps the
@@ -103,13 +106,49 @@ class StaleTaskHandler(BaseCoordinationHandler):
             # if not host.is_agent_running():
             #     await self._nudge_idle_agent(member_name, from_poll=True)
 
-    async def _check_stale_claimed_tasks(self) -> None:
-        """Nudge self when idle too long while still owning active work.
+    async def _own_stalled_tasks(self, task_manager) -> list[Any]:
+        """The tasks this member owes work on right now.
 
-        Sweeps the tasks assigned to *this* member in the two conditions the
-        member itself is expected to push — PLANNING and IN_PROGRESS.
-        IN_REVIEW is deliberately excluded: an author sitting idle while its
-        reviewers decide is waiting by design, not stalling.
+        Active work comes first: the PLANNING and IN_PROGRESS tasks assigned
+        to *this* member — the two conditions the member itself is expected
+        to push. IN_REVIEW is deliberately excluded: an author sitting idle
+        while its reviewers decide is waiting by design, not stalling.
+
+        With no active task the member's duty is its backlog instead — the
+        PENDING tasks the leader put in its name but that were never started.
+        A targeted assignment is announced by a single transient
+        ``TASK_CLAIMED`` event; a member that was down or missed it would
+        otherwise sit on that task forever, since the leader's stale-PENDING
+        self-prompt only covers *unassigned* work. Only the earliest one is
+        returned: ``claim_task`` enforces one active task per member, so
+        nudging the whole queue would just produce refusals.
+
+        The backlog is a fallback rather than an addition to the active set
+        for the same reason — a member already pushing a task cannot start
+        another, so its queued assignments are a normal queue, not a stall.
+        """
+        own_name = self._blueprint.member_name
+        active: list[Any] = []
+        for status in (
+            TaskStatus.PLANNING.value,
+            TaskStatus.IN_PROGRESS.value,
+        ):
+            active.extend(await task_manager.list_tasks(status=status))
+        owned_active = [tk for tk in active if tk.assignee and tk.assignee == own_name]
+        if owned_active:
+            return owned_active
+
+        pending = await task_manager.list_tasks(status=TaskStatus.PENDING.value)
+        assigned = [tk for tk in pending if tk.assignee and tk.assignee == own_name]
+        if not assigned:
+            return []
+        return [min(assigned, key=lambda tk: (tk.updated_at or 0, tk.task_id))]
+
+    async def _check_stale_claimed_tasks(self) -> None:
+        """Nudge self when idle too long while still owing work on a task.
+
+        The swept set comes from ``_own_stalled_tasks`` — active work, or
+        the earliest unstarted assignment when there is none.
 
         The stall is measured by the member's own idle clock rather than the
         task's ``updated_at``, which buys two things: a paused team cannot
@@ -126,18 +165,12 @@ class StaleTaskHandler(BaseCoordinationHandler):
         if task_manager is None:
             return
 
-        own_name = self._blueprint.member_name
-        active: list[Any] = []
-        for status in (
-            TaskStatus.PLANNING.value,
-            TaskStatus.IN_PROGRESS.value,
-        ):
-            active.extend(await task_manager.list_tasks(status=status))
-        relevant = [tk for tk in active if tk.assignee and tk.assignee == own_name]
+        relevant = await self._own_stalled_tasks(task_manager)
 
-        # GC bookkeeping for tasks that left the owned-active set — completed,
-        # reassigned, sent to review or cancelled. A task that comes back
-        # starts its streak over, which is what "consecutive" should mean.
+        # GC bookkeeping for tasks that left the swept set — completed,
+        # reassigned, sent to review, cancelled, or a queued assignment
+        # displaced by the task the member just started. A task that comes
+        # back starts its streak over, which is what "consecutive" should mean.
         current_ids = {tk.task_id for tk in relevant}
         for tid in [k for k in self._last_stale_nudge if k not in current_ids]:
             self._last_stale_nudge.pop(tid, None)
@@ -171,13 +204,18 @@ class StaleTaskHandler(BaseCoordinationHandler):
         Rendered as a ``<team-event kind="stale-claim">`` and appended
         (``use_steer=False``) rather than steered: the nudge only tells the
         member to keep pushing a task it already owns, so it must not
-        interrupt a round. The body carries just the task id + title + how
-        long the member has been idle; full details come from ``view_task``.
+        interrupt a round. The body carries just the task id + title + its
+        current condition + how long the member has been idle; full details
+        come from ``view_task``. The condition is what makes one wording
+        cover both swept sets — an unstarted assignment needs claiming, an
+        active one needs pushing, and the member reads which from the text
+        instead of the handler branching on it.
         """
         content = t(
             "dispatcher.stale_idle_claim_self",
             task_id=task.task_id,
             title=task.title,
+            status=task.status,
             minutes=int(idle // 60),
         )
         await self._round.deliver_input(
@@ -213,6 +251,7 @@ class StaleTaskHandler(BaseCoordinationHandler):
             "dispatcher.stale_idle_claim_escalate",
             task_id=task.task_id,
             title=task.title,
+            status=task.status,
             minutes=int(idle // 60),
         )
         await message_manager.send_message(

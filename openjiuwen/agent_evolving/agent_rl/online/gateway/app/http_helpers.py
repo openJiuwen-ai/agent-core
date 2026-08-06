@@ -44,6 +44,7 @@ async def stream_chat_response(response_json: dict[str, Any], *, model_id: str):
     resp_id = response_json.get("id", f"chatcmpl-gw-{created}")
     model = response_json.get("model", model_id)
     usage = response_json.get("usage")
+    rl_lora = response_json.get("rl_lora")
     prompt_token_ids = response_json.get("prompt_token_ids")
     choices = response_json.get("choices")
     choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -79,6 +80,8 @@ async def stream_chat_response(response_json: dict[str, Any], *, model_id: str):
     }
     if prompt_token_ids is not None:
         first["prompt_token_ids"] = prompt_token_ids
+    if rl_lora is not None:
+        first["rl_lora"] = rl_lora
     last = {
         "id": resp_id,
         "object": "chat.completion.chunk",

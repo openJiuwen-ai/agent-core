@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compressor import (
     DialogueCompressor,
     DialogueCompressorConfig,
@@ -9,7 +11,8 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
     resolve_context_max,
     resolve_ratio_token_threshold,
 )
-from openjiuwen.core.foundation.llm import UserMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata, UserMessage
+from openjiuwen.core.foundation.tool import ToolInfo
 
 
 def test_compressor_delegates_message_counting_to_shared_helper(monkeypatch):
@@ -24,7 +27,12 @@ def test_compressor_delegates_message_counting_to_shared_helper(monkeypatch):
     messages = [UserMessage(content="hello")]
 
     assert compressor.count_messages_tokens(messages, context) == 37
-    shared_counter.assert_called_once_with(messages, context.token_counter(), "DialogueCompressor")
+    shared_counter.assert_called_once_with(
+        messages,
+        context.token_counter(),
+        "DialogueCompressor",
+        usage_aware=False,
+    )
 
 
 def test_shared_message_counter_uses_token_counter():
@@ -46,8 +54,112 @@ def test_shared_message_counter_falls_back_to_character_estimate(caplog):
         "TestProcessor",
     )
 
-    assert result == 4
+    assert result == 3
     assert "[TestProcessor] token_counter failed" in caplog.text
+
+
+def test_usage_aware_uses_last_assistant_usage_plus_tail_len_estimate():
+    token_counter = MagicMock()
+    token_counter.count_messages.return_value = 999  # should not be reached
+
+    messages = [
+        UserMessage(content="earlier"),
+        AssistantMessage(content="ok", usage_metadata=UsageMetadata(total_tokens=5000)),
+        UserMessage(content="x" * 40),  # tail: 40 // 4 = 10
+    ]
+
+    result = count_messages_tokens(messages, token_counter, "TestProcessor", usage_aware=True)
+
+    assert result == 5010
+    token_counter.count_messages.assert_not_called()
+
+
+def test_usage_aware_without_usage_falls_back_to_token_counter():
+    token_counter = MagicMock()
+    token_counter.count_messages.return_value = 23
+
+    messages = [UserMessage(content="hello")]  # no AssistantMessage with usage
+
+    result = count_messages_tokens(messages, token_counter, "TestProcessor", usage_aware=True)
+
+    assert result == 23
+    token_counter.count_messages.assert_called_once_with(messages)
+
+
+def test_usage_aware_false_default_ignores_usage():
+    token_counter = MagicMock()
+    token_counter.count_messages.return_value = 7
+
+    messages = [
+        AssistantMessage(content="ok", usage_metadata=UsageMetadata(total_tokens=5000)),
+    ]
+
+    result = count_messages_tokens(messages, token_counter, "TestProcessor")
+
+    assert result == 7
+    token_counter.count_messages.assert_called_once_with(messages)
+
+
+def test_usage_aware_ignores_stale_usage_after_context_rewrite():
+    token_counter = MagicMock()
+    token_counter.count_messages.return_value = 23
+    messages = [
+        UserMessage(content="old prefix"),
+        AssistantMessage(content="ok", usage_metadata=UsageMetadata(total_tokens=5000)),
+        UserMessage(content="tail"),
+    ]
+    ContextUtils.invalidate_usage_metadata(messages)
+
+    result = count_messages_tokens(messages, token_counter, "TestProcessor", usage_aware=True)
+
+    assert result == 23
+    token_counter.count_messages.assert_called_once_with(messages)
+
+
+def test_usage_aware_handles_truthy_non_dict_metadata():
+    assistant = AssistantMessage(content="ok", usage_metadata=UsageMetadata(total_tokens=5000))
+    object.__setattr__(assistant, "metadata", ["unexpected metadata"])
+
+    assert ContextUtils.has_valid_usage_metadata(assistant) is True
+
+
+def test_context_window_without_valid_usage_counts_messages_and_tools():
+    token_counter = MagicMock()
+    token_counter.count_messages.return_value = 20
+    token_counter.count_tools.return_value = 7
+    context = MagicMock()
+    context.token_counter.return_value = token_counter
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    window = ContextWindow(
+        context_messages=[UserMessage(content="hello")],
+        tools=[ToolInfo(name="read_file", description="Read a file", parameters={})],
+    )
+
+    result = compressor._count_context_window_tokens(window, context)
+
+    assert result == 27
+    token_counter.count_messages.assert_called_once_with(window.context_messages)
+    token_counter.count_tools.assert_called_once_with(window.tools)
+
+
+def test_context_window_with_valid_usage_does_not_double_count_tools():
+    token_counter = MagicMock()
+    context = MagicMock()
+    context.token_counter.return_value = token_counter
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    window = ContextWindow(
+        context_messages=[
+            AssistantMessage(content="ok", usage_metadata=UsageMetadata(total_tokens=5000)),
+            UserMessage(content="x" * 40),
+        ],
+        tools=[ToolInfo(name="read_file", description="Read a file", parameters={})],
+    )
+
+    result = compressor._count_context_window_tokens(window, context)
+
+    assert result == 5010
+    token_counter.count_messages.assert_not_called()
+    token_counter.count_tools.assert_not_called()
 
 
 def test_shared_context_max_resolver_uses_config_model_mapping_and_default():

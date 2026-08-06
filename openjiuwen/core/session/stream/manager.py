@@ -1,12 +1,12 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
 from typing import Dict, Optional, List, AsyncIterator, Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import session_logger, LogEventType
 from openjiuwen.core.session.stream.base import StreamMode, BaseStreamMode
+from openjiuwen.core.session.stream.chunk_logging import log_stream_chunk, log_stream_summary
 from openjiuwen.core.session.stream.emitter import StreamEmitter
 from openjiuwen.core.session.stream.writer import StreamWriter, OutputStreamWriter, TraceStreamWriter, \
     CustomStreamWriter
@@ -40,6 +40,7 @@ class StreamWriterManager:
     async def stream_output(self, first_frame_timeout=_DEFAULT_FRAME_TIMEOUT, timeout=_DEFAULT_FRAME_TIMEOUT,
                             need_close: bool = True) -> AsyncIterator[Any]:
         is_first_frame = True
+        yielded_count = 0
         while True:
             if is_first_frame:
                 try:
@@ -59,27 +60,20 @@ class StreamWriterManager:
                 if data == StreamEmitter.END_FRAME:
                     if need_close:
                         await self._stream_emitter.stream_queue.close(timeout=timeout)
+                    log_stream_summary("Stream output finished", yielded_count=yielded_count)
                     break
                 else:
+                    yielded_count += 1
                     if UserConfig.is_sensitive():
-                        session_logger.debug(
-                            "Stream data received",
-                            event_type=LogEventType.SESSION_STREAM_CHUNK,
-                            metadata={"sensitive_mode": True}
-                        )
+                        log_stream_chunk("Stream data received", sensitive_mode=True)
                     else:
-                        session_logger.debug(
+                        log_stream_chunk(
                             "Stream data received",
-                            event_type=LogEventType.SESSION_STREAM_CHUNK,
-                            metadata={"data_type": type(data).__name__}
+                            data_type=type(data).__name__,
                         )
                     yield data
             else:
-                session_logger.debug(
-                    "No stream data received, waiting",
-                    event_type=LogEventType.SESSION_STREAM_CHUNK,
-                    metadata={"status": "waiting"}
-                )
+                log_stream_chunk("No stream data received, waiting", status="waiting")
 
     def add_writer(self, key: StreamMode, writer: StreamWriter) -> None:
         self._writers[key] = writer

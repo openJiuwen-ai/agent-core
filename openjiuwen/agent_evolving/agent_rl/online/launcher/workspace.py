@@ -41,6 +41,8 @@ def ensure_workspace(
     trajectory_mode: str,
     trajectory_gateway_url: str | None = None,
     trajectory_batch_size: int = 8,
+    lora_repo_root: str | None = None,
+    lora_default_policy: str = "disabled",
 ) -> None:
     """Ensure JiuwenClaw .env points to the Gateway."""
     if not config_env.exists():
@@ -68,9 +70,11 @@ def ensure_workspace(
         'EMBED_API_BASE': gateway_url,
         'EMBED_API_KEY': 'EMPTY',
         'EMBED_MODEL': model_name,
+        'LORA_DEFAULT_POLICY': lora_default_policy,
         'BROWSER_RUNTIME_MCP_ENABLED': '0',
-        'EVOLUTION_AUTO_SCAN': 'false',
     }
+    if lora_repo_root:
+        updates['LORA_REPO_ROOT'] = lora_repo_root
     updates.update(
         build_trajectory_env_updates(
             gateway_url=traj_gateway,
@@ -98,6 +102,8 @@ def ensure_workspace(
         'EMBED_API_BASE',
         'EMBED_API_KEY',
         'EMBED_MODEL',
+        'LORA_REPO_ROOT',
+        'LORA_DEFAULT_POLICY',
     }
     for key, value in updates.items():
         existing[key] = f'"{value}"' if key in quoted_keys else value

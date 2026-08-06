@@ -319,6 +319,25 @@ wheels = [
 ]
 
 [[package]]
+name = "anthropic"
+version = "0.120.2"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "docstring-parser" },
+    { name = "httpx" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/d7/10/4ca013cb166f226bd89e0aeb0fcaff94f45ddf716d4925ce89475d3c587b/anthropic-0.120.2.tar.gz", hash = "sha256:9722efc10c27a30a69f5338ddacdb35bc6a64297a4e4ba729bf83af873d5fb3a" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/63/af/0f5db57b9397a0f3b7fc204cbef143401a7cadaf982330f97f1ce3d39f34/anthropic-0.120.2-py3-none-any.whl", hash = "sha256:0f0bc2b381dc0eb41c8d886b815d79c2041cd2374f83aed36f574b6dc9c579c1" },
+]
+
+[[package]]
 name = "antlr4-python3-runtime"
 version = "4.9.3"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
@@ -1829,7 +1848,7 @@ wheels = [
 [[package]]
 name = "intelli-router"
 version = "0.1.0"
-source = { git = "https://gitcode.com/openJiuwen/agent-protocol.git?subdirectory=intelli_router&rev=09b2035ce98a6dc78b3c7ad1011cc2d38ea4fc78#09b2035ce98a6dc78b3c7ad1011cc2d38ea4fc78" }
+source = { git = "https://gitcode.com/openJiuwen/agent-protocol.git?subdirectory=intelli_router&rev=feature%2FintelliRouter#09b2035ce98a6dc78b3c7ad1011cc2d38ea4fc78" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -2848,6 +2867,7 @@ dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
     { name = "alembic" },
+    { name = "anthropic" },
     { name = "anyio" },
     { name = "beautifulsoup4" },
     { name = "cacheout" },
@@ -2871,6 +2891,7 @@ dependencies = [
     { name = "pymilvus" },
     { name = "pyoxigraph" },
     { name = "pysbd" },
+    { name = "pyyaml" },
     { name = "python-dateutil" },
     { name = "python-docx" },
     { name = "python-dotenv" },
@@ -2951,9 +2972,6 @@ gaussdb = [
 gaussvector = [
     { name = "psycopg2-binary" },
 ]
-intelli-router = [
-    { name = "intelli-router" },
-]
 jiuwen-memory = [
     { name = "httpx" },
     { name = "jiuwenmemory" },
@@ -3029,10 +3047,14 @@ dev = [
     { name = "pytest-mock" },
     { name = "ruff" },
     { name = "sse-starlette" },
+    { name = "types-pyyaml" },
     { name = "uvicorn" },
 ]
 docs = [
     { name = "autodoc-pydantic" },
+]
+intelli-router = [
+    { name = "intelli-router" },
 ]
 lint = [
     { name = "codespell" },
@@ -3040,6 +3062,7 @@ lint = [
     { name = "mypy" },
     { name = "pylint" },
     { name = "ruff" },
+    { name = "types-pyyaml" },
 ]
 test = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -3066,6 +3089,7 @@ requires-dist = [
     { name = "aiomysql", marker = "extra == 'mysql'", specifier = ">=0.3.2" },
     { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.22.1" },
     { name = "alembic", specifier = ">=1.13.1" },
+    { name = "anthropic", specifier = ">=0.120.2" },
     { name = "anyio", specifier = ">=4.0.0" },
     { name = "async-gaussdb", marker = "extra == 'gaussdb'", specifier = "~=0.30.0" },
     { name = "asyncpg", marker = "extra == 'gaussdb'", specifier = ">=0.29.0" },
@@ -3086,7 +3110,6 @@ requires-dist = [
     { name = "gitcode-api", specifier = ">=1.2.20" },
     { name = "httpx", marker = "extra == 'jiuwen-memory'", specifier = ">=0.24" },
     { name = "httpx", marker = "extra == 'online-rl'", specifier = ">=0.24" },
-    { name = "intelli-router", marker = "extra == 'intelli-router'", git = "https://gitcode.com/openJiuwen/agent-protocol.git?subdirectory=intelli_router&rev=09b2035ce98a6dc78b3c7ad1011cc2d38ea4fc78" },
     { name = "jiuwenmemory", marker = "extra == 'jiuwen-memory'", specifier = ">=0.1.0" },
     { name = "json-repair", specifier = ">=0.55.0" },
     { name = "loguru", specifier = ">=0.7.3" },
@@ -3122,6 +3145,7 @@ requires-dist = [
     { name = "pymilvus", specifier = ">=2.6.2,<2.6.10" },
     { name = "pyoxigraph", specifier = ">=0.5.8" },
     { name = "pysbd", specifier = ">=0.3.4" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
@@ -3139,7 +3163,8 @@ requires-dist = [
     { name = "uiautomator2", marker = "extra == 'mobile-gui'", specifier = ">=3.2.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'online-rl'" },
 ]
-provides-extras = ["all-a2a", "pulsar", "elasticsearch", "redis", "sqlite", "postgres", "mysql", "gaussdb", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "mem0", "jiuwen-memory", "agentarts", "claude", "codex", "ssh", "observability", "mobile-gui", "online-rl", "all-mq", "all-storage", "all-vector", "cli", "intelli-router", "default", "all"]
+provides-extras = ["all-a2a", "pulsar", "elasticsearch", "redis", "sqlite", "postgres", "mysql", "gaussdb", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "mem0", "jiuwen-memory", "agentarts", "claude", "codex", "ssh", "observability", "mobile-gui", "online-rl", "all-mq", "all-storage", "all-vector", "cli", "default", "all"]
+
 [package.metadata.requires-dev]
 dev = [
     { name = "a2a-sdk", extras = ["http-server"], specifier = "==1.0.0" },
@@ -3158,15 +3183,18 @@ dev = [
     { name = "pytest-mock", specifier = ">=3.14.0" },
     { name = "ruff", specifier = ">=0.11.2" },
     { name = "sse-starlette", specifier = ">=2.1.3" },
+    { name = "types-pyyaml", specifier = ">=6.0.12" },
     { name = "uvicorn", specifier = ">=0.32.0" },
 ]
 docs = [{ name = "autodoc-pydantic", specifier = ">=2.2.0" }]
+intelli-router = [{ name = "intelli-router", git = "https://gitcode.com/openJiuwen/agent-protocol.git?subdirectory=intelli_router&rev=feature%2FintelliRouter" }]
 lint = [
     { name = "codespell", specifier = ">=2.2.4" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mypy", specifier = ">=1.12.0" },
     { name = "pylint", specifier = ">=3.0.0" },
     { name = "ruff", specifier = ">=0.11.2" },
+    { name = "types-pyyaml", specifier = ">=6.0.12" },
 ]
 test = [
     { name = "a2a-sdk", extras = ["http-server"], specifier = "==1.0.0" },
@@ -5540,6 +5568,15 @@ dependencies = [
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/a7/a7/e6aecc4b4eb59598829a3b5076a93aff291b4fdaa2ded25efc4e1f4d219c/typer_slim-0.24.0.tar.gz", hash = "sha256:f0ed36127183f52ae6ced2ecb2521789995992c521a46083bfcdbb652d22ad34" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/a7/24/5480c20380dfd18cf33d14784096dca45a24eae6102e91d49a718d3b6855/typer_slim-0.24.0-py3-none-any.whl", hash = "sha256:d5d7ee1ee2834d5020c7c616ed5e0d0f29b9a4b1dd283bdebae198ec09778d0e" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260724"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/3f/6f/a28f44bcd56bebed42b028a2894c79853e2f5e6b5279e633cb3f287a05e7/types_pyyaml-6.0.12.20260724.tar.gz", hash = "sha256:3c1ce1bb73cd5ec02e90390c2b1f00e810d241d8825fd73ff359696839271b6b" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/8b/42/0337fefc615e20ee55d1c8f71b774a9b2b734a04669139c20753b27a2a3a/types_pyyaml-6.0.12.20260724-py3-none-any.whl", hash = "sha256:d57db930a4b2efbc57cf430ec8882765d246929432fa253092f383902329a453" },
 ]
 
 [[package]]

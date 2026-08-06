@@ -1,0 +1,420 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""test_assessor — stages.assess 单元测试。"""
+
+from __future__ import annotations
+
+import tempfile
+from unittest import IsolatedAsyncioTestCase
+from unittest.mock import AsyncMock, patch
+
+from openjiuwen.core.session.stream.base import OutputSchema
+from openjiuwen.rsi.auto_harness.schema import (
+    AutoHarnessConfig,
+    Experience,
+    ExperienceType,
+    OptimizationTask,
+    StageResult,
+)
+
+_ASSESS_MOD = "openjiuwen.rsi.auto_harness.stages.assess"
+
+
+class _FakeExperienceStore:
+    """轻量 ExperienceStore mock。"""
+
+    def __init__(self, experiences=None):
+        self._experiences = experiences or []
+
+    async def list_recent(self, limit=10):
+        return self._experiences[:limit]
+
+
+class TestAssessFallback(
+    IsolatedAsyncioTestCase,
+):
+    """测试 fallback（纯 Python）路径。"""
+
+    @patch(
+        f"{_ASSESS_MOD}._assess_with_agent",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("no model"),
+    )
+    async def test_fallback_returns_report(
+        self,
+        _mock_agent,
+    ):
+        """agent 失败时回退到纯 Python 版本。"""
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            _run_assess_with_fallback,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = AutoHarnessConfig(
+                data_dir=d,
+                workspace=d,
+            )
+            experience_store = _FakeExperienceStore()
+            report = await _run_assess_with_fallback(cfg, experience_store)
+            assert "评估报告" in report
+            assert len(report) > 50
+
+    @patch(
+        f"{_ASSESS_MOD}._assess_with_agent",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("no model"),
+    )
+    async def test_fallback_with_experiences(
+        self,
+        _mock_agent,
+    ):
+        """fallback 包含经验记录。"""
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            _run_assess_with_fallback,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = AutoHarnessConfig(
+                data_dir=d,
+                workspace=d,
+            )
+            experiences = [
+                Experience(
+                    type=ExperienceType.FAILURE,
+                    topic="lint-fix",
+                    summary="ruff failed",
+                ),
+            ]
+            experience_store = _FakeExperienceStore(experiences)
+            report = await _run_assess_with_fallback(cfg, experience_store)
+            assert "lint-fix" in report
+
+
+class TestAssessWithAgent(
+    IsolatedAsyncioTestCase,
+):
+    """测试 DeepAgent 驱动路径。"""
+
+    async def test_build_query_includes_python_check_strategy(self):
+        """query 应包含动态 Python 检查策略。"""
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            _build_query,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = AutoHarnessConfig(
+                data_dir=d,
+                workspace=d,
+            )
+            experience_store = _FakeExperienceStore()
+            with patch(
+                f"{_ASSESS_MOD}._detect_python_check_strategy",
+                new_callable=AsyncMock,
+                return_value="使用 staged files 运行 make check",
+            ):
+                query = await _build_query(cfg, experience_store)
+        assert "Python 检查策略建议" in query
+        assert "使用 staged files 运行 make check" in query
+        assert "`openjiuwen/harness/**`" in query
+        assert "`openjiuwen/core/**`" in query
+        assert "`openjiuwen/harness/cli/README.md`" in query
+        assert "`tests/**`" in query
+        assert "`examples/**`" in query
+        assert "`docs/en/`" in query
+        assert "`docs/zh/`" in query
+        assert "`openjiuwen/rsi/auto_harness/**`" in query
+
+    @patch(
+        "openjiuwen.rsi.auto_harness.agents.create_assess_agent",
+        autospec=False,
+    )
+    async def test_assess_with_agent(
+        self,
+        mock_create,
+    ):
+        """正常 agent 调用返回报告。"""
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            _run_assess_with_fallback,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = AutoHarnessConfig(
+                data_dir=d,
+                workspace=d,
+            )
+
+            long_text = "# 评估报告\n## 构建状态\nOK\n" * 10
+
+            class _Chunk:
+                def __init__(self, text):
+                    self.payload = {"content": text}
+
+            mock_agent = AsyncMock()
+
+            async def _fake_stream(inputs):
+                yield _Chunk(long_text)
+
+            mock_agent.stream = _fake_stream
+            mock_create.return_value = mock_agent
+
+            experience_store = _FakeExperienceStore()
+            report = await _run_assess_with_fallback(cfg, experience_store)
+            assert "评估报告" in report
+
+    @patch(
+        "openjiuwen.rsi.auto_harness.agents.create_assess_agent",
+        autospec=False,
+    )
+    async def test_short_report_triggers_fallback(
+        self,
+        mock_create,
+    ):
+        """agent 返回过短时回退。"""
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            _run_assess_with_fallback,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = AutoHarnessConfig(
+                data_dir=d,
+                workspace=d,
+            )
+
+            class _Chunk:
+                def __init__(self, text):
+                    self.payload = {"content": text}
+
+            mock_agent = AsyncMock()
+
+            async def _fake_stream(inputs):
+                yield _Chunk("too short")
+
+            mock_agent.stream = _fake_stream
+            mock_create.return_value = mock_agent
+
+            experience_store = _FakeExperienceStore()
+            report = await _run_assess_with_fallback(cfg, experience_store)
+            # 应该走 fallback
+            assert "评估报告" in report
+
+
+class TestAssessStream(IsolatedAsyncioTestCase):
+    """测试流式评估。"""
+
+    @patch(
+        "openjiuwen.rsi.auto_harness.agents.create_assess_agent",
+        autospec=False,
+    )
+    async def test_assess_stream_yields_chunks(
+        self,
+        mock_create,
+    ):
+        """run_assess_stream 透传 agent chunks。"""
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            run_assess_stream,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            cfg = AutoHarnessConfig(
+                data_dir=d,
+                workspace=d,
+            )
+
+            class _FakeChunk:
+                def __init__(self, text):
+                    self.type = "llm_output"
+                    self.payload = {"content": text}
+
+            chunks = [
+                _FakeChunk("part1"),
+                _FakeChunk("part2"),
+            ]
+
+            mock_agent = AsyncMock()
+
+            async def _fake_stream(inputs):
+                for c in chunks:
+                    yield c
+
+            mock_agent.stream = _fake_stream
+            mock_create.return_value = mock_agent
+
+            experience_store = _FakeExperienceStore()
+
+            collected = []
+            async for chunk in run_assess_stream(
+                cfg,
+                experience_store,
+            ):
+                collected.append(chunk)
+
+            assert len(collected) == 2
+            assert collected[0].payload["content"] == "part1"
+
+    async def test_meta_assess_uses_input_tasks_as_agent_focus(self):
+        from openjiuwen.rsi.auto_harness.contexts import (
+            SessionContext,
+        )
+        from openjiuwen.rsi.auto_harness.orchestrator import (
+            AutoHarnessOrchestrator,
+        )
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            MetaAssessStage,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            orch = AutoHarnessOrchestrator(
+                AutoHarnessConfig(data_dir=d),
+                agent=None,
+            )
+            orch.artifacts.put(
+                "input_tasks",
+                [OptimizationTask(topic="生成预算报告扩展")],
+            )
+            ctx = SessionContext(orchestrator=orch)
+
+            seen_tasks = None
+
+            async def _fake_assess_stream(
+                _config,
+                _experience_store,
+                *,
+                input_tasks=None,
+                extra_rails=None,
+            ):
+                nonlocal seen_tasks
+                del extra_rails
+                seen_tasks = input_tasks
+                yield OutputSchema(
+                    type="message",
+                    index=0,
+                    payload={"content": "# assessment"},
+                )
+
+            with patch(
+                f"{_ASSESS_MOD}.run_assess_stream",
+                new=_fake_assess_stream,
+            ):
+                results = [item async for item in MetaAssessStage().stream(ctx)]
+
+            result = next(item for item in results if isinstance(item, StageResult))
+            assert "assessment" in result.artifacts
+            assert seen_tasks is not None
+            assert seen_tasks[0].topic == "生成预算报告扩展"
+
+    async def test_extend_assess_uses_input_tasks_as_agent_focus(self):
+        from openjiuwen.rsi.auto_harness.contexts import (
+            SessionContext,
+        )
+        from openjiuwen.rsi.auto_harness.orchestrator import (
+            AutoHarnessOrchestrator,
+        )
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            ExtendAssessStage,
+        )
+
+        with tempfile.TemporaryDirectory() as d:
+            orch = AutoHarnessOrchestrator(
+                AutoHarnessConfig(data_dir=d),
+                agent=None,
+            )
+            orch.artifacts.put(
+                "input_tasks",
+                [OptimizationTask(topic="conversation_budget_report")],
+            )
+            ctx = SessionContext(orchestrator=orch)
+
+            seen_query = ""
+
+            class _FakeAgent:
+                async def stream(self, payload):
+                    nonlocal seen_query
+                    seen_query = payload["query"]
+                    yield OutputSchema(
+                        type="message",
+                        index=0,
+                        payload={
+                            "content": (
+                                "| 竞品 | 功能 | 当前状态 | 差距描述 | 影响(0-1) | 可行性(0-1) | 建议方案 | 目标文件 |\n"
+                                "| --- | --- | --- | --- | --- | --- | --- | --- |\n"
+                                "| cursor | conversation_budget_report | missing | no report | 0.9 | 0.8 | add report | openjiuwen/extensions/harness/report |\n"
+                            )
+                        },
+                    )
+
+            with patch(
+                "openjiuwen.rsi.auto_harness.agents.create_assess_agent",
+                return_value=_FakeAgent(),
+            ):
+                results = [item async for item in ExtendAssessStage().stream(ctx)]
+
+            result = next(item for item in results if isinstance(item, StageResult))
+            gap_analysis = result.artifacts["gap_analysis"]
+            assert gap_analysis.gaps[0].feature == ("conversation_budget_report")
+            assert "conversation_budget_report" in seen_query
+
+    def test_extend_assess_query_marks_runtime_extension_mode(self):
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            _build_gap_query,
+        )
+
+        query = _build_gap_query(
+            [
+                OptimizationTask(
+                    topic="huawei_ppt_generator",
+                    description=("帮我优化创建一个能生成华为风格ppt的办公拓展"),
+                )
+            ],
+            "",
+        )
+
+        assert "评估模式: runtime_extension_gap_assessment" in query
+        assert "当前 pipeline: extended_evolve_pipeline" in query
+        assert "华为风格ppt" in query
+        assert "主流编码 agent 的能力差距" not in query
+        assert "只有用户明确要求" in query
+
+
+class TestAssessCheckStrategy(IsolatedAsyncioTestCase):
+    """测试 assess 阶段的检查策略推导。"""
+
+    def test_format_strategy_prefers_staged_make_targets(self):
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            _format_python_check_strategy,
+        )
+
+        strategy = _format_python_check_strategy(
+            ["openjiuwen/rsi/auto_harness/agent.py"],
+            [],
+            [],
+        )
+        assert "`make check`" in strategy
+        assert "`make type-check`" in strategy
+        assert "staged" in strategy
+
+    def test_format_strategy_uses_explicit_tools_for_worktree_delta(self):
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            _format_python_check_strategy,
+        )
+
+        strategy = _format_python_check_strategy(
+            [],
+            ["openjiuwen/rsi/auto_harness/agent.py"],
+            ["tests/unit_tests/rsi/auto_harness/test_agent.py"],
+        )
+        assert "不要运行 `make check COMMITS=1`" in strategy
+        assert "`uv run ruff check <files>`" in strategy
+        assert "`uv run mypy <files>`" in strategy
+
+    def test_format_strategy_marks_empty_snapshot_as_not_applicable(self):
+        from openjiuwen.rsi.auto_harness.stages.assess import (
+            _format_python_check_strategy,
+        )
+
+        strategy = _format_python_check_strategy(
+            [],
+            [],
+            [],
+        )
+        assert "No Python files selected" in strategy
+        assert "未执行" in strategy

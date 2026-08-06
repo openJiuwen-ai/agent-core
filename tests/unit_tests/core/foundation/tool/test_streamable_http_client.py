@@ -320,3 +320,149 @@ class TestMcpToolResultExtraction(unittest.TestCase):
         result = extract_mcp_tool_result_content(tool_result)
 
         self.assertEqual(result, "[image content: image/png, 6 base64 chars]")
+
+    def test_no_content_returns_none(self):
+        tool_result = SimpleNamespace(content=[])
+
+        self.assertIsNone(extract_mcp_tool_result_content(tool_result))
+
+
+class TestMcpModelToolNameHelpers(unittest.TestCase):
+    def test_helpers_pin_the_ability_manager_naming_convention(self):
+        # Rails match tools by these names; a silent convention change in
+        # AbilityManager must fail here, not in a live run.
+        from openjiuwen.core.foundation.tool.mcp.base import mcp_model_tool_name, mcp_model_tool_prefix
+
+        self.assertEqual(mcp_model_tool_prefix("cua-driver"), "mcp_cua-driver_")
+        self.assertEqual(mcp_model_tool_name("cua-driver", "click"), "mcp_cua-driver_click")
+
+
+class TestMcpToolResultMultiBlockExtraction(unittest.TestCase):
+    def test_text_and_image_blocks_are_both_preserved(self):
+        # Perception tools return action/state text plus a screenshot; block
+        # order must not decide which half of the result survives.
+        tool_result = SimpleNamespace(
+            content=[
+                SimpleNamespace(text="window_id=1 pid=7 elements=42"),
+                SimpleNamespace(mimeType="image/png", data="abc123"),
+            ]
+        )
+
+        result = extract_mcp_tool_result_content(tool_result)
+
+        self.assertIn("window_id=1 pid=7 elements=42", result)
+        self.assertIn("[image content: image/png, 6 base64 chars]", result)
+
+    def test_image_first_text_last_keeps_both(self):
+        tool_result = SimpleNamespace(
+            content=[
+                SimpleNamespace(mimeType="image/png", data="abc123"),
+                SimpleNamespace(text="window_id=1 pid=7 elements=42"),
+            ]
+        )
+
+        result = extract_mcp_tool_result_content(tool_result)
+
+        self.assertIn("[image content: image/png, 6 base64 chars]", result)
+        self.assertIn("window_id=1 pid=7 elements=42", result)
+
+    def test_multiple_text_blocks_joined_in_order(self):
+        tool_result = SimpleNamespace(
+            content=[SimpleNamespace(text="first"), SimpleNamespace(text="second")]
+        )
+
+        result = extract_mcp_tool_result_content(tool_result)
+
+        self.assertEqual(result, "first\n\nsecond")
+
+
+class TestMcpToolResultImageBridge(unittest.TestCase):
+    def test_image_bridged_to_multimodal_when_opted_in(self):
+        from openjiuwen.core.foundation.tool import McpToolResult
+
+        tool_result = SimpleNamespace(
+            content=[
+                SimpleNamespace(text="tree summary"),
+                SimpleNamespace(mimeType="image/png", data="abc123"),
+            ]
+        )
+
+        result = extract_mcp_tool_result_content(
+            tool_result, include_image_content=True, tool_name="get_window_state"
+        )
+
+        self.assertIsInstance(result, McpToolResult)
+        self.assertEqual(
+            result.data["content"],
+            "tree summary\n\n1 image(s) attached as multimodal input.",
+        )
+        (item,) = result.data["multimodal"]
+        self.assertEqual(item["type"], "image")
+        self.assertEqual(item["source"], "mcp")
+        self.assertEqual(item["source_path"], "get_window_state")
+        self.assertEqual(item["mime_type"], "image/png")
+        self.assertEqual(item["data_url"], "data:image/png;base64,abc123")
+
+    def test_opted_in_without_images_returns_plain_text(self):
+        tool_result = SimpleNamespace(content=[SimpleNamespace(text="no screenshot here")])
+
+        result = extract_mcp_tool_result_content(tool_result, include_image_content=True)
+
+        self.assertEqual(result, "no screenshot here")
+
+
+class TestMcpToolInvokeMultimodalWrapping(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _make_tool(call_result):
+        from openjiuwen.core.foundation.tool.mcp.base import MCPTool
+
+        client = SimpleNamespace(call_tool=AsyncMock(return_value=call_result))
+        card = McpToolCard(
+            name="get_window_state",
+            description="",
+            input_params={"type": "object", "properties": {}},
+            server_name="cua-driver",
+        )
+        return MCPTool(client, card)
+
+    async def test_mcp_tool_result_passes_through_unwrapped(self):
+        from openjiuwen.core.foundation.tool import McpToolResult
+
+        bridged = McpToolResult(
+            data={
+                "content": "tree summary\n\n1 image(s) attached as multimodal input.",
+                "multimodal": [
+                    {
+                        "type": "image",
+                        "source": "mcp",
+                        "source_path": "get_window_state",
+                        "mime_type": "image/png",
+                        "data_url": "data:image/png;base64,abc123",
+                    }
+                ],
+            }
+        )
+        tool = self._make_tool(bridged)
+
+        result = await tool.invoke({})
+
+        self.assertIs(result, bridged)
+        self.assertTrue(result.success)
+
+    async def test_plain_dict_result_is_not_mistaken_for_multimodal(self):
+        # A server-returned dict that happens to contain "content" and
+        # "multimodal" keys must keep the legacy {"result": ...} shape;
+        # only the McpToolResult sentinel type triggers the bridge.
+        lookalike = {"content": "x", "multimodal": []}
+        tool = self._make_tool(lookalike)
+
+        result = await tool.invoke({})
+
+        self.assertEqual(result, {"result": lookalike})
+
+    async def test_plain_result_keeps_legacy_shape(self):
+        tool = self._make_tool("snapshotted")
+
+        result = await tool.invoke({})
+
+        self.assertEqual(result, {"result": "snapshotted"})

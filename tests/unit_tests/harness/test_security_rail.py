@@ -86,6 +86,14 @@ def _make_agent(builder=None):
     return MagicMock(system_prompt_builder=builder)
 
 
+def test_safety_prompt_includes_non_fabrication_rule() -> None:
+    cn = build_safety_section("cn").render("cn")
+    en = build_safety_section("en").render("en")
+
+    assert "不虚构工具结果、文件内容、执行状态或已经完成的操作" in cn
+    assert "Do not fabricate tool results, file contents, execution status" in en
+
+
 def test_init_sets_system_prompt_builder_reference() -> None:
     builder = SystemPromptBuilder()
     rail = SecurityRail()

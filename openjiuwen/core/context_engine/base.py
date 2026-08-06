@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.context_engine.token.base import TokenCounter
 
 
@@ -218,6 +219,10 @@ class ModelContext(ABC):
         Return a TokenCounter instance that can accurately count tokens
         for the model family used by this context.
         """
+
+    def compression_recall_config(self) -> CompressionRecallConfig:
+        """Return the context-wide compression recall configuration."""
+        return CompressionRecallConfig()
 
     def last_context_window_access_at(self) -> float | None:
         """Return the timestamp of the latest context-window access, if tracked."""

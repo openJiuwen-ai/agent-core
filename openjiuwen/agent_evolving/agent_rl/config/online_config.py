@@ -69,10 +69,13 @@ class GatewayServiceConfig(BaseModel):
     host: str = Field(default="127.0.0.1")
     port: Port = None
     redis_url: str | None = None
+    trajectory_store_backend: str = Field(default="auto")
+    local_trajectory_store_dir: str = Field(default="")
     record_dir: str = Field(default="records")
     log_level: str = Field(default="info")
     health_timeout: float = Field(default=30.0, gt=0)
     disable_trajectory_collection: bool = True
+    lora_default_policy: str = Field(default="disabled")
     env: dict[str, str] = Field(default_factory=dict)
 
 
@@ -87,6 +90,10 @@ class TrainingConfig(BaseModel):
     scan_interval: int = Field(default=30, ge=1)
     ppo_config: str | None = None
     lora_repo: str | None = None
+    drain_pending_on_train: bool = False
+    max_samples_per_run: int = Field(default=0, ge=0)
+    ppo_samples_per_step: int = Field(default=0, ge=0)
+    allow_partial_last_step: bool = True
 
 
 class JiuwenConfig(BaseModel):
@@ -126,8 +133,11 @@ class OnlineRLConfig(BaseModel):
             )
         if self.gateway.port is None:
             raise ValueError("gateway.port is required (--gateway-port or YAML).")
-        if not self.gateway.redis_url:
-            raise ValueError("gateway.redis_url is required (--redis-url or YAML).")
+        backend = str(self.gateway.trajectory_store_backend or "auto").strip().lower()
+        if backend not in {"auto", "redis", "local"}:
+            raise ValueError("gateway.trajectory_store_backend must be one of: auto, redis, local.")
+        if backend == "redis" and not self.gateway.redis_url:
+            raise ValueError("gateway.redis_url is required when gateway.trajectory_store_backend=redis.")
         if self.jiuwen.enabled:
             if self.jiuwen.agent_server_port is None:
                 raise ValueError("jiuwen.agent_server_port is required when jiuwen.enabled is true.")
@@ -178,7 +188,7 @@ ONLINE_PPO_VERL_HYDRA_OVERLAY: dict[str, Any] = {
         "actor": {
             "strategy": "fsdp",
             "ppo_mini_batch_size": 4,
-            "ppo_micro_batch_size_per_gpu": 2,
+            "ppo_micro_batch_size_per_gpu": 1,
             "ppo_epochs": 1,
             "use_kl_loss": False,
             "kl_loss_coef": 0.02,
@@ -200,7 +210,7 @@ ONLINE_PPO_VERL_HYDRA_OVERLAY: dict[str, Any] = {
             "fsdp_config": {
                 "param_offload": True,
             },
-            "log_prob_micro_batch_size_per_gpu": 2,
+            "log_prob_micro_batch_size_per_gpu": 1,
         },
         "rollout": {
             "mode": "async",
@@ -211,7 +221,7 @@ ONLINE_PPO_VERL_HYDRA_OVERLAY: dict[str, Any] = {
             "max_model_len": 512,
             "max_num_seqs": 1,
             "n": 1,
-            "log_prob_micro_batch_size_per_gpu": 2,
+            "log_prob_micro_batch_size_per_gpu": 1,
         },
     },
     "trainer": {

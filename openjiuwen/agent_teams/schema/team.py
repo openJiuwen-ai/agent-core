@@ -266,7 +266,7 @@ class ExternalCliAgentSpec(BaseModel):
 
     inject_mcp: bool = True
     """Whether the spawn path auto-registers the team MCP server with the CLI
-    so it gets the team collaboration tools (read_inbox / claim_task / ...).
+    so it gets team collaboration tools such as view_task / claim_task / send_message.
     Injection is backend-specific (Claude SDK MCP options, codex
     ``-c mcp_servers...``); adapters without an injection strategy ignore it."""
 
@@ -417,17 +417,21 @@ class TeamRuntimeContext(BaseModel):
 
     role: TeamRole = TeamRole.LEADER
     member_name: Optional[str] = None
+    display_name: str = ""
+    """Human-readable member label (DB ``team_member.display_name``).
+
+    Peers see it in their roster; the member itself is told its own label as
+    part of its identity, so it can recognise which roster row is itself and
+    refer to itself the way the rest of the team does."""
     desc: str = ""
     """Public member description (DB ``team_member.desc``). Shared into other
-    members' roster (``team_members`` section) and ``list_members`` only; it is
-    NOT injected into this member's own system prompt."""
+    members' roster and ``list_members`` only; it is NOT injected into this
+    member's own identity."""
     prompt: str = ""
-    """Private, member-only system-prompt addendum (DB ``team_member.prompt``).
+    """Private, member-only working agreement (DB ``team_member.prompt``).
 
-    Injected ONLY into this member's own system prompt, as a static section,
-    and never surfaces in ``list_members`` or peers' prompts. Empty for the
-    leader, whose system prompt is fixed at build time to keep the KV-cache
-    prefix stable."""
+    Delivered ONLY to this member, as part of its identity, and never surfaces
+    in ``list_members`` or peers' rosters."""
     team_spec: Optional[TeamSpec] = None
     messager_config: Optional[MessagerTransportConfig] = None
     db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)

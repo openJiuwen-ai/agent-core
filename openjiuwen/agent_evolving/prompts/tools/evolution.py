@@ -67,9 +67,13 @@ class PrepareSkillEvolutionReviewMetadataProvider(ToolMetadataProvider):
         if language == "en":
             return (
                 "Create a Skill evolution review ref before drafting new experiences. "
-                "Use this after the user agrees to evolve a skill from ambiguous feedback."
+                "Use only after explicit user confirmation, pass a subject object, and set user_confirmed=true. "
+                "The returned ref is required by the review and mutation tools."
             )
-        return "在起草新经验前创建技能演进 review ref；用于用户同意将模糊反馈沉淀为 skill 演进后。"
+        return (
+            "在起草新经验前创建技能演进 review ref；仅在用户明确确认后调用，必须提供 subject 对象并设置 "
+            "user_confirmed=true。返回的 ref 供后续 review 和变更工具使用。"
+        )
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return {
@@ -105,8 +109,15 @@ class EvolveReviewTaskMetadataProvider(ToolMetadataProvider):
 
     def get_description(self, language: str = "cn") -> str:
         if language == "en":
-            return "Launch the evolution_reviewer subagent for a prepared evolution_review_ref."
-        return "为已准备的 evolution_review_ref 启动 evolution_reviewer subagent。"
+            return (
+                "Launch the restricted evolution reviewer for a prepared evolution_review_ref. "
+                "Use the ref returned by prepare_skill_evolution and keep subject consistent when supplied; "
+                "submit proposals only through the review result."
+            )
+        return (
+            "为已准备的 evolution_review_ref 启动受限演进 reviewer；使用 prepare_skill_evolution 返回的 ref，"
+            "如提供 subject 必须保持一致，proposal 只能来自 review 结果。"
+        )
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return {
@@ -250,8 +261,15 @@ class EvolveSkillExperiencesMetadataProvider(ToolMetadataProvider):
 
     def get_description(self, language: str = "cn") -> str:
         if language == "en":
-            return "Accept reviewed Skill evolution proposals from a completed evolution review."
-        return "接受已完成 evolution review 中的已审查 Skill 演进 proposals。"
+            return (
+                "Accept reviewed Skill evolution proposals from a completed evolution review. "
+                "Pass the same subject, the completed review ref, and proposal IDs exactly as returned by the review; "
+                "do not rewrite proposal content. Runtime validation checks the ref, subject, IDs, and drafts."
+            )
+        return (
+            "接受已完成 evolution review 中的已审查 Skill 演进 proposals；subject、review ref 和 proposal ID 必须与 "
+            "review 结果一致，不要改写 proposal 内容。运行时会校验 ref、对象、ID 及草稿。"
+        )
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return {
@@ -299,8 +317,15 @@ class SimplifySkillExperiencesMetadataProvider(ToolMetadataProvider):
 
     def get_description(self, language: str = "cn") -> str:
         if language == "en":
-            return "Apply delete, merge, or refine actions to existing evolution experiences."
-        return "对已有演进经验执行删除、合并或改写动作。"
+            return (
+                "Apply validated delete, merge, refine, or keep actions to existing evolution experiences. "
+                "Pass a subject and a non-empty actions array matching the schema; record references and action "
+                "fields are validated by the tool even when no interrupt rail is installed."
+            )
+        return (
+            "对已有演进经验执行经过校验的删除、合并、改写或保留动作；必须提供 subject 和非空 actions 数组并符合 "
+            "schema。即使未安装 Interrupt rail，工具自身也会校验记录引用和动作字段并安全失败。"
+        )
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return {

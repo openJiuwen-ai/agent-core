@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import os
@@ -20,6 +19,8 @@ from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+from .browser_capabilities import CORE_BROWSER_TOOL_NAMES
 
 ToolResultObserver = Callable[[str, Any], Awaitable[None]]
 
@@ -48,7 +49,7 @@ def _build_dialogue_compressor_config(
     )
 
 
-def _resolve_tool_timeout_s(default_s: float = 180.0) -> float:
+def _resolve_tool_timeout_s(default_s: float = 240.0) -> float:
     raw = (
         os.getenv("PLAYWRIGHT_TOOL_TIMEOUT_S")
         or os.getenv("PLAYWRIGHT_MCP_TIMEOUT_S")
@@ -191,28 +192,40 @@ def build_browser_worker_system_prompt(
         "If browser_probe_cards returns the fields needed for the task, including article/result-row "
         "title, link, author/source, or summary fields, use that compact result as the evidence "
         "for extraction and final reporting instead of taking screenshots, snapshots, or running extra DOM scans. "
-        "After a successful card probe, call browser_run_code/browser_run_code_unsafe only for a clearly missing "
-        "required field or a specific selector-based action; do not repeat broad evaluation "
-        "just to re-read the same cards. Prefer selector_hint values from compact probes when they are relevant. "
+        "After a successful card probe, use browser_evaluate, or a browser_run_code tool only when it is "
+        "explicitly present, for a clearly missing required field or a specific target-based action; "
+        "do not repeat broad evaluation "
+        "just to re-read the same cards. Treat page_id/generation_id/url/title/interactives/cards/"
+        "field_coverage/blockers as one PageState contract. Pass the current generation_id with a "
+        "probe target_id or current AX ref directly to browser_batch_interact; never translate them "
+        "into guessed CSS. For compatibility clicks, use selector_hint only when validated, "
+        "clickable=true, match_count=1, visible=true, and enabled=true. If a card has primary_link "
+        "or href, navigate to it directly. "
         "browser_batch_interact is a standalone runtime helper like browser_probe_interactives and "
         "browser_probe_cards, not a browser_custom_action wrapper. Use it directly. "
-        "For multi-field forms with several known controls, search flows with autocomplete, dropdown/date-picker " 
+        "For multi-field forms with several known controls, search flows with autocomplete, dropdown/date-picker "
         "flows, filter panels, or any short sequence where two or more next click/type/wait/extract steps are "
         "already known, call browser_batch_interact before falling back to repeated "
         "browser_click/browser_type/browser_wait_for turns. "
+        "Extract multiple fields from the same page in one batch with named extract_text/extract_value "
+        "steps, or use one card probe result that already contains every requested field. "
         "Do not force browser_batch_interact for a single uncertain click, one simple text field, or a page state "
-        "that still needs inspection. Use selector_hint values from probes as batch step selectors. "
+        "that still needs inspection. Prefer target_id/ref over selector_hint in batch steps. "
         "Use autocomplete steps for type-then-choose widgets, and condition-based wait_for_selector/wait_for_text "
-        "steps instead of fixed browser_wait_for sleeps. Do not split click+type+wait, click+wait+click, "
+        "steps instead of fixed browser_wait_for sleeps. For dynamic pages use wait_for_url, "
+        "wait_for_first_card_title, wait_for_sort_state, wait_for_result_count, "
+        "wait_for_dom_text_change, or wait_for_stable with a short poll interval and total timeout. "
+        "Interpret 'fully loaded' or an 'appropriate pause' as condition stability, not a fixed sleep. "
+        "Do not split click+type+wait, click+wait+click, "
         "date open+choose, or search submit+result wait into separate ReAct turns unless browser_batch_interact "
         "failed or the next target is genuinely unknown. "
         "Keep using browser_fill_form for ordinary visible text fields when that official tool is enough. "
         "Use browser_snapshot only when the compact probes are insufficient, when accessibility structure is needed, "
         "or when you need exact element references required by a Playwright MCP action. "
-        "Use browser_run_code_unsafe or browser_run_code only when you already know the exact selector/computation, "
-        "or when the compact probes and browser_snapshot are insufficient. "
-        "Do not use browser_run_code_unsafe or browser_run_code to dump the entire document body "
-        " unless all compact approaches fail.\nIf actions repeatedly fail, stop and report the exact failing action.\n"
+        "Use browser_evaluate for small exact computations. Use a browser_run_code tool only when it is present "
+        "in the current tool list and compact probes, evaluate, snapshot, and deterministic actions are "
+        "insufficient. Never use run-code to dump the entire document body.\n"
+        "If actions repeatedly fail, stop and report the exact failing action.\n"
         "If you use browser_tabs, action MUST be one of: list, new, close, select.\n"
         "For specialized operations (file upload, drag-and-drop, coordinates, etc.), "
         "call browser_list_custom_actions to discover available actions and their params, "
@@ -222,9 +235,7 @@ def build_browser_worker_system_prompt(
         "If you cannot finish without recursion, return a JSON error object instead.\n"
         "IMPORTANT: Do NOT use browser_take_screenshot unless strictly necessary. "
         f"If a screenshot is needed, always save it under '{screenshot_subdir}/'. "
-        "Use browser_run_code_unsafe or browser_run_code with: "
-        f"async (page) => {{ await page.screenshot({{ path: '{screenshot_subdir}/screenshot.png' }}); "
-        f"return '{screenshot_subdir}/screenshot.png'; }}\n"
+        "Use browser_take_screenshot when it is present; do not create screenshots through run-code.\n"
         f"If you produce any output files (reports, notes, summaries, markdown, text files, etc.), "
         f"write them to the '{artifacts_subdir}/' directory relative to the working directory. "
         "Never write output files to the project root or any other location.\n"
@@ -330,7 +341,7 @@ def build_browser_worker_agent(
     allowed_tool_names: Optional[Iterable[str]] = None,
 ) -> ReActAgent:
     resolved_allowed_tool_names = (
-        None
+        CORE_BROWSER_TOOL_NAMES
         if allowed_tool_names is None
         else tuple(dict.fromkeys(allowed_tool_names))
     )
@@ -379,10 +390,9 @@ def build_browser_worker_agent(
         config.model_config_obj.top_p = worker_top_p
     agent = ReActAgent(card=card).configure(config)
     agent.ability_manager.add(mcp_cfg)
-    if resolved_allowed_tool_names is not None:
-        agent.ability_manager.set_mcp_tool_allowlist(
-            mcp_cfg,
-            resolved_allowed_tool_names,
-        )
+    agent.ability_manager.set_mcp_tool_allowlist(
+        mcp_cfg,
+        resolved_allowed_tool_names,
+    )
     ensure_execute_signature_compat(agent, tool_result_observer=tool_result_observer)
     return agent

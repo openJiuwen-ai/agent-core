@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.i18n import reply_hint_for, t
 from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_BROADCAST,
     INBOUND_TYPE_DIRECT,
@@ -106,7 +106,7 @@ def render_message(
         msg_type=msg_type,
         time_info=time_info,
         note_kind="reply-hint",
-        note_text=t("dispatcher.reply_hint", sender=message.from_member_name),
+        note_text=reply_hint_for(message.from_member_name),
     )
 
 

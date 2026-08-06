@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from typing import Union
 
 from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EvolutionInterruptRail
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import SkillEvolutionRail
 from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import TeamSkillEvolutionRail
-from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EvolutionInterruptRail
 
 
 @dataclass(frozen=True)
@@ -290,21 +290,14 @@ def _validate_evolution_rail_config(existing, *, auto_save, language, rail_kwarg
         mismatches.append(f"language: {getattr(existing, '_language', None)!r} != {language!r}")
 
     requested_signal_trigger = rail_kwargs.get("signal_trigger")
-    requested_auto_scan = rail_kwargs.get("auto_scan")
-    expected_signal_trigger = bool(
-        requested_signal_trigger if requested_signal_trigger is not None else requested_auto_scan or False
-    )
+    expected_signal_trigger = bool(requested_signal_trigger)
     if getattr(existing, "signal_trigger", None) != expected_signal_trigger:
         mismatches.append(
             f"signal_trigger: {getattr(existing, 'signal_trigger', None)!r} != {expected_signal_trigger!r}"
         )
 
-    review_old_name = "completion_followup_enabled" if isinstance(existing, TeamSkillEvolutionRail) else "fuzzy_review"
     requested_review_trigger = rail_kwargs.get("review_trigger")
-    requested_legacy_review_trigger = rail_kwargs.get(review_old_name)
-    expected_review_trigger = bool(
-        requested_review_trigger if requested_review_trigger is not None else requested_legacy_review_trigger or False
-    )
+    expected_review_trigger = bool(requested_review_trigger)
     if getattr(existing, "review_trigger", None) != expected_review_trigger:
         mismatches.append(
             f"review_trigger: {getattr(existing, 'review_trigger', None)!r} != {expected_review_trigger!r}"

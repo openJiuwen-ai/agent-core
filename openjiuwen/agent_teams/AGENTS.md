@@ -33,9 +33,10 @@ agent_teams/
 ├── __init__.py          # 公开 API 聚合导出
 ├── constants.py         # 保留名（user/team_leader/human_agent）集中定义
 ├── context.py           # session_id 跨成员/跨模式共享 contextvars
-├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）
+├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）+ `reply_hint_for(sender)`：按发件人选 reply-hint 文案（user 走无条件强制版，其余走通用条件版）——文案归它管，选哪条文案也归它管，两个消费点（coordination `MessageHandler` / external `format`）不各写一遍
 ├── timefmt.py           # 毫秒 epoch → "绝对本地时间 + 相对差" 渲染（喂 LLM/观测，文案走 i18n）
-├── inbound_render.py    # 入站消息/框架事件 → <team-inbound>/<team-event>/<team-note> XML 渲染（纯函数，喂 LLM；文案由 handler 从 i18n 取）。见 F_46
+├── inbound_render.py    # 入站消息/框架事件/团队状态 → <team-inbound>/<team-event>/<team-note>/<team-context> XML 渲染（纯函数，喂 LLM；文案由 handler 从 i18n 取；`<team-note>` 嵌在它所修饰的 inbound / event 块内部，不平级）+ `SNAPSHOT_EVENT_KINDS`/`snapshot_kind_of`/`drop_superseded_snapshots`：判定哪些 event 是全量幂等快照、并从一批排队输入里整条剔除被覆盖的那几条（当前只有 task-board）。见 F_46 / F_70 / F_71 / F_72
+├── team_context.py      # TeamContextTracker：判定该告诉这个成员哪些团队状态（自身身份 / 团队元数据 / 成员名册），并把投递进度基线持久化到成员自己的 child AgentSession。两个调用方：TeamPolicyRail（进程内）与 CliRuntimeBase（外部 CLI）。见 F_70
 ├── message_template.py  # 框架模板消息的两阶段渲染：发送存意图（消息行 content 空 + meta={template,refs,params}），投递时按收件人语言加载 prompts/<lang>/<key>.md、用 {{task.*}}/{{member.*}}/{{param.*}} 填当前行（单遍替换不二次扫描、字段白名单、失败降级为 meta 合成的 fallback 行）。见 F_63
 ├── tiny_agent.py        # Tiny Agent：随时唤起的极简 NativeHarness（system_prompt + model + 仅结构化输出工具）；run 单轮 / chat 多轮；ephemeral（含 title/summary 预定义）+ team-scoped（TeamAgentSpec.tiny_agents 多实例，TeamInfra 持有）。见 F_45
 ├── paths.py             # 文件系统布局单一真相源
@@ -51,6 +52,7 @@ agent_teams/
 ├── messager/            # 消息传输层（inprocess / pyzmq）
 ├── spawn/               # 成员启动（process / inprocess）
 ├── monitor/             # 团队运行态监控（TeamMonitor 只读视图 + TeamStreamLogger 流式诊断日志）
+├── observability/       # 团队 OpenTelemetry 观测；Codex 专用桥接 / OTLP 接收 / rollout trace 集中在 codex/ 子包
 ├── reliability/         # 主动可靠性框架（健康信号采集 rail + 检测器 + 分级处置；opt-in）
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
 ├── cli/                 # 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）
@@ -72,8 +74,9 @@ agent_teams/
 | 文件 | 职责 |
 |---|---|
 | `loader.py` | `load_template`，按语言加载 `.md` |
-| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（唯一装配路径）；`build_team_role_section` 直接读 `leader_policy` / `teammate_policy` |
-| `section_cache.py` | `MtimeSectionCache`：dynamic section 的 mtime 缓存 |
+| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（系统提示词的唯一装配路径）；`build_team_role_section` 直接读 `leader_policy` / `teammate_policy` |
+| `messages.py` | 团队状态的消息正文（身份 / 团队信息 / 名册快照与增量）+ `diff_roster`。纯渲染，不管投递 |
+| `section_cache.py` | `MtimeSectionCache`：通用 mtime 缓存原语（团队侧当前无使用者）|
 | `cn/` · `en/` | 角色 / 工作流 / 生命周期模板 |
 
 **唯一装配路径是 `sections.build_team_*_section`**（由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费，各 builder 直接 `load_template` 读对应 `.md`）。改正文即时生效。详见 `prompts/AGENTS.md`。
@@ -88,7 +91,7 @@ customizer 后处理）。
 
 | 文件 | 职责 |
 |---|---|
-| `team_policy_rail.py` | `TeamPolicyRail`：所有团队 section 均静态（role / HITT 协作契约 [gate `hitt_enabled`] / bridge avatar 自契约 [仅 BRIDGE_AGENT] / workflow / dispatch [gate `dispatch_mode`，LEADER + TEAMMATE] / lifecycle / private / extra + 两个说明 section），init 建一次注入 `SystemPromptBuilder`（前缀 KV cache 稳定）；仅 churn 的 `team_members`（统一名册，人类标 `[human]`）/ `team_info` 经探针缓存刷新后挂 `prompt_attachment_manager`（`_sync_dynamic_sections` 不碰 builder）。见 F_46 / F_50 / F_52 |
+| `team_policy_rail.py` | `TeamPolicyRail`：所有进 builder 的团队 section 均静态**且成员间逐字一致**（role / HITT 协作契约 [gate `hitt_enabled`] / bridge avatar 自契约 [仅 BRIDGE_AGENT] / workflow / dispatch [gate `dispatch_mode`，LEADER + TEAMMATE] / lifecycle / extra + inbound 说明 section），init 建一次注入 `SystemPromptBuilder`（前缀 KV cache 稳定）；团队状态（自身身份 / `team_info` / 成员名册）**不进 builder 也不进 attachment**，由 `TeamContextTracker` 在数据出现或变化的那次调用写进成员的对话历史。`on_user_message` 同时承担第二件事：非 leader 成员的一批排队输入里，被后来者覆盖的任务看板整条剔除（leader 不剔——它读的是快照之间的差异）。见 F_46 / F_50 / F_52 / F_68 / F_70 / F_71 |
 | `confirm_payload.py` | `TeamConfirmPayload` + `TeamPermissionConfirmResponse`：team-specific confirmation payload/response models（extend harness base classes with `decided_by` tracking） |
 | `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |
@@ -235,6 +238,12 @@ messager，不经本地 avatar 代理。与 F_07 bridge（本地完整 DeepAgent
 - `external/format.py`：纯函数把消息 / 任务板渲染成与进程内 dispatcher 一致的
   `<team-inbound>`/`<team-event>` XML（复用 `inbound_render` 结构 + `i18n.t` note 文案）；
   `read_inbox` 用之。见 F_51。
+- `external/runtime.py` 的 `CliRuntimeBase`：**团队状态的第二条投递通道**（F_70）。外部 CLI
+  成员没有 rail、拿不到对端上下文，所以 `send` 在真正投递前把 `TeamContextTracker` 的待发
+  文本拼到 user message 正文最前面（搭车），成员变更事件另经 `announce_team_context()` 单独
+  发一条公告（补偿）。两个入口共用下沉后的 `_send_raw`——唯一真正投递的地方，都是"投递成功
+  再 commit"。`start(team_session=...)` 统一开成员自己的 child AgentSession（基线 + codex
+  thread id 都存在那里）。
 - `skill/cli.py`：非交互脚本式 CLI（`team-member` 入口），两段解析后按 scope 分化子命令
   （member 驱动真实工具 / operator 控制面）。两份 skill 文档：`skill/SKILL_member.md` /
   `skill/SKILL_operator.md`。与 `cli/` 的交互式 TUI 不同——后者给人用，本 CLI 给外部 agent

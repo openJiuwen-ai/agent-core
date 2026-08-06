@@ -32,6 +32,7 @@ MEMORY_PROMPT_CN = """# 记忆使用策略（主动模式）
 
 ## 读取与检索
 
+- 今天和昨天的每日记忆（daily_memory）已自动加载到上下文中，无需调用 `memory_search` 或 `read_memory` 来获取今日/昨日记录。
 - 不确定相关记忆在哪个文件时，先调用 `memory_search`。
 - 已知具体文件时，调用 `read_memory`。
 - 回答历史问题、偏好问题、继续之前任务前，必须先检索或读取记忆。
@@ -61,6 +62,7 @@ Choose the storage location by content type:
 
 ## Reading and Retrieval
 
+- Today's and yesterday's daily memory files are already loaded in the context. Do not call `memory_search` or `read_memory` to retrieve today's/yesterday's records.
 - If you do not know which file contains the relevant memory, call `memory_search` first.
 - If you know the exact file, call `read_memory`.
 - Before answering questions about history, preferences, or continuing previous work, retrieve or read memory first.
@@ -115,69 +117,25 @@ MEMORY_DATE_PROMPT_EN = """## Daily Memory Path
 When operating a daily session log, use the `memory/daily_memory/YYYY-MM-DD.md` path format. Resolve the actual date from the current task context only when you call the memory tool.
 """
 
-MEMORY_INACTIVE_PROMPT_CN = """# 记忆使用策略（被动模式）
+MEMORY_INACTIVE_PROMPT_CN = """# 记忆使用策略
 
-每轮对话默认不包含历史记忆正文。只有在用户明确需要历史上下文，或明确要求保存信息时，才使用记忆工具。
+默认不读取历史记忆。仅在用户明确要求保存信息，或当前任务确实依赖历史上下文时，才使用记忆工具。
 
-## 存储层级
-
-- `IDENTITY.md`：Agent 自身身份、名字、角色定位、用户为 Agent 指定的称呼。
-- `USER.md`：用户本人的画像、稳定偏好、身份信息、长期习惯。不要把 Agent 自身名字作为权威身份写入 `USER.md`。
-- `MEMORY.md`：长期背景知识、稳定事实、重要决策。
-- `memory/daily_memory/YYYY-MM-DD.md`：每日会话记录、任务进展、阶段性上下文。
-
-## 被动使用规则
-
-- 只有当用户明确说“记住、记录、保存、以后参考”等含义时，才写入或修改记忆。
-- 只有当用户询问“之前、上次、继续、历史、回忆、偏好”等内容，或回答确实依赖历史信息时，才调用 `memory_search` / `read_memory`。
-- 普通闲聊、一次性任务、当前上下文足够回答的问题，不要调用记忆工具。
-- 当前用户消息优先于历史记忆。
-
-## 写入规则
-
-- Agent 自身身份、名字、角色定位、用户为 Agent 指定的称呼：写入 `IDENTITY.md`，使用 `read_file` / `edit_file`。
-- 用户身份、偏好、稳定习惯：写入 `USER.md`。
-- 长期背景、稳定事实、重要决策：写入 `MEMORY.md`。
-- 当天事件、任务进展、阶段性记录：写入 `memory/daily_memory/YYYY-MM-DD.md`。
-- 更新前先读取现有内容，避免重复、冲突或覆盖。
-- 已有字段或已有事实使用 `edit_memory` 更新；新事实再用 `write_memory` 追加。
-
-## 不应记录
-
-不要记录敏感信息、用户不希望保存的信息、短期临时信息、可从当前代码/文件直接推导的信息、无长期价值的过程细节。
+- 写入前先检索相关内容；已有事实使用 `edit_memory` 更新，新事实使用 `write_memory` 添加，避免重复和冲突。
+- 记忆只作为补充上下文；与当前用户消息冲突时，以当前消息为准。
+- 使用可能已经变化的记忆前，先核验其是否仍然有效。
+- 不要记录密码、令牌等认证凭证，未经确认的推断，短期临时信息，无长期价值的过程细节，以及可从当前代码、文件或 Git 历史直接获得的信息。
 
 """
 
-MEMORY_INACTIVE_PROMPT_EN = """# Memory Usage Policy (Passive Mode)
+MEMORY_INACTIVE_PROMPT_EN = """# Memory Usage Policy
 
-Historical memory content is not included in the prompt by default. Use memory tools only when the user explicitly needs historical context or explicitly asks you to save information.
+Do not read historical memory by default. Use memory tools only when the user explicitly asks to save information or the current task genuinely depends on historical context.
 
-## Storage Hierarchy
-
-- `IDENTITY.md`: The agent's own identity, name, role, and user-assigned name.
-- `USER.md`: The user's own profile, stable preferences, identity information, and long-term habits. Do not store the agent's own name as the authoritative identity in `USER.md`.
-- `MEMORY.md`: Long-term background knowledge, stable facts, and important decisions.
-- `memory/daily_memory/YYYY-MM-DD.md`: Daily session logs, task progress, and staged context.
-
-## Passive Usage Rules
-
-- Write or modify memory only when the user explicitly says "remember", "record", "save", "refer to this later", or similar.
-- Call `memory_search` / `read_memory` only when the user asks about previous context, last time, continuation, history, recall, preferences, or when the answer genuinely depends on historical information.
-- Do not call memory tools for casual conversation, one-off tasks, or questions that can be answered from the current context.
-- The current user message has priority over historical memory.
-
-## Write Rules
-
-- Agent identity, name, role, and user-assigned name: write to `IDENTITY.md` with `read_file` / `edit_file`.
-- User identity, preferences, and stable habits: write to `USER.md`.
-- Long-term background, stable facts, and important decisions: write to `MEMORY.md`.
-- Daily events, task progress, and staged records: write to `memory/daily_memory/YYYY-MM-DD.md`.
-- Read existing content before updating to avoid duplication, conflicts, or overwrites.
-- Update existing fields or facts with `edit_memory`; append new facts with `write_memory`.
-
-## What Not To Record
-
-Do not record sensitive information, information the user does not want saved, short-lived temporary details, information directly derivable from current code/files, or process details with no long-term value.
+- Search for related content before writing. Use `edit_memory` to update an existing fact and `write_memory` to add a new fact, avoiding duplication and conflicts.
+- Treat memory only as supplemental context. If it conflicts with the current user message, follow the current message.
+- Verify that potentially changed memory is still valid before using it.
+- Do not record passwords, tokens, or other authentication credentials; unconfirmed inferences; short-lived information; process details without long-term value; or information directly available from current code, files, or Git history.
 
 """
 

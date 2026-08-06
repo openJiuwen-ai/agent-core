@@ -8,4 +8,6 @@ This section contains the API documentation for the main openJiuwen packages.
 | [`openjiuwen.agent_teams`](./openjiuwen.agent_teams.README.md) | Multi-agent team collaboration framework: Leader/Teammate collaboration, transport layer, and persistent storage. |
 | [`openjiuwen.dev_tools`](./openjiuwen.dev_tools.README.md) | Development tools: `prompt_builder`, `tune` (prompt generation/optimization and tuning), and [`agent_builder`](./openjiuwen.dev_tools/agent_builder.README.md) for building Agents. |
 | [`openjiuwen.harness`](./openjiuwen.harness.README.md) | Agent harness framework: DeepAgent with built-in planning, context management, sub-agent spawning, rails, tools, and long-term memory. |
+| [`openjiuwen.agent_evolving`](./openjiuwen.agent_evolving.README.md) | Self-evolution framework: online RL training, experience store, signal collection, and trajectory management. |
 | [`openjiuwen.extensions`](./openjiuwen.extensions.README.md) | Optional extensions, such as `message_queue`. |
+| [`openjiuwen.auto_harness`](./openjiuwen.auto_harness.README.md) | Autonomous optimization harness framework: orchestrator, pipelines, stages, rails, and experience store. |

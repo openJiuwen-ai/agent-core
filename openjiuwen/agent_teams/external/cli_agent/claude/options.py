@@ -9,7 +9,6 @@ import json
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from openjiuwen.agent_teams.external.descriptor import TEAM_JOIN_ENV
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 
@@ -39,9 +38,6 @@ def build_claude_options(
     cwd: str | None,
     add_dirs: tuple[str, ...],
     env: dict[str, str],
-    inject_mcp: bool,
-    mcp_server_name: str,
-    mcp_server_command: tuple[str, ...],
     system_prompt: str | None,
     team_session_id: str | None,
     member_name: str,
@@ -55,27 +51,11 @@ def build_claude_options(
     )
     session_id = None if resume_external_backend else claude_session_id
     resume = claude_session_id if resume_external_backend else None
-    mcp_servers = None
-    if inject_mcp:
-        if not mcp_server_command:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="Claude SDK MCP injection requires a non-empty mcp_server_command",
-            )
-            raise AssertionError  # pragma: no cover - raise_error always raises
-        mcp_servers = {
-            mcp_server_name: {
-                "type": "stdio",
-                "command": mcp_server_command[0],
-                "args": list(mcp_server_command[1:]),
-                "env": {TEAM_JOIN_ENV: env[TEAM_JOIN_ENV]},
-            }
-        }
     return sdk.ClaudeAgentOptions(
         add_dirs=list(add_dirs),
         cwd=cwd,
         env=env,
-        mcp_servers=mcp_servers,
+        mcp_servers=None,
         permission_mode="bypassPermissions",
         resume=resume,
         session_id=session_id,

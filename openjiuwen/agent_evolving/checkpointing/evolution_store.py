@@ -442,8 +442,6 @@ class EvolutionStore:
         """Append or merge one evolution record to evolutions.json."""
         async with self._get_skill_lock(name):
             evo_log = await self._records.append_record_transactional(name, record, subject_kind=subject_kind)
-            if evo_log is None:
-                return
             logger.info(
                 "[EvolutionStore] wrote %s/%s (id=%s, target=%s)",
                 name,

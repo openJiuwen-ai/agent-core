@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/concurrency.py`、`workflow/engine/admission.py`、`workflow/engine/cap.py`、`workflow/engine/runtime.py`、`workflow/engine/primitives.py`、`workflow/engine/runner.py`、`workflow/tool_swarmflow.py`、`workflow/runner.py`、`workflow/backends/team_worker_backend.py`、`harness/async_tools.py`、`harness/native_harness.py`、`schema/blueprint.py`、`agent/agent_configurator.py`、`rails/team_context.py`、`rails/team_tool_rail.py`、`tools/tool_factory.py`、`agent/coordination/handlers/workflow.py`、`i18n.py` |
-| 最近一次修订日期 | 2026-07-16 |
+| 最近一次修订日期 | 2026-08-04 |
 | 关联 feature | `F_47_swarmflow-concurrency-governor.md`、`F_48_swarmflow-inline-script-execution.md` |
 
 ## 范围 / 边界
@@ -195,7 +195,8 @@ swarmflow_concurrency:
 **已知 run_id 覆盖缺口**：`workflow.human_prompt` / `workflow.human_replied`（人工交互节点）与
 `async_tool.*`（无回调时的默认回退）**不含** `{run_id}` 占位符。`WorkflowHandler` 对 started/phase
 传 `run_id=payload.run_id or "?"`（缺失回退 `"?"` 保 format 不报 KeyError），对 human_prompt /
-human_replied **故意不传 run_id**——人工交互靠 `correlation_id` 路由回执（corr 跨 resume 稳定、与人一一对应），
+human_replied **故意不传 run_id**——人工交互靠 `correlation_id` 路由回执（corr 跨 resume 稳定、与人一一对应；
+**并行 branch 时** corr 含 `#disambig` 段，格式 `{phase}#{disambig}:{label}:{turn}`，见 `S_18` 有状态会话段），
 run_id 在此无叙事价值。后果：多 run 并行时，这几类消息无法从文案本身区分来源 run（started/phase/终态可区分）。
 见「已知遗留」。
 

@@ -78,13 +78,24 @@ class TeammateWorktreeLifecycle:
         self._configurator = configurator
         self._member_worktree_info: dict[str, MemberWorktreeInfo] = {}
 
+    def _session_disables_teammate_worktree(self) -> bool:
+        """Return whether the current runtime context disables member worktrees."""
+        spec = self._configurator.spec
+        build_context = getattr(spec, "build_context", None) if spec is not None else None
+        if bool(getattr(build_context, "disable_teammate_worktree", False)):
+            return True
+        seed = getattr(spec, "build_context_seed", None) if spec is not None else None
+        return isinstance(seed, dict) and bool(seed.get("disable_teammate_worktree", False))
+
     @staticmethod
     def _member_needs_worktree(teammate: Any, role: TeamRole) -> bool:
         """Return whether the DB member should be spawned in a worktree."""
         if role != TeamRole.TEAMMATE:
             return False
         worktree = get_member_worktree(teammate)
-        return worktree is not None and worktree.isolation == "worktree"
+        if worktree is None or worktree.isolation != "worktree":
+            return False
+        return True
 
     def _get_worktree_manager(self) -> "WorktreeManager":
         """Return a manager for leader-owned teammate worktrees."""
@@ -198,6 +209,12 @@ class TeammateWorktreeLifecycle:
     ) -> str | None:
         """Create or reuse the current-session worktree for a teammate."""
         if not self._member_needs_worktree(teammate, role):
+            return None
+        if self._session_disables_teammate_worktree():
+            team_logger.info(
+                "Skipping teammate worktree for {} because the current runtime disabled worktree isolation",
+                teammate.member_name,
+            )
             return None
 
         team_backend = self._configurator.team_backend

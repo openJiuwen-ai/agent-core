@@ -202,6 +202,18 @@ class TestNumberCondition(TestConditionBase):
 
 class TestExpressionCondition(TestConditionBase):
 
+    def test_expression_condition_preserves_boolean_substrings_in_variable_paths(self):
+        """Boolean replacements must not alter identifier components."""
+        expression = "${node_llm.userFields.structured_output.is_false_alarm} == true"
+        self.mock_state.get_global.return_value = True
+
+        result = ExpressionCondition(expression).invoke({}, self.mock_session)
+
+        assert result is True
+        self.mock_state.get_global.assert_called_once_with(
+            "node_llm.userFields.structured_output.is_false_alarm"
+        )
+
     def test_expression_condition_initialization(self):
         """Test ExpressionCondition initialization"""
         expression = "${a} > 5 && ${b} < 10"

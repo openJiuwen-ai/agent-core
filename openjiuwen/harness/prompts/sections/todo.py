@@ -18,14 +18,20 @@ from openjiuwen.harness.prompts.sections import SectionName
 # TodoTool system prompt - for system message injection
 # ---------------------------------------------------------------------------
 TODO_SYSTEM_PROMPT_EN = """
-Use the todo tools (todo_create, todo_modify, todo_list) to break down and manage your work. These tools help track progress, organize complex tasks, and ensure all requirements are completed.
+Use the todo tools (todo_create, todo_modify, todo_list, todo_get) to break down and manage your work. These tools help track progress, organize complex tasks, and ensure all requirements are completed.
 
-**When to create a task list — call todo_create immediately when:**
-- User explicitly requests a todo list or provides multiple items to complete
-- Task requires 3 or more distinct steps
-- Task has planning nature (multi-step implementation, feature development, etc.)
+**When to create a task list — call todo_create when any of the following applies:**
+- The user explicitly requests planning or provides multiple items to complete
+- The task has several stages with a real sequence or dependency between them, spans multiple rounds of tool calls, and visibility into overall progress is genuinely useful
 
-Identify the planning need and call todo_create BEFORE starting execution.
+**When NOT to create a task list:**
+- The task is simple: a one-off question, a single action, or a few straightforward steps that can be completed directly
+- Executing directly is more efficient than planning first
+
+**Task granularity — avoid over-decomposing:**
+- Each todo should represent an execution stage that needs to be advanced or verified independently, not a single tool call, a small action, or a component of the final deliverable; do not mechanically convert the structure of the final deliverable into todos
+- Merge steps that are logically continuous and normally completed together into one todo, rather than creating a separate item per action
+- Only create separate todos for stages that need to be advanced independently, produce independent intermediate results, or require separate verification; merge steps that can be completed continuously, have no independent result, or whose statuses would normally change together
 
 **Parallel awareness when breaking down tasks:**
 - If a phase involves applying the same processing to multiple independent objects
@@ -37,7 +43,9 @@ Identify the planning need and call todo_create BEFORE starting execution.
   This makes it unambiguous that one task_tool call should be dispatched per sub-item at execution time.
 
 **Task management rules:**
-- Real-time status update: call todo_modify immediately when a task's status changes
+- Once a planning need is identified, call todo_create immediately before starting execution.
+- Update status via todo_modify as soon as it changes; do not accumulate multiple status changes that have already occurred and update them all later. A single update should normally change only the current task and the next task: set the current task to completed and the next task to in_progress; do not change multiple pending tasks to completed in one call
+- When calling todo_modify to update a task, only include the fields that changed (usually just id and status); do not resend unchanged fields
 - Only one task can be in_progress at a time; complete it before starting the next
   - Exception: if an in_progress task needs to process multiple independent sub-items in parallel
     (e.g., reading several documents simultaneously, concurrently searching multiple sources),
@@ -45,7 +53,8 @@ Identify the planning need and call todo_create BEFORE starting execution.
     before marking the task completed. This is intra-task parallelism and does not violate the
     "one in_progress at a time" rule.
 - Mark unnecessary tasks as cancelled via todo_modify.
-- Can understand the current task planning progress by calling todo_list.
+- Use todo_list to understand the overall progress of the current task plan
+- Use todo_get to view the details of a specific task
 
 **Before marking a task completed:**
 - Verify the work is fully done (e.g., run tests to confirm)
@@ -54,14 +63,20 @@ Identify the planning need and call todo_create BEFORE starting execution.
 """
 
 TODO_SYSTEM_PROMPT_CN = """
-使用 todo 工具（todo_create、todo_modify、todo_list）拆解和管理工作。这些工具用于跟踪进度、组织复杂任务，确保所有需求都被完成。
+使用 todo 工具（todo_create、todo_modify、todo_list、todo_get）拆解和管理工作。这些工具用于跟踪进度、组织复杂任务，确保所有需求都被完成。
 
-**何时创建任务列表 — 以下情况立即调用 todo_create：**
-- 用户明确要求使用待办清单，或提供了多个待完成事项
-- 任务需要 3 个或更多步骤
-- 任务具有规划性质（多步骤实现、功能开发等）
+**何时创建任务列表 — 满足以下任一情况时调用 todo_create：**
+- 用户明确要求进行规划或提供了多个待完成事项
+- 任务包含多个存在先后顺序或依赖关系的阶段，需要跨多轮工具调用逐步推进，且让用户看到整体进展确有必要
 
-**识别到规划需求后，在开始执行前立即调用 todo_create。**
+**何时不创建任务列表：**
+- 任务本身简单：一次性问答、单一动作，或几步连续操作即可直接完成
+- 直接执行比先规划更高效的场景
+
+**任务粒度 — 拆分任务时避免过度细化：**
+- 每条 todo 应对应一个需要独立推进或验证的执行阶段，而不是一次工具调用、一个细小动作或最终交付内容的组成部分；不要把最终交付内容的结构机械地转换为 todo
+- 逻辑上连续、通常会一起完成的步骤合并为同一条 todo，不要逐个动作单独建条目
+- 只将需要独立推进、会产生独立中间结果或需要单独验证的阶段列为 todo；如果多个步骤可以连续完成、没有独立结果，或其状态通常会同时变化，应合并为同一条 todo
 
 **拆解任务时的并行意识：**
 - 若某个阶段涉及对多个独立对象（多篇文档、多个来源、多个文件）进行相同处理，
@@ -71,13 +86,16 @@ TODO_SYSTEM_PROMPT_CN = """
   这样执行时才能清楚地为每个子项发出一个 task_tool 调用。
 
 **任务管理规则：**
-- 实时更新状态：任务状态变化时立即调用 todo_modify
+- **识别到规划需求后，在开始执行前立即调用 todo_create。**
+- 实时更新状态：任务状态变化时立即调用 todo_modify，不要积攒多个已发生的状态变化后统一更新。单次 update 的状态变更通常只涉及当前任务和下一任务：将当前任务设为 completed，并将下一任务设为 in_progress；不要在一次调用中将多个 pending 任务批量改为 completed
+- 调用 todo_modify 更新时，每次只传入发生变化的字段（通常只有 id 和 status），不要把未变化的字段重新传一遍
 - 同一时间只能有一个任务处于 in_progress，完成后再开始下一个
   - 例外：若某个 in_progress 任务内部需要并行处理多个独立子项（如同时阅读多篇文档、并发搜索多个来源），
     可在该任务内一次性发出多个 task_tool 调用，等全部返回后再将任务标记为 completed。
     这属于任务内部的并行执行，不违反"同一时间只有一个 in_progress"原则。
 - 不再需要的任务用 todo_modify 标记为 cancelled
-- 可通过调用 todo_list 了解当前任务规划进展
+- 可通过调用 todo_list 了解当前任务整体规划进展
+- 可通过调用 todo_get 了解某项任务的详细信息
 
 **将任务标记为已完成前：**
 - 必须仔细验证工作已全部完成（如运行测试用例）

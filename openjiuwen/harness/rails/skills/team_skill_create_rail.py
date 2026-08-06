@@ -27,38 +27,19 @@ _TEAM_SPAWN_TOOL_NAMES = {
 _AUTO_TEAM_SKILL_CREATION_FOLLOW_UP_TAG = "auto_team_skill_creation_followup"
 
 _TEAM_SKILL_CREATION_FOLLOW_UP_CN = (
-    "这是运行时自动插入的 Team Skill 创建 follow-up，用于在团队执行告一段落后做一次轻量判断，不是用户的新需求。\n"
-    "当前可见上下文已经出现可复用团队协作信号，可能包含未来同类团队任务可复用的经验。\n"
-    "请参考常驻提示词中的“团队技能沉淀自检”规则，基于当前可见上下文和刚完成的团队执行过程，"
-    "检查是否形成了可复用的协作流程、角色分工、交接方式、并行推进方式、汇总整合方式、验收方式或检查清单。\n"
-    "\n"
-    "如果判断应创建：在本条普通回复末尾最多追加两句。第一句简短说明发现的可复用团队流程；"
-    "第二句询问用户是否创建 Team/Swarm Skill。\n"
-    "如果判断不应创建：不要提及自检、沉淀、无需创建、已检查、内部判断或本提醒；"
-    "回复应自然承接刚完成的团队任务，优先询问与该团队任务相关的下一步需求。\n"
-    "\n"
-    "不要重新总结任务结果、产物内容、完整团队轨迹、成员明细、长证据列表或判断过程。"
+    "这是运行时插入的 Team Skill 创建自检，不是用户的新需求。\n"
+    "参考常驻“团队技能沉淀自检”规则，只判断本轮协作是否形成可复用方法，不重新判断运行时触发门槛。\n"
+    "如需建议，只在普通最终回复末尾追加一至两句，并同时包含可复用团队方法和是否创建 Team/Swarm Skill 的"
+    "确认问题；否则自然回复，不提本提醒或内部判断。"
 )
 
 _TEAM_SKILL_CREATION_FOLLOW_UP_EN = (
-    "This is a runtime-inserted Team Skill creation follow-up for a lightweight check after the team "
-    "execution has settled; it is not a new user request.\n"
-    "The visible context has shown reusable team collaboration signals and may contain experience "
-    "reusable by future similar team tasks.\n"
-    'Refer to the standing "Team Skill Capture Self-Check" rules and, based on the visible context and '
-    "the recently completed team execution, check whether there is a reusable collaboration workflow, "
-    "role split, handoff pattern, parallel execution pattern, synthesis pattern, validation method, "
-    "or checklist.\n"
-    "\n"
-    "If creation is appropriate: append at most two short sentences to the end of this normal reply. "
-    "The first sentence should briefly state the reusable team workflow found; the second should ask "
-    "whether to create a Team/Swarm Skill.\n"
-    "If creation is not appropriate: do not mention self-checks, capture, no need to create, checked "
-    "status, internal judgment, or this reminder; naturally continue from the completed team task and "
-    "preferably ask about a team-task-related next step.\n"
-    "\n"
-    "Do not recap the task result, artifact content, full team trajectory, member details, "
-    "a long evidence list, or your reasoning process."
+    "This runtime-inserted Team Skill creation self-check is not a new user request.\n"
+    'Refer to the standing "Team Skill Capture Self-Check" rules and judge only whether this round produced a reusable '
+    "collaboration method; do not re-evaluate the runtime trigger threshold.\n"
+    "If suggesting, append only one or two sentences to the normal final reply and include both the reusable team "
+    "method and the Team/Swarm Skill creation question; otherwise reply naturally without mentioning this reminder "
+    "or internal judgment."
 )
 
 
@@ -174,11 +155,7 @@ class TeamSkillCreateRail(EvolutionRail):
 
     @staticmethod
     def _wrap_follow_up_prompt(prompt: str) -> str:
-        return (
-            f"<{_AUTO_TEAM_SKILL_CREATION_FOLLOW_UP_TAG}>\n"
-            f"{prompt}\n"
-            f"</{_AUTO_TEAM_SKILL_CREATION_FOLLOW_UP_TAG}>"
-        )
+        return f"<{_AUTO_TEAM_SKILL_CREATION_FOLLOW_UP_TAG}>\n{prompt}\n</{_AUTO_TEAM_SKILL_CREATION_FOLLOW_UP_TAG}>"
 
     def _can_enqueue_creation_follow_up(self, session_id: Optional[str], spawn_count: int) -> bool:
         """Check completion, threshold, dedupe, and existing-team-skill gates."""

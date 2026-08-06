@@ -108,7 +108,11 @@ class PlaywrightClient(McpClient):
         try:
             logger.info(f"Calling browser tool '{tool_name}' with arguments: {arguments}")
             tool_result = await self._session.call_tool(tool_name, arguments=arguments)
-            result_content = extract_mcp_tool_result_content(tool_result)
+            result_content = extract_mcp_tool_result_content(
+                tool_result,
+                include_image_content=self._include_image_content,
+                tool_name=tool_name,
+            )
             logger.info(f"Browser tool '{tool_name}' call completed")
             return result_content
         except Exception as e:

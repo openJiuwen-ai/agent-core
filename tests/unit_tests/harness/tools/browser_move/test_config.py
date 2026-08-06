@@ -26,6 +26,8 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_tools impo
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     DEFAULT_BROWSER_TIMEOUT_S,
+    DEFAULT_GUARDRAIL_MAX_FAILURES,
+    DEFAULT_GUARDRAIL_MAX_STEPS,
     DEFAULT_MODEL_NAME,
     BrowserInstanceConfig,
     build_playwright_mcp_config,
@@ -74,6 +76,8 @@ def test_build_runtime_settings_uses_shared_defaults() -> None:
         assert settings.api_key == ""
         assert settings.api_base == "https://api.openai.com/v1"
         assert settings.model_name == DEFAULT_MODEL_NAME
+        assert settings.guardrails.max_steps == DEFAULT_GUARDRAIL_MAX_STEPS
+        assert settings.guardrails.max_failures == DEFAULT_GUARDRAIL_MAX_FAILURES
         assert settings.guardrails.timeout_s == DEFAULT_BROWSER_TIMEOUT_S
         assert settings.mcp_cfg.params["timeout_s"] == DEFAULT_BROWSER_TIMEOUT_S
 
@@ -110,6 +114,15 @@ def test_build_playwright_mcp_config_enables_all_optional_capabilities_by_defaul
         cfg = build_playwright_mcp_config()
 
     assert cfg.params["args"][-1] == "--caps=pdf,vision,devtools,config,network,storage,testing"
+
+
+def test_model_policy_capabilities_are_not_forwarded_as_playwright_caps() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        cfg = build_playwright_mcp_config()
+
+    caps_arg = cfg.params["args"][-1]
+    assert "advanced_code" not in caps_arg
+    assert "unsafe_dev" not in caps_arg
 
 
 def test_build_playwright_mcp_config_preserves_other_capabilities() -> None:

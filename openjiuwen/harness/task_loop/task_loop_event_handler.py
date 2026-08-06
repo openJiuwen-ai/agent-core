@@ -11,6 +11,8 @@ import asyncio
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+import anyio
+
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.controller.modules.event_handler import (
     EventHandler,
@@ -142,13 +144,11 @@ class TaskLoopEventHandler(EventHandler):
             return {"error": "no active round"}
         try:
             if timeout is not None:
-                result = await asyncio.wait_for(
-                    self._current_future,
-                    timeout=timeout,
-                )
+                with anyio.fail_after(timeout):
+                    result = await self._current_future
             else:
                 result = await self._current_future
-        except asyncio.TimeoutError:
+        except TimeoutError:
             result = {"error": "completion_timeout"}
         except asyncio.CancelledError:
             result = {"error": "cancelled"}
@@ -527,12 +527,19 @@ class TaskLoopEventHandler(EventHandler):
 
     @staticmethod
     def _extract_query(event: Any) -> str:
-        """Pull text from an InputEvent."""
+        """Pull the round's query text from an InputEvent.
+
+        Several text frames mean several inputs queued up together and drive
+        one round; they join here so the task description is the whole batch.
+        The unjoined frames stay on the event, which rides along on the task —
+        that is what lets the inner loop hand rails the individual inputs.
+        """
         if isinstance(event, InputEvent):
+            texts = [str(getattr(df, "text", "")) for df in event.input_data]
+            texts = [text for text in texts if text]
+            if texts:
+                return "\n".join(texts)
             for df in event.input_data:
-                text = getattr(df, "text", None)
-                if text:
-                    return str(text)
                 data = getattr(df, "data", None)
                 if isinstance(data, dict):
                     return str(

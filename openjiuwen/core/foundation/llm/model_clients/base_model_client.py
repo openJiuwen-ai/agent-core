@@ -146,6 +146,65 @@ class BaseModelClient(ABC):
         return 0
 
     @staticmethod
+    def _extract_reasoning_tokens(obj: Any) -> int:
+        """Extract reasoning/thinking token count from provider usage metadata.
+
+        Providers disagree on the field shape. OpenAI-compatible providers
+        nest it under ``completion_tokens_details.reasoning_tokens``; some
+        surface it as a top-level field. Mirrors ``_extract_cache_tokens``
+        so callers can pass the raw usage object from either a streaming
+        chunk or a non-streaming response.
+        """
+
+        def _get_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        def _get_path(source: Any, path: tuple[str, ...]) -> Any:
+            current = source
+            for key in path:
+                current = _get_value(current, key)
+                if current is None:
+                    return None
+            return current
+
+        def _to_int(value: Any) -> int:
+            if value is None or isinstance(value, bool):
+                return 0
+            if not isinstance(value, (int, float, str)):
+                return 0
+            try:
+                return max(int(float(value)), 0)
+            except (TypeError, ValueError):
+                return 0
+
+        reasoning_token_paths = (
+            ("completion_tokens_details", "reasoning_tokens"),
+            ("completionTokensDetails", "reasoningTokens"),
+            ("usage", "completion_tokens_details", "reasoning_tokens"),
+            ("usageMetadata", "thoughtsTokenCount"),
+        )
+        for path in reasoning_token_paths:
+            reasoning_tokens = _to_int(_get_path(obj, path))
+            if reasoning_tokens:
+                return reasoning_tokens
+
+        reasoning_token_fields = (
+            "reasoning_tokens",
+            "reasoningTokens",
+            "thinking_tokens",
+            "thoughtsTokenCount",
+        )
+        for field in reasoning_token_fields:
+            reasoning_tokens = _to_int(_get_value(obj, field))
+            if reasoning_tokens:
+                return reasoning_tokens
+        return 0
+
+    @staticmethod
     def _extract_cost_info(obj: Any) -> tuple:
         """Extract cost information from a response or chunk object.
         Supports three formats:

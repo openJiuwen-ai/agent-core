@@ -53,7 +53,10 @@ from openjiuwen.agent_teams.workflow.engine.schema import coerce, resolve_schema
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.foundation.llm import ModelRequestConfig
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.prompts import PromptMode
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec, TeamModelConfig
@@ -74,6 +77,12 @@ _SUMMARY_SCHEMA: dict[str, Any] = {
     "properties": {"summary": {"type": "string", "description": "A concise summary."}},
     "required": ["summary"],
 }
+_STRUCTURED_OUTPUT_TOOL_CHOICE = {
+    "type": "function",
+    "function": {"name": "structured_output"},
+}
+# One compensating user turn when a completed schema round omits the tool call.
+_STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2
 _TITLE_PROMPT: dict[str, str] = {
     "cn": (
         "你是一个标题生成助手。根据用户提供的内容生成一个简洁、准确、概括性强的标题。"
@@ -108,6 +117,22 @@ def _output_text(result: Any) -> str:
     if isinstance(result, dict):
         return str(result.get("output", ""))
     return str(result or "")
+
+
+def _force_structured_output_model(model: "TeamModelConfig") -> "TeamModelConfig":
+    """Copy a model config with the structured-output tool selected explicitly."""
+    request_config = model.model_request_config
+    if request_config is None:
+        model_name = str(getattr(model.model_client_config, "model", "") or "")
+        request_config = ModelRequestConfig(model=model_name)
+    forced_request_config = request_config.model_copy(
+        update={"tool_choice": _STRUCTURED_OUTPUT_TOOL_CHOICE},
+        deep=True,
+    )
+    return model.model_copy(
+        update={"model_request_config": forced_request_config},
+        deep=True,
+    )
 
 
 class TinyAgent:
@@ -178,9 +203,36 @@ class TinyAgent:
             # lifecycle. Keep a reference to read ``captured`` after the run.
             capture = next(t for t in spec.tools if isinstance(t, StructuredOutputTool))
             prompt = f"{content}\n\n{self._t('structured_output', key='reminder')}"
+        # Own the session so ``run_once`` skips its pre_run / post_run pair: a
+        # single-shot run has nothing to restore and nothing worth persisting,
+        # and the checkpointer round-trip is pure cost here. That also skips the
+        # AGENT_SESSION_CREATED event pre_run fires, so a tiny agent's session
+        # is deliberately invisible to session-lifecycle observers. Closing the
+        # stream is still required to release the emitter.
+        session = Session(card=spec.card)
+        result: Any = None
         try:
-            result = await harness.run_once(prompt)
+            for attempt in range(_STRUCTURED_OUTPUT_MAX_ATTEMPTS):
+                if attempt > 0 and capture is not None:
+                    # run_once removes stateful tools after every round. Mount
+                    # the same capture instance again and keep the Session so
+                    # the reminder continues the existing model conversation.
+                    harness.ability_manager.add_ability(capture.card, capture)
+                    prompt = self._t("structured_output", key="reminder")
+                result = await harness.run_once(prompt, session=session)
+                if capture is None or (capture.called and capture.captured is not None):
+                    break
+                if attempt + 1 < _STRUCTURED_OUTPUT_MAX_ATTEMPTS:
+                    team_logger.warning(
+                        "[tiny_agent] structured_output not submitted; retrying turn %d/%d",
+                        attempt + 2,
+                        _STRUCTURED_OUTPUT_MAX_ATTEMPTS,
+                    )
         finally:
+            try:
+                await session.close_stream()
+            except Exception:
+                team_logger.debug("[tiny_agent] run session close failed", exc_info=True)
             try:
                 await harness.dispose()
             except Exception:
@@ -210,6 +262,7 @@ class TinyAgent:
         update: dict[str, Any] = {"card": run_card}
         if json_schema is not None:
             update["tools"] = [StructuredOutputTool(json_schema, self._t)]
+            update["model"] = _force_structured_output_model(self._spec.model)
         return self._spec.model_copy(update=update)
 
     # ------------------------------------------------------------------
@@ -240,16 +293,31 @@ class TinyAgent:
                 capture = StructuredOutputTool(json_schema, self._t)
                 harness.ability_manager.add_ability(capture.card, capture)
                 turn_prompt = f"{content}\n\n{self._t('structured_output', key='reminder')}"
+            result: Any = None
             try:
-                result = await self._drive_turn(turn_prompt)
+                for attempt in range(_STRUCTURED_OUTPUT_MAX_ATTEMPTS):
+                    if attempt > 0:
+                        turn_prompt = self._t("structured_output", key="reminder")
+                    result = await self._drive_turn(turn_prompt)
+                    if self._failed:
+                        raise_error(
+                            StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+                            error_msg="tiny agent chat round failed",
+                        )
+                    if capture is None or (capture.called and capture.captured is not None):
+                        break
+                    if attempt + 1 < _STRUCTURED_OUTPUT_MAX_ATTEMPTS:
+                        team_logger.warning(
+                            "[tiny_agent] structured_output not submitted; retrying chat turn %d/%d",
+                            attempt + 2,
+                            _STRUCTURED_OUTPUT_MAX_ATTEMPTS,
+                        )
             finally:
                 if capture is not None:
                     try:
                         harness.ability_manager.remove_ability("structured_output")
                     except Exception:
                         team_logger.debug("[tiny_agent] structured_output detach failed", exc_info=True)
-            if self._failed:
-                raise_error(StatusCode.AGENT_TEAM_EXECUTION_ERROR, error_msg="tiny agent chat round failed")
             if json_schema is None:
                 return _output_text(result)
             if capture is None or not (capture.called and capture.captured is not None):
@@ -331,6 +399,7 @@ def create_tiny_agent(
     name: str = "tiny",
     language: str = "cn",
     max_iterations: int = 6,
+    enable_security_rail: bool = False,
 ) -> TinyAgent:
     """Create a tiny agent from a system prompt + a resolvable model name.
 
@@ -344,6 +413,8 @@ def create_tiny_agent(
         name: Logical name; becomes the agent card name/id base.
         language: Prompt language for the structured-output tool i18n.
         max_iterations: ReAct iteration ceiling for the underlying harness.
+        enable_security_rail: Whether the harness automatically mounts its
+            default SecurityRail. Tiny agents disable it by default.
 
     Returns:
         A ready-to-use :class:`TinyAgent`.
@@ -363,7 +434,19 @@ def create_tiny_agent(
         tools=None,
         auto_create_workspace=False,
         max_iterations=max_iterations,
+        enable_security_rail=enable_security_rail,
         language=_normalize_language(language),
+        # A tiny agent has no filesystem tools at all, so image support is
+        # irrelevant to it; saying so keeps it from paying for a modality probe.
+        enable_read_image_multimodal=False,
+        # The caller's system prompt is the whole contract here. Harness
+        # sections (the <system-reminder> explainer and friends) describe
+        # machinery a tiny agent does not have, so keep them out of a prompt
+        # that is otherwise two sentences long.
+        prompt_mode=PromptMode.NONE.value,
+        # No filesystem / shell / code tools by definition (see module docstring),
+        # so do not register a sys_operation's tool resources for it either.
+        enable_sys_operation=False,
     )
     return TinyAgent(spec, default_schema=default_schema, language=language)
 

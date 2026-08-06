@@ -10,28 +10,43 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.session_memory_manager import (
+    group_completed_api_rounds as group_completed_api_round_ranges,
+)
 from openjiuwen.core.context_engine.processor.forked.compressor.reinjection import (
     ReinjectContext,
-    StateReinjector as FullCompactStateReinjector,
     build_file_reinjected_content,
     build_plan_mode_reinjected_content,
     build_plan_reinjected_content,
-    build_skill_reinjected_content,
     build_single_reinjected_state_message,
+    build_skill_reinjected_content,
     build_task_status_reinjected_content,
     build_todo_reinjected_content,
     build_tool_result_hint_reinjected_content,
 )
-from openjiuwen.core.context_engine.context.session_memory_manager import (
-    group_completed_api_rounds as group_completed_api_round_ranges,
+from openjiuwen.core.context_engine.processor.forked.compressor.reinjection import (
+    StateReinjector as FullCompactStateReinjector,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage, UserMessage
 
 STATE_REINJECTION_MARKER = "[STATE_REINJECTION]"
 
+# Prefixes marking user-role messages that carry internal state rather than
+# real user input; such messages must not be treated as genuine user turns.
+INTERNAL_USER_PREFIXES = (
+    "<system-reminder>",
+    "<memory_block_current>",
+    "<memory_block_dialogue>",
+    "<memory_block_round>",
+    "<recovered_context>",
+    "[STATE_REINJECTION]",
+)
+
 __all__ = [
     "FullCompactStateReinjector",
+    "INTERNAL_USER_PREFIXES",
     "ReinjectedStateBuilderSpec",
     "STATE_REINJECTION_MARKER",
     "build_compressor_reinjected_state_message",
@@ -223,12 +238,7 @@ def extract_tool_result_hint(
 
 def message_to_text(message: BaseMessage) -> str:
     content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return content
-    try:
-        return json.dumps(content, ensure_ascii=False)
-    except TypeError:
-        return str(content)
+    return sanitize_content_for_text(content)
 
 
 def is_summary_message(message: BaseMessage, summary_marker: str) -> bool:
@@ -246,19 +256,37 @@ def collect_summary_indices(messages: List[BaseMessage], summary_marker: str) ->
 
 
 def estimate_content_tokens(content: Any) -> int:
-    """Approximate token count when no token counter is available."""
-    if isinstance(content, str):
-        return len(content) // 3
-    try:
-        return len(json.dumps(content, ensure_ascii=False)) // 3
-    except TypeError:
-        return len(str(content)) // 3
+    """Approximate token count when no token counter is available.
+
+    Uses ``len // 4`` to mirror ``TiktokenCounter``'s own fallback and align
+    with thresholds scaled to real context-window token counts.
+    """
+    text = sanitize_content_for_text(content)
+    return max(len(text) // 4, 1)
 
 
-def count_messages_tokens(messages: List[BaseMessage], token_counter, processor_type: str = "") -> int:
-    """Count tokens with tokenizer-first strategy and character fallback."""
+def count_messages_tokens(
+    messages: List[BaseMessage],
+    token_counter,
+    processor_type: str = "",
+    *,
+    usage_aware: bool = False,
+) -> int:
+    """Count tokens with tokenizer-first strategy and character fallback.
+
+    When ``usage_aware`` is True, prefer the cumulative ``total_tokens``
+    reported by the last AssistantMessage carrying ``usage_metadata`` and
+    only ``len // 4``-estimate the tail messages after it. This avoids
+    re-tokenizing the whole window on threshold checks. Single-message or
+    partial-list callers must leave ``usage_aware`` False (default), since a
+    per-message size cannot be derived from a conversation-cumulative usage.
+    """
     if not messages:
         return 0
+    if usage_aware:
+        usage_tokens = count_usage_tokens_with_tail(messages)
+        if usage_tokens is not None:
+            return usage_tokens
     if token_counter is not None:
         try:
             return token_counter.count_messages(messages)
@@ -266,6 +294,36 @@ def count_messages_tokens(messages: List[BaseMessage], token_counter, processor_
             prefix = f"[{processor_type}] " if processor_type else ""
             logger.warning(f"{prefix}token_counter failed, fallback to char-based estimate: {exc}")
     return sum(estimate_content_tokens(getattr(message, "content", "")) for message in messages)
+
+
+def count_usage_tokens_with_tail(messages: List[BaseMessage]) -> Optional[int]:
+    """Return a valid model-reported usage baseline plus its appended tail."""
+    split = _last_usage_base(messages)
+    if split is None:
+        return None
+    base, tail = split
+    return base + sum(_len4(message) for message in tail)
+
+
+def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[BaseMessage]]]:
+    """Return ``(total_tokens, tail_messages)`` from the last AssistantMessage
+    carrying a positive ``usage_metadata``, or ``None`` when no such message
+    exists. ``total_tokens`` is the model-reported cumulative input+output and
+    already includes the tools/system present at that turn; ``tail_messages``
+    are the messages added after it (estimated with ``len // 4``).
+    """
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if ContextUtils.has_valid_usage_metadata(message):
+            return message.usage_metadata.total_tokens, messages[slice(idx + 1, None)]
+    return None
+
+
+def _len4(message: BaseMessage) -> int:
+    """Estimate a single message's tokens with ``len // 4`` (mirrors the
+    fallback coefficient used elsewhere in this module)."""
+    content = getattr(message, "content", "")
+    return len(sanitize_content_for_text(content)) // 4
 
 
 def resolve_context_max(context: ModelContext, model_name: str | None = None) -> int:
@@ -291,6 +349,7 @@ def build_compressor_reinjected_state_message(
     builder_names: List[str] | None,
     session_state: dict[str, Any] | None = None,
 ) -> UserMessage | None:
+    """Assemble a single reinjected-state user message for a compressor."""
     ctx = ReinjectContext(
         session_state=session_state if session_state is not None else get_session_state_for_reinjection(context),
         source_messages=source_messages,
@@ -308,6 +367,7 @@ def build_compressor_reinjected_state_message(
 
 
 def get_session_state_for_reinjection(context: Any) -> dict[str, Any]:
+    """Best-effort read of the session state dict for state reinjection."""
     if context is None or not hasattr(context, "get_session_ref"):
         return {}
     try:
@@ -324,6 +384,7 @@ def get_session_state_for_reinjection(context: Any) -> dict[str, Any]:
 
 
 def get_workspace_root_for_reinjection(context: Any) -> str | None:
+    """Best-effort resolve of the workspace root for state reinjection."""
     if context is None or not hasattr(context, "workspace_dir"):
         return None
     try:
@@ -334,22 +395,25 @@ def get_workspace_root_for_reinjection(context: Any) -> str | None:
 
 
 def truncate_state_text(text: str, max_chars: int) -> str:
+    """Truncate long state text head/tail-wise with a truncation marker."""
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     head = text[: max_chars // 2]
-    tail = text[-max(max_chars - len(head), 0):]
+    tail_start = -max(max_chars - len(head), 0)
+    tail = text[tail_start:]
     return f"{head}\n...[STATE_REINJECTION_TRUNCATED]...\n{tail}"
 
 
 def find_last_completed_api_round_end_idx(
-        messages: List[BaseMessage],
-        start_idx: int,
-        end_idx: int,
+    messages: List[BaseMessage],
+    start_idx: int,
+    end_idx: int,
 ) -> int:
     """Return absolute end index for the last complete API round in the selected range."""
     if end_idx < start_idx:
         return end_idx
-    candidate_messages = messages[start_idx:end_idx + 1]
+    end = end_idx + 1
+    candidate_messages = messages[start_idx:end]
     completed_rounds = group_completed_api_round_ranges(candidate_messages)
     if not completed_rounds:
         return start_idx - 1
@@ -358,9 +422,9 @@ def find_last_completed_api_round_end_idx(
 
 
 def iter_summary_merge_ranges(
-        messages: List[BaseMessage],
-        summary_marker: str,
-        min_blocks: int,
+    messages: List[BaseMessage],
+    summary_marker: str,
+    min_blocks: int,
 ) -> List[Tuple[int, int]]:
     """Return contiguous summary-message ranges eligible for second-stage merge."""
     ranges: List[Tuple[int, int]] = []

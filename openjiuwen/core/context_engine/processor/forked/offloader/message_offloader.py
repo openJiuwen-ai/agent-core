@@ -53,9 +53,7 @@ class MessageSummaryOffloaderConfig(BaseModel):
     )
     """Context-token-capacity ratio above which one TTL tool message is processed."""
 
-    protected_tool_names: list[str] = Field(
-        default_factory=lambda: ["read_file"]
-    )
+    protected_tool_names: list[str] = Field(default_factory=lambda: ["read_file"])
     """Tool names, or ``tool:argument-pattern`` entries, that must remain inline."""
 
     enable_debug_dump: bool = Field(default=False)
@@ -98,6 +96,18 @@ class MessageSummaryOffloader(ContextProcessor):
                     content_tokens=content_tokens,
                     content_chars=len(message.content),
                     original_content=message.content,
+                )
+            else:
+                self._write_debug_log(
+                    context,
+                    event="threshold_check",
+                    pass_name="add",
+                    message=message,
+                    message_index=index,
+                    threshold_tokens=threshold_tokens,
+                    content_tokens=content_tokens,
+                    hit=False,
+                    reason="message_below_threshold",
                 )
         return triggered
 
@@ -440,13 +450,7 @@ class MessageSummaryOffloader(ContextProcessor):
         head_budget = body_budget - len(body_separator) - tail_budget
         if head_budget <= 0:
             return f"{body[-body_budget:].lstrip()}{marker_separator}{marker}"
-        return (
-            f"{body[:head_budget].rstrip()}"
-            f"{body_separator}"
-            f"{body[-tail_budget:].lstrip()}"
-            f"{marker_separator}"
-            f"{marker}"
-        )
+        return f"{body[:head_budget].rstrip()}{body_separator}{body[-tail_budget:].lstrip()}{marker_separator}{marker}"
 
     @staticmethod
     def _rule_compression_requests_original_offload(message: BaseMessage) -> bool:
@@ -462,7 +466,7 @@ class MessageSummaryOffloader(ContextProcessor):
         return self._rule_compression_requests_original_offload(message)
 
     def _context_occupancy_tokens(self, context: ModelContext) -> int:
-        return self._count_messages_tokens(context, context.get_messages())
+        return self._count_messages_tokens(context, context.get_messages(), usage_aware=True)
 
     def _ttl_occupancy_token_threshold(self, context: ModelContext) -> int:
         return resolve_ratio_token_threshold(self._context_max(context), self._ttl_context_occupancy_ratio())
@@ -480,13 +484,26 @@ class MessageSummaryOffloader(ContextProcessor):
         return self._character_budget(context, self._ttl_message_threshold_ratio())
 
     def _character_budget(self, context: ModelContext, ratio: float) -> int:
-        return max(int(self._context_max(context) * 3 * ratio), 1)
+        # token 阈值 (context_max * ratio) 反推为字符阈值；×4 与 fallback
+        # 估算 len//4 互逆，保证字符截断阈值与 token 触发阈值口径一致。
+        return max(int(self._context_max(context) * 4 * ratio), 1)
 
     def _context_max(self, context: ModelContext) -> int:
         return resolve_context_max(context)
 
-    def _count_messages_tokens(self, context: ModelContext, messages: list[BaseMessage]) -> int:
-        return count_messages_tokens(messages, context.token_counter(), self.processor_type())
+    def _count_messages_tokens(
+        self,
+        context: ModelContext,
+        messages: list[BaseMessage],
+        *,
+        usage_aware: bool = False,
+    ) -> int:
+        return count_messages_tokens(
+            messages,
+            context.token_counter(),
+            self.processor_type(),
+            usage_aware=usage_aware,
+        )
 
     def _head_tail_preview(self, content: str, *, description: str) -> str:
         keep_chars = self._offload_preview_head_tail_chars()
@@ -494,11 +511,7 @@ class MessageSummaryOffloader(ContextProcessor):
             return f"[{description}]"
         if len(content) <= keep_chars * 2:
             return content
-        return (
-            f"{content[:keep_chars]}"
-            f"\n{OMIT_STRING} [{description}] {OMIT_STRING}\n"
-            f"{content[-keep_chars:]}"
-        )
+        return f"{content[:keep_chars]}\n{OMIT_STRING} [{description}] {OMIT_STRING}\n{content[-keep_chars:]}"
 
     def _offload_strategy(self) -> OffloadStrategy:
         return _OFFLOAD_STRATEGY

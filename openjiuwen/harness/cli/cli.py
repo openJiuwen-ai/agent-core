@@ -117,12 +117,8 @@ def _interactive_setup() -> dict[str, str]:
     )
 
     click.echo()
-    click.secho(
-        "  Welcome to OpenJiuWen CLI!", fg="cyan", bold=True
-    )
-    click.echo(
-        "  No API key found. Let's set one up.\n"
-    )
+    click.secho("  Welcome to OpenJiuWen CLI!", fg="cyan", bold=True)
+    click.echo("  No API key found. Let's set one up.\n")
 
     provider = click.prompt(
         "  LLM Provider",
@@ -135,25 +131,16 @@ def _interactive_setup() -> dict[str, str]:
 
     default_bases = {
         "OpenAI": "https://api.openai.com/v1",
-        "DashScope": (
-            "https://dashscope.aliyuncs.com"
-            "/compatible-mode/v1"
-        ),
+        "DashScope": ("https://dashscope.aliyuncs.com/compatible-mode/v1"),
         "SiliconFlow": "https://api.siliconflow.cn/v1",
     }
 
     api_base = click.prompt(
         "  API Base URL",
-        default=default_bases.get(
-            provider, default_bases["OpenAI"]
-        ),
+        default=default_bases.get(provider, default_bases["OpenAI"]),
     )
-    model = click.prompt(
-        "  Model name", default="gpt-4o"
-    )
-    api_key = click.prompt(
-        "  API Key", hide_input=True
-    )
+    model = click.prompt("  Model name", default="gpt-4o")
+    api_key = click.prompt("  API Key", hide_input=True)
 
     # Save to ~/.openjiuwen/settings.json
     saved_path = save_settings_json(
@@ -216,8 +203,8 @@ class CLIOptions:
 async def _run_chat(opts: CLIOptions) -> None:
     """Start the interactive REPL session."""
     from openjiuwen.harness.cli.agent.factory import create_backend
-    from openjiuwen.harness.cli.ui.repl import run_repl
     from openjiuwen.harness.cli.storage.session_store import SessionStore
+    from openjiuwen.harness.cli.ui.repl import run_repl
 
     cfg = load_config(
         provider=opts.provider,
@@ -231,9 +218,7 @@ async def _run_chat(opts: CLIOptions) -> None:
 
     backend = create_backend(cfg)
     store = SessionStore()
-    store.new_session(
-        getattr(backend, "_session_id", "cli"), cfg.model
-    )
+    store.new_session(getattr(backend, "_session_id", "cli"), cfg.model)
 
     try:
         await backend.start()
@@ -268,29 +253,17 @@ async def _run_once(
 
 
 @click.group(invoke_without_command=True)
-@click.version_option(
-    version=__version__, prog_name="openjiuwen"
-)
-@click.option(
-    "--model", "-m", default=None, help="Model name."
-)
-@click.option(
-    "--provider", default=None, help="LLM provider."
-)
-@click.option(
-    "--api-key", default=None, help="API key."
-)
-@click.option(
-    "--api-base", default=None, help="API base URL."
-)
+@click.version_option(version=__version__, prog_name="openjiuwen")
+@click.option("--model", "-m", default=None, help="Model name.")
+@click.option("--provider", default=None, help="LLM provider.")
+@click.option("--api-key", default=None, help="API key.")
+@click.option("--api-base", default=None, help="API base URL.")
 @click.option(
     "--remote",
     default=None,
     help="Remote agent-server URL.",
 )
-@click.option(
-    "--verbose", "-v", is_flag=True, help="Verbose logging."
-)
+@click.option("--verbose", "-v", is_flag=True, help="Verbose logging.")
 @click.option(
     "--workspace",
     "-w",
@@ -366,19 +339,13 @@ def run(
     opts: CLIOptions = ctx.obj["opts"]
 
     # Support stdin pipe: openjiuwen run -
-    if prompt == "-" or (
-        prompt is None and not sys.stdin.isatty()
-    ):
+    if prompt == "-" or (prompt is None and not sys.stdin.isatty()):
         prompt = sys.stdin.read().strip()
     if not prompt:
-        raise click.UsageError(
-            "A prompt argument is required, or pipe via stdin."
-        )
+        raise click.UsageError("A prompt argument is required, or pipe via stdin.")
 
     try:
-        exit_code = asyncio.run(
-            _run_once(opts, prompt, output_format)
-        )
+        exit_code = asyncio.run(_run_once(opts, prompt, output_format))
         ctx.exit(exit_code)
     except ValueError as exc:
         click.echo(f"Error: {exc}", err=True)
@@ -406,9 +373,7 @@ class AutoHarnessRunRequest:
     pipeline: str | None = None
 
     @classmethod
-    def from_kwargs(
-        cls, kwargs: dict[str, Any]
-    ) -> "AutoHarnessRunRequest":
+    def from_kwargs(cls, kwargs: dict[str, Any]) -> "AutoHarnessRunRequest":
         """Build request from click callback kwargs."""
         return cls(
             task=kwargs.get("task"),
@@ -436,30 +401,6 @@ async def _run_auto_harness(
     import time
     from pathlib import Path
 
-    from openjiuwen.auto_harness.schema import (
-        normalize_pipeline_preference,
-        OptimizationTask,
-        is_placeholder_local_repo,
-        load_auto_harness_config,
-    )
-    from openjiuwen.auto_harness.pipelines import (
-        META_EVOLVE_PIPELINE,
-    )
-    from openjiuwen.auto_harness.orchestrator import (
-        create_auto_harness_orchestrator,
-    )
-    from openjiuwen.auto_harness.stages.assess import (
-        run_assess_stream,
-    )
-    from openjiuwen.auto_harness.experience.experience_store import (
-        ExperienceStore,
-    )
-    from openjiuwen.auto_harness.infra.ci_gate_runner import (
-        CIGateRunner,
-    )
-    from openjiuwen.auto_harness.infra.github_cli import (
-        ensure_github_cli_ready,
-    )
     from openjiuwen.core.foundation.llm.model import Model
     from openjiuwen.core.foundation.llm.schema.config import (
         ModelClientConfig,
@@ -468,56 +409,59 @@ async def _run_auto_harness(
     from openjiuwen.harness.cli.agent.config import (
         load_config as load_cli_config,
     )
+    from openjiuwen.rsi.auto_harness.experience.experience_store import (
+        ExperienceStore,
+    )
+    from openjiuwen.rsi.auto_harness.infra.ci_gate_runner import (
+        CIGateRunner,
+    )
+    from openjiuwen.rsi.auto_harness.infra.github_cli import (
+        ensure_github_cli_ready,
+    )
+    from openjiuwen.rsi.auto_harness.orchestrator import (
+        create_auto_harness_orchestrator,
+    )
+    from openjiuwen.rsi.auto_harness.pipelines import (
+        META_EVOLVE_PIPELINE,
+    )
+    from openjiuwen.rsi.auto_harness.schema import (
+        OptimizationTask,
+        is_placeholder_local_repo,
+        load_auto_harness_config,
+        normalize_pipeline_preference,
+    )
+    from openjiuwen.rsi.auto_harness.stages.assess import (
+        run_assess_stream,
+    )
 
     if opts.verbose:
         for name in (
             "auto_harness",
-            "openjiuwen.auto_harness",
+            "openjiuwen.rsi.auto_harness",
         ):
             logging.getLogger(name).setLevel(
                 logging.DEBUG,
             )
 
     # data_dir 由 CLI home 决定
-    cli_home = opts.workspace or str(
-        Path.home() / ".openjiuwen"
-    )
+    cli_home = opts.workspace or str(Path.home() / ".openjiuwen")
     data_dir = str(Path(cli_home) / "auto_harness")
-    config_path = str(
-        Path(data_dir) / "config.yaml"
-    )
+    config_path = str(Path(data_dir) / "config.yaml")
 
     # 从 YAML 加载配置
     config = load_auto_harness_config(
-        config_path, workspace_hint=opts.workspace or "",
+        config_path,
+        workspace_hint=opts.workspace or "",
     )
     config.data_dir = data_dir
-    if (
-        config.local_repo
-        and (
-            is_placeholder_local_repo(
-                config.local_repo
-            )
-            or not Path(config.local_repo).exists()
-        )
-    ):
-        click.echo(
-            "忽略无效的 local_repo 配置: "
-            f"{config.local_repo}"
-        )
+    if config.local_repo and (is_placeholder_local_repo(config.local_repo) or not Path(config.local_repo).exists()):
+        click.echo(f"忽略无效的 local_repo 配置: {config.local_repo}")
         config.local_repo = ""
     if config.config_bootstrapped:
-        click.echo(
-            "已初始化 auto-harness 配置模板: "
-            f"{config.config_path}"
-        )
+        click.echo(f"已初始化 auto-harness 配置模板: {config.config_path}")
     if not config.local_repo and config.suggested_local_repo:
         config.local_repo = config.suggested_local_repo
-        click.echo(
-            "检测到本地仓库，临时使用 "
-            f"local_repo={config.local_repo}。"
-            "建议写回 config.yaml。"
-        )
+        click.echo(f"检测到本地仓库，临时使用 local_repo={config.local_repo}。建议写回 config.yaml。")
     elif not config.local_repo:
         click.echo(
             "未配置 local_repo，auto-harness 将使用 "
@@ -562,15 +506,14 @@ async def _run_auto_harness(
     if request.budget is not None:
         config.session_budget_secs = request.budget
         config.task_timeout_secs = min(
-            config.task_timeout_secs, request.budget * 0.95,
+            config.task_timeout_secs,
+            request.budget * 0.95,
         )
     if request.no_push:
         config.git_remote = ""
     if request.goal:
         config.optimization_goal = request.goal
-    config.pipeline_preference = normalize_pipeline_preference(
-        request.pipeline or META_EVOLVE_PIPELINE
-    )
+    config.pipeline_preference = normalize_pipeline_preference(request.pipeline or META_EVOLVE_PIPELINE)
 
     if request.stage in (None, "assess", "plan"):
         ensure_github_cli_ready(click.echo)
@@ -586,26 +529,25 @@ async def _run_auto_harness(
         if isinstance(raw, dict):
             raw = [raw]
         for item in raw:
-            tasks.append(OptimizationTask(
-                topic=item["topic"],
-                description=item.get("description", ""),
-                files=item.get("files", []),
-            ))
+            tasks.append(
+                OptimizationTask(
+                    topic=item["topic"],
+                    description=item.get("description", ""),
+                    files=item.get("files", []),
+                )
+            )
 
     # Stage dispatch
     if request.stage == "assess":
         from rich.console import Console
+
         from openjiuwen.harness.cli.ui.renderer import (
             render_stream,
         )
 
-        experience_store = ExperienceStore(
-            config.resolved_experience_dir
-        )
+        experience_store = ExperienceStore(config.resolved_experience_dir)
         console = Console()
-        stream = run_assess_stream(
-            config, experience_store
-        )
+        stream = run_assess_stream(config, experience_store)
         result = await render_stream(stream, console)
         report = result.text or ""
         if report:
@@ -615,23 +557,14 @@ async def _run_auto_harness(
 
     if request.stage == "verify":
         ci = CIGateRunner(
-            workspace=(
-                config.local_repo
-                or config.cache_repo_dir
-            ),
+            workspace=(config.local_repo or config.cache_repo_dir),
             config_path=config.ci_gate_config,
-            python_executable=(
-                config.resolve_ci_gate_python_executable()
-            ),
-            install_command=(
-                config.ci_gate_install_command
-            ),
+            python_executable=(config.resolve_ci_gate_python_executable()),
+            install_command=(config.ci_gate_install_command),
         )
         result = await ci.run("all")
         passed = result.get("passed", False)
-        click.echo(
-            f"CI Gate: {'PASSED' if passed else 'FAILED'}"
-        )
+        click.echo(f"CI Gate: {'PASSED' if passed else 'FAILED'}")
         if not passed:
             for err in result.get("errors", [])[:10]:
                 click.echo(f"  {err}", err=True)
@@ -645,10 +578,7 @@ async def _run_auto_harness(
             f"使用手动指定的 {len(tasks)} 个任务",
         )
     else:
-        click.echo(
-            "未指定手动任务，将执行 "
-            "assess → plan → implement → learnings"
-        )
+        click.echo("未指定手动任务，将执行 assess → plan → implement → learnings")
 
     if request.dry_run:
         task_data = [
@@ -662,13 +592,19 @@ async def _run_auto_harness(
         out_path = debug_dir / "tasks.json"
         out_path.write_text(
             json.dumps(
-                task_data, ensure_ascii=False, indent=2,
+                task_data,
+                ensure_ascii=False,
+                indent=2,
             ),
             encoding="utf-8",
         )
-        click.echo(json.dumps(
-            task_data, ensure_ascii=False, indent=2,
-        ))
+        click.echo(
+            json.dumps(
+                task_data,
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         click.echo(f"[dry-run] 任务列表 → {out_path}")
         return 0
 
@@ -682,6 +618,7 @@ async def _run_auto_harness(
     )
     stream = orch.run_session_stream(tasks=tasks or None)
     from rich.console import Console
+
     from openjiuwen.harness.cli.ui.renderer import (
         render_stream,
     )
@@ -689,31 +626,28 @@ async def _run_auto_harness(
     console = Console()
 
     async def _on_activate_interaction(
-        iid: str, value: Any,
+        iid: str,
+        value: Any,
     ) -> str:
-        if (
-            isinstance(value, dict)
-            and value.get("interaction_type")
-            == "activate_confirm"
-        ):
-            ext_name = value.get(
-                "extension_name", "unknown"
-            )
+        if isinstance(value, dict) and value.get("interaction_type") == "activate_confirm":
+            ext_name = value.get("extension_name", "unknown")
             click.echo()
             click.echo(f"扩展 {ext_name} 已就绪")
             if value.get("runtime_path"):
-                click.echo(
-                    f"  路径: {value['runtime_path']}"
-                )
+                click.echo(f"  路径: {value['runtime_path']}")
             click.echo()
             click.echo("  [A] 接受并热加载")
             click.echo("  [R] 拒绝并清理")
             click.echo()
             while True:
-                choice = click.prompt(
-                    "选择 (A/R)",
-                    default="A",
-                ).strip().lower()
+                choice = (
+                    click.prompt(
+                        "选择 (A/R)",
+                        default="A",
+                    )
+                    .strip()
+                    .lower()
+                )
                 if choice in ("a", "accept"):
                     action = "accept"
                     break
@@ -738,30 +672,24 @@ async def _run_auto_harness(
     results = orch.results
     elapsed = time.monotonic() - t0
     ok = sum(1 for r in results if r.success)
-    click.echo(
-        f"Session 完成: {ok}/{len(results)} 成功, "
-        f"耗时 {elapsed:.1f}s"
-    )
+    click.echo(f"Session 完成: {ok}/{len(results)} 成功, 耗时 {elapsed:.1f}s")
     for i, r in enumerate(results):
         s = "OK" if r.success else "FAIL"
-        click.echo(
-            f"Task {i + 1}: {s}"
-            f" | pr={r.pr_url or 'N/A'}"
-            f" | error={r.error or 'none'}"
-        )
+        click.echo(f"Task {i + 1}: {s} | pr={r.pr_url or 'N/A'} | error={r.error or 'none'}")
         if r.summary:
             click.echo(f"  summary={r.summary}")
     return 0
 
 
 async def _run_experience_search(
-    workspace: str, query: str,
+    workspace: str,
+    query: str,
 ) -> None:
     """Search the experience store."""
     import os
     from pathlib import Path
 
-    from openjiuwen.auto_harness.experience.experience_store import (
+    from openjiuwen.rsi.auto_harness.experience.experience_store import (
         ExperienceStore,
     )
 
@@ -774,10 +702,7 @@ async def _run_experience_search(
         click.echo("无匹配结果")
         return
     for m in results:
-        click.echo(
-            f"[{m.type.value}] {m.topic}: "
-            f"{m.summary or m.outcome}"
-        )
+        click.echo(f"[{m.type.value}] {m.topic}: {m.summary or m.outcome}")
 
 
 async def _run_experience_list(
@@ -789,7 +714,7 @@ async def _run_experience_list(
     import os
     from pathlib import Path
 
-    from openjiuwen.auto_harness.experience.experience_store import (
+    from openjiuwen.rsi.auto_harness.experience.experience_store import (
         ExperienceStore,
     )
 
@@ -799,18 +724,12 @@ async def _run_experience_list(
     )
     entries = await store.list_recent(limit=limit)
     if mem_type:
-        entries = [
-            e for e in entries
-            if e.type.value == mem_type
-        ]
+        entries = [e for e in entries if e.type.value == mem_type]
     if not entries:
         click.echo("无记录")
         return
     for m in entries:
-        click.echo(
-            f"[{m.type.value}] {m.topic}: "
-            f"{m.summary or m.outcome}"
-        )
+        click.echo(f"[{m.type.value}] {m.topic}: {m.summary or m.outcome}")
 
 
 async def _run_gap_analyze(
@@ -819,28 +738,24 @@ async def _run_gap_analyze(
     """Run competitive gap analysis."""
     import os
 
-    from openjiuwen.auto_harness.schema import (
+    from openjiuwen.rsi.auto_harness.schema import (
         AutoHarnessConfig,
     )
-    from openjiuwen.auto_harness.stages.assess import (
+    from openjiuwen.rsi.auto_harness.stages.assess import (
         run_gap_analysis,
     )
 
     ws = workspace or os.getcwd()
     config = AutoHarnessConfig(workspace=ws)
     gaps = await run_gap_analysis(
-        config, harness_state="",
+        config,
+        harness_state="",
     )
     if not gaps:
-        click.echo(
-            "Phase 1 占位: 差距分析尚未接入 LLM"
-        )
+        click.echo("Phase 1 占位: 差距分析尚未接入 LLM")
         return
     for g in gaps:
-        click.echo(
-            f"[{g.priority:.1f}] {g.feature}: "
-            f"{g.gap_description}"
-        )
+        click.echo(f"[{g.priority:.1f}] {g.feature}: {g.gap_description}")
 
 
 # -------------------------------------------------------------------
@@ -857,15 +772,18 @@ def auto_harness(ctx: click.Context) -> None:
 
 @auto_harness.command("run")
 @click.option(
-    "--task", default=None,
+    "--task",
+    default=None,
     help="手动指定单个任务描述。",
 )
 @click.option(
-    "--task-file", default=None,
+    "--task-file",
+    default=None,
     help="从 JSON 文件加载任务列表。",
 )
 @click.option(
-    "--dry-run", is_flag=True,
+    "--dry-run",
+    is_flag=True,
     help="只执行 assess + plan，不 implement。",
 )
 @click.option(
@@ -877,15 +795,19 @@ def auto_harness(ctx: click.Context) -> None:
     help="只执行指定阶段。",
 )
 @click.option(
-    "--no-push", is_flag=True,
+    "--no-push",
+    is_flag=True,
     help="不 push / 不创建 MR。",
 )
 @click.option(
-    "--budget", type=float, default=None,
+    "--budget",
+    type=float,
+    default=None,
     help="覆盖 session 预算（秒）。",
 )
 @click.option(
-    "--goal", default=None,
+    "--goal",
+    default=None,
     help="指定本轮自然语言优化目标，驱动 assess/plan 全流程。",
 )
 @click.option(
@@ -903,9 +825,7 @@ def auto_harness_run(
     opts: CLIOptions = ctx.obj["opts"]
     try:
         request = AutoHarnessRunRequest.from_kwargs(kwargs)
-        exit_code = asyncio.run(
-            _run_auto_harness(opts, request)
-        )
+        exit_code = asyncio.run(_run_auto_harness(opts, request))
         ctx.exit(exit_code)
     except KeyboardInterrupt:
         pass
@@ -921,24 +841,27 @@ def auto_harness_experience() -> None:
 @click.argument("query")
 @click.pass_context
 def experience_search(
-    ctx: click.Context, query: str,
+    ctx: click.Context,
+    query: str,
 ) -> None:
     """搜索经验库。"""
     opts: CLIOptions = ctx.obj["opts"]
     asyncio.run(
-        _run_experience_search(
-            opts.workspace or "", query
-        ),
+        _run_experience_search(opts.workspace or "", query),
     )
 
 
 @auto_harness_experience.command("list")
 @click.option(
-    "--type", "mem_type", default=None,
+    "--type",
+    "mem_type",
+    default=None,
     help="按类型过滤 (optimization/failure/insight)。",
 )
 @click.option(
-    "--limit", default=10, type=int,
+    "--limit",
+    default=10,
+    type=int,
     help="返回条数。",
 )
 @click.pass_context
@@ -951,7 +874,9 @@ def experience_list(
     opts: CLIOptions = ctx.obj["opts"]
     asyncio.run(
         _run_experience_list(
-            opts.workspace or "", mem_type, limit,
+            opts.workspace or "",
+            mem_type,
+            limit,
         ),
     )
 
@@ -961,10 +886,7 @@ def experience_list(
     "--ext-path",
     default=None,
     type=click.Path(exists=True, file_okay=False),
-    help=(
-        "扩展包根目录（含 harness_config.yaml）。"
-        "不传则自动生成 smoke-test scaffold。"
-    ),
+    help=("扩展包根目录（含 harness_config.yaml）。不传则自动生成 smoke-test scaffold。"),
 )
 @click.pass_context
 def auto_harness_verify_ext(
@@ -986,19 +908,16 @@ def _generate_smoke_scaffold(
     if base_dir:
         root = _P(base_dir) / ext_name
     else:
-        root = _P(
-            tempfile.mkdtemp(prefix="verify_ext_")
-        ) / ext_name
+        root = _P(tempfile.mkdtemp(prefix="verify_ext_")) / ext_name
     rails_dir = root / "rails"
     tools_dir = root / "tools"
     for d in (root, rails_dir, tools_dir):
         d.mkdir(parents=True, exist_ok=True)
         (d / "__init__.py").write_text(
-            "", encoding="utf-8",
+            "",
+            encoding="utf-8",
         )
-    mod = (
-        f"openjiuwen.extensions.harness.{ext_name}"
-    )
+    mod = f"openjiuwen.extensions.harness.{ext_name}"
     (rails_dir / "smoke_rail.py").write_text(
         "from openjiuwen.harness.rails.base "
         "import DeepAgentRail\n\n\n"
@@ -1068,15 +987,15 @@ async def _run_verify_ext(
     import uuid
     from pathlib import Path as _Path
 
-    from openjiuwen.auto_harness.infra.runtime_extension_loader import (
+    from openjiuwen.rsi.auto_harness.infra.runtime_extension_loader import (
         load_runtime_rails,
         load_runtime_skill_dirs,
         load_runtime_tools,
     )
-    from openjiuwen.auto_harness.schema import (
+    from openjiuwen.rsi.auto_harness.schema import (
         RuntimeExtensionArtifact,
     )
-    from openjiuwen.auto_harness.stages.verify import (
+    from openjiuwen.rsi.auto_harness.stages.verify import (
         _check_ruff,
     )
 
@@ -1090,9 +1009,7 @@ async def _run_verify_ext(
     root = _Path(ext_path).resolve()
     manifest = root / "harness_config.yaml"
     if not manifest.is_file():
-        raise click.ClickException(
-            f"{manifest} not found"
-        )
+        raise click.ClickException(f"{manifest} not found")
 
     ext_name = root.name
     session_id = f"cli_verify_{uuid.uuid4().hex[:8]}"
@@ -1111,10 +1028,12 @@ async def _run_verify_ext(
     click.echo("== Layer 1: structure check ==")
     try:
         rails = load_runtime_rails(
-            runtime_ext, session_id=session_id,
+            runtime_ext,
+            session_id=session_id,
         )
         tools = load_runtime_tools(
-            runtime_ext, session_id=session_id,
+            runtime_ext,
+            session_id=session_id,
         )
         for cls in rails:
             cls()
@@ -1128,13 +1047,8 @@ async def _run_verify_ext(
             skill_mds = list(sd_path.rglob("SKILL.md"))
             skills_count += len(skill_mds)
             if not skill_mds:
-                errors.append(
-                    f"Skill dir has no SKILL.md: {sd}"
-                )
-        click.echo(
-            f"  rails={rails_count} tools={tools_count}"
-            f" skills={skills_count}"
-        )
+                errors.append(f"Skill dir has no SKILL.md: {sd}")
+        click.echo(f"  rails={rails_count} tools={tools_count} skills={skills_count}")
     except Exception as exc:
         errors.append(f"Structure check failed: {exc}")
         click.echo(f"  FAILED: {exc}", err=True)
@@ -1153,6 +1067,7 @@ async def _run_verify_ext(
     # Cleanup generated scaffold
     if generated:
         import shutil
+
         shutil.rmtree(root.parent, ignore_errors=True)
 
     if errors:
@@ -1162,14 +1077,8 @@ async def _run_verify_ext(
         )
         for e in errors:
             click.echo(f"  - {e}", err=True)
-        raise click.ClickException(
-            f"verify_ext failed ({len(errors)} error(s))"
-        )
-    click.echo(
-        f"\nPASSED: rails={rails_count}"
-        f" tools={tools_count}"
-        f" skills={skills_count}"
-    )
+        raise click.ClickException(f"verify_ext failed ({len(errors)} error(s))")
+    click.echo(f"\nPASSED: rails={rails_count} tools={tools_count} skills={skills_count}")
 
 
 @auto_harness.command("gap-analyze")
@@ -1188,17 +1097,18 @@ def gap_analyze(
 
 @auto_harness.command("history")
 @click.option(
-    "--limit", default=20, type=int,
+    "--limit",
+    default=20,
+    type=int,
     help="返回条数。",
 )
 @click.pass_context
 def auto_harness_history(
-    ctx: click.Context, limit: int,
+    ctx: click.Context,
+    limit: int,
 ) -> None:
     """查看优化历史。"""
     opts: CLIOptions = ctx.obj["opts"]
     asyncio.run(
-        _run_experience_list(
-            opts.workspace or "", None, limit
-        ),
+        _run_experience_list(opts.workspace or "", None, limit),
     )

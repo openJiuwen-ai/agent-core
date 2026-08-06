@@ -617,22 +617,22 @@ def test_enable_progress_repeat_true() -> None:
     assert rail.enable_progress_repeat is True
 
 
+@pytest.mark.asyncio
+async def test_inject_prompt_false_removes_todo_section() -> None:
+    """Disabling prompt injection keeps the rail active without the todo section."""
+    rail = TaskPlanningRail(inject_prompt=False)
+    rail.system_prompt_builder = MagicMock(language="en")
+
+    await rail.before_model_call(MagicMock())
+
+    rail.system_prompt_builder.remove_section.assert_called_once_with("todo")
+    rail.system_prompt_builder.add_section.assert_not_called()
+
+
 def test_list_tool_call_interval_default() -> None:
     """Default list_tool_call_interval is 20."""
     rail = TaskPlanningRail()
     assert rail.list_tool_call_interval == 20
-
-
-def test_build_todo_system_prompt_chinese() -> None:
-    """build_todo_system_prompt returns Chinese prompt."""
-    prompt = build_todo_system_prompt(language="cn")
-    assert "任务规划" in prompt
-
-
-def test_build_todo_system_prompt_english() -> None:
-    """build_todo_system_prompt returns English prompt."""
-    prompt = build_todo_system_prompt(language="en")
-    assert "task planning" in prompt
 
 
 def test_build_progress_reminder_user_prompt_chinese() -> None:

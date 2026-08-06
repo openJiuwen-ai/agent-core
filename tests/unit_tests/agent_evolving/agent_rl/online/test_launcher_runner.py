@@ -311,6 +311,8 @@ def test_ensure_workspace_writes_web_user_headers(monkeypatch, tmp_path: Path):
     assert values['WEB_USER_ID'] == '"alice"'
     assert values['RL_ONLINE_TENANT_ID'] == '"alice"'
     assert json.loads(values['CUSTOM_HEADERS'].strip("'")) == {'x-user-id': 'alice'}
+    assert 'EVOLUTION_AUTO_SCAN' not in values
+    assert 'EVOLUTION_AUTO_SAVE' not in values
 
 
 def test_start_jiuwenclaw_passes_web_user_headers(monkeypatch, tmp_path: Path):

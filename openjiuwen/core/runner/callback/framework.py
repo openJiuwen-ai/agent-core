@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """
 Comprehensive Async Callback Framework
@@ -57,6 +57,7 @@ from openjiuwen.core.runner.callback.filters import (
     CircuitBreakerFilter,
     EventFilter,
 )
+from openjiuwen.core.common.logging import runner_logger
 from openjiuwen.core.runner.callback.models import (
     CallbackInfo,
     CallbackMetrics,
@@ -64,6 +65,64 @@ from openjiuwen.core.runner.callback.models import (
     ChainResult,
     FilterResult,
 )
+
+# Above this, a single callback is reported at INFO so a slow hook is visible
+# without enabling debug logging. Mirrors ``SLOW_RAIL_CHAIN_SECONDS`` on the
+# rail side; kept local so this low-level module does not import from
+# ``single_agent``. Keep the two values in step.
+SLOW_CALLBACK_SECONDS = 1.0
+
+# Above this, an event's whole callback chain is reported at INFO with a
+# per-callback split. A dozen-plus rails each doing modest work add up without
+# any one of them crossing ``SLOW_CALLBACK_SECONDS``, which is exactly the case
+# a single total cannot explain — so this bar sits far below the per-callback
+# one. Mirrors ``SLOW_RAIL_INIT_BATCH_SECONDS`` on the rail-init side.
+SLOW_CALLBACK_CHAIN_SECONDS = 0.05
+
+
+def _callback_owner_name(callback: Callable) -> str:
+    """Name a callback by its owning rail for a chain breakdown.
+
+    Rail hooks arrive as bound methods, so the instance they are bound to names
+    them: the event is already in the log line, and the class alone keeps a
+    fifteen-entry breakdown on one readable line. Read the owner off
+    ``__self__`` rather than splitting ``__qualname__``, which would yield
+    ``<locals>`` for a closure.
+
+    Args:
+        callback: Callback to name.
+
+    Returns:
+        The owning class name for a bound method, otherwise the callback's own
+        name.
+    """
+    owner = getattr(callback, "__self__", None)
+    if owner is not None:
+        return type(owner).__name__
+    return getattr(callback, "__name__", "") or "<unknown>"
+
+
+def _log_callback_chain_breakdown(event: str, timings: List[tuple]) -> None:
+    """Report what an event's callback chain cost, slowest callback first.
+
+    Args:
+        event: Event whose chain just ran.
+        timings: ``(owner name, elapsed seconds)`` in execution order; an empty
+            list logs nothing.
+    """
+    if not timings:
+        return
+    total = sum(elapsed for _, elapsed in timings)
+    ranked = sorted(timings, key=lambda item: item[1], reverse=True)
+    breakdown = " ".join("%s=%.1f" % (name, elapsed * 1000) for name, elapsed in ranked)
+    log = runner_logger.info if total >= SLOW_CALLBACK_CHAIN_SECONDS else runner_logger.debug
+    log(
+        "[RailChain] %s callbacks=%d total_ms=%.1f %s",
+        event,
+        len(timings),
+        total * 1000,
+        breakdown,
+    )
 
 
 @lru_cache(maxsize=4096)
@@ -1000,6 +1059,8 @@ class AsyncCallbackFramework:
         await self._execute_hooks(event, HookType.BEFORE, *args, **kwargs)
 
         callbacks = self._callbacks.get(event, [])
+        # Per-callback timings for the chain breakdown emitted below.
+        chain_timings: List[tuple] = []
 
         for callback_info in callbacks:
             if not callback_info.enabled:
@@ -1048,6 +1109,20 @@ class AsyncCallbackFramework:
                     result = await callback_result
 
                 execution_time = time.time() - start_time
+                chain_timings.append((_callback_owner_name(callback), execution_time))
+
+                # Name the individual slow callback, so a slow rail chain can be
+                # attributed to one hook instead of the whole event.
+                if execution_time >= SLOW_CALLBACK_SECONDS:
+                    # ``__qualname__`` carries the owning class for a bound rail
+                    # method, so "before_invoke" points at one rail instead of
+                    # every rail that implements the hook.
+                    runner_logger.info(
+                        "[RailChain] slow callback: event=%s callback=%s elapsed_ms=%.1f",
+                        event,
+                        getattr(callback, "__qualname__", None) or callback.__name__,
+                        execution_time * 1000,
+                    )
 
                 # Update metrics
                 if self.enable_metrics:
@@ -1091,12 +1166,17 @@ class AsyncCallbackFramework:
                             f"Callback execution aborted: {callback.__name__} - {e.reason}"
                         )
 
+                # An aborted chain is exactly when the split matters, so report
+                # what ran before reraising.
+                _log_callback_chain_breakdown(event, chain_timings)
                 if e.cause is not None:
                     raise e.cause
                 raise
 
             except Exception as e:
                 execution_time = time.time() - start_time
+                # A callback that fails slowly still owns its share of the chain.
+                chain_timings.append((_callback_owner_name(callback), execution_time))
 
                 # Update metrics
                 if self.enable_metrics:
@@ -1118,6 +1198,8 @@ class AsyncCallbackFramework:
                         f"Callback execution failed: {callback.__name__} - {e}",
                         exc_info=True
                     )
+
+        _log_callback_chain_breakdown(event, chain_timings)
 
         # Execute AFTER hooks
         await self._execute_hooks(event, HookType.AFTER, results, *args, **kwargs)

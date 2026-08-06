@@ -15,23 +15,19 @@ import pytest
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
-from openjiuwen.auto_harness.pipelines import (
-    EXTENDED_EVOLVE_PIPELINE,
-    META_EVOLVE_PIPELINE,
-)
 from openjiuwen.harness.cli.cli import (
     AutoHarnessRunRequest,
     _run_auto_harness,
 )
+from openjiuwen.rsi.auto_harness.pipelines import (
+    EXTENDED_EVOLVE_PIPELINE,
+    META_EVOLVE_PIPELINE,
+)
 
 
 def _install_renderer_stubs(fake_render):
-    ui_module = types.ModuleType(
-        "openjiuwen.harness.cli.ui"
-    )
-    renderer_module = types.ModuleType(
-        "openjiuwen.harness.cli.ui.renderer"
-    )
+    ui_module = types.ModuleType("openjiuwen.harness.cli.ui")
+    renderer_module = types.ModuleType("openjiuwen.harness.cli.ui.renderer")
     renderer_module.render_stream = fake_render
     ui_module.renderer = renderer_module
     return {
@@ -44,7 +40,7 @@ def _make_fake_repo(parent: Path, name: str) -> Path:
     """Create a directory that passes ``_looks_like_repo_root``.
 
     Mirrors the four conditions in
-    ``openjiuwen.auto_harness.schema._looks_like_repo_root``: a directory
+    ``openjiuwen.rsi.auto_harness.schema._looks_like_repo_root``: a directory
     containing ``.git/``, ``pyproject.toml``, and ``openjiuwen/``. Used
     to make tests deterministic regardless of the invoking cwd.
     """
@@ -64,7 +60,9 @@ class TestAutoHarnessCli:
 
     @pytest.mark.asyncio
     async def test_run_without_manual_tasks_uses_full_session(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ) -> None:
         """未传 task 时应传 tasks=None 给 orchestrator。"""
         # workspace_hint (tmp_path) is not a repo root, so detection must
@@ -108,51 +106,43 @@ class TestAutoHarnessCli:
             verbose=False,
         )
         (tmp_path / "auto_harness").mkdir(
-            parents=True, exist_ok=True,
+            parents=True,
+            exist_ok=True,
         )
 
-        with patch(
-            "openjiuwen.auto_harness.orchestrator"
-            ".create_auto_harness_orchestrator",
-            side_effect=_capture_create,
-        ), patch(
-            "openjiuwen.core.foundation.llm.model.Model",
-            return_value=MagicMock(name="mock_model"),
-        ), patch.dict(
-            sys.modules,
-            _install_renderer_stubs(_fake_render),
+        with (
+            patch(
+                "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+                side_effect=_capture_create,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model.Model",
+                return_value=MagicMock(name="mock_model"),
+            ),
+            patch.dict(
+                sys.modules,
+                _install_renderer_stubs(_fake_render),
+            ),
         ):
             exit_code = await _run_auto_harness(
                 opts=opts,
-                request=AutoHarnessRunRequest(
-                    goal="分析差距 claude-code"
-                ),
+                request=AutoHarnessRunRequest(goal="分析差距 claude-code"),
             )
 
         assert exit_code == 0
         assert captured_config is not None
-        assert (
-            captured_config.optimization_goal
-            == "分析差距 claude-code"
-        )
-        assert captured_config.local_repo == str(
-            fake_cwd_repo.resolve()
-        )
-        assert captured_config.workspace == str(
-            fake_cwd_repo.resolve()
-        )
-        assert captured_config.data_dir == str(
-            (tmp_path / "auto_harness").resolve()
-        )
-        assert (
-            captured_config.pipeline_preference
-            == META_EVOLVE_PIPELINE
-        )
+        assert captured_config.optimization_goal == "分析差距 claude-code"
+        assert captured_config.local_repo == str(fake_cwd_repo.resolve())
+        assert captured_config.workspace == str(fake_cwd_repo.resolve())
+        assert captured_config.data_dir == str((tmp_path / "auto_harness").resolve())
+        assert captured_config.pipeline_preference == META_EVOLVE_PIPELINE
         assert received_tasks is None
 
     @pytest.mark.asyncio
     async def test_run_pipeline_option_overrides_default(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ) -> None:
         """--pipeline extended should override the CLI meta default."""
         fake_cwd_repo = _make_fake_repo(tmp_path, "cwd_repo")
@@ -190,19 +180,23 @@ class TestAutoHarnessCli:
             verbose=False,
         )
         (tmp_path / "auto_harness").mkdir(
-            parents=True, exist_ok=True,
+            parents=True,
+            exist_ok=True,
         )
 
-        with patch(
-            "openjiuwen.auto_harness.orchestrator"
-            ".create_auto_harness_orchestrator",
-            side_effect=_capture_create,
-        ), patch(
-            "openjiuwen.core.foundation.llm.model.Model",
-            return_value=MagicMock(name="mock_model"),
-        ), patch.dict(
-            sys.modules,
-            _install_renderer_stubs(_fake_render),
+        with (
+            patch(
+                "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+                side_effect=_capture_create,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model.Model",
+                return_value=MagicMock(name="mock_model"),
+            ),
+            patch.dict(
+                sys.modules,
+                _install_renderer_stubs(_fake_render),
+            ),
         ):
             exit_code = await _run_auto_harness(
                 opts=opts,
@@ -214,14 +208,13 @@ class TestAutoHarnessCli:
 
         assert exit_code == 0
         assert captured_config is not None
-        assert (
-            captured_config.pipeline_preference
-            == EXTENDED_EVOLVE_PIPELINE
-        )
+        assert captured_config.pipeline_preference == EXTENDED_EVOLVE_PIPELINE
 
     @pytest.mark.asyncio
     async def test_run_with_detected_local_repo_sets_workspace(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ) -> None:
         """探测到 local_repo 时，workspace 也应切到仓库根。"""
         captured_config = None
@@ -263,39 +256,39 @@ class TestAutoHarnessCli:
             verbose=False,
         )
         (tmp_path / "auto_harness").mkdir(
-            parents=True, exist_ok=True,
+            parents=True,
+            exist_ok=True,
         )
 
-        with patch(
-            "openjiuwen.auto_harness.orchestrator"
-            ".create_auto_harness_orchestrator",
-            side_effect=_capture_create,
-        ), patch(
-            "openjiuwen.core.foundation.llm.model.Model",
-            return_value=MagicMock(name="mock_model"),
-        ), patch.dict(
-            sys.modules,
-            _install_renderer_stubs(_fake_render),
+        with (
+            patch(
+                "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+                side_effect=_capture_create,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model.Model",
+                return_value=MagicMock(name="mock_model"),
+            ),
+            patch.dict(
+                sys.modules,
+                _install_renderer_stubs(_fake_render),
+            ),
         ):
             exit_code = await _run_auto_harness(
                 opts=opts,
-                request=AutoHarnessRunRequest(
-                    goal="分析差距 claude-code"
-                ),
+                request=AutoHarnessRunRequest(goal="分析差距 claude-code"),
             )
 
         assert exit_code == 0
         assert captured_config is not None
-        assert captured_config.local_repo == str(
-            repo.resolve()
-        )
-        assert captured_config.workspace == str(
-            repo.resolve()
-        )
+        assert captured_config.local_repo == str(repo.resolve())
+        assert captured_config.workspace == str(repo.resolve())
 
     @pytest.mark.asyncio
     async def test_run_assess_invokes_github_cli_preflight(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ) -> None:
         """Assess stage should run GitHub CLI preflight first."""
         # Isolate from the invoking cwd so repo detection cannot drag in
@@ -329,7 +322,8 @@ class TestAutoHarnessCli:
             verbose=False,
         )
         (tmp_path / "auto_harness").mkdir(
-            parents=True, exist_ok=True,
+            parents=True,
+            exist_ok=True,
         )
 
         def _fake_preflight(_emit):
@@ -337,18 +331,23 @@ class TestAutoHarnessCli:
             preflight_called = True
             return None
 
-        with patch(
-            "openjiuwen.auto_harness.infra.github_cli.ensure_github_cli_ready",
-            side_effect=_fake_preflight,
-        ), patch(
-            "openjiuwen.auto_harness.stages.assess.run_assess_stream",
-            side_effect=_fake_assess_stream,
-        ), patch(
-            "openjiuwen.core.foundation.llm.model.Model",
-            return_value=MagicMock(name="mock_model"),
-        ), patch.dict(
-            sys.modules,
-            _install_renderer_stubs(_fake_render),
+        with (
+            patch(
+                "openjiuwen.rsi.auto_harness.infra.github_cli.ensure_github_cli_ready",
+                side_effect=_fake_preflight,
+            ),
+            patch(
+                "openjiuwen.rsi.auto_harness.stages.assess.run_assess_stream",
+                side_effect=_fake_assess_stream,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model.Model",
+                return_value=MagicMock(name="mock_model"),
+            ),
+            patch.dict(
+                sys.modules,
+                _install_renderer_stubs(_fake_render),
+            ),
         ):
             exit_code = await _run_auto_harness(
                 opts=opts,

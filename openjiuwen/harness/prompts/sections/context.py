@@ -6,8 +6,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 import re
+import threading
 
 from openjiuwen.core.foundation.tool.base import ToolCard
+from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.harness.prompts.workspace_content.workspace_header import (
     CONTEXT_HEADER,
     CONTEXT_FILE_TITLES,
@@ -102,12 +104,49 @@ DAILY_MEMORY_GUIDANCE = {
 }
 
 
+# Resolved context-file content per path, keyed on the file's identity. These
+# files (AGENT.md, SOUL.md, USER.md, ...) are re-read on every model call to be
+# folded into the system prompt, but they hold an agent's identity and change
+# about as often as its configuration does.
+#
+# Only LOCAL sys operations are cached. Under a sandbox the path names a file
+# inside the sandbox, so a same-named file on the host would stamp content that
+# was never read — the check below keeps that case on the uncached path rather
+# than serving a wrong answer.
+_CONTEXT_FILE_CACHE: dict[str, tuple[tuple[int, int], str | None]] = {}
+_CONTEXT_FILE_CACHE_LOCK = threading.Lock()
+
+
+def _local_context_file_stamp(sys_operation, full_path: Path) -> tuple[int, int] | None:
+    """Return the identity a cached read of this context file is keyed on.
+
+    Args:
+        sys_operation: SysOperation the read will go through.
+        full_path: Absolute path of the context file.
+
+    Returns:
+        ``(mtime_ns, size)`` for a local, stat-able file; None when the read is
+        not local or the file cannot be stat'd, meaning it must not be cached.
+    """
+    if getattr(sys_operation, "mode", None) != OperationMode.LOCAL:
+        return None
+    try:
+        stat_result = full_path.stat()
+    except OSError:
+        return None
+    return stat_result.st_mtime_ns, stat_result.st_size
+
+
 async def _read_context_file(
         sys_operation,
         workspace,
         file_key: str,
 ) -> str | None:
     """Read a single context file using sys_operation.
+
+    The resolved result is cached against the file's mtime and size, so an
+    unchanged file is not re-read on every model call. Both outcomes are cached:
+    an unfilled template resolves to None just as durably as real content does.
 
     Args:
         sys_operation: SysOperation instance.
@@ -130,15 +169,27 @@ async def _read_context_file(
     if full_path is None:
         return None
 
+    stamp = _local_context_file_stamp(sys_operation, full_path)
+    cache_key = str(full_path)
+    if stamp is not None:
+        with _CONTEXT_FILE_CACHE_LOCK:
+            cached = _CONTEXT_FILE_CACHE.get(cache_key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+
+    resolved: str | None = None
     result = await sys_operation.fs().read_file(str(full_path))
     if result.code == 0 and result.data:
         content = result.data.content
         if file_key == WorkspaceNode.IDENTITY_MD.value and _identity_has_filled_name(content):
-            return content
-        if content and not _is_unfilled_template(content):
-            return content
+            resolved = content
+        elif content and not _is_unfilled_template(content):
+            resolved = content
 
-    return None
+    if stamp is not None:
+        with _CONTEXT_FILE_CACHE_LOCK:
+            _CONTEXT_FILE_CACHE[cache_key] = (stamp, resolved)
+    return resolved
 
 
 async def _build_context_content(
@@ -268,295 +319,42 @@ async def build_context_file_sections(
     return sections
 
 
-def _extract_task_tool_agent_lines(
-        description: str,
-        language: str = "cn",
-) -> list[str]:
-    """Extract available sub-agent lines from task_tool's tool description."""
-    if not description:
-        return []
-
-    if language == "cn":
-        marker = "可用代理类型及对应工具："
-        stop_marker = "重要："
-    else:
-        marker = "Available agent types and the tools they have access to:"
-        stop_marker = "Important:"
-
-    if marker not in description:
-        return []
-
-    body = description.split(marker, 1)[1]
-    if stop_marker in body:
-        body = body.split(stop_marker, 1)[0]
-
-    lines = []
-    for raw_line in body.strip().splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        lines.append(line if line.startswith("- ") else f"- {line}")
-    return lines
-
-
 def build_tools_content(
         ability_manager,
         language: str = "cn",
 ) -> Optional[str]:
-    """Build tools list content string.
-
-    Args:
-        ability_manager: AbilityManager instance (or None).
-        language: 'cn' or 'en'.
-
-    Returns:
-        Formatted tools content string, or None if no tools available.
-    """
+    """Build general tool-usage rules when at least one tool is available."""
     if ability_manager is None:
         return None
 
-    tool_descriptions = {}
-    for ability in ability_manager.list():
-        if isinstance(ability, ToolCard) and ability.name and ability.description:
-            tool_descriptions[ability.name] = ability.description
-
-    if not tool_descriptions:
+    has_tools = any(
+        isinstance(ability, ToolCard) and bool(ability.name)
+        for ability in ability_manager.list()
+    )
+    if not has_tools:
         return None
 
-    hidden_tools = {
-        "cron_list_jobs",
-        "cron_get_job",
-        "cron_create_job",
-        "cron_update_job",
-        "cron_delete_job",
-        "cron_toggle_job",
-        "cron_preview_job",
+    prompts = {
+        "cn": """# 工具使用规则
+
+- 只调用当前请求中实际可用的工具。
+- 相同工具和相同参数已有结果时，不要重复调用。
+- 上一次结果为空或没有新增信息时，调整参数、改用其他工具或说明结果不足。
+- 文件搜索、读取、编辑和写入优先使用专用工具，不要用 Shell 重复实现。
+- Shell 命令只有存在依赖关系时才串联；长时间运行的命令使用后台执行，不要用 `sleep` 轮询。
+- 工具执行结果是事实来源，不要虚构或改写为尚未发生的结果。
+""",
+        "en": """# Tool Usage Rules
+
+- Call only tools that are actually available for the current request.
+- Do not repeat a tool call when the same tool and arguments already produced a result.
+- If the previous result was empty or added no new information, adjust the arguments, use another tool, or explain that the result is insufficient.
+- Prefer dedicated tools for searching, reading, editing, and writing files; do not reimplement those operations with Shell.
+- Chain Shell commands only when they depend on one another; run long-lived commands in the background instead of polling with `sleep`.
+- Tool results are the source of truth; do not fabricate or present operations that have not occurred as completed.
+""",
     }
-
-    grouped_labels = [
-        (
-            ("read_file", "write_file", "edit_file"),
-            "read_file / write_file / edit_file" if language == "cn" else "read_file / write_file / edit_file",
-            "文件读写编辑" if language == "cn" else "Read, write, and edit files",
-        ),
-        (
-            ("glob", "list_files", "grep"),
-            "glob / list_files / grep",
-            "文件搜索" if language == "cn" else "Search files and file contents",
-        ),
-    ]
-    memory_group = (
-        ("memory_search", "memory_get", "write_memory", "edit_memory", "read_memory"),
-        "memory_search / memory_get / write_memory / edit_memory / read_memory",
-        "记忆系统" if language == "cn" else "Memory system",
-    )
-
-    summary_overrides_cn = {
-        "paid_search": "付费联网搜索（配置 API 时优先使用）",
-        "free_search": "免费搜索（DuckDuckGo 等）",
-        "fetch_webpage": "抓取网页文本内容",
-        "image_ocr": "读取图片中的文字",
-        "visual_question_answering": "理解图片内容并回答问题",
-        "audio_transcription": "转写音频文件",
-        "audio_question_answering": "理解音频内容并回答",
-        "audio_metadata": "识别音频时长和歌曲信息",
-        "video_understanding": "分析视频内容",
-        "session_new": "创建多个协程任务（子 agent 异步运行）",
-        "session_cancel": "取消正在运行的协程",
-        "session_list": "查看所有协程状态",
-        "cron": "管理定时任务与提醒",
-        "bash": "执行 Shell 命令",
-        "code": "执行 Python 或 JavaScript 代码",
-        "list_skill": "列出可用技能",
-        "task_tool": "启动临时子代理处理复杂任务",
-    }
-    summary_overrides_en = {
-        "paid_search": "Paid web search (preferred when configured)",
-        "free_search": "Free web search",
-        "fetch_webpage": "Fetch webpage text",
-        "image_ocr": "Read text from images",
-        "visual_question_answering": "Understand images and answer questions",
-        "audio_transcription": "Transcribe audio",
-        "audio_question_answering": "Understand audio and answer questions",
-        "audio_metadata": "Identify audio duration and song metadata",
-        "video_understanding": "Analyze video content",
-        "session_new": "Create async sub-agent sessions",
-        "session_cancel": "Cancel a running sub-agent session",
-        "session_list": "List sub-agent session status",
-        "cron": "Manage scheduled jobs and reminders",
-        "bash": "Run shell commands",
-        "code": "Run Python or JavaScript code",
-        "list_skill": "List available skills",
-        "task_tool": "Launch a temporary sub-agent for complex work",
-    }
-    summary_overrides = summary_overrides_cn if language == "cn" else summary_overrides_en
-
-    def _tool_summary(name: str) -> str:
-        """Return concise tool summary with safe dict access."""
-        return summary_overrides.get(name, tool_descriptions.get(name, "").strip())
-
-    header = "# 可用工具" if language == "cn" else "# Available Tools"
-    lines = [header, ""]
-    rendered_names: set[str] = set()
-
-    preferred_order = [
-        "paid_search",
-        "free_search",
-        "fetch_webpage",
-        "image_ocr",
-        "visual_question_answering",
-        "audio_transcription",
-        "audio_question_answering",
-        "audio_metadata",
-        "video_understanding",
-        "session_new",
-        "session_cancel",
-        "session_list",
-        "cron",
-    ]
-
-    for name in preferred_order:
-        if name in tool_descriptions and name not in hidden_tools:
-            lines.append(f"- {name}: {_tool_summary(name)}")
-            rendered_names.add(name)
-
-    for group_names, label, summary in grouped_labels:
-        existing = [name for name in group_names if name in tool_descriptions and name not in hidden_tools]
-        if len(existing) == len(group_names):
-            lines.append(f"- {label}: {summary}")
-            rendered_names.update(existing)
-        else:
-            for name in existing:
-                lines.append(f"- {name}: {_tool_summary(name)}")
-                rendered_names.add(name)
-
-    for name in ("bash", "code"):
-        if name in tool_descriptions and name not in hidden_tools and name not in rendered_names:
-            lines.append(f"- {name}: {_tool_summary(name)}")
-            rendered_names.add(name)
-
-    if "list_skill" in tool_descriptions and "list_skill" not in rendered_names:
-        lines.append(f"- list_skill: {_tool_summary('list_skill')}")
-        rendered_names.add("list_skill")
-
-    group_names, label, summary = memory_group
-    existing = [name for name in group_names if name in tool_descriptions and name not in hidden_tools]
-    if len(existing) == len(group_names):
-        lines.append(f"- {label}: {summary}")
-        rendered_names.update(existing)
-    else:
-        for name in existing:
-            lines.append(f"- {name}: {_tool_summary(name)}")
-            rendered_names.add(name)
-
-    if "task_tool" in tool_descriptions and "task_tool" not in rendered_names:
-        lines.append(f"- task_tool: {_tool_summary('task_tool')}")
-        rendered_names.add("task_tool")
-
-    if language == "cn":
-        lines.extend(
-            [
-                "",
-                "## 工具调用去重规则",
-                "",
-                "- 调用工具前先检查本轮对话中是否已经用相同参数调用过同一工具；如果已有结果，优先基于已有结果继续推理，不要重复调用",
-                "- 如果上一次工具结果为空、无匹配或没有提供新信息，不要用完全相同的参数再次调用；应调整查询条件、换用更合适的工具，或直接说明当前结果不足",
-                "- 只有当任务确实需要分步执行、状态已经变化、参数不同，或前一次结果明确要求继续获取下一部分信息时，才可以再次调用同一工具",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "",
-                "## Tool Call Deduplication Rules",
-                "",
-                "- Before calling a tool, check whether the same tool has already been called with the same "
-                "arguments in this turn; if a result already exists, reason from that result instead of "
-                "repeating the call",
-                "- If the previous tool result was empty, had no matches, or added no new information, do not "
-                "call again with identical arguments; adjust the query, use a better-suited tool, or explain "
-                "that the current result is insufficient",
-                "- Call the same tool again only when the task genuinely requires multiple steps, state has "
-                "changed, arguments differ, or the previous result clearly asks you to fetch the next part of "
-                "the information",
-            ]
-        )
-
-    if "bash" in rendered_names:
-        if language == "cn":
-            lines.extend(
-                [
-                    "",
-                    "## bash 使用原则",
-                    "",
-                    "- 优先使用专用工具完成文件搜索、内容搜索、读取、编辑和写入，不要用 bash 替代 `glob` / `grep` / "
-                    "`read_file` / `edit_file` / `write_file`",
-                    "- 独立命令尽量并行调用；多步依赖命令才在单次调用里用 `&&` 串联，仅在不关心前序失败时才用 `;`",
-                    "- 长时间运行命令使用 `background: true`，不要用 `sleep` 轮询等待",
-                    "- 尽量使用绝对路径并避免频繁 `cd`；路径包含空格时使用双引号",
-                    "- 执行破坏性 Git 操作前先考虑更安全的替代方案",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    "",
-                    "## bash Guidelines",
-                    "",
-                    "- Prefer dedicated tools for file search, content search, reading, editing, and writing "
-                    "instead of using bash as a substitute for `glob` / `grep` / `read_file` / `edit_file` / "
-                    "`write_file`",
-                    "- Run independent commands in parallel; only chain dependent commands with `&&`, and "
-                    "use `;` only when earlier failures do not matter",
-                    "- Use `background: true` for long-running commands instead of polling with `sleep`",
-                    "- Prefer absolute paths and avoid frequent `cd`; quote paths with spaces using double quotes",
-                    "- Consider safer alternatives before destructive Git operations",
-                ]
-            )
-
-    if "task_tool" in rendered_names:
-        if language == "cn":
-            lines.extend(
-                [
-                    "",
-                    "## task_tool 使用原则",
-                    "",
-                    "- 任务复杂、多步骤、可独立执行时使用",
-                    "- 独立任务尽量并行执行",
-                    "- 简单任务直接执行，不使用子代理",
-                ]
-            )
-            agent_lines = _extract_task_tool_agent_lines(
-                tool_descriptions.get("task_tool", ""),
-                language,
-            )
-            if agent_lines:
-                lines.extend(["", "可用代理类型：", *agent_lines])
-        else:
-            lines.extend(
-                [
-                    "",
-                    "## task_tool Guidelines",
-                    "",
-                    "- Use it for complex, multi-step, independent tasks",
-                    "- Run independent tasks in parallel when possible",
-                    "- Execute simple tasks directly without spawning a sub-agent",
-                ]
-            )
-            agent_lines = _extract_task_tool_agent_lines(
-                tool_descriptions.get("task_tool", ""),
-                language,
-            )
-            if agent_lines:
-                lines.extend(["", "Available agent types:", *agent_lines])
-
-    for name, desc in tool_descriptions.items():
-        if name in rendered_names or name in hidden_tools:
-            continue
-        compact_desc = desc.strip().splitlines()[0]
-        lines.append(f"- {name}: {summary_overrides.get(name, compact_desc)}")
-
-    return "\n".join(lines) + "\n"
+    return prompts.get(language, prompts["cn"])
 
 
 def build_tools_section(

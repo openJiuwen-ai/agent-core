@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """AbilityManager Class Definition
 """
 from __future__ import annotations
@@ -9,6 +9,8 @@ import json
 import os
 from dataclasses import dataclass
 from typing import List, Any, Union, Optional, Tuple, Dict, Iterable
+
+import anyio
 from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -19,6 +21,7 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.core.foundation.tool.mcp.base import mcp_model_tool_name, mcp_model_tool_prefix
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -66,6 +69,19 @@ class AbilityExecutionError(AgentError):
             **kwargs,
         )
         self.tool_message = tool_message
+
+
+# 单次 tool.invoke 的默认调用级超时上限(秒)。作为"工具自身无超时"时的
+# 兜底,防止卡死的 tool.invoke 永久阻塞整轮 task_loop。工具可在
+# ``ToolCard.properties["resilience"]["timeout_s"]`` 声明覆盖;声明 ``None``
+# 表示豁免外层超时(完全交给工具内部超时管控)。
+DEFAULT_TOOL_CALL_TIMEOUT: float = float(os.getenv("DEFAULT_TOOL_CALL_TIMEOUT", 300.0))
+
+#: 全局绝对硬上限(秒)。即使工具被声明为非幂等或显式豁免(timeout_s=None)，
+#: 也不能超过此上限，防止"合法挂起"。
+MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT: float = float(
+    os.getenv("MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT", "3600.0")
+)
 
 
 class AbilityManager:
@@ -371,6 +387,45 @@ class AbilityManager:
         )
 
     @staticmethod
+    def _resolve_call_timeout(
+            tool_card: Optional[ToolCard],
+    ) -> Optional[float]:
+        """Resolve the per-call timeout for ``tool.invoke``.
+
+        Override order:
+
+        1. ``ToolCard.properties["resilience"]["timeout_s"]`` declared:
+           ``None`` or non-positive → ``None`` (exempt, internal timeout governs);
+           a positive number → that many seconds.
+        2. absent / no ``resilience`` block → ``DEFAULT_TOOL_CALL_TIMEOUT``.
+
+        ``ToolCard.idempotent`` is no longer consulted here. Whether a tool
+        is retried on failure is owned by ``ToolCallResilienceRail``; the
+        call-level timeout applies uniformly. An exempt (``None``) result
+        is still bounded by ``MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT`` at the call
+        site to prevent indefinite hangs.
+
+        Returning ``None`` means the caller passes it to
+        ``anyio.fail_after(None)``, which is a no-op deadline.
+        """
+        properties = getattr(tool_card, "properties", None) if tool_card else None
+        if not isinstance(properties, dict):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        resilience = properties.get("resilience")
+        if not isinstance(resilience, dict):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        declared = resilience.get("timeout_s", "unset")
+        if declared == "unset":
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        if declared is None:
+            return None
+        try:
+            value = float(declared)
+        except (TypeError, ValueError):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        return value if value > 0 else None
+
+    @staticmethod
     def _get_stream_writer_manager(session: Session) -> Any:
         try:
             return session._inner.stream_writer_manager()  # pylint: disable=protected-access
@@ -394,6 +449,26 @@ class AbilityManager:
         def add_single_ability(_ability: Ability) -> AddAbilityResult:
             if isinstance(_ability, ToolCard):
                 existing = self._tools.get(_ability.name)
+                if existing is not None and existing.id == _ability.id:
+                    # Same registry id: this is a re-registration of one logical
+                    # tool (a rail rebinding its own instance after a
+                    # reconfigure, or two rails contributing the same ability),
+                    # not an ambiguous name conflict. ``add_ability`` binds the
+                    # resource with ``refresh=True``, so the newest instance
+                    # already won; store its card too, otherwise the exposed
+                    # description would describe a different object than the one
+                    # that executes.
+                    logger.debug(
+                        f"Tool ability re-registered: "
+                        f"name='{_ability.name}', id='{_ability.id}'. "
+                        f"Rebind to the new ability."
+                    )
+                    self._tools[_ability.name] = _ability
+                    return AddAbilityResult(
+                        name=_ability.name,
+                        added=True,
+                        reason="refreshed_tool",
+                    )
                 if existing is not None:
                     logger.warning(
                         f"Duplicate tool ability detected: "
@@ -787,7 +862,7 @@ class AbilityManager:
                     underlying_tool_name = mcp_tool.name
                     if allowed_tool_names is not None and underlying_tool_name not in allowed_tool_names:
                         continue
-                    mcp_tool_name = f"mcp_{mcp_server_name}_{underlying_tool_name}"
+                    mcp_tool_name = mcp_model_tool_name(mcp_server_name, underlying_tool_name)
                     mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{underlying_tool_name}'
                     mcp_tool.name = mcp_tool_name
                     self._tools[mcp_tool_name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
@@ -1115,8 +1190,26 @@ class AbilityManager:
                     tool_call,
                     f"Tool instance not found in resource_mgr: {tool_id}",
                 )
+            call_timeout = self._resolve_call_timeout(tool_card)
+            # Global hard limit: even exempt tools (None) get a ceiling so they
+            # cannot hang the round indefinitely.
+            if call_timeout is None:
+                call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
-                result = await tool.invoke(tool_args, session=session)
+                with anyio.fail_after(call_timeout):
+                    result = await tool.invoke(tool_args, session=session)
+            except TimeoutError as e:
+                error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
+                logger.warning(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
+            except asyncio.CancelledError:
+                # Do not swallow cancellation; let outer scopes (e.g. DeepAgent
+                # round cancellation) propagate correctly through anyio CancelScope.
+                logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
+                raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)
@@ -1200,8 +1293,27 @@ class AbilityManager:
                     tool_call,
                     f"Ability not found in resource_mgr: {tool_name}",
                 )
+            # Resolve timeout from the tool's own card so non-idempotent
+            # tools are exempt on this path too (Layer 0 reads
+            # ``ToolCard.idempotent``); the name kwarg is no longer used.
+            call_timeout = self._resolve_call_timeout(tool.card)
+            # Global hard limit: even exempt tools (None) get a ceiling.
+            if call_timeout is None:
+                call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
-                result = await tool.invoke(tool_args, session=session)
+                with anyio.fail_after(call_timeout):
+                    result = await tool.invoke(tool_args, session=session)
+            except TimeoutError as e:
+                error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
+                logger.warning(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
+            except asyncio.CancelledError:
+                # Do not swallow cancellation; let outer scopes propagate correctly.
+                logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
+                raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)
@@ -1242,7 +1354,7 @@ class AbilityManager:
             resource_prefix = f"{mcp_server.server_id}.{server_name}."
             if tool_name.startswith(resource_prefix):
                 return mcp_server.server_id, tool_name.removeprefix(resource_prefix)
-            model_prefix = f"mcp_{server_name}_"
+            model_prefix = mcp_model_tool_prefix(server_name)
             if tool_name.startswith(model_prefix):
                 return mcp_server.server_id, tool_name.removeprefix(model_prefix)
         return None

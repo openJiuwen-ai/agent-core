@@ -1,599 +1,933 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Unit tests for JiuwenMemoryProvider (dual-mode: server + sdk).
+"""Unit tests for JiuwenMemoryProvider — server mode, httpx fully mocked.
 
-These tests exercise the provider purely through its public ``MemoryProvider``
-surface (``initialize`` / ``prefetch`` / ``sync_turn`` / ``handle_tool_call`` /
-``shutdown`` / ``get_tool_schemas`` / ``system_prompt_block`` / ``is_available``
-/ ``is_initialized`` / ``mode`` / ``name``). No private attributes or internal
-backend classes are accessed.
+The provider talks to a remote agent-memory server over httpx
+(``POST /v1/<verb>`` + ``GET /healthz``). These tests replace
+``httpx.AsyncClient`` with a fake so no network is touched — they exercise the
+provider's own logic (request shaping, response parsing, error mapping, circuit
+breaker, lifecycle) rather than the live server.
 
-- SDK-mode backend is driven through the real ``initialize()`` path by patching
-  the ``LongTermMemory`` source, then asserting on the injected mock's calls.
-- Server-mode backend is driven through ``initialize()`` with a mocked
-  ``httpx.AsyncClient``.
+These tests only touch ``JiuwenMemoryProvider``'s public API. The fake HTTP
+client is injected by patching the third-party ``httpx.AsyncClient`` symbol
+(which ``initialize()`` consumes as a public dependency); no private members
+or module-private constants of the provider are imported or accessed. The
+fake client is the very ``MagicMock`` the test builds and passes into
+``initialize()`` — asserting on ``fake.post`` / ``fake.get`` is asserting on
+the test's own object, not on provider internals.
+
+Coverage:
+- construction / metadata (name, availability, schemas, system prompt)
+- initialize (client creation, optional healthz, api_key → Authorization header,
+  health failure is non-fatal)
+- write path (add payload: content / tags / metadata.infer / tenant+scope)
+- read path (search payload: query / k / tenant+scope; prefetch formatting)
+- sync_turn (default: user only; ``save_assistant=True`` also stores assistant)
+- handle_tool_call (search / add result shapes; missing-arg / unknown-tool
+  errors)
+- circuit breaker (consecutive failures short-circuit later calls; a success
+  resets the failure counter so subsequent calls resume)
+- lifecycle (shutdown closes the client)
 """
+
+from __future__ import annotations
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.memory.external.jiuwen_memory_provider import (
-    JiuwenMemoryProvider,
-    LTM_SEARCH_SCHEMA,
-    LTM_SEARCH_SUMMARY_SCHEMA,
-    _SERVER_READ_TIMEOUT,
-    _SERVER_WRITE_TIMEOUT,
-)
-from jiuwen_memory.memory_core.long_term_memory import MemInfo, MemResult
-from jiuwen_memory.memory_core.manage.mem_model.memory_unit import MemoryType
-
-
-LTM_SOURCE = "jiuwen_memory.memory_core.long_term_memory.LongTermMemory"
+from openjiuwen.core.memory.external import JiuwenMemoryProvider
 
 
 # ---------------------------------------------------------------------------
-# Helpers / fixtures
+# httpx fakes
 # ---------------------------------------------------------------------------
 
 
-def _make_mem_result(mem_id="id1", content="test content", mem_type=MemoryType.USER_PROFILE, score=0.85):
-    return MemResult(
-        mem_info=MemInfo(mem_id=mem_id, content=content, type=mem_type),
-        score=score,
-    )
-
-
-def _make_http_result_row(mem_id="id1", content="test content", mem_type="user_profile", score=0.85):
-    return {"mem_id": mem_id, "content": content, "type": mem_type, "score": score}
-
-
-@pytest.fixture
-def mock_ltm():
-    ltm = MagicMock()
-    ltm.kv_store = None
-    ltm.register_store = AsyncMock()
-    ltm.set_scope_config = AsyncMock()
-    ltm.search_user_mem = AsyncMock(return_value=[])
-    ltm.search_user_history_summary = AsyncMock(return_value=[])
-    ltm.add_messages = AsyncMock()
-    return ltm
-
-
-@pytest.fixture
-def mock_kv():
-    kv = MagicMock()
-    kv.__bool__ = lambda self: True
-    return kv
-
-
-@pytest.fixture
-def mock_vector_store():
-    vs = MagicMock()
-    vs.__bool__ = lambda self: True
-    return vs
-
-
-@pytest.fixture
-def mock_db_store():
-    db = MagicMock()
-    db.__bool__ = lambda self: True
-    return db
-
-
-@pytest.fixture
-def mock_embedding():
-    emb = MagicMock()
-    emb.__bool__ = lambda self: True
-    return emb
-
-
-@pytest.fixture
-def sdk_stores(mock_kv, mock_vector_store, mock_db_store, mock_embedding):
-    """kwarg bundle for constructing an SDK-mode provider with mock stores."""
-    return dict(
-        kv_store=mock_kv,
-        vector_store=mock_vector_store,
-        db_store=mock_db_store,
-        embedding_model=mock_embedding,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Construction & mode selection (public surface only)
-# ---------------------------------------------------------------------------
-
-
-class TestConstruction:
-    def test_default_mode_is_server(self):
-        provider = JiuwenMemoryProvider()
-        assert provider.mode == "server"
-
-    def test_name_is_jiuwen_for_both_modes(self):
-        assert JiuwenMemoryProvider().name == "jiuwen"
-        assert JiuwenMemoryProvider(mode="sdk").name == "jiuwen"
-
-    def test_mode_is_case_insensitive(self):
-        assert JiuwenMemoryProvider(mode="SDK").mode == "sdk"
-
-    def test_invalid_mode_raises(self):
-        with pytest.raises(ValueError, match="Unsupported mode"):
-            JiuwenMemoryProvider(mode="bogus")
-
-    def test_server_mode_is_available_with_base_url(self):
-        assert JiuwenMemoryProvider(mode="server", base_url="http://localhost:8000").is_available() is True
-
-    def test_server_mode_not_available_with_empty_base_url(self):
-        assert JiuwenMemoryProvider(mode="server", base_url="").is_available() is False
-
-    def test_server_mode_not_available_with_none_base_url(self):
-        assert JiuwenMemoryProvider(mode="server", base_url=None).is_available() is False
-
-    def test_server_mode_not_initialized_by_default(self):
-        assert JiuwenMemoryProvider(mode="server").is_initialized is False
-
-
-# ---------------------------------------------------------------------------
-# Shared surface (tools / prompt) — mode-agnostic
-# ---------------------------------------------------------------------------
-
-
-class TestSharedSurface:
-    def test_get_tool_schemas(self):
-        names = [s["name"] for s in JiuwenMemoryProvider().get_tool_schemas()]
-        assert names == ["ltm_search", "ltm_search_summary"]
-
-    def test_system_prompt_block(self):
-        prompt = JiuwenMemoryProvider().system_prompt_block()
-        assert isinstance(prompt, str)
-        assert "ltm_search" in prompt
-        assert len(prompt) > 0
-
-    def test_schema_constants(self):
-        assert LTM_SEARCH_SCHEMA["name"] == "ltm_search"
-        assert LTM_SEARCH_SUMMARY_SCHEMA["name"] == "ltm_search_summary"
-        assert LTM_SEARCH_SCHEMA["parameters"]["required"] == ["query"]
-
-
-# ---------------------------------------------------------------------------
-# SDK-mode availability
-# ---------------------------------------------------------------------------
-
-
-class TestSDKAvailability:
-    def test_available_with_all_stores(self, sdk_stores):
-        assert JiuwenMemoryProvider(mode="sdk", **sdk_stores).is_available() is True
-
-    def test_available_with_embedding_config(self):
-        provider = JiuwenMemoryProvider(
-            mode="sdk", config={"embedding": {"model_name": "text-embedding-ada-002"}}
-        )
-        assert provider.is_available() is True
-
-    def test_not_available_with_no_stores_no_config(self):
-        assert JiuwenMemoryProvider(mode="sdk").is_available() is False
-
-    def test_not_available_with_partial_stores(self, mock_kv, mock_vector_store):
-        provider = JiuwenMemoryProvider(mode="sdk", kv_store=mock_kv, vector_store=mock_vector_store)
-        assert provider.is_available() is False
-
-    def test_not_initialized_by_default(self, sdk_stores):
-        assert JiuwenMemoryProvider(mode="sdk", **sdk_stores).is_initialized is False
-
-
-# ---------------------------------------------------------------------------
-# SDK-mode lifecycle (driven through real initialize())
-# ---------------------------------------------------------------------------
-
-
-class TestSDKLifecycle:
-    @pytest.mark.asyncio
-    async def test_initialize_marks_initialized_and_registers_store(self, sdk_stores, mock_ltm):
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize(user_id="u1", scope_id="s1")
-        assert provider.is_initialized is True
-        mock_ltm.register_store.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_initialize_skips_register_when_engine_already_bound(
-        self, sdk_stores, mock_ltm, mock_kv
-    ):
-        # Simulate an engine that already has a kv store bound: register_store
-        # must not be called.
-        mock_ltm.kv_store = mock_kv
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-        mock_ltm.register_store.assert_not_awaited()
-        assert provider.is_initialized is True
-
-    @pytest.mark.asyncio
-    async def test_shutdown_resets_initialized(self, sdk_stores, mock_ltm):
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            assert provider.is_initialized is True
-            await provider.shutdown()
-        assert provider.is_initialized is False
-
-
-# ---------------------------------------------------------------------------
-# SDK-mode prefetch (driven through real initialize())
-# ---------------------------------------------------------------------------
-
-
-class TestSDKPrefetch:
-    @pytest.mark.asyncio
-    async def test_prefetch_before_init_returns_empty(self):
-        provider = JiuwenMemoryProvider(mode="sdk", config={})
-        assert await provider.prefetch("anything") == ""
-
-    @pytest.mark.asyncio
-    async def test_empty_query_returns_empty(self, sdk_stores, mock_ltm):
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            assert await provider.prefetch("") == ""
-        mock_ltm.search_user_mem.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_prefetch_with_mem_results(self, sdk_stores, mock_ltm):
-        mock_ltm.search_user_mem.return_value = [
-            _make_mem_result(content="likes Rust", mem_type=MemoryType.EPISODIC_MEMORY, score=0.88),
-        ]
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            result = await provider.prefetch("Rust", user_id="u1", scope_id="s1")
-        assert "## Related Memories" in result
-        assert "likes Rust" in result
-        assert "episodic_memory" in result
-        mock_ltm.search_user_mem.assert_awaited_once_with(
-            query="Rust", num=5, user_id="u1", scope_id="s1", threshold=0.3,
-        )
-
-    @pytest.mark.asyncio
-    async def test_prefetch_with_summary_results(self, sdk_stores, mock_ltm):
-        mock_ltm.search_user_history_summary.return_value = [
-            _make_mem_result(content="discussed ownership", score=0.75),
-        ]
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            result = await provider.prefetch("ownership")
-        assert "## Related History Summaries" in result
-        assert "discussed ownership" in result
-
-    @pytest.mark.asyncio
-    async def test_prefetch_no_results_returns_empty(self, sdk_stores, mock_ltm):
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            assert await provider.prefetch("nothing") == ""
-
-    @pytest.mark.asyncio
-    async def test_prefetch_search_exception_returns_partial(self, sdk_stores, mock_ltm):
-        mock_ltm.search_user_mem.side_effect = RuntimeError("search error")
-        mock_ltm.search_user_history_summary.return_value = [
-            _make_mem_result(content="fallback summary", score=0.6),
-        ]
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            result = await provider.prefetch("test")
-        assert "fallback summary" in result
-        assert "## Related Memories" not in result
-
-
-# ---------------------------------------------------------------------------
-# SDK-mode sync_turn
-# ---------------------------------------------------------------------------
-
-
-class TestSDKSyncTurn:
-    @pytest.mark.asyncio
-    async def test_sync_turn_before_init_does_nothing(self, mock_ltm):
-        provider = JiuwenMemoryProvider(mode="sdk", config={})
-        await provider.sync_turn("hello", "hi")
-        mock_ltm.add_messages.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_sync_turn_with_both_messages(self, sdk_stores, mock_ltm):
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            await provider.sync_turn("hello", "hi there", user_id="u1", scope_id="s1")
-        mock_ltm.add_messages.assert_awaited_once()
-        call_args = mock_ltm.add_messages.call_args
-        messages = call_args[0][0]
-        assert len(messages) == 2
-        assert call_args.kwargs["user_id"] == "u1"
-        assert call_args.kwargs["scope_id"] == "s1"
-        assert "session_id" not in call_args.kwargs
-
-    @pytest.mark.asyncio
-    async def test_sync_turn_empty_messages_does_nothing(self, sdk_stores, mock_ltm):
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            await provider.sync_turn("", "")
-        mock_ltm.add_messages.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_sync_turn_exception_swallowed(self, sdk_stores, mock_ltm):
-        mock_ltm.add_messages.side_effect = RuntimeError("write failed")
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            await provider.sync_turn("hello", "hi")  # must not raise
-
-
-# ---------------------------------------------------------------------------
-# SDK-mode handle_tool_call
-# ---------------------------------------------------------------------------
-
-
-class TestSDKHandleToolCall:
-    @pytest.mark.asyncio
-    async def test_before_init_returns_error(self):
-        provider = JiuwenMemoryProvider(mode="sdk", config={})
-        parsed = json.loads(await provider.handle_tool_call("ltm_search", {"query": "test"}))
-        assert "error" in parsed
-
-    @pytest.mark.asyncio
-    async def test_unknown_tool_returns_error(self, sdk_stores, mock_ltm):
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            parsed = json.loads(await provider.handle_tool_call("unknown_tool", {}))
-        assert "error" in parsed and "unknown_tool" in parsed["error"]
-
-    @pytest.mark.asyncio
-    async def test_ltm_search_returns_results(self, sdk_stores, mock_ltm):
-        mock_ltm.search_user_mem.return_value = [
-            _make_mem_result(mem_id="m1", content="likes Python", mem_type=MemoryType.USER_PROFILE, score=0.92),
-        ]
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            parsed = json.loads(await provider.handle_tool_call("ltm_search", {"query": "likes what"}))
-        assert parsed["count"] == 1
-        assert parsed["results"][0]["mem_id"] == "m1"
-        assert parsed["results"][0]["content"] == "likes Python"
-        assert parsed["results"][0]["type"] == "user_profile"
-
-    @pytest.mark.asyncio
-    async def test_ltm_search_summary_returns_results(self, sdk_stores, mock_ltm):
-        mock_ltm.search_user_history_summary.return_value = [
-            _make_mem_result(mem_id="s1", content="discussed Rust", score=0.78),
-        ]
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            parsed = json.loads(await provider.handle_tool_call("ltm_search_summary", {"query": "Rust"}))
-        assert parsed["count"] == 1
-        assert parsed["results"][0]["content"] == "discussed Rust"
-
-    @pytest.mark.asyncio
-    async def test_handle_tool_call_exception_returns_error(self, sdk_stores, mock_ltm):
-        mock_ltm.search_user_mem.side_effect = RuntimeError("db down")
-        provider = JiuwenMemoryProvider(mode="sdk", **sdk_stores)
-        with patch(LTM_SOURCE, return_value=mock_ltm):
-            await provider.initialize()
-            parsed = json.loads(await provider.handle_tool_call("ltm_search", {"query": "test"}))
-        assert "error" in parsed and "db down" in parsed["error"]
-
-
-# ---------------------------------------------------------------------------
-# Server-mode — mocked httpx.AsyncClient (driven through real initialize())
-# ---------------------------------------------------------------------------
-
-
-def _mock_response(payload, status_code=200):
+def _mock_response(payload: dict, status_code: int = 200):
+    """An httpx.Response stand-in carrying a JSON payload."""
     resp = MagicMock()
     resp.status_code = status_code
     resp.json.return_value = payload
-    resp.raise_for_status = MagicMock()
     if status_code >= 400:
         resp.raise_for_status.side_effect = Exception(f"HTTP {status_code}")
+    else:
+        resp.raise_for_status = MagicMock()
     return resp
 
 
-def _fake_http(get_side_effect=ConnectionError("refused"), post_value=None, post_side_effect=None):
-    """Build a MagicMock standing in for httpx.AsyncClient.
+def _fake_http(
+    get_side_effect=None,
+    post_value=None,
+    post_side_effect=None,
+):
+    """A MagicMock standing in for httpx.AsyncClient.
 
-    The health-check GET defaults to failing (non-fatal); POSTs default to a
-    no-op success response.
+    - ``GET`` defaults to a successful healthz (initialize probes it).
+    - ``POST`` defaults to an empty ``{}`` success body.
     """
     http = MagicMock()
-    http.get = AsyncMock(side_effect=get_side_effect)
+    if get_side_effect is not None:
+        http.get = AsyncMock(side_effect=get_side_effect)
+    else:
+        http.get = AsyncMock(return_value=_mock_response({"status": "ok"}))
     if post_side_effect is not None:
         http.post = AsyncMock(side_effect=post_side_effect)
     else:
-        http.post = AsyncMock(return_value=post_value if post_value is not None else _mock_response({"results": []}))
+        http.post = AsyncMock(
+            return_value=post_value if post_value is not None else _mock_response({})
+        )
     http.aclose = AsyncMock()
     return http
 
 
-class TestServerInitialize:
-    @pytest.mark.asyncio
-    async def test_initialize_creates_http_client_and_checks_health(self):
-        provider = JiuwenMemoryProvider(mode="server", base_url="http://localhost:8000")
-        fake_http = _fake_http(get_side_effect=_mock_response({"status": "healthy"}))
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-        assert provider.is_initialized is True
-        fake_http.get.assert_awaited_once_with("/health")
-
-    @pytest.mark.asyncio
-    async def test_initialize_swallows_unreachable_health(self):
-        provider = JiuwenMemoryProvider(mode="server", base_url="http://nowhere:9999")
-        fake_http = _fake_http()
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-        assert provider.is_initialized is True  # health failure must not be fatal
-
-    @pytest.mark.asyncio
-    async def test_initialize_passes_authorization_header(self):
-        # Verify api_key flows into the client headers via observable behavior:
-        # the client is built with the Authorization header in the headers dict.
-        provider = JiuwenMemoryProvider(mode="server", api_key="secret-token")
-        with patch("httpx.AsyncClient") as client_cls:
-            await provider.initialize()
-        _, kwargs = client_cls.call_args
-        assert kwargs["headers"]["Authorization"] == "Bearer secret-token"
-
-    @pytest.mark.asyncio
-    async def test_shutdown_closes_client(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http()
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            await provider.shutdown()
-        fake_http.aclose.assert_awaited_once()
-        assert provider.is_initialized is False
+_PATCH = "httpx.AsyncClient"
 
 
-class TestServerPrefetch:
-    @pytest.mark.asyncio
-    async def test_prefetch_before_init_returns_empty(self):
-        assert await JiuwenMemoryProvider(mode="server").prefetch("test") == ""
+async def _init(provider: JiuwenMemoryProvider, fake_http) -> JiuwenMemoryProvider:
+    """initialize() under a patched httpx.AsyncClient returning fake_http.
 
-    @pytest.mark.asyncio
-    async def test_prefetch_formats_results(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http(post_side_effect=[
-            _mock_response({"results": [_make_http_result_row(content="likes Python")]}),
-            _mock_response({"results": [_make_http_result_row(content="chat summary", mem_type="summary")]}),
+    ``patch(..., return_value=fake_http)`` makes ``httpx.AsyncClient(...)``
+    return ``fake_http``, so the provider ends up using exactly this object.
+    The test then asserts on ``fake_http`` directly (its own mock).
+    """
+    with patch(_PATCH, return_value=fake_http):
+        await provider.initialize()
+    return provider
+
+
+# ---------------------------------------------------------------------------
+# Construction / metadata
+# ---------------------------------------------------------------------------
+
+
+def test_name_is_mem2():
+    assert JiuwenMemoryProvider().name == "jiuwen_memory"
+
+
+def test_is_available_with_base_url():
+    assert JiuwenMemoryProvider(base_url="http://localhost:8137").is_available() is True
+
+
+def test_not_available_without_base_url():
+    assert JiuwenMemoryProvider(base_url="").is_available() is False
+
+
+def test_not_initialized_by_default():
+    assert JiuwenMemoryProvider(base_url="http://localhost:8137").is_initialized is False
+
+
+def test_tool_schemas_have_expected_names():
+    schemas = JiuwenMemoryProvider().get_tool_schemas()
+    names = {s["name"] for s in schemas}
+    assert {"mem2_search", "mem2_add"} <= names
+    for s in schemas:
+        assert "parameters" in s and "description" in s
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_block_mentions_tools():
+    provider = JiuwenMemoryProvider(tenant_id="t1", user_id="u1")
+    with patch(_PATCH, return_value=_fake_http()):
+        await provider.initialize()
+    block = provider.system_prompt_block()
+    assert "Jiuwen Memory" in block
+    assert "mem2_search" in block and "mem2_add" in block
+    assert "u1" in block and "t1" in block
+
+
+# ---------------------------------------------------------------------------
+# initialize
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_initialize_creates_client_and_probes_healthz():
+    provider = JiuwenMemoryProvider(base_url="http://localhost:8137")
+    fake = _fake_http()
+    with patch(_PATCH, return_value=fake):
+        await provider.initialize()
+    assert provider.is_initialized is True
+    fake.get.assert_awaited_once_with("/healthz")
+
+
+@pytest.mark.asyncio
+async def test_initialize_health_failure_is_non_fatal():
+    """An unreachable server must not block initialization."""
+    provider = JiuwenMemoryProvider(base_url="http://nowhere:9999")
+    fake = _fake_http(get_side_effect=ConnectionError("refused"))
+    with patch(_PATCH, return_value=fake):
+        await provider.initialize()
+    assert provider.is_initialized is True
+
+
+@pytest.mark.asyncio
+async def test_initialize_requires_base_url():
+    provider = JiuwenMemoryProvider(base_url="")
+    with pytest.raises(ValueError):
+        await provider.initialize()
+
+
+@pytest.mark.asyncio
+async def test_api_key_flows_into_authorization_header():
+    provider = JiuwenMemoryProvider(api_key="secret-token")
+    with patch(_PATCH) as client_cls:
+        await provider.initialize()
+    _, kwargs = client_cls.call_args
+    assert kwargs["headers"]["Authorization"] == "Bearer secret-token"
+
+
+# ---------------------------------------------------------------------------
+# Write path — add via handle_tool_call (public entry point)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_add_posts_to_v1_add_with_full_payload():
+    fake = _fake_http()
+    provider = await _init(
+        JiuwenMemoryProvider(tenant_id="org1", user_id="alice"), fake
+    )
+    fake.post = AsyncMock(
+        return_value=_mock_response({"ok": True, "item_id": "id-1", "item": {}})
+    )
+    await provider.handle_tool_call(
+        "mem2_add", {"content": "a fact", "infer": True, "tags": ["x", "y"]}
+    )
+
+    fake.post.assert_awaited_once()
+    args, kwargs = fake.post.call_args
+    assert args[0] == "/v1/add"
+    body = kwargs["json"]
+    assert body["content"] == "a fact"
+    assert body["tags"] == ["x", "y"]
+    assert body["metadata"] == {"infer": "true"}  # infer flag translated to metadata
+    assert body["tenant_id"] == "org1"
+    assert body["scope"] == "alice"
+    # writes use the larger write timeout
+    assert kwargs["timeout"] >= 60.0
+
+
+@pytest.mark.asyncio
+async def test_add_without_infer_omits_infer_metadata():
+    fake = _fake_http()
+    provider = await _init(
+        JiuwenMemoryProvider(tenant_id="org1", user_id="alice"), fake
+    )
+    fake.post = AsyncMock(return_value=_mock_response({"ok": True, "item_id": "id-1"}))
+    await provider.handle_tool_call("mem2_add", {"content": "raw text", "infer": False})
+    body = fake.post.call_args.kwargs["json"]
+    assert body["metadata"] == {}  # no infer flag when infer=False
+
+
+@pytest.mark.asyncio
+async def test_add_returns_error_when_unavailable():
+    """A failed POST surfaces an error JSON via the tool-call entry (degrade, don't raise)."""
+    fake = _fake_http()
+    provider = await _init(
+        JiuwenMemoryProvider(tenant_id="org1", user_id="alice"), fake
+    )
+    fake.post = AsyncMock(side_effect=Exception("boom"))
+    out = await provider.handle_tool_call("mem2_add", {"content": "x", "infer": False})
+    assert "error" in json.loads(out)
+
+
+# ---------------------------------------------------------------------------
+# Read path — search via handle_tool_call / prefetch (public entry points)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_posts_to_v1_search_with_query_k_and_scope():
+    fake = _fake_http()
+    provider = await _init(
+        JiuwenMemoryProvider(tenant_id="org1", user_id="alice"), fake
+    )
+    fake.post = AsyncMock(
+        return_value=_mock_response(
+            {"hits": [{"item_id": "h1", "content": "c1", "score": 0.9}]}
+        )
+    )
+    out = await provider.handle_tool_call("mem2_search", {"query": "Python", "top_k": 5})
+    data = json.loads(out)
+    assert data["count"] == 1
+    assert data["results"][0]["content"] == "c1"
+    body = fake.post.call_args.kwargs["json"]
+    assert body["query"] == "Python"
+    assert body["k"] == 5
+    assert body["tenant_id"] == "org1" and body["scope"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_search_top_k_capped_to_max():
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(), fake)
+    fake.post = AsyncMock(return_value=_mock_response({"hits": []}))
+    await provider.handle_tool_call("mem2_search", {"query": "q", "top_k": 9999})
+    assert fake.post.call_args.kwargs["json"]["k"] == 50  # server-side cap
+
+
+@pytest.mark.asyncio
+async def test_search_empty_query_returns_error_without_posting():
+    """Empty query is treated as missing → error, no HTTP call."""
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(), fake)
+    out = await provider.handle_tool_call("mem2_search", {"query": ""})
+    data = json.loads(out)
+    assert "error" in data  # empty query == missing query
+    fake.post.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prefetch_formats_marked_block():
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(), fake)
+    fake.post = AsyncMock(
+        return_value=_mock_response(
+            {"hits": [{"content": "likes Python", "score": 0.8}]}
+        )
+    )
+    block = await provider.prefetch("Python")
+    assert block.startswith("## Jiuwen Memory")
+    assert "- likes Python" in block
+
+
+@pytest.mark.asyncio
+async def test_prefetch_empty_hits_returns_empty_string():
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(), fake)
+    fake.post = AsyncMock(return_value=_mock_response({"hits": []}))
+    assert await provider.prefetch("Python") == ""
+
+
+@pytest.mark.asyncio
+async def test_prefetch_pops_top_k_before_delegating_to_search():
+    """Regression: prefetch used to pass top_k twice (in kwargs + explicit)."""
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(), fake)
+    fake.post = AsyncMock(return_value=_mock_response({"hits": []}))
+    await provider.prefetch("q", top_k=3)
+    assert fake.post.call_args.kwargs["json"]["k"] == 3
+
+
+# ---------------------------------------------------------------------------
+# sync_turn — user-only by default, assistant when opted in
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sync_turn_stores_only_user_by_default():
+    fake = _fake_http()
+    provider = await _init(
+        JiuwenMemoryProvider(tenant_id="org1", user_id="alice", infer_turns=False),
+        fake,
+    )
+    fake.post = AsyncMock(return_value=_mock_response({"ok": True, "item_id": "i"}))
+    await provider.sync_turn("user says", "assistant says")
+
+    # Exactly one POST — only the user turn.
+    assert fake.post.await_count == 1
+    body = fake.post.call_args.kwargs["json"]
+    assert body["content"] == "user says"
+    assert "user" in body["tags"]
+
+
+@pytest.mark.asyncio
+async def test_sync_turn_saves_assistant_when_enabled():
+    fake = _fake_http()
+    provider = await _init(
+        JiuwenMemoryProvider(
+            tenant_id="org1",
+            user_id="alice",
+            infer_turns=False,
+            save_assistant_turns=True,
+        ),
+        fake,
+    )
+    fake.post = AsyncMock(return_value=_mock_response({"ok": True, "item_id": "i"}))
+    await provider.sync_turn("user says", "assistant says")
+
+    assert fake.post.await_count == 2
+    bodies = [c.kwargs["json"] for c in fake.post.call_args_list]
+    assert bodies[0]["content"] == "user says"
+    assert bodies[1]["content"] == "assistant says"
+    assert "assistant" in bodies[1]["tags"]
+
+
+@pytest.mark.asyncio
+async def test_sync_turn_infer_flag_respected():
+    fake = _fake_http()
+    provider = await _init(
+        JiuwenMemoryProvider(tenant_id="org1", user_id="alice", infer_turns=False),
+        fake,
+    )
+    fake.post = AsyncMock(return_value=_mock_response({"ok": True, "item_id": "i"}))
+    await provider.sync_turn("user says", "assistant says", infer=True)
+    assert fake.post.call_args.kwargs["json"]["metadata"] == {"infer": "true"}
+
+
+# ---------------------------------------------------------------------------
+# handle_tool_call
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_call_search_returns_results():
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(tenant_id="t1", user_id="u1"), fake)
+    fake.post = AsyncMock(
+        return_value=_mock_response(
+            {"hits": [{"item_id": "h1", "content": "c1", "score": 0.9}]}
+        )
+    )
+    out = await provider.handle_tool_call("mem2_search", {"query": "Python", "top_k": 3})
+    data = json.loads(out)
+    assert data["count"] == 1
+    assert data["results"][0]["content"] == "c1"
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_call_add_returns_stored():
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(tenant_id="t1", user_id="u1"), fake)
+    fake.post = AsyncMock(
+        return_value=_mock_response(
+            {"item_id": "id-1", "item": {"content": "a fact", "tier": "semantic"}}
+        )
+    )
+    out = await provider.handle_tool_call(
+        "mem2_add", {"content": "a fact", "infer": True}
+    )
+    data = json.loads(out)
+    assert data["result"] == "stored"
+    assert data["item_id"] == "id-1"
+    assert data["tier"] == "semantic"
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_call_add_deduped_when_no_item_id():
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(tenant_id="t1", user_id="u1"), fake)
+    fake.post = AsyncMock(return_value=_mock_response({"item_id": None}))
+    out = await provider.handle_tool_call("mem2_add", {"content": "dup"})
+    data = json.loads(out)
+    assert data["result"] == "deduped"
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_call_search_missing_query_errors():
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(tenant_id="t1", user_id="u1"), fake)
+    out = await provider.handle_tool_call("mem2_search", {})
+    assert "error" in json.loads(out)
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_call_add_missing_content_errors():
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(tenant_id="t1", user_id="u1"), fake)
+    out = await provider.handle_tool_call("mem2_add", {})
+    assert "error" in json.loads(out)
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_call_unknown_tool_errors():
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(tenant_id="t1", user_id="u1"), fake)
+    out = await provider.handle_tool_call("mem2_bogus", {})
+    assert "Unknown tool" in json.loads(out)["error"]
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_call_uninitialized_errors():
+    provider = JiuwenMemoryProvider(tenant_id="t1", user_id="u1")  # not initialized
+    out = await provider.handle_tool_call("mem2_search", {"query": "x"})
+    assert "not initialized" in json.loads(out)["error"]
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker — observed purely through HTTP call counts (no private state)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_breaker_opens_after_repeated_failures():
+    """Once the breaker trips, further calls must NOT reach http again.
+
+    The threshold is an implementation detail, so we drive failures until the
+    call count stops growing (the breaker short-circuits) or we hit a safe
+    upper bound. No private constants or fields are read.
+    """
+    fake = _fake_http(post_side_effect=Exception("server down"))
+    provider = await _init(JiuwenMemoryProvider(), fake)
+
+    upper = 20  # well above any plausible threshold; guards against infinite loop
+    for _ in range(upper):
+        await provider.handle_tool_call("mem2_search", {"query": "q"})
+
+    before = fake.post.await_count
+    # The breaker is open by now (threshold is far below ``upper``); subsequent
+    # calls must short-circuit without a new POST.
+    await provider.handle_tool_call("mem2_search", {"query": "q"})
+    assert fake.post.await_count == before
+
+
+@pytest.mark.asyncio
+async def test_breaker_success_resets_counter():
+    """After a success, the failure counter resets: subsequent calls resume
+    hitting http (the breaker is closed again)."""
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(), fake)
+
+    # Two failures (below threshold) then a success.
+    fake.post = AsyncMock(
+        side_effect=[Exception("x"), Exception("x"), _mock_response({"hits": []})]
+    )
+    await provider.handle_tool_call("mem2_search", {"query": "q"})  # fail
+    await provider.handle_tool_call("mem2_search", {"query": "q"})  # fail
+    out = await provider.handle_tool_call("mem2_search", {"query": "q"})  # success
+    assert json.loads(out)["count"] == 0
+
+    # Counter reset: a fresh success call still reaches http (breaker closed),
+    # and returns its payload — proving we did not short-circuit.
+    fake.post = AsyncMock(
+        return_value=_mock_response(
+            {"hits": [{"item_id": "h1", "content": "c1", "score": 0.9}]}
+        )
+    )
+    out = await provider.handle_tool_call("mem2_search", {"query": "q"})
+    assert json.loads(out)["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_client_and_clears_state():
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(), fake)
+    await provider.shutdown()
+    fake.aclose.assert_awaited_once()
+    assert provider.is_initialized is False
+
+
+# ===========================================================================
+# SDK mode — agent-memory kernel fully mocked (no real engine, no HTTP)
+# ===========================================================================
+#
+# SDK backend does ``from api import assemble`` plus a few type imports at
+# initialize() time. We inject fakes into ``sys.modules`` so no real
+# agent-memory install is needed — the backend exercises its own logic (scope
+# mapping, write/recall argument shaping, result parsing, sync_turn behavior,
+# error mapping) against a mock LocalMemoryAPI.
+
+import asyncio
+import sys
+import types
+
+from dataclasses import dataclass, field
+
+
+# ---- fake agent-memory type surface -------------------------------------- #
+
+
+@dataclass
+class _FakeScope:
+    org: str = ""
+    space: str = ""
+    user: str = ""
+    agent: str = ""
+    session: str = ""
+
+
+class _FakeModality:
+    TEXT = "text"
+
+
+@dataclass
+class _FakeContext:
+    scope: _FakeScope = field(default_factory=_FakeScope)
+    extensions: dict = field(default_factory=dict)
+
+
+class _FakeDisclosureLevel:
+    L0 = "l0"
+    L1 = "l1"
+    L2 = "l2"
+    ADAPTIVE = "adaptive"
+
+
+@dataclass
+class _FakeRetrievedItem:
+    unit_id: str = ""
+    content: str = ""
+    score: float = 0.0
+
+
+@dataclass
+class _FakeRetrievalResult:
+    items: list = field(default_factory=list)
+
+
+@dataclass
+class _FakeMemoryUnit:
+    id: str = ""
+    content: str = ""
+    tier: Any = None
+
+
+class _FakeTier:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeConfig:
+    """Stand-in for agent-memory's config.Config."""
+    @classmethod
+    def from_dict(cls, data):
+        return cls()
+
+
+def _build_fake_mem_modules(local_api):
+    """Build fake api / common / common.type_def / retrieval / retrieval.types /
+    config modules for sys.modules injection.
+
+    ``api.assemble`` returns ``local_api`` (the fake LocalMemoryAPI); tests
+    configure local_api's write/recall and assert on call_args.
+    """
+    api_mod = types.ModuleType("api")
+    api_mod.assemble = MagicMock(return_value=local_api)
+
+    ctd_pkg = types.ModuleType("common.type_def")
+    ctd_pkg.Scope = _FakeScope
+    ctd_pkg.Modality = _FakeModality
+    ctd_pkg.Context = _FakeContext
+    ctd_pkg.MemoryUnit = _FakeMemoryUnit
+
+    common_pkg = types.ModuleType("common")
+    common_pkg.__path__ = []  # mark as package
+
+    rt_mod = types.ModuleType("retrieval.types")
+    rt_mod.DisclosureLevel = _FakeDisclosureLevel
+    rt_mod.RetrievedItem = _FakeRetrievedItem
+    rt_mod.RetrievalResult = _FakeRetrievalResult
+
+    retrieval_pkg = types.ModuleType("retrieval")
+    retrieval_pkg.__path__ = []
+
+    config_mod = types.ModuleType("config")
+    config_mod.Config = _FakeConfig
+
+    return {
+        "api": api_mod,
+        "common": common_pkg,
+        "common.type_def": ctd_pkg,
+        "retrieval": retrieval_pkg,
+        "retrieval.types": rt_mod,
+        "config": config_mod,
+    }
+
+
+@pytest.fixture
+def fake_kernel():
+    """Yield (api_mod, local_api) with agent-memory modules injected.
+
+    ``api_mod.assemble`` is the MagicMock the backend calls via
+    ``from api import assemble``; it returns ``local_api`` (the fake
+    LocalMemoryAPI). Tests configure local_api.write/recall and assert on
+    call_args, and can assert on api_mod.assemble to check config flow.
+    """
+    local_api = MagicMock()
+    local_api.write = MagicMock(return_value=[])
+    local_api.recall = MagicMock(return_value=_FakeRetrievalResult(items=[]))
+    modules = _build_fake_mem_modules(local_api)
+    api_mod = modules["api"]
+    saved = {k: sys.modules.get(k) for k in modules}
+    sys.modules.update(modules)
+    try:
+        yield api_mod, local_api
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
+# ---- construction & mode ------------------------------------------------ #
+
+
+def test_sdk_mode_selected():
+    provider = JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u")
+    assert provider.mode == "sdk"
+    assert provider.is_available() is True     # SDK always available in principle
+
+
+def test_sdk_mode_case_insensitive():
+    assert JiuwenMemoryProvider(mode="SDK").mode == "sdk"
+
+
+def test_invalid_mode_raises():
+    with pytest.raises(ValueError):
+        JiuwenMemoryProvider(mode="bogus")
+
+
+# ---- initialize --------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_sdk_initialize_calls_assemble_with_config(fake_kernel):
+    api_mod, local_api = fake_kernel
+    provider = JiuwenMemoryProvider(
+        mode="sdk", tenant_id="t1", user_id="u1", config_dict={"globals": {}}
+    )
+    await provider.initialize()
+    assert provider.is_initialized is True
+    api_mod.assemble.assert_called_once()
+    _, kwargs = api_mod.assemble.call_args
+    assert "config" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_sdk_initialize_without_config_uses_default(fake_kernel):
+    api_mod, local_api = fake_kernel
+    provider = JiuwenMemoryProvider(mode="sdk", tenant_id="t1", user_id="u1")
+    await provider.initialize()
+    assert provider.is_initialized is True
+    assert api_mod.assemble.call_args.kwargs.get("config") is None
+
+
+async def _init_sdk(provider, fake_kernel):
+    """Initialize an SDK provider under the fake agent-memory modules."""
+    api_mod, local_api = fake_kernel
+    await provider.initialize()
+    return provider
+
+
+# ---- write path (add) --------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_sdk_add_passes_content_scope_tags_metadata(fake_kernel):
+    api_mod, local_api = fake_kernel
+    local_api.write = MagicMock(
+        return_value=[_FakeMemoryUnit(id="id-1", content="a fact", tier=_FakeTier("semantic"))]
+    )
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", tenant_id="org1", user_id="alice", infer_turns=False),
+        fake_kernel,
+    )
+
+    out = await provider.handle_tool_call("mem2_add", {"content": "a fact", "tags": ["x"], "infer": True})
+    data = json.loads(out)
+    assert data["result"] == "stored"
+    assert data["item_id"] == "id-1"
+    assert data["tier"] == "semantic"
+
+    args, kwargs = local_api.write.call_args
+    assert args[0] == "a fact"                       # content
+    scope = args[1]
+    assert scope.org == "org1" and scope.user == "alice"
+    assert kwargs["tags"] == ["x"]
+    assert kwargs["metadata"] == {"infer": "true"}   # infer flag → metadata
+    assert kwargs["identity"] is scope               # identity == target scope
+
+
+@pytest.mark.asyncio
+async def test_sdk_add_without_infer_omits_metadata(fake_kernel):
+    api_mod, local_api = fake_kernel
+    local_api.write = MagicMock(return_value=[_FakeMemoryUnit(id="id-1")])
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u", infer_turns=False),
+        fake_kernel,
+    )
+    await provider.handle_tool_call("mem2_add", {"content": "raw text"})
+    assert local_api.write.call_args.kwargs["metadata"] is None
+
+
+@pytest.mark.asyncio
+async def test_sdk_add_deduped_when_write_returns_empty(fake_kernel):
+    api_mod, local_api = fake_kernel
+    local_api.write = MagicMock(return_value=[])     # all deduped (infer path)
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u", infer_turns=False),
+        fake_kernel,
+    )
+    out = await provider.handle_tool_call("mem2_add", {"content": "dup"})
+    data = json.loads(out)
+    assert data["result"] == "deduped"
+    assert data["item_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_sdk_add_missing_content_errors(fake_kernel):
+    api_mod, local_api = fake_kernel
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u", infer_turns=False),
+        fake_kernel,
+    )
+    out = await provider.handle_tool_call("mem2_add", {})
+    assert "error" in json.loads(out)
+
+
+# ---- read path (search) ------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_sdk_search_passes_query_scope_top_k_disclosure(fake_kernel):
+    api_mod, local_api = fake_kernel
+    local_api.recall = MagicMock(
+        return_value=_FakeRetrievalResult(items=[
+            _FakeRetrievedItem(unit_id="h1", content="c1", score=0.9),
         ])
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            result = await provider.prefetch("Python", user_id="u1", scope_id="s1")
-        assert "## Related Memories" in result
-        assert "likes Python" in result
-        assert "## Related History Summaries" in result
-        assert "chat summary" in result
-        # Two POSTs: /search_memory/ then /search_user_history_summary/
-        assert fake_http.post.await_count == 2
-        assert fake_http.post.call_args_list[0][0][0] == "/search_memory/"
-        assert fake_http.post.call_args_list[1][0][0] == "/search_user_history_summary/"
+    )
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", tenant_id="org1", user_id="alice", infer_turns=False),
+        fake_kernel,
+    )
+    out = await provider.handle_tool_call("mem2_search", {"query": "Python", "top_k": 5})
+    data = json.loads(out)
+    assert data["count"] == 1
+    assert data["results"][0]["content"] == "c1"
+    assert data["results"][0]["item_id"] == "h1"
 
-    @pytest.mark.asyncio
-    async def test_prefetch_no_results_returns_empty(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http(post_value=_mock_response({"results": []}))
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            assert await provider.prefetch("nothing") == ""
+    args, kwargs = local_api.recall.call_args
+    assert args[0] == "Python"                       # query
+    ctx = args[1]
+    assert ctx.scope.org == "org1" and ctx.scope.user == "alice"
+    assert kwargs["identity"] is ctx.scope
+    assert kwargs["top_k"] == 5
+    assert kwargs["disclosure"] == _FakeDisclosureLevel.L2   # full content parity
 
-    @pytest.mark.asyncio
-    async def test_prefetch_search_failure_returns_partial(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http(post_side_effect=[
-            Exception("boom"),
-            _mock_response({"results": [_make_http_result_row(content="fallback summary", mem_type="summary")]}),
+
+@pytest.mark.asyncio
+async def test_sdk_search_top_k_capped(fake_kernel):
+    api_mod, local_api = fake_kernel
+    local_api.recall = MagicMock(return_value=_FakeRetrievalResult(items=[]))
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", infer_turns=False), fake_kernel
+    )
+    await provider.handle_tool_call("mem2_search", {"query": "q", "top_k": 9999})
+    assert local_api.recall.call_args.kwargs["top_k"] == 50   # _MAX_TOP_K
+
+
+@pytest.mark.asyncio
+async def test_sdk_search_empty_query_errors_without_recall(fake_kernel):
+    api_mod, local_api = fake_kernel
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", infer_turns=False), fake_kernel
+    )
+    out = await provider.handle_tool_call("mem2_search", {"query": ""})
+    assert "error" in json.loads(out)
+    local_api.recall.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sdk_search_failure_returns_empty(fake_kernel):
+    api_mod, local_api = fake_kernel
+    local_api.recall = MagicMock(side_effect=RuntimeError("boom"))
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", infer_turns=False), fake_kernel
+    )
+    out = await provider.handle_tool_call("mem2_search", {"query": "q"})
+    assert json.loads(out)["count"] == 0
+
+
+# ---- prefetch ----------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_sdk_prefetch_formats_marked_block(fake_kernel):
+    api_mod, local_api = fake_kernel
+    local_api.recall = MagicMock(
+        return_value=_FakeRetrievalResult(items=[
+            _FakeRetrievedItem(content="likes Python", score=0.8),
         ])
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            result = await provider.prefetch("test")
-        assert "fallback summary" in result
-        assert "## Related Memories" not in result
+    )
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", infer_turns=False), fake_kernel
+    )
+    block = await provider.prefetch("Python")
+    assert block.startswith("## Jiuwen Memory")
+    assert "- likes Python" in block
 
 
-class TestServerSyncTurn:
-    @pytest.mark.asyncio
-    async def test_sync_turn_before_init_does_nothing(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        await provider.sync_turn("hello", "hi")  # no http client yet; must not raise
-
-    @pytest.mark.asyncio
-    async def test_sync_turn_posts_add_messages(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http(post_value=_mock_response({"status": "success"}))
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            await provider.sync_turn("hello", "hi there", user_id="u1", scope_id="s1")
-        fake_http.post.assert_awaited_once()
-        path, kwargs = fake_http.post.call_args[0][0], fake_http.post.call_args[1]
-        assert path == "/add_messages/"
-        payload = kwargs["json"]
-        assert payload["messages"] == [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "hi there"},
-        ]
-        assert payload["user_id"] == "u1"
-        assert payload["scope_id"] == "s1"
-        # add_messages triggers LLM extraction → write path uses a larger timeout
-        assert kwargs["timeout"] == _SERVER_WRITE_TIMEOUT
-        assert kwargs["timeout"] > _SERVER_READ_TIMEOUT
-
-    @pytest.mark.asyncio
-    async def test_sync_turn_empty_messages_does_nothing(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http()
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            await provider.sync_turn("", "")
-        fake_http.post.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_sync_turn_exception_swallowed(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http(post_side_effect=Exception("server down"))
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            await provider.sync_turn("hello", "hi")  # must not raise
+# ---- sync_turn ---------------------------------------------------------- #
 
 
-class TestServerHandleToolCall:
-    @pytest.mark.asyncio
-    async def test_before_init_returns_error(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        parsed = json.loads(await provider.handle_tool_call("ltm_search", {"query": "test"}))
-        assert "error" in parsed
+@pytest.mark.asyncio
+async def test_sdk_sync_turn_stores_only_user_by_default(fake_kernel):
+    api_mod, local_api = fake_kernel
+    local_api.write = MagicMock(return_value=[_FakeMemoryUnit(id="i")])
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u", infer_turns=False),
+        fake_kernel,
+    )
+    await provider.sync_turn("user says", "assistant says")
+    assert local_api.write.call_count == 1          # only user turn
+    assert local_api.write.call_args.args[0] == "user says"
 
-    @pytest.mark.asyncio
-    async def test_unknown_tool_returns_error(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http()
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            parsed = json.loads(await provider.handle_tool_call("unknown_tool", {}))
-        assert "error" in parsed and "unknown_tool" in parsed["error"]
 
-    @pytest.mark.asyncio
-    async def test_ltm_search_returns_results(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http(post_value=_mock_response({
-            "results": [_make_http_result_row(mem_id="m1", content="likes Python")],
-        }))
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            parsed = json.loads(await provider.handle_tool_call("ltm_search", {"query": "Python"}))
-        assert parsed["count"] == 1
-        assert parsed["results"][0]["content"] == "likes Python"
-        assert fake_http.post.call_args[0][0] == "/search_memory/"
+@pytest.mark.asyncio
+async def test_sdk_sync_turn_saves_assistant_when_enabled(fake_kernel):
+    api_mod, local_api = fake_kernel
+    local_api.write = MagicMock(return_value=[_FakeMemoryUnit(id="i")])
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(
+            mode="sdk", tenant_id="t", user_id="u",
+            infer_turns=False, save_assistant_turns=True,
+        ),
+        fake_kernel,
+    )
+    await provider.sync_turn("user says", "assistant says")
+    assert local_api.write.call_count == 2
+    contents = [c.args[0] for c in local_api.write.call_args_list]
+    assert contents == ["user says", "assistant says"]
 
-    @pytest.mark.asyncio
-    async def test_ltm_search_summary_returns_results(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http(post_value=_mock_response({
-            "results": [_make_http_result_row(mem_id="s1", content="discussed Rust", mem_type="summary")],
-        }))
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            parsed = json.loads(await provider.handle_tool_call("ltm_search_summary", {"query": "Rust"}))
-        assert parsed["count"] == 1
-        assert parsed["results"][0]["content"] == "discussed Rust"
-        assert fake_http.post.call_args[0][0] == "/search_user_history_summary/"
 
-    @pytest.mark.asyncio
-    async def test_handle_tool_call_exception_returns_error(self):
-        provider = JiuwenMemoryProvider(mode="server")
-        fake_http = _fake_http(post_side_effect=Exception("network down"))
-        with patch("httpx.AsyncClient", return_value=fake_http):
-            await provider.initialize()
-            parsed = json.loads(await provider.handle_tool_call("ltm_search", {"query": "test"}))
-        assert "error" in parsed
+@pytest.mark.asyncio
+async def test_sdk_sync_turn_infer_flag_respected(fake_kernel):
+    api_mod, local_api = fake_kernel
+    local_api.write = MagicMock(return_value=[_FakeMemoryUnit(id="i")])
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u", infer_turns=False),
+        fake_kernel,
+    )
+    await provider.sync_turn("user says", "assistant says", infer=True)
+    assert local_api.write.call_args.kwargs["metadata"] == {"infer": "true"}
+
+
+# ---- tool dispatch edges ------------------------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_sdk_unknown_tool_errors(fake_kernel):
+    api_mod, local_api = fake_kernel
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", infer_turns=False), fake_kernel
+    )
+    out = await provider.handle_tool_call("mem2_bogus", {})
+    assert "Unknown tool" in json.loads(out)["error"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_uninitialized_errors(fake_kernel):
+    provider = JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u")  # not initialized
+    out = await provider.handle_tool_call("mem2_search", {"query": "x"})
+    assert "not initialized" in json.loads(out)["error"]
+
+
+# ---- lifecycle ---------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_sdk_shutdown_clears_state(fake_kernel):
+    api_mod, local_api = fake_kernel
+    provider = await _init_sdk(
+        JiuwenMemoryProvider(mode="sdk", infer_turns=False), fake_kernel
+    )
+    await provider.shutdown()
+    assert provider.is_initialized is False

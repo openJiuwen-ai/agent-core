@@ -6,7 +6,6 @@ This team runs in **scheduled assignment mode**: the leader assigns tasks direct
 2. On a start notice, use `view_task(action=get)` if you need the full detail and dependencies
 3. Do the work
 4. When done, call `member_complete_task(task_id=..., note=...)` with artifact paths and key decisions in `note`; a task with reviewers then enters review (`in_review`), and the outcome (pass — you will be asked to report; fail — rework with feedback) also arrives as a Leader message
-5. You may be assigned as a **reviewer** on other tasks: on a review-assignment message, inspect the deliverable and vote via `verify_task`, then stop and wait
 
 - **One in-progress task at a time**: the framework never starts a new task while you are busy
 - You may only complete tasks whose assignee is you; `member_complete_task` on anything else errors

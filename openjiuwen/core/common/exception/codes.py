@@ -167,6 +167,26 @@ class StatusCode(Enum):
     COMPONENT_TOOL_INPUT_PARAM_ERROR = (102001, "component tool_input parameter error, reason: {error_msg}")
     COMPONENT_TOOL_INIT_FAILED = (102002, "component tool initialization failed, reason: {error_msg}")
 
+    # ======================================
+    # Symphony Component 119000 - 119019
+    # ======================================
+    COMPONENT_SYMPHONY_INVENTORY_INVALID = (119000, "component symphony inventory is invalid, reason: {reason}")
+    COMPONENT_SYMPHONY_CONFIG_ERROR = (119001, "component symphony config error, reason: {reason}")
+    COMPONENT_SYMPHONY_SCHEMA_INVALID = (119002, "component symphony schema is invalid, reason: {reason}")
+    COMPONENT_SYMPHONY_ARTIFACT_NOT_FOUND = (119003, "component symphony artifact not found, reason: {reason}")
+    COMPONENT_SYMPHONY_ARTIFACT_READ_CALL_FAILED = (
+        119004,
+        "component symphony artifact read call failed, reason: {reason}",
+    )
+    COMPONENT_SYMPHONY_ARTIFACT_WRITE_CALL_FAILED = (
+        119005,
+        "component symphony artifact write call failed, reason: {reason}",
+    )
+    COMPONENT_SYMPHONY_LLM_CALL_FAILED = (119006, "component symphony llm call failed, reason: {reason}")
+    COMPONENT_SYMPHONY_BUILD_STATE_INVALID = (119007, "component symphony build state is invalid, reason: {reason}")
+    COMPONENT_SYMPHONY_BUILD_RUNTIME_ERROR = (119008, "component symphony build runtime error, reason: {reason}")
+    COMPONENT_SYMPHONY_BUILD_INTERRUPTED = (119009, "component symphony build interrupted, reason: {reason}")
+
     # =========================
     # Agent Orchestration 120000–129999
     # =========================
@@ -207,7 +227,9 @@ class StatusCode(Enum):
     DEEPAGENT_RUNTIME_ERROR = (123023, "deepagent runtime error, reason: {error_msg}")
     DEEPAGENT_TASK_LOOP_NOT_IMPLEMENTED = (123024, "deepagent task loop not implemented, reason: {error_msg}")
     DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND = (123025, "subagent not found, reason: {error_msg}")
-    DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR = (123026, "deepagent load expert harness error, reason: {error_msg}")
+    DEEPAGENT_LOAD_PLUGIN_ERROR = (123026, "deepagent load plugin error, reason: {error_msg}")
+    DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR = (123027, "deepagent load agent template error, reason: {error_msg}")
+    DEEPAGENT_UNLOAD_EXTENSION_ERROR = (123028, "deepagent unload extension error, reason: {error_msg}")
 
     # =============================================================================================================
     # 110 Runner / Distributed 110000–110999

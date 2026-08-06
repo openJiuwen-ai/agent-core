@@ -43,14 +43,15 @@ SKILL_RAIL_LIST_SKILL_SYSTEM_PROMPT: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 SKILL_RAIL_ALL_MODE_HEADER_CN = (
     "# 技能\n\n"
-    "执行前先用 read_file 阅读相关 SKILL.md。\n\n"
-    "可用技能：\n"
+    "选择与任务最相关的技能，使用技能前，调用 `skill_tool` 获取该技能的完整 `SKILL.md`。\n\n"
+    "当前可用技能：\n\n"
 )
 
 SKILL_RAIL_ALL_MODE_HEADER_EN = (
     "# Skills\n\n"
-    "Read the relevant SKILL.md using read_file before execution.\n\n"
-    "Available skills:\n"
+    "Select the skill most relevant to the task. Before using a skill, call "
+    "`skill_tool` to retrieve its complete `SKILL.md`.\n\n"
+    "Currently available skills:\n\n"
 )
 
 SKILL_RAIL_ALL_MODE_HEADER: Dict[str, str] = {
@@ -58,13 +59,9 @@ SKILL_RAIL_ALL_MODE_HEADER: Dict[str, str] = {
     "en": SKILL_RAIL_ALL_MODE_HEADER_EN,
 }
 
-SKILL_RAIL_ALL_MODE_INSTRUCTION_CN = (
-    "\n选择最相关的技能，先阅读其 SKILL.md 再执行。"
-)
+SKILL_RAIL_ALL_MODE_INSTRUCTION_CN = ""
 
-SKILL_RAIL_ALL_MODE_INSTRUCTION_EN = (
-    "\nSelect the most relevant skill by reading its SKILL.md first."
-)
+SKILL_RAIL_ALL_MODE_INSTRUCTION_EN = ""
 
 SKILL_RAIL_ALL_MODE_INSTRUCTION: Dict[str, str] = {
     "cn": SKILL_RAIL_ALL_MODE_INSTRUCTION_CN,
@@ -77,7 +74,7 @@ SKILL_RAIL_ALL_MODE_INSTRUCTION: Dict[str, str] = {
 SKILL_RAIL_AUTO_LIST_MODE_PROMPT_CN = """# 技能
 
 需要时先调用 list_skill 查看可用技能，再用 read_file 读取相关 SKILL.md 后执行。
-需要时使用 code 执行 Python 或 JavaScript；执行 shell 命令时，根据运行环境信息选择合适的 shell
+执行 shell 命令时，根据运行环境信息选择合适的 shell
 （Windows 按 Git Bash/PowerShell 可用性选择，Linux/macOS 通常使用 bash/sh）。
 """
 
@@ -85,7 +82,6 @@ SKILL_RAIL_AUTO_LIST_MODE_PROMPT_EN = """# Skills
 
 When needed, call list_skill first to see available skills,
 then read the relevant SKILL.md with read_file before execution.
-Use code for Python or JavaScript snippets when needed.
 For shell commands, choose the shell according to the runtime environment information
 (Windows depends on Git Bash/PowerShell availability; Linux/macOS usually use bash/sh).
 """
@@ -123,10 +119,12 @@ def build_skill_line(
     skill_name: str,
     description: str,
     skill_md_path: Optional[str] = None,
+    language: str = "cn",
 ) -> str:
     """Build one rendered skill line."""
+    separator = "：" if language == "cn" else ": "
     return (
-        f"{index}. {skill_name}: {description}"
+        f"{index}. `{skill_name}`{separator}{description}"
         + (f"\n   Path: {skill_md_path}" if skill_md_path else "")
     )
 
@@ -134,7 +132,7 @@ def build_skill_line(
 def build_skill_lines(lines: Iterable[str]) -> str:
     """Join rendered skill lines."""
     items: List[str] = [line for line in lines if line]
-    return "\n\n".join(items)
+    return "\n".join(items)
 
 
 def build_all_mode_skill_prompt(skill_lines: str, language: str = "cn") -> str:

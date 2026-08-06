@@ -46,6 +46,7 @@ class TaskPlanningRail(DeepAgentRail):
         enable_progress_repeat: bool = False,
         list_tool_call_interval: int = 20,
         model_selection: Optional[Dict[Model, str]] = None,
+        inject_prompt: bool = True,
     ) -> None:
         """Initialize TaskPlanningRail.
 
@@ -56,11 +57,14 @@ class TaskPlanningRail(DeepAgentRail):
                 The model's client_id (from model_client_config) is used as the model_id
                 for switching. When provided, the rail switches the inner ReActAgent's
                 model before each LLM call based on the in-progress task's selected_model_id.
+            inject_prompt: Whether to inject the task-planning system prompt.
+                Todo tool registration and model switching remain enabled when false.
         """
         super().__init__()
         self.tools = None
         self.enable_progress_repeat = enable_progress_repeat
         self.list_tool_call_interval = list_tool_call_interval
+        self.inject_prompt = inject_prompt
         self._tool_call_counts = {}
         self._todos_cache: Dict[str, List[TodoItem]] = {}
         self.system_prompt_builder = None
@@ -150,12 +154,15 @@ class TaskPlanningRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
-        task_planning_section = build_todo_section(
-            language=self.system_prompt_builder.language,
-            model_selection=self._model_selection if self._model_selection else None,
-        )
-        if task_planning_section is not None:
-            self.system_prompt_builder.add_section(task_planning_section)
+        if self.inject_prompt:
+            task_planning_section = build_todo_section(
+                language=self.system_prompt_builder.language,
+                model_selection=self._model_selection if self._model_selection else None,
+            )
+            if task_planning_section is not None:
+                self.system_prompt_builder.add_section(task_planning_section)
+            else:
+                self.system_prompt_builder.remove_section(SectionName.TODO)
         else:
             self.system_prompt_builder.remove_section(SectionName.TODO)
 

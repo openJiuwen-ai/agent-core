@@ -26,7 +26,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
-from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.i18n import reply_hint_for, t
 from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_BROADCAST,
     INBOUND_TYPE_DIRECT,
@@ -562,7 +562,7 @@ class MessageHandler(BaseCoordinationHandler):
                 note_text=t("hitt.silence_note"),
             )
         note_kind = None if expanded.is_template else "reply-hint"
-        note_text = None if expanded.is_template else t("dispatcher.reply_hint", sender=msg.from_member_name)
+        note_text = None if expanded.is_template else reply_hint_for(msg.from_member_name)
         return render_inbound(
             content=expanded.body,
             sender=msg.from_member_name,

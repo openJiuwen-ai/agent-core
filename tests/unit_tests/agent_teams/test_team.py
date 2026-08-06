@@ -1090,6 +1090,22 @@ async def test_is_team_completed_unread_message_returns_none(agent_team, db):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_is_team_completed_ignores_unread_direct_to_shutdown_member(agent_team, db):
+    """Unread direct messages to SHUTDOWN members do not block completion."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.SHUTDOWN.value)
+    await _drain_one_task(agent_team)
+    await agent_team.message_manager.send_message(content="shutdown notice", to_member_name="member1")
+
+    snapshot = await agent_team.is_team_completed()
+
+    assert snapshot is not None
+    assert snapshot.member_count == 2
+    assert snapshot.task_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_is_team_completed_blocks_on_unread_broadcast(agent_team, db):
     """A pending broadcast blocks completion: any unread message gates conclusion."""
     await _seed_member(db, "leader1", MemberStatus.READY.value)

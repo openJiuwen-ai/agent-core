@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -37,6 +37,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import (
     DeepAgentConfig,
@@ -52,6 +53,7 @@ from openjiuwen.harness.subagents.code_agent import (
     CODE_AGENT_FACTORY_NAME,
     DEFAULT_CODE_AGENT_SYSTEM_PROMPT,
 )
+from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import (
     DEFAULT_RESEARCH_AGENT_SYSTEM_PROMPT,
     RESEARCH_AGENT_FACTORY_NAME,
@@ -77,9 +79,13 @@ def _create_dummy_model() -> Model:
 
 @pytest.fixture(autouse=True)
 def _mock_image_modality_probe(monkeypatch):
-    probe = AsyncMock(return_value=True)
-    monkeypatch.setattr("openjiuwen.harness.deep_agent.probe_image_support", probe)
-    return probe
+    from openjiuwen.harness.image_modality_probe import reset_image_support_cache
+
+    reset_image_support_cache()
+    schedule = MagicMock()
+    monkeypatch.setattr("openjiuwen.harness.deep_agent.schedule_image_support_probe", schedule)
+    yield schedule
+    reset_image_support_cache()
 
 
 class FakeInnerCallbackManager:
@@ -241,11 +247,10 @@ class DummyTool(Tool):
 
 
 @pytest.mark.asyncio
-async def test_ensure_initialized_resolves_read_image_multimodal_before_rails(
+async def test_ensure_initialized_defers_read_image_multimodal_probe(
     _mock_image_modality_probe,
 ) -> None:
     llm = _create_dummy_model()
-    _mock_image_modality_probe.return_value = False
     rail = CapturingRail()
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
         DeepAgentConfig(
@@ -259,9 +264,38 @@ async def test_ensure_initialized_resolves_read_image_multimodal_before_rails(
 
     await agent.ensure_initialized()
 
-    assert agent.deep_config.enable_read_image_multimodal is False
-    assert rail.enable_read_image_multimodal is False
-    _mock_image_modality_probe.assert_awaited_once_with(llm)
+    # The probe never blocks startup: rails see the unresolved value and
+    # degrade to metadata-only while the verdict is fetched in the background.
+    assert agent.deep_config.enable_read_image_multimodal is None
+    assert rail.enable_read_image_multimodal is None
+    assert should_enable_read_image_multimodal(agent) is False
+    _mock_image_modality_probe.assert_called_once_with(llm)
+
+
+@pytest.mark.asyncio
+async def test_ensure_initialized_uses_cached_read_image_multimodal(
+    _mock_image_modality_probe,
+) -> None:
+    from openjiuwen.harness import image_modality_probe
+
+    llm = _create_dummy_model()
+    image_modality_probe._probe_results[image_modality_probe.probe_cache_key(llm)] = True
+    rail = CapturingRail()
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(
+            model=llm,
+            enable_task_loop=False,
+            auto_create_workspace=False,
+        )
+    )
+    agent.set_react_agent(FakeReactAgent(), initialized=False)
+    agent.add_rail(rail)
+
+    await agent.ensure_initialized()
+
+    assert agent.deep_config.enable_read_image_multimodal is True
+    assert rail.enable_read_image_multimodal is True
+    _mock_image_modality_probe.assert_not_called()
 
 
 def test_configure_set_react_agent_and_is_initialized() -> None:
@@ -279,7 +313,7 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
     assert agent.loop_coordinator is None
 
 
-def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt() -> None:
+def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
         DeepAgentConfig(
             enable_task_loop=False,
@@ -289,10 +323,10 @@ def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt
     )
 
     assert agent.system_prompt_builder is not None
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
+    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
     initial_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "initial identity" in initial_prompt
-    assert "<prompt-attachment>" in initial_prompt
+    assert "<prompt-attachment>" not in initial_prompt
 
     agent.configure(
         DeepAgentConfig(
@@ -302,10 +336,10 @@ def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt
         )
     )
 
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
+    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
     reloaded_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "updated identity" in reloaded_prompt
-    assert "<prompt-attachment>" in reloaded_prompt
+    assert "<prompt-attachment>" not in reloaded_prompt
 
 
 @pytest.mark.asyncio
@@ -728,7 +762,7 @@ async def test_create_deep_agent_auto_registers_complete_vision_tools(
         assert agent.ability_manager.get("visual_question_answering") is not None
         assert agent.deep_config.enable_read_image_multimodal is False
         await agent.ensure_initialized()
-        _mock_image_modality_probe.assert_not_awaited()
+        _mock_image_modality_probe.assert_not_called()
     finally:
         agent.ability_manager.teardown_tools()
 
@@ -747,11 +781,11 @@ async def test_create_deep_agent_skips_incomplete_vision_tools(
     assert agent.ability_manager.get("visual_question_answering") is None
     assert agent.deep_config.enable_read_image_multimodal is None
 
-    _mock_image_modality_probe.return_value = True
     await agent.ensure_initialized()
 
-    assert agent.deep_config.enable_read_image_multimodal is True
-    _mock_image_modality_probe.assert_awaited_once_with(agent.deep_config.model)
+    # Still auto: the probe was only scheduled, never waited for.
+    assert agent.deep_config.enable_read_image_multimodal is None
+    _mock_image_modality_probe.assert_called_once_with(agent.deep_config.model)
 
 
 def test_create_deep_agent_skips_free_search_when_all_free_engines_disabled(monkeypatch) -> None:
@@ -1033,6 +1067,22 @@ def test_create_deep_agent_auto_add_task_planning_rail() -> None:
     assert "TaskPlanningRail" in rail_types
 
 
+def test_resolve_deep_agent_parts_adds_rl_online_rail_from_env(monkeypatch) -> None:
+    from openjiuwen.harness.factory import resolve_deep_agent_parts
+
+    monkeypatch.setenv("USE_RL_ONLINE_RAIL", "1")
+    monkeypatch.setenv("TRAJECTORY_GATEWAY_URL", "http://127.0.0.1:18080")
+    monkeypatch.setenv("RL_ONLINE_TENANT_ID", "test-user")
+
+    parts = resolve_deep_agent_parts(
+        model=_create_dummy_model(),
+        enable_sys_operation=False,
+    )
+
+    rail_types = [type(rail).__name__ for rail in parts.rails if rail is not None]
+    assert "RLOnlineRail" in rail_types
+
+
 @pytest.mark.asyncio
 async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
     tool = _build_tool_card("factory_tool")
@@ -1285,6 +1335,7 @@ def test_create_subagent_forwards_browser_capabilities_to_factory(tmp_path) -> N
         workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
         subagents=[browser_spec],
     )
+    parent.deep_config.enable_read_image_multimodal = False
     factory_result = object()
 
     with patch(
@@ -1299,6 +1350,80 @@ def test_create_subagent_forwards_browser_capabilities_to_factory(tmp_path) -> N
 
     assert subagent is factory_result
     assert mock_create_browser_agent.call_args.kwargs["browser_capabilities"] == ["pdf", "vision"]
+    assert mock_create_browser_agent.call_args.kwargs["enable_read_image_multimodal"] is False
+
+
+def test_create_subagent_forwards_multimodal_support_to_browser_factory(tmp_path) -> None:
+    browser_spec = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser prompt",
+        factory_name="browser_agent",
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[browser_spec],
+    )
+    parent.deep_config.enable_read_image_multimodal = True
+
+    with patch(
+        "openjiuwen.harness.subagents.browser_agent.create_browser_agent",
+        return_value=object(),
+    ) as mock_create_browser_agent:
+        parent.create_subagent("browser_agent", "browser_session")
+
+    assert mock_create_browser_agent.call_args.kwargs["enable_read_image_multimodal"] is True
+
+
+def test_create_subagent_forwards_multimodal_support_to_derived_browser_model(tmp_path) -> None:
+    parent_model = _create_dummy_model()
+    browser_spec = build_browser_agent_config(
+        parent_model,
+        language="en",
+    )
+    parent = create_deep_agent(
+        model=parent_model,
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[browser_spec],
+    )
+    parent.deep_config.enable_read_image_multimodal = False
+
+    with patch(
+        "openjiuwen.harness.subagents.browser_agent.create_browser_agent",
+        return_value=object(),
+    ) as mock_create_browser_agent:
+        parent.create_subagent("browser_agent", "browser_session")
+
+    assert mock_create_browser_agent.call_args.kwargs["enable_read_image_multimodal"] is False
+
+
+def test_create_subagent_keeps_auto_probe_for_distinct_browser_model(tmp_path) -> None:
+    browser_spec = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser prompt",
+        factory_name="browser_agent",
+        model=_create_dummy_model(),
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[browser_spec],
+    )
+    parent.deep_config.enable_read_image_multimodal = False
+
+    with patch(
+        "openjiuwen.harness.subagents.browser_agent.create_browser_agent",
+        return_value=object(),
+    ) as mock_create_browser_agent:
+        parent.create_subagent("browser_agent", "browser_session")
+
+    assert "enable_read_image_multimodal" not in mock_create_browser_agent.call_args.kwargs
 
 
 def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:

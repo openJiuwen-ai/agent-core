@@ -38,8 +38,8 @@ class MemoryProvider(ABC):
     async def sync_turn(self, user_msg: str, assistant_msg: str, **kwargs) -> None:
         pass
     
-    def system_prompt_block(self) -> str:
-        """Return each provider's guide of system prompts.."""
+    def system_prompt_block(self) -> str | dict[str, str]:
+        """Return provider guidance as plain text or localized text."""
         return ""
     
     async def shutdown(self) -> None:

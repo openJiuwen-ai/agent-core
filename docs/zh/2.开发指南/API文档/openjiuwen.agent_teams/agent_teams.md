@@ -18,6 +18,7 @@
 * **worktree**(WorktreeConfig, 可选): 队友 worktree 隔离配置。默认值：`None`。
 * **workspace**(TeamWorkspaceConfig, 可选): 团队共享工作空间配置。默认值：`None`。
 * **metadata**(dict[str, Any], 可选): 附加元数据。默认值：`{}`。
+* **enable_permissions**(bool, 可选): 是否启用 Team 权限审批链路。启用后由 `TeamPermissionRail` 处理 Teammate 工具权限，并由 Leader 审批 `ask` 决策。默认值：`False`。详见 [Team 权限护栏](./rails/team_permission_rail.md)。
 
 ### model_validate
 

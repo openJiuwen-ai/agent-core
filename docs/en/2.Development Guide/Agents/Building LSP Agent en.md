@@ -68,10 +68,10 @@ uv run python examples/lsp/deep_agent_lsp_demo.py
 
 | Lifecycle event | What `LspRail` does |
 |---|---|
-| `init()` — agent starts | Initializes `LSPServerManager`; registers `LspTool` on the agent's `ability_manager` |
+| `init()` — agent starts | Resolves LSP options and registers `LspTool` on the agent's `ability_manager` |
 | Agent runs | LLM calls the `lsp` tool freely; language servers start lazily on first request; `publishDiagnostics` notifications are buffered in `LspDiagnosticRegistry` |
 | `after_tool_call` — after `edit_file` / `write_file` | Sends `textDocument/didChange` to the language server so it re-analyses the modified file; fresh diagnostics are buffered asynchronously (fire-and-forget) |
-| `before_model_call` — before each LLM call | Drains buffered diagnostics and injects them as a `UserMessage` so the LLM sees errors without calling any diagnostic tool explicitly |
+| `before_model_call` — before each LLM call | Asynchronously initializes `LSPServerManager` before the first LLM call, then drains buffered diagnostics and injects them as a `UserMessage` so the LLM sees errors without calling any diagnostic tool explicitly |
 | `uninit()` — agent stops | Removes `LspTool`; shuts down all language server processes |
 
 The agent sees a single tool named `lsp`. Its description and full operation schema are automatically injected into the system prompt — you do not need to describe it manually.

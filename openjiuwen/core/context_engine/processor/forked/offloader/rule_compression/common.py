@@ -4,7 +4,6 @@ import re
 
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import RuleContext
 
-
 ERROR_RE = re.compile(
     r"\b(error|failed|failure|traceback|exception|warn|warning)\b",
     re.IGNORECASE,
@@ -31,7 +30,7 @@ _DISPLAY_LINE_PREFIX_PRESERVE_WS_RE = re.compile(
 def count_tokens(text: str, ctx: RuleContext) -> int:
     if ctx.count_tokens is not None:
         return max(ctx.count_tokens(text), 1)
-    return max(len(text) // 3, 1)
+    return max(len(text) // 4, 1)
 
 
 def meets_savings_ratio(original: str, candidate: str, ctx: RuleContext) -> bool:

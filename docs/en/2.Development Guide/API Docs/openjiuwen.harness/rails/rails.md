@@ -14,7 +14,7 @@ Built-in guardrails that hook into the `DeepAgent` lifecycle. Rails are register
 | `ProgressiveToolRail` | Dynamically loads and unloads tools based on relevance to the current task. |
 | `SecurityRail` | Applies security policies such as command allowlists and path validation. |
 | `SkillUseRail` | Enables the agent to discover and invoke learned skills; it does not generate, approve, or persist evolution records. |
-| `SkillEvolutionRail` | Evolves existing regular skills from trajectories or user requests, with optional approval before `EvolutionStore` persistence; active review flow must be used together with `SubagentRail`. |
+| `SkillEvolutionRail` | Evolves existing regular skills from trajectories or user requests, with optional approval before `EvolutionStore` persistence; active review runs through the rail-owned `evolve_review_task`. |
 | `SubagentRail` | Manages sub-agent spawning via `enable_async_subagent` flag — sync mode registers `TaskTool`, async mode registers `session` tools. |
 | `TaskCompletionRail` | Evaluates whether the current task is complete and triggers the stop condition. |
 | `ContextEvolutionRail` | Persists and retrieves task-specific memory across iterations. |

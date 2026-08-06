@@ -150,7 +150,7 @@ processor_type() -> str
 ### async offload_messages
 
 ```python
-async offload_messages(role: str, content: str, messages: List[BaseMessage], *, context: ModelContext = None, offload_handle: str = None, offload_type: str = "in_memory", **kwargs) -> Optional[BaseMessage]
+async offload_messages(role: str, content: str, messages: List[BaseMessage], *, context: ModelContext = None, offload_handle: str = None, offload_type: str = "filesystem", **kwargs) -> Optional[BaseMessage]
 ```
 
 将指定消息 offload 到旁路存储，主上下文中用占位符替换。用于实现消息卸载能力。
@@ -162,7 +162,7 @@ async offload_messages(role: str, content: str, messages: List[BaseMessage], *, 
 * **messages**(List[BaseMessage])：待 offload 的原始消息列表。
 * **context**(ModelContext，可选)：当前上下文实例。默认值：`None`。
 * **offload_handle**(str，可选)：offload 句柄，为空时自动生成 UUID。默认值：`None`。
-* **offload_type**(str，可选)：存储类型。默认值：`"in_memory"`。
+* **offload_type**(str，可选)：存储类型。默认值：`"filesystem"`。
 
 **返回**：
 

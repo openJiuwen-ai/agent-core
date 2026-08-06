@@ -41,7 +41,10 @@ def test_react_agent_builds_multimodal_user_message_from_tool_result() -> None:
 
     assert len(messages) == 1
     assert messages[0].role == "user"
-    assert messages[0].content[0]["type"] == "text"
+    assert messages[0].content[0] == {
+        "type": "text",
+        "text": "Image loaded from tool: /tmp/a.png",
+    }
     assert messages[0].content[1] == {
         "type": "image_url",
         "image_url": {"url": "data:image/png;base64,abc"},
@@ -92,6 +95,50 @@ def test_react_agent_batches_multiple_multimodal_tool_results_into_one_user_mess
         "type": "image_url",
         "image_url": {"url": "data:image/jpeg;base64,bbb"},
     }
+
+
+def test_react_agent_labels_mcp_sourced_images() -> None:
+    from openjiuwen.core.foundation.tool import McpToolResult
+
+    result = McpToolResult(
+        data={
+            "content": "tree summary\n\n1 image(s) attached as multimodal input.",
+            "multimodal": [
+                {
+                    "type": "image",
+                    "source": "mcp",
+                    "source_path": "get_window_state",
+                    "mime_type": "image/png",
+                    "data_url": "data:image/png;base64,abc",
+                }
+            ],
+        },
+    )
+
+    messages = ReActAgent._build_multimodal_tool_result_messages(result)
+
+    assert len(messages) == 1
+    assert messages[0].content[0] == {
+        "type": "text",
+        "text": "Image loaded from mcp: get_window_state",
+    }
+    assert messages[0].content[1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,abc"},
+    }
+
+
+def test_tool_message_content_uses_mcp_tool_result_content() -> None:
+    from openjiuwen.core.foundation.tool import McpToolResult
+
+    result = McpToolResult(
+        data={
+            "content": "tree summary",
+            "multimodal": [{"type": "image", "data_url": "data:image/png;base64,abc"}],
+        },
+    )
+
+    assert AbilityManager._build_tool_message_content(result) == "tree summary"
 
 
 def test_react_agent_detects_image_input_in_messages() -> None:

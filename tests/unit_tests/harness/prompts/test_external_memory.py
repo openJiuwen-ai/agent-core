@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.external_memory import (
     build_external_memory_section,
@@ -32,6 +30,20 @@ class TestBuildExternalMemorySection:
 
         assert section is not None
         assert section.content.get("cn") == prompt_block
+
+    def test_build_with_localized_prompt_block(self):
+        prompt_block = {
+            "cn": "# 长期记忆规则",
+            "en": "# Long-Term Memory Rules",
+        }
+
+        cn = build_external_memory_section(prompt_block, language="cn")
+        en = build_external_memory_section(prompt_block, language="en")
+
+        assert cn is not None
+        assert en is not None
+        assert cn.content["cn"] == "# 长期记忆规则"
+        assert en.content["en"] == "# Long-Term Memory Rules"
 
     def test_build_with_empty_prompt_block(self):
         """Scenario 2: Build section with empty prompt block returns None."""

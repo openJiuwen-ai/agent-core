@@ -15,6 +15,10 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from openjiuwen.agent_teams.agent.coordination.event_bus import (
+    InnerEventMessage,
+    InnerEventType,
+)
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
 from openjiuwen.agent_teams.external.format import render_task_line
 from openjiuwen.agent_teams.i18n import t
@@ -29,6 +33,8 @@ class TaskBoardHandler(BaseCoordinationHandler):
     """Handle TASK_CLAIMED / TASK_REVOKED + 6 task-board state-transition events."""
 
     EVENT_METHOD_MAP: ClassVar[dict[str, str]] = {
+        # One-shot startup board survey (F_69), enqueued by the kernel.
+        InnerEventType.INITIAL_POLL_TASK.value: "on_initial_task_poll",
         # Targeted to the affected member (self-branch), else board fallback
         TeamEvent.TASK_CLAIMED: "on_task_claimed",
         TeamEvent.TASK_REVOKED: "on_task_revoked",
@@ -405,15 +411,35 @@ class TaskBoardHandler(BaseCoordinationHandler):
         team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
         await self._nudge_idle_agent(member_name)
 
+    async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
+        """First board survey after this member's runtime comes up (F_69).
+
+        The symmetric counterpart of the startup mailbox sweep: that one
+        picks up messages sent while the member was down, this one picks up
+        work assigned while it was down. A task assigned at creation time is
+        announced only by a transient ``TASK_CLAIMED`` event, so a member
+        that had not started yet never sees it and would otherwise sit idle
+        until the stale-claim window elapses.
+
+        Surfaces the same board slice as any other nudge — claimable work
+        plus tasks assigned to this member — and inherits its silence on an
+        empty slice, so a member starting into a board with nothing for it
+        never burns a round.
+        """
+        member_name = self._blueprint.member_name
+        if not member_name or self._infra.task_manager is None:
+            return
+        await self._nudge_idle_agent(member_name)
+
     async def _nudge_idle_agent(self, member_name: str, from_poll: bool = False) -> None:
         """Feed task context to an idle agent.
 
         Leader: reviews the full task board (every incomplete task) to
         decide whether to re-plan, assign, or conclude.
-        Teammate: sees only claimable tasks (pending + unassigned) to
-        pick one. Tasks already claimed / in-flight by others are not
-        surfaced — a teammate is woken to take on new claimable work,
-        not to survey what everyone else is doing.
+        Teammate: sees claimable tasks (pending + unassigned) plus tasks
+        explicitly assigned to itself. Tasks claimed / in-flight by others are
+        not surfaced — a teammate is woken to take on work it can act on, not
+        to survey what everyone else is doing.
 
         Args:
             member_name: The calling member's own name.
@@ -444,10 +470,15 @@ class TaskBoardHandler(BaseCoordinationHandler):
             lines = [t("dispatcher.leader_task_board")]
             board_tasks = incomplete
         else:
-            # Teammate: surface only claimable work (pending + unassigned).
-            # No claimable task means nothing to pick up — stay idle
-            # rather than dump others' in-flight tasks into the round.
-            board_tasks = [task for task in incomplete if task.status == "pending" and not task.assignee]
+            # Teammate: surface claimable work (pending + unassigned) and
+            # explicitly assigned self work. Assigned pending tasks may have
+            # been created before this member started; feeding them here makes
+            # the startup poll actionable without exposing other members' work.
+            board_tasks = [
+                task
+                for task in incomplete
+                if (task.status == "pending" and not task.assignee) or task.assignee == member_name
+            ]
             if not board_tasks:
                 return
             lines = [t("dispatcher.teammate_task_list")]
@@ -456,7 +487,15 @@ class TaskBoardHandler(BaseCoordinationHandler):
         for task in board_tasks:
             lines.append(render_task_line(task, now_ms=now_ms))
 
-        await self._round.deliver_input(render_event(kind="task-board", body="\n".join(lines)))
+        # A board survey is a reminder, not a reason to drop what the member is
+        # doing (decision dimension 3): it never says "the work you are on is
+        # void", so it goes to the follow-up queue and is read when the current
+        # round ends. Steering it in used to interrupt the member's reasoning
+        # with a survey it had no reason to act on yet.
+        await self._round.deliver_input(
+            render_event(kind="task-board", body="\n".join(lines)),
+            use_steer=False,
+        )
 
 
 class ScheduledTaskBoardHandler(TaskBoardHandler):
@@ -491,6 +530,21 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
         TeamEvent.TASK_VERIFIED: "on_task_board_event",
         TeamEvent.TASK_REVISION_REQUESTED: "on_task_board_event",
     }
+
+    async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
+        """No startup board survey under scheduled dispatch (F_69).
+
+        The autonomous survey exists because a member that was down when
+        work was assigned to it has no other way to learn of it. Under
+        scheduled dispatch it does: the scheduler's start scan runs on every
+        wake, and its handoff lands in the mailbox as a durable row that the
+        startup mailbox sweep drains. Surveying the board here would deliver
+        the same task a second time, next to the scheduler's mail.
+        """
+        team_logger.debug(
+            "[{}] scheduled dispatch: startup board survey skipped",
+            self._blueprint.member_name,
+        )
 
     async def on_task_board_event(self, event: EventMessage) -> None:
         """Board churn in scheduled dispatch: keep polling alive, wake nobody.

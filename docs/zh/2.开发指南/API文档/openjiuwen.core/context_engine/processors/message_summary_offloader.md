@@ -1,24 +1,38 @@
-# openjiuwen.core.context_engine.processor.offloader.message_summary_offloader
+# openjiuwen.core.context_engine.processor.forked.offloader.message_offloader
 
-## class openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.MessageSummaryOffloaderConfig
+> **迁移说明**：本文档描述默认处理链使用的实现。旧模块路径
+> `openjiuwen.core.context_engine.processor.offloader.message_summary_offloader`
+> 下的同名类仍然存在，但配置字段与行为不同（旧版经 LLM 生成摘要后 offload，
+> 使用 `large_message_threshold`、`offload_message_type` 等字段），两者不能
+> 混用。从旧版迁移时请按本文档的模块路径导入，并按 `MessageSummaryOffloaderConfig`
+> 的新字段重新配置。
 
-`MessageSummaryOffloader` 的配置类。对于每条新加入且大小超过 `large_message_threshold` 的候选消息，先经 LLM 生成摘要再 offload，相比 [MessageOffloader](message_offloader.md) 可保留更多语义。
+## class openjiuwen.core.context_engine.processor.forked.offloader.message_offloader.MessageSummaryOffloaderConfig
 
-* **large_message_threshold**(int，可选)：单条消息 token 数超过该值时视为「大消息」，可被 offload。默认值：`1000`。
-* **offload_message_type**(list[Literal["user", "assistant", "tool"]]，可选)：可被 offload 的消息 role 列表。默认值：`["tool"]`。
-* **model**(ModelRequestConfig | None，可选)：用于执行摘要的模型请求配置。默认值：`None`。
-* **model_client**(ModelClientConfig | None，可选)：用于执行摘要的模型服务配置。默认值：`None`。
-* **customized_summary_prompt**(str | None，可选)：自定义摘要 prompt；为 `None` 时使用内置 prompt。默认值：`None`。
+`MessageSummaryOffloader` 的配置类。该处理器不依赖 LLM：当 tool 消息过大时，先按内置规则压缩，再将原始内容 offload 到文件系统，上下文中仅保留头尾预览与 `[[OFFLOAD: ...]]` 占位符，需要时可按占位符中的句柄/路径取回原文。
 
-**约束**：进行摘要时需配置 `model` 与 `model_client`。
+* **add_message_threshold_ratio**(float，可选)：新增消息时，单条 tool 消息的 token 数超过上下文容量 × 该比例时被处理。默认值：`0.1`。
+* **ttl_seconds**(int，可选)：距离上一次获取上下文窗口超过该秒数后，TTL 处理才可能触发；`0` 表示关闭 TTL 处理。默认值：`300`。
+* **ttl_context_occupancy_ratio**(float，可选)：上下文 token 占用达到上下文容量 × 该比例时，TTL 处理才可能触发。默认值：`0.5`。
+* **ttl_message_threshold_ratio**(float，可选)：TTL 处理时，单条历史 tool 消息的 token 数超过上下文容量 × 该比例时被处理。默认值：`0.05`。
+* **protected_tool_names**(list[str]，可选)：始终保留原文、不做压缩与 offload 的工具名列表；支持 `"工具名"` 或 `"工具名:参数glob模式"` 两种写法。默认值：`["read_file"]`。
+* **enable_debug_dump**(bool，可选)：是否将规则压缩与 offload 的调试记录落盘。默认值：`False`。
+* **debug_dump_dir**(str | None，可选)：调试记录存放目录，支持 `{session_id}`、`{context_id}` 占位符；为 `None` 时使用默认目录。默认值：`None`。
 
-## class openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.MessageSummaryOffloader
+**约束**：offload 文件默认写入 `{workspace}/context/{session_id}_context/offload/` 目录；上下文未关联 workspace 时 offload 不会生效，消息保持原样。
+
+## class openjiuwen.core.context_engine.processor.forked.offloader.message_offloader.MessageSummaryOffloader
 
 ```python
 MessageSummaryOffloader(config: MessageSummaryOffloaderConfig)
 ```
 
-`MessageSummaryOffloader` 继承自 [MessageOffloader](message_offloader.md#class-openjiuwencorecontext_engineprocessoroffloadermessage_offloadermessageoffloader)，在 offload 前先调用 LLM 对大消息生成 2–4 句摘要，再以摘要 + 占位符替换原文。接口与基类一致，详见 [ContextProcessor](message_offloader.md#class-openjiuwencorecontext_engineprocessoroffloadermessage_offloadermessageoffloader)。
+`MessageSummaryOffloader` 继承自 [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor)，在两个时机介入：
+
+1. 新增消息（`on_add_messages`）：对超过 `add_message_threshold_ratio` 的新增 tool 消息做规则压缩与 offload；
+2. 获取上下文窗口（`on_get_context_window`）：当上下文空闲超过 `ttl_seconds` 且占用达到 `ttl_context_occupancy_ratio` 时，对超过 `ttl_message_threshold_ratio` 的历史 tool 消息做同样处理。
+
+接口与基类一致，详见 [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor)。
 
 **参数**：
 
@@ -27,10 +41,10 @@ MessageSummaryOffloader(config: MessageSummaryOffloaderConfig)
 **样例**：
 
 ```python
->>> import os
 >>> import asyncio
 >>> from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
->>> from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
+>>> from openjiuwen.core.context_engine.processor import forked
+>>> from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
 ...     MessageSummaryOffloader,
 ...     MessageSummaryOffloaderConfig,
 ... )
@@ -38,28 +52,14 @@ MessageSummaryOffloader(config: MessageSummaryOffloaderConfig)
 ...     UserMessage,
 ...     AssistantMessage,
 ...     ToolMessage,
-...     ModelRequestConfig,
-...     ModelClientConfig,
 ... )
 >>>
->>> API_BASE = os.getenv("API_BASE", "your api base")
->>> API_KEY = os.getenv("API_KEY", "your api key")
->>> MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
->>> MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "OpenAI")
->>>
 >>> async def main():
-...     model_config = ModelRequestConfig(model=MODEL_NAME)
-...     model_client_config = ModelClientConfig(
-...         client_provider=MODEL_PROVIDER,
-...         api_base=API_BASE,
-...         api_key=API_KEY,
-...     )
 ...     offloader_config = MessageSummaryOffloaderConfig(
-...         large_message_threshold=50,
-...         offload_message_type=["tool"],
-...         model=model_config,
-...         model_client=model_client_config,
+...         add_message_threshold_ratio=0.1,
+...         protected_tool_names=["read_file"],
 ...     )
+...     forked.activate()  # 注册处理器，之后可按名称引用
 ...     engine_config = ContextEngineConfig(default_window_message_num=100)
 ...     engine = ContextEngine(engine_config)
 ...     ctx = await engine.create_context(
@@ -71,18 +71,15 @@ MessageSummaryOffloader(config: MessageSummaryOffloaderConfig)
 ...     await ctx.add_messages([
 ...         UserMessage(content="调用工具查询数据"),
 ...         AssistantMessage(content="", tool_calls=[{"id": "1", "name": "query", "type": "function", "arguments": "{}"}]),
-...         ToolMessage(
-...             content="查询结果：2024年Q1营收同比增长15%，净利润为1.2亿元，主要来自云服务业务。"
-...             + "详细数据包括：云服务收入占比达60%，企业客户续费率提升至92%。",
-...             tool_call_id="1",
-...         ),
-...         UserMessage(content="继续"),
+...         ToolMessage(content="查询结果：营收增长15%", tool_call_id="1"),
 ...     ])
-...     msgs = ctx.get_messages()
-...     tool_msg = next(m for m in msgs if m.role == "tool")
-...     assert "[[OFFLOAD:" in tool_msg.content
-...     return len(msgs)
+...     # 消息未达到 add_message_threshold_ratio，不发生 offload
+...     return len(ctx.get_messages())
 >>>
 >>> asyncio.run(main())
 3
 ```
+
+> 示例输出 `3` 为未触发 offload 时的原始消息数。当 tool 消息超过
+> `add_message_threshold_ratio` 时，该消息会被规则压缩并 offload 到文件系统，
+> 上下文中替换为头尾预览加 `[[OFFLOAD: ...]]` 占位符（消息条数不变，内容变短）。

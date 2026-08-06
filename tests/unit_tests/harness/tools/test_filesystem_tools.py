@@ -591,7 +591,7 @@ async def test_edit_file_tool_partial_read_still_rejects_external_modification(s
         "new_string": "line2-edited",
     })
     assert res.success is False
-    assert "modified externally" in res.error
+    assert "modified since read" in res.error
 
 
 @pytest.mark.asyncio
@@ -873,7 +873,7 @@ async def test_read_file_tool_rejects_large_text_without_explicit_limit(sys_op, 
 
     assert result.success is False
     assert "exceeds maximum allowed size" in result.error
-    assert "offset and limit" in result.error
+    assert "offset/limit" in result.error
 
 
 @pytest.mark.asyncio

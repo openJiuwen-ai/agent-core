@@ -14,6 +14,7 @@ from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -664,6 +665,46 @@ async def test_has_unread_messages_direct_counts_when_broadcast_excluded(team_me
 
     assert await team_messaging.has_unread_messages() is True
     assert await team_messaging.has_unread_messages(include_broadcast=False) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_ignores_direct_to_shutdown_member(db, team_messaging):
+    """Direct unread messages to SHUTDOWN members do not block completion."""
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    await db.member.create_member(
+        member_name="member3",
+        team_name="test_team_123",
+        display_name="Member Three",
+        agent_card=agent_card,
+        status=MemberStatus.SHUTDOWN.value,
+    )
+    await team_messaging.send_message(content="shutdown notice", to_member_name="member3")
+
+    assert await team_messaging.has_unread_messages() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_ignores_shutdown_member_broadcast_gap(db, team_messaging):
+    """Broadcast unread state ignores SHUTDOWN members but still gates live members."""
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    await db.member.create_member(
+        member_name="member3",
+        team_name="test_team_123",
+        display_name="Member Three",
+        agent_card=agent_card,
+        status=MemberStatus.READY.value,
+    )
+    await db.member.update_member_status("member2", "test_team_123", MemberStatus.SHUTDOWN_REQUESTED.value)
+    await db.member.update_member_status("member2", "test_team_123", MemberStatus.SHUTDOWN.value)
+
+    message_id = await team_messaging.broadcast_message(content="all hands")
+
+    assert await team_messaging.has_unread_messages() is True
+
+    await team_messaging.mark_message_read(message_id, "member3")
+    assert await team_messaging.has_unread_messages() is False
 
 
 @pytest.mark.asyncio

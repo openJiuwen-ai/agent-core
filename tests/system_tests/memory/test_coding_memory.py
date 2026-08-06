@@ -197,7 +197,7 @@ class TestCodingMemoryRailLifecycle:
         rail.uninit(mock_agent)
         
         # 验证清理
-        assert mock_agent.ability_manager.remove.called or not rail._owned_tool_names
+        assert mock_agent.ability_manager.remove.called or not rail._owned_tool_cards
         assert rail._manager_initialized is False
 
 

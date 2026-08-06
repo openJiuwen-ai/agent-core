@@ -1,0 +1,47 @@
+# Default standalone Harness self-improvement configuration.
+
+workspace_dir: .local/rsi/workspace
+max_epochs: 1
+
+model_configs:
+  evaluation: ""
+  analysis: ""
+  member_optimization: ""
+
+data_loader:
+  file_pattern: "*.json"
+  batch_size: 2
+  batch_balance_keys:
+    - dimension
+    - difficulty
+    - source
+    - task_type
+
+evaluator:
+  backend: single_harness
+  evaluation_method: script-based
+  transient_case_retry_limit: 2
+
+evaluation_result_analyzer:
+  diagnosis_agent_max_retries: 2
+  diagnosis_agent_max_concurrency: 5
+  diagnosis_agent_max_iterations: 20
+  max_issues: 8
+  evidence_limit_per_issue: 3
+  output_filename: issues.yaml
+
+member_optimizer:
+  action_group_configs:
+    - prompt
+    - skill
+    - tool
+  max_roles_per_run: 1
+  execution_concurrency: 1
+  role_execution_concurrency: 1
+  action_execution_concurrency_per_role: 1
+
+scheduling:
+  evaluation_strategy: hybrid
+  coordination_strategy: team_first_single_pass
+  promotion_policy: epoch_full_evaluation
+  full_evaluation_enabled: true

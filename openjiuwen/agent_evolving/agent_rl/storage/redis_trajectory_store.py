@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from redis.asyncio import Redis
 
@@ -195,6 +195,156 @@ class RedisTrajectoryStore:
             "trained_samples": trained,
             "failed_samples": failed,
         }
+
+    async def get_sample(self, sample_id: str) -> Optional[dict[str, Any]]:
+        payload, status = await self._r.hmget(_traj_key(sample_id), ["sample_json", "status"])
+        if payload is None:
+            return None
+        if isinstance(payload, bytes):
+            payload = payload.decode()
+        if isinstance(status, bytes):
+            status = status.decode()
+        try:
+            sample = json.loads(payload)
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning("Failed to decode trajectory sample=%s: %s", sample_id, exc)
+            return None
+        sample["_store_status"] = str(status or sample.get("_store_status") or "pending")
+        return sample
+
+    async def list_samples(
+        self,
+        *,
+        user_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        sample_ids = await self._list_sample_ids(user_id=user_id, status=status, limit=max(1, int(limit)))
+        if not sample_ids:
+            return []
+
+        pipe = self._r.pipeline()
+        for sample_id in sample_ids:
+            pipe.hmget(_traj_key(sample_id), ["sample_json", "status"])
+        rows = await pipe.execute()
+
+        out: list[dict[str, Any]] = []
+        for sample_id, row in zip(sample_ids, rows):
+            if not row or row[0] is None:
+                continue
+            payload = row[0].decode() if isinstance(row[0], bytes) else row[0]
+            item_status = row[1].decode() if len(row) > 1 and isinstance(row[1], bytes) else row[1]
+            try:
+                sample = json.loads(payload)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.warning("Skipping invalid trajectory sample=%s in list: %s", sample_id, exc)
+                continue
+            sample["_store_status"] = str(item_status or sample.get("_store_status") or "pending")
+            out.append(sample)
+        return out
+
+    async def patch_sample(self, sample_id: str, updates: dict[str, Any]) -> Optional[dict[str, Any]]:
+        row = await self._r.hmget(_traj_key(sample_id), ["user_id", "status", "sample_json", "created_at"])
+        if not row or row[2] is None:
+            return None
+        user_id = row[0].decode() if isinstance(row[0], bytes) else row[0]
+        old_status = row[1].decode() if isinstance(row[1], bytes) else row[1]
+        payload = row[2].decode() if isinstance(row[2], bytes) else row[2]
+        created_at = row[3].decode() if isinstance(row[3], bytes) else row[3]
+        sample = json.loads(payload)
+        user_id = str(user_id or sample.get("user_id") or "online")
+        old_status = str(old_status or sample.get("_store_status") or "pending")
+        new_status = str(updates.get("status") or old_status)
+
+        for key in ("reward", "judge", "metadata", "policy_version", "source"):
+            if key in updates:
+                sample[key] = updates[key]
+        sample["_store_status"] = new_status
+        updated_at = datetime.now(timezone.utc).isoformat()
+        sample["updated_at"] = updated_at
+
+        score = _epoch(datetime.fromisoformat(str(created_at or updated_at).replace("Z", "+00:00")))
+        pipe = self._r.pipeline()
+        if new_status != old_status:
+            pipe.zrem(_idx_key(user_id, old_status), sample_id)
+            pipe.zadd(_idx_key(user_id, new_status), {sample_id: score})
+        pipe.hset(
+            _traj_key(sample_id),
+            mapping={
+                "status": new_status,
+                "sample_json": json.dumps(sample, ensure_ascii=False),
+                "updated_at": updated_at,
+            },
+        )
+        await pipe.execute()
+        return sample
+
+    async def delete_sample(self, sample_id: str, *, force: bool = False) -> bool:
+        row = await self._r.hmget(_traj_key(sample_id), ["user_id", "status"])
+        if not row or row[0] is None:
+            return False
+        user_id = row[0].decode() if isinstance(row[0], bytes) else row[0]
+        status = row[1].decode() if isinstance(row[1], bytes) else row[1]
+        status = str(status or "pending")
+        if status == "training" and not force:
+            raise RuntimeError("cannot delete training trajectory without force=true")
+        pipe = self._r.pipeline()
+        pipe.zrem(_idx_key(str(user_id), status), sample_id)
+        pipe.delete(_traj_key(sample_id))
+        await pipe.execute()
+        return True
+
+    async def management_stats(
+        self,
+        *,
+        user_id: str | None = None,
+        model_id: str | None = None,
+    ) -> dict[str, Any]:
+        samples = await self.list_samples(user_id=user_id, limit=1000000)
+        if model_id:
+            samples = [
+                sample
+                for sample in samples
+                if str(sample.get("model") or sample.get("model_id") or "") == model_id
+            ]
+        by_status: dict[str, int] = {}
+        by_source: dict[str, int] = {}
+        for sample in samples:
+            item_status = str(sample.get("_store_status") or "pending")
+            by_status[item_status] = by_status.get(item_status, 0) + 1
+            source = str(sample.get("source") or sample.get("mode") or "unknown")
+            by_source[source] = by_source.get(source, 0) + 1
+        return {
+            "total": len(samples),
+            "by_status": by_status,
+            "by_source": by_source,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def _list_sample_ids(
+        self,
+        *,
+        user_id: str | None,
+        status: str | None,
+        limit: int,
+    ) -> list[str]:
+        if user_id:
+            user_ids = [user_id]
+        else:
+            members = await self._r.smembers(_USERS_SET_KEY)
+            user_ids = sorted(m.decode() if isinstance(m, bytes) else m for m in members)
+
+        statuses = [status] if status else ["pending", "training", "trained", "failed", "deleted"]
+        out: list[str] = []
+        for uid in user_ids:
+            for item_status in statuses:
+                raw_ids = await self._r.zrange(_idx_key(uid, item_status), 0, max(0, limit - len(out) - 1))
+                for raw_id in raw_ids:
+                    sample_id = raw_id.decode() if isinstance(raw_id, bytes) else raw_id
+                    out.append(str(sample_id))
+                    if len(out) >= limit:
+                        return out
+        return out
 
     async def _update_status(self, sample_ids: list[str], *, from_status: str, to_status: str) -> None:
         if not sample_ids:

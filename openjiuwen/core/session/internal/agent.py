@@ -37,7 +37,7 @@ class AgentSession(BaseSession):
             if stream_writer_manager is not None
             else StreamWriterManager(StreamEmitter())
         )
-        tracer = Tracer()
+        tracer = Tracer(session_id=session_id)
         tracer.init(self._stream_writer_manager)
         self._tracer = tracer
         self._checkpointer = CheckpointerFactory.get_checkpointer() if checkpointer is None else checkpointer

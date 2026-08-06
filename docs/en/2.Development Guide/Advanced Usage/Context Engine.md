@@ -20,6 +20,87 @@ The Context Engine (`ContextEngine`) is a unified component in openJiuwen for **
   - Represents a snapshot of a "context window" about to be sent to the model, i.e., the return result of `get_context_window()`.
   - Encapsulates three types of content: system_messages (system instructions), context_messages (conversation history), tools (tool definitions).
 
+## Default Harness processor chain
+
+The Harness assembles context processors through `ContextProcessorRail`.
+With the default `preset=True`, the processor chain runs in this order:
+
+1. `MessageSummaryOffloader`
+2. `SessionMemoryCompressor` (disabled by default)
+3. `ReasoningToolLoopCompactProcessor`
+4. `DialogueCompressor`
+5. `CurrentRoundCompressor`
+6. `RoundLevelCompressor`
+
+## Optional capabilities
+
+### Defaults
+
+The default chain enables offload and compression out of the box, while
+Session Memory and compression recall stay disabled, so their background model
+calls and archives add no overhead until explicitly enabled.
+
+### Enabling Session Memory
+
+```python
+from openjiuwen.core.context_engine.context.session_memory_manager import (
+    SessionMemoryConfig,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor import (
+    SessionMemoryCompressorConfig,
+)
+from openjiuwen.harness.rails.context_engineer.context_processor_rail import (
+    ContextProcessorRail,
+)
+
+context_rail = ContextProcessorRail(
+    preset=True,
+    processors=[
+        (
+            "SessionMemoryCompressor",
+            SessionMemoryCompressorConfig(
+                enabled=True,
+                memory=SessionMemoryConfig(
+                    update_trigger_context_ratio=0.7,
+                ),
+            ),
+        ),
+    ],
+)
+```
+
+Session notes are stored by default at:
+
+```text
+{workspace}/context/{session_id}_context/session_memory/session_context.md
+```
+
+### Enabling compression recall
+
+```python
+from openjiuwen.core.context_engine import (
+    CompressionRecallConfig,
+    ContextEngineConfig,
+)
+
+context_engine_config = ContextEngineConfig(
+    compression_recall_config=CompressionRecallConfig(enabled=True),
+)
+```
+
+Pass `context_engine_config` to `DeepAgentConfig`. Once enabled:
+
+- Compressors in the default chain (`DialogueCompressor`,
+  `CurrentRoundCompressor`, `RoundLevelCompressor`) archive the source messages
+  they replace under `compression_recall/` in the workspace session context
+  directory, and the summary carries a `[[COMPRESSION_RECALL: id=...]]` marker;
+- The Harness automatically registers the `recall_compressed_context` tool, so
+  the model can retrieve the archived content on demand using the `memory_id`
+  from the marker.
+
+The switch is disabled by default and is independent of Session Memory; the
+two can be enabled separately or together.
+
 ## Agent Using Context
 
 ContextEngine is a member of the Agent, created during Agent initialization. The Agent manages context through `context_engine` in `invoke`, with a typical flow as follows:

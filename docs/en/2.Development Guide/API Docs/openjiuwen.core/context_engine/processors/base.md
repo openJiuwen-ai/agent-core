@@ -150,7 +150,7 @@ Return the configuration object passed during construction, read-only.
 ### async offload_messages
 
 ```python
-async offload_messages(role: str, content: str, messages: List[BaseMessage], *, context: ModelContext = None, offload_handle: str = None, offload_type: str = "in_memory", **kwargs) -> Optional[BaseMessage]
+async offload_messages(role: str, content: str, messages: List[BaseMessage], *, context: ModelContext = None, offload_handle: str = None, offload_type: str = "filesystem", **kwargs) -> Optional[BaseMessage]
 ```
 
 Offload specified messages to side storage, replacing them with placeholders in the main context. Used to implement message offloading capability.
@@ -162,7 +162,7 @@ Offload specified messages to side storage, replacing them with placeholders in 
 * **messages** (List[BaseMessage]): List of original messages to be offloaded.
 * **context** (ModelContext, optional): Current context instance. Default value: `None`.
 * **offload_handle** (str, optional): Offload handle, automatically generates UUID if empty. Default value: `None`.
-* **offload_type** (str, optional): Storage type. Default value: `"in_memory"`.
+* **offload_type** (str, optional): Storage type. Default value: `"filesystem"`.
 
 **Returns**:
 

@@ -37,10 +37,17 @@ def build_cli_overrides(args: argparse.Namespace) -> dict[str, object]:
         'judge_url': 'judge.existing_url',
         'gateway_port': 'gateway.port',
         'redis_url': 'gateway.redis_url',
+        'trajectory_store_backend': 'gateway.trajectory_store_backend',
+        'local_trajectory_store_dir': 'gateway.local_trajectory_store_dir',
+        'lora_default_policy': 'gateway.lora_default_policy',
         'threshold': 'training.threshold',
         'scan_interval': 'training.scan_interval',
         'train_gpu': 'training.gpu_ids',
         'ppo_config': 'training.ppo_config',
+        'drain_pending_on_train': 'training.drain_pending_on_train',
+        'max_samples_per_run': 'training.max_samples_per_run',
+        'ppo_samples_per_step': 'training.ppo_samples_per_step',
+        'allow_partial_last_step': 'training.allow_partial_last_step',
         'trajectory_batch_size': 'trajectory.batch_size',
         'lora_repo': 'training.lora_repo',
         'jiuwen_agent_server_port': 'jiuwen.agent_server_port',
@@ -83,9 +90,50 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument('--gateway-port', type=int, default=None, help='Gateway port')
     parser.add_argument('--redis-url', default=None, help='RedisTrajectoryStore URL')
+    parser.add_argument(
+        '--trajectory-store-backend',
+        choices=('auto', 'redis', 'local'),
+        default=None,
+        help='Trajectory/task store backend. auto uses Redis when --redis-url is set, otherwise local files.',
+    )
+    parser.add_argument(
+        '--local-trajectory-store-dir',
+        default=None,
+        help='Directory for local trajectory/task store files.',
+    )
+    parser.add_argument(
+        '--lora-default-policy',
+        choices=('disabled', 'latest_by_user'),
+        default=None,
+        help='Default LoRA fallback policy for chat requests that do not name a LoRA',
+    )
     parser.add_argument('--threshold', type=int, default=None, help='Sample count threshold to trigger training')
     parser.add_argument('--scan-interval', type=int, default=None, help='TrainingScheduler poll interval (seconds)')
     parser.add_argument('--train-gpu', default=None, help='GPUs for training (comma-separated)')
+    parser.add_argument(
+        '--drain-pending-on-train',
+        action='store_true',
+        default=None,
+        help='When a user reaches threshold, claim all currently pending samples for one LoRA run',
+    )
+    parser.add_argument(
+        '--max-samples-per-run',
+        type=int,
+        default=None,
+        help='Maximum pending samples claimed by one training run; 0 means no cap',
+    )
+    parser.add_argument(
+        '--ppo-samples-per-step',
+        type=int,
+        default=None,
+        help='Samples per PPO train_step inside one run; 0 means train all claimed samples in one step',
+    )
+    parser.add_argument(
+        '--allow-partial-last-step',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='Allow the final PPO chunk to contain fewer than --ppo-samples-per-step samples',
+    )
     parser.add_argument(
         '--ppo-config',
         default=None,

@@ -6,17 +6,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
-from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
-    build_compressor_reinjected_state_message,
-    count_messages_tokens,
-    resolve_context_max,
-    resolve_ratio_token_threshold,
-)
 from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
     CompressionError,
     CompressionErrorKind,
@@ -24,6 +18,18 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.compress
     CompressionRequest,
     CompressionResult,
 )
+from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
+    INTERNAL_USER_PREFIXES,
+    build_compressor_reinjected_state_message,
+    count_messages_tokens,
+    count_usage_tokens_with_tail,
+    resolve_context_max,
+    resolve_ratio_token_threshold,
+)
+from openjiuwen.core.context_engine.processor.forked.support.context_debug import (
+    write_debug_record,
+)
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,
@@ -34,7 +40,6 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
 )
 from openjiuwen.core.foundation.tool import ToolInfo
-
 
 _CONTEXT_OVERFLOW_RETRY_BUDGET_RATIOS = (0.85, 0.65, 0.5)
 _TRANSIENT_COMPRESSION_ERROR_KINDS = {
@@ -68,6 +73,21 @@ class PrefixCompactProcessorConfig(BaseModel):
     # effect analysis. Disabled by default; zero overhead when off.
     enable_compression_dump: bool = Field(default=False)
     compression_dump_dir: str | None = Field(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_recall_config(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        legacy_fields = {
+            "enable_recall",
+            "recall_chunk_size_tokens",
+            "recall_chunk_overlap_tokens",
+        }
+        configured_fields = sorted(legacy_fields.intersection(value))
+        if configured_fields:
+            raise ValueError(f"{', '.join(configured_fields)} moved to ContextEngineConfig.compression_recall_config")
+        return value
 
 
 def adjust_keep_recent_for_tool_boundaries(messages: list[BaseMessage], keep_recent: int) -> int:
@@ -109,15 +129,7 @@ def _is_real_user_message(message: BaseMessage) -> bool:
     if not isinstance(content, str):
         return True
     stripped = content.lstrip()
-    internal_prefixes = (
-        "<system-reminder>",
-        "<memory_block_current>",
-        "<memory_block_dialogue>",
-        "<memory_block_round>",
-        "<recovered_context>",
-        "[STATE_REINJECTION]",
-    )
-    return not stripped.startswith(internal_prefixes)
+    return not stripped.startswith(INTERNAL_USER_PREFIXES)
 
 
 class PrefixCompactProcessor(ContextProcessor):
@@ -125,9 +137,7 @@ class PrefixCompactProcessor(ContextProcessor):
     memory_block_close: str = "</memory_block>"
     default_prompt: str = ""
     processor_label: str = "PrefixCompactProcessor"
-    memory_block_meaning: str = (
-        "This is compressed context from earlier messages. It is not a new user request."
-    )
+    memory_block_meaning: str = "This is compressed context from earlier messages. It is not a new user request."
     memory_block_conflict_policy: str = (
         "Newer raw messages and the latest explicit user intent override this compressed context."
     )
@@ -156,10 +166,30 @@ class PrefixCompactProcessor(ContextProcessor):
         context_max = self._resolve_context_max(context, kwargs)
         absolute_threshold = self._resolve_trigger_token_limit(context_max)
         if total_tokens < absolute_threshold:
+            self._write_context_debug(
+                context,
+                "threshold_check",
+                phase="get_context_window",
+                total_tokens=total_tokens,
+                context_max=context_max,
+                threshold=absolute_threshold,
+                hit=False,
+                reason="below_threshold",
+            )
             return False
 
         span = self._build_span(context_window.context_messages)
         if not span.has_target:
+            self._write_context_debug(
+                context,
+                "threshold_check",
+                phase="get_context_window",
+                total_tokens=total_tokens,
+                context_max=context_max,
+                threshold=absolute_threshold,
+                hit=False,
+                reason="no_compressible_span",
+            )
             return False
         target_tokens = self._count_messages_tokens(span.messages_to_compress, context)
         min_target_tokens = int(context_max * getattr(self.config, "min_target_context_ratio", 0.0))
@@ -170,6 +200,18 @@ class PrefixCompactProcessor(ContextProcessor):
                 target_tokens,
                 min_target_tokens,
             )
+            self._write_context_debug(
+                context,
+                "threshold_check",
+                phase="get_context_window",
+                total_tokens=total_tokens,
+                context_max=context_max,
+                threshold=absolute_threshold,
+                hit=False,
+                reason="target_below_min",
+                target_tokens=target_tokens,
+                min_target_tokens=min_target_tokens,
+            )
             return False
 
         logger.info(
@@ -178,6 +220,17 @@ class PrefixCompactProcessor(ContextProcessor):
             total_tokens,
             absolute_threshold,
             context_max,
+        )
+        self._write_context_debug(
+            context,
+            "threshold_check",
+            phase="get_context_window",
+            total_tokens=total_tokens,
+            context_max=context_max,
+            threshold=absolute_threshold,
+            hit=True,
+            reason="reached_threshold",
+            target_tokens=target_tokens,
         )
         return True
 
@@ -195,6 +248,14 @@ class PrefixCompactProcessor(ContextProcessor):
         span = self._build_span(original_messages)
         if not span.has_target:
             return None, context_window
+        self._write_context_debug(
+            context,
+            "span_built",
+            phase="get_context_window",
+            preserved_prefix=self._span_summary(span.preserved_prefix),
+            messages_to_compress=self._span_summary(span.messages_to_compress),
+            protected_tail=self._span_summary(span.protected_tail),
+        )
 
         prompt = self._build_prompt(span, preserve_instruction=kwargs.get("preserve_instruction"))
         invoke_result = await self._invoke_compression_with_retries(
@@ -212,18 +273,23 @@ class PrefixCompactProcessor(ContextProcessor):
         if not summary:
             return None, context_window
 
-        memory_message = UserMessage(content=self._wrap_memory_block(summary))
-        new_messages = [*span.preserved_prefix, memory_message, *span.protected_tail]
-        reinjected_message = build_compressor_reinjected_state_message(
-            source_messages=original_messages,
-            messages_to_keep=new_messages,
+        archive = await self._archive_compressed_messages(
             context=context,
-            config=self.config,
-            builder_names=self.reinject_builder_names,
+            original_messages=original_messages,
+            span=span,
         )
-        if reinjected_message is not None:
-            new_messages = [*span.preserved_prefix, memory_message, reinjected_message, *span.protected_tail]
+        memory_message = UserMessage(
+            content=self._wrap_memory_block(summary, memory_id=archive.memory_id if archive is not None else None)
+        )
+        new_messages = self._build_compacted_messages(
+            context=context,
+            original_messages=original_messages,
+            span=span,
+            memory_message=memory_message,
+        )
         if not self._has_compression_benefit(context, original_messages, new_messages):
+            if archive is not None:
+                self._delete_compression_archive(archive)
             return None, context_window
 
         context_window.context_messages = new_messages
@@ -282,6 +348,15 @@ class PrefixCompactProcessor(ContextProcessor):
                             exc,
                             exc_info=True,
                         )
+                        self._write_context_debug(
+                            context,
+                            "compression_retry",
+                            attempt=overflow_retry_index + 1,
+                            error_type="context_overflow",
+                            error_message=str(exc),
+                            retried=False,
+                            reason="retry_budget_exhausted",
+                        )
                         return None
                     budget_ratio = _CONTEXT_OVERFLOW_RETRY_BUDGET_RATIOS[overflow_retry_index]
                     next_span = self._build_context_overflow_retry_span(
@@ -298,6 +373,15 @@ class PrefixCompactProcessor(ContextProcessor):
                             self.processor_type(),
                             exc_info=True,
                         )
+                        self._write_context_debug(
+                            context,
+                            "compression_retry",
+                            attempt=overflow_retry_index,
+                            error_type="context_overflow",
+                            error_message=str(exc),
+                            retried=False,
+                            reason="no_smaller_span",
+                        )
                         return None
                     logger.warning(
                         "[%s] compression context_overflow retry attempt=%s budget_ratio=%.2f "
@@ -307,6 +391,16 @@ class PrefixCompactProcessor(ContextProcessor):
                         budget_ratio,
                         len(span.protected_tail),
                         len(next_span.protected_tail),
+                    )
+                    self._write_context_debug(
+                        context,
+                        "compression_retry",
+                        attempt=overflow_retry_index,
+                        error_type="context_overflow",
+                        error_message=str(exc),
+                        retried=True,
+                        reason="budget_ratio_shrink",
+                        budget_ratio=budget_ratio,
                     )
                     span = next_span
                     continue
@@ -323,6 +417,16 @@ class PrefixCompactProcessor(ContextProcessor):
                         transient_retry_count,
                         exc.kind.value,
                         delay,
+                    )
+                    self._write_context_debug(
+                        context,
+                        "compression_retry",
+                        attempt=transient_retry_count,
+                        error_type=f"transient:{exc.kind.value}",
+                        error_message=str(exc),
+                        retried=True,
+                        reason="transient_backoff",
+                        delay_seconds=delay,
                     )
                     if delay > 0:
                         await asyncio.sleep(delay)
@@ -355,9 +459,7 @@ class PrefixCompactProcessor(ContextProcessor):
         context_max = self._resolve_context_max(context, {})
         budget_tokens = max(int(context_max * budget_ratio), 1)
         fixed_tokens = self._count_messages_tokens(
-            list(context_window.system_messages or [])
-            + list(span.preserved_prefix)
-            + [UserMessage(content=prompt)],
+            list(context_window.system_messages or []) + list(span.preserved_prefix) + [UserMessage(content=prompt)],
             context,
         )
         fixed_tokens += self._count_tools_tokens(list(context_window.tools or []), context)
@@ -493,7 +595,78 @@ class PrefixCompactProcessor(ContextProcessor):
             "Do not invent details. Preserve only information supported by the conversation."
         )
 
-    def _wrap_memory_block(self, summary: str) -> str:
+    def _build_compacted_messages(
+        self,
+        *,
+        context: ModelContext,
+        original_messages: list[BaseMessage],
+        span: PrefixCompactSpan,
+        memory_message: UserMessage,
+    ) -> list[BaseMessage]:
+        new_messages = [*span.preserved_prefix, memory_message, *span.protected_tail]
+        reinjected_message = build_compressor_reinjected_state_message(
+            source_messages=original_messages,
+            messages_to_keep=new_messages,
+            context=context,
+            config=self.config,
+            builder_names=self.reinject_builder_names,
+        )
+        if reinjected_message is not None:
+            return [*span.preserved_prefix, memory_message, reinjected_message, *span.protected_tail]
+        return new_messages
+
+    async def _archive_compressed_messages(
+        self,
+        *,
+        context: ModelContext,
+        original_messages: list[BaseMessage],
+        span: PrefixCompactSpan,
+    ) -> Any | None:
+        get_recall_config = getattr(context, "compression_recall_config", None)
+        recall_config = get_recall_config() if callable(get_recall_config) else None
+        if not isinstance(recall_config, CompressionRecallConfig) or not recall_config.enabled:
+            return None
+        from openjiuwen.core.context_engine.processor.forked.compressor.recall import (
+            archive_compression_messages,
+        )
+
+        try:
+            return await asyncio.to_thread(
+                archive_compression_messages,
+                context=context,
+                processor_type=self.processor_type(),
+                original_messages=original_messages,
+                messages_to_compress=list(span.messages_to_compress),
+                preceding_messages=list(span.preserved_prefix),
+                chunk_size_tokens=recall_config.chunk_size_tokens,
+                chunk_overlap_tokens=recall_config.chunk_overlap_tokens,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] compression recall archive failed; continuing without a recall marker: %s",
+                self.processor_type(),
+                exc,
+                exc_info=True,
+            )
+            return None
+
+    def _delete_compression_archive(self, archive: Any) -> None:
+        from openjiuwen.core.context_engine.processor.forked.compressor.recall import (
+            delete_compression_archive,
+        )
+
+        try:
+            delete_compression_archive(archive)
+        except Exception as exc:
+            logger.warning(
+                "[%s] compression recall archive rollback failed: %s",
+                self.processor_type(),
+                exc,
+                exc_info=True,
+            )
+
+    def _wrap_memory_block(self, summary: str, *, memory_id: str | None = None) -> str:
+        recall_marker = f"\n[[COMPRESSION_RECALL: id={memory_id}]]" if memory_id else ""
         return (
             f"{self.memory_block_open}\n"
             "<meaning>\n"
@@ -504,7 +677,7 @@ class PrefixCompactProcessor(ContextProcessor):
             "</conflict_policy>\n"
             "<summary>\n"
             f"{summary}\n"
-            "</summary>\n"
+            f"</summary>{recall_marker}\n"
             f"{self.memory_block_close}"
         )
 
@@ -530,11 +703,16 @@ class PrefixCompactProcessor(ContextProcessor):
         return original_tokens <= 0 or new_tokens < original_tokens
 
     def _count_context_window_tokens(self, context_window: ContextWindow, context: ModelContext) -> int:
-        total = self._count_messages_tokens(
-            list(context_window.system_messages or []) + list(context_window.context_messages or []),
+        messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])
+        usage_tokens = count_usage_tokens_with_tail(messages)
+        if usage_tokens is not None:
+            # The model-reported usage already includes the system prompt and
+            # tools that were present when this still-valid baseline was made.
+            return usage_tokens
+        return self._count_messages_tokens(messages, context) + self._count_tools_tokens(
+            list(context_window.tools or []),
             context,
         )
-        return total + self._count_tools_tokens(list(context_window.tools or []), context)
 
     def _count_tools_tokens(self, tools: list[ToolInfo], context: ModelContext) -> int:
         token_counter = context.token_counter()
@@ -545,8 +723,19 @@ class PrefixCompactProcessor(ContextProcessor):
                 logger.warning("[%s] tool token counter failed: %s", self.processor_type(), exc)
         return sum(self._estimate_text_tokens(_serialize_tool(tool)) for tool in tools)
 
-    def _count_messages_tokens(self, messages: list[BaseMessage], context: ModelContext) -> int:
-        return count_messages_tokens(messages, context.token_counter(), self.processor_type())
+    def _count_messages_tokens(
+        self,
+        messages: list[BaseMessage],
+        context: ModelContext,
+        *,
+        usage_aware: bool = False,
+    ) -> int:
+        return count_messages_tokens(
+            messages,
+            context.token_counter(),
+            self.processor_type(),
+            usage_aware=usage_aware,
+        )
 
     def count_messages_tokens(self, messages: list[BaseMessage], context: ModelContext) -> int:
         """Count message tokens for diagnostics and extension points."""
@@ -563,7 +752,35 @@ class PrefixCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _estimate_text_tokens(text: str) -> int:
-        return max(len(text) // 3, 1) if text else 0
+        return max(len(text) // 4, 1) if text else 0
+
+    def _context_debug_enabled(self) -> bool:
+        return bool(getattr(self.config, "enable_compression_dump", False))
+
+    def _context_debug_dir(self) -> str | None:
+        return getattr(self.config, "compression_dump_dir", None)
+
+    def _write_context_debug(self, context: ModelContext, event: str, **payload: Any) -> None:
+        write_debug_record(
+            context,
+            processor_type=self.processor_type(),
+            event=event,
+            enabled=self._context_debug_enabled(),
+            dump_dir=self._context_debug_dir(),
+            **payload,
+        )
+
+    @staticmethod
+    def _span_summary(messages: list[BaseMessage]) -> list[dict[str, Any]]:
+        return [
+            {
+                "idx": idx,
+                "role": getattr(message, "role", None),
+                "tokens": max(len(str(getattr(message, "content", "") or "")) // 4, 1),
+                "preview": (str(getattr(message, "content", "") or ""))[:200],
+            }
+            for idx, message in enumerate(messages)
+        ]
 
     def load_state(self, state: dict[str, Any]) -> None:
         return

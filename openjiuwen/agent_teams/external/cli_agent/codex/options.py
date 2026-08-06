@@ -13,6 +13,8 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 
 _MCP_STARTUP_TIMEOUT_S = 120
+_REASONING_SUMMARY = "detailed"
+_OTEL_TRACE_EXPORT_DELAY_MS = 100
 
 
 def load_codex_sdk() -> Any:
@@ -39,11 +41,35 @@ def build_codex_config(
     mcp_default_tools_approval_mode: str | None,
     member_name: str,
     codex_bin: str | None,
+    native_otel_trace_endpoint: str | None = None,
+    rollout_trace_root: str | None = None,
     sdk: Any | None = None,
 ) -> Any:
     """Build ``CodexConfig`` without importing the optional SDK eagerly."""
     sdk = sdk or load_codex_sdk()
+    process_env = dict(env)
+    if rollout_trace_root:
+        process_env["CODEX_ROLLOUT_TRACE_ROOT"] = rollout_trace_root
     config_overrides: tuple[str, ...] = ()
+    if native_otel_trace_endpoint:
+        # Codex uses an OTel batch span processor. Keep its delivery interval
+        # below Jiuwen's turn-finalization grace period so the native logical
+        # sampling span arrives before the member turn is finalized.
+        process_env.setdefault(
+            "OTEL_BSP_SCHEDULE_DELAY",
+            str(_OTEL_TRACE_EXPORT_DELAY_MS),
+        )
+        config_overrides = (
+            'otel.environment="openjiuwen"',
+            "otel.exporter=none",
+            (
+                "otel.trace_exporter={ otlp-http = { "
+                f"endpoint = {json.dumps(native_otel_trace_endpoint)}, "
+                'protocol = "binary" } }'
+            ),
+            "otel.metrics_exporter=none",
+            "otel.log_user_prompt=false",
+        )
     if inject_mcp:
         if not mcp_server_command:
             raise_error(
@@ -51,7 +77,7 @@ def build_codex_config(
                 reason="Codex SDK MCP injection requires a non-empty mcp_server_command",
             )
             raise AssertionError  # pragma: no cover - raise_error always raises
-        config_overrides = codex_mcp_config_overrides(
+        config_overrides += codex_mcp_config_overrides(
             server_name=mcp_server_name,
             server_command=mcp_server_command,
             default_tools_approval_mode=mcp_default_tools_approval_mode,
@@ -61,7 +87,7 @@ def build_codex_config(
         codex_bin=codex_bin,
         config_overrides=config_overrides,
         cwd=cwd,
-        env=env,
+        env=process_env,
         client_name="openjiuwen_agent_team",
         client_title=f"OpenJiuwen Team Member {member_name}",
         client_version="1",
@@ -75,8 +101,11 @@ def build_codex_thread_options(
     bypass_approvals_and_sandbox: bool = False,
     sdk: Any | None = None,
 ) -> dict[str, Any]:
-    """Build thread options, applying full-access bypass only when requested."""
-    options: dict[str, Any] = {"ephemeral": False}
+    """Build thread options, including an SDK-visible reasoning summary."""
+    options: dict[str, Any] = {
+        "ephemeral": False,
+        "config": {"model_reasoning_summary": _REASONING_SUMMARY},
+    }
     if cwd:
         options["cwd"] = cwd
     if system_prompt:
@@ -110,10 +139,7 @@ def codex_mcp_config_overrides(
         ]
     )
     if default_tools_approval_mode is not None:
-        overrides.append(
-            f"mcp_servers.{key}.default_tools_approval_mode="
-            f"{json.dumps(default_tools_approval_mode)}"
-        )
+        overrides.append(f"mcp_servers.{key}.default_tools_approval_mode={json.dumps(default_tools_approval_mode)}")
     return tuple(overrides)
 
 

@@ -6,12 +6,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from openjiuwen.agent_teams.external.cli_agent.codex.runtime import (
     CodexSdkRuntime,
+    _json_arguments,
+    _start_thread_with_raw_events,
     _tool_result,
 )
 
@@ -22,6 +26,13 @@ def _notification(method: str, **payload):
 
 def _item_notification(method: str, item):
     return _notification(method, item=SimpleNamespace(root=item))
+
+
+def _raw_notification(method: str, **params):
+    return SimpleNamespace(
+        method=method,
+        payload=SimpleNamespace(params=params),
+    )
 
 
 class _FakeTurnHandle:
@@ -77,6 +88,28 @@ class _BlockingThread(_FakeThread):
         self.prompts.append(prompt)
         self.handles.append(self.handle)
         return self.handle
+
+
+class _SdkPathString:
+    def __init__(self, value: str):
+        self.value = value
+
+    def __str__(self) -> str:
+        return self.value
+
+
+def test_codex_json_arguments_stringifies_sdk_path_values():
+    arguments = _json_arguments(
+        {
+            "path": _SdkPathString("codex-report.txt"),
+            "nested": {"paths": [_SdkPathString(".team/workspace")]},
+        }
+    )
+
+    assert json.loads(arguments) == {
+        "path": "codex-report.txt",
+        "nested": {"paths": [".team/workspace"]},
+    }
 
 
 class _HandleSequenceThread(_FakeThread):
@@ -199,10 +232,13 @@ def _runtime(
     runtime = CodexSdkRuntime(
         member_name="developer",
         member_agent_id="team_developer",
+        team_name="team",
+        team_session_id="session",
         sdk=sdk,
         config=SimpleNamespace(name="config"),
         thread_options={
             "ephemeral": False,
+            "config": {"model_reasoning_summary": "detailed"},
             "cwd": "/workspace",
             "developer_instructions": "role prompt",
         },
@@ -252,7 +288,9 @@ async def test_codex_sdk_runtime_reuses_thread_and_maps_stream_events():
     assert runtime.session_id == "thread-developer"
     assert client.start_calls == [
         {
+            "experimental_raw_events": True,
             "ephemeral": False,
+            "config": {"model_reasoning_summary": "detailed"},
             "cwd": "/workspace",
             "developer_instructions": "role prompt",
         }
@@ -264,13 +302,544 @@ async def test_codex_sdk_runtime_reuses_thread_and_maps_stream_events():
         "tool_result",
         "llm_output",
     ]
-    assert first[1].payload["tool_name"] == "openjiuwen-team.send_message"
+    assert first[1].payload == {
+        "name": "openjiuwen-team.send_message",
+        "arguments": '{"recipient": "leader"}',
+        "tool_call_id": "tool-1",
+    }
+    assert first[2].payload == {
+        "tool_name": "openjiuwen-team.send_message",
+        "result": '{"ok": true}',
+        "tool_call_id": "tool-1",
+    }
     assert first[3].payload["content"] == "done"
     assert second[0].payload["content"] == "continued"
 
     await runtime.aclose()
     await runtime.aclose()
     assert client.close_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_waits_for_native_api_logs_before_finishing_turn():
+    events: list[str] = []
+
+    class _SpanBridge:
+        def start_turn(self, **_):
+            events.append("start")
+
+        def append_output(self, _):
+            pass
+
+        def append_reasoning(self, _):
+            pass
+
+        def record_model_usage(self, **_):
+            pass
+
+        def append_raw_response_item(self, _):
+            pass
+
+        def complete_model_response(self, **_):
+            pass
+
+        def start_tool(self, **_):
+            pass
+
+        def finish_tool(self, **_):
+            pass
+
+        def record_error(self, _, **__):
+            pass
+
+        async def wait_for_native_observations(self):
+            events.append("wait")
+
+        def finish_turn(self, **_):
+            events.append("finish")
+
+    thread = _FakeThread(
+        "thread-developer",
+        [
+            [
+                _notification(
+                    "turn/completed",
+                    turn=SimpleNamespace(status="completed", error=None),
+                ),
+            ],
+        ],
+    )
+    runtime, _ = _runtime(thread=thread)
+    runtime._span_bridge = _SpanBridge()
+
+    await _start(runtime)
+    _ = [chunk async for chunk in runtime._drive({"query": "inspect task"})]
+
+    assert events == ["start", "wait", "finish"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_emits_turn_and_tool_spans():
+    exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
+    from openjiuwen.agent_teams.observability import (
+        ObservabilityConfig,
+        init_observability,
+        shutdown_observability,
+    )
+    from openjiuwen.agent_teams.observability.semconv import (
+        GEN_AI_TOOL_INPUT,
+        GEN_AI_TOOL_OUTPUT,
+        LANGFUSE_OBSERVATION_INPUT,
+        LANGFUSE_OBSERVATION_OUTPUT,
+    )
+
+    InMemorySpanExporter = exporter_module.InMemorySpanExporter
+    exporter = InMemorySpanExporter()
+    init_observability(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="codex-runtime-test",
+            sample_rate=1.0,
+        ),
+        span_exporter_override=exporter,
+    )
+    try:
+        from openjiuwen.agent_teams.observability.setup import get_tracer
+        from openjiuwen.agent_teams.observability.span_context import (
+            clear_team_span,
+            get_or_create_team_span,
+        )
+
+        team_span = get_or_create_team_span(
+            "team",
+            get_tracer("codex-runtime-test"),
+        )
+        assert team_span is not None
+
+        started_tool = SimpleNamespace(
+            type="mcpToolCall",
+            id="tool-1",
+            server="openjiuwen-team",
+            tool="claim_task",
+            arguments={"task_id": "task-1", "status": "claimed"},
+            result=None,
+            error=None,
+        )
+        completed_tool = SimpleNamespace(
+            type="mcpToolCall",
+            id="tool-1",
+            server="openjiuwen-team",
+            tool="claim_task",
+            arguments={"task_id": "task-1", "status": "claimed"},
+            result={"status": "claimed"},
+            error=None,
+        )
+        thread = _FakeThread(
+            "thread-developer",
+            [
+                [
+                    _item_notification("item/started", started_tool),
+                    _item_notification("item/completed", completed_tool),
+                    _notification("item/agentMessage/delta", delta="task claimed"),
+                    _notification(
+                        "turn/completed",
+                        turn=SimpleNamespace(status="completed", error=None),
+                    ),
+                ]
+            ],
+        )
+        runtime, _ = _runtime(thread=thread)
+
+        await _start(runtime)
+        clear_team_span()
+        _ = [chunk async for chunk in runtime._drive({"query": "claim task-1"})]
+
+        spans = list(exporter.get_finished_spans())
+        turn_span = next(span for span in spans if span.name == "agent.developer.codex_turn.1")
+        tool_span = next(span for span in spans if span.name == "tool.claim_task")
+
+        assert turn_span.parent is not None
+        assert turn_span.parent.span_id == team_span.context.span_id
+        assert tool_span.parent is not None
+        assert tool_span.parent.span_id == turn_span.context.span_id
+        assert turn_span.attributes[LANGFUSE_OBSERVATION_INPUT] == "claim task-1"
+        assert turn_span.attributes[LANGFUSE_OBSERVATION_OUTPUT] == "task claimed"
+        assert '"task_id": "task-1"' in tool_span.attributes[GEN_AI_TOOL_INPUT]
+        assert '"status": "claimed"' in tool_span.attributes[GEN_AI_TOOL_OUTPUT]
+    finally:
+        shutdown_observability()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_keeps_sdk_response_as_separate_summary():
+    exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
+    from openjiuwen.agent_teams.observability import (
+        ObservabilityConfig,
+        init_observability,
+        shutdown_observability,
+    )
+    from openjiuwen.agent_teams.observability.semconv import (
+        GEN_AI_USAGE_COMPLETION_TOKENS,
+        GEN_AI_USAGE_PROMPT_TOKENS,
+        GEN_AI_USAGE_TOTAL_TOKENS,
+        LANGFUSE_OBSERVATION_OUTPUT,
+    )
+
+    exporter = exporter_module.InMemorySpanExporter()
+    init_observability(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="codex-raw-response-test",
+            sample_rate=1.0,
+        ),
+        span_exporter_override=exporter,
+    )
+    try:
+        from openjiuwen.agent_teams.observability.setup import get_tracer
+        from openjiuwen.agent_teams.observability.span_context import (
+            clear_team_span,
+            get_or_create_team_span,
+        )
+
+        assert get_or_create_team_span("team", get_tracer("codex-raw-response-test")) is not None
+        tool = SimpleNamespace(
+            type="mcpToolCall",
+            id="tool-1",
+            server="openjiuwen-team",
+            tool="view_task",
+            arguments={"task_id": "task-1"},
+            result={"status": "pending"},
+            error=None,
+        )
+        thread = _FakeThread(
+            "thread-developer",
+            [
+                [
+                    _notification("item/reasoning/textDelta", delta="inspect task"),
+                    _raw_notification(
+                        "rawResponseItem/completed",
+                        item={"type": "function_call", "name": "view_task"},
+                    ),
+                    _raw_notification(
+                        "rawResponse/completed",
+                        responseId="response-1",
+                        usage={
+                            "inputTokens": 100,
+                            "cachedInputTokens": 20,
+                            "outputTokens": 10,
+                            "reasoningOutputTokens": 4,
+                            "totalTokens": 110,
+                        },
+                    ),
+                    _item_notification("item/started", tool),
+                    _item_notification("item/completed", tool),
+                    _notification("item/reasoning/textDelta", delta="report result"),
+                    _notification("item/agentMessage/delta", delta="task is pending"),
+                    _raw_notification(
+                        "rawResponseItem/completed",
+                        item={"type": "message", "role": "assistant"},
+                    ),
+                    _raw_notification(
+                        "rawResponse/completed",
+                        responseId="response-2",
+                        usage={
+                            "inputTokens": 130,
+                            "cachedInputTokens": 100,
+                            "outputTokens": 15,
+                            "reasoningOutputTokens": 5,
+                            "totalTokens": 145,
+                        },
+                    ),
+                    _notification(
+                        "turn/completed",
+                        turn=SimpleNamespace(status="completed", error=None),
+                    ),
+                ]
+            ],
+        )
+        runtime, _ = _runtime(thread=thread)
+
+        await _start(runtime)
+        clear_team_span()
+        _ = [chunk async for chunk in runtime._drive({"query": "inspect task-1"})]
+
+        spans = list(exporter.get_finished_spans())
+        assert not [span for span in spans if span.name == "llm.call"]
+        summary = next(span for span in spans if span.name == "codex.sdk.summary")
+        assert summary.attributes["codex.response.ids"] == (
+            "response-1",
+            "response-2",
+        )
+        assert summary.attributes[GEN_AI_USAGE_PROMPT_TOKENS] == 130
+        assert summary.attributes[GEN_AI_USAGE_COMPLETION_TOKENS] == 15
+        assert summary.attributes[GEN_AI_USAGE_TOTAL_TOKENS] == 145
+        assert "task is pending" in summary.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+        reasoning_span = next(span for span in spans if span.name == "llm.reasoning")
+        assert reasoning_span.parent.span_id == summary.context.span_id
+        assert (
+            next(span for span in spans if span.name == "tool.view_task").parent.span_id
+            == next(span for span in spans if span.name == "agent.developer.codex_turn.1").context.span_id
+        )
+    finally:
+        shutdown_observability()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_native_model_request_sets_exact_llm_span_timing(
+):
+    exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
+    from openjiuwen.agent_teams.observability import (
+        ObservabilityConfig,
+        init_observability,
+        shutdown_observability,
+    )
+    from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
+    exporter = exporter_module.InMemorySpanExporter()
+    init_observability(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="codex-native-api-request-test",
+            sample_rate=1.0,
+        ),
+        span_exporter_override=exporter,
+    )
+    try:
+        from openjiuwen.agent_teams.observability.setup import get_tracer
+        from openjiuwen.agent_teams.observability.span_context import (
+            clear_team_span,
+            get_or_create_team_span,
+        )
+
+        assert (
+            get_or_create_team_span(
+                "team",
+                get_tracer("codex-native-api-request-test"),
+            )
+            is not None
+        )
+        bridge = CodexSpanBridge(
+            member_name="developer",
+            member_agent_id="team_developer",
+            team_name="team",
+            session_id="session",
+        )
+        bridge.enable_native_model_spans()
+        bridge.start_turn(
+            prompt="inspect task-1",
+            thread_id="thread-developer",
+            developer_instructions="role prompt",
+            model="gpt-test",
+        )
+        clear_team_span()
+
+        end_ns = time.time_ns()
+        async def deliver_native_span():
+            await asyncio.sleep(0)
+            bridge.record_native_model_span(
+                {
+                    "name": "run_sampling_request",
+                    "start_time_ns": end_ns - 25_000_000,
+                    "end_time_ns": end_ns,
+                    "trace_id": "11" * 16,
+                    "span_id": "22" * 8,
+                    "parent_span_id": "33" * 8,
+                    "status_code": 1,
+                    "attributes": {
+                        "turn_id": "turn-native",
+                        "model": "gpt-native",
+                    },
+                },
+            )
+
+        delivery = asyncio.create_task(deliver_native_span())
+        await bridge.wait_for_native_observations()
+        await delivery
+        bridge.finish_turn(status="completed")
+
+        spans = list(exporter.get_finished_spans())
+        llm_span = next(span for span in spans if span.name == "llm.call")
+        assert llm_span.start_time == end_ns - 25_000_000
+        assert llm_span.end_time == end_ns
+        assert llm_span.attributes["codex.observation.granularity"] == "native_sampling_span"
+        assert llm_span.attributes["codex.model.call.boundary"] == "run_sampling_request"
+        assert llm_span.attributes["codex.model.call.boundary_exact"] is True
+        assert llm_span.attributes["codex.model.call.start_observed"] is True
+        assert llm_span.attributes["codex.model.call.paired"] is False
+        assert llm_span.attributes["gen_ai.request.model"] == "gpt-native"
+        assert llm_span.attributes["codex.turn.id"] == "turn-native"
+        assert llm_span.attributes["codex.native.trace_id"] == "11" * 16
+        assert llm_span.attributes["codex.native.span_id"] == "22" * 8
+    finally:
+        shutdown_observability()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_native_mode_preserves_exact_unpaired_span():
+    exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
+    from openjiuwen.agent_teams.observability import (
+        ObservabilityConfig,
+        init_observability,
+        shutdown_observability,
+    )
+    from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
+
+    exporter = exporter_module.InMemorySpanExporter()
+    init_observability(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="codex-unpaired-observation-test",
+            sample_rate=1.0,
+        ),
+        span_exporter_override=exporter,
+    )
+    try:
+        from openjiuwen.agent_teams.observability.setup import get_tracer
+        from openjiuwen.agent_teams.observability.span_context import (
+            get_or_create_team_span,
+        )
+
+        assert get_or_create_team_span(
+            "team",
+            get_tracer("codex-unpaired-observation-test"),
+        ) is not None
+        bridge = CodexSpanBridge(
+            member_name="developer",
+            member_agent_id="team_developer",
+            team_name="team",
+            session_id="session",
+        )
+        bridge.enable_native_model_spans()
+        bridge.start_turn(
+            prompt="inspect task",
+            thread_id="thread-developer",
+            model="gpt-test",
+        )
+        end_ns = time.time_ns()
+        bridge.record_native_model_span(
+            {
+                "name": "run_sampling_request",
+                "start_time_ns": end_ns - 10_000_000,
+                "end_time_ns": end_ns,
+                "attributes": {
+                    "turn_id": "turn-1",
+                    "model": "gpt-test",
+                },
+            },
+        )
+        bridge.finish_turn(status="completed")
+
+        llm_span = next(
+            span for span in exporter.get_finished_spans() if span.name == "llm.call"
+        )
+        assert llm_span.attributes["codex.observation.granularity"] == "native_sampling_span"
+        assert llm_span.attributes["codex.model.call.observed"] is True
+        assert llm_span.attributes["codex.model.call.paired"] is False
+        assert llm_span.start_time == end_ns - 10_000_000
+        assert llm_span.end_time == end_ns
+    finally:
+        shutdown_observability()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_turn_does_not_infer_llm_call_when_native_export_is_missing():
+    exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
+    from openjiuwen.agent_teams.observability import (
+        ObservabilityConfig,
+        init_observability,
+        shutdown_observability,
+    )
+    from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
+
+    exporter = exporter_module.InMemorySpanExporter()
+    init_observability(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="codex-missing-native-export-test",
+            sample_rate=1.0,
+        ),
+        span_exporter_override=exporter,
+    )
+    try:
+        from openjiuwen.agent_teams.observability.setup import get_tracer
+        from openjiuwen.agent_teams.observability.span_context import (
+            get_or_create_team_span,
+        )
+
+        assert get_or_create_team_span(
+            "team",
+            get_tracer("codex-missing-native-export-test"),
+        ) is not None
+        bridge = CodexSpanBridge(
+            member_name="developer",
+            member_agent_id="team_developer",
+            team_name="team",
+            session_id="session",
+        )
+        bridge.enable_native_model_spans()
+        bridge.start_turn(
+            prompt="inspect task",
+            thread_id="thread-developer",
+            model="gpt-test",
+        )
+        bridge.finish_turn(status="failed", error="transport closed")
+
+        spans = list(exporter.get_finished_spans())
+        assert not [span for span in spans if span.name == "llm.call"]
+        turn_span = next(
+            span for span in spans if span.name == "agent.developer.codex_turn.1"
+        )
+        assert turn_span.attributes["codex.native.model_span_count"] == 0
+    finally:
+        shutdown_observability()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_thread_start_uses_low_level_raw_event_compatibility():
+    sdk_module = pytest.importorskip("openai_codex")
+    requests: list[dict] = []
+
+    class _LowLevelClient:
+        async def thread_start(self, params):
+            requests.append(params)
+            return SimpleNamespace(thread=SimpleNamespace(id="thread-raw"))
+
+    class _HighLevelClient:
+        def __init__(self):
+            self._client = _LowLevelClient()
+            self.initialized = False
+
+        async def _ensure_initialized(self):
+            self.initialized = True
+
+        async def thread_start(self, *, cwd=None, ephemeral=None):
+            raise AssertionError("the public start method must not be used")
+
+    client = _HighLevelClient()
+    sdk = SimpleNamespace(
+        ApprovalMode=sdk_module.ApprovalMode,
+        AsyncThread=lambda owner, thread_id: SimpleNamespace(owner=owner, id=thread_id),
+    )
+
+    thread = await _start_thread_with_raw_events(
+        client=client,
+        sdk=sdk,
+        options={"cwd": "/workspace", "ephemeral": False},
+    )
+
+    assert client.initialized is True
+    assert thread.id == "thread-raw"
+    assert requests[0]["experimentalRawEvents"] is True
+    assert requests[0]["cwd"] == "/workspace"
+    assert requests[0]["ephemeral"] is False
+    assert requests[0]["approvalPolicy"] == "on-request"
+    assert requests[0]["approvalsReviewer"] == "auto_review"
 
 
 @pytest.mark.parametrize(
@@ -293,8 +862,7 @@ def test_codex_sdk_runtime_preserves_falsy_mcp_tool_results(result):
 
     actual = _tool_result(item)
 
-    assert actual == result
-    assert type(actual) is type(result)
+    assert actual == json.dumps(result, ensure_ascii=False)
 
 
 @pytest.mark.level0
@@ -302,7 +870,34 @@ def test_codex_sdk_runtime_uses_mcp_error_when_result_is_none():
     error = {"message": "tool failed"}
     item = SimpleNamespace(type="mcpToolCall", result=None, error=error)
 
-    assert _tool_result(item) == error
+    assert _tool_result(item) == '{"message": "tool failed"}'
+
+
+@pytest.mark.level0
+def test_codex_sdk_runtime_returns_command_output_as_tool_result():
+    item = SimpleNamespace(type="commandExecution", aggregated_output="codex reporter in\n", exit_code=0)
+
+    assert _tool_result(item) == "codex reporter in\n"
+
+
+@pytest.mark.level0
+def test_codex_sdk_runtime_returns_exit_code_when_command_output_is_empty():
+    item = SimpleNamespace(type="commandExecution", aggregated_output="", exit_code=0)
+
+    assert _tool_result(item) == "exit_code=0"
+
+
+@pytest.mark.level0
+def test_codex_sdk_runtime_joins_text_block_tool_results():
+    item = SimpleNamespace(
+        type="dynamicToolCall",
+        content_items=[
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"},
+        ],
+    )
+
+    assert _tool_result(item) == "first\nsecond"
 
 
 @pytest.mark.asyncio
@@ -317,7 +912,11 @@ async def test_codex_sdk_runtime_resumes_saved_thread_id_without_ephemeral():
     assert client.resume_calls == [
         (
             "thread-saved",
-            {"cwd": "/workspace", "developer_instructions": "role prompt"},
+            {
+                "config": {"model_reasoning_summary": "detailed"},
+                "cwd": "/workspace",
+                "developer_instructions": "role prompt",
+            },
         )
     ]
 
@@ -338,7 +937,11 @@ async def test_codex_sdk_runtime_resume_failure_never_starts_replacement_thread(
     assert client.resume_calls == [
         (
             "thread-saved",
-            {"cwd": "/workspace", "developer_instructions": "role prompt"},
+            {
+                "config": {"model_reasoning_summary": "detailed"},
+                "cwd": "/workspace",
+                "developer_instructions": "role prompt",
+            },
         )
     ]
     assert client.start_calls == []
