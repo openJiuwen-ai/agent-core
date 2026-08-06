@@ -2363,3 +2363,106 @@ async def test_subagent_invoke_nests_under_the_dispatching_tool_span(
     assert invoke_span.parent.span_id == tool_spans[0].context.span_id, (
         "subagent invoke span must nest under the dispatching tool span"
     )
+
+
+@pytest.mark.asyncio
+async def test_subagent_without_team_name_still_gets_an_agent_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A harness-built sub-agent carries no team, and must still be traced.
+
+    ``team_name`` only labels the span. Gating on it left every sub-agent the
+    harness creates without an agent tier, so its llm/tool spans attached to
+    the dispatching agent's span as if that agent had made the calls.
+    """
+    from opentelemetry.trace import set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_current_agent_span,
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+    team_span = _create_team_span("test_team")
+    agent_span = get_tracer("test").start_span(
+        "agent.leader.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    set_current_agent_span(agent_span)
+
+    rail = ObservabilityRail()
+    ctx = AgentCallbackContext(
+        inputs=type("In", (), {"query": "list files"})(),
+        agent=type("A", (), {
+            "team_name": "",  # harness sub-agents have no team
+            "deep_config": type("DC", (), {"enable_task_loop": False})(),
+            "card": type("C", (), {"name": "explore_agent"})(),
+            "role": None,
+        })(),
+        exception=None,
+    )
+    await rail.before_invoke(ctx)
+    invoke_span = get_current_agent_span()
+    await rail.after_invoke(ctx)
+
+    set_current_agent_span(None)
+    agent_span.end()
+    remove_team_span("test_team")
+
+    assert invoke_span is not None and invoke_span is not agent_span
+    assert invoke_span.name == "agent.explore_agent.invoke"
+    assert invoke_span.parent is not None
+    assert invoke_span.parent.span_id == agent_span.context.span_id
+
+
+@pytest.mark.asyncio
+async def test_iterations_nest_under_the_invoke_span_of_the_same_agent(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """One invoke, N iterations — the rounds belong under the request, not beside it.
+
+    Both hooks fire for an agent whose ``enable_task_loop`` the rail reads as
+    false while the loop still runs. They used to produce sibling spans under
+    the team span, the invoke one empty.
+    """
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+    _create_team_span("test_team")
+
+    agent = type("A", (), {
+        "team_name": "test_team",
+        "deep_config": type("DC", (), {"enable_task_loop": False})(),
+        "card": type("C", (), {"name": "main_agent"})(),
+        "role": None,
+    })()
+
+    def _ctx() -> AgentCallbackContext:
+        # The runtime hands each hook its own callback context.
+        return AgentCallbackContext(
+            inputs=type("In", (), {
+                "query": "q", "result": "r", "iteration": 1,
+                "is_follow_up": False, "loop_event": None,
+            })(),
+            agent=agent,
+            exception=None,
+        )
+
+    rail = ObservabilityRail()
+    invoke_ctx, iter_ctx = _ctx(), _ctx()
+    await rail.before_invoke(invoke_ctx)
+    await rail.before_task_iteration(iter_ctx)
+    await rail.after_task_iteration(iter_ctx)
+    await rail.after_invoke(invoke_ctx)
+    remove_team_span("test_team")
+
+    invoke_spans = _spans_by_name(in_memory_exporter, "agent.main_agent.invoke")
+    iter_spans = _spans_by_name(in_memory_exporter, "agent.main_agent.task_iteration.1")
+    assert invoke_spans and iter_spans
+    assert iter_spans[0].parent is not None
+    assert iter_spans[0].parent.span_id == invoke_spans[0].context.span_id
+    # The invoke span must survive the iteration's stale-span drain.
+    assert invoke_spans[0].end_time >= iter_spans[0].end_time
