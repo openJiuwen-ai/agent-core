@@ -1,0 +1,186 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Single subagent instance with a serial asyncio worker."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from typing import Any
+
+from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.harness.subagent_lifecycle import (
+    cleanup_subagent_task_resources,
+    prepare_subagent_task_resources,
+)
+from openjiuwen.harness.subagent_runtime.models import (
+    ShutdownOp,
+    SubagentOp,
+    SubagentStatus,
+    SubagentStatusKind,
+    UserInputOp,
+)
+from openjiuwen.harness.subagent_runtime.status import StatusChannel, StatusReceiver
+
+
+class SubagentInstance:
+    """One live subagent with a resident session and serial worker."""
+
+    def __init__(
+        self,
+        *,
+        subagent_id: str,
+        subagent_type: str,
+        display_name: str,
+        role: str,
+        parent_session_id: str,
+        agent: Any,
+        session: Any,
+        running_semaphore: asyncio.Semaphore,
+    ) -> None:
+        self.subagent_id = subagent_id
+        self.subagent_type = subagent_type
+        self.display_name = display_name
+        self.role = role
+        self.parent_session_id = parent_session_id
+
+        self.status = StatusChannel()
+        self.last_output: str | None = None
+        self.last_task_id: str | None = None
+        self.current_task_id: str | None = None
+
+        self._agent = agent
+        self._session = session
+
+        self._ops: asyncio.Queue[SubagentOp] = asyncio.Queue()
+        self._worker_task: asyncio.Task[None] | None = None
+        self._current_run: asyncio.Task[None] | None = None
+        self._running_semaphore = running_semaphore
+        self._interrupt_requested = False
+        self._closed = False
+
+    def agent_status(self) -> SubagentStatus:
+        return self.status.current()
+
+    def revision(self) -> int:
+        return self.status.version()
+
+    def subscribe_status(self) -> StatusReceiver:
+        return self.status.subscribe()
+
+    async def enqueue(self, op: SubagentOp) -> None:
+        await self._ops.put(op)
+
+    async def interrupt(self) -> bool:
+        run = self._current_run
+        if run is None or run.done():
+            return False
+        self._interrupt_requested = True
+        run.cancel()
+        await asyncio.wait({run})
+        return True
+
+    async def start_worker(self) -> None:
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(self._worker_main())
+
+    async def shutdown(self, reason: str) -> None:
+        await self.interrupt()
+        await self.enqueue(ShutdownOp(reason=reason))
+        if self._worker_task is not None:
+            await self._worker_task
+
+    def is_evictable(self) -> bool:
+        if self._closed:
+            return False
+        if self.status.current().kind == SubagentStatusKind.RUNNING:
+            return False
+        if self._current_run is not None and not self._current_run.done():
+            return False
+        return self._ops.empty()
+
+    def is_closed(self) -> bool:
+        return self._closed
+
+    async def _worker_main(self) -> None:
+        while True:
+            op = await self._ops.get()
+            try:
+                if isinstance(op, ShutdownOp):
+                    await self._handle_shutdown(op.reason)
+                    return
+                await self._handle_user_input(op)
+            finally:
+                self._ops.task_done()
+
+    async def _handle_user_input(self, op: UserInputOp) -> None:
+        self.current_task_id = op.task_id
+
+        async with self._running_semaphore:
+            self._interrupt_requested = False
+            await self.status.set(SubagentStatus.running())
+            self._current_run = asyncio.create_task(self._run_one_turn(op))
+            try:
+                await self._current_run
+            except asyncio.CancelledError:
+                await self._on_turn_cancelled()
+            except Exception:
+                pass
+            finally:
+                self._current_run = None
+
+    async def _on_turn_cancelled(self) -> None:
+        if not self.status.current().is_final():
+            await self.status.set(SubagentStatus.interrupted())
+
+        if self._interrupt_requested:
+            self._interrupt_requested = False
+            return
+
+        run = self._current_run
+        if run is not None and not run.done():
+            run.cancel()
+        raise
+
+    async def _run_one_turn(self, op: UserInputOp) -> None:
+        await prepare_subagent_task_resources(self._agent)
+        try:
+            result = await self._agent.invoke(
+                {"query": op.query, "conversation_id": self.subagent_id},
+                session=self._session,
+            )
+            output = str(result.get("output") or "")
+            self.last_output = output
+            self.last_task_id = op.task_id
+            await self.status.set(SubagentStatus.completed(output))
+        except BaseError as exc:
+            await self.status.set(
+                SubagentStatus.errored(str(exc), code=exc.status.name),
+            )
+            raise
+        except Exception as exc:
+            await self.status.set(SubagentStatus.errored(str(exc)))
+            raise
+        finally:
+            await self._finalize_turn()
+
+    async def _finalize_turn(self) -> None:
+        task = asyncio.create_task(self._finalize_turn_inner())
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.shield(task)
+
+    async def _finalize_turn_inner(self) -> None:
+        await cleanup_subagent_task_resources(self._agent)
+        await self._session.commit()
+
+    async def _handle_shutdown(self, reason: str) -> None:
+        if self._closed:
+            return
+        run = self._current_run
+        if run is not None and not run.done():
+            self._interrupt_requested = True
+            run.cancel()
+            await asyncio.wait({run})
+        await self.status.set(SubagentStatus.closed(reason))
+        await self.status.close()
+        self._closed = True

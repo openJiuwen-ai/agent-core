@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Subagent runtime foundation (phase 1A: types and status)."""
+"""Subagent runtime foundation: types, status, registry, and instance worker."""
 
 from openjiuwen.harness.subagent_runtime.config import (
     WAIT_TIMEOUT_MS_DEFAULT,
@@ -8,7 +8,13 @@ from openjiuwen.harness.subagent_runtime.config import (
     WAIT_TIMEOUT_MS_MIN,
     SubagentRuntimeConfig,
 )
+from openjiuwen.harness.subagent_runtime.errors import (
+    build_subagent_runtime_error,
+    raise_subagent_capacity_invalid,
+    raise_subagent_not_found,
+)
 from openjiuwen.harness.subagent_runtime.ids import build_subagent_id, new_task_id
+from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
 from openjiuwen.harness.subagent_runtime.models import (
     ShutdownOp,
     SpawnResult,
@@ -20,6 +26,7 @@ from openjiuwen.harness.subagent_runtime.models import (
     WaitResult,
     resolve_presentation,
 )
+from openjiuwen.harness.subagent_runtime.registry import SpawnReservation, SubagentRegistry
 from openjiuwen.harness.subagent_runtime.status import StatusChannel, StatusReceiver
 
 __all__ = [
@@ -27,17 +34,23 @@ __all__ = [
     "WAIT_TIMEOUT_MS_MAX",
     "WAIT_TIMEOUT_MS_MIN",
     "ShutdownOp",
+    "SpawnReservation",
     "SpawnResult",
     "StatusChannel",
     "StatusReceiver",
+    "SubagentInstance",
     "SubagentMetadata",
     "SubagentOp",
+    "SubagentRegistry",
     "SubagentRuntimeConfig",
     "SubagentStatus",
     "SubagentStatusKind",
     "UserInputOp",
     "WaitResult",
     "build_subagent_id",
+    "build_subagent_runtime_error",
     "new_task_id",
+    "raise_subagent_capacity_invalid",
+    "raise_subagent_not_found",
     "resolve_presentation",
 ]
