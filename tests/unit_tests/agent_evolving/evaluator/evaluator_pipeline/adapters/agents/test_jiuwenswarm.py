@@ -13,7 +13,9 @@ import yaml
 
 from openjiuwen.agent_evolving.evaluator.evaluator_pipeline.adapters.agents.jiuwenswarm import (
     JiuWenSwarmAgent,
+    _debug_dir,
     _staged_file,
+    _write_private,
 )
 from openjiuwen.agent_evolving.evaluator.evaluator_pipeline.models import ExecResult
 
@@ -190,6 +192,50 @@ class TestStagedFile:
         with pytest.raises(OSError):
             os.fstat(descriptors[0])
         assert staged and not staged[0].exists()
+
+
+class TestDebugOutput:
+    """Debug output must not be writable, or readable, by other local accounts."""
+
+    @staticmethod
+    def test_debug_dir_is_private_and_unpredictable():
+        first = _debug_dir()
+        second = _debug_dir()
+        try:
+            assert stat.S_IMODE(first.stat().st_mode) == 0o700
+            assert first.parent == Path(tempfile.gettempdir())
+            assert first != second
+        finally:
+            first.rmdir()
+            second.rmdir()
+
+    @staticmethod
+    def test_write_private_creates_an_owner_only_file(tmp_path):
+        target = tmp_path / "raw_output.txt"
+        _write_private(target, "transcript")
+
+        assert target.read_text(encoding="utf-8") == "transcript"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    @staticmethod
+    def test_write_private_truncates_an_existing_file(tmp_path):
+        target = tmp_path / "raw_output.txt"
+        _write_private(target, "long previous transcript")
+        _write_private(target, "short")
+
+        assert target.read_text(encoding="utf-8") == "short"
+
+    @staticmethod
+    def test_write_private_refuses_to_follow_a_symlink(tmp_path):
+        victim = tmp_path / "victim.txt"
+        victim.write_text("untouched", encoding="utf-8")
+        planted = tmp_path / "raw_output.txt"
+        planted.symlink_to(victim)
+
+        with pytest.raises(OSError):
+            _write_private(planted, "attacker-chosen content")
+
+        assert victim.read_text(encoding="utf-8") == "untouched"
 
 
 class TestJiuWenSwarmAgentCredentialStaging:

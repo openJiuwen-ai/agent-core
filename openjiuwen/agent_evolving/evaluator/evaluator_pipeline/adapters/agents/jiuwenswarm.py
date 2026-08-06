@@ -53,6 +53,30 @@ def _staged_file(content: str, suffix: str = "") -> Iterator[Path]:
         path.unlink(missing_ok=True)
 
 
+def _debug_dir() -> Path:
+    """Create a fresh directory for one run's debug output.
+
+    ``mkdtemp`` creates the directory with mode 0700 and a name nobody else can
+    guess, so an existing path in the shared temporary directory can neither be
+    adopted nor followed as a symlink. The directory is deliberately left in
+    place after the run; its location is logged so it can be found.
+    """
+    return Path(tempfile.mkdtemp(prefix="jiuwenswarm_debug_"))
+
+
+def _write_private(path: Path, content: str) -> None:
+    """Write ``content`` to ``path``, refusing to follow an existing symlink.
+
+    ``O_NOFOLLOW`` makes the open fail rather than write through a symlink
+    someone else planted, and the explicit mode keeps the umask from widening
+    the result.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
 @register_agent("jiuwenswarm")
 class JiuWenSwarmAgent(BaseAgentAdapter):
     SKILL_DIR = "/root/.jiuwenswarm/agent/workspace/skills"
@@ -369,11 +393,11 @@ memory:
         raw_output = result.stdout
         stderr = result.stderr
 
-        debug_dir = Path("/tmp/jiuwenswarm_debug")
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        (debug_dir / "raw_output.txt").write_text(raw_output, encoding="utf-8")
+        debug_dir = _debug_dir()
+        _write_private(debug_dir / "raw_output.txt", raw_output)
         if stderr:
-            (debug_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
+            _write_private(debug_dir / "stderr.txt", stderr)
+        logger.info(f"  Debug output written to {debug_dir}")
 
         trajectory = []
         final_response = ""
