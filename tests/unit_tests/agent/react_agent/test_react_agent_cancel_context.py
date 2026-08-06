@@ -20,6 +20,25 @@ def _tool_call(call_id: str, name: str = "search") -> ToolCall:
     return ToolCall(id=call_id, type="function", name=name, arguments="{}")
 
 
+class _EmptyAsyncIterator:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+class _FailingAsyncIterator:
+    def __init__(self, message: str):
+        self.message = message
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise RuntimeError(self.message)
+
+
 def test_sanitize_keeps_user_message_and_adds_cancel_marker():
     messages = [UserMessage(content="帮我查询热搜前50")]
     kept = ReActAgent._sanitize_cancelled_turn_messages(messages)
@@ -245,6 +264,76 @@ async def test_stream_abort_commits_owned_agent_session_once():
     agent.context_engine.save_contexts.assert_awaited_once_with(session)
     session.commit.assert_called_once()
     session.close_stream.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_real_stream_exception_persists_and_commits_once():
+    """The stream wrapper owns lifecycle persistence for the real invoke path."""
+    agent = ReActAgent(card=AgentCard(name="real_stream_agent", description="real stream lifecycle"))
+    agent.configure(ReActAgentConfig().configure_model("gpt-4").configure_max_iterations(3))
+
+    user_msg = UserMessage(content="查一下热搜")
+    mock_context_window = MagicMock(
+        get_messages=MagicMock(return_value=[]),
+        get_tools=MagicMock(return_value=None),
+    )
+    mock_context = MagicMock()
+    mock_context.add_messages = AsyncMock()
+    mock_context.get_context_window = AsyncMock(return_value=mock_context_window)
+    mock_context.get_messages = MagicMock(return_value=[user_msg])
+    mock_context.set_messages = MagicMock()
+
+    mock_context_engine = MagicMock()
+    mock_context_engine.create_context = AsyncMock(return_value=mock_context)
+    mock_context_engine.get_context = MagicMock(return_value=mock_context)
+    mock_context_engine.save_contexts = AsyncMock()
+    agent.context_engine = mock_context_engine
+
+    mock_llm = MockLLMModel()
+    mock_llm.stream = MagicMock(return_value=_FailingAsyncIterator("insufficient_quota"))
+
+    session = MagicMock()
+    session.get_session_id.return_value = "sess"
+    session.get_state.return_value = None
+    session.write_stream = AsyncMock()
+    session.stream_iterator.return_value = _EmptyAsyncIterator()
+    session.close_stream = AsyncMock()
+    session.commit = AsyncMock()
+    agent.is_agent_session = True
+
+    with patch.object(agent, "_get_llm", return_value=mock_llm):
+        async for _ in agent._inner_stream(
+                session=session,
+                inputs={"query": "查一下热搜"},
+                need_cleanup=True,
+        ):
+            pass
+
+    mock_context_engine.save_contexts.assert_awaited_once_with(session)
+    session.commit.assert_awaited_once_with()
+    session.close_stream.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_model_exception_recovery_uses_instance_hook():
+    """An explicitly installed context recovery hook must be invoked."""
+    agent = ReActAgent(card=AgentCard(name="instance_hook_agent", description="instance recovery hook"))
+    context = MagicMock()
+    context.context_id.return_value = "context"
+    session = MagicMock()
+    ctx = AgentCallbackContext(agent=agent, session=session)
+    recovery = AsyncMock(return_value=True)
+    agent.context_engine = MagicMock()
+    agent.context_engine.recover_from_model_exception = recovery
+
+    recovered = await agent._recover_from_model_exception(
+        ctx,
+        context=context,
+        exception=RuntimeError("context length exceeded"),
+    )
+
+    assert recovered is True
+    recovery.assert_awaited_once()
 
 
 @pytest.mark.asyncio

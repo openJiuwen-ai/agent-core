@@ -872,11 +872,22 @@ class ReActAgent(BaseAgent):
         returns ``True`` to retry the same ReAct model step. Returning
         ``False`` leaves the original exception untouched.
         """
-        recover = getattr(type(self.context_engine), "recover_from_model_exception", None)
+        # Inspect the instance without triggering dynamic ``__getattr__`` hooks
+        # on mocks/proxies. This still honors a method explicitly installed on
+        # the instance as well as the normal ContextEngine class method.
+        recover_descriptor = inspect.getattr_static(
+            self.context_engine,
+            "recover_from_model_exception",
+            None,
+        )
+        if recover_descriptor is None:
+            return False
+
+        recover = getattr(self.context_engine, "recover_from_model_exception", None)
         if not callable(recover):
             return False
 
-        return bool(await recover(self.context_engine,
+        return bool(await recover(
             context_id=context.context_id(),
             session=ctx.session,
             context=context,
@@ -1841,6 +1852,7 @@ class ReActAgent(BaseAgent):
         invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
         abort_persisted = False
+        stream_lifecycle_owner = bool(kwargs.get("_stream_lifecycle_owner"))
         commit_on_abort = self._session_supports_agent_lifecycle(session)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
         if isinstance(inputs, dict):
@@ -2065,6 +2077,8 @@ class ReActAgent(BaseAgent):
         except asyncio.CancelledError:
             # 外部取消（非工具级 CancelledError）。工具级 CancelledError
             # 在 AbilityManager.execute 中会被转成 ToolMessage，不会传播到这里。
+            if stream_lifecycle_owner:
+                raise
             abort_persisted = await self._handle_context_abort(
                 session,
                 marker="[Request cancelled by user]",
@@ -2076,6 +2090,8 @@ class ReActAgent(BaseAgent):
             # already been appended to the in-memory context. Preserve the same
             # safe prefix used for cancellation instead of falling back to the
             # last persisted snapshot on the next invocation.
+            if stream_lifecycle_owner:
+                raise
             abort_persisted = await self._handle_context_abort(
                 session,
                 marker="[Request interrupted by an unexpected error]",
@@ -2083,7 +2099,7 @@ class ReActAgent(BaseAgent):
             )
             raise  # Preserve the original ReAct failure for the caller
         finally:
-            if need_cleanup:
+            if need_cleanup and not stream_lifecycle_owner:
                 if not abort_persisted:
                     await self.context_engine.save_contexts(session)
                 await session.close_stream()
@@ -2192,7 +2208,12 @@ class ReActAgent(BaseAgent):
         async def stream_process():
             nonlocal abort_persisted
             try:
-                final_result = await self.invoke(inputs, session, _streaming=True)
+                final_result = await self.invoke(
+                    inputs,
+                    session,
+                    _streaming=True,
+                    _stream_lifecycle_owner=True,
+                )
                 if isinstance(final_result, list):
                     for schema in final_result:
                         await session.write_stream(schema)
@@ -2208,12 +2229,12 @@ class ReActAgent(BaseAgent):
                 )
                 raise
             except Exception as e:
+                logger.error("ReActAgent stream error: %s", e, exc_info=True)
                 abort_persisted = await self._handle_context_abort(
                     session,
                     marker="[Request interrupted by an unexpected error]",
                     commit_session=self.is_agent_session,
                 )
-                logger.error(f"ReActAgent stream error: {e}", exc_info=True)
                 error_result = {"output": str(e), "result_type": "error"}
                 await self._write_invoke_result_to_stream(
                     error_result, session
@@ -2342,13 +2363,6 @@ class ReActAgent(BaseAgent):
 
         kept = self._sanitize_cancelled_turn_messages(current, marker=marker)
         context.set_messages(kept, with_history=False)
-
-    async def _cleanup_context_on_cancel(self, session: Session) -> None:
-        """Compatibility wrapper for cancellation-specific callers."""
-        await self._cleanup_context_after_abort(
-            session,
-            marker="[Request cancelled by user]",
-        )
 
     async def _persist_context_after_abort(
             self,

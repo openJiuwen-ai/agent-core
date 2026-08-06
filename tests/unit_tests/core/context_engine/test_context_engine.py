@@ -222,6 +222,20 @@ class TestContextEngine:
         assert recovered is False
 
     @pytest.mark.asyncio
+    async def test_compress_context_preserves_explicit_empty_trigger(self, engine, session):
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+        )
+        context._select_processors = MagicMock(return_value=[MagicMock()])
+        context._run_active_compression_processors = AsyncMock(return_value=False)
+
+        await context.compress_context(compression_trigger="")
+
+        context._run_active_compression_processors.assert_awaited_once()
+        assert context._run_active_compression_processors.await_args.kwargs["compression_trigger"] == ""
+
+    @pytest.mark.asyncio
     async def test_create_context_isolated_per_session(self, engine, session, another_session):
         ctx1 = await engine.create_context(context_id="ctx", session=session)
         ctx2 = await engine.create_context(context_id="ctx", session=another_session)
