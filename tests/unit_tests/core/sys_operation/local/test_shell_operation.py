@@ -461,6 +461,53 @@ def test_get_sandbox_roots_explicit(tmp_path):
     assert any(r == tmp_path.resolve() for r in roots)
 
 
+@pytest.fixture
+def cwd_state():
+    """Isolate the CwdState ContextVar so fallback tests do not leak into others."""
+    from openjiuwen.core.sys_operation import cwd as cwd_mod
+
+    token = cwd_mod._cwd_state.set(cwd_mod.CwdState())
+    yield cwd_mod
+    cwd_mod._cwd_state.reset(token)
+
+
+def test_get_sandbox_roots_deduplicates_overlapping_defaults(cwd_state, tmp_path):
+    """The [workspace, project_root, cwd] fallback overlaps and must collapse.
+
+    project_root defaults to cwd, and a subagent inherits both from its
+    parent, so the raw fallback lists the same root twice.  The denial message
+    renders this list verbatim, where a repeated entry reads like a bug.
+    """
+    workspace = tmp_path / "workspace" / "sub_agents" / "sub"
+    artifact_root = tmp_path / "workspace" / "projects"
+    workspace.mkdir(parents=True)
+    artifact_root.mkdir(parents=True)
+
+    cwd_state.init_cwd(
+        str(artifact_root),
+        project_root=str(artifact_root),
+        workspace=str(workspace),
+    )
+    op = _make_shell_op(restrict=True)
+
+    assert op._get_sandbox_roots() == [workspace.resolve(), artifact_root.resolve()]
+
+
+def test_get_sandbox_roots_deduplicates_explicit_roots(tmp_path):
+    """An explicitly configured list is collapsed too, order preserved."""
+    first = tmp_path / "a"
+    second = tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+
+    op = _make_shell_op(
+        restrict=True,
+        roots=[str(first), str(second), str(first) + os.sep],
+    )
+
+    assert op._get_sandbox_roots() == [first.resolve(), second.resolve()]
+
+
 def test_extract_abs_paths_windows_quoted(monkeypatch):
     import openjiuwen.core.sys_operation.local.shell_operation as shell_mod
     monkeypatch.setattr(shell_mod.os, "name", "nt", raising=False)

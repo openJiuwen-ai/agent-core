@@ -1551,3 +1551,61 @@ async def test_concurrent_upload_download_mixed(sys_op, work_dir):
     assert final_content != "", "Final content empty after mixed upload/download"
     assert final_content.startswith("upload_task_") or final_content == base_content, \
         "Final content corrupted after mixed concurrency"
+
+
+# ── sandbox path checks (unit, no Runner) ──────────────────────────────────
+
+class _FakeRunConfig:
+    """Minimal stand-in for LocalWorkConfig used in sandbox unit tests."""
+
+    def __init__(self, *, restrict: bool, roots: list[str] | None = None):
+        self.restrict_to_sandbox = restrict
+        self.sandbox_root = roots
+        self.shell_allowlist = None
+        self.dangerous_patterns = None
+
+
+def _make_fs_op(restrict: bool, roots: list[str] | None = None) -> FsOperation:
+    """Return an FsOperation whose _run_config mimics sandbox settings."""
+    op = object.__new__(FsOperation)
+    op._run_config = _FakeRunConfig(restrict=restrict, roots=roots)
+    return op
+
+
+@pytest.fixture
+def cwd_state():
+    """Isolate the CwdState ContextVar so fallback tests do not leak into others."""
+    from openjiuwen.core.sys_operation import cwd as cwd_mod
+
+    token = cwd_mod._cwd_state.set(cwd_mod.CwdState())
+    yield cwd_mod
+    cwd_mod._cwd_state.reset(token)
+
+
+def test_resolve_path_deduplicates_overlapping_defaults(cwd_state, tmp_path):
+    """The [workspace, project_root, cwd] fallback overlaps and must collapse.
+
+    project_root defaults to cwd, and a subagent inherits both from its
+    parent, so the raw fallback lists the same root twice.  The denial message
+    renders this list verbatim, where a repeated entry reads like a bug.
+    """
+    workspace = tmp_path / "workspace" / "sub_agents" / "sub"
+    artifact_root = tmp_path / "workspace" / "projects"
+    outside = tmp_path / "workspace" / "elsewhere"
+    workspace.mkdir(parents=True)
+    artifact_root.mkdir(parents=True)
+    outside.mkdir(parents=True)
+
+    cwd_state.init_cwd(
+        str(artifact_root),
+        project_root=str(artifact_root),
+        workspace=str(workspace),
+    )
+    op = _make_fs_op(restrict=True)
+
+    with pytest.raises(Exception) as excinfo:
+        op._resolve_path(str(outside / "note.md"))
+
+    message = str(excinfo.value)
+    assert message.count(str(artifact_root.resolve())) == 1
+    assert str(workspace.resolve()) in message

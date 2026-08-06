@@ -1084,7 +1084,14 @@ class FsOperation(BaseFsOperation):
             else:
                 roots = [p for p in (get_workspace(), get_project_root(), get_cwd()) if p]
 
-            resolved_roots = [pathlib.Path(r).expanduser().resolve() for r in roots]
+            # De-duplicate after resolution: the three fallback layers overlap
+            # by design (project_root defaults to cwd, and a subagent inherits
+            # both from its parent), so the raw list routinely repeats a root.
+            # Repetition changes no decision but is copied verbatim into the
+            # denial message, where a doubled entry reads like a bug.
+            resolved_roots = list(dict.fromkeys(
+                pathlib.Path(r).expanduser().resolve() for r in roots
+            ))
             if not any(self._is_within(normalized, root) for root in resolved_roots):
                 raise build_error(
                     status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
