@@ -101,6 +101,7 @@ class TaskTool(Tool):
         if isinstance(inputs, dict):
             subagent_type = inputs.get("subagent_type")
             task_description = inputs.get("task_description")
+            thinking = str(inputs.get("thinking") or "").strip()
         else:
             raise build_error(
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
@@ -150,6 +151,18 @@ class TaskTool(Tool):
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
                 reason=f"Subagent {subagent_type} creation failed: {exc}",
             ) from exc
+
+        # Optional semantic thinking control (default|off|on). No-op unless a
+        # host registers a hook that attaches a BEFORE_MODEL_CALL rail.
+        try:
+            from openjiuwen.harness.tools.subagent.thinking_hook import (
+                apply_subagent_thinking,
+            )
+
+            model = getattr(getattr(subagent, "deep_config", None), "model", None)
+            apply_subagent_thinking(subagent, thinking=thinking, model=model)
+        except Exception as exc:  # noqa: BLE001 — never break spawn
+            logger.warning("[TaskTool] subagent thinking hook skipped: %s", exc)
 
         query_summary = _summarize_task_description(task_description)
         invoke_log = (
