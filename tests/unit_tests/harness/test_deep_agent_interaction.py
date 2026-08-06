@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,6 +18,62 @@ from openjiuwen.harness.schema.interaction import (
     RoundWorkItem,
     SendInputRequest,
 )
+from openjiuwen.harness.tools.worktree import session as worktree_session_state
+from openjiuwen.harness.tools.worktree.models import WorktreeSession
+from openjiuwen.harness.tools.worktree.session import (
+    get_current_session,
+    set_current_session,
+)
+
+
+@pytest.mark.asyncio
+async def test_start_initializes_context_before_scheduler_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduler created during start shares the pre-created mutable holder."""
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._task_completion_rail = object()  # type: ignore[assignment]
+
+    scheduler_release = asyncio.Event()
+    scheduler_task: asyncio.Task[None] | None = None
+    active = WorktreeSession(
+        original_cwd="/repo",
+        worktree_path="/repo/.worktrees/shared",
+        worktree_name="shared",
+    )
+
+    async def scheduler() -> None:
+        await scheduler_release.wait()
+        set_current_session(active)
+
+    async def prepare_interaction_task_loop(_session):
+        nonlocal scheduler_task
+        scheduler_task = asyncio.create_task(scheduler())
+        return MagicMock(), MagicMock()
+
+    async def forward_session_stream() -> None:
+        return
+
+    monkeypatch.setattr(
+        agent,
+        "prepare_interaction_task_loop",
+        prepare_interaction_task_loop,
+    )
+    monkeypatch.setattr(agent, "_forward_session_stream", forward_session_stream)
+    monkeypatch.setattr(agent, "_ensure_supervisor_running", MagicMock())
+
+    token = worktree_session_state._state.set(None)
+    try:
+        session = MagicMock()
+        session.get_session_id.return_value = "shared-holder-session"
+        await agent.start(session=session)
+
+        assert scheduler_task is not None
+        scheduler_release.set()
+        await scheduler_task
+        assert get_current_session() is active
+    finally:
+        worktree_session_state._state.reset(token)
 
 
 @pytest.mark.asyncio
