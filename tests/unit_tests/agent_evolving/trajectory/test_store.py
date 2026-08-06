@@ -18,24 +18,8 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TRAJECTORY_SCHEMA_VERSION_ATTR,
     TRAJECTORY_SOURCE,
 )
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.agent_evolving.trajectory.store import FileTrajectoryStore, InMemoryTrajectoryStore
-
-
-def attributes_from_map(attributes: dict[str, object]) -> list[dict[str, object]]:
-    """Build simple OTLP attributes without depending on Phase 2 accessors."""
-
-    def encode(value: object) -> dict[str, object]:
-        if isinstance(value, bool):
-            return {"boolValue": value}
-        if isinstance(value, int):
-            return {"intValue": str(value)}
-        if isinstance(value, float):
-            return {"doubleValue": value}
-        if isinstance(value, str):
-            return {"stringValue": value}
-        return {"stringValue": str(value)}
-
-    return [{"key": key, "value": encode(value)} for key, value in sorted(attributes.items())]
 
 
 def _trajectory(

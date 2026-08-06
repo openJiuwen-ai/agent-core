@@ -13,7 +13,7 @@ from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
 from openjiuwen.agent_evolving.experience.lifecycle import HostFacingExperienceResult
 from openjiuwen.agent_evolving.protocols import SKILL_EXPERIENCE_ENTRY
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal
-from openjiuwen.agent_evolving.trajectory.types import Trajectory
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.types import ApplyResult
 
 

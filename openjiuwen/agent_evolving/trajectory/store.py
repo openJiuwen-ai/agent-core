@@ -135,9 +135,8 @@ def _canonical_input(trajectory: Any) -> Trajectory:
 
 
 def _canonical_record(data: Mapping[str, Any]) -> Trajectory:
-    # Keep the historical parser out of package initialization.  The legacy
-    # module imports observability conventions, while trajectory/__init__.py
-    # still exposes the pre-migration runtime during this phase.
+    # Resolve the historical parser lazily so package initialization does not
+    # pull in the Team runtime graph.
     from openjiuwen.agent_evolving.trajectory.legacy import is_legacy_record, upgrade_legacy_record
 
     if is_legacy_record(data):
