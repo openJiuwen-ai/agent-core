@@ -51,6 +51,7 @@ from openjiuwen.agent_evolving.trajectory.types import (
     trajectory_session_id,
     trajectory_source,
     trajectory_steps,
+    trajectory_otlp,
 )
 
 TrajectoryRecord = Trajectory
@@ -359,7 +360,7 @@ def _filter_trajectory_step_spans(
     trajectory: Trajectory,
     keep_step: Callable[[TrajectoryStep], bool],
 ) -> Trajectory:
-    trace = deepcopy(trajectory.otlp_trace or {})
+    trace = trajectory_otlp(trajectory)
     steps = iter(trajectory_steps(trajectory))
     for resource_span in trace.get("resourceSpans") or []:
         for scope_span in resource_span.get("scopeSpans") or []:
@@ -376,7 +377,7 @@ def _filter_trajectory_step_spans(
 
 def _trajectory_spans(trajectory: Trajectory) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []
-    trace = trajectory.otlp_trace if isinstance(trajectory.otlp_trace, dict) else {}
+    trace = trajectory_otlp(trajectory)
     for resource_span in trace.get("resourceSpans") or []:
         for scope_span in resource_span.get("scopeSpans") or []:
             spans.extend(deepcopy(scope_span.get("spans") or []))
