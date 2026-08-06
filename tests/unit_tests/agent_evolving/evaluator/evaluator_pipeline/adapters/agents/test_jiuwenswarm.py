@@ -256,6 +256,69 @@ class TestJiuWenSwarmAgentCredentialStaging:
         assert not staged[0].exists()
 
 
+class TestJiuWenSwarmAgentSkillStaging:
+    """Skill payloads must not be staged at names the caller can influence."""
+
+    @staticmethod
+    def _env(copy_to):
+        env = MagicMock()
+        env.exec = AsyncMock(return_value=ExecResult(stdout="", returncode=0))
+        env.copy_to = AsyncMock(side_effect=copy_to)
+        return env
+
+    @pytest.mark.asyncio
+    async def test_skill_payloads_are_staged_privately(self):
+        staged: list[tuple[Path, int]] = []
+
+        async def copy_to(source: Path, destination: str) -> bool:
+            source = Path(source)
+            staged.append((source, stat.S_IMODE(source.stat().st_mode)))
+            return True
+
+        agent = JiuWenSwarmAgent()
+        loaded = await agent.load_skills(
+            self._env(copy_to),
+            {"alpha": "skill body"},
+            evolutions={"alpha": "{}"},
+            evolution_files={"alpha": {"notes.md": "extra body"}},
+        )
+
+        assert loaded == 1
+        assert len(staged) == 3
+        for path, mode in staged:
+            assert mode == 0o600
+            assert not path.exists()
+
+    @pytest.mark.asyncio
+    async def test_skill_name_does_not_reach_the_host_path(self):
+        staged: list[Path] = []
+
+        async def copy_to(source: Path, destination: str) -> bool:
+            staged.append(Path(source))
+            return True
+
+        agent = JiuWenSwarmAgent()
+        await agent.load_skills(self._env(copy_to), {"../escape": "skill body"})
+
+        assert staged
+        assert staged[0].parent == Path(tempfile.gettempdir())
+        assert "escape" not in staged[0].name
+
+    @pytest.mark.asyncio
+    async def test_skill_payload_is_removed_when_the_copy_fails(self):
+        staged: list[Path] = []
+
+        async def copy_to(source: Path, destination: str) -> bool:
+            staged.append(Path(source))
+            raise OSError("docker cp failed")
+
+        agent = JiuWenSwarmAgent()
+        with pytest.raises(OSError):
+            await agent.load_skills(self._env(copy_to), {"alpha": "skill body"})
+
+        assert staged and not staged[0].exists()
+
+
 class TestJiuWenSwarmAgentSetup:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("evolution_enabled", [True, False])

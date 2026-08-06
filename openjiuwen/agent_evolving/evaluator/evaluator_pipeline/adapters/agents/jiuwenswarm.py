@@ -207,11 +207,8 @@ react:
 memory:
   engine: none
 """
-        config_path = Path("/tmp/jiuwenswarm_config.yaml")
-        config_path.write_text(config_yaml, encoding="utf-8")
-        await env.copy_to(config_path, f"{self.CONFIG_DIR}/config.yaml")
-        if config_path.exists():
-            config_path.unlink()
+        with _staged_file(config_yaml, suffix=".yaml") as config_path:
+            await env.copy_to(config_path, f"{self.CONFIG_DIR}/config.yaml")
         logger.info(f"  ✓ Created config.yaml (evolution={'enabled' if evolution_enabled else 'disabled'})")
 
         return True
@@ -254,11 +251,8 @@ memory:
         skill_dir = f"{self.SKILL_DIR}/{skill_name}"
         await env.exec(f"mkdir -p {skill_dir}", timeout=10)
 
-        skill_path = Path(f"/tmp/skill_{skill_name}.md")
-        skill_path.write_text(skill_content, encoding="utf-8")
-        success = await env.copy_to(skill_path, f"{skill_dir}/SKILL.md")
-        if skill_path.exists():
-            skill_path.unlink()
+        with _staged_file(skill_content, suffix=".md") as skill_path:
+            success = await env.copy_to(skill_path, f"{skill_dir}/SKILL.md")
 
         if not success:
             logger.error(f"  Failed to load skill: {skill_name}")
@@ -267,25 +261,19 @@ memory:
         logger.info(f"  Skill loaded: {skill_dir}/SKILL.md")
 
         if evo_content:
-            evo_path = Path(f"/tmp/evolutions_{skill_name}.json")
-            evo_path.write_text(evo_content, encoding="utf-8")
-            evo_success = await env.copy_to(evo_path, f"{skill_dir}/evolutions.json")
+            with _staged_file(evo_content, suffix=".json") as evo_path:
+                evo_success = await env.copy_to(evo_path, f"{skill_dir}/evolutions.json")
             if evo_success:
                 logger.info(f"  Evolutions loaded: {skill_dir}/evolutions.json ({len(evo_content)} chars)")
-            if evo_path.exists():
-                evo_path.unlink()
 
         if evo_files:
             evolution_dir = f"{skill_dir}/evolution"
             await env.exec(f"mkdir -p {evolution_dir}", timeout=10)
             for filename, file_content in evo_files.items():
-                file_path = Path(f"/tmp/evolution_{skill_name}_{filename}")
-                file_path.write_text(file_content, encoding="utf-8")
-                file_success = await env.copy_to(file_path, f"{evolution_dir}/{filename}")
+                with _staged_file(file_content) as file_path:
+                    file_success = await env.copy_to(file_path, f"{evolution_dir}/{filename}")
                 if file_success:
                     logger.info(f"  Evolution file loaded: {evolution_dir}/{filename}")
-                if file_path.exists():
-                    file_path.unlink()
 
         return True
 
@@ -310,11 +298,9 @@ memory:
             container_skill_dir = f"{self.SKILL_DIR}/{skill_name}"
             await env.exec(f"mkdir -p {container_skill_dir}", timeout=10)
 
-            tmp_path = Path(f"/tmp/skill_{skill_name}.md")
-            tmp_path.write_text(skill_md.read_text(encoding="utf-8"), encoding="utf-8")
-            success = await env.copy_to(tmp_path, f"{container_skill_dir}/SKILL.md")
-            if tmp_path.exists():
-                tmp_path.unlink()
+            skill_content = skill_md.read_text(encoding="utf-8")
+            with _staged_file(skill_content, suffix=".md") as tmp_path:
+                success = await env.copy_to(tmp_path, f"{container_skill_dir}/SKILL.md")
 
             if success:
                 loaded_skills.append(skill_name)
@@ -322,11 +308,9 @@ memory:
 
             for extra in skill_subdir.iterdir():
                 if extra.is_file() and extra.name != "SKILL.md":
-                    tmp_extra = Path(f"/tmp/skill_{skill_name}_{extra.name}")
-                    tmp_extra.write_text(extra.read_text(encoding="utf-8"), encoding="utf-8")
-                    await env.copy_to(tmp_extra, f"{container_skill_dir}/{extra.name}")
-                    if tmp_extra.exists():
-                        tmp_extra.unlink()
+                    extra_content = extra.read_text(encoding="utf-8")
+                    with _staged_file(extra_content) as tmp_extra:
+                        await env.copy_to(tmp_extra, f"{container_skill_dir}/{extra.name}")
 
         self._all_skill_names = loaded_skills
         if loaded_skills:
@@ -356,29 +340,19 @@ memory:
             else:
                 logger.info(f"  Single-run mode: executing task without skill evolution")
 
-        instruction_path = Path("/tmp/instruction.txt")
-        instruction_path.write_text(task.instruction, encoding="utf-8")
-        await env.copy_to(instruction_path, "/tmp/jiuwenswarm_instruction.txt")
+        with _staged_file(task.instruction, suffix=".txt") as instruction_path:
+            await env.copy_to(instruction_path, "/tmp/jiuwenswarm_instruction.txt")
 
         system_message = self._build_system_message(
             iteration, has_skill, evolution_suggestions, previous_result
         )
         if system_message:
-            system_path = Path("/tmp/system_message.txt")
-            system_path.write_text(system_message, encoding="utf-8")
-            await env.copy_to(system_path, "/tmp/jiuwenswarm_system_message.txt")
-            if system_path.exists():
-                system_path.unlink()
+            with _staged_file(system_message, suffix=".txt") as system_path:
+                await env.copy_to(system_path, "/tmp/jiuwenswarm_system_message.txt")
 
         runner_script = _get_runner_script()
-        runner_path = Path("/tmp/jiuwenswarm_runner.py")
-        runner_path.write_text(runner_script, encoding="utf-8")
-        await env.copy_to(runner_path, "/tmp/jiuwenswarm_runner.py")
-
-        if runner_path.exists():
-            runner_path.unlink()
-        if instruction_path.exists():
-            instruction_path.unlink()
+        with _staged_file(runner_script, suffix=".py") as runner_path:
+            await env.copy_to(runner_path, "/tmp/jiuwenswarm_runner.py")
 
         start_time = time.time()
         evolution_wait = self._config.get("evolution_wait_time", 60) if has_skill else 0
