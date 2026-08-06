@@ -9,10 +9,14 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
-from openjiuwen.core.foundation.llm import AssistantMessageChunk, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm import (
+    AssistantMessageChunk,
+    ModelClientConfig,
+    ModelRequestConfig,
+)
 from openjiuwen.core.single_agent import AgentCard, ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.harness.rails.llm_retry_rail import LLMRetryRail
+from openjiuwen.harness.rails.model_anomaly_detection_rail import ModelAnomalyDetectionRail
 
 
 _DEFAULT_ABC_REPEAT_COUNT = 54
@@ -25,7 +29,7 @@ def _make_ctx(agent=None):
 
 
 def _make_agent() -> ReActAgent:
-    return ReActAgent(card=AgentCard(description="retry rail test")).configure(
+    return ReActAgent(card=AgentCard(description="anomaly detection rail test")).configure(
         ReActAgentConfig(
             model_config_obj=ModelRequestConfig(model="mock-model"),
             model_client_config=ModelClientConfig(
@@ -43,12 +47,14 @@ class _RetryStreamModel:
     def __init__(self, mode: str):
         self.mode = mode
         self.call_count = 0
+        self.last_messages = None
 
     async def invoke(self, **kwargs):
         raise NotImplementedError
 
     async def stream(self, **kwargs):
         self.call_count += 1
+        self.last_messages = kwargs.get("messages")
         if self.mode in {"loop", "loop_exhausted"} and (self.mode == "loop_exhausted" or self.call_count == 1):
             for _ in range(_DEFAULT_ABC_REPEAT_COUNT):
                 yield AssistantMessageChunk(reasoning_content="abc")
@@ -63,7 +69,7 @@ class _RetryStreamModel:
 
 @pytest.mark.asyncio
 async def test_short_repeated_stream_output_below_total_threshold_is_ignored():
-    rail = LLMRetryRail()
+    rail = ModelAnomalyDetectionRail()
     ctx = _make_ctx()
 
     await rail.before_model_call(ctx)
@@ -74,7 +80,7 @@ async def test_short_repeated_stream_output_below_total_threshold_is_ignored():
 
 @pytest.mark.asyncio
 async def test_repeated_stream_output_raises_model_error():
-    rail = LLMRetryRail()
+    rail = ModelAnomalyDetectionRail()
     ctx = _make_ctx()
 
     await rail.before_model_call(ctx)
@@ -93,7 +99,7 @@ async def test_repeated_stream_output_raises_model_error():
 
 @pytest.mark.asyncio
 async def test_single_char_repetition_raises_model_error():
-    rail = LLMRetryRail()
+    rail = ModelAnomalyDetectionRail()
     ctx = _make_ctx()
 
     await rail.before_model_call(ctx)
@@ -110,7 +116,7 @@ async def test_single_char_repetition_raises_model_error():
 
 @pytest.mark.asyncio
 async def test_repeat_exception_retries_twice_then_resets():
-    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.5, 1.0, 2.0])
+    rail = ModelAnomalyDetectionRail(max_retries=2, backoff_seconds=[0.5, 1.0, 2.0])
     ctx = _make_ctx()
     ctx.request_retry = MagicMock()
     ctx.exception = build_error(
@@ -130,7 +136,7 @@ async def test_repeat_exception_retries_twice_then_resets():
 
 @pytest.mark.asyncio
 async def test_backoff_delay_follows_schedule_and_clamps():
-    rail = LLMRetryRail(backoff_seconds=[0.5, 1.0, 2.0])
+    rail = ModelAnomalyDetectionRail(backoff_seconds=[0.5, 1.0, 2.0])
     assert rail.backoff_delay(0) == 0.5
     assert rail.backoff_delay(1) == 1.0
     assert rail.backoff_delay(2) == 2.0
@@ -138,13 +144,13 @@ async def test_backoff_delay_follows_schedule_and_clamps():
     assert rail.backoff_delay(5) == 2.0
 
     # Default schedule matches the documented (0.5, 1.0, 2.0).
-    default_rail = LLMRetryRail()
+    default_rail = ModelAnomalyDetectionRail()
     assert [default_rail.backoff_delay(i) for i in range(3)] == [0.5, 1.0, 2.0]
 
 
 @pytest.mark.asyncio
 async def test_stream_timeout_exception_retries_twice_then_resets():
-    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.5, 1.0, 2.0])
+    rail = ModelAnomalyDetectionRail(max_retries=2, backoff_seconds=[0.5, 1.0, 2.0])
     ctx = _make_ctx()
     ctx.request_retry = MagicMock()
     ctx.exception = build_error(
@@ -163,7 +169,7 @@ async def test_stream_timeout_exception_retries_twice_then_resets():
 
 @pytest.mark.asyncio
 async def test_before_invoke_resets_retry_counters():
-    rail = LLMRetryRail()
+    rail = ModelAnomalyDetectionRail()
     rail.repeat_retry_count = 1
     rail.stream_timeout_retry_count = 1
 
@@ -176,7 +182,7 @@ async def test_before_invoke_resets_retry_counters():
 @pytest.mark.asyncio
 async def test_rail_retries_repeated_stream_output_in_agent_streaming_path():
     agent = _make_agent()
-    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.0])
+    rail = ModelAnomalyDetectionRail(max_retries=2, backoff_seconds=[0.0])
     await agent.register_rail(rail)
     model = _RetryStreamModel("loop")
     agent.set_llm(model)
@@ -191,7 +197,7 @@ async def test_rail_retries_repeated_stream_output_in_agent_streaming_path():
 @pytest.mark.asyncio
 async def test_rail_retries_stream_timeout_in_agent_streaming_path():
     agent = _make_agent()
-    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.0])
+    rail = ModelAnomalyDetectionRail(max_retries=2, backoff_seconds=[0.0])
     await agent.register_rail(rail)
     model = _RetryStreamModel("timeout")
     agent.set_llm(model)
@@ -206,7 +212,7 @@ async def test_rail_retries_stream_timeout_in_agent_streaming_path():
 @pytest.mark.asyncio
 async def test_rail_propagates_repeated_stream_output_after_retry_exhaustion():
     agent = _make_agent()
-    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.0])
+    rail = ModelAnomalyDetectionRail(max_retries=2, backoff_seconds=[0.0])
     await agent.register_rail(rail)
     model = _RetryStreamModel("loop_exhausted")
     agent.set_llm(model)
@@ -221,7 +227,7 @@ async def test_rail_propagates_repeated_stream_output_after_retry_exhaustion():
 @pytest.mark.asyncio
 async def test_rail_propagates_stream_timeout_after_retry_exhaustion():
     agent = _make_agent()
-    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.0])
+    rail = ModelAnomalyDetectionRail(max_retries=2, backoff_seconds=[0.0])
     await agent.register_rail(rail)
     model = _RetryStreamModel("timeout_exhausted")
     agent.set_llm(model)
