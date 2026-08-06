@@ -6,13 +6,7 @@ from __future__ import annotations
 
 import json
 
-from openjiuwen.agent_evolving.trajectory.types import (
-    LegacyTrajectory,
-    LLMCallDetail,
-    ToolCallDetail,
-    TrajectoryStep,
-    trajectory_from_legacy,
-)
+from openjiuwen.agent_evolving.trajectory.legacy import upgrade_legacy_record
 from openjiuwen.rsi.evaluator.case_backend import (
     _is_runtime_workspace_metadata,
     _skip_trace_snapshot_path,
@@ -37,37 +31,37 @@ def test_role_file_trajectory_store_writes_bounded_latest_snapshot(tmp_path) -> 
             "parameters": {"type": "object", "properties": {"content": {"description": large_text}}},
         },
     }
-    first = trajectory_from_legacy(
-        LegacyTrajectory(
-            execution_id="first",
-            steps=[
-                TrajectoryStep(
-                    kind="llm",
-                    detail=LLMCallDetail(
-                        model="deepseek-v4-flash",
-                        messages=[
+    first = upgrade_legacy_record(
+        {
+            "execution_id": "first",
+            "steps": [
+                {
+                    "kind": "llm",
+                    "detail": {
+                        "model": "deepseek-v4-flash",
+                        "messages": [
                             {"role": "system", "content": large_text},
                             {"role": "user", "content": "task"},
                             {"role": "assistant", "content": large_text},
                             {"role": "tool", "content": large_text},
                             {"role": "user", "content": "latest"},
                         ],
-                        response={"role": "assistant", "content": large_text},
-                        tools=[large_tool_schema],
-                    ),
-                ),
-                TrajectoryStep(
-                    kind="tool",
-                    detail=ToolCallDetail(
-                        tool_name="write_file",
-                        call_args={"content": large_text},
-                        call_result={"ok": True, "content": large_text},
-                    ),
-                ),
+                        "response": {"role": "assistant", "content": large_text},
+                        "tools": [large_tool_schema],
+                    },
+                },
+                {
+                    "kind": "tool",
+                    "detail": {
+                        "tool_name": "write_file",
+                        "call_args": {"content": large_text},
+                        "call_result": {"ok": True, "content": large_text},
+                    },
+                },
             ],
-        )
+        }
     )
-    second = trajectory_from_legacy(LegacyTrajectory(execution_id="second", steps=[]))
+    second = upgrade_legacy_record({"execution_id": "second", "steps": []})
 
     store.save(first)
     store.save(second)

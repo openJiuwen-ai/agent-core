@@ -12,7 +12,7 @@ from typing import Any
 
 from openjiuwen.core.common.logging import logger
 
-from openjiuwen.agent_teams.observability import semconv
+from openjiuwen.extensions.observability import semconv
 
 from openjiuwen.agent_evolving.trajectory.offline.builder import TrajectoryBuilder
 from openjiuwen.agent_evolving.trajectory.schema import (

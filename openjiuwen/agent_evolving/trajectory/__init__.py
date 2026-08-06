@@ -1,85 +1,36 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Canonical trajectory model, capture processor, and synchronous archives."""
 
-from openjiuwen.agent_evolving.trajectory.trace import (
-    TRAJECTORY_TRACE_AGENT_HANDLER_NAME,
-    TRAJECTORY_TRACE_WORKFLOW_HANDLER_NAME,
-    TrajectoryTraceAgentHandler,
-    TrajectoryTraceStateManager,
-    TrajectoryTraceWorkflowHandler,
-    ensure_otlp_handlers_registered,
-)
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.store import (
     FileTrajectoryStore,
     InMemoryTrajectoryStore,
     TrajectoryStore,
 )
-from openjiuwen.agent_evolving.trajectory.types import (
-    LLMCallDetail,
-    LegacyTrajectory,
-    StepDetail,
-    StepKind,
-    ToolCallDetail,
-    Trajectory,
-    TrajectoryStep,
-    UpdateKey,
-    Updates,
-    set_trajectory_resource_attributes,
-    to_legacy_trajectory,
-    trajectory_case_id,
-    trajectory_cost,
-    trajectory_execution_id,
-    trajectory_from_legacy,
-    trajectory_from_steps,
-    trajectory_meta,
-    trajectory_resource_attributes,
-    trajectory_session_id,
-    trajectory_source,
-    trajectory_steps,
-    trajectory_with_resource_attributes,
-)
+
+_REMOVED_EXPORT_HINTS = {
+    "TrajectoryBuilder": "use openjiuwen.agent_evolving.trajectory.offline.TrajectoryBuilder",
+    "TrajectoryExtractor": "use openjiuwen.agent_evolving.trajectory.offline.TrajectoryExtractor",
+    "TracerTrajectoryExtractor": "use openjiuwen.agent_evolving.trajectory.offline.TrajectoryExtractor",
+    "TrajectoryStep": "use canonical Trajectory spans and trajectory.spans accessors",
+    "UpdateKey": "use openjiuwen.agent_evolving.types.UpdateKey",
+    "Updates": "use openjiuwen.agent_evolving.types.Updates",
+}
+
+
+def __getattr__(name: str):
+    hint = _REMOVED_EXPORT_HINTS.get(name)
+    if hint is not None:
+        raise AttributeError(f"{__name__}.{name} was removed; {hint}")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
-    "LLMCallDetail",
-    "LegacyTrajectory",
-    "StepDetail",
-    "StepKind",
-    "ToolCallDetail",
-    "Trajectory",
-    "TrajectoryStep",
-    "UpdateKey",
-    "Updates",
-    "set_trajectory_resource_attributes",
-    "to_legacy_trajectory",
-    "trajectory_case_id",
-    "trajectory_cost",
-    "trajectory_execution_id",
-    "trajectory_from_legacy",
-    "trajectory_from_steps",
-    "trajectory_meta",
-    "trajectory_resource_attributes",
-    "trajectory_session_id",
-    "trajectory_source",
-    "trajectory_steps",
-    "trajectory_with_resource_attributes",
-    "TRAJECTORY_TRACE_AGENT_HANDLER_NAME",
-    "TRAJECTORY_TRACE_WORKFLOW_HANDLER_NAME",
-    "TrajectoryTraceAgentHandler",
-    "TrajectoryTraceStateManager",
-    "TrajectoryTraceWorkflowHandler",
-    "ensure_otlp_handlers_registered",
-    "TrajectoryStore",
-    "InMemoryTrajectoryStore",
     "FileTrajectoryStore",
+    "InMemoryTrajectoryStore",
+    "Trajectory",
     "TrajectorySpanProcessor",
+    "TrajectoryStore",
 ]
-
-
-def __getattr__(name):
-    """Resolve processor exports lazily to preserve legacy import order."""
-    if name == "TrajectorySpanProcessor":
-        from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
-
-        globals()[name] = TrajectorySpanProcessor
-        return TrajectorySpanProcessor
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

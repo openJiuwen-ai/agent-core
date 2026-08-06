@@ -23,7 +23,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     read_llm_messages,
     read_tool_call,
 )
-from openjiuwen.agent_teams.observability import semconv
+from openjiuwen.extensions.observability import semconv
 
 
 def _span(span_id: str, name: str = "tool.lookup") -> dict:

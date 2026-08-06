@@ -9,6 +9,7 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
+from openjiuwen.agent_evolving.trajectory.legacy import is_legacy_record, upgrade_legacy_record
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.agent_evolving.trajectory.schema import (
@@ -90,25 +91,10 @@ def _metadata_value(trajectory: Trajectory, key: str) -> str | None:
 def _canonical_input(trajectory: Any) -> Trajectory:
     if isinstance(trajectory, Trajectory):
         return Trajectory.from_otlp(trajectory.to_otlp())
-
-    # Remove this migration branch with the legacy runtime model.  Import it
-    # lazily because trajectory/__init__.py still loads Store before types.py.
-    from openjiuwen.agent_evolving.trajectory.types import Trajectory as LegacyTrajectory
-
-    if isinstance(trajectory, LegacyTrajectory):
-        from openjiuwen.agent_evolving.trajectory.legacy import upgrade_legacy_record
-
-        if not isinstance(trajectory.otlp_trace, Mapping):
-            raise ValueError("legacy trajectory requires an OTLP payload")
-        return upgrade_legacy_record(trajectory.otlp_trace)
-    raise TypeError("store accepts only canonical Trajectory or legacy OTLP trajectory")
+    raise TypeError("store accepts only canonical Trajectory")
 
 
 def _canonical_record(data: Mapping[str, Any]) -> Trajectory:
-    # Resolve the historical parser lazily so package initialization does not
-    # pull in the Team runtime graph.
-    from openjiuwen.agent_evolving.trajectory.legacy import is_legacy_record, upgrade_legacy_record
-
     if is_legacy_record(data):
         return upgrade_legacy_record(data)
     return Trajectory.from_otlp(data)

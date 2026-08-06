@@ -15,7 +15,7 @@ from copy import deepcopy
 from collections.abc import Mapping
 from typing import Any
 
-from openjiuwen.agent_teams.observability import semconv
+from openjiuwen.extensions.observability import semconv
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import (

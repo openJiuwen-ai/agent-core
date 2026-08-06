@@ -12,16 +12,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
-from openjiuwen.agent_evolving.trajectory import (
-    ToolCallDetail,
-    TrajectoryStep,
-    trajectory_from_steps,
-)
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.agent_teams.agent.scheduling.review_feedback_evolution import (
     GLOBAL_EVOLUTION_EVENTS,
     SKILL_CREATION_EVENTS,
     ReviewFeedbackEvolutionCoordinator,
 )
+from openjiuwen.extensions.observability import semconv
 
 
 class _AttributionLLM:
@@ -46,19 +45,36 @@ class _TrajectoryRegistry:
 
 
 def _trajectory(skill_md: str | None):
-    steps = []
+    spans = []
     if skill_md is not None:
-        steps.append(
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="read_file",
-                    call_args={"path": skill_md},
-                    call_result="# xlsx",
+        spans.append(
+            {
+                "traceId": "trace-1",
+                "spanId": "tool-1",
+                "name": "tool.read_file",
+                "attributes": attributes_from_map(
+                    {
+                        semconv.GEN_AI_TOOL_NAME: "read_file",
+                        semconv.GEN_AI_TOOL_INPUT: {"path": skill_md},
+                        semconv.GEN_AI_TOOL_OUTPUT: "# xlsx",
+                    }
                 ),
-            )
+            }
         )
-    return trajectory_from_steps(execution_id="trace-1", steps=steps, session_id="sess-1")
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map(
+                            {TRAJECTORY_ID: "trace-1", SESSION_ID: "sess-1"}
+                        )
+                    },
+                    "scopeSpans": [{"scope": {}, "spans": spans}],
+                }
+            ]
+        }
+    )
 
 
 def _rail(tmp_path, llm):

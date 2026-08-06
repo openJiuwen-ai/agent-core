@@ -22,7 +22,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     read_tool_call,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
-from openjiuwen.agent_evolving.trajectory.types import TrajectoryLike
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.core.common.logging import logger
 
 
@@ -162,7 +162,7 @@ _EXEC_CONTENT_KEYS = (
     "shell_command",
 )
 
-DetectionInput = Union[TrajectoryLike, List[dict]]
+DetectionInput = Union[Trajectory, List[dict]]
 
 
 class ConversationSignalDetector:
@@ -212,7 +212,7 @@ class ConversationSignalDetector:
 
     def detect_trajectory_signals(
         self,
-        trajectory: Optional[TrajectoryLike],
+        trajectory: Optional[Trajectory],
         *,
         messages: Optional[List[dict]] = None,
         signal_types: Optional[Set[str]] = None,
@@ -310,7 +310,7 @@ class ConversationSignalDetector:
         return [self._make_user_feedback_signal(excerpt, skill_name)]
 
     @staticmethod
-    def convert_trajectory_to_messages(trajectory: TrajectoryLike) -> List[dict]:
+    def convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
         """Convert canonical LLM/tool spans to message-list format.
 
         The message format matches what SignalDetector.detect() expects:
