@@ -55,7 +55,6 @@ from openjiuwen.agent_evolving.trajectory import (
     TrajectoryStep,
     UpdateKey,
     Updates,
-    TracerTrajectoryExtractor,
 )
 
 # updater
@@ -138,7 +137,6 @@ _TRAJECTORY = [
     "TrajectoryStep",
     "UpdateKey",
     "Updates",
-    "TracerTrajectoryExtractor",
 ]
 
 _UPDATER = [

@@ -5,13 +5,12 @@
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import Iterator, Mapping
-from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.agent_evolving.trajectory.schema import (
     CASE_ID,
     MEMBER_ID,
@@ -19,8 +18,6 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TEAM_ID,
     TRAJECTORY_SOURCE,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class TrajectoryStore(Protocol):
@@ -54,33 +51,6 @@ def _version_name(version: str | None) -> str:
     if value in {"", ".", ".."} or any(separator in value for separator in ("/", "\\")):
         raise ValueError("version must be a simple path component")
     return value
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    if is_dataclass(value) and not isinstance(value, type):
-        return _json_safe(asdict(value))
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        try:
-            return _json_safe(model_dump())
-        except Exception:
-            logger.warning(
-                "Failed to serialize trajectory value with model_dump(); falling back to string representation.",
-                exc_info=True,
-            )
-    return str(value)
-
-
-def to_json_compatible(value: Any) -> Any:
-    """Serialize legacy RSI snapshots during the trajectory migration."""
-
-    return _json_safe(value)
 
 
 def _query_filters(**values: str | None) -> dict[str, str]:
@@ -199,7 +169,7 @@ class FileTrajectoryStore:
         resource_spans = payload.get("resourceSpans")
         if not isinstance(resource_spans, list) or not resource_spans:
             raise ValueError("trajectory payload must contain non-empty resourceSpans")
-        record = {"resourceSpans": _json_safe(resource_spans)}
+        record = {"resourceSpans": to_json_compatible(resource_spans)}
         with self._get_file_path(version).open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
