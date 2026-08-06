@@ -337,8 +337,8 @@ class TeamBackend:
             "source": fork_source,
             "compact": compact,
         }
-        team_logger.info(
-            "[fork-d] mark_fork_on_spawn: member=%s fork=%s source=%s "
+        team_logger.debug(
+            "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s "
             "compact=%s team_name=%s pending_keys=%s",
             member, fork_value, fork_source, compact,
             self.team_name, list(self._pending_forks.keys()),
@@ -346,8 +346,8 @@ class TeamBackend:
 
     def consume_fork_on_spawn(self, member: str) -> dict | None:
         result = self._pending_forks.pop(member, None)
-        team_logger.info(
-            "[fork-d] consume_fork_on_spawn: member=%s result=%s "
+        team_logger.debug(
+            "[fork] consume_fork_on_spawn: member=%s result=%s "
             "remaining_pending=%s team_name=%s",
             member, result, list(self._pending_forks.keys()),
             self.team_name,
@@ -357,20 +357,20 @@ class TeamBackend:
     def snapshot_context_length(self) -> int:
         if self._snapshot_length is not None:
             result = self._snapshot_length()
-            team_logger.info(
-                "[fork-d] snapshot_context_length: member=%s len=%d",
+            team_logger.debug(
+                "[fork] snapshot_context_length: member=%s len=%d",
                 self.member_name, result,
             )
             return result
-        team_logger.info(
-            "[fork-d] snapshot_context_length: member=%s NO callback",
+        team_logger.debug(
+            "[fork] snapshot_context_length: member=%s NO callback",
             self.member_name,
         )
         return 0
 
     def store_checkpoint(self, name: str, count: int) -> None:
-        team_logger.info(
-            "[fork-d] store_checkpoint: member=%s name=%s count=%d "
+        team_logger.debug(
+            "[fork] store_checkpoint: member=%s name=%s count=%d "
             "has_store_fn=%s",
             self.member_name, name, count,
             self._store_checkpoint_fn is not None,

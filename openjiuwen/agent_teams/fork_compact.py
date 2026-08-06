@@ -51,7 +51,7 @@ async def compact_context(deep_agent, *, split_at: int, session_id: str | None =
 
     if split_at <= 0 or split_at >= len(msgs):
         team_logger.info(
-            "[fork-d] compact_context: skipping (split_at=%d len=%d)",
+            "[fork] compact_context: skipping (split_at=%d len=%d)",
             split_at, len(msgs),
         )
         return
@@ -60,7 +60,7 @@ async def compact_context(deep_agent, *, split_at: int, session_id: str | None =
     recent_msgs = msgs[split_at:]
 
     team_logger.info(
-        "[fork-d] compact_context: compressing %d messages, keeping %d",
+        "[fork] compact_context: compressing %d messages, keeping %d",
         len(old_msgs), len(recent_msgs),
     )
 
@@ -85,7 +85,7 @@ async def compact_context(deep_agent, *, split_at: int, session_id: str | None =
             context.set_messages(compacted)
 
     team_logger.info(
-        "[fork-d] compact_context: done — %d messages after compaction",
+        "[fork] compact_context: done — %d messages after compaction",
         len(compacted),
     )
 
@@ -110,7 +110,7 @@ async def _run_compaction(deep_agent, old_msgs) -> str:
         )
         return response.content if response else "[compaction returned empty response]"
     except Exception as exc:
-        team_logger.warning("[fork-d] compaction failed: %s", exc)
+        team_logger.warning("[fork] compaction failed: %s", exc)
         return f"[compaction failed: {exc}]"
 
 

@@ -1017,8 +1017,8 @@ class TeamAgent(BaseAgent):
         fork_ctx: ForkContext | None = None
         if self.team_backend is not None:
             fork_info = self.team_backend.consume_fork_on_spawn(teammate_id)
-            team_logger.info(
-                "[fork-d] _on_teammate_created: member=%s fork_info=%s "
+            team_logger.debug(
+                "[fork] _on_teammate_created: member=%s fork_info=%s "
                 "checkpoints=%s spawned_handles=%s",
                 teammate_id,
                 fork_info,
@@ -1027,8 +1027,8 @@ class TeamAgent(BaseAgent):
             )
             if fork_info:
                 native = self._resolve_fork_native(fork_info.get("source"))
-                team_logger.info(
-                    "[fork-d] resolve_fork_native: source=%s native=%s",
+                team_logger.debug(
+                    "[fork] resolve_fork_native: source=%s native=%s",
                     fork_info.get("source"), type(native).__name__ if native else "None",
                 )
                 if native is not None:
@@ -1073,9 +1073,17 @@ class TeamAgent(BaseAgent):
                             native, checkpoint=ckpt_idx,
                         )
                         fork_ctx = ForkContext.from_agent(native)
-                    team_logger.info(
-                        "[fork-d] ForkContext created: msgs=%d empty=%s",
+                    team_logger.debug(
+                        "[fork] ForkContext created: msgs=%d empty=%s",
                         len(fork_ctx.messages), fork_ctx.is_empty(),
+                    )
+                    team_logger.info(
+                        "[fork] %s into %s (msgs=%d)%s",
+                        "compacted fork" if compact else
+                        "checkpoint fork" if is_named else "live fork",
+                        teammate_id,
+                        len(fork_ctx.messages),
+                        f" split_at={fork_ctx.compact_split}" if fork_ctx.compact_split else "",
                     )
 
         ctx = await self._spawn_manager.build_context_from_db(teammate_id)

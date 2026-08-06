@@ -81,9 +81,13 @@ async def inprocess_spawn(
             session_id=session_id,
             messages=fork_from.to_messages(),
         )
-        team_logger.info(
-            "[fork-d] inprocess_spawn: injected %d messages into %s compact_split=%s",
+        team_logger.debug(
+            "[fork] inprocess_spawn: injected %d messages into %s compact_split=%s",
             len(fork_from.messages), ctx.member_name, fork_from.compact_split,
+        )
+        team_logger.info(
+            "[fork] %d messages injected into %s",
+            len(fork_from.messages), ctx.member_name,
         )
         # Compaction: compress older messages before the split point.
         if fork_from.compact_split is not None:
@@ -94,8 +98,8 @@ async def inprocess_spawn(
                 session_id=session_id,
             )
     else:
-        team_logger.info(
-            "[fork-d] inprocess_spawn: NO fork injection for %s (fork_from=%s)",
+        team_logger.debug(
+            "[fork] inprocess_spawn: NO fork injection for %s (fork_from=%s)",
             ctx.member_name, "present" if fork_from else "None",
         )
 
