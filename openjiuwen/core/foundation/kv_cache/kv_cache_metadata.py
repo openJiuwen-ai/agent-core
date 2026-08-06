@@ -26,6 +26,33 @@ class KVCacheIdentity:
     parent_cache_id: str
 
 
+_CONTEXT_COMPRESSOR_CACHE_SUFFIXES = {
+    "RoundLevelCompressor": "round-level",
+    "CurrentRoundCompressor": "current-round",
+    "DialogueCompressor": "dialogue",
+}
+
+
+def context_compressor_cache_identity(
+    owner_cache_id: str,
+    compressor_type: str,
+) -> KVCacheIdentity:
+    """Return the stable child identity used by one context compressor."""
+    normalized_owner = str(owner_cache_id or "").strip()
+    if not normalized_owner:
+        raise ValueError("owner_cache_id is required")
+    try:
+        suffix = _CONTEXT_COMPRESSOR_CACHE_SUFFIXES[compressor_type]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported context compressor type: {compressor_type}"
+        ) from exc
+    return KVCacheIdentity(
+        cache_id=f"{normalized_owner}:compressor:{suffix}",
+        parent_cache_id=normalized_owner,
+    )
+
+
 def self_parent_kwargs(cache_id: str) -> dict:
     return {"session_id": cache_id, "parent_session_id": cache_id}
 
