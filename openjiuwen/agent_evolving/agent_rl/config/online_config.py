@@ -69,6 +69,8 @@ class GatewayServiceConfig(BaseModel):
     host: str = Field(default="127.0.0.1")
     port: Port = None
     redis_url: str | None = None
+    trajectory_store_backend: str = Field(default="auto")
+    local_trajectory_store_dir: str = Field(default="")
     record_dir: str = Field(default="records")
     log_level: str = Field(default="info")
     health_timeout: float = Field(default=30.0, gt=0)
@@ -131,8 +133,11 @@ class OnlineRLConfig(BaseModel):
             )
         if self.gateway.port is None:
             raise ValueError("gateway.port is required (--gateway-port or YAML).")
-        if not self.gateway.redis_url:
-            raise ValueError("gateway.redis_url is required (--redis-url or YAML).")
+        backend = str(self.gateway.trajectory_store_backend or "auto").strip().lower()
+        if backend not in {"auto", "redis", "local"}:
+            raise ValueError("gateway.trajectory_store_backend must be one of: auto, redis, local.")
+        if backend == "redis" and not self.gateway.redis_url:
+            raise ValueError("gateway.redis_url is required when gateway.trajectory_store_backend=redis.")
         if self.jiuwen.enabled:
             if self.jiuwen.agent_server_port is None:
                 raise ValueError("jiuwen.agent_server_port is required when jiuwen.enabled is true.")

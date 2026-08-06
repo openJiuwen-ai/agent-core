@@ -1067,6 +1067,22 @@ def test_create_deep_agent_auto_add_task_planning_rail() -> None:
     assert "TaskPlanningRail" in rail_types
 
 
+def test_resolve_deep_agent_parts_adds_rl_online_rail_from_env(monkeypatch) -> None:
+    from openjiuwen.harness.factory import resolve_deep_agent_parts
+
+    monkeypatch.setenv("USE_RL_ONLINE_RAIL", "1")
+    monkeypatch.setenv("TRAJECTORY_GATEWAY_URL", "http://127.0.0.1:18080")
+    monkeypatch.setenv("RL_ONLINE_TENANT_ID", "test-user")
+
+    parts = resolve_deep_agent_parts(
+        model=_create_dummy_model(),
+        enable_sys_operation=False,
+    )
+
+    rail_types = [type(rail).__name__ for rail in parts.rails if rail is not None]
+    assert "RLOnlineRail" in rail_types
+
+
 @pytest.mark.asyncio
 async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
     tool = _build_tool_card("factory_tool")

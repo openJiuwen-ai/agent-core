@@ -37,6 +37,8 @@ def build_cli_overrides(args: argparse.Namespace) -> dict[str, object]:
         'judge_url': 'judge.existing_url',
         'gateway_port': 'gateway.port',
         'redis_url': 'gateway.redis_url',
+        'trajectory_store_backend': 'gateway.trajectory_store_backend',
+        'local_trajectory_store_dir': 'gateway.local_trajectory_store_dir',
         'lora_default_policy': 'gateway.lora_default_policy',
         'threshold': 'training.threshold',
         'scan_interval': 'training.scan_interval',
@@ -88,6 +90,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument('--gateway-port', type=int, default=None, help='Gateway port')
     parser.add_argument('--redis-url', default=None, help='RedisTrajectoryStore URL')
+    parser.add_argument(
+        '--trajectory-store-backend',
+        choices=('auto', 'redis', 'local'),
+        default=None,
+        help='Trajectory/task store backend. auto uses Redis when --redis-url is set, otherwise local files.',
+    )
+    parser.add_argument(
+        '--local-trajectory-store-dir',
+        default=None,
+        help='Directory for local trajectory/task store files.',
+    )
     parser.add_argument(
         '--lora-default-policy',
         choices=('disabled', 'latest_by_user'),

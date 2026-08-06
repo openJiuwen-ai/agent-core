@@ -8,9 +8,7 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
-from ....storage.redis_trajectory_store import RedisTrajectoryStore
 from .judge_dispatcher import JudgeDispatcher
-from .pending_judge_store import PendingJudgeStore
 from .rail_ingest import RailBatchIngestor
 from .sample_payloads import build_sample, coerce_logprobs
 from .sample_recorder import SampleRecorder
@@ -26,18 +24,21 @@ class GatewayTrajectoryRuntime:
         self,
         config: Any,
         *,
-        redis: Optional[Any] = None,
+        trajectory_store: Optional[Any] = None,
+        pending_judge_store: Optional[Any] = None,
     ) -> None:
-        if redis is None:
-            raise ValueError("GatewayTrajectoryRuntime requires redis client")
+        if trajectory_store is None:
+            raise ValueError("GatewayTrajectoryRuntime requires trajectory_store")
+        if pending_judge_store is None:
+            raise ValueError("GatewayTrajectoryRuntime requires pending_judge_store")
         os.makedirs(config.record_dir, exist_ok=True)
         self._default_user_id = _SINGLE_USER_DEFAULT_ID if getattr(config, "single_user_default", False) else ""
-        self._trajectory_store = RedisTrajectoryStore(redis)
+        self._trajectory_store = trajectory_store
         self._sample_recorder = SampleRecorder(
             sample_file=os.path.join(config.record_dir, "samples.jsonl"),
             dump_token_ids=config.dump_token_ids,
         )
-        self._pending_judge_store = PendingJudgeStore(redis=redis)
+        self._pending_judge_store = pending_judge_store
         self._rail_ingestor: RailBatchIngestor | None = None
         self.set_judge_scorer(None)
 

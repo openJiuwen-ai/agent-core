@@ -18,6 +18,11 @@ from ...judge.judge_scorer import JudgeScorer
 from ..trajectory import GatewayTrajectoryRuntime
 from ..upstream import Forwarder, HTTPXUpstreamGatewayClient, RetryPolicy
 from .server import build_gateway_app
+from ....storage.store_factory import (
+    backend_from_env,
+    build_gateway_store_bundle,
+    local_store_dir_from_env,
+)
 
 logger = logging.getLogger("online_rl.gateway")
 
@@ -53,6 +58,8 @@ def _build_config_from_env() -> GatewayConfig:
         lora_repo_root=_env("LORA_REPO_ROOT", ""),
         lora_default_policy=_env("LORA_DEFAULT_POLICY", "disabled"),
         redis_url=_env("REDIS_URL", ""),
+        trajectory_store_backend=_env("TRAJECTORY_STORE_BACKEND", "auto"),
+        local_trajectory_store_dir=_env("LOCAL_TRAJECTORY_STORE_DIR", ""),
         upstream_max_retries=int(_env("UPSTREAM_MAX_RETRIES", "2")),
         upstream_retry_backoff_sec=float(_env("UPSTREAM_RETRY_BACKOFF_SEC", "0.2")),
         upstream_retry_max_backoff_sec=float(_env("UPSTREAM_RETRY_MAX_BACKOFF_SEC", "2.0")),
@@ -74,17 +81,20 @@ def build_app_from_config(
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    owns_redis_client = redis_client is None
-    if redis_client is None and config.redis_url:
-        try:
-            from redis.asyncio import from_url as redis_from_url
-            redis_client = redis_from_url(config.redis_url, decode_responses=False)
-            logger.info("Redis client created: %s", config.redis_url)
-        except Exception:
-            logger.warning("Failed to create Redis client from %s", config.redis_url)
-            raise
-    if redis_client is None:
-        raise ValueError("gateway requires redis_url or injected redis_client")
+    store_bundle = build_gateway_store_bundle(
+        backend=getattr(config, "trajectory_store_backend", None) or backend_from_env(),
+        redis_url=config.redis_url,
+        local_store_dir=getattr(config, "local_trajectory_store_dir", "") or local_store_dir_from_env(),
+        record_dir=config.record_dir,
+        redis_client=redis_client,
+    )
+    redis_client = store_bundle.redis_client
+    logger.info(
+        "Gateway trajectory store backend=%s local_dir=%s redis_url=%s",
+        store_bundle.backend,
+        getattr(config, "local_trajectory_store_dir", "") or "",
+        config.redis_url,
+    )
 
     owns_http_client = http_client is None
     http_client = http_client or httpx.AsyncClient(timeout=config.request_timeout)
@@ -103,8 +113,10 @@ def build_app_from_config(
     )
     trajectory_runtime = GatewayTrajectoryRuntime(
         config,
-        redis=redis_client,
+        trajectory_store=store_bundle.trajectory_store,
+        pending_judge_store=store_bundle.pending_judge_store,
     )
+    training_task_store = store_bundle.training_task_store
 
     judge_scorer: Optional[JudgeScorer] = None
     if config.judge_url:
@@ -128,7 +140,7 @@ def build_app_from_config(
     async def close_resources() -> None:
         if owns_http_client:
             await http_client.aclose()
-        if owns_redis_client and hasattr(redis_client, "aclose"):
+        if store_bundle.owns_redis_client and redis_client is not None and hasattr(redis_client, "aclose"):
             with suppress(Exception):
                 await redis_client.aclose()
 
@@ -137,6 +149,7 @@ def build_app_from_config(
         forwarder=forwarder,
         upstream_client=upstream_client,
         trajectory_runtime=trajectory_runtime,
+        training_task_store=training_task_store,
         close_resources=close_resources,
         lora_repo=lora_repo,
     )

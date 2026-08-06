@@ -67,6 +67,29 @@ def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
     return card.name == "free_search" and not is_free_search_enabled()
 
 
+def _append_env_online_training_rail(rails: list[AgentRail]) -> list[AgentRail]:
+    """Append env-configured online training rail without exposing it to hosts.
+
+    JiuwenSwarm and other harness hosts only need to set environment variables.
+    The online-RL package owns the concrete rail selection and gateway wiring.
+    """
+    try:
+        from openjiuwen.agent_evolving.agent_rl.online.rail import (
+            RLOnlineRail,
+            build_rl_online_rail_from_env,
+        )
+    except ImportError as exc:
+        logger.warning("Failed to import online training rail factory: %s", exc)
+        return rails
+
+    if any(isinstance(rail, RLOnlineRail) for rail in rails):
+        return rails
+    rail = build_rl_online_rail_from_env()
+    if rail is None:
+        return rails
+    return [*rails, rail]
+
+
 def _normalize_tools(
     tools: Optional[List[Tool | ToolCard]],
 ) -> tuple[List[ToolCard], List[Tool]]:
@@ -369,6 +392,7 @@ def resolve_deep_agent_parts(
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):
             all_rails.append(make_rail())
+    all_rails = _append_env_online_training_rail(all_rails)
 
     return DeepAgentParts(
         config=config,
