@@ -1119,13 +1119,13 @@ class TeamAgent(BaseAgent):
 
     def share_checkpoints_with(self, other: "TeamAgent") -> None:
         """Share the leader's checkpoint namespace with another agent."""
-        other._set_checkpoints_from(self._named_checkpoints)
+        other.set_checkpoints_from(self._named_checkpoints)
 
     def set_checkpoint(self, name: str, count: int) -> None:
         """Store a named checkpoint in this agent's namespace."""
         self._named_checkpoints[name] = count
 
-    def _set_checkpoints_from(self, source: dict[str, int]) -> None:
+    def set_checkpoints_from(self, source: dict[str, int]) -> None:
         """Replace this agent's checkpoint namespace with *source*."""
         self._named_checkpoints = source
 
