@@ -75,6 +75,15 @@ class TrajectorySource(Protocol):
     ) -> Trajectory | None:
         """Return the aggregated team trajectory for a session."""
 
+    def get_member_trajectory(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        member_id: str,
+    ) -> Trajectory | None:
+        """Return the latest trajectory snapshot for one team member."""
+
 
 @dataclass(frozen=True)
 class _SnapshotEntry:
@@ -121,6 +130,21 @@ class InMemoryTrajectoryRegistry:
             session_id=session_id,
             filter_collaborative=filter_collaborative,
         )
+
+    def get_member_trajectory(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        member_id: str,
+    ) -> Trajectory | None:
+        """Return one member's latest bounded trajectory without team merging."""
+        key = (team_id, session_id)
+        with self._lock:
+            entry = self._snapshots.get(key, {}).get(member_id)
+        if entry is None:
+            return None
+        return _trajectory_for_snapshot(entry.snapshot)
 
     def clear_session(self, *, team_id: str, session_id: str) -> None:
         with self._lock:

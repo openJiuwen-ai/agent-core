@@ -119,6 +119,9 @@ class TeamScheduler:
         self._summary_requested: set[tuple[str, int]] = set()
         self._digested_tasks: set[str] = set()
         self._all_done_announced = False
+        self._review_feedback_dispatched: set[tuple[str, int]] = set()
+        self._review_feedback_tasks: set[asyncio.Task[Any]] = set()
+        self._team_review_feedback_dispatched = False
 
     @property
     def is_active(self) -> bool:
@@ -136,6 +139,7 @@ class TeamScheduler:
         first = not self._active
         self._active = True
         self._all_done_announced = False
+        self._team_review_feedback_dispatched = False
         if first:
             team_logger.info("[scheduler] activated for team %s", self._blueprint.spec.team_name or "?")
         await self._scan()
@@ -284,6 +288,7 @@ class TeamScheduler:
             if task.assignee and round_key not in self._summary_requested:
                 self._summary_requested.add(round_key)
                 await self._send_as_leader(task.assignee, render.meta_rework_summary(task, max_rounds))
+            self._dispatch_review_feedback(task, feedback)
             return False
         result = await task_manager.settle_review(task.task_id, "fail", feedback)
         if not result.ok:
@@ -291,7 +296,95 @@ class TeamScheduler:
             return False
         if task.assignee:
             await self._send_as_leader(task.assignee, render.meta_rework(task, max_rounds, feedback))
+        self._dispatch_review_feedback(task, feedback)
         return True
+
+    def _dispatch_review_feedback(self, task: Any, feedback: str) -> None:
+        """Notify an optional platform handler after a failed round settles.
+
+        The scheduler owns review aggregation but intentionally knows nothing
+        about LLMs, trajectories, Skills, or persistence. Platforms may attach
+        an async ``review_feedback_handler`` through ``BuildContext.extras``.
+        """
+
+        normalized_feedback = str(feedback or "").strip()
+        if not normalized_feedback:
+            return
+        extras = getattr(self._build_context, "extras", None)
+        handler = extras.get("review_feedback_handler") if isinstance(extras, dict) else None
+        if not callable(handler):
+            return
+
+        round_key = (str(task.task_id), int(task.review_round))
+        if round_key in self._review_feedback_dispatched:
+            return
+        self._review_feedback_dispatched.add(round_key)
+        payload = {
+            "team_id": str(getattr(self._blueprint.spec, "team_name", "") or ""),
+            "session_id": str(getattr(self._build_context, "session_id", "") or ""),
+            "task_id": str(task.task_id),
+            "review_round": int(task.review_round),
+            "task_title": str(getattr(task, "title", "") or ""),
+            "task_content": str(getattr(task, "content", "") or ""),
+            "assignee": str(getattr(task, "assignee", "") or ""),
+            "feedback": normalized_feedback,
+        }
+        background = asyncio.create_task(
+            self._invoke_review_feedback_handler(handler, payload),
+            name=f"review-feedback-{task.task_id}-{task.review_round}",
+        )
+        self._review_feedback_tasks.add(background)
+        background.add_done_callback(self._review_feedback_tasks.discard)
+
+    @staticmethod
+    async def _invoke_review_feedback_handler(handler: Any, payload: dict[str, Any]) -> None:
+        try:
+            result = handler(payload)
+            if hasattr(result, "__await__"):
+                await result
+        except Exception:
+            team_logger.error(
+                "[scheduler] review feedback handler failed: task=%s round=%s",
+                payload.get("task_id"),
+                payload.get("review_round"),
+                exc_info=True,
+            )
+
+    async def _dispatch_team_review_feedback(self) -> None:
+        """Finalize the optional feedback-evolution hook after the board drains.
+
+        Per-task feedback callbacks run in the background so they never delay
+        task handoff.  The terminal callback waits for those jobs before asking
+        the platform handler to aggregate them, which prevents the last task's
+        feedback from racing the team-level evolution pass.
+        """
+        if self._team_review_feedback_dispatched:
+            return
+        self._team_review_feedback_dispatched = True
+
+        pending = list(self._review_feedback_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        extras = getattr(self._build_context, "extras", None)
+        handler = extras.get("review_feedback_handler") if isinstance(extras, dict) else None
+        callback = getattr(handler, "on_team_completed", None)
+        if not callable(callback):
+            return
+        payload = {
+            "team_id": str(getattr(self._blueprint.spec, "team_name", "") or ""),
+            "session_id": str(getattr(self._build_context, "session_id", "") or ""),
+        }
+        try:
+            result = callback(payload)
+            if hasattr(result, "__await__"):
+                await result
+        except Exception:
+            team_logger.error(
+                "[scheduler] team review feedback handler failed: team=%s",
+                payload["team_id"],
+                exc_info=True,
+            )
 
     async def _handle_undecided(self, task, tally: dict, now_ms: int) -> None:
         """Stall handling for an open round: soft re-nudge, then escalation."""
@@ -531,6 +624,8 @@ class TeamScheduler:
                 render.render_leader_all_done(len(tasks)),
                 use_steer=False,
             )
+        if remaining == 0 and tasks:
+            await self._dispatch_team_review_feedback()
 
     async def _digest_completion(self, event: EventMessage, *, verified: bool) -> None:
         """Digest a completion observed via a transport event.
@@ -553,11 +648,11 @@ class TeamScheduler:
 
     async def _announce_all_done(self, event: EventMessage) -> None:
         """Inject the final all-terminal digest into the leader, once."""
-        if self._all_done_announced:
-            return
-        self._all_done_announced = True
         payload = event.get_payload()
-        await self._host.deliver_input(
-            render.render_leader_all_done(payload.task_count),
-            use_steer=False,
-        )
+        if not self._all_done_announced:
+            self._all_done_announced = True
+            await self._host.deliver_input(
+                render.render_leader_all_done(payload.task_count),
+                use_steer=False,
+            )
+        await self._dispatch_team_review_feedback()
