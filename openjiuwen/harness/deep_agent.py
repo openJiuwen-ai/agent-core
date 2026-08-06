@@ -2961,6 +2961,14 @@ class DeepAgent(BaseAgent):
                     f"cannot bind {sid}."
                 )
 
+            # The controller starts its long-lived TaskScheduler inside
+            # prepare_interaction_task_loop().  Create the mutable worktree
+            # holder first so the scheduler, supervisor, rounds, and tool
+            # tasks all inherit the same object through their copied Context.
+            from openjiuwen.harness.tools.worktree.session import init_session_state
+
+            init_session_state()
+
             self._interaction_session = session
             await self.prepare_interaction_task_loop(session)
             if self._task_completion_rail is None:
