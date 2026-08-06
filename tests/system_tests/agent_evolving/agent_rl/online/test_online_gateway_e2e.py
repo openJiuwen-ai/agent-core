@@ -65,6 +65,10 @@ class _FakeRedisPipeline:
         self._ops.append(("zrem", (key, member)))
         return self
 
+    def hincrby(self, key: str, field: str, amount: int = 1):
+        self._ops.append(("hincrby", (key, field, amount)))
+        return self
+
     async def execute(self):
         out = []
         for name, args in self._ops:
@@ -158,6 +162,11 @@ class _FakeRedis:
 
     async def zrem(self, key: str, member: str) -> None:
         self._zsets.get(key, {}).pop(member, None)
+
+    async def hincrby(self, key: str, field: str, amount: int = 1) -> int:
+        row = self._hashes.setdefault(key, {})
+        row[field] = int(row.get(field, 0) or 0) + int(amount)
+        return row[field]
 
 
 @pytest.mark.asyncio

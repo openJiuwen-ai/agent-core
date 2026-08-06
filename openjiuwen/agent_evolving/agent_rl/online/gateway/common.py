@@ -16,6 +16,16 @@ NON_STANDARD_BODY_KEYS = {
     "workspace_id",
 }
 
+VLLM_EXTRA_BODY_KEYS = {
+    "lora_name",
+    "return_token_ids",
+    "guided_choice",
+    "guided_json",
+    "guided_regex",
+    "guided_grammar",
+    "guided_decoding_backend",
+}
+
 
 def utc_now_iso() -> str:
     """Return current UTC time in ISO-8601 format."""

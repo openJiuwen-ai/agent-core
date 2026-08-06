@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import asyncio
 import json
 import logging
 import os
@@ -39,6 +40,7 @@ class LoRAVersion:
     trajectory_count: int
     reward_avg: float
     base_model: str
+    size_bytes: int = 0
     parent_lora_id: str = ""
     parent_lora_version: str = ""
     parent_lora_path: str = ""
@@ -52,8 +54,15 @@ class LoRARepository:
     def __init__(self, root: str = "lora_repo"):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._publish_locks: dict[str, asyncio.Lock] = {}
 
-    def publish(self, request: LoRAPublishRequest, *args, **kwargs) -> LoRAVersion:
+    async def publish(self, request: LoRAPublishRequest, *args, **kwargs) -> LoRAVersion:
+        publish_request = self._coerce_publish_request(request, args, kwargs)
+        lock = self._publish_locks.setdefault(publish_request.user_id, asyncio.Lock())
+        async with lock:
+            return await asyncio.to_thread(self.publish_sync, publish_request)
+
+    def publish_sync(self, request: LoRAPublishRequest, *args, **kwargs) -> LoRAVersion:
         request = self._coerce_publish_request(request, args, kwargs)
         user_id = request.user_id
         user_dir = self.root / user_id
@@ -70,6 +79,7 @@ class LoRARepository:
         src = Path(request.lora_path)
         for f in src.iterdir() if src.is_dir() else [src]:
             shutil.copy2(f, version_dir / f.name)
+        size_bytes = self.path_size_bytes(version_dir)
 
         # 计算 reward 平均值
         metadata = request.metadata or {}
@@ -84,6 +94,7 @@ class LoRARepository:
             "trajectory_count": trajectory_count,
             "reward_avg": reward_avg,
             "base_model": request.base_model,
+            "size_bytes": size_bytes,
             "parent_lora_id": request.parent_lora_id,
             "parent_lora_version": request.parent_lora_version,
             "parent_lora_path": request.parent_lora_path,
@@ -115,15 +126,14 @@ class LoRARepository:
             trajectory_count=trajectory_count,
             reward_avg=reward_avg,
             base_model=request.base_model,
+            size_bytes=size_bytes,
             parent_lora_id=request.parent_lora_id,
             parent_lora_version=request.parent_lora_version,
             parent_lora_path=request.parent_lora_path,
             availability_status=meta["availability_status"],
             availability_reason=meta["availability_reason"],
             availability_checked_at=(
-                datetime.fromisoformat(meta["availability_checked_at"])
-                if meta["availability_checked_at"]
-                else None
+                datetime.fromisoformat(meta["availability_checked_at"]) if meta["availability_checked_at"] else None
             ),
             training_source=str(meta.get("training_source") or "base_model"),
         )
@@ -219,11 +229,7 @@ class LoRARepository:
     def list_users(self) -> list[str]:
         if not self.root.exists():
             return []
-        return sorted(
-            path.name
-            for path in self.root.iterdir()
-            if path.is_dir() and not path.name.startswith(".")
-        )
+        return sorted(path.name for path in self.root.iterdir() if path.is_dir() and not path.name.startswith("."))
 
     def set_latest(self, user_id: str, version: str) -> LoRAVersion:
         lora_version = self.get_version(user_id, version)
@@ -257,9 +263,7 @@ class LoRARepository:
         meta = json.loads(meta_file.read_text())
         meta["availability_status"] = "available" if available else "unavailable"
         meta["availability_reason"] = reason
-        meta["availability_checked_at"] = (
-            (checked_at or datetime.now(timezone.utc)).isoformat()
-        )
+        meta["availability_checked_at"] = (checked_at or datetime.now(timezone.utc)).isoformat()
         meta_file.write_text(json.dumps(meta, indent=2))
         return self._load_version(meta, version_dir)
 
@@ -302,15 +306,46 @@ class LoRARepository:
             trajectory_count=meta["trajectory_count"],
             reward_avg=meta["reward_avg"],
             base_model=meta["base_model"],
+            size_bytes=int(meta.get("size_bytes") or 0),
             parent_lora_id=str(meta.get("parent_lora_id") or ""),
             parent_lora_version=str(meta.get("parent_lora_version") or ""),
             parent_lora_path=str(meta.get("parent_lora_path") or ""),
             availability_status=str(meta.get("availability_status") or "pending"),
             availability_reason=str(meta.get("availability_reason") or ""),
             availability_checked_at=(
-                datetime.fromisoformat(availability_checked_at)
-                if availability_checked_at
-                else None
+                datetime.fromisoformat(availability_checked_at) if availability_checked_at else None
             ),
             training_source=str(meta.get("training_source") or "base_model"),
         )
+
+    @staticmethod
+    def path_size_bytes(path: Path | str) -> int:
+        path = Path(path)
+        try:
+            if not path.exists():
+                return 0
+            if path.is_file():
+                return int(path.stat().st_size)
+        except OSError as exc:
+            logger.warning("Failed to inspect LoRA path size path=%s error=%s", path, exc)
+            return 0
+
+        total = 0
+        try:
+            for item in path.rglob("*"):
+                try:
+                    if item.is_file():
+                        total += int(item.stat().st_size)
+                except OSError as exc:
+                    logger.warning(
+                        "Skipping LoRA file during size calculation path=%s error=%s",
+                        item,
+                        exc,
+                    )
+        except OSError as exc:
+            logger.warning("Failed to traverse LoRA path size path=%s error=%s", path, exc)
+        return total
+
+    @staticmethod
+    def _path_size_bytes(path: Path | str) -> int:
+        return LoRARepository.path_size_bytes(path)

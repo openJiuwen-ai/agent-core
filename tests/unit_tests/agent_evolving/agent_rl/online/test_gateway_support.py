@@ -37,6 +37,10 @@ class _FakeRedisPipeline:
         self._ops.append(("zcard", (key,)))
         return self
 
+    def hincrby(self, key: str, field: str, amount: int = 1):
+        self._ops.append(("hincrby", (key, field, amount)))
+        return self
+
     def hmget(self, key: str, fields: list[str]):
         self._ops.append(("hmget", (key, fields)))
         return self
@@ -127,6 +131,11 @@ class _FakeRedis:
 
     async def zrem(self, key: str, member: str) -> None:
         self._zsets.get(key, {}).pop(member, None)
+
+    async def hincrby(self, key: str, field: str, amount: int = 1) -> int:
+        row = self._hashes.setdefault(key, {})
+        row[field] = int(row.get(field, 0) or 0) + int(amount)
+        return row[field]
 
     def pipeline(self) -> _FakeRedisPipeline:
         return _FakeRedisPipeline(self)

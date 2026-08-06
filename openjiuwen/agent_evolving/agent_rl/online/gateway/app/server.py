@@ -18,12 +18,13 @@ from typing import Any, Awaitable, Callable, Optional
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .http_helpers import build_upstream_headers, ensure_gateway_auth, stream_chat_response
-from .request_context import require_messages, require_user_id, resolve_trace_id
-from ...lora_runtime import build_lora_info, lora_id as build_lora_id
+from ....storage.lora_repo import LoRAPublishRequest, LoRARepository
+from ...lora_runtime import build_lora_info
+from ...lora_runtime import lora_id as build_lora_id
 from ..trajectory import GatewayTrajectoryRuntime
 from ..upstream import Forwarder, UpstreamGatewayClient
-from ....storage.lora_repo import LoRAPublishRequest
+from .http_helpers import build_upstream_headers, ensure_gateway_auth, stream_chat_response
+from .request_context import require_messages, require_user_id, resolve_trace_id
 
 logger = logging.getLogger("online_rl.gateway")
 
@@ -42,9 +43,7 @@ def _inject_latest_lora(
         body["model"] = user_id
         extra_body = body.get("extra_body")
         if isinstance(extra_body, dict):
-            extra_body.pop("lora_name", None)
-            if not extra_body:
-                body.pop("extra_body", None)
+            extra_body["lora_name"] = user_id
         return build_lora_info(user_id, latest_lora, default_policy=lora_default_policy)
     return None
 
@@ -143,7 +142,7 @@ def _trajectory_list_filters(request: Request) -> TrajectoryListFilters:
     )
 
 
-def _lora_to_response(
+async def _lora_to_response(
     version: Any,
     *,
     latest_version: str | None = None,
@@ -151,9 +150,9 @@ def _lora_to_response(
 ) -> dict[str, Any]:
     is_latest = latest_version == version.version
     path = Path(version.path)
-    size_bytes = 0
-    if path.exists():
-        size_bytes = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+    size_bytes = int(getattr(version, "size_bytes", 0) or 0)
+    if not size_bytes:
+        size_bytes = await asyncio.to_thread(LoRARepository.path_size_bytes, path)
     return {
         "lora_id": _lora_id(version.user_id, version.version),
         "model_id": version.user_id,
@@ -259,11 +258,13 @@ def build_gateway_app(
                 url=f"{config.llm_url.rstrip('/')}/v1/load_lora_adapter",
                 params={},
                 headers={"content-type": "application/json"},
-                content=json.dumps({
-                    "lora_name": version.user_id,
-                    "lora_path": lora_path,
-                    "load_inplace": True,
-                }).encode("utf-8"),
+                content=json.dumps(
+                    {
+                        "lora_name": version.user_id,
+                        "lora_path": lora_path,
+                        "load_inplace": True,
+                    }
+                ).encode("utf-8"),
             )
         except Exception as exc:
             logger.warning(
@@ -312,7 +313,7 @@ def build_gateway_app(
         }
 
     async def _lora_response(version: Any, *, latest_version: str | None = None) -> dict[str, Any]:
-        return _lora_to_response(
+        return await _lora_to_response(
             version,
             latest_version=latest_version,
             load_status=await _lora_load_status(version),
@@ -519,13 +520,13 @@ def build_gateway_app(
             metadata.update(payload["metrics"])
         if isinstance(payload.get("source"), dict):
             metadata["source"] = payload["source"]
-        version = repo.publish(
+        version = await repo.publish(
             LoRAPublishRequest(
                 user_id=model_id,
                 lora_path=lora_path,
                 metadata=metadata,
                 base_model=str(payload.get("base_model") or ""),
-            )
+            ),
         )
         if payload.get("set_latest") is False:
             # Current repository publish updates latest atomically. This field is
