@@ -420,13 +420,13 @@ def attribution_to_evolution_signal(
 ) -> EvolutionSignal | None:
     """Convert an actionable attribution into the standard evolution signal."""
 
-    if (
-        attribution.action != ReviewFeedbackAction.EVOLVE_EXISTING_SKILL
-        or not attribution.is_skill_actionable
-        or not attribution.skill_name
-        or attribution.target is None
-        or not attribution.reusable_guidance
-    ):
+    if attribution.action != ReviewFeedbackAction.EVOLVE_EXISTING_SKILL:
+        return None
+    if not attribution.is_skill_actionable:
+        return None
+    if not attribution.skill_name or attribution.target is None:
+        return None
+    if not attribution.reusable_guidance:
         return None
 
     section = {
@@ -454,7 +454,12 @@ def attribution_to_evolution_signal(
 
 
 def _normalize_skill_reads(skill_reads: Sequence[str]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(name for raw in skill_reads if (name := str(raw).strip())))
+    normalized_names: list[str] = []
+    for raw in skill_reads:
+        name = str(raw).strip()
+        if name and name not in normalized_names:
+            normalized_names.append(name)
+    return tuple(normalized_names)
 
 
 def _response_to_text(response: Any) -> str:
@@ -482,7 +487,7 @@ def _parse_json_object(raw: str) -> dict[str, Any]:
         end = text.rfind("}")
         if start < 0 or end <= start:
             raise ValueError("attribution response does not contain a JSON object") from None
-        parsed = json.loads(text[start : end + 1])
+        parsed = json.loads(text[start:end + 1])
     if not isinstance(parsed, dict):
         raise ValueError("attribution response must be a JSON object")
     return parsed

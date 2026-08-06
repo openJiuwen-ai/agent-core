@@ -82,4 +82,3 @@ signal = attribution_to_evolution_signal(
 只有可执行的 `evolve_existing_skill` 结果会转换成功；其余 action 返回 `None`。产生的 signal 使用
 `signal_type="review_feedback"` 和 `source="scheduler_review_feedback"`，可交给
 `SkillEvolutionRail.evolve_from_external_signals(...)` 继续走标准经验生成与审批流程。
-
