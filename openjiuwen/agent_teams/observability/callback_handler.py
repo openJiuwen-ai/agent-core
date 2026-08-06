@@ -876,32 +876,64 @@ class OtelCallbackHandler:
             except Exception as exc:
                 team_logger.warning("otel: _finalize_llm_span_output reasoning span failed: {}", exc)
 
-    @staticmethod
-    def _record_usage_attrs(state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
-        """Record usage attributes (tokens, model_name) from usage_metadata."""
+    def _record_usage_attrs(self, state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
+        """Record usage attributes (tokens, model_name) from usage_metadata.
+
+        Cached prompt tokens and reasoning tokens are *subsets* of the prompt
+        and completion counts the provider reports, not additional tokens. A
+        backend that treats every ``gen_ai.usage.*`` key as its own additive
+        category — Langfuse does, summing them per observation and per trace —
+        then counts the cached prefix twice, which on a long agent run (where
+        most of each prompt is a cache hit) inflates the trace total by more
+        than half.
+
+        For such a backend the subsets are carved out of their parent, so the
+        keys are disjoint and add up to the reported total: ``prompt`` becomes
+        the freshly processed prompt and ``completion`` the visible output.
+        The subtraction is skipped when a subset does not fit inside its parent
+        (a provider counting reasoning outside the completion), leaving the raw
+        numbers rather than inventing one. For plain OTLP consumers nothing
+        changes: ``gen_ai.usage.prompt_tokens`` keeps its semconv meaning of
+        all input tokens.
+
+        Args:
+            state: Span state for the LLM call being recorded.
+            usage: Provider usage metadata.
+            skip_existing: Leave an attribute already written by an earlier
+                trigger untouched.
+        """
         if usage is None:
             return
-        for src_attr, dst_attr in (
-            ("input_tokens", GEN_AI_USAGE_PROMPT_TOKENS),
-            ("output_tokens", GEN_AI_USAGE_COMPLETION_TOKENS),
-            ("total_tokens", GEN_AI_USAGE_TOTAL_TOKENS),
-            ("cache_tokens", GEN_AI_USAGE_CACHE_TOKENS),
-            ("reasoning_tokens", GEN_AI_USAGE_REASONING_TOKENS),
+        prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        cache_tokens = int(getattr(usage, "cache_tokens", 0) or 0)
+        reasoning_tokens = int(getattr(usage, "reasoning_tokens", 0) or 0)
+        if self._config is not None and self._config.backend == "langfuse":
+            if 0 < cache_tokens <= prompt_tokens:
+                prompt_tokens -= cache_tokens
+            if 0 < reasoning_tokens <= completion_tokens:
+                completion_tokens -= reasoning_tokens
+
+        for value, dst_attr in (
+            (prompt_tokens, GEN_AI_USAGE_PROMPT_TOKENS),
+            (completion_tokens, GEN_AI_USAGE_COMPLETION_TOKENS),
+            (int(getattr(usage, "total_tokens", 0) or 0), GEN_AI_USAGE_TOTAL_TOKENS),
+            (cache_tokens, GEN_AI_USAGE_CACHE_TOKENS),
+            (reasoning_tokens, GEN_AI_USAGE_REASONING_TOKENS),
         ):
-            value = getattr(usage, src_attr, 0) or 0
             if value and not (skip_existing and state.span.attributes.get(dst_attr)):
-                state.span.set_attribute(dst_attr, int(value))
+                state.span.set_attribute(dst_attr, value)
         model_name = getattr(usage, "model_name", "")
         if model_name and not (skip_existing and state.span.attributes.get(GEN_AI_RESPONSE_MODEL)):
             state.span.set_attribute(GEN_AI_RESPONSE_MODEL, str(model_name))
 
-    @staticmethod
-    def _maybe_record_response_attrs(state: LlmSpanState, response: Any) -> None:
+    def _maybe_record_response_attrs(self, state: LlmSpanState, response: Any) -> None:
+        """Record usage and finish_reason carried by a response or chunk."""
         if response is None:
             return
         usage = getattr(response, "usage_metadata", None)
         if usage is not None:
-            OtelCallbackHandler._record_usage_attrs(state, usage, skip_existing=False)
+            self._record_usage_attrs(state, usage, skip_existing=False)
         finish_reason = getattr(response, "finish_reason", None)
         if finish_reason and finish_reason != "null":
             state.span.set_attribute(GEN_AI_RESPONSE_FINISH_REASON, str(finish_reason))

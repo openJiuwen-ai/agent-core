@@ -228,11 +228,22 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     assert _attr(span, "gen_ai.system") == "openjiuwen-test"
     assert _attr(span, "gen_ai.request.model") == "fake-llm-1"
     assert _attr(span, "gen_ai.request.temperature") == 0.5
-    assert _attr(span, "gen_ai.usage.prompt_tokens") == 12
-    assert _attr(span, "gen_ai.usage.completion_tokens") == 7
+    # Cached prompt and reasoning tokens are subsets of the provider's prompt /
+    # completion counts. On the langfuse backend (this fixture's default) every
+    # usage key is an additive category, so the subsets are carved out of their
+    # parent: 12 prompt = 10 fresh + 2 cached, 7 completion = 2 visible +
+    # 5 reasoning, and the four still add up to the reported 19.
+    assert _attr(span, "gen_ai.usage.prompt_tokens") == 10
+    assert _attr(span, "gen_ai.usage.completion_tokens") == 2
     assert _attr(span, "gen_ai.usage.total_tokens") == 19
     assert _attr(span, "gen_ai.usage.cache_tokens") == 2
     assert _attr(span, "gen_ai.usage.reasoning_tokens") == 5
+    assert (
+        _attr(span, "gen_ai.usage.prompt_tokens")
+        + _attr(span, "gen_ai.usage.completion_tokens")
+        + _attr(span, "gen_ai.usage.cache_tokens")
+        + _attr(span, "gen_ai.usage.reasoning_tokens")
+    ) == _attr(span, "gen_ai.usage.total_tokens")
 
     ttft = _attr(span, "gen_ai.response.time_to_first_token_ms")
     assert ttft is not None and ttft >= 0.0, "TTFT must be recorded on the LLM span"
@@ -2466,3 +2477,89 @@ async def test_iterations_nest_under_the_invoke_span_of_the_same_agent(
     assert iter_spans[0].parent.span_id == invoke_spans[0].context.span_id
     # The invoke span must survive the iteration's stale-span drain.
     assert invoke_spans[0].end_time >= iter_spans[0].end_time
+
+
+def test_usage_keys_are_disjoint_for_langfuse_but_semconv_for_otlp() -> None:
+    """Token subsets are carved out only for the backend that sums usage keys.
+
+    Langfuse counts every ``gen_ai.usage.*`` key as its own category, so a
+    cached prefix reported beside the full prompt count is charged twice — the
+    trace total on a long agent run came out well above what the provider
+    actually billed. Plain OTLP consumers read ``prompt_tokens`` per semconv
+    (all input tokens), so nothing is subtracted for them.
+    """
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams.observability.callback_handler import (
+        LlmSpanState,
+        OtelCallbackHandler,
+    )
+
+    usage = _FakeUsage(
+        input_tokens=1000,
+        output_tokens=100,
+        total_tokens=1100,
+        cache_tokens=900,
+        reasoning_tokens=40,
+    )
+
+    def _recorded(backend: str) -> dict[str, Any]:
+        written: dict[str, Any] = {}
+        span = SimpleNamespace(
+            attributes={},
+            set_attribute=lambda key, value: written.update({key: value}),
+        )
+        handler = OtelCallbackHandler(
+            ObservabilityConfig(enabled=True, backend=backend),
+            tracer=MagicMock(),
+        )
+        handler._record_usage_attrs(LlmSpanState(span=span, start_ns=0), usage)
+        return written
+
+    langfuse = _recorded("langfuse")
+    assert langfuse["gen_ai.usage.prompt_tokens"] == 100  # 1000 - 900 cached
+    assert langfuse["gen_ai.usage.completion_tokens"] == 60  # 100 - 40 reasoning
+    assert langfuse["gen_ai.usage.cache_tokens"] == 900
+    assert langfuse["gen_ai.usage.reasoning_tokens"] == 40
+    assert (
+        langfuse["gen_ai.usage.prompt_tokens"]
+        + langfuse["gen_ai.usage.completion_tokens"]
+        + langfuse["gen_ai.usage.cache_tokens"]
+        + langfuse["gen_ai.usage.reasoning_tokens"]
+    ) == langfuse["gen_ai.usage.total_tokens"] == 1100
+
+    otlp = _recorded("otlp")
+    assert otlp["gen_ai.usage.prompt_tokens"] == 1000
+    assert otlp["gen_ai.usage.completion_tokens"] == 100
+
+
+def test_usage_subset_larger_than_its_parent_is_left_alone() -> None:
+    """A provider counting reasoning outside the completion keeps its raw numbers.
+
+    Subtracting there would invent a count rather than report one.
+    """
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams.observability.callback_handler import (
+        LlmSpanState,
+        OtelCallbackHandler,
+    )
+
+    written: dict[str, Any] = {}
+    span = SimpleNamespace(
+        attributes={},
+        set_attribute=lambda key, value: written.update({key: value}),
+    )
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, backend="langfuse"), tracer=MagicMock()
+    )
+    handler._record_usage_attrs(
+        LlmSpanState(span=span, start_ns=0),
+        _FakeUsage(
+            input_tokens=10, output_tokens=5, total_tokens=15,
+            cache_tokens=0, reasoning_tokens=9,  # > completion
+        ),
+    )
+
+    assert written["gen_ai.usage.completion_tokens"] == 5
+    assert written["gen_ai.usage.reasoning_tokens"] == 9
