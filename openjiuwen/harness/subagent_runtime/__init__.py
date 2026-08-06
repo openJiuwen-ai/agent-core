@@ -14,7 +14,9 @@ from openjiuwen.harness.subagent_runtime.errors import (
     raise_subagent_not_found,
 )
 from openjiuwen.harness.subagent_runtime.ids import build_subagent_id, new_task_id
+from openjiuwen.harness.subagent_runtime.control import SubagentControl
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
+from openjiuwen.harness.subagent_runtime.session_manager import SubagentSessionManager
 from openjiuwen.harness.subagent_runtime.models import (
     ShutdownOp,
     SpawnResult,
@@ -38,11 +40,13 @@ __all__ = [
     "SpawnResult",
     "StatusChannel",
     "StatusReceiver",
+    "SubagentControl",
     "SubagentInstance",
     "SubagentMetadata",
     "SubagentOp",
     "SubagentRegistry",
     "SubagentRuntimeConfig",
+    "SubagentSessionManager",
     "SubagentStatus",
     "SubagentStatusKind",
     "UserInputOp",

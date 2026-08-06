@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import pytest
 
@@ -42,6 +43,7 @@ class MockAgent:
     max_active_invokes: int = 0
     prepare_calls: int = 0
     cleanup_calls: int = 0
+    card: SimpleNamespace = field(default_factory=lambda: SimpleNamespace(id="sub-card"))
 
     async def invoke(self, inputs: dict[str, str], *, session: MockSession) -> dict[str, str]:
         self.invoke_calls += 1

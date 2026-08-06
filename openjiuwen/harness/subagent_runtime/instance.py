@@ -93,10 +93,12 @@ class SubagentInstance:
     def is_evictable(self) -> bool:
         if self._closed:
             return False
-        if self.status.current().kind == SubagentStatusKind.RUNNING:
+        kind = self.status.current().kind
+        if kind == SubagentStatusKind.RUNNING:
             return False
         if self._current_run is not None and not self._current_run.done():
-            return False
+            if kind in {SubagentStatusKind.RUNNING, SubagentStatusKind.PENDING_INIT}:
+                return False
         return self._ops.empty()
 
     def is_closed(self) -> bool:
