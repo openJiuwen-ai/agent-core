@@ -256,6 +256,44 @@ class _FakeRemoteProcess:
         self.wait_count += 1
 
 
+class _RecordingAsyncSshConnection:
+    def __init__(self) -> None:
+        self.command: str | None = None
+        self.env: dict[str, str] | None = None
+        self.closed = False
+
+    async def create_process(
+        self,
+        command: str,
+        *,
+        env: dict[str, str],
+        encoding: str | None,
+    ) -> _FakeRemoteProcess:
+        """Record the remote command and return a fake process."""
+        self.command = command
+        self.env = env
+        return _FakeRemoteProcess(_BlockingStdout())
+
+    def close(self) -> None:
+        """Record connection close."""
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        """Wait for connection close."""
+
+
+class _RecordingAsyncSshModule(ModuleType):
+    def __init__(self) -> None:
+        super().__init__("asyncssh")
+        self.connection = _RecordingAsyncSshConnection()
+        self.connect_kwargs: dict[str, Any] | None = None
+
+    async def connect(self, **kwargs: Any) -> _RecordingAsyncSshConnection:
+        """Record asyncssh connection kwargs."""
+        self.connect_kwargs = kwargs
+        return self.connection
+
+
 class _RecordingSpanBridge:
     def __init__(self) -> None:
         self.enter_count = 0
@@ -343,7 +381,7 @@ def fake_claude_sdk(monkeypatch):
             return cmd
 
     subprocess_module.SubprocessCLITransport = _FakeSubprocessCLITransport
-    asyncssh_module = ModuleType("asyncssh")
+    asyncssh_module = _RecordingAsyncSshModule()
 
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", sdk_module)
     monkeypatch.setitem(sys.modules, "claude_agent_sdk._internal", internal_module)
@@ -760,6 +798,45 @@ def test_claude_sdk_ssh_transport_uses_options_cli_path(fake_claude_sdk):
     command = transport._build_command()
 
     assert command[0] == "/remote/bin/claude"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_ssh_transport_uses_exec_by_default(fake_claude_sdk):
+    config = SshTransportConfig(host="127.0.0.1", username="u", password="pw")
+    options = _FakeOptions(cwd="/remote/project", env={"OPENJIUWEN_TEAM_JOIN": "{}"})
+    transport = build_claude_sdk_ssh_transport(prompt=[], options=options, config=config)
+
+    await transport.connect()
+
+    asyncssh_module = sys.modules["asyncssh"]
+    assert isinstance(asyncssh_module, _RecordingAsyncSshModule)
+    command = asyncssh_module.connection.command
+    assert command is not None
+    assert "; exec claude " in command
+
+    await transport.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_ssh_transport_can_disable_exec_and_use_empty_password(fake_claude_sdk):
+    config = SshTransportConfig(host="127.0.0.1", username="u", password="", use_exec=False)
+    options = _FakeOptions(cwd="/remote/project", env={"OPENJIUWEN_TEAM_JOIN": "{}"})
+    transport = build_claude_sdk_ssh_transport(prompt=[], options=options, config=config)
+
+    await transport.connect()
+
+    asyncssh_module = sys.modules["asyncssh"]
+    assert isinstance(asyncssh_module, _RecordingAsyncSshModule)
+    command = asyncssh_module.connection.command
+    assert command is not None
+    assert "; claude " in command
+    assert "; exec claude " not in command
+    assert asyncssh_module.connect_kwargs is not None
+    assert asyncssh_module.connect_kwargs["password"] == ""
+
+    await transport.close()
 
 
 @pytest.mark.asyncio
