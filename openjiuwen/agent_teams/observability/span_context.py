@@ -577,6 +577,31 @@ def push_tool_span(tool_name: str, span: Span) -> None:
     _tool_span_map.set(mapping)
 
 
+def get_current_tool_span() -> Span | None:
+    """Return the innermost tool span still executing in this context.
+
+    The tool call a sub-agent is dispatched from: the sub-agent runs *inside*
+    ``tool.task`` (or a platform's own agent tool), so its agent span belongs
+    under that tool span rather than beside it.
+
+    Tool spans are keyed by name with no cross-key ordering, so the innermost
+    one is the latest-started still-recording span — tool calls are sequential
+    within an agent loop, which makes start time an unambiguous order.
+
+    Returns:
+        The innermost open tool span, or None when no tool call is running.
+    """
+    open_spans = [
+        span
+        for bucket in _tool_span_map.get().values()
+        for span in bucket
+        if span.is_recording()
+    ]
+    if not open_spans:
+        return None
+    return max(open_spans, key=lambda span: getattr(span, "start_time", 0) or 0)
+
+
 def pop_tool_span(tool_name: str) -> Span | None:
     """Pop the most recent open tool span for tool_name, or None."""
     mapping = dict(_tool_span_map.get())

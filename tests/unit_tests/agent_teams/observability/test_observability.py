@@ -2108,3 +2108,70 @@ async def test_flush_spares_a_non_team_named_root_span(
         if root_span.is_recording():
             root_span.end()
         clear_ambient_team_span()
+
+
+@pytest.mark.asyncio
+async def test_subagent_invoke_nests_under_the_dispatching_tool_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A sub-agent runs inside the tool call that dispatched it, so it nests there.
+
+    Before this, the ``agent.<type>.invoke`` span was opened directly under the
+    dispatching agent, leaving it a sibling of the ``tool.task`` span whose
+    execution actually contains it.
+    """
+    from opentelemetry.trace import set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_current_agent_span,
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+    fw = Runner.callback_framework
+    team_span = _create_team_span("test_team")
+
+    # The dispatching agent's own span, then the task tool call it makes.
+    agent_span = get_tracer("test").start_span(
+        "agent.leader.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    set_current_agent_span(agent_span)
+    await fw.trigger(
+        ToolCallEvents.TOOL_CALL_STARTED,
+        tool_name="task",
+        tool_id="call-1",
+        inputs={"subagent_type": "explore_agent"},
+    )
+
+    rail = ObservabilityRail()
+    ctx = AgentCallbackContext(
+        inputs=type("In", (), {"query": "list files"})(),
+        agent=type("A", (), {
+            "member_name": "explore_agent",
+            "team_name": "test_team",
+            "deep_config": type("DC", (), {"enable_task_loop": False})(),
+            "card": type("C", (), {"name": "explore_agent"})(),
+            "role": None,
+        })(),
+        exception=None,
+    )
+    await rail.before_invoke(ctx)
+    invoke_span = get_current_agent_span()
+    await rail.after_invoke(ctx)
+
+    await fw.trigger(ToolCallEvents.TOOL_CALL_FINISHED, tool_name="task", result="ok")
+    set_current_agent_span(None)
+    agent_span.end()
+    remove_team_span("test_team")
+
+    tool_spans = _spans_by_name(in_memory_exporter, "tool.task")
+    assert tool_spans, "no tool.task span captured"
+    assert invoke_span is not None
+    assert invoke_span.parent is not None
+    assert invoke_span.parent.span_id == tool_spans[0].context.span_id, (
+        "subagent invoke span must nest under the dispatching tool span"
+    )

@@ -56,6 +56,7 @@ from openjiuwen.agent_teams.observability.semconv import (
 from openjiuwen.agent_teams.observability.span_context import (
     cascade_close_children,
     get_current_agent_span,
+    get_current_tool_span,
     set_current_agent_span,
     get_team_span,
     _tool_span_map,
@@ -431,7 +432,24 @@ class ObservabilityRail(DeepAgentRail):
                     # so the team span becomes the ambient parent.
                     set_current_agent_span(None)
 
-            parent_ctx = set_span_in_context(parent_span, otel_context.get_current())
+            # A sub-agent is dispatched *from* a tool call and runs to
+            # completion inside it, so the dispatching tool span — not the
+            # agent span the tool itself hangs off — is its span parent. Only
+            # a tool span opened directly under the parent resolved above
+            # qualifies, which keeps this to the actual dispatch and never
+            # re-parents across a trace or an unrelated branch. The agent tier
+            # is unaffected: ``parent_agent_span`` below still records the
+            # agent span to restore, and ``is_outermost`` still follows it.
+            dispatch_tool_span = get_current_tool_span()
+            otel_parent: Span = parent_span
+            if (
+                dispatch_tool_span is not None
+                and dispatch_tool_span.parent is not None
+                and dispatch_tool_span.parent.span_id == parent_span.context.span_id
+            ):
+                otel_parent = dispatch_tool_span
+
+            parent_ctx = set_span_in_context(otel_parent, otel_context.get_current())
             span = self._tracer().start_span(
                 name=f"agent.{member_name}.invoke",
                 context=parent_ctx,
