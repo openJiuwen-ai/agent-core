@@ -2,6 +2,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Tests for JiuWenSwarm agent adapter."""
 
+import os
+import stat
+import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -10,6 +13,7 @@ import yaml
 
 from openjiuwen.agent_evolving.evaluator.evaluator_pipeline.adapters.agents.jiuwenswarm import (
     JiuWenSwarmAgent,
+    _staged_file,
 )
 from openjiuwen.agent_evolving.evaluator.evaluator_pipeline.models import ExecResult
 
@@ -82,6 +86,174 @@ class TestJiuWenSwarmAgentValidateConfig:
         errors = agent.validate_config()
         
         assert len(errors) == 0
+
+
+class TestStagedFile:
+    """The staging helper must not expose its content to other local accounts."""
+
+    @staticmethod
+    def test_staged_file_is_private_to_its_owner():
+        with _staged_file("payload") as path:
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    @staticmethod
+    def test_staged_file_holds_the_content():
+        with _staged_file("payload", suffix=".env") as path:
+            assert path.read_text(encoding="utf-8") == "payload"
+            assert path.suffix == ".env"
+
+    @staticmethod
+    def test_staged_file_lives_in_the_configured_temp_dir():
+        with _staged_file("payload") as path:
+            assert path.parent == Path(tempfile.gettempdir())
+
+    @staticmethod
+    def test_staged_names_are_not_reused():
+        with _staged_file("payload") as first, _staged_file("payload") as second:
+            assert first != second
+
+    @staticmethod
+    def test_staged_file_is_removed_on_success():
+        with _staged_file("payload") as path:
+            assert path.exists()
+        assert not path.exists()
+
+    @staticmethod
+    def test_staged_file_is_removed_when_the_body_raises():
+        captured: list[Path] = []
+        with pytest.raises(RuntimeError):
+            with _staged_file("payload") as path:
+                captured.append(path)
+                raise RuntimeError("copy failed")
+
+        assert captured and not captured[0].exists()
+
+    @staticmethod
+    def test_staged_file_is_removed_when_the_write_fails():
+        """A failed write must not strand the partially staged content."""
+        staged: list[Path] = []
+        real_mkstemp = tempfile.mkstemp
+        real_fdopen = os.fdopen
+
+        def recording_mkstemp(*args, **kwargs):
+            fd, raw_path = real_mkstemp(*args, **kwargs)
+            staged.append(Path(raw_path))
+            return fd, raw_path
+
+        class FailingHandle:
+            def __init__(self, handle):
+                self._handle = handle
+
+            def write(self, _content):
+                raise OSError("no space left on device")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc_info):
+                self._handle.close()
+                return False
+
+        def failing_fdopen(fd, *args, **kwargs):
+            return FailingHandle(real_fdopen(fd, *args, **kwargs))
+
+        with patch.object(tempfile, "mkstemp", recording_mkstemp):
+            with patch("os.fdopen", failing_fdopen):
+                with pytest.raises(OSError):
+                    with _staged_file("payload"):
+                        pass
+
+        assert staged and not staged[0].exists()
+
+    @staticmethod
+    def test_staged_file_closes_the_descriptor_it_cannot_wrap():
+        """``mkstemp`` hands over a descriptor that must not outlive a failed wrap."""
+        staged: list[Path] = []
+        descriptors: list[int] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            fd, raw_path = real_mkstemp(*args, **kwargs)
+            descriptors.append(fd)
+            staged.append(Path(raw_path))
+            return fd, raw_path
+
+        def failing_fdopen(*_args, **_kwargs):
+            raise MemoryError("cannot allocate the file object")
+
+        with patch.object(tempfile, "mkstemp", recording_mkstemp):
+            with patch("os.fdopen", failing_fdopen):
+                with pytest.raises(MemoryError):
+                    with _staged_file("payload"):
+                        pass
+
+        with pytest.raises(OSError):
+            os.fstat(descriptors[0])
+        assert staged and not staged[0].exists()
+
+
+class TestJiuWenSwarmAgentCredentialStaging:
+    """The API key must never rest at a guessable path in the shared temp dir."""
+
+    API_KEY = "not-a-real-key-0123456789"
+
+    def _agent_and_env(self, copy_to):
+        async def exec_command(command: str, timeout: int) -> ExecResult:
+            stdout = "OK" if "import jiuwenswarm" in command else ""
+            return ExecResult(stdout=stdout, returncode=0)
+
+        env = MagicMock()
+        env.exec = AsyncMock(side_effect=exec_command)
+        env.copy_to = AsyncMock(side_effect=copy_to)
+        agent = JiuWenSwarmAgent(
+            {
+                "api_key": self.API_KEY,
+                "api_base": "https://api.example.invalid",
+                "model_name": "example-model",
+            }
+        )
+        return agent, env
+
+    @pytest.mark.asyncio
+    async def test_env_file_is_staged_privately_and_unpredictably(self):
+        staged: dict[str, tuple[Path, int]] = {}
+
+        async def copy_to(source: Path, destination: str) -> bool:
+            source = Path(source)
+            staged[destination] = (source, stat.S_IMODE(source.stat().st_mode))
+            return True
+
+        agent, env = self._agent_and_env(copy_to)
+        assert await agent.setup(env) is True
+
+        env_path, mode = staged[f"{agent.CONFIG_DIR}/.env"]
+
+        # Readable and writable by the owner only, for the whole copy window.
+        assert mode == 0o600
+
+        # The name must not be derivable from the configuration, so it cannot be
+        # pre-created as a symlink pointing somewhere else.
+        assert "jiuwenswarm_env" not in env_path.name
+        assert self.API_KEY not in env_path.name
+        assert "example-model" not in env_path.name
+
+        # And it must not survive the copy.
+        assert not env_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_env_file_is_removed_when_the_copy_fails(self):
+        staged: list[Path] = []
+
+        async def copy_to(source: Path, destination: str) -> bool:
+            staged.append(Path(source))
+            raise OSError("docker cp failed")
+
+        agent, env = self._agent_and_env(copy_to)
+        with pytest.raises(OSError):
+            await agent.setup(env)
+
+        assert staged, "the .env file was never staged"
+        assert not staged[0].exists()
 
 
 class TestJiuWenSwarmAgentSetup:

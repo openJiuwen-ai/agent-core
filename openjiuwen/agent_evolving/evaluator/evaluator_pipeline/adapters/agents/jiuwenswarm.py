@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +17,40 @@ from ...base import BaseAgentAdapter, register_agent
 from ...docker_env import DockerEnvironment
 from ...models import AgentContext, AgentRunResult, SkillDelta, Task
 from ...skill_manager import extract_specific_errors
+
+
+@contextmanager
+def _staged_file(content: str, suffix: str = "") -> Iterator[Path]:
+    """Materialise ``content`` on the host just long enough to copy it into a sandbox.
+
+    Files handed to the sandbox are written to the shared temporary directory,
+    which on a multi-user host is world-writable and world-readable. Writing
+    them at a fixed, caller-derived path there is unsafe twice over: any local
+    account can read the content while the copy is in flight, and any local
+    account can pre-create the path as a symlink so the write lands somewhere
+    of its choosing.
+
+    ``tempfile.mkstemp`` closes both holes in one atomic step. It picks an
+    unpredictable name, refuses to follow an existing path, and creates the
+    file readable and writable by its owner only. The file is removed when the
+    block exits, including when the block raises, so a failed copy cannot leave
+    the content behind.
+    """
+    fd, raw_path = tempfile.mkstemp(prefix="jiuwenswarm_", suffix=suffix)
+    path = Path(raw_path)
+    try:
+        try:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            # The descriptor is only owned by the file object once ``fdopen``
+            # has returned one, so a failure here has to close it by hand.
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(content)
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
 
 
 @register_agent("jiuwenswarm")
@@ -138,11 +176,8 @@ PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 PIP_TIMEOUT=120
 PIP_DEFAULT_TIMEOUT=120
 """
-        env_path = Path("/tmp/jiuwenswarm_env")
-        env_path.write_text(env_content, encoding="utf-8")
-        await env.copy_to(env_path, f"{self.CONFIG_DIR}/.env")
-        if env_path.exists():
-            env_path.unlink()
+        with _staged_file(env_content, suffix=".env") as env_path:
+            await env.copy_to(env_path, f"{self.CONFIG_DIR}/.env")
         logger.info(f"  ✓ Created .env file (evolution={'enabled' if evolution_enabled else 'disabled'})")
 
         config_yaml = f"""preferred_language: en
