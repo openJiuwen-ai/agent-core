@@ -27,6 +27,7 @@ from openjiuwen.agent_teams.agent.session_manager import SessionManager
 from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 from openjiuwen.agent_teams.agent.state import TeamAgentState
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
+from openjiuwen.agent_teams.fork import ForkContext
 from openjiuwen.agent_teams.interaction.payload import GodViewMessage
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
@@ -71,6 +72,7 @@ class TeamAgent(BaseAgent):
         super().__init__(card)
         self._configurator = AgentConfigurator(card)
         self._state = TeamAgentState()
+        self._named_checkpoints: dict[str, int] = {}  # name → message_count
 
         self._spawn_manager = SpawnManager(
             state=self._state,
@@ -1008,7 +1010,76 @@ class TeamAgent(BaseAgent):
         return agent
 
     async def _on_teammate_created(self, teammate_id: str):
-        team_logger.info("[{}] on_teammate_created: {}", self._member_name() or "?", teammate_id)
+        team_logger.info("[%s] on_teammate_created: %s",
+                         self._member_name() or "?", teammate_id)
+
+        # ── Resolve fork context ──
+        fork_ctx: ForkContext | None = None
+        if self.team_backend is not None:
+            fork_info = self.team_backend.consume_fork_on_spawn(teammate_id)
+            team_logger.info(
+                "[fork-d] _on_teammate_created: member=%s fork_info=%s "
+                "checkpoints=%s spawned_handles=%s",
+                teammate_id,
+                fork_info,
+                list(self._named_checkpoints.keys()),
+                list(self._spawn_manager.spawned_handles.keys()),
+            )
+            if fork_info:
+                native = self._resolve_fork_native(fork_info.get("source"))
+                team_logger.info(
+                    "[fork-d] resolve_fork_native: source=%s native=%s",
+                    fork_info.get("source"), type(native).__name__ if native else "None",
+                )
+                if native is not None:
+                    fork_value = fork_info["fork"]
+                    compact = fork_info.get("compact", False)
+                    is_named = (
+                        isinstance(fork_value, str)
+                        and fork_value not in ("true", "false")
+                    )
+                    ckpt_idx = self._named_checkpoints.get(fork_value) if is_named else None
+
+                    if compact:
+                        if not is_named:
+                            team_logger.warning(
+                                "[fork] compact=true ignored for member=%s: "
+                                "requires a named checkpoint fork", teammate_id,
+                            )
+                            compact = False
+                        elif ckpt_idx is None:
+                            team_logger.warning(
+                                "[fork] checkpoint '%s' not found for "
+                                "member=%s; falling back to full context",
+                                fork_value, teammate_id,
+                            )
+                            compact = False
+
+                    if compact:
+                        fork_ctx = ForkContext.from_agent(native)
+                        if ckpt_idx is not None and 0 <= ckpt_idx < len(fork_ctx.messages):
+                            fork_ctx.compact_split = ckpt_idx
+                        else:
+                            fork_ctx.compact_split = len(fork_ctx.messages)
+                    elif is_named:
+                        if ckpt_idx is None:
+                            team_logger.warning(
+                                "[fork] checkpoint '%s' not found for "
+                                "member=%s; falling back to full context",
+                                fork_value, teammate_id,
+                            )
+                            fork_ctx = ForkContext.from_agent(native)
+                        else:
+                            fork_ctx = ForkContext.from_agent(
+                                native, checkpoint=ckpt_idx,
+                            )
+                    else:
+                        fork_ctx = ForkContext.from_agent(native)
+                    team_logger.info(
+                        "[fork-d] ForkContext created: msgs=%d empty=%s",
+                        len(fork_ctx.messages), fork_ctx.is_empty(),
+                    )
+
         ctx = await self._spawn_manager.build_context_from_db(teammate_id)
         if ctx is None:
             return
@@ -1021,7 +1092,24 @@ class TeamAgent(BaseAgent):
             initial_message=None,
             session=self.session_id,
             spawn_config=SpawnConfig(health_check_timeout=30, health_check_interval=50),
+            fork_from=fork_ctx,
         )
+
+    def _resolve_fork_native(self, source_name: str | None):
+        """Return the DeepAgent of a named member, or leader's own."""
+        if source_name is None or source_name == self._member_name():
+            return self.resources.harness._native
+
+        handle = self._spawn_manager.spawned_handles.get(source_name)
+        if handle and hasattr(handle, "agent_ref"):
+            agent = handle.agent_ref
+            if hasattr(agent, "resources") and agent.resources.harness:
+                return agent.resources.harness._native
+
+        team_logger.warning(
+            "Fork source '%s' not found or not in-process", source_name
+        )
+        return None
 
     async def _mark_team_cleaned(self) -> None:
         """Latch ``state.team_cleaned`` from the ``clean_team`` success path.
@@ -1070,12 +1158,14 @@ class TeamAgent(BaseAgent):
         initial_message: Optional[str] = None,
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
+        fork_from: ForkContext | None = None,
     ):
         return await self._spawn_manager.spawn_teammate(
             ctx,
             initial_message=initial_message,
             session=session,
             spawn_config=spawn_config,
+            fork_from=fork_from,
         )
 
     async def auto_start_member(self, member_name: str) -> bool:
