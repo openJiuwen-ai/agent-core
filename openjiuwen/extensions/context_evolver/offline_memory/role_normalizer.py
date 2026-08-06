@@ -62,7 +62,8 @@ Respond with a JSON object:
 
 class RosterMemberLike(Protocol):
     """Structural type for whatever roster-member record a caller has —
-    decouples this module from any one trace-format's roster dataclass."""
+    decouples this module from any one trace-format's roster dataclass.
+    """
 
     member_name: str
     display_name: str

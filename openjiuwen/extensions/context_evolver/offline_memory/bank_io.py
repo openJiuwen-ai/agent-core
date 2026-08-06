@@ -89,7 +89,8 @@ def save_json(path: Path, data: dict[str, Any]) -> None:
 
 def new_item_id(existing: dict[str, Any] | None = None) -> str:
     """Short stable id for a new playbook item, regenerated on the
-    astronomically unlikely collision against ``existing``'s keys."""
+    astronomically unlikely collision against ``existing``'s keys.
+    """
     existing = existing or {}
     while True:
         candidate = uuid.uuid4().hex[:8]
