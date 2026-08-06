@@ -25,6 +25,10 @@ GEN_AI_SYSTEM = "gen_ai.system"
 GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
 GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
 
+# Id of the LLM request this span belongs to, stamped so a trace can be read
+# back against the framework's own correlation key when a span looks wrong.
+GEN_AI_REQUEST_ID = "gen_ai.request.id"
+
 GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
 GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
 GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"

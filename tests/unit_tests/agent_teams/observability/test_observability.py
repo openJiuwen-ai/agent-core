@@ -1846,18 +1846,19 @@ async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
 async def test_find_llm_span_disambiguates_concurrent_workers(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """Peek must return the right llm.call span per worker and per recency.
+    """Peek must return the right llm.call span, or none at all.
 
-    Covers two disambiguation paths in ``_find_llm_span``:
+    Covers the fallback ``_find_llm_span`` uses for callbacks that carry no
+    LLM call id (a model wrapper that bypasses ``Model``, or a test triggering
+    the events directly):
 
     1. **Cross-worker**: two workers each with one LLM span — parent
        matching picks the span whose parent is the current agent.
-    2. **Same-parent recency**: one worker with two concurrent LLM spans
-       — ``max(exact, key=start_ns)`` picks the most recently opened one.
-       This is the branch a single-span-per-worker fixture can never
-       trigger (``exact`` would have length 1 and the key would not be
-       compared), so it is what guards the ``otel_llm_state``/``start_ns``
-       contract against silent regressions.
+    2. **Same-parent ambiguity**: one worker with two concurrent LLM spans —
+       parent matching cannot tell them apart, so it answers None. Writing a
+       completion onto the wrong span is worse than losing it; the id-based
+       path covered by ``test_concurrent_llm_requests_never_cross_write``
+       is what resolves this case in production.
     """
     from openjiuwen.agent_teams.observability.span_context import (
         LlmSpanState,
@@ -1910,12 +1911,11 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
     peek_a = tracker.peek_current_llm_span()
     assert peek_a is not None and peek_a.context.span_id == llm_a.context.span_id
 
-    # ── Same-parent recency: two LLM spans under one worker ──────────
-    # llm_older is opened first (smaller start_ns); llm_newer is opened
-    # second (larger start_ns). Both share agent_a as parent, so parent
-    # matching yields ``exact`` of length 2 and max() must compare
-    # ``start_ns`` — selecting llm_newer. This is the regression guard
-    # the original single-span-per-worker fixture could not exercise.
+    # ── Same-parent ambiguity: two LLM spans under one worker ────────
+    # Both share agent_a as parent and neither callback carries a call id,
+    # so nothing in the current context says which of the two the caller
+    # means. Guessing by recency is what used to write one request's
+    # completion onto the other's span, so peek must answer None.
     llm_older = tracer.start_span(
         "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
         kind=SpanKind.CLIENT,
@@ -1929,22 +1929,210 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
     llm_newer.otel_llm_state = LlmSpanState(span=llm_newer, start_ns=3_000)
 
     set_current_agent_span(agent_a)
-    peek = tracker.peek_current_llm_span()
-    assert peek is not None and peek.context.span_id == llm_newer.context.span_id
+    # llm_a is still open under agent_a too, so three candidates share the parent.
+    assert tracker.peek_current_llm_span() is None, (
+        "an ambiguous parent match must not be resolved by guessing"
+    )
 
-    # End the newer one; the older one becomes the most-recent survivor.
+    # Once only one candidate is left, the parent match is unambiguous again.
     llm_newer.end()
-    set_current_agent_span(agent_a)
-    peek = tracker.peek_current_llm_span()
-    assert peek is not None and peek.context.span_id == llm_older.context.span_id
-
     llm_older.end()
+    peek = tracker.peek_current_llm_span()
+    assert peek is not None and peek.context.span_id == llm_a.context.span_id
+
     llm_a.end()
     llm_b.end()
     agent_a.end()
     agent_b.end()
     set_current_agent_span(None)
     remove_team_span("test_team")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_llm_requests_never_cross_write(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Two LLM requests in flight at once each keep their own llm.call span.
+
+    This is the image-modality probe against a member's streaming call. The
+    probe runs in a detached background task that inherited the member's agent
+    span, so both spans hang off the same parent. It opens *first* and answers
+    while the member's call is still streaming — so at the moment the probe's
+    completion arrives, the most recently opened span in the trace is the
+    member's. Resolving "the most recently opened llm.call span" therefore
+    wrote the probe's one-word answer onto the member's span.
+
+    Matching on the LLM call id instead keeps each request on its own span, and
+    the assertions below pin prompt against completion on both.
+    """
+    from openjiuwen.agent_teams.observability.span_context import (
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    fw = Runner.callback_framework
+    team_span = _create_team_span("test_team")
+    agent_span = get_tracer("test").start_span(
+        "agent.member.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    set_current_agent_span(agent_span)
+
+    member_messages = [{"role": "user", "content": "Compute 6 * 7."}]
+    probe_messages = [{"role": "user", "content": "What color is this image?"}]
+
+    probe_opened = asyncio.Event()
+    member_streaming = asyncio.Event()
+    probe_finished = asyncio.Event()
+
+    async def _probe_call() -> None:
+        # The probe inherits the member's agent span through the context copy
+        # asyncio.create_task takes — exactly how schedule_image_support_probe
+        # lands its background task.
+        with LlmCallScope():
+            await fw.trigger(
+                LLMCallEvents.LLM_INVOKE_INPUT,
+                messages=probe_messages,
+                model="member-llm",
+            )
+            probe_opened.set()
+            # The member's call opens while the probe is in flight, which is
+            # what makes "most recently opened" the wrong answer below.
+            await member_streaming.wait()
+            await fw.trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                messages=probe_messages,
+                response="red",
+                usage=_FakeUsage(input_tokens=9, output_tokens=1, total_tokens=10),
+            )
+        probe_finished.set()
+
+    async def _member_call() -> None:
+        with LlmCallScope():
+            await fw.trigger(
+                LLMCallEvents.LLM_STREAM_INPUT,
+                messages=member_messages,
+                model="member-llm",
+            )
+            await fw.trigger(
+                LLMCallEvents.LLM_STREAM_OUTPUT,
+                messages=member_messages,
+                result=_FakeChunk(content="4"),
+            )
+            member_streaming.set()
+            await probe_finished.wait()
+            await fw.trigger(
+                LLMCallEvents.LLM_STREAM_OUTPUT,
+                messages=member_messages,
+                result=_FakeChunk(content="2"),
+            )
+            await fw.trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                messages=member_messages,
+                response="42",
+                usage=_FakeUsage(input_tokens=100, output_tokens=1, total_tokens=101),
+            )
+
+    probe_task = asyncio.get_running_loop().create_task(_probe_call())
+    await probe_opened.wait()
+    member_task = asyncio.get_running_loop().create_task(_member_call())
+    await asyncio.gather(member_task, probe_task)
+
+    set_current_agent_span(None)
+    agent_span.end()
+    remove_team_span("test_team")
+    team_span.end()
+
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(llm_spans) == 2, f"expected one span per request, got {len(llm_spans)}"
+
+    by_prompt = {_attr(s, "langfuse.gen_ai.prompt.0.content"): s for s in llm_spans}
+    assert set(by_prompt) == {"Compute 6 * 7.", "What color is this image?"}
+
+    member_span = by_prompt["Compute 6 * 7."]
+    probe_span = by_prompt["What color is this image?"]
+
+    assert _attr(member_span, "langfuse.gen_ai.completion.0.content") == "42"
+    assert _attr(member_span, "gen_ai.usage.total_tokens") == 101
+    assert _attr(probe_span, "langfuse.gen_ai.completion.0.content") == "red"
+    assert _attr(probe_span, "gen_ai.usage.total_tokens") == 10
+
+    # Both spans carry the id their request ran under, and the two differ.
+    member_id = _attr(member_span, "gen_ai.request.id")
+    probe_id = _attr(probe_span, "gen_ai.request.id")
+    assert member_id and probe_id and member_id != probe_id
+
+
+@pytest.mark.asyncio
+async def test_stream_callbacks_resolve_across_per_frame_task_hops(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A stream driven through ``asyncio.wait_for`` still lands on its own span.
+
+    ``Model.stream`` pulls every frame through ``wait_for``, so each chunk
+    callback runs in a fresh task with a *copied* context. The call id has to
+    survive that hop, otherwise the chunk and completion callbacks fall back to
+    guessing — which is where a second open request gets robbed.
+    """
+    from openjiuwen.agent_teams.observability.span_context import (
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    fw = Runner.callback_framework
+    team_span = _create_team_span("test_team")
+    agent_span = get_tracer("test").start_span(
+        "agent.member.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    set_current_agent_span(agent_span)
+
+    messages = [{"role": "user", "content": "stream please"}]
+
+    with LlmCallScope():
+        await fw.trigger(LLMCallEvents.LLM_STREAM_INPUT, messages=messages, model="member-llm")
+        # A second request opened after this stream and left in flight under
+        # the same agent span. It is the more recently opened of the two, so a
+        # resolver that guesses by recency sends this stream's chunks and
+        # completion to it instead.
+        with LlmCallScope():
+            await fw.trigger(
+                LLMCallEvents.LLM_INVOKE_INPUT,
+                messages=[{"role": "user", "content": "other"}],
+            )
+        for delta in ("4", "2"):
+            await asyncio.wait_for(
+                fw.trigger(LLMCallEvents.LLM_STREAM_OUTPUT, messages=messages, result=_FakeChunk(content=delta)),
+                timeout=5,
+            )
+        await asyncio.wait_for(
+            fw.trigger(LLMCallEvents.LLM_OUTPUT, messages=messages, response="42"),
+            timeout=5,
+        )
+
+    set_current_agent_span(None)
+    agent_span.end()
+    remove_team_span("test_team")
+    team_span.end()
+
+    finished = [
+        s for s in _spans_by_name(in_memory_exporter, "llm.call")
+        if _attr(s, "langfuse.gen_ai.prompt.0.content") == "stream please"
+    ]
+    assert len(finished) == 1
+    span = finished[0]
+    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "42"
+    assert _attr(span, "gen_ai.response.time_to_first_token_ms") is not None, (
+        "the first chunk callback must have reached this span"
+    )
 
 
 # ---------------------------------------------------------------------------

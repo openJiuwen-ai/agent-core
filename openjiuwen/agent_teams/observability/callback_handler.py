@@ -44,6 +44,7 @@ from openjiuwen.agent_teams.observability.semconv import (
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MESSAGE_COUNT,
     GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
+    GEN_AI_REQUEST_ID,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_P,
@@ -70,6 +71,7 @@ from openjiuwen.agent_teams.observability.semconv import (
 )
 from openjiuwen.agent_teams.observability.span_context import (
     LlmSpanState,
+    get_active_span_tracker,
     get_current_llm_span,
     get_team_span,
     get_current_agent_span,
@@ -78,6 +80,7 @@ from openjiuwen.agent_teams.observability.span_context import (
     push_tool_span,
 )
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.foundation.llm.call_scope import get_current_llm_call_id
 
 
 _TRACER_NAME = "openjiuwen.agent_teams.observability"
@@ -541,12 +544,19 @@ class OtelCallbackHandler:
 
         messages = kwargs.get("messages") or []
         model_name = kwargs.get("model") or self._derive_model_name(kwargs) or "unknown"
+        # Identity of the request this span stands for. Everything that
+        # arrives later — chunks, usage, completion, errors — is matched back
+        # to the span through it, so it must be read here, while the opening
+        # callback still runs inside the caller's LLM call scope.
+        call_id = get_current_llm_call_id()
 
         span = self._tracer().start_span(
             name="llm.call",
             kind=SpanKind.CLIENT,
             context=parent_ctx,
         )
+        if call_id:
+            span.set_attribute(GEN_AI_REQUEST_ID, call_id)
         span.set_attribute(GEN_AI_SYSTEM, _gen_ai_system_name())
         span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         provider_name = self._derive_provider_name(kwargs)
@@ -696,15 +706,23 @@ class OtelCallbackHandler:
         self._propagate_team_context(span)
         self._stamp_parent_member_name(span)
 
-        _llm_st = LlmSpanState(span=span, start_ns=time.monotonic_ns(), is_streaming=is_streaming)
+        _llm_st = LlmSpanState(
+            span=span,
+            start_ns=time.monotonic_ns(),
+            call_id=call_id,
+            is_streaming=is_streaming,
+        )
         span.otel_llm_state = _llm_st  # attach state to span object (context-immune)
 
+        tracker = get_active_span_tracker()
+        if tracker is not None:
+            tracker.register_llm_span(call_id, span)
 
         team_logger.debug(
             "otel: _open_llm_span name=llm.call trace_id={:032x} span_id={:016x} "
-            "parent_span_id={:016x} streaming={}",
+            "parent_span_id={:016x} streaming={} call_id={}",
             span.context.trace_id, span.context.span_id,
-            span.parent.span_id if span.parent else 0, is_streaming,
+            span.parent.span_id if span.parent else 0, is_streaming, call_id or "<none>",
         )
 
     def _close_llm_span(self, state: LlmSpanState, response: Any) -> None:

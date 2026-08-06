@@ -545,8 +545,9 @@ class ObservabilityRail(DeepAgentRail):
                 prev_member, member_name,
             )
             # Clear the tool span ContextVar so the new member starts clean.
-            # LLM span stacks are now managed by ActiveSpanTracker per-task,
-            # so no ContextVar cleanup is needed for llm spans.
+            # LLM spans need no equivalent cleanup: ActiveSpanTracker indexes
+            # them by the id of the request that opened them, so an inherited
+            # context can never make this member resolve another member's span.
             _tool_span_map.set({})
         set_current_agent_span(None)
 
