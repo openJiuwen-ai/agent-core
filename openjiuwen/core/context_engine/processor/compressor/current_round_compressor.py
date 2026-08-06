@@ -9,7 +9,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.context_engine.context_engine import ContextEngine
-from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent
+from openjiuwen.core.context_engine.processor.base import ContextProcessor, ContextEvent, _invoke_via_stream
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.foundation.llm import (
     BaseMessage, AssistantMessage, UserMessage,
@@ -914,7 +914,7 @@ class CurrentRoundCompressor(ContextProcessor):
         filled_prompt = filled_prompt.replace("{selected_messages}", str(processed_messages))
 
         try:
-            response = await self._model.invoke([UserMessage(content=filled_prompt)])
+            response = await _invoke_via_stream(self._model, [UserMessage(content=filled_prompt)])
         except Exception as exc:
             logger.warning(
                 f"[{self.processor_type()}] compression model invoke failed during current-round compression, "
@@ -979,7 +979,7 @@ class CurrentRoundCompressor(ContextProcessor):
         model_messages = [UserMessage(content=filled_prompt)]
 
         try:
-            response = await self._model.invoke(model_messages)
+            response = await _invoke_via_stream(self._model, model_messages)
         except Exception as exc:
             logger.warning(
                 f"[{self.processor_type()}] compression model invoke failed during summary merge, "

@@ -11,6 +11,7 @@ from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor imp
     _DIALOGUE_MEMORY_BLOCK_MARKER,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
+from tests.unit_tests.core.context_engine._stream_helpers import make_stream_side_effect
 
 
 def create_tool_call_list(ids: list[str]) -> list[ToolCall]:
@@ -74,7 +75,7 @@ class TestDialogueCompressor:
             "openjiuwen.core.context_engine.processor.compressor.dialogue_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=make_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
 
             compressor = _TestableDialogueCompressor(
@@ -143,7 +144,7 @@ class TestDialogueCompressor:
             "openjiuwen.core.context_engine.processor.compressor.dialogue_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=make_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
 
             compressor = DialogueCompressor(
@@ -167,5 +168,5 @@ class TestDialogueCompressor:
                 ],
             )
 
-            model_messages = mock_model.invoke.call_args[0][0]
+            model_messages = mock_model.stream.call_args.kwargs["messages"]
             assert "Task Data Preservation Expert" in model_messages[0].content

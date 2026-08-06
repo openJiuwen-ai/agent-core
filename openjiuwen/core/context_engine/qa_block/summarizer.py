@@ -116,10 +116,11 @@ class QABlockSummarizer:
                 max_chars=self._config.l1_summary_max_chars,
                 text=inline_text[:cap],
             )
-            invoke = getattr(model, "invoke", None)
-            if not callable(invoke):
+            from openjiuwen.core.context_engine.processor.base import _invoke_via_stream
+            stream = getattr(model, "stream", None)
+            if not callable(stream):
                 return ""
-            response = await invoke([UserMessage(content=prompt)], tools=None)
+            response = await _invoke_via_stream(model, [UserMessage(content=prompt)], tools=None)
             content = (getattr(response, "content", None) or str(response) or "").strip()
             if not content:
                 logger.warning("[QABlockSummarizer] llm invoke returned empty content")

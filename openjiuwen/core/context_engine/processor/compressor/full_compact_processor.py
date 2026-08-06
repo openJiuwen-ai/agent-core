@@ -23,7 +23,7 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
 )
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.observability import write_context_trace
-from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor, _invoke_via_stream
 from openjiuwen.core.context_engine.processor.compressor.util import (
     FullCompactStateReinjector,
     build_plan_mode_reinjected_content,
@@ -1233,7 +1233,7 @@ class FullCompactProcessor(ContextProcessor):
             UserMessage(content=self._serialize_messages(messages)),
         ]
         try:
-            response = await self._model.invoke(messages=prompt_messages, tools=None)
+            response = await _invoke_via_stream(self._model, messages=prompt_messages, tools=None)
             content = (response.content or "").strip()
             if not content:
                 logger.warning("[FullCompact] LLM returned empty summary, falling back")
