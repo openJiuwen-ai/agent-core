@@ -18,7 +18,8 @@ import json
 import os
 import re
 import uuid
-from typing import Any, Dict, List, Optional, Set, Union
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional, Set, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import (
@@ -260,7 +261,8 @@ class SkillEvolutionRail(EvolutionRail):
 
     Hosts that need UI summary / approval events after auto evolution should call
     ``await rail.wait_for_pending_evolution()`` before ``take_run_summary`` /
-    ``drain_pending_approval_events``.
+    ``drain_pending_approval_events``. Completed summaries are queued (FIFO) so a
+    later evolution run cannot overwrite an undrained prior result.
 
     Note: This class uses two stores:
     - trajectory_store (from EvolutionRail): stores execution trajectories
@@ -332,8 +334,11 @@ class SkillEvolutionRail(EvolutionRail):
         self._new_skill_tool_threshold = new_skill_tool_threshold
         self._new_skill_tool_diversity = new_skill_tool_diversity
         self._language = language
-        # Last run_evolution summary for host to emit after stream closes (auto_save path).
-        self._run_summary: Optional[Dict[str, Any]] = None
+        # In-flight summary for the lock-held run (_record_* writers).
+        self._active_run_summary: Optional[Dict[str, Any]] = None
+        # Completed summaries awaiting host take_run_summary() (FIFO).
+        # Cleared only by take; next run must not overwrite undrained results.
+        self._run_summary_queue: Deque[Dict[str, Any]] = deque()
         # Serialize concurrent evolution jobs (shared store / signal / summary state).
         self._evolution_lock = asyncio.Lock()
         self._pending_evolution_tasks: Set[asyncio.Task[Any]] = set()
@@ -342,6 +347,15 @@ class SkillEvolutionRail(EvolutionRail):
         # In-memory snapshot: session_id → skills used in this chat (cross-turn;
         # Session objects are recreated per request so setattr on session is lost).
         self._used_skills_by_session: Dict[str, Set[str]] = {}
+
+    @property
+    def _run_summary(self) -> Optional[Dict[str, Any]]:
+        """Compat alias for the in-flight summary buffer (not the drain queue)."""
+        return self._active_run_summary
+
+    @_run_summary.setter
+    def _run_summary(self, value: Optional[Dict[str, Any]]) -> None:
+        self._active_run_summary = value
 
     @property
     def store(self) -> EvolutionStore:
@@ -857,6 +871,9 @@ class SkillEvolutionRail(EvolutionRail):
                     len(self._run_summary.get("new_skills", [])),
                     len(self._run_summary.get("display_text") or ""),
                 )
+                # Enqueue before clearing active so a later run cannot overwrite.
+                self._run_summary_queue.append(self._run_summary)
+                self._run_summary = None
             else:
                 logger.info("[SkillEvolutionRail] run_evolution finished with no UI summary")
         except Exception as exc:
@@ -866,17 +883,19 @@ class SkillEvolutionRail(EvolutionRail):
                 self._restore_session_presented_records(session, claimed)
 
     def take_run_summary(self) -> Optional[Dict[str, Any]]:
-        """Return and clear the last run_evolution summary for host UI delivery.
+        """Return and clear the oldest completed run_evolution summary for host UI.
 
         Because evolution runs in the background after ``after_invoke``, hosts
         should ``await wait_for_pending_evolution()`` first when they need the
         summary in the current turn.
+
+        Completed summaries are queued so a subsequent evolution run that clears
+        the in-flight buffer cannot drop an undrained prior result.
         """
-        summary = self._run_summary
-        self._run_summary = None
-        if not summary:
+        if not self._run_summary_queue:
             logger.info("[SkillEvolutionRail] take_run_summary: no summary buffered")
             return None
+        summary = self._run_summary_queue.popleft()
         if not summary.get("skills") and not summary.get("new_skills"):
             logger.info(
                 "[SkillEvolutionRail] take_run_summary: summary empty after filter, raw=%s",
@@ -884,9 +903,11 @@ class SkillEvolutionRail(EvolutionRail):
             )
             return None
         logger.info(
-            "[SkillEvolutionRail] take_run_summary: draining skills=%d new_skills=%d",
+            "[SkillEvolutionRail] take_run_summary: draining skills=%d new_skills=%d "
+            "(queue_remaining=%d)",
             len(summary.get("skills", [])),
             len(summary.get("new_skills", [])),
+            len(self._run_summary_queue),
         )
         return summary
 

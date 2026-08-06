@@ -822,6 +822,57 @@ async def test_wait_for_pending_evolution_noop_when_idle(tmp_path):
     assert not rail.has_pending_evolution
 
 
+def test_take_run_summary_survives_next_run_clearing_active(tmp_path):
+    """Queued summary must not be dropped when the next run clears the active buffer."""
+    rail = _make_rail(tmp_path)
+    summary_a = {
+        "skills": [{"skill_name": "weather-v2", "records_count": 1}],
+        "new_skills": [],
+        "display_text": "evolved weather-v2",
+    }
+    rail._run_summary_queue.append(summary_a)
+
+    # Simulate next _run_evolution_locked entry: clear in-flight only.
+    rail._run_summary = None
+    assert rail._active_run_summary is None
+    assert len(rail._run_summary_queue) == 1
+
+    taken = rail.take_run_summary()
+    assert taken is summary_a
+    assert rail.take_run_summary() is None
+
+
+def test_take_run_summary_fifo_across_multiple_runs(tmp_path):
+    """Host drain must receive completed summaries in enqueue order."""
+    rail = _make_rail(tmp_path)
+    summary_a = {
+        "skills": [{"skill_name": "skill-a", "records_count": 1}],
+        "new_skills": [],
+        "display_text": "a",
+    }
+    summary_b = {
+        "skills": [{"skill_name": "skill-b", "records_count": 2}],
+        "new_skills": [],
+        "display_text": "b",
+    }
+    rail._run_summary_queue.append(summary_a)
+    rail._run_summary_queue.append(summary_b)
+
+    assert rail.take_run_summary() is summary_a
+    assert rail.take_run_summary() is summary_b
+    assert rail.take_run_summary() is None
+
+
+def test_run_summary_property_maps_to_active_buffer(tmp_path):
+    """_run_summary remains a compat alias for the in-flight buffer."""
+    rail = _make_rail(tmp_path)
+    rail._run_summary = {"skills": [], "new_skills": [{"name": "n1"}]}
+    assert rail._active_run_summary == {"skills": [], "new_skills": [{"name": "n1"}]}
+    assert rail._run_summary is rail._active_run_summary
+    rail._run_summary = None
+    assert rail._active_run_summary is None
+
+
 @pytest.mark.asyncio
 async def test_cancel_pending_evolution_awaits_cancelled_tasks(tmp_path):
     """cancel_pending_evolution must await tasks so cancellation can unwind cleanly."""
