@@ -12,9 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import subprocess
-import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -39,7 +36,6 @@ from openjiuwen.rsi.member_optimizer.action_groups import (
 )
 from openjiuwen.rsi.member_optimizer.action_planner import (
     MemberActionPlanner,
-    MemberActionPlannerAgent,
     _adapt_surface_for_activation_phase,
     _bind_immutable_hypotheses,
     _validate_action_issue_attribution,
@@ -85,15 +81,10 @@ from openjiuwen.rsi.member_optimizer.schema import (
     RoleIssueAttribution,
     RoleMechanismAttribution,
 )
-from openjiuwen.rsi.member_optimizer.skill_acquisition import (
-    SkillAcquisition,
-    SkillAcquisitionResult,
-    _run_command,
-    scan_skill_directory,
-)
 from openjiuwen.rsi.member_optimizer.verification import (
     HarnessChangeVerifier,
     _validate_package_python_source,
+    scan_skill_directory,
 )
 from openjiuwen.rsi.member_optimizer.worktree_coordinator import (
     MemberWorktreeCoordinator,
@@ -1669,106 +1660,6 @@ def test_member_action_planner_replans_when_action_surface_mismatches_diagnosis(
     assert plan.actions[0].target_path == "tools/runtime_state_validator.py"
 
 
-def test_member_action_planner_accepts_package_local_rail_actions() -> None:
-    """Control diagnoses can publish a loadable package-local Rail."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
-        MemberActionPlanner,
-    )
-
-    class MixedSurfacePlannerAgent:
-        async def create_plan(self, **kwargs):  # type: ignore[no-untyped-def]
-            return {
-                "plan_id": "plan_mixed_surface",
-                "targets": [{"role": "solver"}],
-                "actions": [
-                    {
-                        "action_id": "act_solver_rail_1",
-                        "role": "solver",
-                        "action_group": "rail",
-                        "operation": "add",
-                        "action_type": "rail_guard",
-                        "target_path": "rails/conflict_marker_guard.py",
-                        "declared_write_paths": [
-                            "rails/conflict_marker_guard.py",
-                            "rails/rails.yaml",
-                        ],
-                        "description": "Add a conflict marker output guard.",
-                        "rationale": "Output contained unresolved conflict markers.",
-                        "depends_on": [],
-                        "allowed_skills": [],
-                        "allowed_tools": ["read_file", "write_file"],
-                        "candidate_query": "",
-                        "install_ref": "",
-                        "expected_effect": "Runtime blocks unresolved conflict markers.",
-                        "risk_notes": [],
-                        "constraints": {"class_name": "ConflictMarkerGuardRail"},
-                    },
-                ],
-                "action_waves": [["act_solver_rail_1"]],
-            }
-
-    target = MemberOptimizationTarget(
-        role="solver",
-        member_name="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["ISS-git"],
-        confidence=0.9,
-        mechanism_types=["control", "output_guard"],
-        optimization_surfaces=["rail"],
-    )
-    role_report = RoleAttributionReport(
-        attribution_id="attr_git",
-        candidate_roles=[MemberRoleCandidate(role="solver", harness_ref_path="solver", member_name="solver")],
-        assigned_role_issues=[
-            RoleIssueAttribution(
-                issue_id="ISS-git",
-                role="solver",
-                harness_ref_path="solver",
-                confidence=0.9,
-                evidence=[{"summary": "Solver left conflict markers in output."}],
-            )
-        ],
-    )
-    mechanism_report = MechanismAttributionReport(
-        mechanism_attribution_id="mech_git",
-        role_mechanisms={
-            "solver": [
-                RoleMechanismAttribution(
-                    issue_id="ISS-git",
-                    role="solver",
-                    mechanism_type="control",
-                    failure_signature="missing_conflict_marker_check",
-                    confidence=0.8,
-                    optimization_surface="rail",
-                    rationale="Needs a conflict marker handling improvement.",
-                )
-            ]
-        },
-    )
-
-    plan = asyncio.run(
-        MemberActionPlanner(planner_agent=MixedSurfacePlannerAgent()).plan(
-            targets=[target],
-            role_attribution_report=role_report,
-            mechanism_attribution_report=mechanism_report,
-            action_definitions=[
-                ActionDefinition(
-                    name="rail_add",
-                    group="rail",
-                    operation="add",
-                    function="add_rail",
-                    purpose="Add a package-local runtime control Rail",
-                )
-            ],
-            model_config_ref="unused",
-            allowed_action_groups=["rail"],
-        )
-    )
-
-    assert [action.action_group for action in plan.actions] == ["rail"]
-    assert plan.actions[0].target_path == "rails/conflict_marker_guard.py"
-
-
 # ---------------------------------------------------------------------------
 # Test: run directory allocation -next version
 # ---------------------------------------------------------------------------
@@ -2242,42 +2133,6 @@ def test_member_action_policy_requires_tool_manifest_update_for_tool_code() -> N
     assert any("tools/tools.yaml" in error for error in check.errors)
 
 
-def test_member_action_policy_requires_rail_manifest_update_for_rail_code() -> None:
-    action = MemberOptimizationAction(
-        action_id="rail_code_001",
-        role="explainer",
-        action_group="rail",
-        operation="modify",
-        action_type="rail_modify",
-        target_path="rails/demo.py",
-        declared_write_paths=["rails/demo.py"],
-        allowed_tools=["read_file", "edit_file"],
-    )
-
-    check = validate_action_policy(action, {"explainer"})
-
-    assert not check.valid
-    assert any("rails/rails.yaml" in error for error in check.errors)
-
-
-def test_member_action_policy_accepts_loadable_rail_add() -> None:
-    action = MemberOptimizationAction(
-        action_id="rail_add_001",
-        role="explainer",
-        action_group="rail",
-        operation="add",
-        action_type="rail_add",
-        target_path="rails/action_commitment.py",
-        declared_write_paths=[
-            "rails/action_commitment.py",
-            "rails/rails.yaml",
-        ],
-        constraints={"class_name": "ActionCommitmentRail"},
-    )
-
-    assert validate_action_policy(action, {"explainer"}).valid
-
-
 def test_member_action_policy_rejects_non_expert_harness_prompt_path() -> None:
     action = MemberOptimizationAction(
         action_id="bad_prompt",
@@ -2339,14 +2194,14 @@ def test_action_config_cannot_expand_current_policy() -> None:
 
     filtered = filter_action_definitions(definitions)
 
-    assert [definition.name for definition in filtered] == ["prompt_modify", "skill_search"]
+    assert [definition.name for definition in filtered] == ["prompt_modify"]
 
 
 def test_action_definition_loader_filters_config_policy(action_group_yaml: Path) -> None:
     """Action config loading keeps only current Auto Harness-compatible actions."""
     definitions = load_action_definitions([str(action_group_yaml)])
 
-    assert [definition.name for definition in definitions] == ["prompt_modify", "skill_search"]
+    assert [definition.name for definition in definitions] == ["prompt_modify"]
 
 
 def test_action_definition_loader_tolerates_missing_config(tmp_path: Path) -> None:
@@ -2367,22 +2222,11 @@ def test_action_definition_loader_resolves_builtin_group_names() -> None:
         ("skill", "add"),
         ("skill", "modify"),
         ("skill", "remove"),
-        ("skill", "search"),
         ("tool", "add"),
         ("tool", "modify"),
         ("tool", "remove"),
     }
-    assert (
-        next(item for item in definitions if item.group == "skill" and item.operation == "search").requires_search
-        is True
-    )
-
-    rail_definitions = load_action_definitions(["rail"])
-    assert {(item.group, item.operation) for item in rail_definitions} == {
-        ("rail", "add"),
-        ("rail", "modify"),
-        ("rail", "remove"),
-    }
+    assert load_action_definitions(["rail"]) == []
 
 
 def _write_model_config(path: Path) -> Path:
@@ -2787,7 +2631,6 @@ def test_member_optimizer_full_pipeline_fake_agents_closes_loop(
     model_path = _write_model_config(tmp_path / "model.yaml")
     optimizer = MemberOptimizer(
         MemberOptimizerConfig(model_config_ref=str(model_path)),
-        experience_learner=object(),
         role_attributor=_FakeRoleAttributor(),
         mechanism_attributor=_FakeMechanismAttributor(),
         action_planner=_FakePlanner(),
@@ -2859,7 +2702,6 @@ def test_member_optimizer_rejects_invalid_llm_plan_without_aborting_run(
     output_dir = tmp_path / "member_optimizations"
     optimizer = MemberOptimizer(
         MemberOptimizerConfig(model_config_ref=str(_write_model_config(tmp_path / "model.yaml"))),
-        experience_learner=object(),
         role_attributor=_FakeRoleAttributor(),
         mechanism_attributor=_FakeMechanismAttributor(),
         action_planner=_RejectedPlanner(),
@@ -3131,15 +2973,6 @@ class _SkillWritingNoCompletionExecutorAgent:
             "response_text": "Max iterations reached without completion",
             "error": "agent response must be a structured file_writes JSON object",
         }
-
-
-class _FailingSkillAcquisition:
-    def acquire(self, *, action_worktree, query):  # type: ignore[no-untyped-def]
-        return SkillAcquisitionResult(
-            status="failed",
-            query=query,
-            error="all skill candidates were rejected",
-        )
 
 
 class _RailShortManifestExecutorAgent:
@@ -5083,103 +4916,6 @@ def test_member_executor_rejects_illegal_action_before_execution(
     assert not (role_worktree_path(run_dir / "wt", "explainer") / "waves").exists()
 
 
-def test_member_executor_executes_package_local_rail_action(
-    tmp_path: Path,
-    two_role_harness_dir: Path,
-) -> None:
-    """A valid package-local Rail is generated, normalized, and merged."""
-    run_dir = tmp_path / "member_optimization_001"
-    action = MemberOptimizationAction(
-        action_id="rail_explainer_001",
-        role="explainer",
-        action_group="rail",
-        operation="add",
-        action_type="rail_guard",
-        target_path="rails/conflict_marker_guard.py",
-        declared_write_paths=["rails/conflict_marker_guard.py", "rails/rails.yaml"],
-        description="Add conflict marker guard.",
-        constraints={"class_name": "ConflictMarkerGuardRail"},
-    )
-    target = MemberOptimizationTarget(
-        role="explainer",
-        harness_ref_path=str(two_role_harness_dir / "explainer"),
-        attributed_issue_ids=["issue_001"],
-        confidence=0.9,
-    )
-    plan = MemberOptimizationPlan(
-        plan_id="plan_rail",
-        targets=[target],
-        actions=[action],
-        action_waves=[[action.action_id]],
-    )
-    executor = MemberActionExecutor(executor_agent=_RailShortManifestExecutorAgent())
-
-    import asyncio
-
-    results = asyncio.run(
-        executor.execute(
-            plan=plan,
-            output_dir=str(run_dir),
-            model_config_ref="unused-by-fake",
-        )
-    )
-
-    assert results[0].status == "succeeded"
-    assert "rails/conflict_marker_guard.py" in results[0].changed_files
-    manifest = Path(results[0].worktree_path) / "rails" / "rails.yaml"
-    assert yaml.safe_load(manifest.read_text(encoding="utf-8"))["rails"][0]["file"] == (
-        "rails/conflict_marker_guard.py"
-    )
-
-
-def test_member_executor_validates_generated_rail_source(
-    tmp_path: Path,
-    two_role_harness_dir: Path,
-) -> None:
-    """A syntactically broken Rail reaches and fails resource validation."""
-    run_dir = tmp_path / "member_optimization_001"
-    action = MemberOptimizationAction(
-        action_id="rail_broken_001",
-        role="explainer",
-        action_group="rail",
-        operation="add",
-        action_type="rail_guard",
-        target_path="rails/broken.py",
-        declared_write_paths=["rails/broken.py", "rails/rails.yaml"],
-        description="Add a broken rail.",
-        constraints={"class_name": "BrokenRail"},
-    )
-    target = MemberOptimizationTarget(
-        role="explainer",
-        harness_ref_path=str(two_role_harness_dir / "explainer"),
-        attributed_issue_ids=["issue_001"],
-        confidence=0.9,
-    )
-    plan = MemberOptimizationPlan(
-        plan_id="plan_broken_rail",
-        targets=[target],
-        actions=[action],
-        action_waves=[[action.action_id]],
-    )
-    executor = MemberActionExecutor(executor_agent=_BrokenRailExecutorAgent())
-
-    import asyncio
-
-    results = asyncio.run(
-        executor.execute(
-            plan=plan,
-            output_dir=str(run_dir),
-            model_config_ref="unused-by-fake",
-        )
-    )
-
-    assert results[0].status == "failed"
-    assert "python_compile:rails/broken.py" in results[0].error
-    assert results[0].merge_status == "pending"
-    assert results[0].worktree_path
-    assert not (run_dir / "merges" / "explainer" / "wave_000_subwave_000.json").exists()
-
-
 def test_member_repair_prompt_includes_failed_file_contents(tmp_path: Path) -> None:
     """Repair agent receives bounded file content for directly failed files."""
     from openjiuwen.rsi.member_optimizer.verification import (
@@ -5315,76 +5051,6 @@ def test_member_executor_merges_successful_non_overlapping_action_when_peer_fail
     assert (integration_worktree_path(run_dir / "wt", "explainer") / "identity.md").read_text(
         encoding="utf-8"
     ) == "# bash-only solver\n"
-
-
-def test_member_executor_runs_fallback_skill_add_after_skill_search_failure(
-    tmp_path: Path,
-    two_role_harness_dir: Path,
-) -> None:
-    """A failed skill/search should not block a dependency_failed skill/add fallback."""
-    run_dir = tmp_path / "member_optimization_001"
-    target = MemberOptimizationTarget(
-        role="explainer",
-        harness_ref_path=str(two_role_harness_dir / "explainer"),
-        attributed_issue_ids=["issue_001"],
-        confidence=0.9,
-    )
-    search_action = MemberOptimizationAction(
-        action_id="act_skill_search",
-        role="explainer",
-        action_group="skill",
-        operation="search",
-        action_type="skill_search",
-        target_path="skills/",
-        candidate_query="preserve analyze fix",
-        declared_write_paths=["skills", "skills/skills.yaml"],
-    )
-    add_action = MemberOptimizationAction(
-        action_id="act_skill_add",
-        role="explainer",
-        action_group="skill",
-        operation="add",
-        action_type="skill_creation",
-        target_path="skills/preserve_analyze_fix/SKILL.md",
-        depends_on=["act_skill_search"],
-        run_if="dependency_failed",
-        declared_write_paths=[
-            "skills/preserve_analyze_fix/SKILL.md",
-            "skills/skills.yaml",
-        ],
-    )
-    plan = MemberOptimizationPlan(
-        plan_id="plan_skill_fallback",
-        targets=[target],
-        actions=[search_action, add_action],
-        # Persisted/model-authored wave metadata may be stale. The executor must
-        # still honor depends_on and run the fallback only after search fails.
-        action_waves=[["act_skill_search", "act_skill_add"]],
-    )
-    executor = MemberActionExecutor(
-        executor_agent=_SkillWritingExecutorAgent(),
-        skill_acquisition=_FailingSkillAcquisition(),
-    )
-
-    results = asyncio.run(
-        executor.execute(
-            plan=plan,
-            output_dir=str(run_dir),
-            model_config_ref="unused-by-fake",
-        )
-    )
-
-    by_id = {result.action_id: result for result in results}
-    assert by_id["act_skill_search"].status == "failed"
-    assert by_id["act_skill_add"].status == "succeeded"
-    assert by_id["act_skill_add"].merge_status == "merged"
-    assert (
-        integration_worktree_path(run_dir / "wt", "explainer") / "skills" / "preserve_analyze_fix" / "SKILL.md"
-    ).is_file()
-    skill_text = (
-        integration_worktree_path(run_dir / "wt", "explainer") / "skills" / "preserve_analyze_fix" / "SKILL.md"
-    ).read_text(encoding="utf-8")
-    assert "name: preserve_analyze_fix" in skill_text
 
 
 def test_member_verifier_fails_role_when_planned_action_failed(
@@ -6142,173 +5808,6 @@ def test_member_verifier_repair_loop_preserves_role_isolation(
     assert any(item.role == "diagnostician" and item.status == "failed" for item in fix.repairs)
 
 
-def test_member_action_planner_user_message_includes_skill_search_candidate_query() -> None:
-    planner_agent = MemberActionPlannerAgent(model_config_ref="dummy")
-    targets = [
-        MemberOptimizationTarget(
-            role="script_writer",
-            member_name="script_writer",
-            harness_ref_path="current_harnesses/script_writer",
-            attributed_issue_ids=["issue_code_review_skill"],
-            confidence=0.9,
-            reason="role owns the skill gap",
-            mechanism_types=["skill"],
-        )
-    ]
-    role_report = RoleAttributionReport(
-        assigned_role_issues=[
-            RoleIssueAttribution(
-                issue_id="issue_code_review_skill",
-                role="script_writer",
-                harness_ref_path="current_harnesses/script_writer",
-                confidence=0.9,
-                rationale="role lacks a reusable review skill",
-                evidence=[
-                    {
-                        "summary": "script_writer lacks an external code review skill",
-                        "recommendation": "Use skill/search with candidate_query exactly 'code review'.",
-                        "candidate_query": "code review",
-                    }
-                ],
-                trace_refs=[],
-            )
-        ],
-        unassigned_issues=[],
-        metadata={},
-    )
-    mechanism_report = MechanismAttributionReport(
-        role_mechanisms={
-            "script_writer": [
-                RoleMechanismAttribution(
-                    issue_id="issue_code_review_skill",
-                    role="script_writer",
-                    mechanism_type="skill",
-                    failure_signature="skill_code_failure",
-                    confidence=0.95,
-                    rationale="missing skill",
-                    evidence=[{"summary": "missing code review skill"}],
-                    evidence_refs=[],
-                )
-            ]
-        },
-        metadata={},
-    )
-
-    message = planner_agent._build_user_message(
-        targets,
-        role_report,
-        mechanism_report,
-        [
-            ActionDefinition(
-                name="skill_search",
-                group="skill",
-                operation="search",
-                function="search_skill",
-                purpose="Search for an existing reusable skill",
-            )
-        ],
-    )
-
-    assert "Allowed action_group values" in message
-    assert "skill/search: Search for an existing reusable skill" in message
-    assert "candidate_query=code review" in message
-    assert "candidate_query exactly 'code review'" in message
-
-
-def test_member_action_planner_disables_search_in_single_action_mode() -> None:
-    class LocalPatchPlannerAgent:
-        seen_definitions: list[ActionDefinition] = []
-
-        async def create_plan(self, **kwargs):  # type: ignore[no-untyped-def]
-            self.seen_definitions = kwargs["action_definitions"]
-            return {
-                "plan_id": "plan_local_skill",
-                "actions": [
-                    {
-                        "action_id": "act_local_skill",
-                        "role": "game-developer",
-                        "action_group": "skill",
-                        "operation": "add",
-                        "action_type": "skill_add",
-                        "target_path": "skills/deterministic_dom_identity/SKILL.md",
-                        "description": "Add a bounded local skill from current evidence.",
-                        "rationale": "The failure mechanism is already concrete.",
-                        "depends_on": [],
-                        "declared_write_paths": [
-                            "skills/deterministic_dom_identity/SKILL.md",
-                            "skills/skills.yaml",
-                        ],
-                    }
-                ],
-                "action_waves": [["act_local_skill"]],
-            }
-
-    target = MemberOptimizationTarget(
-        role="game-developer",
-        harness_ref_path="game-developer",
-        attributed_issue_ids=["issue_dom_identity"],
-        confidence=0.9,
-        mechanism_types=["skill"],
-        optimization_surfaces=["skill"],
-    )
-    role_report = RoleAttributionReport(
-        assigned_role_issues=[
-            RoleIssueAttribution(
-                issue_id="issue_dom_identity",
-                role="game-developer",
-                harness_ref_path="game-developer",
-                confidence=0.9,
-            )
-        ]
-    )
-    mechanism_report = MechanismAttributionReport(
-        role_mechanisms={
-            "game-developer": [
-                RoleMechanismAttribution(
-                    issue_id="issue_dom_identity",
-                    role="game-developer",
-                    mechanism_type="skill",
-                    failure_signature="missing_dom_identity_contract",
-                    confidence=0.9,
-                    optimization_surface="skill",
-                )
-            ]
-        }
-    )
-    planner_agent = LocalPatchPlannerAgent()
-
-    plan = asyncio.run(
-        MemberActionPlanner(planner_agent=planner_agent).plan(
-            targets=[target],
-            role_attribution_report=role_report,
-            mechanism_attribution_report=mechanism_report,
-            action_definitions=[
-                ActionDefinition(
-                    name="skill_search",
-                    group="skill",
-                    operation="search",
-                    function="search_skill",
-                    purpose="Search externally",
-                ),
-                ActionDefinition(
-                    name="skill_add",
-                    group="skill",
-                    operation="add",
-                    function="add_skill",
-                    purpose="Create a local skill",
-                ),
-            ],
-            model_config_ref="unused",
-            allowed_action_groups=["skill"],
-            max_actions_per_plan=1,
-        )
-    )
-
-    assert [definition.operation for definition in planner_agent.seen_definitions] == ["add"]
-    assert plan.actions[0].operation == "add"
-    assert plan.metadata["skill_search_disabled_for_single_action"] is True
-
-
 def test_member_action_planner_reports_the_latest_action_budget_error() -> None:
     class RetryingPlannerAgent:
         def __init__(self) -> None:
@@ -6567,194 +6066,6 @@ def test_planner_keeps_skill_surface_after_semantic_replay_failure() -> None:
     assert targets[0].optimization_surfaces == ["skill"]
     assert mechanisms.role_mechanisms["solver"][0].optimization_surface == "skill"
     assert adaptations == []
-
-
-def test_member_action_planner_recovers_when_model_reintroduces_disabled_search() -> None:
-    """A new contract error after a size retry must still get a correction attempt."""
-
-    class RetryingPlannerAgent:
-        def __init__(self) -> None:
-            self.calls = 0
-            self.validation_errors: list[list[str] | None] = []
-
-        async def create_plan(self, **kwargs):  # type: ignore[no-untyped-def]
-            self.calls += 1
-            self.validation_errors.append(kwargs.get("validation_errors"))
-            search = {
-                "action_id": "act_skill_search",
-                "role": "game-developer",
-                "action_group": "skill",
-                "operation": "search",
-                "action_type": "skill_search",
-                "target_path": "skills/",
-                "candidate_query": "runtime verification",
-                "depends_on": [],
-                "declared_write_paths": ["skills/", "skills/skills.yaml"],
-            }
-            add = {
-                "action_id": "act_skill_add",
-                "role": "game-developer",
-                "action_group": "skill",
-                "operation": "add",
-                "action_type": "skill_add",
-                "target_path": "skills/runtime_verification/SKILL.md",
-                "candidate_query": "",
-                "depends_on": [],
-                "declared_write_paths": [
-                    "skills/runtime_verification/SKILL.md",
-                    "skills/skills.yaml",
-                ],
-            }
-            if self.calls == 1:
-                actions = [search, add]
-            elif self.calls == 2:
-                actions = [search]
-            else:
-                actions = [add]
-            return {
-                "plan_id": "plan_retry_contract",
-                "actions": actions,
-                "action_waves": [[action["action_id"] for action in actions]],
-            }
-
-    target = MemberOptimizationTarget(
-        role="game-developer",
-        harness_ref_path="game-developer",
-        attributed_issue_ids=["issue_runtime"],
-        confidence=0.9,
-        mechanism_types=["skill"],
-        optimization_surfaces=["skill"],
-    )
-    role_report = RoleAttributionReport(
-        assigned_role_issues=[
-            RoleIssueAttribution(
-                issue_id="issue_runtime",
-                role="game-developer",
-                harness_ref_path="game-developer",
-                confidence=0.9,
-            )
-        ]
-    )
-    mechanism_report = MechanismAttributionReport(
-        role_mechanisms={
-            "game-developer": [
-                RoleMechanismAttribution(
-                    issue_id="issue_runtime",
-                    role="game-developer",
-                    mechanism_type="skill",
-                    failure_signature="runtime_reference_error",
-                    confidence=0.9,
-                    optimization_surface="skill",
-                )
-            ]
-        }
-    )
-    planner_agent = RetryingPlannerAgent()
-
-    plan = asyncio.run(
-        MemberActionPlanner(planner_agent=planner_agent).plan(
-            targets=[target],
-            role_attribution_report=role_report,
-            mechanism_attribution_report=mechanism_report,
-            action_definitions=[
-                ActionDefinition(
-                    name="skill_search",
-                    group="skill",
-                    operation="search",
-                    function="search_skill",
-                    purpose="Search externally",
-                ),
-                ActionDefinition(
-                    name="skill_add",
-                    group="skill",
-                    operation="add",
-                    function="add_skill",
-                    purpose="Create a local skill",
-                ),
-            ],
-            model_config_ref="unused",
-            allowed_action_groups=["skill"],
-            max_actions_per_plan=1,
-        )
-    )
-
-    assert planner_agent.calls == 3
-    assert planner_agent.validation_errors[1] == ["restricted optimization mode allows at most 1 action(s)"]
-    assert any(
-        "not present in the run-specific action contract" in error for error in planner_agent.validation_errors[2] or []
-    )
-    assert [action.operation for action in plan.actions] == ["add"]
-
-
-def test_member_action_contract_marks_unoffered_search_disabled() -> None:
-    from openjiuwen.rsi.member_optimizer.action_planner import (
-        _build_action_contract_text,
-    )
-
-    contract = _build_action_contract_text(
-        [
-            ActionDefinition(
-                name="skill_add",
-                group="skill",
-                operation="add",
-                function="add_skill",
-                purpose="Create a local skill",
-            )
-        ]
-    )
-
-    assert "Run-Specific Strict Allowlist" in contract
-    assert "skill/search is disabled for this run" in contract
-
-
-def test_member_action_planner_rejects_skill_add_success_dependency_on_skill_search() -> None:
-    """skill/add may follow failed search only with explicit dependency_failed semantics."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
-        _validate_plan,
-    )
-
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="harnesses/solver",
-        attributed_issue_ids=["issue_001"],
-        confidence=0.8,
-        optimization_surfaces=["skill"],
-    )
-    plan_data = {
-        "actions": [
-            {
-                "action_id": "act_skill_search",
-                "role": "solver",
-                "action_group": "skill",
-                "operation": "search",
-                "action_type": "skill_search",
-                "target_path": "skills/",
-                "candidate_query": "preserve analyze fix",
-                "declared_write_paths": ["skills", "skills/skills.yaml"],
-            },
-            {
-                "action_id": "act_skill_add",
-                "role": "solver",
-                "action_group": "skill",
-                "operation": "add",
-                "action_type": "skill_creation",
-                "target_path": "skills/preserve_analyze_fix/SKILL.md",
-                "depends_on": ["act_skill_search"],
-                "declared_write_paths": [
-                    "skills/preserve_analyze_fix/SKILL.md",
-                    "skills/skills.yaml",
-                ],
-            },
-        ],
-        "action_waves": [["act_skill_search"], ["act_skill_add"]],
-    }
-
-    errors = _validate_plan(plan_data, {"solver"}, [target])
-
-    assert any("skill/add fallback after skill/search" in error for error in errors)
-
-    plan_data["actions"][1]["run_if"] = "dependency_failed"
-    assert _validate_plan(plan_data, {"solver"}, [target]) == []
 
 
 def test_member_action_planner_rejects_action_removed_from_run_contract() -> None:
@@ -7120,219 +6431,6 @@ def test_member_action_planner_rejects_duplicate_add_target(tmp_path: Path) -> N
     assert any("target_path already exists" in error for error in errors)
 
 
-def test_skill_acquisition_parses_skill_hub_list_response() -> None:
-    result = SkillAcquisitionResult(status="failed", query="code review")
-    acquisition = SkillAcquisition(
-        runner=_failing_skill_search_runner,
-        skill_hub_url="https://skill-hub.example/search",
-        skill_hub_fetcher=lambda query, url, token: [
-            {
-                "ref": "demo/skills@skills/code-review",
-                "install_count": "2.5K",
-                "security_rating": "safe",
-                "source_url": "https://github.com/demo/skills/tree/main/skills/code-review",
-            }
-        ],
-    )
-
-    candidates = acquisition.search("code review", result)
-
-    assert [candidate.ref for candidate in candidates] == ["demo/skills@skills/code-review"]
-    candidate = candidates[0]
-    assert candidate.backend == "skill_hub"
-    assert candidate.install_count == 2500
-    assert candidate.security_rating == "Safe"
-    assert candidate.source_url.endswith("/skills/code-review")
-    assert {item["ref"] for item in result.rejections} == {"npx", "skillnet"}
-
-
-def test_skill_acquisition_parses_skill_hub_results_response() -> None:
-    acquisition = SkillAcquisition(
-        runner=_failing_skill_search_runner,
-        skill_hub_url="https://skill-hub.example/search",
-        skill_hub_fetcher=lambda query, url, token: {
-            "results": [
-                {
-                    "ref": "demo/skills@skills/review-helper",
-                    "installs": 1800,
-                    "security": "low",
-                    "url": "https://github.com/demo/skills",
-                }
-            ]
-        },
-    )
-
-    candidates = acquisition.search("review helper")
-
-    assert len(candidates) == 1
-    assert candidates[0].ref == "demo/skills@skills/review-helper"
-    assert candidates[0].install_count == 1800
-    assert candidates[0].security_rating == "Low"
-    assert candidates[0].source_url == "https://github.com/demo/skills"
-
-
-def test_skill_acquisition_skips_skill_hub_when_url_absent() -> None:
-    def unexpected_fetcher(query, url, token):  # type: ignore[no-untyped-def]
-        raise AssertionError("Skill Hub should be disabled when URL is absent")
-
-    result = SkillAcquisitionResult(status="failed", query="code review")
-    acquisition = SkillAcquisition(
-        runner=_failing_skill_search_runner,
-        skill_hub_url="",
-        skill_hub_fetcher=unexpected_fetcher,
-    )
-
-    candidates = acquisition.search("code review", result)
-
-    assert candidates == []
-    assert {item["ref"] for item in result.rejections} == {"npx", "skillnet"}
-
-
-def test_skill_command_timeout_terminates_descendant_holding_output_pipe() -> None:
-    """A child inheriting stdout must not keep the timed-out runner blocked."""
-    parent_code = (
-        "import subprocess,sys,time; "
-        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-        "time.sleep(60)"
-    )
-    started = time.monotonic()
-
-    with pytest.raises(subprocess.TimeoutExpired):
-        _run_command(
-            [sys.executable, "-c", parent_code],
-            None,
-            timeout=0.2,
-        )
-
-    assert time.monotonic() - started < 5
-
-
-def test_skill_acquisition_records_skill_hub_errors_without_aborting() -> None:
-    def fake_runner(command, cwd):  # type: ignore[no-untyped-def]
-        if _is_skill_find_command(command):
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout="demo/skills@skills/npx-review\ninstalls: 2K\nsecurity: Safe\n",
-                stderr="",
-            )
-        if command[:2] == ["skillnet", "search"]:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="missing")
-        raise AssertionError(f"unexpected command: {command}")
-
-    result = SkillAcquisitionResult(status="failed", query="code review")
-    acquisition = SkillAcquisition(
-        runner=fake_runner,
-        skill_hub_url="https://skill-hub.example/search",
-        skill_hub_fetcher=lambda query, url, token: (_ for _ in ()).throw(ValueError("bad json")),
-    )
-
-    candidates = acquisition.search("code review", result)
-
-    assert [candidate.ref for candidate in candidates] == ["demo/skills@skills/npx-review"]
-    assert any(item["ref"] == "skill_hub" and "bad json" in item["reason"] for item in result.rejections)
-
-
-def test_skill_acquisition_falls_back_to_skill_hub_when_command_sources_fail(tmp_path: Path) -> None:
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-
-    def fake_runner(command, cwd):  # type: ignore[no-untyped-def]
-        if _is_skill_find_command(command):
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="npx failed")
-        if command[:2] == ["skillnet", "search"]:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="skillnet failed")
-        if _is_git_clone_command(command):
-            checkout = Path(command[-1])
-            skill_dir = checkout / "skills" / "hub-review"
-            skill_dir.mkdir(parents=True)
-            (skill_dir / "SKILL.md").write_text(
-                "---\ndescription: hub review skill\n---\n\n# Hub Review\n",
-                encoding="utf-8",
-            )
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if _is_git_ls_tree_command(command):
-            return subprocess.CompletedProcess(command, 0, stdout="skills/hub-review/SKILL.md\n", stderr="")
-        if _is_git_sparse_command(command):
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        raise AssertionError(f"unexpected command: {command}")
-
-    acquisition = SkillAcquisition(
-        runner=fake_runner,
-        skill_hub_url="https://skill-hub.example/search",
-        skill_hub_fetcher=lambda query, url, token: {
-            "results": [
-                {
-                    "ref": "demo/skills@skills/hub-review",
-                    "install_count": 5000,
-                    "security_rating": "Safe",
-                }
-            ]
-        },
-    )
-
-    result = acquisition.acquire(action_worktree=worktree, query="code review")
-
-    assert result.status == "succeeded"
-    assert result.selected_ref == "demo/skills@skills/hub-review"
-    assert result.safety_scan["status"] == "passed"
-    assert (worktree / "skills" / "hub-review" / "SKILL.md").is_file()
-    assert yaml.safe_load((worktree / "skills" / "skills.yaml").read_text(encoding="utf-8")) == {"skills": ["skills"]}
-
-
-def test_skill_acquisition_resolves_real_skill_dir_from_sparse_repo_tree(tmp_path: Path) -> None:
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    sparse_paths: list[str] = []
-
-    def fake_runner(command, cwd):  # type: ignore[no-untyped-def]
-        if _is_skill_find_command(command):
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout="demo/skills@feature-dev-loop\ninstalls: 2K\nsecurity: Safe\n",
-                stderr="",
-            )
-        if command[:2] == ["skillnet", "search"]:
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="missing")
-        if _is_git_clone_command(command):
-            Path(command[-1]).mkdir(parents=True)
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        if _is_git_ls_tree_command(command):
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout="\n".join(
-                    [
-                        "skills/feature-dev-loop/SKILL.md",
-                        "skills/other-review/SKILL.md",
-                    ]
-                ),
-                stderr="",
-            )
-        if _is_git_sparse_command(command):
-            sparse_path = command[-1]
-            sparse_paths.append(sparse_path)
-            skill_dir = _git_checkout_dir(command) / sparse_path
-            skill_dir.mkdir(parents=True)
-            (skill_dir / "SKILL.md").write_text(
-                "---\ndescription: feature dev loop\n---\n\n# Feature Dev Loop\n",
-                encoding="utf-8",
-            )
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-        raise AssertionError(f"unexpected command: {command}")
-
-    result = SkillAcquisition(runner=fake_runner, skill_hub_url="").acquire(
-        action_worktree=worktree,
-        query="code review",
-    )
-
-    assert result.status == "succeeded"
-    assert result.selected_ref == "demo/skills@feature-dev-loop"
-    assert sparse_paths == ["skills/feature-dev-loop"]
-    assert (worktree / "skills" / "feature-dev-loop" / "SKILL.md").is_file()
-
-
 def test_skill_safety_scan_rejects_dangerous_script(tmp_path: Path) -> None:
     skill_dir = tmp_path / "bad-skill"
     skill_dir.mkdir()
@@ -7346,32 +6444,3 @@ def test_skill_safety_scan_rejects_dangerous_script(tmp_path: Path) -> None:
 
     assert scan["status"] == "failed"
     assert any("dangerous import" in error for error in scan["errors"])
-
-
-def _is_skill_find_command(command) -> bool:  # type: ignore[no-untyped-def]
-    executable = Path(str(command[0])).name.lower() if command else ""
-    return executable in {"npx", "npx.cmd"} and command[1:3] == ["skills", "find"]
-
-
-def _is_git_clone_command(command) -> bool:  # type: ignore[no-untyped-def]
-    return command and command[0] == "git" and "clone" in command
-
-
-def _is_git_sparse_command(command) -> bool:  # type: ignore[no-untyped-def]
-    return command and command[0] == "git" and "sparse-checkout" in command
-
-
-def _is_git_ls_tree_command(command) -> bool:  # type: ignore[no-untyped-def]
-    return command and command[0] == "git" and "ls-tree" in command
-
-
-def _git_checkout_dir(command) -> Path:  # type: ignore[no-untyped-def]
-    return Path(command[command.index("-C") + 1])
-
-
-def _failing_skill_search_runner(command, cwd):  # type: ignore[no-untyped-def]
-    if _is_skill_find_command(command):
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="npx failed")
-    if command[:2] == ["skillnet", "search"]:
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="skillnet failed")
-    raise AssertionError(f"unexpected command: {command}")

@@ -196,6 +196,10 @@ openjiuwen = [
     "symphony/README.md",
     "symphony/shared/fingerprint/resources/*.yaml",
     "symphony/retrieval/common/prompts/*.yaml",
+    "rsi/**/*.html",
+    "rsi/**/*.md",
+    "rsi/**/*.template",
+    "rsi/**/*.yaml",
 ]
 
 [tool.coverage.run]

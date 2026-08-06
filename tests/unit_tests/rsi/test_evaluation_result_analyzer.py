@@ -17,26 +17,6 @@ import pytest
 import yaml
 
 
-class _FakeExperienceLearner:
-    """Capture analyzer experience lookups without touching persistence."""
-
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-
-    async def retrieve_member_stage_experience(self, **kwargs: Any) -> Any:
-        from openjiuwen.rsi.optimization_experience_learner.schema import (
-            OptimizationExperienceRetrievalResult,
-        )
-
-        self.calls.append(kwargs)
-        query = type("Query", (), {"stage": kwargs["stage"]})()
-        return OptimizationExperienceRetrievalResult(
-            query=query,
-            matches=[{"experience_id": "analysis_exp_001"}],
-            metadata={"retrieval_status": "mocked"},
-        )
-
-
 class _FakeIssueStrategy:
     async def analyze(self, invocation):  # type: ignore[no-untyped-def]
         from openjiuwen.rsi.schema import (
@@ -908,7 +888,6 @@ class TestDiagnosisAgentStrategy:
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
             EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"),
-            experience_learner=_FakeExperienceLearner(),
         )
         diagnosed_case_ids: list[str] = []
 
@@ -954,7 +933,6 @@ class TestDiagnosisAgentStrategy:
                 model_config_ref="unused.yaml",
                 diagnosis_agent_max_concurrency=2,
             ),
-            experience_learner=_FakeExperienceLearner(),
         )
         case_inputs = []
         expected_case_dirs: list[Path] = []
@@ -1578,16 +1556,12 @@ class TestDiagnosisAgentStrategy:
             EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
         )
 
-        async def fake_retrieve_experience(invocation: Any) -> dict[str, Any]:
-            return {}
-
         async def fake_per_case(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
             return [{"case_id": "case_001", "issue_category": "member_harness"}]
 
         async def fake_aggregate(*args: Any, **kwargs: Any) -> list[Any]:
             raise RuntimeError("aggregation failed")
 
-        monkeypatch.setattr(strategy, "_retrieve_experience", fake_retrieve_experience)
         monkeypatch.setattr(strategy, "_per_case_diagnosis", fake_per_case)
         monkeypatch.setattr(strategy, "_aggregate_diagnosis", fake_aggregate)
 
@@ -3133,10 +3107,8 @@ class TestAnalyzerFacadeArtifacts:
         )
         from openjiuwen.rsi.schema import EvaluationResultAnalysisInvocation
 
-        fake_experience_learner = _FakeExperienceLearner()
         analyzer = EvaluationResultAnalyzer(
             EvaluationResultAnalyzerConfig(output_filename="issues.yaml"),
-            experience_learner=fake_experience_learner,
         )
         output_dir = tmp_path / "analysis"
         eval_ref_path = _write_empty_eval_ref(tmp_path)
@@ -3155,15 +3127,6 @@ class TestAnalyzerFacadeArtifacts:
         issues_path = Path(analysis_ref["issues_path"])
         issues_payload = yaml.safe_load(issues_path.read_text(encoding="utf-8"))
 
-        assert fake_experience_learner.calls == [
-            {
-                "stage": "evaluation_result_analysis",
-                "eval_ref_path": str(eval_ref_path),
-                "analysis_result_path": "",
-                "harness_refs_path": str(tmp_path / "harness_refs.yaml"),
-                "candidate_modules": ["team_skill", "member_harness"],
-            }
-        ]
         assert analysis_ref["metadata"]["analysis_status"] == "empty_case_results"
         assert analysis_ref["issues"] == []
         assert issues_payload == {"issues": []}
@@ -3240,7 +3203,6 @@ class TestAnalyzerRealModelIntegration:
                 evidence_limit_per_issue=3,
                 output_filename="team_issues.yaml",
             ),
-            experience_learner=_FakeExperienceLearner(),
         )
         invocation = EvaluationResultAnalysisInvocation(
             eval_ref_path=str(artifacts["eval_ref_path"]),
@@ -3320,7 +3282,6 @@ class TestAnalyzerRealModelIntegration:
                 model_config_ref=str(model_config_path),
                 output_filename="team_issues.yaml",
             ),
-            experience_learner=_FakeExperienceLearner(),
         )
         invocation = EvaluationResultAnalysisInvocation(
             eval_ref_path=str(bounded_eval["eval_ref_path"]),

@@ -8,7 +8,6 @@ import asyncio
 import hashlib
 import json
 import shutil
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,13 +21,9 @@ from openjiuwen.rsi.evaluator.case_backend import (
 from openjiuwen.rsi.evaluator.case_runner import CaseRunner
 from openjiuwen.rsi.evaluator.judger import build_judger
 from openjiuwen.rsi.evaluator.metrics_collector import MetricsCollector
-from openjiuwen.rsi.evaluator.team_factory import (
-    resolve_team_name_from_skill_path,
-)
 from openjiuwen.rsi.schema import (
     DatasetArtifact,
     EvaluationCaseTraceRef,
-    EvaluationHistoryItem,
 )
 
 CASE_RESULTS_DIR_NAME = "cases"
@@ -72,7 +67,6 @@ class TeamEvaluator:
         team_skill_ref_path: str,
         harness_refs_path: str,
         output_dir: str,
-        context_path: str | None = None,
     ) -> str:
         """Evaluate all cases from a dataset artifact and return ``eval_ref.yaml``."""
         return await self.evaluate_batch(
@@ -80,7 +74,6 @@ class TeamEvaluator:
             team_skill_ref_path=team_skill_ref_path,
             harness_refs_path=harness_refs_path,
             output_dir=output_dir,
-            context_path=context_path,
             dataset=dataset,
         )
 
@@ -90,7 +83,6 @@ class TeamEvaluator:
         team_skill_ref_path: str,
         harness_refs_path: str,
         output_dir: str,
-        context_path: str | None = None,
         dataset: DatasetArtifact | None = None,
     ) -> str:
         """Run one batch of cases with fresh Team runtimes and persist artifacts."""
@@ -156,48 +148,14 @@ class TeamEvaluator:
         )
         eval_ref_path = _write_eval_ref(
             eval_dir=eval_dir,
-            team_name=resolve_team_name_from_skill_path(team_skill_ref_path),
+            team_name=_evaluation_name(team_skill_ref_path),
             team_skill_ref_path=team_skill_ref_path,
             harness_refs_path=harness_refs_path,
             dataset=dataset,
             case_refs=case_refs,
             summary_path=summary_path,
         )
-        if context_path:
-            self.update_orchestrator_context(context_path, eval_ref_path)
         return eval_ref_path
-
-    @staticmethod
-    def update_orchestrator_context(context_path: str, eval_ref_path: str) -> None:
-        """Update the latest evaluation reference in ``orchestrator_context.yaml``."""
-        from openjiuwen.rsi.orchestrator.context import OrchestratorContextStore
-
-        context_store = OrchestratorContextStore(context_path)
-        context = context_store.load()
-        summary = _load_summary_from_eval_ref(eval_ref_path)
-        current = replace(
-            context.current,
-            eval_ref_path=eval_ref_path,
-        )
-        history = replace(
-            context.history,
-            evaluations=[
-                *context.history.evaluations,
-                EvaluationHistoryItem(
-                    eval_ref_path=eval_ref_path,
-                    phase=context.phase.value,
-                    score=summary.get("average_score"),
-                ),
-            ],
-        )
-        context_store.save(
-            replace(
-                context,
-                current=current,
-                history=history,
-                updated_at=datetime.now(UTC).astimezone(),
-            )
-        )
 
 
 __all__ = [
@@ -209,6 +167,13 @@ def _prepare_eval_dir(output_dir: str) -> Path:
     eval_dir = Path(output_dir).expanduser().resolve()
     eval_dir.mkdir(parents=True, exist_ok=True)
     return eval_dir
+
+
+def _evaluation_name(skill_ref_path: str) -> str:
+    if not str(skill_ref_path or "").strip():
+        return "single_harness"
+    path = Path(skill_ref_path).expanduser()
+    return path.parent.name if path.name.lower() == "skill.md" else path.name
 
 
 def _evaluation_input_fingerprint(

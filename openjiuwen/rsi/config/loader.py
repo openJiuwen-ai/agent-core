@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 
 import yaml
@@ -46,19 +45,7 @@ def load_auto_coordinating_harness_config(config_path: str) -> AutoCoordinatingH
     if not isinstance(data, dict):
         raise ValueError(f"auto-coordinating harness config must be a mapping: {path}")
 
-    config = AutoCoordinatingHarnessConfig.from_dict(data)
-    if config.evaluator.team_spec_config_ref:
-        team_spec_path = Path(config.evaluator.team_spec_config_ref).expanduser()
-        if not team_spec_path.is_absolute():
-            team_spec_path = path.parent / team_spec_path
-        config = replace(
-            config,
-            evaluator=replace(
-                config.evaluator,
-                team_spec_config_ref=str(team_spec_path.resolve()),
-            ),
-        )
-    return config
+    return AutoCoordinatingHarnessConfig.from_dict(data)
 
 
 __all__ = [

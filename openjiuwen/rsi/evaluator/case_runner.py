@@ -14,9 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from openjiuwen.agent_teams.paths import configure_openjiuwen_home, reset_openjiuwen_home, team_home
-from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+from openjiuwen.agent_teams.paths import configure_openjiuwen_home, reset_openjiuwen_home
 from openjiuwen.core.common.logging import logger
 from openjiuwen.rsi.evaluator.case_backend import (
     CaseExecutionBackend,
@@ -100,8 +98,7 @@ class CaseRunner:
         result_path = case_dir / "result.json"
         trace_path = case_dir / "trace.json"
         started_at = datetime.now(UTC).astimezone()
-        resolved_team_spec: TeamAgentSpec | None = None
-        resolved_team_name = ""
+        resolved_team_name = "single_harness"
         artifact_refs = {"harvested": [], "missing": []}
         response: Any = None
         body_error: BaseException | None = None
@@ -114,19 +111,13 @@ class CaseRunner:
                 team_skill_ref_path=team_skill_ref_path,
                 harness_refs=harness_refs or {},
             )
-            resolved_team_spec = execution_result.team_spec
-            resolved_team_name = resolved_team_spec.team_name if resolved_team_spec is not None else ""
             response = execution_result.response
             finished_at = datetime.now(UTC).astimezone()
 
             runtime_workspace_dir = _execution_workspace_dir(execution_result, case_dir)
             expected_artifact_files = _expected_artifact_files(case)
             artifact_refs = _harvest_artifacts(
-                workspace_dir=(
-                    runtime_workspace_dir
-                    if execution_result.workspace_dir
-                    else _team_workspace_dir(case_dir, resolved_team_name)
-                ),
+                workspace_dir=runtime_workspace_dir,
                 dest_dir=case_dir / "artifacts",
                 expected_files=expected_artifact_files,
             )
@@ -300,7 +291,7 @@ class CaseRunner:
                     raise
                 logger.warning("case runtime cleanup failed after case error: {}", exc)
             finally:
-                await _cleanup_scratch(case_dir, resolved_team_spec, runtime_home_dir)
+                _cleanup_scratch(case_dir, runtime_home_dir)
                 reset_openjiuwen_home()
 
     async def _judge(
@@ -997,13 +988,6 @@ def _excerpt(text: str, max_chars: int) -> str:
     return text[: max_chars - 3] + "..."
 
 
-def _team_workspace_dir(case_dir: Path, team_name: str) -> Path:
-    workspace_dir = team_home(team_name) / "team-workspace"
-    if (workspace_dir / "artifacts").is_dir():
-        return workspace_dir
-    return case_dir / "workspace"
-
-
 def _write_error_case_artifacts(
     *,
     case: dict[str, Any],
@@ -1467,21 +1451,11 @@ def _skip_harvest_path(path: str) -> bool:
     return Path(path).suffix.lower() in {".pyc", ".pyo", ".log"}
 
 
-async def _cleanup_scratch(
+def _cleanup_scratch(
     case_dir: Path,
-    team_spec: TeamAgentSpec | None,
     runtime_home_dir: Path | None = None,
 ) -> None:
-    """Delete case-scoped scratch files after runtime cleanup.
-
-    ``clean_team`` already deletes ``<case_dir>/.agent_teams/{team}`` via
-    ``register_cleanup_path``.  This function removes any residual
-    ``.agent_teams/`` subtree (e.g. when ``clean_team`` was not called due to an
-    exception) and the case-scoped ``team.db*`` files.
-    """
-    if team_spec is not None:
-        await _close_case_team_db(team_spec)
-
+    """Delete standalone case-scoped runtime files."""
     scratch_roots = []
     if runtime_home_dir is not None:
         scratch_roots.append(runtime_home_dir)
@@ -1512,20 +1486,6 @@ async def _cleanup_scratch(
             logger.debug("team.db scratch removed: {}", db_path)
         except OSError as exc:
             logger.warning("failed to remove {}: {}", db_path.name, exc)
-
-
-async def _close_case_team_db(team_spec: TeamAgentSpec) -> None:
-    """Close the case-scoped sqlite engine before deleting its files."""
-    db_config = team_spec.resolve_db_config()
-    if db_config.db_type != "sqlite":
-        return
-    try:
-        db = get_shared_db(db_config)
-        close = getattr(db, "close", None)
-        if close is not None:
-            await close()
-    except Exception as exc:
-        logger.warning("failed to close case-scoped team db before scratch cleanup: {}", exc)
 
 
 __all__ = [

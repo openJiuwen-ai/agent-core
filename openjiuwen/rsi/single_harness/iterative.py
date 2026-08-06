@@ -40,8 +40,6 @@ from openjiuwen.rsi.schema import (
     EvaluationResultAnalysisInvocation,
 )
 
-from .orchestrator import _load_cases, _validate_single_harness_refs
-
 _ALLOWED_ACTION_GROUPS = ["prompt", "skill", "tool", "rail"]
 _ALLOWED_PROMPT_SURFACES = ["prompt_section"]
 
@@ -543,7 +541,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             team_skill_ref_path="",
             harness_refs_path=harness_refs_path,
             output_dir=str(output_dir),
-            context_path=None,
             dataset=dataset,
         )
 
@@ -901,6 +898,49 @@ def _dataset_artifact(request: IterativeSingleHarnessRequest) -> DatasetArtifact
         dataset_files=files,
         cases=len(_load_cases(files)),
     )
+
+
+def _load_cases(dataset_files: list[str]) -> list[dict[str, Any]]:
+    cases: list[dict[str, Any]] = []
+    for dataset_file in dataset_files:
+        path = Path(dataset_file).expanduser().resolve()
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+        if isinstance(data, dict) and isinstance(data.get("cases"), list):
+            raw_cases = data["cases"]
+        elif isinstance(data, dict):
+            raw_cases = [data]
+        elif isinstance(data, list):
+            raw_cases = data
+        else:
+            raise ValueError(f"dataset json must contain case mappings: {path}")
+        for index, case in enumerate(raw_cases, start=1):
+            if not isinstance(case, dict):
+                raise ValueError(f"dataset case must be a mapping: {path}#{index}")
+            cases.append({**case, "case_path": str(path), "case_index": index})
+    return cases
+
+
+def _validate_single_harness_refs(harness_refs_path: str) -> None:
+    path = Path(harness_refs_path).expanduser().resolve()
+    with path.open("r", encoding="utf-8") as file:
+        data = yaml.safe_load(file) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"harness refs must be a mapping: {path}")
+    refs = data.get("harness_refs")
+    if isinstance(refs, dict):
+        normalized = {str(role): str(ref) for role, ref in refs.items() if str(ref).strip()}
+    else:
+        normalized = {
+            str(role): str(ref)
+            for role, ref in data.items()
+            if isinstance(ref, str) and role not in {"version", "source_harness_refs_path"}
+        }
+    if len(normalized) != 1:
+        raise ValueError(
+            f"single harness optimization requires exactly one harness ref; got {len(normalized)} "
+            f"from {harness_refs_path}"
+        )
 
 
 def _request_fingerprint(
