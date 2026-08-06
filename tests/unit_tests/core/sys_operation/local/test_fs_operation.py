@@ -1609,3 +1609,54 @@ def test_resolve_path_deduplicates_overlapping_defaults(cwd_state, tmp_path):
     message = str(excinfo.value)
     assert message.count(str(artifact_root.resolve())) == 1
     assert str(workspace.resolve()) in message
+
+
+def _make_subagent_layout(tmp_path):
+    """Build the directory shape a delegated skill run has in production.
+
+    A subagent's workspace is a fresh directory under ``sub_agents/`` and its
+    cwd is the artifact root it inherited from its parent; the skill it was
+    told to run lives in the parent workspace's ``skills`` tree, outside both.
+    """
+    root = tmp_path / "workspace"
+    sub_workspace = root / "sub_agents" / "sub-1"
+    artifact_root = root / "projects"
+    skill = root / "skills" / "sample-skill"
+    unrelated = tmp_path / "elsewhere"
+    for directory in (sub_workspace, artifact_root, skill, unrelated):
+        directory.mkdir(parents=True)
+    return sub_workspace, artifact_root, skill, unrelated
+
+
+def test_resolve_path_allows_file_in_skill_root(cwd_state, tmp_path):
+    """A subagent must be able to read the SKILL.md of an inherited skill."""
+    sub_workspace, artifact_root, skill, _ = _make_subagent_layout(tmp_path)
+    skill_md = skill / "SKILL.md"
+    skill_md.write_text("# skill", encoding="utf-8")
+
+    cwd_state.init_cwd(
+        str(artifact_root),
+        project_root=str(artifact_root),
+        workspace=str(sub_workspace),
+        skill_roots=[str(skill.parent)],
+    )
+    op = _make_fs_op(restrict=True)
+
+    assert op._resolve_path(str(skill_md)) == skill_md.resolve()
+
+
+def test_resolve_path_still_denies_outside_skill_root(cwd_state, tmp_path):
+    """Widening the sandbox for skills must not widen it for anything else."""
+    sub_workspace, artifact_root, skill, unrelated = _make_subagent_layout(tmp_path)
+
+    cwd_state.init_cwd(
+        str(artifact_root),
+        project_root=str(artifact_root),
+        workspace=str(sub_workspace),
+        skill_roots=[str(skill.parent)],
+    )
+    op = _make_fs_op(restrict=True)
+
+    with pytest.raises(Exception) as excinfo:
+        op._resolve_path(str(unrelated / "secret.txt"))
+    assert "outside sandbox" in str(excinfo.value)

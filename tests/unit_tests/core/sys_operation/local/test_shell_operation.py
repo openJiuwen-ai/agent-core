@@ -493,6 +493,75 @@ def test_get_sandbox_roots_deduplicates_overlapping_defaults(cwd_state, tmp_path
     assert op._get_sandbox_roots() == [workspace.resolve(), artifact_root.resolve()]
 
 
+def _make_subagent_layout(tmp_path):
+    """Build the directory shape a delegated skill run has in production.
+
+    A subagent's workspace is a fresh directory under ``sub_agents/`` and its
+    cwd is the artifact root it inherited from its parent; the skill it was
+    told to run lives in the parent workspace's ``skills`` tree, outside both.
+    """
+    root = tmp_path / "workspace"
+    sub_workspace = root / "sub_agents" / "sub-1"
+    artifact_root = root / "projects"
+    skill = root / "skills" / "sample-skill"
+    unrelated = tmp_path / "elsewhere"
+    for directory in (sub_workspace, artifact_root, skill / "scripts", unrelated):
+        directory.mkdir(parents=True)
+    return sub_workspace, artifact_root, skill, unrelated
+
+
+def test_check_shell_sandbox_allows_script_in_skill_root(cwd_state, tmp_path):
+    """A subagent must be able to run scripts out of an inherited skill tree."""
+    sub_workspace, artifact_root, skill, _ = _make_subagent_layout(tmp_path)
+
+    cwd_state.init_cwd(
+        str(artifact_root),
+        project_root=str(artifact_root),
+        workspace=str(sub_workspace),
+        skill_roots=[str(skill.parent)],
+    )
+    op = _make_shell_op(restrict=True)
+
+    err = op._check_shell_sandbox(
+        f"python {skill / 'scripts' / 'run.py'}", artifact_root
+    )
+    assert err is None
+
+
+def test_check_shell_sandbox_still_denies_outside_skill_root(cwd_state, tmp_path):
+    """Widening the sandbox for skills must not widen it for anything else."""
+    sub_workspace, artifact_root, skill, unrelated = _make_subagent_layout(tmp_path)
+
+    cwd_state.init_cwd(
+        str(artifact_root),
+        project_root=str(artifact_root),
+        workspace=str(sub_workspace),
+        skill_roots=[str(skill.parent)],
+    )
+    op = _make_shell_op(restrict=True)
+
+    err = op._check_shell_sandbox(
+        f"python {unrelated / 'run.py'}", artifact_root
+    )
+    assert err is not None
+    assert "outside sandbox" in err
+
+
+def test_get_sandbox_roots_ignores_skill_roots_when_configured(cwd_state, tmp_path):
+    """An explicit sandbox_root stays the whole boundary; skills add nothing."""
+    sub_workspace, artifact_root, skill, _ = _make_subagent_layout(tmp_path)
+
+    cwd_state.init_cwd(
+        str(artifact_root),
+        project_root=str(artifact_root),
+        workspace=str(sub_workspace),
+        skill_roots=[str(skill.parent)],
+    )
+    op = _make_shell_op(restrict=True, roots=[str(artifact_root)])
+
+    assert op._get_sandbox_roots() == [artifact_root.resolve()]
+
+
 def test_get_sandbox_roots_deduplicates_explicit_roots(tmp_path):
     """An explicitly configured list is collapsed too, order preserved."""
     first = tmp_path / "a"
