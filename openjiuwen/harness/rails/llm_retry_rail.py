@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -19,6 +19,9 @@ _STREAM_TIMEOUT_MARKERS = (
     "LLM stream timeout",
     "stream frame timeout",
 )
+# Whole-call retry backoff (seconds) before the 1st/2nd/... retry attempt.
+# The last value is reused if there are more retries than entries.
+_DEFAULT_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
 
 
 class LLMRetryRail(DeepAgentRail):
@@ -45,10 +48,14 @@ class LLMRetryRail(DeepAgentRail):
             repeat_min_total_chars: int = 160,
             repeat_window_chars: int = 1024,
             single_char_repeat_count: int = 100,
+            backoff_seconds: Optional[List[float]] = None,
     ) -> None:
         super().__init__()
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
+        backoff = list(backoff_seconds) if backoff_seconds is not None else list(_DEFAULT_BACKOFF_SECONDS)
+        if any(delay < 0 for delay in backoff):
+            raise ValueError("backoff_seconds entries must be >= 0")
         if repeat_min_pattern_chars < 1:
             raise ValueError("repeat_min_pattern_chars must be >= 1")
         if repeat_max_pattern_chars < repeat_min_pattern_chars:
@@ -70,8 +77,18 @@ class LLMRetryRail(DeepAgentRail):
         self.repeat_min_total_chars = repeat_min_total_chars
         self.repeat_window_chars = repeat_window_chars
         self.single_char_repeat_count = single_char_repeat_count
+        self.backoff_seconds = backoff
         self.repeat_retry_count = 0
         self.stream_timeout_retry_count = 0
+
+    def backoff_delay(self, retry_index: int) -> float:
+        """Return the sleep (seconds) before the retry at ``retry_index`` (0-based).
+
+        Uses the configured backoff schedule, clamped to its last entry.
+        """
+        if not self.backoff_seconds:
+            return 0.0
+        return self.backoff_seconds[min(retry_index, len(self.backoff_seconds) - 1)]
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Reset retry counters at the start of each agent invocation."""
@@ -185,23 +202,25 @@ class LLMRetryRail(DeepAgentRail):
     def _request_retry_or_reset(self, ctx: AgentCallbackContext, reason: str) -> None:
         if reason == "repeat":
             if self.repeat_retry_count < self.max_retries:
+                delay = self.backoff_delay(self.repeat_retry_count)
                 self.repeat_retry_count += 1
                 logger.warning(
                     "[LLMRetryRail] retrying model call after repeated stream output "
-                    f"({self.repeat_retry_count}/{self.max_retries})"
+                    f"({self.repeat_retry_count}/{self.max_retries}) after {delay:.2f}s backoff"
                 )
-                ctx.request_retry()
+                ctx.request_retry(delay_seconds=delay)
             else:
                 self.repeat_retry_count = 0
             return
 
         if self.stream_timeout_retry_count < self.max_retries:
+            delay = self.backoff_delay(self.stream_timeout_retry_count)
             self.stream_timeout_retry_count += 1
             logger.warning(
                 "[LLMRetryRail] retrying model call after stream frame timeout "
-                f"({self.stream_timeout_retry_count}/{self.max_retries})"
+                f"({self.stream_timeout_retry_count}/{self.max_retries}) after {delay:.2f}s backoff"
             )
-            ctx.request_retry()
+            ctx.request_retry(delay_seconds=delay)
         else:
             self.stream_timeout_retry_count = 0
 

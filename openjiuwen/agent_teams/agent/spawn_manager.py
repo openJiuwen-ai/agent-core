@@ -75,6 +75,7 @@ class SpawnManager:
         initial_message: Optional[str] = None,
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
+        resume_external_backend: bool = False,
     ) -> Optional[SpawnedProcessHandle]:
         member_name = ctx.member_name
         # Idempotency: skip a duplicate spawn of an already-spawned or
@@ -104,6 +105,7 @@ class SpawnManager:
                 initial_message=initial_message,
                 session=session,
                 spawn_config=spawn_config,
+                resume_external_backend=resume_external_backend,
             )
         finally:
             self._spawning.discard(member_name)
@@ -115,6 +117,7 @@ class SpawnManager:
         initial_message: Optional[str] = None,
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
+        resume_external_backend: bool = False,
     ) -> SpawnedProcessHandle:
         member_name = ctx.member_name
         team_logger.info("[{}] spawning teammate: {}", self._configurator.member_name or "?", member_name)
@@ -125,11 +128,18 @@ class SpawnManager:
             # third-party CLI binary is the subprocess driven via stdin.
             from openjiuwen.agent_teams.spawn.external_cli_spawn import external_cli_spawn
 
+            team_backend = self._configurator.team_backend
+            if team_backend is not None:
+                hitt_enabled = team_backend.hitt_enabled()
+            else:
+                hitt_enabled = False
             handle = await external_cli_spawn(
-                team_agent=self._get_team_agent(),
+                spec=spec,
                 ctx=ctx,
+                hitt_enabled=hitt_enabled,
                 initial_message=initial_message,
                 session_id=get_session_id() or session,
+                resume_external_backend=resume_external_backend,
             )
             self._wire_inprocess_chunk_forward(handle)
         elif spec and spec.spawn_mode == "inprocess":
@@ -265,6 +275,7 @@ class SpawnManager:
                     initial_message=initial_message,
                     session=get_session_id() or None,
                     spawn_config=spawn_config,
+                    resume_external_backend=True,
                 )
                 await self.publish_restart_event(member_name, attempt)
                 team_logger.info("Teammate {} restarted successfully", member_name)
@@ -354,7 +365,9 @@ class SpawnManager:
         return TeamRuntimeContext(
             role=role,
             member_name=teammate.member_name,
-            persona=teammate.desc or "",
+            display_name=teammate.display_name or "",
+            desc=teammate.desc or "",
+            prompt=teammate.prompt or "",
             team_spec=ctx.team_spec if ctx else None,
             messager_config=self._configurator.build_member_messager_config(teammate.member_name),
             db_config=ctx.db_config if ctx else None,

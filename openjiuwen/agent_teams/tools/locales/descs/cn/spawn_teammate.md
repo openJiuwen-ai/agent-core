@@ -18,7 +18,7 @@
   - 跨团队 / 跨成员的机密策略与对照关系
 - 把"对该成员的私下叮嘱""仅他需要知道的边界与约束"统一放进 `prompt`。`desc` 只描述**让全员都该知道的角色身份**，让其他成员可以据此向他派任务 / 请协助。
 
-必须先调用 build_team 组建团队，才能调用 spawn_teammate。调用顺序：build_team → create_task → spawn_teammate → send_message。spawn_teammate 只创建成员记录（状态为 UNSTARTED），首次调用 send_message 时系统会自动拉起所有未启动成员。成员完成后调用 shutdown_member 关闭。若 member_name 已存在，创建会失败，请使用不冲突的名称。
+必须先调用 build_team 组建团队，才能调用 spawn_teammate。调用顺序：build_team → spawn_teammate → create_task → 让成员开工；**成员先于任务存在**，任务才能落到具体的人头上。这个顺序**按批次成立而非全局只走一遍**——可以先建一名调研成员摸清背景，再据此补齐其余成员和任务。spawn_teammate 只创建成员记录（状态为 UNSTARTED），何时被拉起取决于团队的调度模式（见系统提示词《任务下发与获取》一节）。成员完成后调用 shutdown_member 关闭。若 member_name 已存在，创建会失败，请使用不冲突的名称。
 
 **desc 与 prompt 都是长期内容，不绑定到具体任务**。desc 描述这个角色"是谁、能做什么、负责哪类工作"，会被全员读到；prompt 描述这个角色"工作时长期遵循什么约定"（如代码风格、命名规范、协作习惯），仅本人可见。任何具体任务的目标、ID、名称、清单都不要写入这两个字段——这些信息通过 create_task / send_message 在每次任务时下发。同时也不要把 prompt 写成"开始工作""查看任务列表"这类空泛启动语句。
 

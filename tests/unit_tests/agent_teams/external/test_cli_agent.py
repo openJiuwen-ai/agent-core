@@ -13,6 +13,7 @@ from openjiuwen.agent_teams.external.cli_agent.adapters import (
     available_adapters,
     build_adapter,
 )
+from openjiuwen.agent_teams.external.cli_agent.codex.options import codex_mcp_config_overrides
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.harness import TeamHarness
@@ -21,25 +22,6 @@ from openjiuwen.core.common.exception.errors import BaseError
 
 
 # ---- adapters -------------------------------------------------------------
-
-
-@pytest.mark.level0
-def test_build_adapter_claude_stream_json():
-    adapter = build_adapter("claude")
-    cmd = adapter.build_command()
-    assert cmd[0] == "claude"
-    assert "--dangerously-skip-permissions" in cmd
-    framed = adapter.format_input("hello")
-    assert '"type": "user"' in framed
-    assert '"content": "hello"' in framed
-
-
-@pytest.mark.level0
-def test_claude_completion_on_result_json():
-    adapter = build_adapter("claude")
-    assert adapter.is_turn_complete('{"type": "result", "subtype": "success"}')
-    assert not adapter.is_turn_complete('{"type": "assistant"}')
-    assert not adapter.is_turn_complete("plain text")
 
 
 @pytest.mark.level0
@@ -52,8 +34,8 @@ def test_generic_adapter_marker_completion():
 
 @pytest.mark.level0
 def test_build_adapter_command_override():
-    adapter = build_adapter("claude", command_override=("/usr/local/bin/claude", "-x"))
-    assert adapter.build_command() == ["/usr/local/bin/claude", "-x"]
+    adapter = build_adapter("generic", command_override=("agent", "-x"))
+    assert adapter.build_command() == ["agent", "-x"]
 
 
 @pytest.mark.level1
@@ -65,32 +47,25 @@ def test_build_adapter_unknown_raises():
 @pytest.mark.level1
 def test_available_adapters_includes_known_clis():
     names = set(available_adapters())
-    assert {"claude", "codex", "openclaw", "hermes", "generic"} <= names
+    assert {"codex-exec", "openclaw", "hermes", "generic"} <= names
+    assert "claude" not in names
+    assert "codex" not in names
 
 
 @pytest.mark.level0
-def test_claude_mcp_launch_args_use_mcp_config_flag():
-    adapter = build_adapter("claude")
-    args = adapter.mcp_launch_args(server_name="openjiuwen-team", server_command=("openjiuwen-team-mcp",))
-    assert args[0] == "--mcp-config"
-    import json
-
-    config = json.loads(args[1])
-    assert config["mcpServers"]["openjiuwen-team"]["command"] == "openjiuwen-team-mcp"
-    assert config["mcpServers"]["openjiuwen-team"]["args"] == []
-
-
-@pytest.mark.level0
-def test_codex_mcp_launch_args_use_config_override():
-    adapter = build_adapter("codex")
-    args = adapter.mcp_launch_args(server_name="openjiuwen-team", server_command=("openjiuwen-team-mcp", "--flag"))
-    assert args[0] == "-c"
+def test_codex_mcp_config_overrides_use_sdk_config_shape():
+    overrides = codex_mcp_config_overrides(
+        server_name="openjiuwen-team",
+        server_command=("openjiuwen-team-mcp", "--flag"),
+        default_tools_approval_mode="approve",
+    )
     # Hyphen in the server name is normalised to an underscore for the TOML key.
-    assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' == args[1]
-    assert 'mcp_servers.openjiuwen_team.args=["--flag"]' == args[3]
-    assert 'mcp_servers.openjiuwen_team.env_vars=["OPENJIUWEN_TEAM_JOIN"]' in args
-    assert "mcp_servers.openjiuwen_team.startup_timeout_sec=120" in args
-    assert "mcp_servers.openjiuwen_team.required=true" in args
+    assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' == overrides[0]
+    assert 'mcp_servers.openjiuwen_team.args=["--flag"]' == overrides[1]
+    assert 'mcp_servers.openjiuwen_team.env_vars=["OPENJIUWEN_TEAM_JOIN"]' in overrides
+    assert "mcp_servers.openjiuwen_team.startup_timeout_sec=120" in overrides
+    assert "mcp_servers.openjiuwen_team.required=true" in overrides
+    assert 'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"' in overrides
 
 
 @pytest.mark.level1
@@ -519,8 +494,12 @@ def test_team_harness_exposes_member_runtime_surface():
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stdin_pipe_injector_writes_newline_framed():
+    import sys
+
     proc = await asyncio.create_subprocess_exec(
-        "cat",
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.write(sys.stdin.read())",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
     )

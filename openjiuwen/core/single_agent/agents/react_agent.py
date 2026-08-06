@@ -14,7 +14,6 @@ import hashlib
 import json
 import asyncio
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -46,6 +45,11 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
     SystemMessage
 )
+from openjiuwen.core.foundation.kv_cache import (
+    KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
+    KVCacheAffinityConfig,
+)
+from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
@@ -64,6 +68,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
     ModelCallInputs,
+    UserMessageInputs,
     rail,
 )
 from openjiuwen.core.single_agent.prompts.builder import (
@@ -77,6 +82,12 @@ _SKILLS_SECTION = "legacy_skills"
 _IDENTITY_SECTION_PRIORITY = 10
 _SKILLS_SECTION_PRIORITY = 90
 _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
+# Above this, the per-stage breakdown of invoke preparation is reported at INFO
+# so a slow start shows up without having to enable debug logging. Preparation
+# loads interruption state and builds the prompt, which is normal work worth a
+# few hundred milliseconds; the bar sits above that so an INFO line means a
+# genuine stall. Kept in step with ``SLOW_RAIL_CHAIN_SECONDS``.
+SLOW_INVOKE_PREP_SECONDS = 1.0
 _IMAGE_INPUT_UNSUPPORTED_ERROR_CODES = (
     "invalid_image_input",
     "image_input_unsupported",
@@ -236,6 +247,10 @@ class ReActAgentConfig(BaseModel):
         ),
         description="Context engine configuration"
     )
+    kv_cache_affinity_config: KVCacheAffinityConfig = Field(
+        default_factory=KVCacheAffinityConfig,
+        description="KV cache release and affinity configuration",
+    )
 
     context_processors: List[Tuple[str, BaseModel]] = Field(
         default=None,
@@ -315,11 +330,10 @@ class ReActAgentConfig(BaseModel):
             max_context_message_num: Optional[int] = None,
             default_window_round_num: Optional[int] = None,
             enable_reload: bool = False,
-            enable_kv_cache_release: bool = False,
     ) -> 'ReActAgentConfig':
         """
         Configure the context-engine parameters that control how conversation history
-        is truncated, offloaded and reloaded.
+        is truncated and offloaded.
 
         Parameters
         ----------
@@ -336,16 +350,24 @@ class ReActAgentConfig(BaseModel):
             were previously off-loaded (via hints such as `[[OFFLOAD:...]]`).
             Enable this if you want the model to retrieve long content on demand;
             disable it to keep hints as plain text.
-        enable_kv_cache_release : bool, default False
-            Whether to release GPU KV-cache for offloaded messages via the
-            inference backend (e.g. InferenceAffinity).  Matches
-            ``ContextEngineConfig.enable_kv_cache_release``.
         """
         self.context_engine_config = ContextEngineConfig(
             max_context_message_num=max_context_message_num,
             default_window_round_num=default_window_round_num,
             enable_reload=enable_reload,
+        )
+        return self
+
+    def configure_kv_cache_affinity(
+            self,
+            *,
+            enable_kv_cache_release: bool = False,
+            enable_kv_cache_affinity: bool = False,
+    ) -> 'ReActAgentConfig':
+        """Configure provider-side KV-cache release or Ascend affinity."""
+        self.kv_cache_affinity_config = KVCacheAffinityConfig(
             enable_kv_cache_release=enable_kv_cache_release,
+            enable_kv_cache_affinity=enable_kv_cache_affinity,
         )
         return self
 
@@ -513,11 +535,41 @@ class ReActAgent(BaseAgent):
         super().__init__(card)
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
-        self._kv_release_warning_logged: bool = False
+        self._kv_cache_model_call_hook = kv_cache_hooks.KVCacheModelCallHook()
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
         return ReActAgentConfig()
+
+    @staticmethod
+    def _resolve_context_engine_model_name(config: ReActAgentConfig) -> str:
+        candidates = (
+            getattr(config, "model_name", None),
+            getattr(getattr(config, "model_config_obj", None), "model_name", None),
+            getattr(getattr(config, "model_client_config", None), "model_name", None),
+        )
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
+
+    @classmethod
+    def _with_context_engine_model_name(cls, config: ReActAgentConfig) -> ReActAgentConfig:
+        context_config = config.context_engine_config
+        if getattr(context_config, "model_name", None):
+            return config
+
+        model_name = cls._resolve_context_engine_model_name(config)
+        if not model_name:
+            return config
+
+        return config.model_copy(
+            update={
+                "context_engine_config": context_config.model_copy(
+                    update={"model_name": model_name}
+                )
+            }
+        )
 
     def configure(self, config: ReActAgentConfig) -> 'BaseAgent':
         """Set configuration
@@ -532,15 +584,19 @@ class ReActAgent(BaseAgent):
             After config update, context_engine and memory_scope
             will be updated accordingly
         """
+        config = self._with_context_engine_model_name(config)
         old_config = self._config
         self._config = config
+        kv_config_changed = old_config.kv_cache_affinity_config != config.kv_cache_affinity_config
 
         # Reset LLM if model config changed
         if (old_config.model_provider != config.model_provider or
                 old_config.api_key != config.api_key or
                 old_config.api_base != config.api_base):
             self._llm = None
-            self._kv_release_warning_logged = False
+            self._kv_cache_model_call_hook.reset_warnings()
+        elif kv_config_changed:
+            self._kv_cache_model_call_hook.reset_warnings()
 
         # Get sys_operation from Runner.resource_mgr if sys_operation_id is configured
         sys_operation = None
@@ -671,6 +727,61 @@ class ReActAgent(BaseAgent):
             priority=_SKILLS_SECTION_PRIORITY,
         )
 
+    async def _admit_user_message(
+            self,
+            ctx: AgentCallbackContext,
+            context: ModelContext,
+            parts: List[str],
+            *,
+            source: str,
+            prefix: str = "",
+    ) -> None:
+        """Join one batch of consumed inputs into the conversation, rails first.
+
+        Every input the agent consumes -- a new round's query, the follow-ups
+        that queued up while it was busy, a batch of steering messages, a
+        resumed workflow interrupt -- lands here. ON_USER_MESSAGE fires on the
+        list, *before* it is joined, so a rail still sees the individual inputs
+        and can drop a whole one that a later entry supersedes. This is the one
+        moment a rail can treat them as *inputs*: joined and written, they are
+        ordinary history, subject to compaction, and can no longer be located by
+        position.
+
+        Args:
+            ctx: Callback context; ``inputs`` carries the part list for rails.
+            context: Model context the joined message is written into.
+            parts: The queued inputs, oldest first. Handed to rails as a mutable
+                list and consumed afterwards, so rails may reorder, drop or
+                prepend entries.
+            source: Which input path this came from (see UserMessageInputs).
+            prefix: Literal text put in front of the joined body (the steering
+                marker). It is not a part, so a rail prepending at index 0
+                lands after it rather than displacing it.
+        """
+        previous_inputs = ctx.inputs
+        ctx.inputs = UserMessageInputs(parts=parts, source=source)
+        try:
+            await ctx.fire(AgentCallbackEvent.ON_USER_MESSAGE)
+        finally:
+            ctx.inputs = previous_inputs
+        if not parts:
+            return
+        body = "\n".join(parts)
+        await context.add_messages(UserMessage(content=f"{prefix}{body}"))
+
+    def _extract_user_parts(self, ctx: AgentCallbackContext, user_input: Any) -> List[str]:
+        """Normalize a round's query into the input list ON_USER_MESSAGE sees.
+
+        A round may be driven by several inputs that queued up together; the
+        caller hands those over unjoined so rails still see the seams. The
+        query itself is the same content already joined, and is the single
+        input in every other case.
+        """
+        parts = ctx.extra.get("_input_parts")
+        if parts:
+            return [str(part) for part in parts]
+        return [self._extract_user_text(user_input)]
+
     def _build_preview_messages(self, context: ModelContext) -> List[Any]:
         """Build a lightweight preview of the current model input messages."""
         preview_messages = copy.deepcopy(context.get_messages())
@@ -714,6 +825,31 @@ class ReActAgent(BaseAgent):
 
         return ai_message
 
+    def _build_context_window_kwargs(
+            self,
+            ctx: AgentCallbackContext,
+            final_system: List[SystemMessage],
+    ) -> dict:
+        """Build the final ContextWindow inputs after model-call rails run."""
+        context_window_kwargs = {
+            "system_messages": final_system,
+            "tools": ctx.inputs.tools if ctx.inputs.tools else None,
+        }
+
+        prompt_attachment_manager = getattr(self, "prompt_attachment_manager", None)
+        make_window_mutator = getattr(prompt_attachment_manager, "make_window_mutator", None)
+        if callable(make_window_mutator):
+            session_id = (
+                ctx.session.get_session_id()
+                if ctx.session is not None
+                else ctx.context.session_id()
+            )
+            context_window_kwargs["window_mutators"] = [
+                make_window_mutator(session_id)
+            ]
+
+        return context_window_kwargs
+
     @rail(
         before=AgentCallbackEvent.BEFORE_MODEL_CALL,
         after=AgentCallbackEvent.AFTER_MODEL_CALL,
@@ -736,55 +872,17 @@ class ReActAgent(BaseAgent):
         """
         # --- Finalize system message and context window (post-rails) ---
         final_system = [SystemMessage(content=self.prompt_builder.build())]
-
-        # KV cache release:
-        # When ContextEngineConfig.enable_kv_cache_release=True and the current
-        # model supports release (InferenceAffinity), pass `model=llm` into
-        # get_context_window() so KVCacheManager can decide whether/when
-        # to call release().
         llm = self._get_llm()
-
-        ce_config = self._config.context_engine_config or ContextEngineConfig()
-        enable_kv_release = getattr(ce_config, "enable_kv_cache_release", False)
-        supports_kv_release = False
-        supports_fn = getattr(llm, "supports_kv_cache_release", None)
-        if callable(supports_fn):
-            supports_kv_release = bool(supports_fn())
-
-        # When KV cache release is enabled but the LLM does not support it,
-        # log a one-time warning so users understand the setting is ineffective.
-        if (
-                enable_kv_release
-                and not supports_kv_release
-                and not self._kv_release_warning_logged
-        ):
-            logger.warning(
-                "ContextEngineConfig.enable_kv_cache_release is True, "
-                "but the current LLM does not support KV cache release; "
-                "KV cache release will not take effect."
-            )
-            self._kv_release_warning_logged = True
-
-        context_window_kwargs = {
-            "system_messages": final_system,
-            "tools": ctx.inputs.tools if ctx.inputs.tools else None,
-        }
-        prompt_attachment_manager = getattr(self, "prompt_attachment_manager", None)
-        make_window_mutator = getattr(prompt_attachment_manager, "make_window_mutator", None)
-        if callable(make_window_mutator):
-            session_id = (
-                ctx.session.get_session_id()
-                if ctx.session is not None
-                else ctx.context.session_id()
-            )
-            context_window_kwargs["window_mutators"] = [
-                make_window_mutator(session_id)
-            ]
-        if enable_kv_release and supports_kv_release:
-            context_window_kwargs["model"] = llm
+        kv_runtime = self._kv_cache_model_call_hook.resolve_runtime(
+            llm,
+            self._config.kv_cache_affinity_config,
+        )
 
         context_window = await ctx.context.get_context_window(
-            **context_window_kwargs
+            **self._build_context_window_kwargs(
+                ctx,
+                final_system,
+            )
         )
         # Update ctx.inputs: after_model_call hooks inspect these to see
         # what was actually sent. (LLM call uses them too, but could
@@ -796,16 +894,29 @@ class ReActAgent(BaseAgent):
         # --- End context window finalization ---
 
         session = ctx.session
+        session_id, parent_session_id = self._kv_cache_model_call_hook.resolve_lineage(
+            kv_runtime,
+            session,
+            ctx.context.session_id(),
+        )
         image_input_present = self._messages_contain_image_input(ctx.inputs.messages)
 
-        # Build extra kwargs for LLM calls when KV cache release is enabled.
-        extra_kwargs: dict = {}
-        build_kwargs_fn = getattr(llm, "build_kv_cache_invoke_kwargs", None)
-        if callable(build_kwargs_fn):
-            extra_kwargs.update(build_kwargs_fn(
-                session=session,
-                enable_kv_cache_release=enable_kv_release,
-            ))
+        await self._kv_cache_model_call_hook.handle_context_window_change(
+            runtime=kv_runtime,
+            llm=llm,
+            context=ctx.context,
+            context_window=context_window,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            model_name=self._config.model_name,
+        )
+        extra_kwargs = self._kv_cache_model_call_hook.build_invoke_kwargs(
+            runtime=kv_runtime,
+            llm=llm,
+            session=session,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+        )
 
         if self._config.llm_return_token_ids:
             extra_kwargs["return_token_ids"] = True
@@ -1262,13 +1373,14 @@ class ReActAgent(BaseAgent):
 
         for tool_result in tool_results:
             for item in ReActAgent._iter_multimodal_image_items(tool_result):
+                source = str(item.get("source") or "tool")
                 source_path = str(item.get("source_path") or "unknown image")
                 data_url = item["data_url"]
                 loaded_paths.append(source_path)
                 content.append(
                     {
                         "type": "text",
-                        "text": f"Image loaded from read_file: {source_path}",
+                        "text": f"Image loaded from {source}: {source_path}",
                     }
                 )
                 content.append(
@@ -1645,8 +1757,18 @@ class ReActAgent(BaseAgent):
         need_cleanup = False
         if session is None:
             session_id = conversation_id or "default_session"
+            parent_session_id = (
+                inputs.get("parent_session_id")
+                if isinstance(inputs, dict)
+                else None
+            )
+            session_kwargs = {}
+            if parent_session_id:
+                session_kwargs["envs"] = {
+                    KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,
+                }
             session = create_agent_session(
-                session_id=session_id, card=self.card
+                session_id=session_id, card=self.card, **session_kwargs
             )
             await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
             need_cleanup = True
@@ -1665,12 +1787,29 @@ class ReActAgent(BaseAgent):
             _sq = inputs.get("_steering_queue")
             if _sq is not None:
                 ctx.bind_steering_queue(_sq)
+            # Harness-driven continuation (NativeHarness.resume): continue the
+            # loop over the existing context, without a new user turn.
+            if inputs.get("_resume_continuation"):
+                ctx.extra["_resume_continuation"] = True
+            # Several inputs queued up together and drive this one round. The
+            # query is already their joined text; these are the same content
+            # unjoined, so ON_USER_MESSAGE rails still see the seams.
+            if inputs.get("_input_parts"):
+                ctx.extra["_input_parts"] = list(inputs["_input_parts"])
 
         try:
             async with ctx.lifecycle(AgentCallbackEvent.BEFORE_INVOKE, AgentCallbackEvent.AFTER_INVOKE):
                 user_input = ctx.inputs.query
-                if not user_input:
+                # A continuation round carries no new query: it picks the
+                # preserved context of a paused round back up in place.
+                resume_continuation = bool(ctx.extra.get("_resume_continuation"))
+                if not user_input and not resume_continuation:
                     raise ValueError("Input must contain 'query'")
+
+                # Invoke preparation runs between BEFORE_INVOKE and the first
+                # ReAct iteration with no events of its own; stage timings turn
+                # that window into something a slow-start report can name.
+                prep_started_at = time.monotonic()
 
                 hitl_state = self._hitl_handler.load(session)
                 interruption_state = hitl_state or self._load_interruption_state(session)
@@ -1682,8 +1821,11 @@ class ReActAgent(BaseAgent):
                     # Restore original query so MemoryRail.after_invoke writes the right UserMessage
                     ctx.extra["_original_query"] = interruption_state.original_query
 
+                state_loaded_at = time.monotonic()
+
                 context = await self._init_context(session)
                 ctx.context = context
+                context_ready_at = time.monotonic()
 
                 rendered_system_prompt = self._build_rendered_system_prompt(
                     inputs,
@@ -1694,9 +1836,27 @@ class ReActAgent(BaseAgent):
                     rendered_system_prompt,
                     priority=_IDENTITY_SECTION_PRIORITY,
                 )
+                system_prompt_ready_at = time.monotonic()
+
                 await self._update_skill_prompt_builder_section(rendered_system_prompt)
+                skills_ready_at = time.monotonic()
 
                 tools = await self.ability_manager.list_tool_info()
+                tools_ready_at = time.monotonic()
+
+                prep_elapsed = tools_ready_at - prep_started_at
+                if prep_elapsed >= SLOW_INVOKE_PREP_SECONDS:
+                    logger.info(
+                        "[InvokePrep] slow invoke preparation, total_ms=%.1f "
+                        "(interruption_state=%.1f context=%.1f system_prompt=%.1f "
+                        "skills=%.1f tools=%.1f)",
+                        prep_elapsed * 1000,
+                        (state_loaded_at - prep_started_at) * 1000,
+                        (context_ready_at - state_loaded_at) * 1000,
+                        (system_prompt_ready_at - context_ready_at) * 1000,
+                        (skills_ready_at - system_prompt_ready_at) * 1000,
+                        (tools_ready_at - skills_ready_at) * 1000,
+                    )
 
                 start_iteration = 0
                 if interruption_state is not None:
@@ -1710,7 +1870,12 @@ class ReActAgent(BaseAgent):
                         start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
                     else:
                         # Workflow Interrupt
-                        await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                        await self._admit_user_message(
+                            ctx,
+                            context,
+                            [self._extract_user_text(user_input)],
+                            source="resume",
+                        )
                         resume_result = await self._handle_resume(
                             interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
                         )
@@ -1718,8 +1883,13 @@ class ReActAgent(BaseAgent):
                             pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
                         else:
                             start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
-                else:
-                    await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
+                elif not resume_continuation:
+                    await self._admit_user_message(
+                        ctx,
+                        context,
+                        self._extract_user_parts(ctx, user_input),
+                        source="query",
+                    )
 
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
@@ -1739,14 +1909,12 @@ class ReActAgent(BaseAgent):
                         # before the next model call.
                         steering = ctx.drain_steering()
                         if steering:
-                            combined = "\n".join(steering)
-                            await context.add_messages(
-                                UserMessage(
-                                    content=(
-                                        f"[STEERING] "
-                                        f"{combined}"
-                                    )
-                                )
+                            await self._admit_user_message(
+                                ctx,
+                                context,
+                                list(steering),
+                                source="steering",
+                                prefix="[STEERING] ",
                             )
 
                         ai_message = await self._call_model(
@@ -1834,9 +2002,28 @@ class ReActAgent(BaseAgent):
         except asyncio.CancelledError:
             # 外部取消（非工具级 CancelledError）。
             # Fix 1 确保工具级 CancelledError 在 asyncio.gather 中被捕获并转为
-            # ToolMessage，不会传播到这里。此处只清理当前轮次的消息（工具调用请求 +
-            # 部分结果），保留历史对话上下文（with_history=False）。
-            await self.clear_context_messages(session_id=session.get_session_id())
+            # ToolMessage，不会传播到这里。
+            # 只丢弃本轮残缺的 tool_call / 部分 ToolMessage，保留 UserMessage 与
+            # 已完成的 tool 对，以及历史对话（with_history=False）。
+            # 若整轮 clear 会把用户问题一并抹掉，下一轮同 session 就丢上下文。
+            try:
+                await asyncio.shield(self._cleanup_context_on_cancel(session))
+            except asyncio.CancelledError:
+                logger.info(
+                    "Context cleanup was shielded but the caller was cancelled again for session %s",
+                    session.get_session_id(),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to cleanup context on cancel for session %s",
+                    session.get_session_id(),
+                    exc_info=True,
+                )
+            # 上面的清理只改了内存 buffer，必须同步写回 session state。
+            # 否则下一轮 create_context 会用取消前的旧快照 rebuild 整个
+            # buffer，把本轮保留的 UserMessage 覆盖掉（外部传入 session 时
+            # need_cleanup=False，下面的 finally 不会帮忙保存）。
+            await self._save_contexts_on_cancel(session)
             raise  # Re-raise to propagate cancellation signal
         finally:
             if need_cleanup:
@@ -1913,8 +2100,18 @@ class ReActAgent(BaseAgent):
             else:
                 conversation_id = None
             session_id = conversation_id or "default_session"
+            parent_session_id = (
+                inputs.get("parent_session_id")
+                if isinstance(inputs, dict)
+                else None
+            )
+            session_kwargs = {}
+            if parent_session_id:
+                session_kwargs["envs"] = {
+                    KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,
+                }
             session = create_agent_session(
-                session_id=session_id, card=self.card
+                session_id=session_id, card=self.card, **session_kwargs
             )
             need_cleanup = True
 
@@ -1945,6 +2142,9 @@ class ReActAgent(BaseAgent):
                     await self._write_invoke_result_to_stream(
                         final_result, session
                     )
+            except asyncio.CancelledError:
+                await self._save_contexts_on_cancel(session)
+                raise
             except Exception as e:
                 logger.error(f"ReActAgent stream error: {e}", exc_info=True)
                 error_result = {"output": str(e), "result_type": "error"}
@@ -2007,6 +2207,89 @@ class ReActAgent(BaseAgent):
 
         await context.clear_messages(with_history=False)
         return True
+
+    async def _cleanup_context_on_cancel(self, session: Session) -> None:
+        """Keep the cancelled turn's user query; drop incomplete tool debris.
+
+        Unlike ``clear_context_messages``, this preserves the current-turn
+        ``UserMessage`` (and any fully completed tool pairs) so the next turn
+        in the same session still sees what the user asked before cancelling.
+        """
+        session_id = session.get_session_id()
+        context = self.context_engine.get_context(session_id=session_id)
+        if context is None:
+            return
+
+        current = context.get_messages(with_history=False)
+        if not current:
+            return
+
+        kept = self._sanitize_cancelled_turn_messages(current)
+        context.set_messages(kept, with_history=False)
+
+    async def _save_contexts_on_cancel(self, session: Session) -> None:
+        """Persist the cleaned context while the caller propagates cancellation."""
+        try:
+            await asyncio.shield(self.context_engine.save_contexts(session))
+        except asyncio.CancelledError:
+            logger.info(
+                "Context save was shielded but the caller was cancelled again for session %s",
+                session.get_session_id(),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to save context on cancel for session %s",
+                session.get_session_id(),
+                exc_info=True,
+            )
+
+    @staticmethod
+    def _sanitize_cancelled_turn_messages(messages: List[Any]) -> List[Any]:
+        """Return a LLM-safe prefix of the cancelled turn's messages.
+
+        Keeps user text and completed assistant/tool pairs. Drops incomplete
+        tool_call blocks. Ensures the turn does not end on a bare UserMessage
+        by appending a short cancelled marker when needed.
+        """
+        kept: List[Any] = []
+        i = 0
+        n = len(messages)
+        while i < n:
+            msg = messages[i]
+            if isinstance(msg, AssistantMessage) and msg.tool_calls:
+                tool_ids = [
+                    getattr(tc, "id", None) for tc in msg.tool_calls if getattr(tc, "id", None)
+                ]
+                needed = set(tool_ids)
+                found: Dict[str, ToolMessage] = {}
+                j = i + 1
+                while j < n and isinstance(messages[j], ToolMessage):
+                    tool_msg = messages[j]
+                    found[tool_msg.tool_call_id] = tool_msg
+                    j += 1
+                if needed and needed <= set(found.keys()):
+                    kept.append(msg)
+                    for tool_id in tool_ids:
+                        kept.append(found[tool_id])
+                    i = j
+                else:
+                    # Incomplete tool block: drop assistant + partial tools.
+                    i = j
+                continue
+
+            if isinstance(msg, ToolMessage):
+                # Orphan tool result without a matching assistant tool_calls.
+                i += 1
+                continue
+
+            kept.append(msg)
+            i += 1
+
+        if kept and isinstance(kept[-1], UserMessage):
+            kept.append(
+                AssistantMessage(content="[Request cancelled by user]")
+            )
+        return kept
 
 
 __all__ = [

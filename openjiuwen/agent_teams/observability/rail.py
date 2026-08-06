@@ -58,7 +58,6 @@ from openjiuwen.agent_teams.observability.span_context import (
     get_current_agent_span,
     set_current_agent_span,
     get_team_span,
-    _llm_span_stack,
     _tool_span_map,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -203,6 +202,20 @@ class ObservabilityRail(DeepAgentRail):
             member_name = self._resolve_member_name(agent)
             team_name = getattr(agent, "team_name", "")
 
+            team_span = get_team_span()
+            if team_span is None:
+                if team_name:
+                    team_logger.warning("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
+                return
+            if not team_span.is_recording():
+                team_logger.warning(
+                    "RAIL.before_task_iteration: team_span ENDED! name={} trace_id={:032x} "
+                    "span_id={:016x} member={} iteration={}",
+                    team_span.name, team_span.context.trace_id, team_span.context.span_id,
+                    member_name, iteration,
+                )
+                return
+
             # Get session_id from ContextVar (no agent attribute for this)
             session_id = ""
             try:
@@ -211,23 +224,10 @@ class ObservabilityRail(DeepAgentRail):
             except Exception as exc:
                 team_logger.warning("rail: failed to get session_id: {}", exc)
 
-            team_logger.info(
+            team_logger.debug(
                 "RAIL.before_task_iteration: member={} iteration={} ctx_id={}",
                 member_name, iteration, id(ctx),
             )
-
-            team_span = get_team_span()
-            if team_span is None:
-                team_logger.error("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
-                return
-            if not team_span.is_recording():
-                team_logger.error(
-                    "RAIL.before_task_iteration: team_span ENDED! name={} trace_id={:032x} "
-                    "span_id={:016x} member={} iteration={}",
-                    team_span.name, team_span.context.trace_id, team_span.context.span_id,
-                    member_name, iteration,
-                )
-                return
 
             if AgentSpanScope.current(ctx) is not None:
                 old = AgentSpanScope.current(ctx).span
@@ -279,7 +279,7 @@ class ObservabilityRail(DeepAgentRail):
             agent_ctx = set_span_in_context(span, otel_context.get_current())
             otel_context.attach(agent_ctx)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: agent span opened: agent.{}.task_iteration.{} "
                 "span_id={:016x} trace_id={:032x} parent_span_id={:016x}",
                 member_label, iteration,
@@ -306,7 +306,7 @@ class ObservabilityRail(DeepAgentRail):
             if scope is None:
                 return
 
-            team_logger.info(
+            team_logger.debug(
                 "RAIL.after_task_iteration: ctx_id={} name={} span_id={:016x}",
                 id(ctx), scope.span.name, scope.span.context.span_id,
             )
@@ -340,7 +340,7 @@ class ObservabilityRail(DeepAgentRail):
                         redacted = redact_completion(output_str, config) if config else output_str
                         team_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: agent span closed, member={}, has_output={}",
                 member_name, output is not None,
             )
@@ -383,6 +383,9 @@ class ObservabilityRail(DeepAgentRail):
 
             member_name = self._resolve_member_name(agent) or "unknown"
             team_name = getattr(agent, "team_name", "")
+
+            if not team_name:
+                return
 
             team_span = get_team_span()
             if team_span is None:
@@ -463,7 +466,7 @@ class ObservabilityRail(DeepAgentRail):
                 config=config,
             ).attach(ctx)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: invoke span opened (single-round fallback): agent.{} "
                 "span_id={:016x} trace_id={:032x} nested={}",
                 member_name, span.context.span_id, span.context.trace_id,
@@ -486,7 +489,7 @@ class ObservabilityRail(DeepAgentRail):
 
             scope.close(output=output, exception=ctx.exception)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: invoke span closed: name={} span_id={:016x}",
                 scope.span.name, scope.span.context.span_id,
             )
@@ -523,7 +526,9 @@ class ObservabilityRail(DeepAgentRail):
                 "(current member: {})",
                 prev_member, member_name,
             )
-            _llm_span_stack.set([])
+            # Clear the tool span ContextVar so the new member starts clean.
+            # LLM span stacks are now managed by ActiveSpanTracker per-task,
+            # so no ContextVar cleanup is needed for llm spans.
             _tool_span_map.set({})
         set_current_agent_span(None)
 
@@ -590,7 +595,6 @@ class ObservabilityRail(DeepAgentRail):
         span.set_attribute(AT_AGENT_ROLE, member_name or "")
         if team_name:
             span.set_attribute(AT_TEAM_ID, team_name)
-            span.set_attribute(AT_TEAM_NAME, team_name)
         if session_id:
             span.set_attribute(AT_SESSION_ID, session_id)
             span.set_attribute(LANGFUSE_SESSION_ID, session_id)

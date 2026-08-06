@@ -337,6 +337,64 @@ def test_configure_regular_config_mismatch_fails(tmp_path):
         )
 
 
+def test_configure_regular_trigger_config_mismatch_fails(tmp_path):
+    evolution_rail = SkillEvolutionRail(
+        _skills_dir(tmp_path),
+        llm=_mock_llm(),
+        model="dummy-model",
+        review_runtime=EvolutionReviewRuntime(),
+        signal_trigger=False,
+        review_trigger=False,
+    )
+
+    def _finder(types):
+        if SkillEvolutionRail in types:
+            return [evolution_rail]
+        return []
+
+    agent = _typed_agent(find_rails_by_type=_finder)
+
+    with pytest.raises(RuntimeError, match="signal_trigger"):
+        configure_skill_evolution(
+            agent,
+            skills_dir=_skills_dir(tmp_path),
+            llm=_mock_llm(),
+            model="dummy-model",
+            team=False,
+            review_runtime=evolution_rail._review_runtime,
+            signal_trigger=True,
+        )
+
+
+def test_configure_team_review_trigger_config_mismatch_fails(tmp_path):
+    evolution_rail = TeamSkillEvolutionRail(
+        _skills_dir(tmp_path),
+        llm=_mock_llm(),
+        model="dummy-model",
+        review_runtime=EvolutionReviewRuntime(),
+        signal_trigger=False,
+        review_trigger=False,
+    )
+
+    def _finder(types):
+        if TeamSkillEvolutionRail in types:
+            return [evolution_rail]
+        return []
+
+    agent = _typed_agent(find_rails_by_type=_finder)
+
+    with pytest.raises(RuntimeError, match="review_trigger"):
+        configure_skill_evolution(
+            agent,
+            skills_dir=_skills_dir(tmp_path),
+            llm=_mock_llm(),
+            model="dummy-model",
+            team=True,
+            review_runtime=evolution_rail._review_runtime,
+            review_trigger=True,
+        )
+
+
 def test_configure_regular_then_team_fails(tmp_path):
     evolution_rail = SkillEvolutionRail(
         _skills_dir(tmp_path),

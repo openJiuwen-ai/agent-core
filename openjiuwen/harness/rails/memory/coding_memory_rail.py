@@ -11,9 +11,10 @@
 
 import os
 import asyncio
-from typing import Optional, Set
+from typing import Dict, Optional
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.memory.lite.coding_memory_tool_context import CodingMemoryToolContext
 from openjiuwen.core.memory.lite.config import create_memory_settings
 from openjiuwen.core.single_agent.rail.base import (
@@ -80,7 +81,11 @@ class CodingMemoryRail(DeepAgentRail):
         self._prefetch_task: Optional[asyncio.Task] = None
         
         # 工具管理
-        self._owned_tool_names: Set[str] = set()
+        # Abilities this rail actually registered, mapped from tool name to the
+        # exact card that was stored. The name is the ability-manager key, while
+        # the card identity tells uninit whether this rail is still the owner or
+        # another rail has since taken the name over.
+        self._owned_tool_cards: Dict[str, ToolCard] = {}
         
         # SystemPromptBuilder 引用
         self.system_prompt_builder = None
@@ -119,7 +124,12 @@ class CodingMemoryRail(DeepAgentRail):
         """
         # 注销工具（参考 MemoryRail 的清理方式）
         if hasattr(agent, "ability_manager"):
-            for tool_name in list(self._owned_tool_names):
+            for tool_name, tool_card in list(self._owned_tool_cards.items()):
+                if agent.ability_manager.get(tool_name) is not tool_card:
+                    # Another rail re-registered the name after this rail did
+                    # and now owns both the card and the live instance; tearing
+                    # it down here would unregister that rail's tool.
+                    continue
                 try:
                     agent.ability_manager.remove_ability(tool_name)
                 except Exception as exc:
@@ -128,7 +138,7 @@ class CodingMemoryRail(DeepAgentRail):
                         f"from ability_manager: {exc}"
                     )
 
-        self._owned_tool_names.clear()
+        self._owned_tool_cards.clear()
         self._manager_initialized = False
         self._tool_ctx = None
         
@@ -188,7 +198,7 @@ class CodingMemoryRail(DeepAgentRail):
                     # 按 stateless 决定 id 是否限定 agent。
                     result = agent.ability_manager.add_ability(tool_card, tool)
                     if result.added:
-                        self._owned_tool_names.add(tool_card.name)
+                        self._owned_tool_cards[tool_card.name] = tool_card
                         logger.info(f"[CodingMemoryRail] Registered tool: {tool_card.name}")
                 
                 except Exception as exc:

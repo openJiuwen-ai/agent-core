@@ -35,7 +35,7 @@ def _make_member_ctx(member_name: str) -> TeamRuntimeContext:
     return TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name=member_name,
-        persona="worker persona",
+        desc="worker persona",
         team_spec=team_spec,
     )
 
@@ -64,7 +64,7 @@ def test_spawn_payload_coordination_keys_are_frozen():
         "leader_member_name",
         "member_name",
         "role",
-        "persona",
+        "desc",
         "transport",
     }
     assert coordination["team_name"] == "t"
@@ -72,7 +72,7 @@ def test_spawn_payload_coordination_keys_are_frozen():
     assert coordination["leader_member_name"] == "leader"
     assert coordination["member_name"] == "worker_a"
     assert coordination["role"] == "teammate"
-    assert coordination["persona"] == "worker persona"
+    assert coordination["desc"] == "worker persona"
     assert coordination["transport"] is None  # no messager_config in this builder
     assert payload["query"] == "hello"
 

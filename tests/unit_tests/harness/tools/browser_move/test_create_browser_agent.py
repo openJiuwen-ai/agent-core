@@ -8,19 +8,27 @@ from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import (
     BROWSER_AGENT_FACTORY_NAME,
+    DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
     DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT,
+    DEFAULT_BROWSER_AGENT_TEMPERATURE,
     build_browser_agent_config,
     create_browser_agent,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserRunGuardrails,
     RuntimeSettings,
+)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    CORE_BROWSER_TOOL_NAMES,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserRuntimeRail,
@@ -94,6 +102,163 @@ def test_default_wiring_creates_one_agent() -> None:
     assert len(calls) == 1
 
 
+def test_browser_agent_registers_runtime_task_cleanup() -> None:
+    calls, fake = _capture_create_deep_agent()
+    ctx, runtime_cls, _build_tools, _tools = _patch_all(fake)
+    with ctx:
+        agent = create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    del calls
+    agent.register_task_resource_cleanup.assert_called_once_with(
+        runtime_cls.return_value.release_task_resources,
+        prepare=runtime_cls.return_value.acquire_task_resources,
+    )
+
+
+def test_browser_agent_uses_independent_sampling_config_and_large_budget() -> None:
+    parent_model = SimpleNamespace(
+        model_client_config=SimpleNamespace(),
+        model_config=ModelRequestConfig(
+            model="test-model",
+            temperature=0.95,
+        ),
+    )
+
+    spec = build_browser_agent_config(
+        parent_model,
+        settings=_fake_settings(),
+        language="en",
+    )
+
+    assert spec.model is not parent_model
+    assert spec.model.model_config.temperature == DEFAULT_BROWSER_AGENT_TEMPERATURE
+    assert parent_model.model_config.temperature == 0.95
+    assert spec.max_iterations == DEFAULT_BROWSER_AGENT_MAX_ITERATIONS
+
+
+def test_browser_agent_uses_independent_client_with_lower_temperature() -> None:
+    parent_model = object.__new__(Model)
+    parent_model.model_client_config = SimpleNamespace(client_provider="test")
+    parent_model.model_config = ModelRequestConfig(
+        model="test-model",
+        temperature=0.95,
+    )
+    parent_model._client = SimpleNamespace(model_config=parent_model.model_config)
+
+    def fake_model_init(self, model_client_config, model_config):
+        self.model_client_config = model_client_config
+        self.model_config = model_config
+        self._client = SimpleNamespace(model_config=model_config)
+
+    with patch.object(Model, "__init__", fake_model_init):
+        spec = build_browser_agent_config(
+            parent_model,
+            settings=_fake_settings(),
+            language="en",
+        )
+
+    assert spec.model is not parent_model
+    assert spec.model._client is not parent_model._client
+    assert spec.model._client.model_config.temperature == DEFAULT_BROWSER_AGENT_TEMPERATURE
+    assert parent_model._client.model_config.temperature == 0.95
+
+
+def test_browser_agent_prompt_enforces_convergent_browser_strategy() -> None:
+    english = DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["en"]
+    chinese = DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT["cn"]
+
+    assert "direct search-results URL" in english
+    assert "browser_batch_interact" in english
+    assert "observable condition waits" in english
+    assert "navigate directly to that URL" in english
+    assert "Stop immediately" in english
+    assert "直接构造搜索结果 URL" in chinese
+    assert "可观察条件" in chinese
+    assert "直接导航该 URL" in chinese
+    assert "立即结束" in chinese
+    assert "browser_run_code_unsafe" not in english
+    assert "browser_run_code_unsafe" not in chinese
+    assert "makes a browser_run_code tool visible" in english
+    assert "工具可见" in chinese
+
+
+def test_selected_capabilities_are_logged_and_forwarded_to_runtime(caplog) -> None:
+    settings = _fake_settings()
+    calls, fake = _capture_create_deep_agent()
+    ctx, mock_runtime_cls, _mock_build, _tools = _patch_all(fake)
+    caplog.set_level("INFO")
+
+    with ctx:
+        create_browser_agent(
+            _fake_model(),
+            settings=settings,
+            browser_capabilities=["pdf"],
+        )
+
+    del calls
+    allowed_tool_names = mock_runtime_cls.call_args.kwargs["allowed_tool_names"]
+    assert "browser_click" in allowed_tool_names
+    assert "browser_pdf_save" in allowed_tool_names
+    assert "browser_mouse_click_xy" not in allowed_tool_names
+    assert "requested=('pdf',)" in caplog.text
+    assert "selected=('core', 'pdf')" in caplog.text
+    assert "browser_pdf_save" in caplog.text
+
+
+def test_unknown_capability_error_lists_rejected_and_available_names() -> None:
+    with pytest.raises(ValueError) as exc_info:
+        create_browser_agent(
+            _fake_model(),
+            browser_capabilities=["not-a-capability"],
+        )
+
+    message = str(exc_info.value)
+    assert "Unsupported browser capabilities: not-a-capability" in message
+    assert (
+        "Available capabilities: core, advanced_code, unsafe_dev, pdf, vision, "
+        "devtools, config, network, storage, testing"
+    ) in message
+
+
+def test_default_factory_always_forwards_core_allowlist() -> None:
+    calls, fake = _capture_create_deep_agent()
+    ctx, mock_runtime_cls, _mock_build, _tools = _patch_all(fake)
+
+    with ctx:
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    del calls
+    assert mock_runtime_cls.call_args.kwargs["allowed_tool_names"] == CORE_BROWSER_TOOL_NAMES
+
+
+@pytest.mark.parametrize(
+    ("capability", "included", "excluded"),
+    [
+        ("advanced_code", "browser_run_code", "browser_run_code_unsafe"),
+        ("unsafe_dev", "browser_run_code_unsafe", "browser_run_code"),
+    ],
+)
+def test_factory_exposes_only_selected_run_code_variant(
+    capability: str,
+    included: str,
+    excluded: str,
+) -> None:
+    calls, fake = _capture_create_deep_agent()
+    ctx, mock_runtime_cls, _mock_build, _tools = _patch_all(fake)
+
+    with ctx:
+        create_browser_agent(
+            _fake_model(),
+            settings=_fake_settings(),
+            browser_capabilities=[capability],
+        )
+
+    del calls
+    allowed = mock_runtime_cls.call_args.kwargs["allowed_tool_names"]
+    assert included in allowed
+    assert excluded not in allowed
+
+
 def test_default_wiring_main_agent_card_is_browser_agent() -> None:
     calls, fake = _capture_create_deep_agent()
     with _patch_all(fake)[0]:
@@ -160,6 +325,9 @@ def test_default_wiring_windows_browser_probe_and_snapshot_results() -> None:
         "browser_snapshot",
     ]
     assert config.keep_last_k == 1
+    assert config.trim_size == 1000
+    assert config.min_offload_chars == 4096
+    assert config.small_result_trim_size == 800
 
 
 def test_caller_context_processor_rail_suppresses_injection() -> None:
@@ -181,6 +349,21 @@ def test_default_wiring_does_not_add_sys_operation_rail() -> None:
 
     rails = calls[0].get("rails", [])
     assert not any(type(rail).__name__ == "SysOperationRail" for rail in rails)
+
+
+def test_default_wiring_adds_scoped_offload_recall_without_filesystem_tools() -> None:
+    calls, fake = _capture_create_deep_agent()
+    with _patch_all(fake)[0]:
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    tool_names = [
+        getattr(getattr(tool, "card", None), "name", None)
+        for tool in calls[0].get("tools", [])
+    ]
+    assert "browser_recall_offload" in tool_names
+    assert "read_file" not in tool_names
+    assert "bash" not in tool_names
+    assert "powershell" not in tool_names
 
 
 def test_default_wiring_build_tools_called_with_runtime_instance() -> None:
@@ -219,6 +402,7 @@ def test_settings_forwarded_to_runtime_constructor() -> None:
         mcp_cfg=settings.mcp_cfg,
         guardrails=settings.guardrails,
         instance=settings.instance,
+        allowed_tool_names=CORE_BROWSER_TOOL_NAMES,
     )
 
 
@@ -284,7 +468,7 @@ def test_user_tools_are_merged_with_browser_tools() -> None:
 
     tool_cards = calls[0].get("tools", [])
     assert user_tool in tool_cards
-    assert len(tool_cards) == 4
+    assert len(tool_cards) == 5
 
 
 def test_build_browser_agent_config_uses_browser_factory() -> None:

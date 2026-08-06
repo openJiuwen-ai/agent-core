@@ -29,6 +29,7 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
+from openjiuwen.agent_teams.rails.elements import observability_dependency_installed
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
@@ -94,13 +95,18 @@ def _attach_observability_rail(spec: Any) -> Any:
     implements ``before_invoke``/``after_invoke`` precisely to cover this
     single-round path.
 
-    The "is observability initialized → build one rail" guard is shared
-    with ``_build_observability_rail`` via ``maybe_observability_rail``;
-    only the idempotent-append tail is specific to this sub-agent path.
-    Returns the spec unchanged when observability is off or a rail is
-    already attached. Confined to the team package — the harness sub-agent
-    builders are not modified.
+    Both guards are shared with ``build_observability_rail``: the optional
+    ``observability`` extra must be installed
+    (``observability_dependency_installed``) and observability must be
+    initialized (``maybe_observability_rail``); only the idempotent-append
+    tail is specific to this sub-agent path. Returns the spec unchanged
+    when the extra is absent, observability is off, or a rail is already
+    attached. Confined to the team package — the harness sub-agent builders
+    are not modified.
     """
+    if not observability_dependency_installed():
+        return spec
+
     from openjiuwen.agent_teams.observability.rail import (
         ObservabilityRail,
         maybe_observability_rail,

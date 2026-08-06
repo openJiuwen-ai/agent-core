@@ -1,0 +1,97 @@
+version: data-type-v1
+unknown: unknown
+
+# Canonical data types and their accepted spellings. Parent links are used by
+# deterministic graph compatibility checks; aliases are normalized without an
+# LLM call.
+types:
+  unknown: {}
+  text:
+    aliases: [str, string, plain_text, natural_language, text/plain]
+  markdown:
+    aliases: [md, text/markdown]
+    parents: [text, file]
+  html:
+    aliases: [htm, text/html, application/xhtml+xml]
+    parents: [text, file]
+  json:
+    aliases: [json_object, application/json, text/json]
+    parents: [text, object, file]
+  yaml:
+    aliases: [yml, application/yaml, application/x-yaml, text/yaml]
+    parents: [text, object, file]
+  xml:
+    aliases: [xml_document, application/xml, text/xml]
+    parents: [text, object, file]
+  csv:
+    aliases: [text/csv, application/csv, dataframe, rows, records, tabular_data]
+    parents: [text, table, file]
+  table:
+    aliases: [data_table, table_data]
+    parents: [object]
+  object:
+    aliases: [dict, dictionary, map, mapping]
+  array:
+    aliases: [list, sequence, tuple, collection]
+    parents: [object]
+  boolean:
+    aliases: [bool]
+  integer:
+    aliases: [int, int32, int64, long]
+    parents: [number]
+  number:
+    aliases: [float, float32, float64, double, decimal]
+  bytes:
+    aliases: [binary, byte_array, bytearray, octet_stream, application/octet-stream]
+  file: {}
+  directory:
+    aliases: [dir, folder]
+  path:
+    aliases: [file_path, filepath, directory_path, folder_path]
+  url:
+    aliases: [uri, link, webpage, http_url, https_url, remote_url, download_url, source_url, file_url]
+  pdf:
+    aliases: [application/pdf]
+    parents: [file]
+  docx:
+    aliases: [doc, word, word_document, msword]
+    parents: [file]
+  pptx:
+    aliases: [ppt, slides, slide_deck, deck, presentation, powerpoint]
+    parents: [file]
+  xlsx:
+    aliases: [xls, excel, workbook, spreadsheet]
+    parents: [table, file]
+  image:
+    aliases: [photo, picture, screenshot, scan, scanned_image]
+    parents: [file]
+  png:
+    aliases: [image/png]
+    parents: [image]
+  jpeg:
+    aliases: [jpg, image/jpg, image/jpeg]
+    parents: [image]
+  gif:
+    aliases: [image/gif]
+    parents: [image]
+  svg:
+    aliases: [image/svg+xml]
+    parents: [image]
+  webp:
+    aliases: [image/webp]
+    parents: [image]
+  audio:
+    aliases: [sound]
+    parents: [file]
+  mp3:
+    aliases: [audio/mpeg, audio/mp3]
+    parents: [audio]
+  wav:
+    aliases: [audio/wav, audio/x-wav]
+    parents: [audio]
+  video:
+    aliases: [movie]
+    parents: [file]
+  mp4:
+    aliases: [video/mp4]
+    parents: [video]

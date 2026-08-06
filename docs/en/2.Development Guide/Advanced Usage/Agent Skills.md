@@ -83,7 +83,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.skills import GitHubTree
+from openjiuwen.core.single_agent.skills import GitHubTree
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent import ReActAgent, ReActAgentConfig
@@ -131,7 +131,7 @@ async def main():
     )
 ```
 
-SysOperation controls the file system, code execution, and shell system. There is currently only one OperationMode - `LOCAL`. `OperationMode.LOCAL` runs code, executes commands, and creates files locally. 
+SysOperation controls file-system, code-execution, and shell operations. `OperationMode` supports both `LOCAL` and `SANDBOX`: `OperationMode.LOCAL` runs code, commands, and file operations in the local environment, while `OperationMode.SANDBOX` routes them to an isolated sandbox. See [Sandbox](./Sandbox.md) for sandbox configuration. This example uses local mode.
 
 ```python
 async def main():
@@ -139,7 +139,7 @@ async def main():
 
     sysop_card = SysOperationCard(
         mode=OperationMode.LOCAL,
-        work_config=LocalWorkConfig(work_dir=None),
+        work_config=LocalWorkConfig(),
     )
     Runner.resource_mgr.add_sys_operation(sysop_card)
 ```
@@ -278,7 +278,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.skills import GitHubTree
+from openjiuwen.core.single_agent.skills import GitHubTree
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent import ReActAgent, ReActAgentConfig
@@ -311,7 +311,7 @@ async def main():
 
     sysop_card = SysOperationCard(
         mode=OperationMode.LOCAL,
-        work_config=LocalWorkConfig(work_dir=None),
+        work_config=LocalWorkConfig(),
     )
     Runner.resource_mgr.add_sys_operation(sysop_card)
 

@@ -1,5 +1,7 @@
 View team task information.
 
+**Constraint**: Task state changes (creation, claim, completion, assignment, unblocking, verification verdicts) are pushed to you immediately — do NOT call repeatedly to poll for progress. Call it when a push tells you to, or right before you decide / claim / hand off.
+
 ## When to Use
 
 ### action=list (default, zero-parameter call)

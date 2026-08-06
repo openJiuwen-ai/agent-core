@@ -5,7 +5,8 @@
 
 护栏持久化路径会调用 :func:`merge_permission_allow_rule_into_permissions`；
 本模块用**旧版 YAML 常见写法**（``tools.<name>.*`` 字典）与标量写法验证合并结果与
-``evaluate_tiered_policy`` 二次判定一致。
+``evaluate_tiered_policy`` 二次判定一致。路径类 override 已迁出，路径工具 HITL 抬升整工具
+``tools.*: allow``，路径细则由 ``file_guard`` 落盘（见 rail 侧，不在此函数内）。
 """
 
 from __future__ import annotations
@@ -37,10 +38,10 @@ def _base_tiered() -> dict:
         pytest.param({"read_file": "ask"}, id="scalar_ask"),
     ],
 )
-def test_read_file_merge_after_auto_confirm_adds_path_override_and_allows(
+def test_read_file_merge_after_auto_confirm_elevates_whole_tool_allow(
     tools_fragment: dict,
 ) -> None:
-    """旧/新 tools 写法在 ASK 下合并后应追加 path 类 approval_override，且同参再次评估为 ALLOW。"""
+    """路径工具在 ASK 下「总是允许」应抬升 ``tools.read_file: allow``，不写 path 类 override。"""
     cfg = {**_base_tiered(), "tools": {**tools_fragment, "write_file": "deny"}}
     tool_args = {"file_path": "notes.txt"}
 
@@ -53,30 +54,19 @@ def test_read_file_merge_after_auto_confirm_adds_path_override_and_allows(
     assert applied is True
 
     overrides = merged.get("approval_overrides") or []
-    assert isinstance(overrides, list) and overrides
-    found = next(
-        (
-            o
-            for o in overrides
-            if isinstance(o, dict)
-            and o.get("match_type") == "path"
-            and o.get("pattern") == "notes.txt"
-            and o.get("action") == "allow"
-            and "read_file" in (o.get("tools") or [])
-        ),
-        None,
-    )
-    assert found is not None
+    assert overrides == []
+    assert merged["tools"]["read_file"] == "allow"
 
     after, matched = evaluate_tiered_policy(merged, "read_file", tool_args)
     assert after == PermissionLevel.ALLOW
-    assert "approval_overrides" in matched
+    assert "tools.read_file" in matched
 
     again, applied_again = merge_permission_allow_rule_into_permissions(
         deepcopy(merged), "read_file", tool_args
     )
     assert applied_again is False
     assert again.get("approval_overrides") == merged.get("approval_overrides")
+    assert again["tools"]["read_file"] == "allow"
 
 
 def test_legacy_bash_star_ask_merge_adds_command_override() -> None:

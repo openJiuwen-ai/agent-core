@@ -45,7 +45,8 @@ class SummaryManager(BaseMemoryManager):
             for mem_unit in memory_list:
                 if not isinstance(mem_unit, SummaryUnit):
                     continue
-
+                if not mem_unit.summary or not mem_unit.summary.strip():
+                    continue
                 memory_doc = MemoryDoc(
                     id=mem_unit.mem_id,
                     text=mem_unit.summary,

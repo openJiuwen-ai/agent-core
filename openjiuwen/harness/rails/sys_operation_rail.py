@@ -6,7 +6,6 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.tools import BashTool, PowerShellTool
@@ -22,7 +21,14 @@ from openjiuwen.harness.tools.filesystem import (
 
 
 class SysOperationRail(DeepAgentRail):
-    """Rail for registering filesystem, shell and code tools."""
+    """Rail for registering filesystem, shell and code tools.
+
+    Purely init-time: it registers its tools in :meth:`init` and takes part in
+    no lifecycle hook. The high ``priority`` is about that registration, not
+    about callbacks -- rails are initialized in priority order, so anything
+    that needs the filesystem toolset present at init time only has to declare
+    a lower priority than this rail.
+    """
 
     priority = 100
 
@@ -92,13 +98,6 @@ class SysOperationRail(DeepAgentRail):
                 name = getattr(tool.card, 'name', None)
                 if name and hasattr(agent, 'ability_manager'):
                     agent.ability_manager.remove_ability(name)
-
-
-    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        _ = ctx
-
-    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        _ = ctx
 
 
 __all__ = [

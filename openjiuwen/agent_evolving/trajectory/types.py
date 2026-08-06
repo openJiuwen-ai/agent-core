@@ -197,7 +197,7 @@ def _otlp_trajectory_meta(resource_attrs: Dict[str, Any]) -> Dict[str, Any]:
     return meta
 
 
-def _otlp_legacy_step_kind(span: Dict[str, Any], attrs: Dict[str, Any]) -> Optional[str]:
+def _otlp_step_kind(span: Dict[str, Any], attrs: Dict[str, Any]) -> Optional[str]:
     operation_name = str(attrs.get(GEN_AI_OPERATION_NAME) or "").lower()
     if operation_name in ("chat", "text_completion", "generate_content"):
         return "llm"
@@ -235,7 +235,7 @@ def _otlp_legacy_step_kind(span: Dict[str, Any], attrs: Dict[str, Any]) -> Optio
     return None
 
 
-def _otlp_legacy_usage(attrs: Dict[str, Any]) -> Optional[Dict[str, int]]:
+def _otlp_step_usage(attrs: Dict[str, Any]) -> Optional[Dict[str, int]]:
     input_tokens = _to_int(attrs.get(GEN_AI_USAGE_INPUT_TOKENS))
     output_tokens = _to_int(attrs.get(GEN_AI_USAGE_OUTPUT_TOKENS))
     if input_tokens is None and output_tokens is None:
@@ -256,7 +256,7 @@ def _otlp_span_error(span: Dict[str, Any], attrs: Dict[str, Any]) -> Optional[Di
     return None
 
 
-def _otlp_legacy_reward(attrs: Dict[str, Any]) -> Optional[float]:
+def _otlp_step_reward(attrs: Dict[str, Any]) -> Optional[float]:
     reward = attrs.get(OJ_RL_REWARD)
     if reward is None:
         return None
@@ -275,7 +275,7 @@ def _nanos_to_ms(value: Any) -> Optional[int]:
         return None
 
 
-def _otlp_legacy_meta(span: Dict[str, Any], attrs: Dict[str, Any]) -> Dict[str, Any]:
+def _otlp_step_meta(span: Dict[str, Any], attrs: Dict[str, Any]) -> Dict[str, Any]:
     legacy_meta = attrs.get(LEGACY_STEP_META)
     meta = deepcopy(legacy_meta) if isinstance(legacy_meta, dict) else {}
     meta.setdefault(
@@ -286,23 +286,30 @@ def _otlp_legacy_meta(span: Dict[str, Any], attrs: Dict[str, Any]) -> Dict[str, 
         or span.get("name"),
     )
     meta.setdefault("span_name", span.get("name"))
-    meta.setdefault("invoke_id", attrs.get(OJ_INVOKE_ID))
-    meta.setdefault("parent_invoke_id", attrs.get(OJ_PARENT_INVOKE_ID))
-    meta.setdefault("span_id", span.get("spanId"))
-    meta.setdefault("parent_span_id", span.get("parentSpanId"))
-    meta.setdefault("status", span.get("status"))
+    # Only materialize identity fields when present. Injecting ``None`` would
+    # make key-existence checks (e.g. collaborative filtering) treat absent
+    # invoke links as real cross-member markers.
+    for key, value in (
+        ("invoke_id", attrs.get(OJ_INVOKE_ID)),
+        ("parent_invoke_id", attrs.get(OJ_PARENT_INVOKE_ID)),
+        ("span_id", span.get("spanId")),
+        ("parent_span_id", span.get("parentSpanId")),
+        ("status", span.get("status")),
+    ):
+        if value is not None:
+            meta.setdefault(key, value)
     meta["attributes"] = deepcopy(attrs)
     return meta
 
 
 def _otlp_llm_step(span: Dict[str, Any], attrs: Dict[str, Any]) -> TrajectoryStep:
-    usage = _otlp_legacy_usage(attrs)
+    usage = _otlp_step_usage(attrs)
     output_messages = attrs.get(GEN_AI_OUTPUT_MESSAGES)
     if isinstance(output_messages, list) and len(output_messages) == 1:
         response = output_messages[0]
     else:
         response = output_messages
-    meta = _otlp_legacy_meta(span, attrs)
+    meta = _otlp_step_meta(span, attrs)
     return TrajectoryStep(
         kind="llm",
         error=_otlp_span_error(span, attrs),
@@ -316,7 +323,7 @@ def _otlp_llm_step(span: Dict[str, Any], attrs: Dict[str, Any]) -> TrajectorySte
             usage=usage,
             meta=meta,
         ),
-        reward=_otlp_legacy_reward(attrs),
+        reward=_otlp_step_reward(attrs),
         prompt_token_ids=_json_safe(attrs.get(OJ_RL_PROMPT_TOKEN_IDS)),
         completion_token_ids=_json_safe(attrs.get(OJ_RL_COMPLETION_TOKEN_IDS)),
         logprobs=_json_safe(attrs.get(OJ_RL_LOGPROBS)),
@@ -329,7 +336,7 @@ def _otlp_tool_step(
     attrs: Dict[str, Any],
     parent_llm_ref: Optional[str],
 ) -> TrajectoryStep:
-    meta = _otlp_legacy_meta(span, attrs)
+    meta = _otlp_step_meta(span, attrs)
     if parent_llm_ref:
         meta["parent_llm_call"] = parent_llm_ref
         meta[LEGACY_PARENT_LLM_CALL] = parent_llm_ref
@@ -344,17 +351,17 @@ def _otlp_tool_step(
             call_result=_json_safe(attrs.get(GEN_AI_TOOL_CALL_RESULT)),
             tool_call_id=attrs.get(GEN_AI_TOOL_CALL_ID),
         ),
-        reward=_otlp_legacy_reward(attrs),
+        reward=_otlp_step_reward(attrs),
         meta=meta,
     )
 
 
-def _otlp_legacy_steps(otlp_trace: Optional[Dict[str, Any]]) -> List[TrajectoryStep]:
+def _otlp_steps(otlp_trace: Optional[Dict[str, Any]]) -> List[TrajectoryStep]:
     steps: List[TrajectoryStep] = []
     llm_refs: Dict[str, str] = {}
     for span in _otlp_spans(otlp_trace):
         attrs = _otlp_attribute_map(span.get("attributes") or [])
-        step_kind = _otlp_legacy_step_kind(span, attrs)
+        step_kind = _otlp_step_kind(span, attrs)
         if step_kind is None:
             continue
         if step_kind == "llm":
@@ -390,6 +397,35 @@ def _ensure_otlp_resource_attributes(
             continue
         resource_attributes.append({"key": key, "value": to_otlp_value(value)})
         existing_keys.add(key)
+    return trace
+
+
+def _set_otlp_resource_attributes(
+    otlp_trace: Optional[Dict[str, Any]],
+    attributes: Dict[str, Any],
+) -> Dict[str, Any]:
+    trace = deepcopy(otlp_trace) if isinstance(otlp_trace, dict) else {}
+    resource_spans = trace.setdefault("resourceSpans", [])
+    if not resource_spans:
+        resource_spans.append({"resource": {"attributes": []}})
+    resource_span = resource_spans[0]
+    resource = resource_span.setdefault("resource", {})
+    resource_attributes = resource.setdefault("attributes", [])
+
+    by_key = {
+        item.get("key"): item
+        for item in resource_attributes
+        if isinstance(item, dict) and item.get("key")
+    }
+    for key, value in attributes.items():
+        if value is None:
+            continue
+        encoded = {"key": key, "value": to_otlp_value(value)}
+        if key in by_key:
+            by_key[key].update(encoded)
+        else:
+            resource_attributes.append(encoded)
+            by_key[key] = encoded
     return trace
 
 
@@ -576,8 +612,84 @@ class LegacyTrajectory:
         return messages
 
 
+TrajectoryRecord = Trajectory
+
+
+def trajectory_resource_attributes(trajectory: Trajectory) -> Dict[str, Any]:
+    """Return trajectory-level attributes from OTLP resource spans."""
+    return _otlp_resource_attributes(trajectory.otlp_trace)
+
+
+def trajectory_execution_id(trajectory: Trajectory) -> str:
+    """Read execution id directly from OTLP resource attributes."""
+    return _otlp_trajectory_id(trajectory_resource_attributes(trajectory))
+
+
+def trajectory_steps(trajectory: Trajectory) -> List[TrajectoryStep]:
+    """Project OTLP spans to ``TrajectoryStep`` read models.
+
+    Prefer this over ``to_legacy_trajectory`` when only steps are needed.
+    For a full ``LegacyTrajectory`` compatibility view, use
+    ``to_legacy_trajectory``.
+    """
+    return _otlp_steps(trajectory.otlp_trace)
+
+
+def trajectory_source(trajectory: Trajectory) -> str:
+    """Read trajectory source directly from OTLP resource attributes."""
+    return _otlp_trajectory_source(trajectory_resource_attributes(trajectory))
+
+
+def trajectory_case_id(trajectory: Trajectory) -> Optional[str]:
+    """Read case id directly from OTLP resource attributes."""
+    value = trajectory_resource_attributes(trajectory).get(CASE_ID)
+    return str(value) if value is not None else None
+
+
+def trajectory_session_id(trajectory: Trajectory) -> Optional[str]:
+    """Read session id directly from OTLP resource attributes."""
+    attrs = trajectory_resource_attributes(trajectory)
+    value = attrs.get(OJ_SESSION_ID) or attrs.get(OLD_OJ_SESSION_ID)
+    return str(value) if value is not None else None
+
+
+def trajectory_cost(trajectory: Trajectory) -> Optional[CostInfo]:
+    """Read aggregate cost directly from OTLP spans."""
+    return _otlp_usage_cost(trajectory.otlp_trace)
+
+
+def trajectory_meta(trajectory: Trajectory) -> Dict[str, Any]:
+    """Read trajectory metadata directly from OTLP resource attributes."""
+    return _otlp_trajectory_meta(trajectory_resource_attributes(trajectory))
+
+
+def set_trajectory_resource_attributes(
+    trajectory: Trajectory,
+    attributes: Dict[str, Any],
+) -> Trajectory:
+    """Set resource attributes on the OTLP trace."""
+    trajectory.otlp_trace = _set_otlp_resource_attributes(trajectory.otlp_trace, attributes)
+    return trajectory
+
+
+def trajectory_with_resource_attributes(
+    trajectory: Trajectory,
+    attributes: Dict[str, Any],
+) -> Trajectory:
+    """Return a detached OTLP trajectory with resource attributes merged in."""
+    return Trajectory(
+        otlp_trace=_set_otlp_resource_attributes(trajectory.otlp_trace, attributes),
+    )
+
+
 def to_legacy_trajectory(trajectory: Union[Trajectory, LegacyTrajectory]) -> LegacyTrajectory:
-    """Return a detached step-based compatibility view."""
+    """Project an OTLP ``Trajectory`` (or clone a ``LegacyTrajectory``) to the
+    step-based compatibility view.
+
+    Runtime rails/optimizers should keep ``Trajectory`` and use accessors such
+    as ``trajectory_steps`` / ``trajectory_meta``. Reserve this helper for
+    JSONL migration, tests, and explicit legacy consumers.
+    """
     if isinstance(trajectory, LegacyTrajectory):
         meta = deepcopy(trajectory.meta)
         meta.pop("source", None)
@@ -594,7 +706,7 @@ def to_legacy_trajectory(trajectory: Union[Trajectory, LegacyTrajectory]) -> Leg
     resource_attrs = _otlp_resource_attributes(trajectory.otlp_trace)
     return LegacyTrajectory(
         execution_id=_otlp_trajectory_id(resource_attrs),
-        steps=_otlp_legacy_steps(trajectory.otlp_trace),
+        steps=_otlp_steps(trajectory.otlp_trace),
         source=_otlp_trajectory_source(resource_attrs),
         case_id=resource_attrs.get(CASE_ID),
         session_id=resource_attrs.get(OJ_SESSION_ID) or resource_attrs.get(OLD_OJ_SESSION_ID),
@@ -683,8 +795,12 @@ def _legacy_step_to_otlp_span(step: TrajectoryStep, index: int, trace_id: str) -
     return span
 
 
-def _ensure_otlp_step_spans(trace: Dict[str, Any], legacy: LegacyTrajectory) -> Dict[str, Any]:
-    if not legacy.steps:
+def _ensure_otlp_step_spans(
+    trace: Dict[str, Any],
+    steps: List[TrajectoryStep],
+    execution_id: str,
+) -> Dict[str, Any]:
+    if not steps:
         return trace
     resource_spans = trace.setdefault("resourceSpans", [])
     if not resource_spans:
@@ -705,10 +821,48 @@ def _ensure_otlp_step_spans(trace: Dict[str, Any], legacy: LegacyTrajectory) -> 
     if spans:
         return trace
     spans.extend(
-        _legacy_step_to_otlp_span(step, index, legacy.execution_id)
-        for index, step in enumerate(legacy.steps)
+        _legacy_step_to_otlp_span(step, index, execution_id)
+        for index, step in enumerate(steps)
     )
     return trace
+
+
+def trajectory_from_steps(
+    *,
+    execution_id: str,
+    steps: List[TrajectoryStep],
+    source: str = "offline",
+    case_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    cost: Optional[CostInfo] = None,
+    meta: Optional[Dict[str, Any]] = None,
+    otlp_trace: Optional[Dict[str, Any]] = None,
+) -> Trajectory:
+    """Build an OTLP-first trajectory from recorded step projections."""
+    resource_attrs = deepcopy(meta or {})
+    resource_attrs.pop("source", None)
+    resource_attrs.update(
+        {
+            TRAJECTORY_ID: execution_id,
+            TRAJECTORY_SCHEMA_VERSION_ATTR: TRAJECTORY_SCHEMA_VERSION,
+            OJ_SESSION_ID: session_id,
+            CASE_ID: case_id,
+            TRAJECTORY_SOURCE: source,
+            TRAJECTORY_END_REASON: resource_attrs.get(TRAJECTORY_END_REASON)
+            or resource_attrs.get("end_reason")
+            or "unknown",
+        }
+    )
+    if cost:
+        resource_attrs.setdefault("cost", deepcopy(cost))
+    trace = _ensure_otlp_resource_attributes(
+        otlp_trace,
+        resource_attrs,
+    )
+    trace = _ensure_otlp_step_spans(trace, steps, execution_id)
+    return Trajectory(
+        otlp_trace=trace,
+    )
 
 
 def trajectory_from_legacy(
@@ -717,25 +871,13 @@ def trajectory_from_legacy(
     otlp_trace: Optional[Dict[str, Any]] = None,
 ) -> Trajectory:
     """Wrap a legacy trajectory view in the OTLP-first trajectory type."""
-    resource_attrs = deepcopy(legacy.meta)
-    resource_attrs.pop("source", None)
-    resource_attrs.update(
-        {
-            TRAJECTORY_ID: legacy.execution_id,
-            TRAJECTORY_SCHEMA_VERSION_ATTR: TRAJECTORY_SCHEMA_VERSION,
-            OJ_SESSION_ID: legacy.session_id,
-            CASE_ID: legacy.case_id,
-            TRAJECTORY_SOURCE: _legacy_trajectory_source(legacy),
-            TRAJECTORY_END_REASON: legacy.meta.get(TRAJECTORY_END_REASON)
-            or legacy.meta.get("end_reason")
-            or "unknown",
-        }
-    )
-    trace = _ensure_otlp_resource_attributes(
-        otlp_trace,
-        resource_attrs,
-    )
-    trace = _ensure_otlp_step_spans(trace, legacy)
-    return Trajectory(
-        otlp_trace=trace,
+    return trajectory_from_steps(
+        execution_id=legacy.execution_id,
+        steps=legacy.steps,
+        source=_legacy_trajectory_source(legacy),
+        case_id=legacy.case_id,
+        session_id=legacy.session_id,
+        cost=legacy.cost,
+        meta=legacy.meta,
+        otlp_trace=otlp_trace,
     )

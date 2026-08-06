@@ -134,9 +134,6 @@ API_KEY={api_key}
 MODEL_NAME={model_name}
 MODEL_PROVIDER={"DashScope" if "dashscope" in api_base else "openai"}
 
-EVOLUTION_AUTO_SCAN={"true" if evolution_enabled else "false"}
-EVOLUTION_AUTO_SAVE={"true" if evolution_enabled else "false"}
-
 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 PIP_TIMEOUT=120
 PIP_DEFAULT_TIMEOUT=120
@@ -169,10 +166,8 @@ sandbox:
 react:
   max_iterations: 50
   evolution:
-    enabled: {"true" if evolution_enabled else "false"}
-    auto_scan: {"true" if evolution_enabled else "false"}
+    skill_evolution: {"true" if evolution_enabled else "false"}
     auto_save: {"true" if evolution_enabled else "false"}
-    skill_base_dir: /root/.jiuwenswarm/agent/workspace/skills
 
 memory:
   engine: none
@@ -917,9 +912,6 @@ import urllib.error
 import asyncio
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
-os.environ.setdefault("EVOLUTION_AUTO_SCAN", "true")
-os.environ.setdefault("EVOLUTION_AUTO_SAVE", "true")
-
 _ACP_STDOUT = open(sys.stdout.fileno(), "w", closefd=False)
 
 # Read timeout from environment variable, default to 800 seconds

@@ -110,6 +110,63 @@ class InMemoryTrajectoryStore:
                 "failed_samples": failed,
             }
 
+    async def get_sample(self, sample_id: str) -> dict[str, Any] | None:
+        async with self._lock:
+            sample = self._samples.get(sample_id)
+            return copy.deepcopy(sample) if sample is not None else None
+
+    async def list_samples(
+        self,
+        *,
+        user_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        async with self._lock:
+            out: list[dict[str, Any]] = []
+            user_ids = [user_id] if user_id else sorted(self._status_index)
+            for uid in user_ids:
+                statuses = [status] if status else sorted(self._status_index.get(uid, {}))
+                for item_status in statuses:
+                    for sample_id in self._status_index.get(uid, {}).get(item_status, []):
+                        sample = self._samples.get(sample_id)
+                        if sample is None:
+                            continue
+                        out.append(copy.deepcopy(sample))
+                        if len(out) >= max(1, int(limit)):
+                            return out
+            return out
+
+    async def patch_sample(self, sample_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        async with self._lock:
+            sample = self._samples.get(sample_id)
+            if sample is None:
+                return None
+            old_status = str(sample.get("_store_status") or "pending")
+            new_status = str(updates.get("status") or old_status)
+            if new_status != old_status:
+                user_id = str(sample.get("user_id") or "online")
+                self._remove_from_status_index(sample_id, user_id, old_status)
+                self._add_to_status_index(sample_id, user_id, new_status)
+                sample["_store_status"] = new_status
+            for key in ("reward", "judge", "metadata", "policy_version", "source"):
+                if key in updates:
+                    sample[key] = copy.deepcopy(updates[key])
+            return copy.deepcopy(sample)
+
+    async def delete_sample(self, sample_id: str, *, force: bool = False) -> bool:
+        del force
+        async with self._lock:
+            sample = self._samples.pop(sample_id, None)
+            if sample is None:
+                return False
+            self._remove_from_status_index(
+                sample_id,
+                str(sample.get("user_id") or "online"),
+                str(sample.get("_store_status") or "pending"),
+            )
+            return True
+
     async def _update_status(self, sample_ids: list[str], *, from_status: str, to_status: str) -> None:
         async with self._lock:
             for sample_id in sample_ids:

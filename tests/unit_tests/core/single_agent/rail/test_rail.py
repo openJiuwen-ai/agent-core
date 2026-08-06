@@ -502,7 +502,9 @@ class TestRailExceptionRetry(
         assert events == [
             ("before", "mock_retry_tool", 0),
             ("exception", "mock_retry_tool", 0),
-            ("after", "mock_retry_tool", 0),
+            # attempt 0 fails and a retry is requested: AFTER_TOOL_CALL is
+            # skipped on retry so on_tool_exception's intermediate tool_result
+            # is not consumed by after callbacks as a final result.
             ("before", "mock_retry_tool", 1),
             ("after", "mock_retry_tool", 1),
         ]

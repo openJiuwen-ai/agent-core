@@ -70,7 +70,7 @@ async def test_exit_1_is_error(sys_op) -> None:
     tool = BashTool(sys_op)
     res = await tool.invoke({"command": "echo fail && exit 1"})
     assert res.success is False
-    assert res.data["content"].startswith("Exit code")
+    assert "Exit Code: 1" in res.data["content"]
 
 
 # ── semantic exit codes ───────────────────────────────────────
@@ -79,9 +79,11 @@ async def test_exit_1_is_error(sys_op) -> None:
 async def test_grep_no_match_is_not_error(sys_op) -> None:
     tool = BashTool(sys_op)
     res = await tool.invoke({"command": "echo hello | grep nonexistent_pattern_xyz"})
-    # grep exits 1 on no match: treated as success, empty merged output.
+    # grep exits 1 on no match: treated as success, with an explicit rendered
+    # command/result envelope and an empty stdout section.
     assert res.success is True
-    assert res.data["content"] == ""
+    assert "Stdout: (empty)" in res.data["content"]
+    assert "Exit Code: 1" in res.data["content"]
 
 
 @pytest.mark.asyncio
@@ -101,7 +103,8 @@ async def test_silent_command_empty_content(sys_op) -> None:
     try:
         res = await tool.invoke({"command": f"mkdir -p {workspace}/sub"})
         assert res.success is True
-        assert res.data["content"] == ""
+        assert "Stdout: (empty)" in res.data["content"]
+        assert "Exit Code: 0" in res.data["content"]
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 

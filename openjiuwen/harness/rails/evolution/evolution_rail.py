@@ -25,7 +25,6 @@ from typing import Any, List, Optional, Union
 from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
 from openjiuwen.agent_evolving.trajectory import (
     InMemoryTrajectoryStore,
-    LegacyTrajectory,
     LLMCallDetail,
     MemberTrajectorySnapshot,
     ToolCallDetail,
@@ -35,8 +34,22 @@ from openjiuwen.agent_evolving.trajectory import (
     TrajectoryStep,
     TrajectoryStore,
     ensure_otlp_handlers_registered,
-    to_legacy_trajectory,
+    trajectory_meta,
+    trajectory_from_steps,
+    trajectory_session_id,
 )
+from openjiuwen.agent_evolving.trajectory.semconv import (
+    LEGACY_STEP_META,
+    OJ_RL_COMPLETION_TOKEN_IDS,
+    OJ_RL_LOGPROBS,
+    OJ_RL_PROMPT_TOKEN_IDS,
+    OJ_RL_REWARD,
+)
+from openjiuwen.agent_evolving.trajectory.span_codec import (
+    otlp_value_to_python,
+    to_otlp_value,
+)
+from openjiuwen.agent_evolving.trajectory.types import _otlp_step_kind
 from openjiuwen.core.common.background_tasks import BackgroundTask
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
@@ -459,7 +472,7 @@ class EvolutionRail(DeepAgentRail):
                 EvolutionTriggerPoint.AFTER_INVOKE, ctx
             ):
                 await self._trigger_evolution(trajectory, ctx)
-                await self._on_after_evolution_triggered(to_legacy_trajectory(trajectory), ctx)
+                await self._on_after_evolution_triggered(trajectory, ctx)
         finally:
             if trace_id is not None:
                 self.trajectory_state_manager.release_trace(
@@ -496,19 +509,19 @@ class EvolutionRail(DeepAgentRail):
         ctx: Optional[AgentCallbackContext] = None,
         *,
         finalize: bool = False,
-    ) -> Optional[LegacyTrajectory]:
+    ) -> Optional[Trajectory]:
         """Build trajectory from current builder with snapshot.
 
         Returns trajectory on success, None if no builder.
         """
         trace_trajectory = self._build_trace_trajectory(ctx, finalize=finalize) if ctx is not None else None
         if trace_trajectory is not None:
-            return self._merge_builder_step_projection(to_legacy_trajectory(trace_trajectory))
+            return self._merge_builder_otlp_attributes(trace_trajectory)
         if self._builder is None:
             return None
         meta = dict(self._builder.meta)
         meta.pop("source", None)
-        legacy = LegacyTrajectory(
+        return trajectory_from_steps(
             execution_id=str(uuid.uuid4()),
             steps=list(self._builder.steps),
             source=self._builder.source,
@@ -517,38 +530,85 @@ class EvolutionRail(DeepAgentRail):
             cost=self._builder.cost if self._builder.cost["input_tokens"] > 0 else None,
             meta=meta,
         )
-        return legacy
 
-    def _merge_builder_step_projection(self, legacy: LegacyTrajectory) -> LegacyTrajectory:
-        """Merge builder-only RL fields into a trace-backed legacy projection."""
-        if self._builder is None or not self._builder.steps:
-            return legacy
+    def _merge_builder_otlp_attributes(self, trajectory: Trajectory) -> Trajectory:
+        """Merge builder-only RL fields into trace-backed OTLP span attributes."""
+        if self._builder is None or not self._builder.steps or not isinstance(trajectory.otlp_trace, dict):
+            return trajectory
 
         builder_steps = list(self._builder.steps)
         builder_index = 0
-        for target_step in legacy.steps:
-            while (
-                builder_index < len(builder_steps)
-                and builder_steps[builder_index].kind != target_step.kind
-            ):
+        for span in self._iter_otlp_spans(trajectory.otlp_trace):
+            span_kind = self._otlp_span_step_kind(span)
+            if span_kind is None:
+                continue
+            while builder_index < len(builder_steps) and builder_steps[builder_index].kind != span_kind:
                 builder_index += 1
             if builder_index >= len(builder_steps):
                 break
 
             source_step = builder_steps[builder_index]
             builder_index += 1
-            if target_step.reward is None:
-                target_step.reward = source_step.reward
-            if target_step.prompt_token_ids is None:
-                target_step.prompt_token_ids = deepcopy(source_step.prompt_token_ids)
-            if target_step.completion_token_ids is None:
-                target_step.completion_token_ids = deepcopy(source_step.completion_token_ids)
-            if target_step.logprobs is None:
-                target_step.logprobs = deepcopy(source_step.logprobs)
-            for key, value in (source_step.meta or {}).items():
-                if value is not None:
-                    target_step.meta.setdefault(key, deepcopy(value))
-        return legacy
+            attributes = span.setdefault("attributes", [])
+            self._set_otlp_span_attr(attributes, OJ_RL_REWARD, source_step.reward, overwrite=False)
+            self._set_otlp_span_attr(
+                attributes,
+                OJ_RL_PROMPT_TOKEN_IDS,
+                deepcopy(source_step.prompt_token_ids),
+                overwrite=False,
+            )
+            self._set_otlp_span_attr(
+                attributes,
+                OJ_RL_COMPLETION_TOKEN_IDS,
+                deepcopy(source_step.completion_token_ids),
+                overwrite=False,
+            )
+            self._set_otlp_span_attr(attributes, OJ_RL_LOGPROBS, deepcopy(source_step.logprobs), overwrite=False)
+
+            if source_step.meta:
+                legacy_meta = self._get_otlp_span_attr(attributes, LEGACY_STEP_META)
+                merged_meta = dict(legacy_meta) if isinstance(legacy_meta, dict) else {}
+                for key, value in source_step.meta.items():
+                    if value is not None:
+                        merged_meta.setdefault(key, deepcopy(value))
+                self._set_otlp_span_attr(attributes, LEGACY_STEP_META, merged_meta)
+        return trajectory
+
+    @staticmethod
+    def _iter_otlp_spans(otlp_trace: dict) -> list[dict]:
+        spans: list[dict] = []
+        for resource_span in otlp_trace.get("resourceSpans") or []:
+            for scope_span in resource_span.get("scopeSpans") or []:
+                spans.extend(scope_span.get("spans") or [])
+        return spans
+
+    @staticmethod
+    def _get_otlp_span_attr(attributes: list[dict], key: str) -> Any:
+        for item in attributes or []:
+            if isinstance(item, dict) and item.get("key") == key:
+                return otlp_value_to_python(item.get("value") or {})
+        return None
+
+    @staticmethod
+    def _set_otlp_span_attr(attributes: list[dict], key: str, value: Any, *, overwrite: bool = True) -> None:
+        if value is None:
+            return
+        encoded = {"key": key, "value": to_otlp_value(value)}
+        for item in attributes:
+            if isinstance(item, dict) and item.get("key") == key:
+                if overwrite:
+                    item.update(encoded)
+                return
+        attributes.append(encoded)
+
+    @classmethod
+    def _otlp_span_step_kind(cls, span: dict) -> Optional[str]:
+        attrs = {
+            item.get("key"): otlp_value_to_python(item.get("value") or {})
+            for item in span.get("attributes") or []
+            if isinstance(item, dict) and item.get("key")
+        }
+        return _otlp_step_kind(span, attrs)
 
     def _build_trace_trajectory(
         self,
@@ -644,17 +704,18 @@ class EvolutionRail(DeepAgentRail):
         team_id = self._team_id
         if sink is None or not team_id:
             return
-        legacy = to_legacy_trajectory(trajectory)
-        member_id = legacy.meta.get("member_id")
+        meta = trajectory_meta(trajectory)
+        session_id = trajectory_session_id(trajectory)
+        member_id = meta.get("member_id")
         if not member_id:
             return
-        member_role = _normalize_member_role(legacy.meta.get("member_role")) or self._member_role
+        member_role = _normalize_member_role(meta.get("member_role")) or self._member_role
         sink.publish_member_trajectory(
             MemberTrajectorySnapshot.make(
                 team_id=team_id,
                 member_id=str(member_id),
                 member_role=member_role,
-                session_id=legacy.session_id,
+                session_id=session_id,
                 trajectory=trajectory,
             )
         )
@@ -669,18 +730,22 @@ class EvolutionRail(DeepAgentRail):
             snapshot = await self._snapshot_for_evolution(trajectory, ctx)
             if snapshot is not None:
                 snapshot_contract = EvolutionSnapshot.from_legacy_dict(snapshot)
-                from openjiuwen.core.common.background_tasks import create_background_task
 
-                bg_task = await create_background_task(
-                    self._safe_run_evolution(snapshot),
-                    name=f"evolution-{snapshot_contract.skill_name or 'unknown'}",
+                # Detach from the request task group. create_background_task() would
+                # otherwise attach under the active root group and get cascade-cancelled
+                # as soon as OuterLoop/request cleanup finishes (~0.2s), aborting evaluate.
+                bg_task = BackgroundTask.from_asyncio_task(
+                    asyncio.create_task(
+                        self._safe_run_evolution(snapshot),
+                        name=f"evolution-{snapshot_contract.skill_name or 'unknown'}",
+                    ),
                     group="evolution",
                 )
                 self._bg_tasks.add(bg_task)
                 # Prune completed tasks to prevent unbounded growth
                 self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
         else:
-            await self.run_evolution(to_legacy_trajectory(trajectory), ctx)
+            await self.run_evolution(trajectory, ctx)
 
     # ---- Evolution extension points (override as needed, default no-op) ----
 
@@ -1012,11 +1077,24 @@ class EvolutionRail(DeepAgentRail):
         )
 
     async def cleanup_background_tasks(self) -> None:
-        """Cancel and clear all background tasks. Called by host on shutdown."""
-        for task in self._bg_tasks:
-            if not task.done():
-                await task.cancel(reason="evolution_rail_shutdown")
+        """Wait for background evolution tasks, then clear the registry.
+
+        Host watchers call this when they see terminal progress (cancelled/noop/done).
+        Rails may still be finishing evaluate at that moment, so prefer waiting over
+        immediate cancel. Only force-cancel after a wait timeout.
+        """
+        pending = [task for task in self._bg_tasks if not task.done()]
         self._bg_tasks.clear()
+        for task in pending:
+            try:
+                await asyncio.wait_for(task.wait(), timeout=120.0)
+            except TimeoutError:
+                logger.warning(
+                    "[EvolutionRail] background task still running after wait timeout; cancelling"
+                )
+                await task.cancel(reason="evolution_rail_wait_timeout")
+            except Exception as exc:
+                logger.warning("[EvolutionRail] background task wait failed: %s", exc)
 
 
 __all__ = ["EvolutionRail", "EvolutionTriggerPoint"]

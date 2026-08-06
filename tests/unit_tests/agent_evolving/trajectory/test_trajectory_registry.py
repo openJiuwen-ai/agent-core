@@ -9,8 +9,11 @@ from openjiuwen.agent_evolving.trajectory import (
     LLMCallDetail,
     MemberTrajectorySnapshot,
     ToolCallDetail,
-    LegacyTrajectory,
+    Trajectory,
     TrajectoryStep,
+    trajectory_from_steps,
+    trajectory_meta,
+    trajectory_steps,
 )
 
 
@@ -19,8 +22,8 @@ def _trajectory(
     session_id: str,
     tool_name: str,
     start_time_ms: int = 1,
-) -> LegacyTrajectory:
-    return LegacyTrajectory(
+) -> Trajectory:
+    return trajectory_from_steps(
         execution_id=f"exec-{member_id}-{tool_name}",
         session_id=session_id,
         steps=[
@@ -54,9 +57,13 @@ def _snapshot(
     )
 
 
-def _tool_names(trajectory: LegacyTrajectory | None) -> list[str]:
+def _tool_names(trajectory: Trajectory | None) -> list[str]:
     assert trajectory is not None
-    return [step.detail.tool_name for step in trajectory.steps if step.detail is not None]
+    return [
+        step.detail.tool_name
+        for step in trajectory_steps(trajectory)
+        if step.detail is not None
+    ]
 
 
 def test_registry_returns_none_for_empty_session() -> None:
@@ -76,7 +83,7 @@ def test_registry_uses_later_publish_order_for_same_timestamp() -> None:
 
     assert result is not None
     assert _tool_names(result) == ["new_tool"]
-    assert result.meta["member_count"] == 1
+    assert trajectory_meta(result)["member_count"] == 1
 
 
 def test_registry_keeps_newer_recorded_at_when_older_arrives_later() -> None:
@@ -136,7 +143,7 @@ def test_registry_merges_members_in_time_order() -> None:
 
     assert result is not None
     assert _tool_names(result) == ["view_task", "send_message"]
-    assert result.meta["member_count"] == 2
+    assert trajectory_meta(result)["member_count"] == 2
 
 
 def test_registry_clear_session_removes_only_target_session() -> None:
@@ -158,7 +165,7 @@ def test_registry_uses_snapshot_member_metadata_for_aggregation() -> None:
             session_id="session-a",
             member_id="leader",
             member_role="leader",
-            trajectory=LegacyTrajectory(
+            trajectory=trajectory_from_steps(
                 execution_id="random-execution-id",
                 session_id="session-a",
                 steps=[
@@ -177,9 +184,10 @@ def test_registry_uses_snapshot_member_metadata_for_aggregation() -> None:
     result = registry.get_trajectory(team_id="team-a", session_id="session-a")
 
     assert result is not None
-    assert len(result.steps) == 1
-    assert result.steps[0].kind == "llm"
-    assert result.meta["member_count"] == 1
+    steps = trajectory_steps(result)
+    assert len(steps) == 1
+    assert steps[0].kind == "llm"
+    assert trajectory_meta(result)["member_count"] == 1
 
 
 def test_registry_keeps_leader_llm_for_runtime_leader_member_id() -> None:
@@ -190,7 +198,7 @@ def test_registry_keeps_leader_llm_for_runtime_leader_member_id() -> None:
             team_id="team-a",
             member_id=member_id,
             member_role="leader",
-            trajectory=LegacyTrajectory(
+            trajectory=trajectory_from_steps(
                 execution_id="exec-leader",
                 session_id="session-a",
                 steps=[
@@ -216,7 +224,7 @@ def test_registry_keeps_leader_llm_for_runtime_leader_member_id() -> None:
     result = registry.get_trajectory(team_id="team-a", session_id="session-a")
 
     assert result is not None
-    assert [step.kind for step in result.steps] == ["llm", "tool"]
+    assert [step.kind for step in trajectory_steps(result)] == ["llm", "tool"]
 
 
 def test_member_trajectory_snapshot_make_fills_runtime_defaults(monkeypatch) -> None:

@@ -265,6 +265,14 @@ def _collect_param_rule_hits(
                 r_tools_s,
             )
             continue
+        # 路径策略只认 Pipeline B（file_guard）；A 线跳过 path 类 rules
+        if r_tools_s and _tool_category(r_tools_s[0]) == "path":
+            logger.debug(
+                "[PermissionEngine] permission.tiered_policy.rule_skipped "
+                "id=%r reason=path_rules_moved_to_file_guard",
+                rule.get("id"),
+            )
+            continue
         pattern = rule.get("pattern")
         if not isinstance(pattern, str) or not pattern.strip():
             continue
@@ -289,13 +297,25 @@ def _collect_approval_override_hits(
         tool_name: str,
         tool_args: dict[str, Any],
 ) -> list[str]:
-    """用户审批后持久化的 allow override 命中列表。"""
+    """用户审批后持久化的 allow override 命中列表。
+
+    仅 command（及非 path）类生效；``match_type: path`` / 路径工具 override 忽略，
+    路径放行只认 ``file_guard``。
+    """
     hits: list[str] = []
     for rule in rules:
         if not isinstance(rule, dict):
             continue
         action = str(rule.get("action") or "").strip().lower()
         if action != "allow":
+            continue
+        match_type = str(rule.get("match_type") or "").strip().lower()
+        if match_type == "path":
+            logger.debug(
+                "[PermissionEngine] permission.tiered_policy.override_skipped "
+                "id=%r reason=path_overrides_moved_to_file_guard",
+                rule.get("id"),
+            )
             continue
         r_tools = rule.get("tools") or []
         if isinstance(r_tools, str):
@@ -309,6 +329,13 @@ def _collect_approval_override_hits(
                 "id=%r reason=inconsistent_tool_category tools=%s",
                 rule.get("id"),
                 r_tools_s,
+            )
+            continue
+        if r_tools_s and _tool_category(r_tools_s[0]) == "path":
+            logger.debug(
+                "[PermissionEngine] permission.tiered_policy.override_skipped "
+                "id=%r reason=path_overrides_moved_to_file_guard",
+                rule.get("id"),
             )
             continue
         pattern = rule.get("pattern")
@@ -335,9 +362,7 @@ def tiered_policy_rule_matches(
     if cat == "shell":
         return _shell_pattern_matches(pattern, _command_text(tool_args))
     if cat == "path":
-        for val in _iter_path_strings(tool_name, tool_args):
-            if _path_pattern_matches(pattern, val):
-                return True
+        # 路径匹配已迁至 file_guard；A 线不再匹配 path
         return False
     if cat == "network":
         # 产品设计：网络类暂仅整工具；参数规则不匹配

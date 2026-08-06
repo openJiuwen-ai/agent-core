@@ -9,18 +9,18 @@ not a persistence layer and should not be used as an execution audit log.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from threading import RLock
 from typing import Protocol
 
 from openjiuwen.agent_evolving.trajectory.aggregator import aggregate_member_trajectories
 from openjiuwen.agent_evolving.trajectory.types import (
-    LegacyTrajectory,
     Trajectory,
-    to_legacy_trajectory,
+    trajectory_session_id,
+    trajectory_with_resource_attributes,
 )
 
-TrajectoryRecord = Trajectory | LegacyTrajectory
+TrajectoryRecord = Trajectory
 
 
 @dataclass(frozen=True)
@@ -46,13 +46,12 @@ class MemberTrajectorySnapshot:
         recorded_at_ms: int | None = None,
     ) -> "MemberTrajectorySnapshot":
         """Create a snapshot with runtime defaults filled in."""
-        legacy = trajectory if isinstance(trajectory, LegacyTrajectory) else to_legacy_trajectory(trajectory)
         return cls(
             team_id=team_id,
-            session_id=session_id if session_id is not None else legacy.session_id or "",
+            session_id=session_id if session_id is not None else trajectory_session_id(trajectory) or "",
             member_id=member_id,
             member_role=member_role,
-            trajectory=legacy,
+            trajectory=trajectory,
             recorded_at_ms=recorded_at_ms if recorded_at_ms is not None else now_ms(),
         )
 
@@ -73,7 +72,7 @@ class TrajectorySource(Protocol):
         team_id: str,
         session_id: str,
         filter_collaborative: bool = True,
-    ) -> LegacyTrajectory | None:
+    ) -> Trajectory | None:
         """Return the aggregated team trajectory for a session."""
 
 
@@ -110,7 +109,7 @@ class InMemoryTrajectoryRegistry:
         team_id: str,
         session_id: str,
         filter_collaborative: bool = True,
-    ) -> LegacyTrajectory | None:
+    ) -> Trajectory | None:
         key = (team_id, session_id)
         with self._lock:
             snapshots = [entry.snapshot for entry in self._snapshots.get(key, {}).values()]
@@ -134,13 +133,11 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _trajectory_for_snapshot(snapshot: MemberTrajectorySnapshot) -> LegacyTrajectory:
-    trajectory = to_legacy_trajectory(snapshot.trajectory)
-    meta = dict(trajectory.meta)
-    meta["member_id"] = snapshot.member_id
+def _trajectory_for_snapshot(snapshot: MemberTrajectorySnapshot) -> TrajectoryRecord:
+    attributes = {"member_id": snapshot.member_id}
     if snapshot.member_role is not None:
-        meta["member_role"] = snapshot.member_role
-    return replace(trajectory, meta=meta)
+        attributes["member_role"] = snapshot.member_role
+    return trajectory_with_resource_attributes(snapshot.trajectory, attributes)
 
 
 def _should_keep_current(

@@ -15,6 +15,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig, SysOperation, SysOperationCard
 from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLauncherConfig, SandboxIsolationConfig
+from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import build_jiuwenbox_http_client
 
 
 LONG_RUNNING_COMMAND = ["/usr/bin/python3", "-c", "import time; time.sleep(3600)"]
@@ -33,7 +34,7 @@ def server_endpoint() -> str:
 @pytest_asyncio.fixture(name="sys_op")
 async def sys_op_fixture(server_endpoint, monkeypatch) -> AsyncIterator[SysOperation]:
     base_url = _normalize_endpoint(server_endpoint)
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
+    with build_jiuwenbox_http_client(base_url) as client:
         create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
         assert create_resp.status_code == 201, create_resp.text
         sandbox_id = create_resp.json()["id"]

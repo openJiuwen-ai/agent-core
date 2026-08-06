@@ -163,7 +163,10 @@ class InferenceAffinityModelClient(BaseModelClient):
                 tools=params.get("tools"),
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
-                max_tokens=params.get("max_tokens"))
+                max_tokens=params.get("max_tokens"),
+                frequency_penalty=params.get("frequency_penalty"),
+                presence_penalty=params.get("presence_penalty"),
+                stop=params.get("stop"))
 
             response_data = await self._make_async_request(params, timeout=timeout)
 
@@ -290,6 +293,9 @@ class InferenceAffinityModelClient(BaseModelClient):
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
+                frequency_penalty=params.get("frequency_penalty"),
+                presence_penalty=params.get("presence_penalty"),
+                stop=params.get("stop"),
                 is_stream=True)
 
             if output_parser:
@@ -644,6 +650,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cache_tokens=self._extract_cache_tokens(usage),
+                reasoning_tokens=self._extract_reasoning_tokens(usage),
             )
 
         # Apply output parser (only parse content field)
@@ -833,6 +840,7 @@ class InferenceAffinityModelClient(BaseModelClient):
                         output_tokens=usage.get("completion_tokens", 0) or 0,
                         total_tokens=usage.get("total_tokens", 0) or 0,
                         cache_tokens=self._extract_cache_tokens(usage),
+                        reasoning_tokens=self._extract_reasoning_tokens(usage),
                     )
 
                 # Skip empty chunks

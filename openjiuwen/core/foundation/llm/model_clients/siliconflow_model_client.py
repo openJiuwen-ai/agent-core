@@ -183,7 +183,10 @@ class SiliconFlowModelClient(BaseModelClient):
                 tools=params.get("tools"),
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
-                max_tokens=params.get("max_tokens"))
+                max_tokens=params.get("max_tokens"),
+                frequency_penalty=params.get("frequency_penalty"),
+                presence_penalty=params.get("presence_penalty"),
+                stop=params.get("stop"))
 
             async with self._apost(params, timeout=timeout) as response:
                 data = await response.json()
@@ -308,6 +311,9 @@ class SiliconFlowModelClient(BaseModelClient):
                 temperature=params.get("temperature"),
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
+                frequency_penalty=params.get("frequency_penalty"),
+                presence_penalty=params.get("presence_penalty"),
+                stop=params.get("stop"),
                 is_stream=True)
 
             final_message = None
@@ -531,6 +537,7 @@ class SiliconFlowModelClient(BaseModelClient):
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cache_tokens=self._extract_cache_tokens(usage),
+                reasoning_tokens=self._extract_reasoning_tokens(usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,
@@ -645,6 +652,7 @@ class SiliconFlowModelClient(BaseModelClient):
                     output_tokens=usage.get("completion_tokens", 0) or 0,
                     total_tokens=usage.get("total_tokens", 0) or 0,
                     cache_tokens=self._extract_cache_tokens(usage),
+                    reasoning_tokens=self._extract_reasoning_tokens(usage),
                     input_cost=input_cost,
                     output_cost=output_cost,
                     total_cost=total_cost,

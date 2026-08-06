@@ -17,6 +17,11 @@ from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_proce
 from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
 
+_WINDOW_MANAGED_METADATA_KEY = "tool_result_window_managed"
+WINDOWED_OUTPUT_TAG = "<windowed-output>"
+WINDOWED_OUTPUT_CLOSING_TAG = "</windowed-output>"
+
+
 class ToolResultWindowProcessorConfig(BaseModel):
     """Keep only the most recent ``keep_last_k`` results of selected tools in context.
 
@@ -49,6 +54,23 @@ class ToolResultWindowProcessorConfig(BaseModel):
         description="Number of leading characters kept in the context placeholder after offloading.",
     )
     """Preview length retained in the placeholder message."""
+
+    min_offload_chars: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Minimum character count for filesystem persistence. Smaller results are either kept "
+            "or compacted in place. Zero preserves the legacy always-persist behavior."
+        ),
+    )
+    """Minimum result length that justifies filesystem persistence."""
+
+    small_result_trim_size: int = Field(
+        default=800,
+        gt=0,
+        description="Preview length for old results below min_offload_chars.",
+    )
+    """In-context preview length used when persistence would cost more than it saves."""
 
     offload_file_prefix: str = Field(
         default="ToolResultWindowProcessor",
@@ -109,7 +131,15 @@ class ToolResultWindowProcessor(ToolResultBudgetProcessor):
             message = updated_messages[idx]
             if self._is_already_offloaded(message):
                 continue
-            updated_messages[idx] = await self._offload_tool_message(message, context)
+            content = getattr(message, "content", "")
+            if (
+                self.config.min_offload_chars > 0
+                and isinstance(content, str)
+                and len(content) < self.config.min_offload_chars
+            ):
+                updated_messages[idx] = self._compact_small_result(message)
+            else:
+                updated_messages[idx] = await self._offload_tool_message(message, context)
             modified_indices.append(idx)
 
         if not modified_indices:
@@ -129,6 +159,42 @@ class ToolResultWindowProcessor(ToolResultBudgetProcessor):
         return [
             idx for idx, message in enumerate(messages) if self._is_target_tool_result(message, messages, allowlist)
         ]
+
+    @staticmethod
+    def _is_already_offloaded(message: ToolMessage) -> bool:
+        metadata = getattr(message, "metadata", None)
+        return (
+            ToolResultBudgetProcessor._is_already_offloaded(message)
+            or isinstance(metadata, dict)
+            and bool(metadata.get(_WINDOW_MANAGED_METADATA_KEY))
+        )
+
+    def _compact_small_result(self, message: ToolMessage) -> ToolMessage:
+        content = message.content
+        if not isinstance(content, str):
+            return message
+
+        metadata = dict(getattr(message, "metadata", {}) or {})
+        metadata[_WINDOW_MANAGED_METADATA_KEY] = True
+        trim_size = self.config.small_result_trim_size
+        if len(content) <= trim_size:
+            return message.model_copy(update={"metadata": metadata})
+
+        preview = content[:trim_size]
+        compacted_content = (
+            f"{WINDOWED_OUTPUT_TAG}\n"
+            f"Older tool result compacted in context ({len(content)} chars); "
+            "the full result was not persisted because it was below the offload threshold.\n"
+            f"Preview (first {len(preview)} chars):\n"
+            f"{preview}\n...\n"
+            f"{WINDOWED_OUTPUT_CLOSING_TAG}"
+        )
+        return message.model_copy(
+            update={
+                "content": compacted_content,
+                "metadata": metadata,
+            }
+        )
 
     def _is_target_tool_result(
         self,

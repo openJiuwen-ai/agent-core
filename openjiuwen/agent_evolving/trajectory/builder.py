@@ -9,7 +9,6 @@ Responsibilities:
 - Final Trajectory assembly
 
 Explicitly NOT responsible for:
-- Format conversion (done by caller)
 - Span parsing (done by Extractor)
 - Persistence (done by Store)
 """
@@ -20,9 +19,10 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.trajectory.types import (
-    LegacyTrajectory,
     LLMCallDetail,
+    Trajectory,
     TrajectoryStep,
+    trajectory_from_steps,
 )
 
 
@@ -98,22 +98,25 @@ class TrajectoryBuilder:
         if self._start_time_ms is None and step.start_time_ms:
             self._start_time_ms = step.start_time_ms
 
-    def build(self) -> LegacyTrajectory:
-        """Assemble a legacy step-based trajectory view.
+    def build(self) -> Trajectory:
+        """Assemble an OTLP-first ``Trajectory``.
+
+        Steps are encoded into ``otlp_trace`` spans. Callers that need the
+        step-based ``LegacyTrajectory`` view should use ``to_legacy_trajectory``.
 
         Returns:
-            Assembled trajectory with all steps and metadata.
+            Assembled OTLP trajectory with all steps and metadata.
         """
         meta = dict(self.meta)
         meta.pop("source", None)
         if self.member_id:
             meta.setdefault("member_id", self.member_id)
-        return LegacyTrajectory(
+        return trajectory_from_steps(
             execution_id=_generate_uuid(),
-            session_id=self.session_id,
-            case_id=self.case_id,
             steps=self.steps,
             source=self.source,
+            case_id=self.case_id,
+            session_id=self.session_id,
             cost=self.cost if self.cost["input_tokens"] > 0 else None,
             meta=meta,
         )

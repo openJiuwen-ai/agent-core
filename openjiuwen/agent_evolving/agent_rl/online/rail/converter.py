@@ -11,7 +11,17 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-from openjiuwen.agent_evolving.trajectory import LLMCallDetail, Trajectory
+from openjiuwen.agent_evolving.trajectory import (
+    LLMCallDetail,
+    Trajectory,
+    trajectory_case_id,
+    trajectory_cost,
+    trajectory_execution_id,
+    trajectory_meta,
+    trajectory_session_id,
+    trajectory_source,
+    trajectory_steps,
+)
 
 from .llm_response import extract_logprobs, extract_prompt_ids, extract_token_ids
 
@@ -213,12 +223,12 @@ class OnlineTrajectoryConverter:
         tenant_id: Optional[str] = None,
         session_done: Optional[bool] = None,
     ) -> RailV1Batch:
-        trajectory_id = trajectory.execution_id
-        session_id = str(trajectory.session_id or "")
+        trajectory_id = trajectory_execution_id(trajectory)
+        session_id = str(trajectory_session_id(trajectory) or "")
         samples: list[PerTurnSample] = []
         model_id = self.model_id or ""
 
-        for step_index, step in enumerate(trajectory.steps):
+        for step_index, step in enumerate(trajectory_steps(trajectory)):
             if step.kind != "llm" or not isinstance(step.detail, LLMCallDetail):
                 continue
             detail = step.detail
@@ -259,17 +269,18 @@ class OnlineTrajectoryConverter:
             )
             samples.append(sample)
 
-        status = str((trajectory.meta or {}).get("status") or "ok")
+        trajectory_attrs = trajectory_meta(trajectory)
+        status = str((trajectory_attrs or {}).get("status") or "ok")
         meta = TrajectoryMeta(
             trajectory_id=trajectory_id,
             session_id=session_id,
             status=status,
             total_turns=len(samples),
             extra={
-                **dict(trajectory.meta or {}),
-                "source": trajectory.source,
-                "case_id": trajectory.case_id,
-                "cost": trajectory.cost,
+                **dict(trajectory_attrs or {}),
+                "source": trajectory_source(trajectory),
+                "case_id": trajectory_case_id(trajectory),
+                "cost": trajectory_cost(trajectory),
             },
         )
         return RailV1Batch(
@@ -287,7 +298,7 @@ class OnlineTrajectoryConverter:
     @staticmethod
     def extract_prev_feedback(trajectory: Trajectory) -> Optional[dict[str, Any]]:
         """Use the first user message in the new batch as previous-turn feedback."""
-        for step in trajectory.steps:
+        for step in trajectory_steps(trajectory):
             if step.kind != "llm" or not isinstance(step.detail, LLMCallDetail):
                 continue
             for message in step.detail.messages or []:

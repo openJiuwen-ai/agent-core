@@ -39,6 +39,7 @@ class TraceExtAgentHandler(ABC):
 
     def __init__(self):
         self._trace_id: str = ""
+        self._session_id: str | None = None
 
     def set_trace_id(self, trace_id: str) -> None:
         """Inject the tracer UUID into this handler.
@@ -48,6 +49,10 @@ class TraceExtAgentHandler(ABC):
         to bridge OTel traces with tracer's UUID.
         """
         self._trace_id = trace_id
+
+    def set_session_id(self, session_id: str | None) -> None:
+        """Inject the session identifier associated with the current tracer."""
+        self._session_id = session_id
 
     # --- LLM events ---
     @abstractmethod
@@ -156,6 +161,7 @@ class TraceExtWorkflowHandler(ABC):
 
     def __init__(self):
         self._trace_id: str = ""
+        self._session_id: str | None = None
 
     def set_trace_id(self, trace_id: str) -> None:
         """Inject the tracer UUID into this handler.
@@ -165,6 +171,10 @@ class TraceExtWorkflowHandler(ABC):
         to bridge OTel traces with tracer's UUID.
         """
         self._trace_id = trace_id
+
+    def set_session_id(self, session_id: str | None) -> None:
+        """Inject the session identifier associated with the current tracer."""
+        self._session_id = session_id
 
     # --- Lifecycle events ---
     @abstractmethod

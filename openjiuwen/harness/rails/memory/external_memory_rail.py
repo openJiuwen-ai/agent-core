@@ -5,7 +5,7 @@
 import asyncio
 import json
 import time
-from typing import Optional, Set
+from typing import Dict, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import ToolCard
@@ -48,7 +48,11 @@ class ExternalMemoryRail(DeepAgentRail):
         self._scope_id = scope_id
         self._session_id = session_id
         self._initialized = False
-        self._owned_tool_names: Set[str] = set()
+        # Abilities this rail actually registered, mapped from tool name to the
+        # exact card that was stored. The name is the ability-manager key, while
+        # the card identity tells uninit whether this rail is still the owner or
+        # another rail has since taken the name over.
+        self._owned_tool_cards: Dict[str, ToolCard] = {}
         self.system_prompt_builder = None
         self.attachment_manager = None
         # Per-invoke prefetch cache
@@ -76,12 +80,17 @@ class ExternalMemoryRail(DeepAgentRail):
     def uninit(self, agent) -> None:
         # Unregister tools owned by this rail from the agent
         if hasattr(agent, "ability_manager"):
-            for tool_name in list(self._owned_tool_names):
+            for tool_name, tool_card in list(self._owned_tool_cards.items()):
+                if agent.ability_manager.get(tool_name) is not tool_card:
+                    # Another rail re-registered the name after this rail did
+                    # and now owns both the card and the live instance; tearing
+                    # it down here would unregister that rail's tool.
+                    continue
                 try:
                     agent.ability_manager.remove_ability(tool_name)
                 except Exception as exc:
                     logger.warning(f"[ExternalMemoryRail] remove tool '{tool_name}' failed: {exc}")
-        self._owned_tool_names.clear()
+        self._owned_tool_cards.clear()
         
         # Remove prompt sections
         if self.system_prompt_builder is not None:
@@ -285,7 +294,7 @@ class ExternalMemoryRail(DeepAgentRail):
 
                 result = agent.ability_manager.add_ability(tool_card, local_func)
                 if result.added:
-                    self._owned_tool_names.add(tool_name)
+                    self._owned_tool_cards[tool_name] = tool_card
                     logger.info(f"[ExternalMemoryRail] Registered tool: {tool_name}")
         except Exception as e:
             logger.error(f"[ExternalMemoryRail] Failed to register provider tools: {e}")
@@ -310,20 +319,32 @@ class ExternalMemoryRail(DeepAgentRail):
     @staticmethod
     def _resolve_user_text_for_memory(ctx: AgentCallbackContext) -> str:
         """Resolve user text for memory storage.
-        
+
         Priority rules:
-        1. Prefer non-empty ctx.inputs.query
-        2. Fallback to last user message in ctx.inputs.messages
-        3. Log warning and return empty string if both are empty
-        
+        1. RunContext.extra["raw_query"]
+        2. Prefer non-empty ctx.inputs.query
+        3. Fallback to last user message in ctx.inputs.messages
+        4. Log warning and return empty string if all are empty
+
         Note: Should use this method consistently for prefetch and sync_turn.
-        
+
         Args:
             ctx: AgentCallbackContext
-            
+
         Returns:
-            User text string    
+            User text string
         """
+        # Highest priority: raw query from RunContext.extra
+        #   before_model_call: ctx.extra["run_context"] (bridged to ReActAgent)
+        #   after_invoke: ctx.inputs.run_context (on DeepAgent)
+        run_context = getattr(ctx.inputs, "run_context", None)
+        if run_context is None and isinstance(getattr(ctx, "extra", None), dict):
+            run_context = ctx.extra.get("run_context")
+        if run_context is not None and hasattr(run_context, "extra"):
+            mem_query = run_context.extra.get("raw_query", "")
+            if isinstance(mem_query, str) and mem_query.strip():
+                return mem_query.strip()
+
         # Prioritize the query field
         if hasattr(ctx.inputs, "query"):
             q = ctx.inputs.query

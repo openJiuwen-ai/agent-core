@@ -22,6 +22,7 @@ def _build_mock_response(content: str = "ok") -> MagicMock:
     response.choices[0].message.tool_calls = None
     response.choices[0].message.reasoning = None
     response.choices[0].message.reasoning_content = None
+    response.choices[0].finish_reason = "stop"
     response.usage = MagicMock()
     response.usage.prompt_tokens = 5
     response.usage.completion_tokens = 3

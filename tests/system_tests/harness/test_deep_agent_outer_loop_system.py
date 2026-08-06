@@ -233,7 +233,11 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
 
         invoke_task = asyncio.create_task(
             agent.invoke(
-                {"query": "base"}, session=session
+                {
+                    "query": "wrapped base prompt",
+                    "raw_query": "base",
+                },
+                session=session,
             )
         )
 
@@ -275,6 +279,30 @@ class TestDeepAgentOuterLoopSystem(unittest.IsolatedAsyncioTestCase):
             fake_react.invoke_calls[3]["inputs"][
                 "query"
             ],
+            "third_fu",
+        )
+        self.assertEqual(
+            fake_react.invoke_calls[0]["inputs"][
+                "run_context"
+            ].extra["raw_query"],
+            "base",
+        )
+        self.assertEqual(
+            fake_react.invoke_calls[1]["inputs"][
+                "run_context"
+            ].extra["raw_query"],
+            "first_fu",
+        )
+        self.assertEqual(
+            fake_react.invoke_calls[2]["inputs"][
+                "run_context"
+            ].extra["raw_query"],
+            "second_fu",
+        )
+        self.assertEqual(
+            fake_react.invoke_calls[3]["inputs"][
+                "run_context"
+            ].extra["raw_query"],
             "third_fu",
         )
 

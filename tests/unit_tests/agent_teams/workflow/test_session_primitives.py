@@ -182,14 +182,14 @@ def test_human_correlation_id_is_deterministic_phase_label_turn(tmp_path):
     assert backend.correlations == ["review:lead:0", "review:lead:1"]
 
 
-def test_agent_turn_correlation_id_is_none(tmp_path):
-    """Agent turns carry no correlation id (only human turns do)."""
+def test_agent_turn_correlation_id_is_deterministic(tmp_path):
+    """Agent session turns carry the same deterministic id shape as human turns."""
     script = _write(tmp_path, "sess.py", _MULTI_TURN_SCRIPT)
     backend = _RecordingBackend()
 
     asyncio.run(run_workflow(script, backend=backend))
 
-    assert backend.correlations == [None, None, None]
+    assert backend.correlations == ["_:chat:0", "_:chat:1", "_:chat:2"]
 
 
 _HUMAN_ONESHOT_SCRIPT = '''
@@ -381,3 +381,108 @@ async def run(args):
     asyncio.run(run_workflow(script, backend=second, resume=journal))
     # Pure replay through the single-shot path: run() never called.
     assert second.turns == []
+
+
+_MULTI_LABEL_SESSION_SCRIPT = '''
+from swarmflow import agent_session, human_session, phase
+
+META = {"name": "multi-label", "description": "same-label sessions", "phases": []}
+
+async def run(args):
+    phase("review")
+    a = agent_session(label="chat")
+    h = human_session(label="host")
+    await a.send("a1")
+    await a.send("a2")
+    await h.send("h1")
+    await h.send("h2")
+    return None
+'''
+
+
+_NODE_TYPE_SCRIPT = '''
+from swarmflow import agent, agent_session, human, human_session
+
+META = {"name": "node-types", "description": "primitive node types", "phases": []}
+
+async def run(args):
+    await agent("agent prompt", label="agent")
+    await agent_session(label="agent_session").send("agent session prompt")
+    await human("human prompt", label="human")
+    await human_session(label="human_session").send("human session prompt")
+'''
+
+
+def test_agent_started_carries_explicit_node_type_for_each_primitive(tmp_path):
+    """Each primitive identifies its exact node type on AGENT_STARTED."""
+    script = _write(tmp_path, "node_types.py", _NODE_TYPE_SCRIPT)
+    events: list[WorkflowProgressEvent] = []
+
+    asyncio.run(
+        run_workflow(
+            script,
+            backend=_RecordingBackend(),
+            progress_sink=events.append,
+        )
+    )
+
+    started = [event for event in events if event.kind == ProgressKind.AGENT_STARTED]
+    assert {event.label: event.node_type for event in started} == {
+        "agent": "agent",
+        "agent_session": "agent_session",
+        "human": "human",
+        "human_session": "human_session",
+    }
+
+
+def test_agent_started_carries_agent_id_node_type_correlation_id(tmp_path):
+    """AGENT_STARTED carries agent_id, node_type, and correlation_id for session turns.
+
+    agent_session turns: node_type=agent_session, correlation_id=phase:label:turn, distinct agent_ids.
+    human_session turns: node_type=human_session, correlation_id=phase:label:turn, distinct ids.
+    No is_human flag is emitted; node_type is the sole source of node kind.
+    """
+    script = _write(tmp_path, "multi_label.py", _MULTI_LABEL_SESSION_SCRIPT)
+    backend = _RecordingBackend()
+    events: list[WorkflowProgressEvent] = []
+    asyncio.run(run_workflow(script, backend=backend, progress_sink=events.append))
+
+    started = [e for e in events if e.kind == ProgressKind.AGENT_STARTED]
+    assert len(started) == 4
+
+    # agent_session turns (chat): agent_session, deterministic correlation_id, distinct agent_ids.
+    agent_turns = [e for e in started if e.label == "chat"]
+    assert len(agent_turns) == 2
+    assert all(e.node_type == "agent_session" for e in agent_turns)
+    assert [e.correlation_id for e in agent_turns] == ["review:chat:0", "review:chat:1"]
+    assert all(e.agent_id is not None for e in agent_turns)
+    assert len({e.agent_id for e in agent_turns}) == 2
+
+    # human_session turns (host): human_session, deterministic correlation_id, distinct ids.
+    human_turns = [e for e in started if e.label == "host"]
+    assert len(human_turns) == 2
+    assert all(e.node_type == "human_session" for e in human_turns)
+    assert [e.correlation_id for e in human_turns] == ["review:host:0", "review:host:1"]
+    assert all(e.agent_id is not None for e in human_turns)
+    assert len({e.agent_id for e in human_turns}) == 2
+
+    # No id collisions across agent and human turns of the same label pool.
+    assert len({e.agent_id for e in started}) == 4
+
+
+def test_agent_completed_matches_started_by_agent_id(tmp_path):
+    """AGENT_COMPLETED carries the same agent_id as its AGENT_STARTED (exact match)."""
+    script = _write(tmp_path, "multi_label2.py", _MULTI_LABEL_SESSION_SCRIPT)
+    backend = _RecordingBackend()
+    events: list[WorkflowProgressEvent] = []
+    asyncio.run(run_workflow(script, backend=backend, progress_sink=events.append))
+
+    started = [e for e in events if e.kind == ProgressKind.AGENT_STARTED]
+    completed = [e for e in events if e.kind == ProgressKind.AGENT_COMPLETED]
+    assert len(started) == len(completed) == 4
+
+    started_by_id = {e.agent_id: e for e in started}
+    for c in completed:
+        assert c.agent_id is not None
+        assert c.agent_id in started_by_id
+        assert started_by_id[c.agent_id].label == c.label

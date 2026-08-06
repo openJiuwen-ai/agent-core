@@ -49,6 +49,9 @@ class _StreamingFinishReasonRail(AgentRail):
 
 
 class _FakeContext:
+    def session_id(self):
+        return "streaming-test-session"
+
     async def get_context_window(self, **kwargs):
         return self
 

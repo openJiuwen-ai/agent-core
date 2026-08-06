@@ -12,6 +12,7 @@ from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
 from openjiuwen.agent_evolving.experience.lifecycle import PendingCommitResult
 from openjiuwen.agent_evolving.experience.types import ExperienceApplyResult, PendingChange
 from openjiuwen.agent_evolving.protocols import EXPERIENCE_ENTRY, SKILL_EXPERIENCE_ENTRY
+from openjiuwen.agent_evolving.trajectory.types import Trajectory
 from openjiuwen.core.common.logging import logger
 
 
@@ -21,7 +22,7 @@ def make_pending_change(
     *,
     request_id_prefix: Optional[str] = None,
     subject_kind: Optional[str] = None,
-    trajectory: Any | None = None,
+    trajectory: Trajectory | None = None,
     messages: Optional[List[dict]] = None,
     is_shared_records: bool = False,
 ) -> PendingChange:

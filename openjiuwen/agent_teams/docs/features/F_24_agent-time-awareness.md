@@ -100,7 +100,8 @@ status/assignee 同级），不破坏 `TaskSummary` 的 lightweight 契约。
 
 - **core 层时间约定不统一**（session tracer 用 `datetime`、memory 用 ISO 字符串、session
   controller 用秒级 float）。本次只覆盖 agent_teams 渲染层，不上推到 core 层统一。
-- **`dispatcher.stale_claim_header` 仍保留硬编码 "超过 10 分钟" 阈值描述**（聚合提示头）。
-  其下的每条任务明细行已带各自的认领时间，头部阈值描述影响很小，未参数化。
+- ~~**`dispatcher.stale_claim_header` 仍保留硬编码 "超过 10 分钟" 阈值描述**（聚合提示头）。~~
+  该聚合催促头已随 [[F_53_self-only-stale-nudge-minimal-and-append]] 移除（stale-claim 收敛为
+  self-only 的单任务 self-nudge，不再有批量聚合头），此遗留项作废。
 - **MCP `get_task` 仍返回原始 `updated_at` 整数**（`model_dump`），未渲染成可读时间。它是
   单任务详情的结构化输出，外部 agent 可自行处理；`list_tasks` / `read_inbox` 已给渲染字符串。

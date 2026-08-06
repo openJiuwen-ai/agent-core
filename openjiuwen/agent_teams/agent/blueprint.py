@@ -35,7 +35,6 @@ class TeamAgentBlueprint:
     card: AgentCard
     spec: TeamAgentSpec
     ctx: TeamRuntimeContext
-    role_policy: str
     language: str
 
     @property

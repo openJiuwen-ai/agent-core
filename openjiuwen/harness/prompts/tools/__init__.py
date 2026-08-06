@@ -11,48 +11,69 @@ All built-in tools register via ``ToolMetadataProvider`` implementations.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.prompts.tools.base import (
-    ToolMetadataProvider,
+from openjiuwen.harness.prompts.tools.agent_mode import (
+    EnterPlanModeMetadataProvider,
+    ExitPlanModeMetadataProvider,
+    SwitchModeMetadataProvider,
 )
 from openjiuwen.harness.prompts.tools.ask_user import (
     AskUserMetadataProvider,
-)
-from openjiuwen.harness.prompts.tools.bash import (
-    BashMetadataProvider,
-)
-from openjiuwen.harness.prompts.tools.powershell import (
-    PowerShellMetadataProvider,
 )
 from openjiuwen.harness.prompts.tools.audio import (
     AudioMetadataMetadataProvider,
     AudioQuestionAnsweringMetadataProvider,
     AudioTranscriptionMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.base import (
+    ToolMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.bash import (
+    BashMetadataProvider,
+)
 from openjiuwen.harness.prompts.tools.code import (
     CodeMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.coding_memory import (
+    CodingMemoryEditMetadataProvider,
+    CodingMemoryReadMetadataProvider,
+    CodingMemoryWriteMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.compression_recall import (
+    CompressionRecallMetadataProvider,
+)
 from openjiuwen.harness.prompts.tools.cron import (
-    CronMetadataProvider,
-    CronListJobsMetadataProvider,
-    CronGetJobMetadataProvider,
     CronCreateJobMetadataProvider,
-    CronUpdateJobMetadataProvider,
     CronDeleteJobMetadataProvider,
-    CronToggleJobMetadataProvider,
+    CronGetJobMetadataProvider,
+    CronListJobsMetadataProvider,
+    CronMetadataProvider,
     CronPreviewJobMetadataProvider,
+    CronToggleJobMetadataProvider,
+    CronUpdateJobMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.enter_worktree import (
+    EnterWorktreeMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.exit_worktree import (
+    ExitWorktreeMetadataProvider,
 )
 from openjiuwen.harness.prompts.tools.filesystem import (
-    ReadFileMetadataProvider,
-    WriteFileMetadataProvider,
     EditFileMetadataProvider,
     GlobMetadataProvider,
-    ListDirMetadataProvider,
     GrepMetadataProvider,
+    ListDirMetadataProvider,
+    ReadFileMetadataProvider,
+    WriteFileMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.goal import (
+    GetCurrentGoalMetadataProvider,
+    SubmitGoalReportMetadataProvider,
 )
 from openjiuwen.harness.prompts.tools.list_skill import (
     ListSkillMetadataProvider,
@@ -60,45 +81,8 @@ from openjiuwen.harness.prompts.tools.list_skill import (
 from openjiuwen.harness.prompts.tools.load_tools import (
     LoadToolsMetadataProvider,
 )
-from openjiuwen.harness.prompts.tools.search_tools import (
-    SearchToolsMetadataProvider,
-)
-from openjiuwen.harness.prompts.tools.session_tools import (
-    SessionsListMetadataProvider,
-    SessionsSpawnMetadataProvider,
-    SessionsCancelMetadataProvider,
-)
-from openjiuwen.harness.prompts.tools.skill_tool import (
-    SkillToolMetadataProvider,
-)
-from openjiuwen.harness.prompts.tools.todo import (
-    TodoCreateMetadataProvider,
-    TodoListMetadataProvider,
-    TodoModifyMetadataProvider,
-    TodoGetMetadataProvider,
-)
-from openjiuwen.harness.prompts.tools.video_understanding import (
-    VideoUnderstandingMetadataProvider,
-)
-from openjiuwen.harness.prompts.tools.vision import (
-    ImageOCRMetadataProvider,
-    VisualQuestionAnsweringMetadataProvider,
-)
 from openjiuwen.harness.prompts.tools.lsp_tool import (
     LspToolMetadataProvider,
-)
-from openjiuwen.harness.prompts.tools.task_tool import (
-    TaskMetadataProvider,
-)
-from openjiuwen.harness.prompts.tools.web_tools import (
-    FreeSearchMetadataProvider,
-    PaidSearchMetadataProvider,
-    FetchWebpageMetadataProvider,
-)
-from openjiuwen.harness.prompts.tools.agent_mode import (
-    SwitchModeMetadataProvider,
-    EnterPlanModeMetadataProvider,
-    ExitPlanModeMetadataProvider,
 )
 from openjiuwen.harness.prompts.tools.mcp import (
     ListMcpResourcesMetadataProvider,
@@ -111,16 +95,40 @@ from openjiuwen.harness.prompts.tools.memory import (
     ReadMemoryMetadataProvider,
     WriteMemoryMetadataProvider,
 )
-from openjiuwen.harness.prompts.tools.coding_memory import (
-    CodingMemoryEditMetadataProvider,
-    CodingMemoryReadMetadataProvider,
-    CodingMemoryWriteMetadataProvider,
+from openjiuwen.harness.prompts.tools.powershell import (
+    PowerShellMetadataProvider,
 )
-from openjiuwen.harness.prompts.tools.enter_worktree import (
-    EnterWorktreeMetadataProvider,
+from openjiuwen.harness.prompts.tools.search_tools import (
+    SearchToolsMetadataProvider,
 )
-from openjiuwen.harness.prompts.tools.exit_worktree import (
-    ExitWorktreeMetadataProvider,
+from openjiuwen.harness.prompts.tools.session_tools import (
+    SessionsCancelMetadataProvider,
+    SessionsListMetadataProvider,
+    SessionsSpawnMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.skill_tool import (
+    SkillToolMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.task_tool import (
+    TaskMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.todo import (
+    TodoCreateMetadataProvider,
+    TodoGetMetadataProvider,
+    TodoListMetadataProvider,
+    TodoModifyMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.video_understanding import (
+    VideoUnderstandingMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.vision import (
+    ImageOCRMetadataProvider,
+    VisualQuestionAnsweringMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.web_tools import (
+    FetchWebpageMetadataProvider,
+    FreeSearchMetadataProvider,
+    PaidSearchMetadataProvider,
 )
 
 # ---------------------------------------------------------------------------
@@ -180,11 +188,23 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     CodingMemoryReadMetadataProvider(),
     CodingMemoryWriteMetadataProvider(),
     CodingMemoryEditMetadataProvider(),
+    CompressionRecallMetadataProvider(),
     EnterWorktreeMetadataProvider(),
     ExitWorktreeMetadataProvider(),
+    SubmitGoalReportMetadataProvider(),
+    GetCurrentGoalMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {p.get_name(): p for p in _PROVIDERS}
+
+
+@dataclass(frozen=True)
+class ToolCardBuildOptions:
+    """Options for building a tool card."""
+
+    format_args: Optional[Dict[str, str]] = None
+    parallel_safe: bool = True
+    idempotent: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +230,8 @@ def build_tool_card(
     name: str,
     tool_id: str,
     language: str = "cn",
-    format_args: Optional[Dict[str, str]] = None,
     agent_id: Optional[str] = None,
+    options: Optional[ToolCardBuildOptions] = None,
 ) -> ToolCard:
     """统一建卡函数。工具类不再自己拼 ToolCard。
 
@@ -219,27 +239,37 @@ def build_tool_card(
         name: 工具名称。
         tool_id: 工具 ID 前缀。
         language: 语言（'cn' 或 'en'）。
-        format_args: 可选的格式化参数字典，用于填充描述中的占位符。
         agent_id: 可选的 agent ID，用于生成唯一的工具 ID。
             如果提供，最终的 tool_id 为 f"{tool_id}_{agent_id}"；
             如果不提供，使用 uuid 生成唯一后缀。
+        options: 可选的建卡选项。
 
     Returns:
         配置好的 ToolCard 实例。
     """
     description = get_tool_description(name, language)
+    build_options = options or ToolCardBuildOptions()
 
     # 如果提供了格式化参数，填充描述中的占位符
-    if format_args:
-        description = description.format(**format_args)
+    if build_options.format_args:
+        description = description.format(**build_options.format_args)
 
     final_tool_id = f"{tool_id}_{agent_id}" if agent_id else f"{tool_id}_{uuid.uuid4().hex}"
+
+    # Secure-by-default: idempotent falls back to the provider's declaration.
+    # Only when options explicitly pass idempotent do we allow an override.
+    provider = _REGISTRY.get(name)
+    idempotent = provider.is_idempotent() if provider else False
+    if options is not None and build_options.idempotent is not None:
+        idempotent = build_options.idempotent
 
     return ToolCard(
         id=final_tool_id,
         name=name,
         description=description,
         input_params=get_tool_input_params(name, language),
+        parallel_safe=build_options.parallel_safe,
+        idempotent=idempotent,
     )
 
 

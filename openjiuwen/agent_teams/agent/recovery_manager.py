@@ -44,7 +44,8 @@ class RecoveryManager:
 
         member_name = self._configurator.member_name
         team_logger.info("[{}] recovering team", member_name or "?")
-        all_members = await team_backend.list_members()
+        await team_backend.restore_external_cli_specs_from_db()
+        all_members = await team_backend.list_member_roster()
         restarted: list[str] = []
 
         for member in all_members:
@@ -176,7 +177,7 @@ class RecoveryManager:
         if self._configurator.role != TeamRole.LEADER or not team_backend:
             return []
 
-        members = await team_backend.list_members()
+        members = await team_backend.list_member_roster()
         leader_member_name = self._configurator.member_name
         spawned = self._spawn_manager.spawned_handles
         live_teammates = {

@@ -1,7 +1,7 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from typing import Awaitable, Callable, List, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, List, Dict, Optional, Tuple
 import asyncio
 import functools
 
@@ -115,8 +115,10 @@ class ContextEngine:
             token_counter = TiktokenCounter()
 
         if self._config.enable_openrouter_model_context_window_tokens:
-            await asyncio.to_thread(
-                ContextUtils.fetch_openrouter_model_context_window_tokens,
+            # Scheduled, not awaited: this is the first-turn critical path and the
+            # fetch is a ~600KB cross-region download. This context falls back to
+            # the built-in window table; later contexts pick up the fetched values.
+            ContextUtils.prefetch_openrouter_model_context_window_tokens(
                 self._config.openrouter_request_timeout,
             )
 
@@ -163,7 +165,7 @@ class ContextEngine:
             session_id: str = None,
             processor_types: List[str] = None,
             **kwargs,
-    ) -> str:
+    ) -> str | dict[str, Any]:
         """
         Actively run registered compression processors for an existing context.
 
@@ -181,6 +183,9 @@ class ContextEngine:
             - ``"compressed"``: active compression ran and changed context.
             - ``"noop"``: active compression ran but nothing changed, or no
               compression processor is registered.
+
+        A successful compression is saved to the resolved session and committed
+        before this method returns. Contexts without a session remain in-memory only.
         """
         resolved_session_id = session.get_session_id() if session else (session_id or "default_session_id")
         context = self.get_context(context_id=context_id, session_id=resolved_session_id)
@@ -194,11 +199,19 @@ class ContextEngine:
                 StatusCode.CONTEXT_EXECUTION_ERROR,
                 error_msg=f"context '{context_id}' does not support active compression"
             )
-        return await context.compress_context(
+        result = await context.compress_context(
             processor_types=processor_types,
             sys_operation=self._sys_operation,
             **kwargs,
         )
+        result_code = result.get("result") if isinstance(result, dict) else result
+        if result_code == "compressed":
+            get_session_ref = getattr(context, "get_session_ref", None)
+            effective_session = session or (get_session_ref() if callable(get_session_ref) else None)
+            if effective_session is not None:
+                await self.save_contexts(effective_session, context_ids=[context_id])
+                await effective_session.commit()
+        return result
 
     async def clear_context(
             self,

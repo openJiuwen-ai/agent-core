@@ -55,6 +55,8 @@ team system prompt 与入站消息有两个长期痛点，本特性一并解决�
   `render_event`（`<team-event>` + 可选 `<team-note>`）。**零 i18n 依赖**——动态数据 + 已本地化的
   文案片段由 handler 传入，结构层只负责 XML 标签 + `html.escape`。`type`/`kind`/`for` 是稳定英文
   契约 token（永不本地化），由 §5.2 说明 section（`team_inbound_tags`，P:18）按名解释。
+  （本次 note 渲染成紧跟被修饰块之后的**平级**块，已由
+  [[F_72_nested-team-note-inside-annotated-block]] 改为嵌进块内部；本节其余描述仍然有效。）
 - handler 全量接线：`MessageHandler._format_message`（普通成员 → `<team-inbound>` + `reply-hint`
   note；human_agent → `for="controller"` + `hitt-silence` note）；`TaskBoardHandler` 的
   task-assigned / plan-approved|rejected / all-done / task-board；`StaleTaskHandler` 的
@@ -70,8 +72,10 @@ team system prompt 与入站消息有两个长期痛点，本特性一并解决�
 
 - **本地 `deliver_input`**（喂自己 LLM）：handler 自己包 XML（`<team-event>` 等）。
 - **`send_message`**（进对方 mailbox）：**不自己包**——对方 `_format_message` 会包 `<team-inbound>`，
-  自己再包会嵌套。所以 `StaleTaskHandler._leader_nudge_stale_claim` /
-  `MemberHandler._nudge_idle_member_with_stale_claims` 保持纯文本，由接收者渲染成 inbound。
+  自己再包会嵌套。任何经 `send_message` 跨进程投递的内容都保持纯文本，由接收者渲染成 inbound。
+  （本条原以 `StaleTaskHandler._leader_nudge_stale_claim` /
+  `MemberHandler._nudge_idle_member_with_stale_claims` 为例，这两条 leader 跨进程 stale-claim
+  nudge 路径已随 [[F_53_self-only-stale-nudge-minimal-and-append]] 收敛为 self-only 而移除。）
 
 ## 拒绝的方案
 

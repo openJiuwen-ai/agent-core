@@ -19,12 +19,13 @@ from __future__ import annotations
 import asyncio
 from contextvars import Token
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Awaitable, Callable, NoReturn
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, NoReturn
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
 from openjiuwen.agent_teams.external.format import render_messages, render_task_board
 from openjiuwen.agent_teams.i18n import set_language
+from openjiuwen.agent_teams.message_template import expand_message
 from openjiuwen.agent_teams.messager.base import create_messager
 from openjiuwen.agent_teams.messager.messager import Messager
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
@@ -39,8 +40,8 @@ from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.database import TeamDatabase
-    from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
     from openjiuwen.agent_teams.tools.team import TeamBackend
     from openjiuwen.core.foundation.tool.base import Tool
 
@@ -84,7 +85,8 @@ class ExternalTeamClient:
         self._backend: "TeamBackend | None" = None
         self._tasks: TeamTaskManager | None = None
         self._messages: TeamMessageManager | None = None
-        self._db: "TeamDatabase | InMemoryTeamDatabase | None" = None
+        self._db: "TeamDatabase | None" = None
+        self._workspace_manager: "TeamWorkspaceManager | None" = None
         self._session_token: Token[str] | None = None
         # Member-scope real team tools, keyed by card.name. Built at connect()
         # for the ``member`` scope so an external CLI member calls the exact
@@ -124,6 +126,11 @@ class ExternalTeamClient:
     def is_leader(self) -> bool:
         """Whether this member carries the leader role."""
         return self._descriptor.role == "leader"
+
+    @property
+    def is_human_agent(self) -> bool:
+        """Whether this member is a human-agent avatar (drives the inbound note)."""
+        return self._descriptor.role == "human_agent"
 
     @property
     def scope(self) -> str:
@@ -175,7 +182,24 @@ class ExternalTeamClient:
         db = get_shared_db(self._descriptor.db_config)
         await db.initialize()
 
-        self._messager = create_messager(self._descriptor.transport_config)
+        transport_config = self._descriptor.transport_config
+        if transport_config.backend == "hybrid":
+            from openjiuwen.agent_teams.messager.hybrid import HybridMessager, WebSocketEventPublisher
+
+            if not transport_config.external_publish_url:
+                raise ValueError("hybrid messager requires external_publish_url")
+            publisher = WebSocketEventPublisher(
+                url=transport_config.external_publish_url,
+                session_id=self.session_id,
+                team_name=self.team_name,
+                request_timeout=transport_config.request_timeout,
+            )
+            self._messager = HybridMessager(
+                publisher=publisher,
+                sender_id=self.member_name,
+            )
+        else:
+            self._messager = create_messager(transport_config)
         await self._messager.start()
 
         backend = TeamBackend(
@@ -191,11 +215,19 @@ class ExternalTeamClient:
         self._db = db
 
         if self._descriptor.scope == "member":
+            # Same factory, same dispatch mode as an in-process teammate: the
+            # tool set an external CLI member sees must match the system prompt
+            # it was spawned with.
             real_tools = create_team_tools(
                 role="teammate",
                 agent_team=backend,
+                teammate_mode=self._descriptor.teammate_mode,
+                dispatch_mode=self._descriptor.dispatch_mode,
                 lang=self._descriptor.language,
             )
+            workspace_tool = self._build_workspace_meta_tool()
+            if workspace_tool is not None:
+                real_tools.append(workspace_tool)
             self._tools = {tool.card.name: tool for tool in real_tools}
 
         self._connected = True
@@ -217,8 +249,27 @@ class ExternalTeamClient:
         self._tasks = None
         self._messages = None
         self._backend = None
+        self._workspace_manager = None
         self._tools = {}
         self._connected = False
+
+    def _build_workspace_meta_tool(self) -> "Tool | None":
+        """Build the external workspace metadata tool when workspace is enabled."""
+        workspace_config = self._descriptor.workspace_config
+        workspace_path = self._descriptor.workspace_path
+        if workspace_config is None or not workspace_config.enabled or not workspace_path:
+            return None
+
+        from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+        from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
+        from openjiuwen.agent_teams.tools.locales import make_translator
+
+        self._workspace_manager = TeamWorkspaceManager(
+            config=workspace_config,
+            workspace_path=workspace_path,
+            team_name=self.team_name,
+        )
+        return WorkspaceMetaTool(self._workspace_manager, make_translator(self._descriptor.language))
 
     async def __aenter__(self) -> "ExternalTeamClient":
         await self.connect()
@@ -340,11 +391,47 @@ class ExternalTeamClient:
         now_ms = get_current_time()
         parts: list[str] = []
         if view.messages:
-            parts.append(render_messages(view.messages, now_ms=now_ms))
+            bodies = await self._expand_template_bodies(view.messages)
+            parts.append(
+                render_messages(
+                    view.messages,
+                    is_human_agent=self.is_human_agent,
+                    now_ms=now_ms,
+                    bodies=bodies,
+                )
+            )
         board = render_task_board(view.tasks, is_leader=self.is_leader, now_ms=now_ms)
         if board:
             parts.append(board)
         return "\n\n".join(parts) if parts else "(inbox empty)"
+
+    async def _expand_template_bodies(self, messages: list[TeamMessageBase]) -> dict[str, str]:
+        """Render the framework template messages in a batch (F_63).
+
+        An external member reaches the same shared DB as an in-process one, so
+        it renders the same document from the same template against the same
+        task rows — the pull path must not degrade to a blank body just because
+        the framework stores the message as a template plus refs.
+        """
+        db = self._require_db()
+
+        async def _get_task(task_id: str) -> Any:
+            return await db.task.get_task(task_id)
+
+        async def _get_member(name: str) -> Any:
+            return await db.member.get_member(name, self.team_name)
+
+        bodies: dict[str, str] = {}
+        for msg in messages:
+            expanded = await expand_message(
+                msg,
+                task_getter=_get_task,
+                member_getter=_get_member,
+                language=self._descriptor.language or "cn",
+            )
+            if expanded.is_template:
+                bodies[msg.message_id] = expanded.body
+        return bodies
 
     async def watch(self, observer: InboxObserver) -> None:
         """Block on team events, invoking ``observer`` with a fresh inbox.
@@ -401,7 +488,7 @@ class ExternalTeamClient:
             self._raise_not_connected()
         return self._messager
 
-    def _require_db(self) -> "TeamDatabase | InMemoryTeamDatabase":
+    def _require_db(self) -> "TeamDatabase":
         if self._db is None:
             self._raise_not_connected()
         return self._db

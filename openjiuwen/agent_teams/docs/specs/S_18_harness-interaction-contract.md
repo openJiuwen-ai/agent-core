@@ -1,11 +1,13 @@
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-06-16
+最近一次修订日期：2026-07-31
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
 TeamHarness/StreamController）的决策见 [[F_28_native-harness-team-adoption]]；关停竞态守卫与
-`add_rail` 委派见 [[F_39_swarmflow-e2e-hardening]]。
+`add_rail` 委派见 [[F_39_swarmflow-e2e-hardening]]；pause / abort / resume 的 inner-iteration
+级语义与原地续跑见 [[F_60_native-harness-pause-abort-resume]]；跨 stop/start 的冷恢复续跑见
+[[F_61_cold-resume-across-stop-start]]。
 
 ## 两层契约
 
@@ -30,9 +32,13 @@ TeamHarness/StreamController）的决策见 [[F_28_native-harness-team-adoption]
 | `start` | `async (*, session: Session \| None = None)` | 初始化并启动 supervisor；可注入外部 session |
 | `stop` | `async ()` | 取消在途工作、关闭输出、转 TERMINATED |
 | `outputs` | `() -> AsyncIterator[OutputSchema]` | queue-backed 输出迭代器（单消费者，`_END` sentinel 终止） |
-| `send` | `async (content, *, immediate=False) -> str` | 提交输入，immediate=True 注入当前 round；返回 seq id |
-| `abort` | `async (*, immediate=False)` | 中止当前 round：graceful（False）/ 硬取消+回滚（True） |
-| `pause` | `async ()` | 暂停当前 round；下次 send 拼接并重启 |
+| `send` | `async (content, *, immediate=False) -> str` | 提交输入，immediate=True 注入当前 round，False 进 follow-up 队列（整批驱动下一轮，见下）；返回 seq id |
+| `abort` | `async (*, immediate=False)` | 中止当前 round → IDLE。graceful（False）在 iteration 边界停；immediate（True）硬取消 + 回退最近边界 |
+| `pause` | `async ()` | 在最近的 inner ReAct iteration 边界暂停 → PAUSED，round 保留可续 |
+| `resume` | `async (*, query=None)` | 从保留的 context 原地续跑 paused round（不追加新的 user turn）。`query` 驱动**冷恢复**（harness 已重建、context 来自 checkpoint）；warm 恢复忽略它 |
+
+`abort` 与 `pause` 是**两个正交动词**：abort 丢弃当前 round（下次 `send` 起全新 round），
+pause 停在干净边界并保留 round（`resume` 原地续）。
 
 `MemberRuntime` 额外声明：`subscribe(*, on_state=None, on_round=None)`（单一订阅入口，
 两回调 keyword-only 且可选，只注册非 None 的，kwargs 按回调声明参数 narrow）、
@@ -54,10 +60,27 @@ supervisor 协程 + control channel 串行化所有状态转换（唯一 state w
 
 ## HarnessState
 
-`IDLE` / `RUNNING` / `PAUSED` / `TERMINATED`。NativeHarness 仅 supervisor 协程 mutate。
-转换：IDLE →(send) RUNNING；RUNNING →(round 完成无后继) IDLE / (有 follow_up·pending·
-remaining) RUNNING / (pause) PAUSED / (immediate abort) IDLE；PAUSED →(send)
-RUNNING；任意 →(stop) TERMINATED。CLI runtime 用同一枚举的子集（无 PAUSED）。
+`IDLE` / `RUNNING` / `PAUSING` / `PAUSED` / `TERMINATED`。NativeHarness 仅 supervisor 协程 mutate。
+
+转换：
+
+- IDLE →(send) RUNNING
+- RUNNING →(round 完成无后继) IDLE / (有 follow_up·pending·remaining) RUNNING
+  - **一轮消费全部排队的 follow-up，不是一条一轮**（[[F_71]]）：round 结束时把队列整批
+    drain 掉，合起来驱动下一轮，与 steering 队列的语义对齐。一条一轮会让成员先对最旧的
+    那条动手、更新的排在后面干等；对互相覆盖的输入（任务看板是全量快照）就是照着已经
+    过期的那份干活。整批还**不在 harness 层拼接**——它作为列表往下走（`InputEvent` 的
+    `input_data` 每条一个 text frame），inner loop 先把这串输入交给 `ON_USER_MESSAGE`
+    rail，rail 剔除完再拼成一条 user message。拼早了 rail 就只剩解析正文一条路。
+- RUNNING →(pause，model 阶段：硬取消 + 回退上一 iteration 边界) PAUSED
+- RUNNING →(pause，tool/boundary 阶段：cooperative) PAUSING →(到达 iteration 边界) PAUSED
+- RUNNING →(abort immediate=True：硬取消 + 回退边界) IDLE / (abort immediate=False：边界停) IDLE
+- PAUSED →(resume) RUNNING（continuation round）/ (send) RUNNING（resume + 注入）/ (abort) IDLE
+- 任意 →(stop) TERMINATED
+
+`PAUSING` 是 tool 阶段 pause 的过渡态：一个已开始的 iteration 必须跑完（副作用不可撤销），
+inner loop 在下一个 model-call 边界协作式停止，`_on_round_done` 结算为 PAUSED 并 resolve 延迟的
+pause ack。CLI runtime 用同一枚举的子集（无 PAUSING / PAUSED）。
 
 ## 事件契约（StreamController 消费）
 
@@ -99,17 +122,52 @@ StreamController 经 `subscribe(on_state=_map_state, on_round=_map_round)` 一�
 
 ## 中断语义
 
-- **graceful**（`abort(immediate=False)`）：复用 `coordinator.request_abort`，当前
-  round 收尾后停，不续轮。无回滚。
-- **immediate**（`abort(immediate=True)`）：`task_scheduler.cancel_task(task_id)`
-  硬停 executor + 回滚 DeepAgentState+context 到 round 边界 snapshot。工具已产生
-  的外部副作用不撤销。
-- **pause**：cancel + 回滚到 pre-round baseline + 缓存 query，下次 send 拼接重启。
+停止点一律落在 **inner ReAct iteration 边界**（一次 LLM 调用 + 该轮 toolcall）。由于 tool_call 与
+ToolMessage 强配对，一次 iteration 只有两个合法结局：**整个丢弃**（回退上一边界）或 **整个完成**
+（前进下一边界）。正确性权威是 `PhaseSnapshotRail` 在 model-call 钩子上的 cooperative
+`force_finish`；supervisor 的 hard-cancel 只是**及时性优化**，且 gated 到
+`model_call_in_flight`（只能落在 parked 的 LLM `await`，绝不落在运行中的 tool）。
+
+- **pause**：model 阶段 → 打断 LLM，回退 `last_iter_snapshot`（无则 pre-round baseline）→ PAUSED；
+  tool/boundary 阶段 → 不硬取消，arm `pause_requested`，inner loop 跑完当前 iteration 后在下一个
+  `before_model_call` 停 → PAUSING → PAUSED。round 保留，`resume` 原地续。
+- **graceful abort**（`immediate=False`）：arm `graceful_abort`。LLM 未开始 → 下一个
+  `before_model_call` 立即退；已开始 → 跑完整个 iteration（含 tool）后在随后的 model-call 边界退。
+  无回滚 → IDLE。
+- **immediate abort**（`immediate=True`）：`task_scheduler.cancel_task(task_id)` 硬停 executor +
+  回滚 DeepAgentState+context 到 `last_iter_snapshot`（无则 pre-round baseline）→ IDLE。
+- **工具外部副作用不撤销**（沿袭 F_27）。这正是 tool 阶段必须等 iteration 完成的理由。
 - **CLI runtime**：abort 信号单轮 `_drive` 自然返回并 fire `aborted` round 事件；
-  immediate rollback / pause 无对应快照，降级 no-op。
+  immediate rollback / pause / resume 无对应快照，降级 no-op。
 
-## resume（中断恢复）
+快照由 `PhaseSnapshotRail` 经 **harness back-ref**（公共只读属性 `harness.active_round`）维护：
+`AFTER_REACT_ITERATION` → `last_iter_snapshot`（主回滚目标），`AFTER_TASK_ITERATION` →
+`last_safe_snapshot`。旧的 `_ACTIVE_ROUND` ContextVar 在 exec task 中恒为 None，已删除。
 
-`send(InteractiveInput)` 经 `submit_round` 透传（executor `_extract_interactive_input`
-原生 resume）；resume round 单轮语义，完成后 settle 到 IDLE 不续 task_plan。
-StreamController 仅校验 `is_pending_interrupt_resume_valid` 后转发，不再 client 侧排队。
+## resume（两种，互不相干）
+
+**1. resume（`resume(*, query=None)`，pause 的逆操作）**：起一个 **continuation round**，在 paused
+round 保留的 context 上继续 loop，**不追加新的 user turn**。`_resume_continuation` 沿
+`submit_round → event.metadata → task_metadata → executor.effective → ctx.extra` 透传（与
+`run_kind` / `run_context` 同一模式），`_inner_invoke` 据此跳过 UserMessage append 并放宽空 query
+守卫。该 query 只作 continuation round 的 `original_query`，使 task-plan 续轮仍可复用。
+
+两条路径，都由 `kernel.start` 尾部（session / stream / event bus 就绪后）的 `resume_paused_round()`
+驱动，续跑成功后清 marker：
+
+- **warm**（同进程）：harness 仍 PAUSED —— `kernel.pause` 从不 stop 它 —— 直接 `resume()`，
+  用 `paused_query` 的内存值。
+- **cold**（`pause → stop → start`）：harness 被重建、状态 IDLE，context 由 teardown 时的
+  `child.commit()` 写入 checkpoint 后经共享 session id 恢复。`kernel.pause` 落盘的
+  `pending_resume = {"query": ...}`（per-team bucket，leader-only）提供 query →
+  `resume(query=...)`。**dispatch 不读这个 marker**：`COLD_RECOVER` 本就是正确的派发结果，续跑
+  发生在 kernel 层。详见 [[F_61_cold-resume-across-stop-start]]。
+
+PAUSED 收到 `send` 等价于「resume + 把新内容 steer 进去」——**不再** merge query 重启整轮。
+`kernel.pause` 走 `pause_agent_round()`；只有 stop / destroy 才 `drain_agent_task()` 硬取消。
+
+**2. interrupt resume（`send(InteractiveInput)`，HITL 中断恢复）**：经 `submit_round` 透传
+（executor `_extract_interactive_input` 原生 resume）；resume round 单轮语义，完成后 settle 到
+IDLE 不续 task_plan。StreamController 仅校验 `is_pending_interrupt_resume_valid` 后转发，不再
+client 侧排队。此路径与 warm resume 正交：一个 InteractiveInput round 被 pause 时不缓存其 query
+（不可 replay），PAUSED 收到 InteractiveInput 则直接起它自己的单轮 round。

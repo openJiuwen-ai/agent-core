@@ -4,7 +4,7 @@
 """Unit tests for InMemoryKVStore."""
 
 import asyncio
-import time
+from unittest.mock import patch
 
 import pytest
 
@@ -334,6 +334,20 @@ class TestInMemoryKVStorePipeline:
 
 class TestInMemoryKVStoreExpiry:
     """Tests for key expiry functionality."""
+
+    @pytest.mark.asyncio
+    async def test_expiry_preserves_subsecond_deadline_precision(self):
+        """TTL must not be shortened by truncating its absolute deadline."""
+        store = InMemoryKVStore()
+
+        with patch(
+                "openjiuwen.core.foundation.store.kv.in_memory_kv_store.time.time",
+                side_effect=[100.9, 101.1, 101.9],
+        ):
+            await store.exclusive_set("key1", "value1", expiry=1)
+
+            assert await store.exists("key1") is True
+            assert await store.exists("key1") is False
 
     @pytest.mark.asyncio
     async def test_key_expiry(self):

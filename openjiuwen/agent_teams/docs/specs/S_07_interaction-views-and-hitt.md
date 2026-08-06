@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/interaction/`、`openjiuwen/agent_teams/constants.py`、`openjiuwen/agent_teams/runtime/manager.py`（`_dispatch_payload`）、`openjiuwen/agent_teams/agent/coordination/handlers/message.py`（HITT inbound 钩子）|
-| 最近一次修订日期 | 2026-06-09 |
+| 最近一次修订日期 | 2026-07-14 |
 | 关联 feature | F_13_human-agent-send-message.md |
 
 ## 范围 / 边界
@@ -338,10 +338,12 @@ RESERVED_MEMBER_NAMES: frozenset[str] = frozenset({
 
 1. `human_agent` 是保留成员名，作动态 spawn 的默认人类成员名；自定 HUMAN_AGENT 成员名可避开此保留名。普通 teammate 的 predefined 成员仍然不允许撞保留名（`_validate_reserved_names`）。
 2. human-agent 走标准 `UNSTARTED → spawn` 流程（与 teammate 一致），工具集为 `HUMAN_AGENT_TOOLS` = `view_task` + `member_complete_task` + `send_message`；rail 装配会剥离 `FirstIterationGate` / `TeamToolApprovalRail`。其中 `send_message` 是**用户驱动的转发通道**：能否调用、给谁、说什么完全由用户在 Inbox 输入里的明确指令决定。约束写在 `team_hitt` prompt section 里（不在 `invoke()` 里加 caller-role 分支）——选择 prompt 而非代码强约束是因为「该不该转发」是语义判断，最适合让 LLM 在 prompt 引导下判断；如果未来发现 LLM 越权滥用，再加 tool-level 静态护栏（如 multicast/broadcast 拒收）。
-3. 一旦 `task.assignee` 指向某个 human-agent 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
+3. 一旦 `task.assignee` 指向某个**仍在团队中**的 human-agent 且任务处于活跃态（`PLANNING` / `IN_PROGRESS` / `IN_REVIEW`），`UpdateTaskTool` 拒绝 cancel / reassign / 改标题·内容；批量 cancel 链路也跳过。锁 key 在 `TeamBackend.is_live_human_agent` / `live_human_agent_names`（role 命中 **且** 状态 ∉ `MEMBER_DEPARTED_STATUSES`），**不是**裸 role 判定：锁的目的是防 leader 从活人手里抢活，人一旦被 `shutdown_member` 请出团队就没人能完成它了，锁随之解除，遗留任务退化成普通遗留任务（可 cancel / reassign），与 teammate 被关停后留下的任务同路。`SHUTDOWN_REQUESTED` 与 `SHUTDOWN` 同样算退队——卡在半路的 avatar 可能永远到不了 `SHUTDOWN`，只认终态会把任务重新锁死。`PAUSED` / `STOPPED` / `ERROR` 的人类**仍在队**，锁继续成立。
 4. 发送给 human-agent 的点对点消息与广播 **保持 `is_read=False`**。human-agent 走与 teammate 一致的 `MessageHandler._process_unread_messages` poll → `deliver_input` → `mark_message_read` 路径；写入侧自动标已读会绕过 poll 路径，avatar 的 DeepAgent 就收不到消息（见 F_20）。
 5. `TeamPolicyRail` 注入 `team_hitt` section（priority=12），按 role 给 leader / teammate / human_agent 下达角色特定的行为约束。section 注入条件来自 `backend.hitt_enabled()`——反映运行时 effective flag，不依赖 roster 是否已 spawn。
 6. `_resolve_team_mode` 只把**非 HUMAN_AGENT** 的 predefined member 计入 `hybrid` 派生——所以纯 HITT 团队（仅声明人类成员）仍然是 `default` 模式，leader 保留 `spawn_member` 工具。
+7. **human-agent 的退场与 teammate 对齐，且走同一段代码**：leader 可以对人类成员调用 `shutdown_member`，`clean_team` 的「全员 SHUTDOWN」前置条件同样把人类成员计入。**不存在**「人类成员永远 READY、不可 shutdown」这条约束——它与 `clean_team` 的前置条件直接冲突，会让开了 HITT 的临时团队永远无法解散，且与 `MemberStatus` 状态机（human-agent 走标准流转，见约束 2）自相矛盾。收摊规则见 `S_03` 机制 18，**对所有非 leader 角色是同一套**（`SHUTDOWN_REQUESTED` + 无 in-flight round → 不唤醒 harness 直接落 `SHUTDOWN`；round 在飞 → 靠 round-end close；`force` → 立即 teardown），没有 human-agent 专属分支。
+8. **给控制者的输出独立于 avatar 的 harness**：leader 侧 `_notify_human_agent_inbound` 把团队消息推给控制者回调，不经过 avatar 的 DeepAgent，所以机制 18 跳过 harness 唤醒不会让真人少收消息。收件人按**可达**（status ∉ {`SHUTDOWN`}）筛选而非裸 role——已退场人类的控制者不再收团队广播；但 `SHUTDOWN_REQUESTED` 必须保留，否则"你已被移出团队"这条通知恰恰送不到。注意这个阈值与约束 3 的任务锁阈值（`MEMBER_DEPARTED_STATUSES`）**故意不同**，详见 `S_03` 机制 19。
 
 ## 与其它 spec 的关系
 

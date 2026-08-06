@@ -118,6 +118,7 @@ def _merge(first: str, second: str) -> str:
 class CommandOutput:
     """Bundled command execution result and rendering configuration."""
 
+    command: str
     stdout: str
     stderr: str
     exit_code: int
@@ -145,20 +146,23 @@ def render_tool_content(
     Returns:
         The ``(content, is_error)`` pair for the Anthropic tool_result shape.
     """
-    if is_error:
-        # Error path: stderr leads so the failure detail comes first.
-        merged = _merge(output.stderr, output.stdout)
-        parts = [f"Exit code {output.exit_code}", merged]
-        return _prepend_warning("\n".join(p for p in parts if p), output.warning), True
-
-    # Data path: stdout leads.
     merged = _merge(output.stdout, output.stderr)
-    processed = _LEADING_BLANK_LINES.sub("", merged).rstrip() if merged else merged
     if output.max_output_chars > 0 and len(merged) > output.max_output_chars:
         path, size = persist_large_output(output.stdout, output.stderr)
-        preview, has_more = _generate_preview(processed, _PREVIEW_SIZE_BYTES)
-        processed = _build_persisted_message(path, size, preview, has_more)
-    return _prepend_warning(processed, output.warning), False
+        preview, has_more = _generate_preview(_LEADING_BLANK_LINES.sub("", merged).rstrip(), _PREVIEW_SIZE_BYTES)
+        stdout = _build_persisted_message(path, size, preview, has_more)
+        stderr = "(see persisted output)" if output.stderr else "(empty)"
+    else:
+        stdout = _LEADING_BLANK_LINES.sub("", output.stdout).rstrip() if output.stdout else "(empty)"
+        stderr = output.stderr.rstrip() if output.stderr else "(empty)"
+
+    content = (
+        f"Command: {output.command}\n"
+        f"Stdout: {stdout}\n\n"
+        f"Stderr: {stderr}\n"
+        f"Exit Code: {output.exit_code}"
+    )
+    return _prepend_warning(content, output.warning), is_error
 
 
 def render_partial_on_failure(

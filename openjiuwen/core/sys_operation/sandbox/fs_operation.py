@@ -33,8 +33,13 @@ class FsOperation(BaseFsOperation, BaseSandboxMixin):
             self, path: str, *, mode: Literal['text', 'bytes'] = "text",
             head: Optional[int] = None, tail: Optional[int] = None,
             line_range: Optional[Tuple[int, int]] = None, encoding: str = "utf-8",
-            chunk_size: int = DEFAULT_READ_CHUNK_SIZE, options: Optional[Dict[str, Any]] = None
+            chunk_size: int = DEFAULT_READ_CHUNK_SIZE, only_read: bool = False,
+            options: Optional[Dict[str, Any]] = None
     ) -> ReadFileResult:
+        # ``only_read`` waives the local backend's cross-process file lock; the
+        # sandbox gateway owns its own concurrency, so it is accepted for
+        # signature parity and not forwarded.
+        _ = only_read
         raw = await self.invoke(
             "read_file", path=path, mode=mode, head=head, tail=tail,
             line_range=line_range, encoding=encoding, chunk_size=chunk_size, options=options

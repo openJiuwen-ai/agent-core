@@ -217,7 +217,7 @@ class HumanAgentInbox:
 
     async def _member_exists(self, name: str) -> bool:
         """Async predicate adapter for ``deliver_direct``."""
-        return (await self._team.get_member(name)) is not None
+        return await self._team.member_exists(name)
 
     async def _drive_agent(self, body: str, *, sender: str) -> DeliverResult:
         if self._agent_lookup is None:

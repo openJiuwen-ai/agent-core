@@ -8,8 +8,8 @@
 
 | 象限 | 文件 | 含义 |
 |---|---|---|
-| **静态数据** | `blueprint.py` | `TeamAgentBlueprint`，frozen dataclass。构造时确定的配置，整个生命周期不变（spec、role、member_name、persona 等） |
-| **运行时可变状态** | `state.py` | `TeamAgentState`。**只放跨 operator 的字段**——operator 内部状态（spawn_manager 的 spawned_handles、coordination 的 subscribed_topics 等）留在 operator 自己里 |
+| **静态数据** | `blueprint.py` | `TeamAgentBlueprint`，frozen dataclass。构造时确定的配置，整个生命周期不变（spec、role、member_name、desc、prompt 等） |
+| **运行时可变状态** | `state.py` | `TeamAgentState`。**只放跨 operator 的字段**——operator 内部状态（spawn_manager 的 spawned_handles、coordination 的 subscribed_topics 等）留在 operator 自己里。典型跨 operator 例：`team_cleaned`（tool/clean 路径写、stream round-end 读）、`idle_since`（stream operator 写、coordination 的 stale sweep 读，见 [[F_65_runtime-idle-clock-stall-nudge]]） |
 | **每实例资源** | `resources.py` | `PrivateAgentResources`。这个 TeamAgent 独占的资源（DeepAgent、worktree manager、memory manager 等）。每个 member 一份 |
 | **每进程基础设施** | `infra.py` | `TeamInfra`。**进程内**所有 member 共享的资源（messager、db、team_backend 等）。leader 和 teammate 在不同进程，所以 "共享" 是 per-process 而不是跨实例单例。也持有 tiny-agent 资源：`tiny_agent_model_resolver`（model_name→TeamModelConfig）+ `tiny_agents`（team-scoped tiny agent 按名缓存，`stop`/`shutdown` 时 dispose）。见 `tiny_agent.py` / F_45 |
 
@@ -27,11 +27,15 @@
 | `spawn_manager.py` | `SpawnManager` | teammate 进程生命周期：拉起 / 心跳 / 重启 / 取消。`restart_teammate`（容错 / 切 session）以 `initial_message=None` re-spawn——**恢复不 replay 首启指令**，见下方"初始消息只首启注入" |
 | `recovery_manager.py` | `RecoveryManager` | 团队级容错：成员崩溃恢复、状态对齐 |
 | `session_manager.py` | `SessionManager` | session checkpoint 读写、生命周期 |
-| `stream_controller.py` | `StreamController` | runtime（NativeHarness/CLI runtime）输出转发 + 状态映射层。`start()` 挂 `_forward_outputs`（消费 `runtime.outputs()`→`_tag_chunk`→stream_queue+observers）+ 经 `subscribe(on_state=, on_round=)` 注册 phase/round 回调；不再驱动 round / 排 pending / 自重启（单 supervisor 模型接管）。`_map_state` RUNNING→BUSY、IDLE→READY+`_on_idle_settled`；`_map_round` 走 EXECUTION_TRANSITIONS；transient retry（181001）在 `_handle_retry` swallow+重驱，exhausted/non-retryable 转发不再 raise；自动升级 chunk 为 `TeamOutputSchema` 并 `add_chunk_observer` fan-out；`emit_completion_and_close` 发完成标记 + 关流；`_on_idle_settled` 经注入的 `request_completion_poll_callback` 触发 leader 完成评估 |
+| `stream_controller.py` | `StreamController` | runtime（NativeHarness/CLI runtime）输出转发 + 状态映射层。`start()` 挂 `_forward_outputs`（消费 `runtime.outputs()`→`_tag_chunk`→stream_queue+observers）+ 经 `subscribe(on_state=, on_round=)` 注册 phase/round 回调；不再驱动 round / 排 pending / 自重启（单 supervisor 模型接管）。`_map_state` RUNNING→BUSY、IDLE→READY+`_on_idle_settled`，并在这条边上维护 `state.idle_since`（IDLE 打戳 / RUNNING 清空）——自主停滞检测的计时源，见 [[F_65_runtime-idle-clock-stall-nudge]]；`_map_round` 走 EXECUTION_TRANSITIONS；transient retry（181001）在 `_handle_retry` swallow+重驱，exhausted/non-retryable 转发不再 raise；自动升级 chunk 为 `TeamOutputSchema` 并 `add_chunk_observer` fan-out；`emit_completion_and_close` 发完成标记 + 关流；`_on_idle_settled` 经注入的 `request_completion_poll_callback` 触发 leader 完成评估 |
 
 ## coordination/ — 唤醒循环
 
 事件驱动的 wake-up 层：`EventBus` 收事件 → `EventDispatcher` 粗筛 → `AsyncCallbackFramework` 分发到 7 个固定场景 handler（lifecycle / member / message / task_board / stale_task / team_completion / workflow）+ 可选的 `ReliabilityHandler`（opt-in，见 [`coordination/AGENTS.md`](coordination/AGENTS.md)）。**自身不做决策**，handler 走三类 narrow protocol 触发行为：`AgentRoundController` 驱动 TeamHarness（round 控制），`TeamLifecycleController` 触发 TeamAgent 级生命周期（shutdown），`PollController` 直达 EventBus（poll 暂停/恢复）。详见 [`coordination/AGENTS.md`](coordination/AGENTS.md)。
+
+## scheduling/ — 调度模式决策引擎（F_62）
+
+leader 侧的调度分发 runtime，与 coordination 平齐：coordination 只唤醒不决策，本包只决策（开工 `start_task`、验票判定 `settle_review`、轮数/停摆升级）且从不直接触碰其他成员的 round——所有成员交接都是 **leader 身份的邮箱消息**（投递即经 `auto_start_member` 幂等拉起离线成员）。仅当 `spec.dispatch_mode == "scheduled"`（静态配置）时 `CoordinationKernel.setup(role=LEADER)` 构造（休眠），团队物化（build_team 成功 / start 读到已有 team 行）时激活；wake 路径由 kernel 组合为 "coordination dispatch → scheduler.on_event"，leader 自发事件经 `SCHEDULER_SCAN` inner 回声可见。详见 [`scheduling/AGENTS.md`](scheduling/AGENTS.md) 与 `docs/specs/S_22_scheduling-runtime.md`。
 
 ## 跨文件协作的几个关键点
 

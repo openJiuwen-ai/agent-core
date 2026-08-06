@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """
 Logging Module
@@ -183,6 +183,9 @@ mcp_logger = LazyLogger(lambda: LogManager.get_logger("mcp"))
 
 team_logger = LazyLogger(lambda: LogManager.get_logger("team"))
 
+# Server module logger - for agent server entry point related logs
+server_logger = LazyLogger(lambda: LogManager.get_logger("server"))
+
 
 __all__ = [
     # Protocol and base classes
@@ -220,6 +223,7 @@ __all__ = [
     # Protocol and extension module loggers
     "mcp_logger",
     "team_logger",
+    "server_logger",
     # Event definitions
     "LogEventType",
     "LogLevel",
