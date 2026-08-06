@@ -212,6 +212,36 @@ class SkillCreateInput(ConstructionInput):
     auto_trigger: bool = param_field(default=True, description="Whether threshold auto-trigger is on.")
     tool_call_threshold: int = param_field(default=10, description="Tool-call count threshold.")
     tool_diversity_threshold: int = param_field(default=5, description="Tool diversity threshold.")
+    trajectory_span_processor: Any = context_field(
+        attr="trajectory_span_processor",
+        description="Shared observability trajectory processor.",
+    )
+
+    @classmethod
+    def resolve(cls, params: dict[str, Any] | None, context: Any):
+        """Reject removed threshold knobs instead of silently dropping them."""
+        explicit = set(params or {}) & {"tool_call_threshold", "tool_diversity_threshold"}
+        if explicit:
+            names = ", ".join(sorted(explicit))
+            raise TypeError(f"SkillCreateRail does not support: {names}")
+        return super().resolve(params, context)
+
+
+def _build_skill_create_rail(params: dict[str, Any], context: Any) -> SkillCreateRail:
+    """Build SkillCreateRail with the process-shared trajectory processor.
+
+    Class-based manifest adapters only forward spec parameters.  Skill creation
+    also needs a live processor carried by ``BuildContext``, so resolve the
+    source-tagged input model before constructing the rail rather than falling
+    back to a private processor instance.
+    """
+    resolved = SkillCreateInput.resolve(params, context)
+    return SkillCreateRail(
+        resolved.skills_dir,
+        trajectory_span_processor=resolved.trajectory_span_processor,
+        language=resolved.language,
+        auto_trigger=resolved.auto_trigger,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +300,7 @@ harness_element(
     name=SKILL_CREATE,
     description="Skill-creation evolution rail.",
     input_model=SkillCreateInput,
-    builder=SkillCreateRail,
+    builder=_build_skill_create_rail,
 )
 
 

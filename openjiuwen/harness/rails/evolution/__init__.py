@@ -25,7 +25,6 @@ from openjiuwen.harness.rails.evolution.context_evolution_rail import (
 from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionHostEventMeta,
     EvolutionRequestResult,
-    EvolutionSnapshot,
     SimplifyRequestResult,
 )
 from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EvolutionInterruptRail
@@ -59,7 +58,6 @@ __all__ = [
     "EvolutionRail",
     "EvolutionRequestResult",
     "EvolutionReviewRuntime",
-    "EvolutionSnapshot",
     "EvolutionTriggerPoint",
     "SimplifyRequestResult",
     "SkillCreateRail",
