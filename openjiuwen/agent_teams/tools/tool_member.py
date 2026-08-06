@@ -147,6 +147,18 @@ class SpawnTeammateTool(_SpawnToolBase):
                     "type": "object",
                     "description": t("spawn_teammate", "permissions"),
                 },
+                "fork": {
+                    "anyOf": [{"type": "boolean"}, {"type": "string"}],
+                    "description": t("spawn_teammate", "fork"),
+                },
+                "fork_source": {
+                    "type": "string",
+                    "description": t("spawn_teammate", "fork_source"),
+                },
+                "compact": {
+                    "type": "boolean",
+                    "description": t("spawn_teammate", "compact"),
+                },
             },
             "required": ["member_name", "display_name", "desc"],
         }
@@ -182,6 +194,14 @@ class SpawnTeammateTool(_SpawnToolBase):
             isolation=inputs.get("isolation"),
             permissions_override=permissions_override,
         )
+        fork_value = inputs.get("fork")
+        if fork_value and fork_value not in ("false", False):
+            self.team.mark_fork_on_spawn(
+                member_name,
+                fork_value,
+                fork_source=inputs.get("fork_source"),
+                compact=inputs.get("compact", False),
+            )
         return self._from_result(
             result,
             member_name=member_name,
@@ -189,6 +209,36 @@ class SpawnTeammateTool(_SpawnToolBase):
             role_type="teammate",
             isolation=inputs.get("isolation"),
         )
+
+
+class CheckpointTool(_SpawnToolBase):
+    """Save a named snapshot of current conversation context."""
+
+    def __init__(self, team: TeamBackend, t: Translator):
+        super().__init__(team, t, "checkpoint")
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": t("checkpoint", "name")},
+                "description": {"type": "string", "description": t("checkpoint", "description")},
+            },
+            "required": ["name"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        name = inputs["name"]
+        count = self.team.snapshot_context_length()
+        self.team.store_checkpoint(name, count)
+        return ToolOutput(
+            success=True,
+            data={"name": name, "message_count": count},
+        )
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to save checkpoint"
+        d = output.data
+        return f"Checkpoint '{d['name']}' saved at message {d['message_count']}"
 
 
 class SpawnHumanAgentTool(_SpawnToolBase):

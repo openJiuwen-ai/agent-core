@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.external import (
     ExternalTeamClient,
     TeamJoinDescriptor,
 )
+from openjiuwen.agent_teams.fork import ForkContext
 from openjiuwen.agent_teams.interaction import (
     HumanAgentInbox,
     HumanAgentNotEnabledError,
@@ -70,6 +71,7 @@ __all__ = [
     "DEFAULT_LEADER_MEMBER_NAME",
     "DeepAgentSpec",
     "ExternalTeamClient",
+    "ForkContext",
     "HUMAN_AGENT_MEMBER_NAME",
     "TEAM_JOIN_ENV",
     "TeamJoinDescriptor",
