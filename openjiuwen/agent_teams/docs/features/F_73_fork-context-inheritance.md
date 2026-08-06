@@ -55,7 +55,7 @@ fork 代码需要访问几个 "protected" 属性（`_native`、`_named_checkpoin
 遵循封装原则，在对应类上添加了公开方法替代直接属性访问：
 
 - `TeamHarness.get_deep_agent()` — 替代 `harness._native`
-- `TeamAgent.share_checkpoints_with()` — 替代 `teammate._named_checkpoints = ...`
+- `TeamAgent.share_checkpoints_with()`、`set_checkpoint()`、`_set_checkpoints_from()` — 替代 `_named_checkpoints` 写入和跨实例赋值
 - `TeamBackend.set_snapshot_length()` / `set_store_checkpoint_fn()` — 替代直接赋 `_xxx`
 - `fork_compact` 使用已有的公开 `react_agent` property 替代 `_react_agent`
 
