@@ -1118,9 +1118,11 @@ class ReActAgent(BaseAgent):
                 usage_metadata=accumulated_chunk.usage_metadata,
                 reasoning_content=accumulated_chunk.reasoning_content,
                 finish_reason=accumulated_chunk.finish_reason,
+                parser_content=accumulated_chunk.parser_content,
                 prompt_token_ids=accumulated_chunk.prompt_token_ids,
                 completion_token_ids=accumulated_chunk.completion_token_ids,
                 logprobs=accumulated_chunk.logprobs,
+                metadata=accumulated_chunk.metadata,
             )
         ctx.inputs.response = ai_message
         if ai_message.usage_metadata:
@@ -2051,6 +2053,11 @@ class ReActAgent(BaseAgent):
                                 reasoning_content=ai_message.reasoning_content,
                                 usage_metadata=ai_message.usage_metadata,
                                 finish_reason=ai_message.finish_reason,
+                                parser_content=ai_message.parser_content,
+                                prompt_token_ids=ai_message.prompt_token_ids,
+                                completion_token_ids=ai_message.completion_token_ids,
+                                logprobs=ai_message.logprobs,
+                                metadata=ai_message.metadata,
                             )
                         )
 

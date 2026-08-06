@@ -22,6 +22,7 @@ class ProviderType(str, Enum):
     InferenceAffinity = "InferenceAffinity"
     AscendAffinity = "AscendAffinity"
     IntelliRouter = "intelli_router"
+    EdgeCloudRouter = "EdgeCloudRouter"
 
 
 _TOP_LEVEL_API_KEY_PROVIDERS = {

@@ -1,0 +1,99 @@
+# Replace only the `models` section in ~/.jiuwenswarm/config/config.yaml.
+models:
+  defaults:
+    - alias: edge-cloud-router
+      model_client_config:
+        model_name: edge-cloud-router
+        client_provider: EdgeCloudRouter
+        timeout: 360
+        stream_first_chunk_timeout: 300
+        stream_idle_timeout: 60
+        edge_cloud_router:
+          privacy:
+            enabled: false
+
+          complexity:
+            mode: llm
+            privacy_scope: local
+            classifier_preview_chars: 1500
+            model_client_config:
+              client_provider: OpenAI
+              api_base: ${CLASSIFIER_API_BASE:-http://127.0.0.1:8081/v1}
+              api_key: ${CLASSIFIER_API_KEY:-EMPTY}
+              timeout: 10
+              verify_ssl: false
+            model_request_config:
+              model: ${CLASSIFIER_MODEL:-Qwen/Qwen3-0.6B}
+              temperature: 0
+              max_tokens: 16
+              reasoning_effort: none
+
+          deployments:
+            local_fast:
+              privacy_scope: local
+              model_client_config:
+                client_provider: OpenAI
+                api_base: ${LOCAL_FAST_API_BASE:-http://127.0.0.1:8082/v1}
+                api_key: ${LOCAL_FAST_API_KEY:-EMPTY}
+                timeout: 360
+                verify_ssl: false
+              model_request_config:
+                model: ${LOCAL_FAST_MODEL:-google/gemma-3-4b-it}
+                extra_body:
+                  chat_template_kwargs:
+                    enable_thinking: false
+
+            local_medium:
+              privacy_scope: local
+              model_client_config:
+                client_provider: OpenAI
+                api_base: ${LOCAL_MEDIUM_API_BASE:-http://127.0.0.1:8083/v1}
+                api_key: ${LOCAL_MEDIUM_API_KEY:-EMPTY}
+                timeout: 360
+                verify_ssl: false
+              model_request_config:
+                model: ${LOCAL_MEDIUM_MODEL:-Qwen/Qwen3-8B}
+                extra_body:
+                  chat_template_kwargs:
+                    enable_thinking: false
+
+            cloud_complex:
+              privacy_scope: cloud
+              model_client_config:
+                client_provider: OpenRouter
+                api_base: ${CLOUD_API_BASE:-https://openrouter.ai/api/v1}
+                api_key: ${CLOUD_API_KEY}
+                timeout: 360
+                verify_ssl: true
+              model_request_config:
+                model: ${CLOUD_COMPLEX_MODEL:-deepseek/deepseek-v3.2}
+                reasoning_effort: none
+
+            cloud_research:
+              privacy_scope: cloud
+              model_client_config:
+                client_provider: OpenRouter
+                api_base: ${CLOUD_API_BASE:-https://openrouter.ai/api/v1}
+                api_key: ${CLOUD_API_KEY}
+                timeout: 360
+                verify_ssl: true
+              model_request_config:
+                model: ${CLOUD_RESEARCH_MODEL:-deepseek/deepseek-v4-pro}
+                reasoning_effort: none
+
+            cloud_reasoning:
+              privacy_scope: cloud
+              model_client_config:
+                client_provider: OpenRouter
+                api_base: ${CLOUD_API_BASE:-https://openrouter.ai/api/v1}
+                api_key: ${CLOUD_API_KEY}
+                timeout: 360
+                verify_ssl: true
+              model_request_config:
+                model: ${CLOUD_REASONING_MODEL:-moonshotai/kimi-k2-thinking}
+
+      # Explicit router-level sampling values override each selected child's
+      # defaults and keep the baseline/router comparison repeatable.
+      model_config_obj:
+        temperature: 0
+      is_default: true

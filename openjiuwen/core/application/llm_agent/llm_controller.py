@@ -681,7 +681,7 @@ class LLMController(BaseController):
         llm_inputs = MessageHandlerUtils.format_llm_inputs(inputs, chat_history, self.config, system_prompt_keywords)
 
         if UserConfig.is_sensitive():
-            logger.info(f"React llm inputs")
+            logger.info("React llm inputs")
         else:
             logger.info(f"React llm inputs: {llm_inputs}")
 
@@ -696,7 +696,7 @@ class LLMController(BaseController):
             )
 
             if UserConfig.is_sensitive():
-                logger.info(f"React llm output")
+                logger.info("React llm output")
             else:
                 logger.info(f"React llm output: {llm_output}")
 
@@ -794,6 +794,10 @@ class LLMController(BaseController):
                 finish_reason=accumulated_chunk.finish_reason,
                 parser_content=accumulated_chunk.parser_content,
                 reasoning_content=accumulated_chunk.reasoning_content,
+                prompt_token_ids=accumulated_chunk.prompt_token_ids,
+                completion_token_ids=accumulated_chunk.completion_token_ids,
+                logprobs=accumulated_chunk.logprobs,
+                metadata=accumulated_chunk.metadata,
             )
 
         except Exception as e:
@@ -970,7 +974,7 @@ class LLMController(BaseController):
         # Check if message content already has InteractiveInput
         if event.content.interactive_input is not None:
             interactive_input = event.content.interactive_input
-            logger.info(f"Using InteractiveInput from message for resuming workflow directly")
+            logger.info("Using InteractiveInput from message for resuming workflow directly")
         else:
             # Create InteractiveInput from query
             query = event.content.get_query()

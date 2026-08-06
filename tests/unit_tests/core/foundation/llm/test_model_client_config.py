@@ -170,6 +170,23 @@ def test_model_client_config_normalizes_intelli_router_enum_name():
     assert cfg.api_base == ""
 
 
+def test_model_client_config_allows_edge_cloud_router_without_top_level_credentials():
+    cfg = ModelClientConfig(
+        client_provider=ProviderType.EdgeCloudRouter,
+        edge_cloud_router={"configuration": "is parsed by the provider"},
+    )
+
+    assert cfg.client_provider == ProviderType.EdgeCloudRouter
+    assert cfg.api_key == ""
+    assert cfg.api_base == ""
+
+
+def test_model_client_config_normalizes_edge_cloud_router_case():
+    cfg = ModelClientConfig(client_provider="edgecloudrouter")
+
+    assert cfg.client_provider == ProviderType.EdgeCloudRouter.value
+
+
 def test_model_client_config_timeout_must_be_positive():
     with pytest.raises(ValidationError) as error:
         ModelClientConfig(
