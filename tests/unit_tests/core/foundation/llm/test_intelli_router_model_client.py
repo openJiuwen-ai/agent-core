@@ -895,6 +895,40 @@ class TestIntelliRouterConvertResponse:
         assert result.usage_metadata.cache_tokens == 5
 
     @pytest.mark.asyncio
+    async def test_to_ow_assistant_message_usage_no_reasoning_tokens_field(
+        self, model_request_config, intelli_router_client_config,
+    ):
+        """usage_metadata without reasoning_tokens should default to 0, not crash.
+
+        The third-party intelli_router.UsageMetadata only has {input,output,
+        total,cache}_tokens + model_name — no reasoning_tokens. A bare
+        attribute access would raise AttributeError; _extract_reasoning_tokens
+        must handle this safely.
+        """
+        with (
+            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
+            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+        ):
+            client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
+
+        # Use a plain object (NOT MagicMock) that matches the real
+        # intelli_router UsageMetadata shape — no reasoning_tokens field.
+        class FakeUsage:
+            input_tokens = 10
+            output_tokens = 20
+            total_tokens = 30
+            cache_tokens = 5
+            model_name = "test-model"
+
+        ir_msg = MagicMock(
+            content="hi", tool_calls=None, usage_metadata=FakeUsage(),
+            finish_reason="stop", reasoning_content=None, spec=[],
+        )
+        result = await client._to_ow_assistant_message(ir_msg)
+        assert result.usage_metadata is not None
+        assert result.usage_metadata.reasoning_tokens == 0
+
+    @pytest.mark.asyncio
     async def test_to_ow_assistant_message_with_reasoning(self, model_request_config, intelli_router_client_config):
         """reasoning_content should be passed through."""
         with (
