@@ -22,6 +22,30 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 if TYPE_CHECKING:
     from openjiuwen.harness.workspace.workspace import Workspace
 
+# Key under ``BuildContext.extras`` where ``DeepAgentSpec.resolve_parts``
+# publishes the parent agent's resolved SysOperation, so sub-agent factories can
+# hand it to their specs instead of letting ``create_deep_agent`` mint a fresh
+# LOCAL one. Mirrors the ``_parent_model`` convention. The value is a live
+# runtime handle: a member rebuilt from a serializable seed (spawned teammate,
+# distributed remote, cold recovery) sees None here and falls back to the
+# previous behaviour.
+PARENT_SYS_OPERATION_EXTRAS_KEY = "_parent_sys_operation"
+
+
+def parent_sys_operation(context: Any) -> Any:
+    """Return the parent SysOperation published on ``context`` (or None).
+
+    Args:
+        context: The build context handed to a capability provider. Tolerates
+            None and contexts without ``extras`` so providers can call it
+            unconditionally.
+
+    Returns:
+        The parent agent's SysOperation, or None when it was never published.
+    """
+    extras = getattr(context, "extras", None) or {}
+    return extras.get(PARENT_SYS_OPERATION_EXTRAS_KEY)
+
 
 @dataclass
 class BuildContext:
@@ -108,6 +132,8 @@ def build_context_from_seed(seed: Optional[dict[str, Any]]) -> Optional["BuildCo
 
 __all__ = [
     "BuildContext",
+    "PARENT_SYS_OPERATION_EXTRAS_KEY",
+    "parent_sys_operation",
     "register_build_context_factory",
     "build_context_from_seed",
 ]

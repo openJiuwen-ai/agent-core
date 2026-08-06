@@ -35,6 +35,7 @@ from openjiuwen.harness.rails.skills.skill_create_rail import SkillCreateRail
 from openjiuwen.harness.rails.subagent.verification_rail import VerificationRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
+from openjiuwen.harness.schema.build_context import parent_sys_operation
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.harness.subagents.browser_agent import (
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
@@ -296,12 +297,26 @@ class SubAgentInput(ConstructionInput):
     )
 
 
-def _common_kwargs(inp: SubAgentInput) -> dict[str, Any]:
-    """Build the shared ``build_*_agent_config`` kwargs from resolved inputs."""
+def _common_kwargs(inp: SubAgentInput, context: Any) -> dict[str, Any]:
+    """Build the shared ``build_*_agent_config`` kwargs from resolved inputs.
+
+    ``sys_operation`` comes from the parent agent so the sub-agent stays inside
+    the same filesystem boundary; when it is absent (a member rebuilt from a
+    serializable seed publishes no live handle) the sub-agent falls back to the
+    fresh LOCAL sys_operation ``create_deep_agent`` mints for it.
+
+    Args:
+        inp: Resolved construction inputs for this sub-agent.
+        context: Build context carrying the parent's published handles.
+
+    Returns:
+        Keyword arguments shared by every ``build_*_agent_config`` call.
+    """
     return {
         "workspace": inp.workspace_root,
         "language": inp.language,
         "max_iterations": inp.max_iterations,
+        "sys_operation": parent_sys_operation(context),
     }
 
 
@@ -339,7 +354,7 @@ def _browser_instance_dict(inp: BrowserSubAgentInput) -> dict[str, Any] | None:
 def build_explore_subagent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     """Build explore sub-agent config; parent model from extras when present."""
     inp = SubAgentInput.resolve(factory_kwargs, context)
-    spec = build_explore_agent_config(model=_parent_model(context), **_common_kwargs(inp))
+    spec = build_explore_agent_config(model=_parent_model(context), **_common_kwargs(inp, context))
     spec.factory_kwargs = {"auto_create_workspace": False}
     return spec
 
@@ -347,7 +362,7 @@ def build_explore_subagent(factory_kwargs: dict[str, Any], context: Any) -> Any:
 def build_plan_subagent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     """Build plan sub-agent config; parent model from extras when present."""
     inp = SubAgentInput.resolve(factory_kwargs, context)
-    spec = build_plan_agent_config(model=_parent_model(context), **_common_kwargs(inp))
+    spec = build_plan_agent_config(model=_parent_model(context), **_common_kwargs(inp, context))
     spec.factory_kwargs = {"auto_create_workspace": False}
     return spec
 
@@ -362,7 +377,7 @@ def build_browser_subagent(factory_kwargs: dict[str, Any], context: Any) -> Any:
             SUBAGENT_BROWSER,
         )
         return None
-    spec = build_browser_agent_config(model, **_common_kwargs(inp))
+    spec = build_browser_agent_config(model, **_common_kwargs(inp, context))
     instance_dict = _browser_instance_dict(inp)
     if instance_dict is None:
         if not str(os.getenv("BROWSER_DRIVER") or "").strip():
@@ -383,8 +398,11 @@ def build_code_subagent(factory_kwargs: dict[str, Any], context: Any) -> Any:
             SUBAGENT_CODE,
         )
         return None
-    kwargs = _common_kwargs(inp)
-    kwargs["sys_operation"] = factory_kwargs.get("sys_operation")
+    kwargs = _common_kwargs(inp, context)
+    # An explicitly configured sys_operation wins; otherwise keep the parent's
+    # (already filled in by _common_kwargs) rather than resetting it to None.
+    if "sys_operation" in factory_kwargs:
+        kwargs["sys_operation"] = factory_kwargs["sys_operation"]
     return build_code_agent_config(model, **kwargs)
 
 
@@ -398,13 +416,13 @@ def build_research_subagent(factory_kwargs: dict[str, Any], context: Any) -> Any
             SUBAGENT_RESEARCH,
         )
         return None
-    return build_research_agent_config(model, **_common_kwargs(inp))
+    return build_research_agent_config(model, **_common_kwargs(inp, context))
 
 
 def build_verification_subagent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     """Build verification sub-agent config; parent model from extras when present."""
     inp = SubAgentInput.resolve(factory_kwargs, context)
-    return build_verification_agent_config(model=_parent_model(context), **_common_kwargs(inp))
+    return build_verification_agent_config(model=_parent_model(context), **_common_kwargs(inp, context))
 
 
 def build_general_purpose_subagent(factory_kwargs: dict[str, Any], context: Any) -> Any:
@@ -426,7 +444,7 @@ def build_general_purpose_subagent(factory_kwargs: dict[str, Any], context: Any)
         skills=[],
         rails=[SysOperationRail()],
         workspace=getattr(context, "workspace", None),
-        sys_operation=None,
+        sys_operation=parent_sys_operation(context),
         language=language,
         restrict_to_work_dir=False,
         max_iterations=inp.max_iterations,

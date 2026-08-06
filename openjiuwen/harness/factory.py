@@ -126,8 +126,17 @@ def _inject_general_purpose_subagent(
     mcps: Optional[List[McpServerConfig]],
     model: Model,
     skills: Optional[List[str]],
+    workspace: Optional[Workspace] = None,
+    sys_operation: Optional[SysOperation] = None,
 ) -> list[SubAgentConfig | DeepAgent]:
-    """Inject general-purpose subagent if requested and not already present."""
+    """Inject general-purpose subagent if requested and not already present.
+
+    ``workspace`` and ``sys_operation`` are the parent agent's resolved values;
+    the injected spec carries both so ``create_subagent`` keeps it inside the
+    parent's filesystem boundary instead of minting a fresh LOCAL
+    sys_operation for it (``create_subagent`` only adopts a spec's
+    sys_operation when its workspace is set as well).
+    """
     effective_subagents = list(subagents or [])
     if not add_general_purpose_agent:
         return effective_subagents
@@ -153,6 +162,8 @@ def _inject_general_purpose_subagent(
         model=model,
         skills=skills,
         rails=gp_rails,
+        workspace=workspace,
+        sys_operation=sys_operation,
         restrict_to_work_dir=False,
     ))
     return effective_subagents
@@ -260,18 +271,6 @@ def resolve_deep_agent_parts(
         False if vision_tools_enabled else enable_read_image_multimodal
     )
 
-    effective_subagents = _inject_general_purpose_subagent(
-        subagents,
-        add_general_purpose_agent=add_general_purpose_agent,
-        resolved_language=resolved_language,
-        rails=rails,
-        system_prompt=system_prompt,
-        tools=tools,
-        mcps=mcps,
-        model=model,
-        skills=skills,
-    )
-
     if not workspace:
         workspace_obj = Workspace(root_path="./", language=resolved_language)
     elif isinstance(workspace, (str, PathLike)):
@@ -306,6 +305,24 @@ def resolve_deep_agent_parts(
             sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
     else:
         sys_operation_obj = sys_operation
+
+    # Injected after the workspace / sys_operation are resolved so the
+    # general-purpose sub-agent can carry them: a spec without both makes
+    # create_subagent fall back to a fresh LOCAL sys_operation, which leaves
+    # this agent's sandbox behind.
+    effective_subagents = _inject_general_purpose_subagent(
+        subagents,
+        add_general_purpose_agent=add_general_purpose_agent,
+        resolved_language=resolved_language,
+        rails=rails,
+        system_prompt=system_prompt,
+        tools=tools,
+        mcps=mcps,
+        model=model,
+        skills=skills,
+        workspace=workspace_obj,
+        sys_operation=sys_operation_obj,
+    )
 
     config = DeepAgentConfig(
         model=model,
