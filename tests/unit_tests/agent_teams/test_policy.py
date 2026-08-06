@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.agent_teams.prompts import load_template
+from openjiuwen.agent_teams.prompts import build_team_role_section, load_template
 from openjiuwen.agent_teams.agent.agent_configurator import (
     _TEAM_WORKTREE_BASH_DENY_PATTERNS,
     _apply_team_worktree_shell_guard,
@@ -12,10 +12,17 @@ from openjiuwen.agent_teams.agent.agent_configurator import (
 )
 from openjiuwen.agent_teams.rails.builtin_elements import SYS_OPERATION
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
+from openjiuwen.agent_teams.schema.team import TeamRole
 
 
-def _leader_policy(language: str = "cn") -> str:
-    return load_template("leader_policy", language).content
+def _leader_policy(language: str = "cn", swarmflow_enabled: bool = True) -> str:
+    """Render the leader policy the way a leader actually receives it."""
+    section = build_team_role_section(
+        role=TeamRole.LEADER,
+        swarmflow_enabled=swarmflow_enabled,
+        language=language,
+    )
+    return section.content[language]
 
 
 def _teammate_policy(language: str = "cn") -> str:
@@ -92,6 +99,37 @@ def test_leader_policy_carries_collaboration_mechanism_boundary_en():
     assert "swarmflow" in policy
     assert "sequential relay" in policy
     assert "fixed end condition" in policy
+
+
+@pytest.mark.level1
+def test_leader_policy_hides_swarmflow_when_tool_is_gated_out_cn():
+    policy = _leader_policy("cn", swarmflow_enabled=False)
+
+    # Without the tool, the mechanism-choice guide must vanish entirely —
+    # otherwise the leader deliberates over a mechanism it cannot invoke.
+    assert "swarmflow" not in policy.lower()
+    assert "协作机制选择" not in policy
+    # The build_team path itself is untouched.
+    assert "核心职责" in policy
+    assert "create_task" in policy
+
+
+@pytest.mark.level1
+def test_leader_policy_hides_swarmflow_when_tool_is_gated_out_en():
+    policy = _leader_policy("en", swarmflow_enabled=False)
+
+    assert "swarmflow" not in policy.lower()
+    assert "Collaboration Mechanism" not in policy
+    assert "Core Responsibilities" in policy
+
+
+@pytest.mark.level1
+def test_leader_workflow_never_mentions_swarmflow():
+    # The workflow template is unconditional, so it must stay swarmflow-free;
+    # the mechanism choice belongs to the gated leader_swarmflow section.
+    for language in ("cn", "en"):
+        for name in ("leader_workflow", "leader_workflow_predefined", "leader_workflow_hybrid"):
+            assert "swarmflow" not in load_template(name, language).content.lower()
 
 
 @pytest.mark.level1

@@ -12,7 +12,11 @@ memory, workspace, ...) by priority.
 Section layout owned by this rail (see ``prompts/sections.py`` for
 builders):
 
-  P:11  team_role        - role policy + execution mode (always)
+  P:11  team_role        - role policy + execution mode (always). The leader
+                           policy carries one capability slot: the
+                           build_team-versus-swarmflow mechanism guide, filled
+                           only when ``swarmflow_enabled`` — the same signal
+                           the tool factory gates the ``swarmflow`` tool on.
   P:12  team_hitt        - HITT collaboration contract (static rules, gated on
                            hitt_enabled). Human members are tagged ``[human]``
                            in the roster message, not listed inline.
@@ -106,6 +110,7 @@ class TeamPolicyRail(DeepAgentRail):
         team_workspace_path: str | None = None,
         team_backend: "TeamBackend | None" = None,
         expose_human_agents_to_teammates: bool = False,
+        swarmflow_enabled: bool = False,
     ) -> None:
         super().__init__()
         self._language = language
@@ -132,6 +137,7 @@ class TeamPolicyRail(DeepAgentRail):
             dispatch_mode=dispatch_mode,
             base_prompt=base_prompt,
             hitt_enabled=hitt_enabled,
+            swarmflow_enabled=swarmflow_enabled,
         )
 
         self._tracker = TeamContextTracker(
@@ -275,6 +281,7 @@ class TeamPolicyRail(DeepAgentRail):
         dispatch_mode: str,
         base_prompt: str | None,
         hitt_enabled: bool,
+        swarmflow_enabled: bool,
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time."""
         sections = build_team_static_sections(
@@ -291,6 +298,7 @@ class TeamPolicyRail(DeepAgentRail):
             language=self._language,
             hitt_enabled=hitt_enabled,
             expose_human_agents_to_teammates=self._expose_human_agents_to_teammates,
+            swarmflow_enabled=swarmflow_enabled,
         )
         team_logger.info(
             "[{}] TeamPolicyRail static sections: section_names={}",

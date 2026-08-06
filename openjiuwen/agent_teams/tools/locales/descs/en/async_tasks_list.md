@@ -1,7 +1,7 @@
 List every background async task on this harness and its status.
 
 ## When to use
-- You want to see the launched background tasks (e.g. a swarmflow run) and each one's running/completed/error status;
+- You want to see the launched background tasks and each one's running/completed/error status;
 - You are unsure whether a background task is still in flight.
 
 ## Output

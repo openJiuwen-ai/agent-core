@@ -8,7 +8,7 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 |---|---|
 | `__init__.py` | 公开导出：loader、sections、messages、section_cache |
 | `loader.py` | `load_template(name, lang)` 加载器，`@cache` 缓存，默认语言 `"cn"` |
-| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（系统提示词的唯一装配路径，由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费）；`build_team_role_section` 直接 `load_template` 读 `leader_policy` / `teammate_policy` |
+| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（系统提示词的唯一装配路径，由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费）；`build_team_role_section` 经 `_render_role_policy` 读 `leader_policy` / `teammate_policy`，并按 `swarmflow_enabled` 填 leader 的 capability 槽 |
 | `messages.py` | 团队状态的**消息**正文：`build_identity_text` / `build_team_info_text` / `build_roster_snapshot_text` / `build_roster_delta_text` + `diff_roster` + `format_member_line` + `labels_for`。纯渲染，投递时机与基线归 `agent_teams/team_context.py`。见 [[F_70]] |
 | `section_cache.py` | `MtimeSectionCache`：通用 mtime 缓存原语（团队侧当前无使用者）|
 | `cn/` · `en/` | 语言相关的角色 / 工作流 / 生命周期模板，由 `load_template` 加载 |
@@ -20,7 +20,8 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 | 模板文件 | 触发条件 | 装配位置 | 主要内容 |
 |---|---|---|---|
 | （无模板，Python 装配） | `member_name` 或 `member_prompt` 非空 | `messages.build_identity_text` → `build_team_identity_section` | **唯一的 per-member 内容**：自身 `member_name` 一行 + `## 私有工作约定` 子节（`member_prompt` 为空则只出名字）。正文只有一份（`build_identity_text`），section 只是它给外部 CLI 用的包装（P:10，`include_member_specific=True` 内联进静态 prompt）；**进程内成员经对话历史收到它**（`<team-context>`），留在系统提示词会让每个成员各占一份前缀 KV cache。见 [[F_68]] / [[F_70]] |
-| `leader_policy.md` | `role == LEADER` | `build_team_role_section` | Leader 的核心理念、协作机制选择（按任务协同性质：结构可确定性编排 → swarmflow；涌现式自主协同 → build_team）、职责、成果交接（通道由内容形态决定：短内容直接进消息正文，成型产物落盘、消息只传路径）、决策原则（禁止自执行 / 背景不清先建调研成员 / 无人认领时指派或 spawn / 整合总结交独立汇总成员）、响应节奏、任务状态流转 |
+| `leader_policy.md` | `role == LEADER` | `build_team_role_section` | Leader 的核心理念、职责、成果交接（通道由内容形态决定：短内容直接进消息正文，成型产物落盘、消息只传路径）、决策原则（禁止自执行 / 背景不清先建调研成员 / 无人认领时指派或 spawn / 整合总结交独立汇总成员）、响应节奏、任务状态流转。**「核心理念」与「核心职责」之间有唯一的占位符 `{{collaboration_mechanism}}`**，由下面的 `leader_swarmflow.md` 按 capability 填充或收敛为空 |
+| `leader_swarmflow.md` | `role == LEADER` 且 leader 真的挂了 `swarmflow` 工具 | `build_team_role_section` → `_render_role_policy` 填进 `leader_policy` 的 `{{collaboration_mechanism}}` 槽 | 协作机制选择（按任务协同性质：结构可确定性编排 → swarmflow；涌现式自主协同 → build_team）+ 「本节之后的所有内容都是 build_team 路径」的定位句。**gate 信号与工具同源**：`elements.build_team_policy_rail` 传 `swarmflow_enabled=get_swarmflow_model_resolver(context) is not None`，与 `tool_factory` 减掉 `swarmflow` 工具用的是同一个判断，因此描述机制的文案与能跑它的工具永远同生同灭。关掉 swarmflow 却仍讲机制选择，只会让 leader 在 build_team 与一个它调不到的工具之间反复纠结 |
 | `teammate_policy.md` | `role == TEAMMATE`（`BRIDGE_AGENT` 同用） | `build_team_role_section` | Teammate 的自主规划/领取/协作规范、通信协议、代码/文件协作约定。含"收到 `from="user"` 必须 `send_message(to="user")` 作答"这条无条件义务 |
 | `human_agent_policy.md` | `role == HUMAN_AGENT` | `build_team_role_section` | Avatar 的角色契约：**控制者 / 团队成员 / user 三种对象各自的通道**——回控制者只用纯文本输出（控制者不在名册、`to="controller"` 不存在），发团队成员或 user 一律要控制者明确指示才 `send_message`。**HUMAN_AGENT 不能落回 `teammate_policy`**：那条无条件的"必须回 user"会让 avatar 把控制者的私下问话当成 user 提问，用 `send_message(to="user")` 答给另一个真人。本模板也不渲染执行模式行（avatar 从不自主规划/认领） |
 | `leader_workflow.md` | Leader 且 `team_mode="default"` | `build_team_workflow_section` | 常规 Leader 工作流：建队 → 建任务 → spawn 成员 → 广播启动 → 等通知 |
@@ -41,7 +42,8 @@ Teammate 不消费 workflow / lifecycle 模板；`sections.py` 在 `role != LEAD
 ## 编辑规则（Hard Constraints）
 
 1. **cn / en 双语对齐** — 任何语义变更必须同步修改两种语言文件。结构、小节顺序、字段名保持一致，只翻译文本。
-2. **动态值走 `{{name}}` 占位符** — 只有两个模板含占位符：`bridge_agent` 与 `hitt_human_agent`，都只用 `{{self_line}}`（"你的 member_name 是 X"这一自身名字行）。占位符用 `PromptTemplate` 默认的 `{{ }}` 定界符，由 builder 调 `load_template(...).format({"self_line": ...})` 渲染；`self_line` 由 `_self_member_line` 生成，builder **仅在 HUMAN_AGENT / BRIDGE_AGENT 时才算**（这两个角色单例，不构成前缀 cache 放大）。其余模板（policy / workflow / lifecycle / inbound_tags / `hitt_leader`・`hitt_teammate`・`hitt_teammate_anonymous`）纯静态，`load_template` 原样返回。**不要往这些静态模板里加 per-member 变量**——普通 teammate 的自身名字走 `<team-context>` 消息，见 S_09 不变量 6a / 13。
+2. **动态值走 `{{name}}` 占位符** — 只有三个模板含占位符：`bridge_agent` 与 `hitt_human_agent` 用 `{{self_line}}`（"你的 member_name 是 X"这一自身名字行），`leader_policy` 用 `{{collaboration_mechanism}}`（capability 槽，填 `leader_swarmflow.md` 或空串）。占位符用 `PromptTemplate` 默认的 `{{ }}` 定界符，由 builder 调 `load_template(...).format({...})` 渲染；`self_line` 由 `_self_member_line` 生成，builder **仅在 HUMAN_AGENT / BRIDGE_AGENT 时才算**（这两个角色单例，不构成前缀 cache 放大）。其余模板（teammate policy / workflow / lifecycle / inbound_tags / `hitt_leader`・`hitt_teammate`・`hitt_teammate_anonymous`）纯静态，`load_template` 原样返回。**per-member 变量与 capability 槽是两回事**：capability 槽（`{{collaboration_mechanism}}`）是团队级的，同一团队里取值唯一、不放大前缀 cache；**per-member 变量一律不许进静态模板**——普通 teammate 的自身名字走 `<team-context>` 消息，见 S_09 不变量 6a / 13。
+   **能力关掉时，讲这个能力的文案必须跟着消失**，而且 gate 用的信号要与挂载工具的那个信号同源（`leader_swarmflow` 是范本）。否则 LLM 会围绕一个它调不到的工具做决策——这类"读得到、用不了"的提示词比缺失提示词更糟。
 3. **`@cache` 基于 `(name, language)`** — 运行中的进程不会感知文件改动。开发时如需热更新，重启进程或清 `_load.cache_clear()`。
 4. **空分节省略而不是空字符串** — 新增可选章节时，参考 `build_team_workflow_section` / `build_team_lifecycle_section` 的 None 处理方式（`sections.py` 在 `role != LEADER` 时直接返回 None）。**不要在 `.md` 里写占位文字**。
 5. **策略分层不要重复写** — `leader_policy.md` 谈"角色身份/决策原则"，`leader_workflow.md` 谈"操作步骤"，`tools/locales/descs/*.md` 谈"工具使用语义"。三层内容互不重叠（参见 `agent_teams/tools/AGENTS.md` 的 Prompt Layering 章节）。

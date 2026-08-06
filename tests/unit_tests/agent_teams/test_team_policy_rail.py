@@ -470,6 +470,22 @@ class TestTeamPolicyRailStaticSections:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_leader_rail_hides_swarmflow_unless_the_tool_is_wired(self):
+        # The rail takes the same signal the tool factory gates the swarmflow
+        # tool on, so a leader without the tool never reads about it.
+        for swarmflow_enabled in (False, True):
+            builder = SystemPromptBuilder(language="cn")
+            agent = _StubAgent(builder)
+
+            rail = _leader_rail(swarmflow_enabled=swarmflow_enabled)
+            rail.init(agent)
+            await rail.before_model_call(_StubContext())
+
+            role_text = builder.get_all_sections()[TeamSectionName.ROLE].render("cn")
+            assert ("swarmflow" in role_text.lower()) is swarmflow_enabled
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_teammate_rail_omits_leader_only_sections(self):
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)

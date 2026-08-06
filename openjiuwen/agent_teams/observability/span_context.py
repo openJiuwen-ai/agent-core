@@ -39,6 +39,21 @@ def _is_root_span(span: Span, root_span: Span | None) -> bool:
     return isinstance(name, str) and name.startswith("team.")
 
 
+def _is_open_llm_call_of(span: Span, parent_id: int) -> bool:
+    """Report whether *span* is a still-open ``llm.call`` span under *parent_id*.
+
+    Args:
+        span: Candidate span from the tracker's active set.
+        parent_id: Span id of the parent the caller is resolving against.
+
+    Returns:
+        True when the span is a recording ``llm.call`` whose parent matches.
+    """
+    if span.name != "llm.call" or not span.is_recording():
+        return False
+    return span.parent is not None and span.parent.span_id == parent_id
+
+
 class ActiveSpanTracker(SpanProcessor):
     """SpanProcessor that tracks all active spans for reliable cleanup.
 
@@ -249,11 +264,7 @@ class ActiveSpanTracker(SpanProcessor):
                 return None
             all_spans = list(span_set)
 
-        exact = [
-            s for s in all_spans
-            if s.name == "llm.call" and s.is_recording()
-            and s.parent is not None and s.parent.span_id == parent_id
-        ]
+        exact = [s for s in all_spans if _is_open_llm_call_of(s, parent_id)]
         if len(exact) == 1:
             return exact[0]
         if len(exact) > 1:
@@ -656,12 +667,9 @@ def get_current_tool_span() -> Span | None:
     Returns:
         The innermost open tool span, or None when no tool call is running.
     """
-    open_spans = [
-        span
-        for bucket in _tool_span_map.get().values()
-        for span in bucket
-        if span.is_recording()
-    ]
+    open_spans: list[Span] = []
+    for bucket in _tool_span_map.get().values():
+        open_spans.extend(span for span in bucket if span.is_recording())
     if not open_spans:
         return None
     return max(open_spans, key=lambda span: getattr(span, "start_time", 0) or 0)

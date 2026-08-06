@@ -206,6 +206,10 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         team_workspace_path=inp.team_workspace_path,
         team_backend=get_team_backend(context),
         expose_human_agents_to_teammates=inp.expose_human_agents_to_teammates,
+        # Same signal the tool factory gates the ``swarmflow`` tool on, so the
+        # prompt that describes the mechanism and the tool that runs it appear
+        # and disappear together.
+        swarmflow_enabled=get_swarmflow_model_resolver(context) is not None,
     )
 
 

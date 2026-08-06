@@ -180,11 +180,46 @@ def build_team_identity_section(
     )
 
 
+def _render_role_policy(
+    *,
+    policy_name: str,
+    role: TeamRole,
+    swarmflow_enabled: bool,
+    language: str,
+) -> str:
+    """Load a role policy template and fill its capability-gated slots.
+
+    ``leader_policy`` carries one such slot, ``collaboration_mechanism``: the
+    build_team-versus-swarmflow decision guide, kept in its own
+    ``leader_swarmflow`` template. The signal that gates the ``swarmflow`` tool
+    gates the text describing it, so a leader without the tool never reads about
+    the mechanism — and never deliberates over one it has no way to run. Every
+    other policy template is static and returned as-is.
+
+    Args:
+        policy_name: Template name resolved from the member's role.
+        role: The role whose policy is being rendered.
+        swarmflow_enabled: Whether the leader holds the ``swarmflow`` tool.
+        language: Prompt language ('cn' or 'en').
+
+    Returns:
+        The rendered policy text, stripped.
+    """
+    template = load_template(policy_name, language)
+    if role != TeamRole.LEADER:
+        return template.content.strip()
+    mechanism = ""
+    if swarmflow_enabled:
+        mechanism = "\n" + load_template("leader_swarmflow", language).content.strip() + "\n"
+    return template.format({"collaboration_mechanism": mechanism}).content.strip()
+
+
 def build_team_role_section(
     *,
     role: TeamRole,
     teammate_mode: str = "build_mode",
     workspace_prompt_variant: Literal["native", "external"] = "native",
+    swarmflow_enabled: bool = False,
     language: str = "cn",
 ) -> PromptSection:
     """Build the role policy + execution mode section.
@@ -211,6 +246,11 @@ def build_team_role_section(
         workspace_prompt_variant: Workspace wording variant. Native teammates
             receive the ``.team`` mount instructions; external CLI teammates
             receive path-based shared workspace instructions.
+        swarmflow_enabled: Whether the leader actually has the ``swarmflow``
+            tool. Gates the mechanism-choice subsection of the leader policy —
+            with the tool gated out, telling the leader to weigh build_team
+            against swarmflow only makes it deliberate over a mechanism it
+            cannot invoke.
         language: Prompt language ('cn' or 'en').
 
     Returns:
@@ -226,7 +266,12 @@ def build_team_role_section(
         policy_name = "teammate_policy_external"
     else:
         policy_name = "teammate_policy"
-    role_text = load_template(policy_name, language).content.strip()
+    role_text = _render_role_policy(
+        policy_name=policy_name,
+        role=role,
+        swarmflow_enabled=swarmflow_enabled,
+        language=language,
+    )
 
     # The execution mode describes how a member plans and completes work it
     # took on itself. An avatar never does — it acts only on its controller's
@@ -555,6 +600,7 @@ def build_team_static_sections(
     expose_human_agents_to_teammates: bool = False,
     include_member_specific: bool = False,
     workspace_prompt_variant: Literal["native", "external"] = "native",
+    swarmflow_enabled: bool = False,
 ) -> list[PromptSection]:
     """Build the never-changing team sections for one member.
 
@@ -595,6 +641,8 @@ def build_team_static_sections(
             system-prompt prefix stays identical across the team.
         workspace_prompt_variant: Workspace wording variant forwarded to the
             teammate role policy section.
+        swarmflow_enabled: Whether the leader holds the ``swarmflow`` tool;
+            gates the mechanism-choice subsection of the leader policy.
 
     Returns:
         The non-None sections, unsorted (the caller orders by priority).
@@ -614,6 +662,7 @@ def build_team_static_sections(
             role=role,
             teammate_mode=teammate_mode,
             workspace_prompt_variant=workspace_prompt_variant,
+            swarmflow_enabled=swarmflow_enabled,
             language=language,
         ),
         build_team_hitt_section(

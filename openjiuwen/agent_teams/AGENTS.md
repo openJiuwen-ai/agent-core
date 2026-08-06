@@ -74,7 +74,7 @@ agent_teams/
 | 文件 | 职责 |
 |---|---|
 | `loader.py` | `load_template`，按语言加载 `.md` |
-| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（系统提示词的唯一装配路径）；`build_team_role_section` 直接读 `leader_policy` / `teammate_policy` |
+| `sections.py` | `TeamSectionName` + `build_team_*_section` 构造 `PromptSection`（系统提示词的唯一装配路径）；`build_team_role_section` 读 `leader_policy` / `teammate_policy`，leader 的协作机制选择（`leader_swarmflow`）按 `swarmflow_enabled` 填槽——gate 与 `swarmflow` 工具同源 |
 | `messages.py` | 团队状态的消息正文（身份 / 团队信息 / 名册快照与增量）+ `diff_roster`。纯渲染，不管投递 |
 | `section_cache.py` | `MtimeSectionCache`：通用 mtime 缓存原语（团队侧当前无使用者）|
 | `cn/` · `en/` | 角色 / 工作流 / 生命周期模板 |
@@ -91,7 +91,7 @@ customizer 后处理）。
 
 | 文件 | 职责 |
 |---|---|
-| `team_policy_rail.py` | `TeamPolicyRail`：所有进 builder 的团队 section 均静态**且成员间逐字一致**（role / HITT 协作契约 [gate `hitt_enabled`] / bridge avatar 自契约 [仅 BRIDGE_AGENT] / workflow / dispatch [gate `dispatch_mode`，LEADER + TEAMMATE] / lifecycle / extra + inbound 说明 section），init 建一次注入 `SystemPromptBuilder`（前缀 KV cache 稳定）；团队状态（自身身份 / `team_info` / 成员名册）**不进 builder 也不进 attachment**，由 `TeamContextTracker` 在数据出现或变化的那次调用写进成员的对话历史。`on_user_message` 同时承担第二件事：非 leader 成员的一批排队输入里，被后来者覆盖的任务看板整条剔除（leader 不剔——它读的是快照之间的差异）。见 F_46 / F_50 / F_52 / F_68 / F_70 / F_71 |
+| `team_policy_rail.py` | `TeamPolicyRail`：所有进 builder 的团队 section 均静态**且成员间逐字一致**（role [leader 的协作机制选择 gate `swarmflow_enabled`] / HITT 协作契约 [gate `hitt_enabled`] / bridge avatar 自契约 [仅 BRIDGE_AGENT] / workflow / dispatch [gate `dispatch_mode`，LEADER + TEAMMATE] / lifecycle / extra + inbound 说明 section），init 建一次注入 `SystemPromptBuilder`（前缀 KV cache 稳定）；团队状态（自身身份 / `team_info` / 成员名册）**不进 builder 也不进 attachment**，由 `TeamContextTracker` 在数据出现或变化的那次调用写进成员的对话历史。`on_user_message` 同时承担第二件事：非 leader 成员的一批排队输入里，被后来者覆盖的任务看板整条剔除（leader 不剔——它读的是快照之间的差异）。见 F_46 / F_50 / F_52 / F_68 / F_70 / F_71 |
 | `confirm_payload.py` | `TeamConfirmPayload` + `TeamPermissionConfirmResponse`：team-specific confirmation payload/response models（extend harness base classes with `decided_by` tracking） |
 | `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |
