@@ -195,7 +195,7 @@ class SpawnTeammateTool(_SpawnToolBase):
             permissions_override=permissions_override,
         )
         fork_value = inputs.get("fork")
-        if fork_value:
+        if fork_value and fork_value not in ("false", False):
             self.team.mark_fork_on_spawn(
                 member_name,
                 fork_value,

@@ -1061,19 +1061,17 @@ class TeamAgent(BaseAgent):
                             fork_ctx.compact_split = ckpt_idx
                         else:
                             fork_ctx.compact_split = len(fork_ctx.messages)
+                    elif is_named and ckpt_idx is None:
+                        team_logger.warning(
+                            "[fork] checkpoint '%s' not found for "
+                            "member=%s; falling back to full context",
+                            fork_value, teammate_id,
+                        )
+                        fork_ctx = ForkContext.from_agent(native)
                     elif is_named:
-                        if ckpt_idx is None:
-                            team_logger.warning(
-                                "[fork] checkpoint '%s' not found for "
-                                "member=%s; falling back to full context",
-                                fork_value, teammate_id,
-                            )
-                            fork_ctx = ForkContext.from_agent(native)
-                        else:
-                            fork_ctx = ForkContext.from_agent(
-                                native, checkpoint=ckpt_idx,
-                            )
-                    else:
+                        fork_ctx = ForkContext.from_agent(
+                            native, checkpoint=ckpt_idx,
+                        )
                         fork_ctx = ForkContext.from_agent(native)
                     team_logger.info(
                         "[fork-d] ForkContext created: msgs=%d empty=%s",
@@ -1098,18 +1096,22 @@ class TeamAgent(BaseAgent):
     def _resolve_fork_native(self, source_name: str | None):
         """Return the DeepAgent of a named member, or leader's own."""
         if source_name is None or source_name == self._member_name():
-            return self.resources.harness._native
+            return self.resources.harness.get_deep_agent()
 
         handle = self._spawn_manager.spawned_handles.get(source_name)
         if handle and hasattr(handle, "agent_ref"):
             agent = handle.agent_ref
             if hasattr(agent, "resources") and agent.resources.harness:
-                return agent.resources.harness._native
+                return agent.resources.harness.get_deep_agent()
 
         team_logger.warning(
             "Fork source '%s' not found or not in-process", source_name
         )
         return None
+
+    def share_checkpoints_with(self, other: "TeamAgent") -> None:
+        """Share the leader's checkpoint namespace with another agent."""
+        other._named_checkpoints = self._named_checkpoints
 
     async def _mark_team_cleaned(self) -> None:
         """Latch ``state.team_cleaned`` from the ``clean_team`` success path.

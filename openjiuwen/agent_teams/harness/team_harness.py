@@ -256,6 +256,10 @@ class TeamHarness:
     # Interaction surface (forwarded to the native)
     # ------------------------------------------------------------------
 
+    def get_deep_agent(self):
+        """Return the underlying ``DeepAgent`` (``NativeHarness``)."""
+        return self._native
+
     @property
     def state(self) -> HarnessState:
         """Return the native's lifecycle phase, or IDLE when no cycle is live."""

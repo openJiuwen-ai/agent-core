@@ -882,13 +882,13 @@ class AgentConfigurator:
 
         def _snapshot_length() -> int:
             h = self.harness
-            if h is not None and hasattr(h, "_native"):
-                native = h._native
+            if h is not None and hasattr(h, "get_deep_agent"):
+                native = h.get_deep_agent()
                 if native is not None:
                     return len(native.get_current_context())
             return 0
 
-        agent_team._snapshot_length = _snapshot_length
+        agent_team.set_snapshot_length(_snapshot_length)
 
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager

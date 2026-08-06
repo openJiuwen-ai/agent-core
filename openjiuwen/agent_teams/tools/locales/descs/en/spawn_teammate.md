@@ -86,6 +86,5 @@ Other combinations rely on built-in context compaction.
 ### Mechanism
 
 - Inherited messages are the source member's full conversation history (file reads, search outputs, analysis conclusions)
-- All `SystemMessage` entries are stripped during capture — the source member's role identity never leaks
 - Have the source member call `checkpoint(name="xxx")` before forking, then use `fork="xxx"`
 - `fork=true` inherits the full context at call time; prefer checkpoint mode when later scheduling noise would otherwise be included

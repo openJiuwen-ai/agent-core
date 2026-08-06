@@ -75,7 +75,7 @@ async def compact_context(deep_agent, *, split_at: int, session_id: str | None =
     # ``create_new_context_engine`` re-creates a fresh ``Session``
     # whose ``get_state()`` returns ``None``, so ``_load_state_from_session``
     # silently exits without applying the new messages.
-    react = deep_agent._react_agent
+    react = deep_agent.react_agent
     if react is not None:
         context = react.context_engine.get_context(
             context_id="default_context_id",

@@ -348,8 +348,8 @@ class TestCompactContext:
         ctx.set_messages = MagicMock()
         engine = MagicMock()
         engine.get_context = MagicMock(return_value=ctx)
-        agent._react_agent = MagicMock()
-        agent._react_agent.context_engine = engine
+        agent.react_agent = MagicMock()
+        agent.react_agent.context_engine = engine
         model = MagicMock()
         model.invoke = AsyncMock(
             return_value=AssistantMessage(content="summary text")
@@ -368,7 +368,7 @@ class TestCompactContext:
         )
         await compact_context(agent, split_at=5)
 
-        engine = agent._react_agent.context_engine
+        engine = agent.react_agent.context_engine
         engine.get_context.assert_called_once_with(
             context_id="default_context_id",
             session_id="default_session_id",
@@ -389,7 +389,7 @@ class TestCompactContext:
         )
         await compact_context(agent, split_at=0)
         agent.get_current_context.assert_called_once()
-        ctx = agent._react_agent.context_engine.get_context.return_value
+        ctx = agent.react_agent.context_engine.get_context.return_value
         ctx.set_messages.assert_not_called()
 
     @pytest.mark.asyncio
@@ -400,5 +400,5 @@ class TestCompactContext:
         msgs = [UserMessage(content=f"m{i}") for i in range(5)]
         agent = self._make_mock_agent(msgs)
         await compact_context(agent, split_at=5)
-        ctx = agent._react_agent.context_engine.get_context.return_value
+        ctx = agent.react_agent.context_engine.get_context.return_value
         ctx.set_messages.assert_not_called()

@@ -67,16 +67,16 @@ async def inprocess_spawn(
 
     # Share the leader's checkpoint dict so this teammate's
     # ``checkpoint()`` tool writes into the leader-visible namespace.
-    teammate._named_checkpoints = team_agent._named_checkpoints
+    team_agent.share_checkpoints_with(teammate)
     if teammate.team_backend is not None:
-        teammate.team_backend._store_checkpoint_fn = (
+        teammate.team_backend.set_store_checkpoint_fn(
             teammate._named_checkpoints.__setitem__
         )
 
     # Fork context injection: seed the teammate's context engine with the
     # fork source's conversation history so it inherits prior understanding.
     if fork_from and not fork_from.is_empty():
-        native = teammate.resources.harness._native
+        native = teammate.resources.harness.get_deep_agent()
         await native.create_new_context_engine(
             session_id=session_id,
             messages=fork_from.to_messages(),

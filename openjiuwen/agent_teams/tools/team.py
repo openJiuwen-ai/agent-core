@@ -315,6 +315,14 @@ class TeamBackend:
     # Fork / checkpoint support
     # ------------------------------------------------------------------
 
+    def set_snapshot_length(self, fn) -> None:
+        """Register the callback that returns this member's message count."""
+        self._snapshot_length = fn
+
+    def set_store_checkpoint_fn(self, fn) -> None:
+        """Register the callback for persisting a named checkpoint."""
+        self._store_checkpoint_fn = fn
+
     def mark_fork_on_spawn(
         self,
         member: str,
