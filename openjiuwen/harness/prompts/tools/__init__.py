@@ -212,6 +212,14 @@ def get_tool_description(name: str, language: str = "cn") -> str:
     return provider.get_description(language)
 
 
+def list_tool_metadata(language: str = "cn") -> list[dict[str, str]]:
+    """Return localized metadata for all registered built-in tools."""
+    return [
+        {"name": name, "description": _REGISTRY[name].get_description(language)}
+        for name in sorted(_REGISTRY)
+    ]
+
+
 def get_tool_input_params(name: str, language: str = "cn") -> Dict[str, Any]:
     """查找工具参数 schema。内置工具找不到时抛 KeyError。"""
     provider = _REGISTRY.get(name)
