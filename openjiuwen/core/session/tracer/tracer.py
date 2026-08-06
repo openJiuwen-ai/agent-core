@@ -105,7 +105,12 @@ class Tracer:
         self._workflow_handlers = {}
         self._stream_writer_manager = None
 
-    def init(self, stream_writer_manager=None):
+    @property
+    def trace_id(self) -> str:
+        """Stable id of the trace this tracer's spans belong to."""
+        return self._trace_id
+
+    def init(self, stream_writer_manager=None, *, session_id: str = None, agent_name: str = None):
         """Initialize tracer: pick up extension handlers and, if trace writer exists, register built-in handlers.
 
         If stream_writer_manager is provided and has a trace writer (i.e., BaseStreamMode.TRACE
@@ -115,12 +120,17 @@ class Tracer:
         Args:
             stream_writer_manager: Optional StreamWriterManager. When provided with a trace
                 writer, built-in TraceSchema handlers are registered for chunk output.
+            session_id: Optional id of the agent session owning this tracer,
+                forwarded to extension handlers via ``bind_trace``.
+            agent_name: Optional name of the agent owning this tracer,
+                forwarded to extension handlers via ``bind_trace``.
         """
         self._stream_writer_manager = stream_writer_manager
         # Pick up globally registered extension handlers and inject trace_id
         for name, handler in TracerHandlerRegistry.get_agent_handlers().items():
             handler.set_trace_id(self._trace_id)
             handler.set_session_id(self._session_id)
+            handler.bind_trace(self._trace_id, session_id=session_id, agent_name=agent_name)
             self._agent_handlers[name] = handler
         for name, handler in TracerHandlerRegistry.get_workflow_handlers().items():
             handler.set_trace_id(self._trace_id)
@@ -196,6 +206,25 @@ class Tracer:
             asyncio.run_coroutine_threadsafe(self.trigger(handler_class_name, event_name, **kwargs), loop)
         else:
             loop.run_until_complete(self.trigger(handler_class_name, event_name, **kwargs))
+
+    async def close(self):
+        """Notify extension agent handlers that this trace's session finished.
+
+        Called by ``Session.post_run``. Only handlers implementing
+        ``on_trace_close`` (extension handlers) are notified; built-in
+        TraceSchema handlers have no per-trace state to release.
+        """
+        for _name, handler in self._agent_handlers.items():
+            if handler is None or not hasattr(handler, "on_trace_close"):
+                continue
+            try:
+                await handler.on_trace_close(trace_id=self._trace_id)
+            except Exception as exc:
+                session_logger.warning(
+                    "Tracer close handler failed, skipping",
+                    event_type=LogEventType.SYSTEM_ERROR,
+                    metadata={"handler": _name, "trace_id": self._trace_id, "error": str(exc)},
+                )
 
     def pop_workflow_span(self, invoke_id: str, parent_node_id: str):
         if parent_node_id not in self.tracer_workflow_span_manager_dict:

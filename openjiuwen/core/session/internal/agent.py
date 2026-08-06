@@ -38,7 +38,11 @@ class AgentSession(BaseSession):
             else StreamWriterManager(StreamEmitter())
         )
         tracer = Tracer(session_id=session_id)
-        tracer.init(self._stream_writer_manager)
+        tracer.init(
+            self._stream_writer_manager,
+            session_id=session_id,
+            agent_name=(getattr(card, "name", None) or getattr(card, "id", None)) if card else None,
+        )
         self._tracer = tracer
         self._checkpointer = CheckpointerFactory.get_checkpointer() if checkpointer is None else checkpointer
         self._agent_span = self._tracer.tracer_agent_span_manager.create_agent_span() if self._tracer else None
