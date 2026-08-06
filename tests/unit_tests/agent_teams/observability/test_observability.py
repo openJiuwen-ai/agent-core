@@ -2563,3 +2563,41 @@ def test_usage_subset_larger_than_its_parent_is_left_alone() -> None:
 
     assert written["gen_ai.usage.completion_tokens"] == 5
     assert written["gen_ai.usage.reasoning_tokens"] == 9
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_reasoning_span_sits_at_the_call_start(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A non-streaming call has no reasoning timing, and must not fake one.
+
+    Reasoning time is measured from stream chunks. A sub-agent dispatched via
+    ``invoke`` produces none, and the span used to be created at finalize time —
+    zero-length at the *end* of the llm.call, after the answer it preceded.
+    """
+    fw = Runner.callback_framework
+    _create_team_span("test_team")
+
+    messages = [{"role": "user", "content": "Compute 6 * 7."}]
+    await fw.trigger(LLMCallEvents.LLM_INVOKE_INPUT, messages=messages, model="fake-llm-1")
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=messages,
+        result=_FakeAssistantMessage(
+            content="42",
+            reasoning_content="Six times seven.",
+            finish_reason="stop",
+            usage=_FakeUsage(reasoning_tokens=5),
+        ),
+    )
+
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
+    assert llm_spans and reasoning_spans
+    call, reasoning = llm_spans[0], reasoning_spans[0]
+
+    assert reasoning.start_time == call.start_time
+    assert reasoning.end_time == call.start_time
+    assert _attr(reasoning, "gen_ai.reasoning.duration_ms") is None
+    assert _attr(reasoning, "gen_ai.reasoning.timing") == "unmeasured: non-streaming call"
+    assert _attr(reasoning, "langfuse.observation.output") == "Six times seven."

@@ -64,6 +64,8 @@ from openjiuwen.agent_teams.observability.semconv import (
     GEN_AI_USAGE_CACHE_TOKENS,
     GEN_AI_USAGE_REASONING_TOKENS,
     GEN_AI_REASONING_DURATION_MS,
+    GEN_AI_REASONING_TIMING,
+    REASONING_TIMING_UNMEASURED,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
@@ -840,9 +842,19 @@ class OtelCallbackHandler:
                     and reasoning_last_ns is not None
                     and reasoning_start_wall_ns is not None
                 )
-                start_kwarg: dict[str, Any] = (
-                    {"start_time": reasoning_start_wall_ns} if has_timing else {}
-                )
+                # Without chunks there is nothing to measure: a non-streaming
+                # call returns reasoning and answer together. Anchor the span at
+                # the start of its llm.call — where the reasoning happened —
+                # instead of letting it default to finalize time, which parks a
+                # zero-length span at the *end* of the call, after the answer it
+                # preceded.
+                call_start_wall_ns = getattr(state.span, "start_time", None)
+                if has_timing:
+                    start_kwarg: dict[str, Any] = {"start_time": reasoning_start_wall_ns}
+                elif call_start_wall_ns is not None:
+                    start_kwarg = {"start_time": call_start_wall_ns}
+                else:
+                    start_kwarg = {}
                 reasoning_span = self._tracer().start_span(
                     name="llm.reasoning",
                     context=set_span_in_context(state.span),
@@ -872,7 +884,12 @@ class OtelCallbackHandler:
                     )
                     reasoning_span.end(end_time=reasoning_start_wall_ns + dur_ns)  # type: ignore[operator]
                 else:
-                    reasoning_span.end()
+                    # No duration attribute: none was measured, and a zero is a
+                    # measurement. The reason is recorded instead.
+                    reasoning_span.set_attribute(
+                        GEN_AI_REASONING_TIMING, REASONING_TIMING_UNMEASURED
+                    )
+                    reasoning_span.end(end_time=call_start_wall_ns)
             except Exception as exc:
                 team_logger.warning("otel: _finalize_llm_span_output reasoning span failed: {}", exc)
 

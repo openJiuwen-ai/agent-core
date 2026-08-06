@@ -52,6 +52,11 @@ GEN_AI_RESPONSE_FINISH_REASON = "gen_ai.response.finish_reason"
 GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
 GEN_AI_RESPONSE_TTFT_MS = "gen_ai.response.time_to_first_token_ms"
 GEN_AI_REASONING_DURATION_MS = "gen_ai.reasoning.duration_ms"
+# Why a reasoning span carries no duration. Reasoning time is measured from the
+# stream, so a non-streaming call has none to report — the attribute says so
+# rather than leaving a bare zero-length span to read as instant thinking.
+GEN_AI_REASONING_TIMING = "gen_ai.reasoning.timing"
+REASONING_TIMING_UNMEASURED = "unmeasured: non-streaming call"
 
 # Standard OpenLLMetry / GenAI keys
 GEN_AI_PROMPT = "gen_ai.prompt"
