@@ -10,10 +10,10 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 from uuid import uuid4
 
-from openjiuwen.symphony.interfaces import LLMClient, OrchestrationCapabilityProvider
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.orchestration.artifacts import (
     SCHEMA_VERSION,
     GraphArtifactStore,
@@ -29,9 +29,21 @@ from openjiuwen.symphony.orchestration.contracts import (
     OrchestrationProgress,
 )
 from openjiuwen.symphony.orchestration.execution_graph import build_execution_graph
-from openjiuwen.symphony.orchestration.graph import CandidateGenerator, GraphBuilder, OntologyMatcher
+from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
+from openjiuwen.symphony.orchestration.graph.candidates import CandidateGenerator
+from openjiuwen.symphony.orchestration.graph.matcher.cache import (
+    CACHE_INDEX_SCHEMA,
+    CACHE_RECORD_SCHEMA,
+    sanitize_matcher_metadata,
+)
+from openjiuwen.symphony.orchestration.graph.matcher.ontology import (
+    DEFAULT_PROMPT_VERSION,
+    MATCH_SCHEMA_VERSION,
+    MATCHER_VERSION,
+    OntologyMatcher,
+)
 from openjiuwen.symphony.orchestration.language import resolve_orchestration_language
-from openjiuwen.symphony.orchestration.matcher import LLMRelationMatcher
+from openjiuwen.symphony.orchestration.model import ModelResponseObserver
 from openjiuwen.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
 from openjiuwen.symphony.orchestration.planning.fast import FastOneShotPlanner
 from openjiuwen.symphony.shared.fingerprint import Fingerprint, coerce_fingerprint
@@ -48,19 +60,19 @@ class OrchestrationService:
         self,
         *,
         graph_artifact_root: str | Path,
-        capability_provider: OrchestrationCapabilityProvider | Sequence[Any],
-        llm_client: LLMClient | None,
+        capability_provider: Sequence[Any] | Callable[[], Sequence[Any] | Awaitable[Sequence[Any]]],
+        model: Model | None,
+        model_response_observer: ModelResponseObserver | None = None,
         config: OrchestrationConfig | None = None,
-        matcher: OntologyMatcher | None = None,
         source_snapshot: dict[str, Any] | Callable[[Sequence[Fingerprint]], dict[str, Any]] | None = None,
         graph_config: dict[str, Any] | None = None,
         prepare_artifact: PrepareArtifactHook | None = None,
     ) -> None:
         self.graph_artifact_root = Path(graph_artifact_root)
         self.capability_provider = capability_provider
-        self.llm_client = llm_client
+        self.model = model
+        self.model_response_observer = model_response_observer
         self.config = config or OrchestrationConfig()
-        self.matcher = matcher
         self.source_snapshot = source_snapshot
         self.graph_config = dict(graph_config or {})
         self.prepare_artifact = prepare_artifact
@@ -68,9 +80,11 @@ class OrchestrationService:
         self._build_task: asyncio.Task[Any] | None = None
 
     def status(self, *, expected_snapshot: dict[str, Any] | None = None) -> GraphArtifactStatus:
-        snapshot = expected_snapshot
-        if snapshot is None:
-            snapshot = self._source_snapshot(self._sync_capabilities())
+        if expected_snapshot is None:
+            capabilities = self._sync_capabilities()
+            snapshot = self._source_snapshot(capabilities, self._matcher_identity())
+        else:
+            snapshot = self._merge_build_identity(expected_snapshot, self._matcher_identity())
         return self._store.status(
             expected_snapshot=snapshot,
             building=self._build_task is not None and not self._build_task.done(),
@@ -94,8 +108,11 @@ class OrchestrationService:
             raise RuntimeError("A Symphony graph build is already running.")
         self._build_task = current
         try:
+            if self.model is None:
+                raise ValueError("Graph build requires a model for internal ontology matching.")
             capabilities = await self._capabilities()
-            snapshot = self._source_snapshot(capabilities)
+            matcher = self._create_matcher(capabilities, force=force)
+            snapshot = self._source_snapshot(capabilities, matcher.identity_metadata())
             if not force:
                 try:
                     existing = self._store.read()
@@ -114,42 +131,25 @@ class OrchestrationService:
             def graph_progress(stage: str, **details: Any) -> None:
                 progress_dispatcher.enqueue(stage, **details)
 
-            matcher = self.matcher
-            if matcher is None:
-                if self.llm_client is None:
-                    raise ValueError("Graph build requires an explicit matcher or llm_client.")
-                matcher = LLMRelationMatcher(
-                    self.llm_client,
-                    min_confidence=self.config.min_edge_confidence,
-                    batch_size=_positive_graph_int(self.graph_config, "batch_size", 12),
-                    max_workers=_graph_workers(self.graph_config),
-                    require_consensus=_graph_bool(self.graph_config, "require_consensus", True),
-                    progress=lambda event, current, total, details: graph_progress(
-                        "graph.resolve.progress",
-                        matcher_event=event,
-                        current=current,
-                        total=total,
-                        details=details,
-                    ),
+            def matcher_progress(event: str, current: int, total: int, details: dict[str, Any]) -> None:
+                graph_progress(
+                    "graph.resolve.progress",
+                    matcher_event=event,
+                    current=current,
+                    total=total,
+                    details=details,
                 )
+
+            matcher.progress = matcher_progress
             candidate_generator = CandidateGenerator(
-                max_candidates_per_skill_relation=_positive_graph_int(
-                    self.graph_config,
-                    "max_candidates_per_skill_relation",
-                    32,
-                ),
-                max_port_mappings_per_candidate=_positive_graph_int(
-                    self.graph_config,
-                    "max_port_mappings_per_candidate",
-                    12,
-                ),
-                max_exact_io_pair_fanout=_positive_graph_int(
-                    self.graph_config,
-                    "max_exact_io_pair_fanout",
-                    64,
-                ),
+                max_candidates_per_skill_relation=matcher.graph_config["max_candidates_per_skill_relation"],
+                max_port_mappings_per_candidate=matcher.graph_config["max_port_mappings_per_candidate"],
+                max_exact_io_pair_fanout=matcher.graph_config["max_exact_io_pair_fanout"],
             )
-            result = await GraphBuilder(matcher=matcher, candidate_generator=candidate_generator).build(
+            result = await GraphBuildPipeline(
+                resolver=matcher,
+                candidate_generator=candidate_generator,
+            ).build(
                 capabilities,
                 progress=graph_progress,
             )
@@ -167,7 +167,7 @@ class OrchestrationService:
                 "diagnostics": [item.to_dict() for item in result.diagnostics],
                 "config": {
                     "orchestration": self.config.to_dict(),
-                    "graph": self.graph_config,
+                    "graph": matcher.graph_config,
                     "thresholds": result.manifest.thresholds,
                     "candidate_generation": result.manifest.candidate_generation,
                     "llm": result.manifest.llm,
@@ -222,6 +222,8 @@ class OrchestrationService:
         mode: str | None = None,
     ) -> OrchestrationPlan:
         callback = _resolve_progress_callback(progress, progress_callback)
+        if self.model is None:
+            raise ValueError("Symphony planning requires a model.")
         await _emit(callback, "plan_started", query=query)
         artifacts = filter_disabled_graph_artifacts(
             load_graph_artifacts(self.graph_artifact_root),
@@ -237,8 +239,8 @@ class OrchestrationService:
         if planning_mode == "beam":
             planner = BidirectionalBeamPlanner(
                 artifacts,
-                llm_config=None,
-                llm_client=self.llm_client,
+                model=self.model,
+                model_response_observer=self.model_response_observer,
                 min_edge_confidence=self.config.min_edge_confidence,
                 top_k=self.config.top_k,
                 max_depth=self.config.max_depth,
@@ -249,8 +251,8 @@ class OrchestrationService:
         else:
             planner = FastOneShotPlanner(
                 artifacts,
-                llm_config=None,
-                llm_client=self.llm_client,
+                model=self.model,
+                model_response_observer=self.model_response_observer,
                 min_edge_confidence=self.config.min_edge_confidence,
                 max_depth=self.config.max_depth,
                 candidate_skill_ids=selected,
@@ -287,21 +289,93 @@ class OrchestrationService:
             raise RuntimeError("status() requires a synchronous capability_provider or an explicit expected_snapshot.")
         return [coerce_fingerprint(item) for item in value]
 
-    def _source_snapshot(self, capabilities: Sequence[Fingerprint]) -> dict[str, Any]:
+    def _source_snapshot(
+        self,
+        capabilities: Sequence[Fingerprint],
+        matcher_identity: dict[str, Any],
+    ) -> dict[str, Any]:
         if callable(self.source_snapshot):
-            return dict(self.source_snapshot(capabilities))
-        if isinstance(self.source_snapshot, dict):
-            return dict(self.source_snapshot)
-        canonical = json.dumps(
-            [item.to_internal_dict() for item in sorted(capabilities, key=lambda item: item.id)],
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return {
-            "capability_count": len(capabilities),
-            "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            base = dict(self.source_snapshot(capabilities))
+        elif isinstance(self.source_snapshot, dict):
+            base = dict(self.source_snapshot)
+        else:
+            canonical = json.dumps(
+                [item.to_internal_dict() for item in sorted(capabilities, key=lambda item: item.id)],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            base = {
+                "capability_count": len(capabilities),
+                "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            }
+        return self._merge_build_identity(base, matcher_identity)
+
+    def _merge_build_identity(
+        self,
+        snapshot: dict[str, Any],
+        matcher_identity: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_graph_config = _normalized_graph_config(self.graph_config)
+        candidate_generation = {
+            "max_candidates_per_skill_relation": normalized_graph_config.get("max_candidates_per_skill_relation"),
+            "max_port_mappings_per_candidate": normalized_graph_config.get("max_port_mappings_per_candidate"),
+            "max_exact_io_pair_fanout": normalized_graph_config.get("max_exact_io_pair_fanout"),
         }
+        return sanitize_matcher_metadata(
+            {
+                **snapshot,
+                "symphony_graph_build": {
+                    "matcher": matcher_identity,
+                    "candidate_generation": candidate_generation,
+                },
+            }
+        )
+
+    def _matcher_identity(self) -> dict[str, Any]:
+        if self.model is None:
+            current_identity = {
+                "matcher_version": MATCHER_VERSION,
+                "prompt_version": DEFAULT_PROMPT_VERSION,
+                "match_schema_version": MATCH_SCHEMA_VERSION,
+                "cache_record_schema_version": CACHE_RECORD_SCHEMA,
+                "cache_index_schema_version": CACHE_INDEX_SCHEMA,
+                "graph_config": _normalized_graph_config(self.graph_config),
+                "batch_size": _positive_graph_int(self.graph_config, "batch_size", 12),
+                "max_workers": _graph_workers(self.graph_config),
+                "require_consensus": _graph_bool(self.graph_config, "require_consensus", True),
+                "consensus_runs": 2 if _graph_bool(self.graph_config, "require_consensus", True) else 1,
+                "thresholds": {"can_feed": self.config.min_edge_confidence},
+            }
+            try:
+                source_snapshot = self._store.read().get("source_snapshot", {})
+            except FileNotFoundError:
+                source_snapshot = {}
+            build_identity = source_snapshot.get("symphony_graph_build", {})
+            stored_identity = build_identity.get("matcher", {}) if isinstance(build_identity, dict) else {}
+            identity = dict(stored_identity) if isinstance(stored_identity, dict) else {}
+            identity.update(current_identity)
+            identity.setdefault("model", None)
+            identity.setdefault("backend", None)
+            identity.setdefault("temperature", None)
+            return identity
+        return self._create_matcher([], force=True).identity_metadata()
+
+    def _create_matcher(self, capabilities: Sequence[Fingerprint], *, force: bool) -> OntologyMatcher:
+        if self.model is None:
+            raise ValueError("Graph build requires a model for internal ontology matching.")
+        normalized_graph_config = _normalized_graph_config(self.graph_config)
+        return OntologyMatcher(
+            self.model,
+            model_response_observer=self.model_response_observer,
+            fingerprints=capabilities,
+            cache_path=None if force else self.graph_artifact_root / "cache" / "relation_matches.json",
+            batch_size=normalized_graph_config["batch_size"],
+            max_workers=normalized_graph_config["max_workers"],
+            require_consensus=normalized_graph_config["require_consensus"],
+            graph_config=normalized_graph_config,
+            thresholds={"can_feed": self.config.min_edge_confidence},
+        )
 
 
 def _input_candidate_summary(
@@ -418,6 +492,17 @@ def _graph_bool(config: dict[str, Any], key: str, default: bool) -> bool:
     if not isinstance(value, bool):
         raise TypeError(f"graph_config[{key!r}] must be a boolean.")
     return value
+
+
+def _normalized_graph_config(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "batch_size": _positive_graph_int(config, "batch_size", 12),
+        "max_workers": _graph_workers(config),
+        "require_consensus": _graph_bool(config, "require_consensus", True),
+        "max_candidates_per_skill_relation": _positive_graph_int(config, "max_candidates_per_skill_relation", 32),
+        "max_port_mappings_per_candidate": _positive_graph_int(config, "max_port_mappings_per_candidate", 12),
+        "max_exact_io_pair_fanout": _positive_graph_int(config, "max_exact_io_pair_fanout", 64),
+    }
 
 
 def _version_id(generated_at: str, snapshot: dict[str, Any]) -> str:

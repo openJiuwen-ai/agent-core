@@ -10,32 +10,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-from openjiuwen.symphony.orchestration.graph.models import LLMMatch, RelationCandidate, SkillRegistry
-from openjiuwen.symphony.shared.fingerprint import (
-    CapabilityFingerprint,
-    Fingerprint,
-    coerce_fingerprint,
-)
+from filelock import FileLock
 
-FingerprintInput = Fingerprint | CapabilityFingerprint | dict[str, Any]
+from openjiuwen.symphony.orchestration.graph.models import GraphDiagnostic, LLMMatch, RelationCandidate
+from openjiuwen.symphony.shared.fingerprint import FingerprintLike
+from openjiuwen.symphony.shared.identity import sanitize_metadata as sanitize_matcher_metadata
 
 CACHE_RECORD_SCHEMA = "Symphony-relation-match-cache-v1"
 CACHE_INDEX_SCHEMA = "Symphony-relation-match-cache-index-v1"
-_ENDPOINT_MATCHER_FIELDS = frozenset({"api_base", "api_url", "base_url", "endpoint", "endpoint_url"})
-_SECRET_MATCHER_FIELDS = frozenset(
-    {
-        "api_key",
-        "authorization",
-        "credential",
-        "credentials",
-        "password",
-        "secret",
-        "token",
-    }
-)
 _PATH_LOCKS_GUARD = threading.Lock()
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 
@@ -47,89 +31,6 @@ class RelationCacheStats:
     stored_count: int = 0
 
 
-class CachedOntologyMatcher:
-    """Wrap an ontology matcher with a persistent per-candidate cache."""
-
-    def __init__(
-        self,
-        matcher: Any,
-        cache_path: str | Path,
-        *,
-        fingerprints: Iterable[FingerprintInput],
-    ) -> None:
-        self.matcher = matcher
-        self.cache = RelationMatchCache(
-            cache_path,
-            matcher_signature=_matcher_signature(matcher),
-            fingerprints=fingerprints,
-        )
-        self.diagnostics: list[Any] = []
-        self.stats = RelationCacheStats()
-
-    async def match(
-        self,
-        registry: SkillRegistry,
-        candidates: Iterable[RelationCandidate],
-    ) -> list[LLMMatch]:
-        self.diagnostics = []
-        self.stats = RelationCacheStats()
-        candidate_list = list(candidates)
-        cached_matches: list[tuple[int, list[LLMMatch]]] = []
-        misses: list[tuple[int, RelationCandidate]] = []
-        for index, candidate in enumerate(candidate_list):
-            matches = self.cache.load(candidate)
-            if matches is None:
-                misses.append((index, candidate))
-            else:
-                cached_matches.append((index, matches))
-
-        resolved_by_index: dict[int, list[LLMMatch]] = {}
-        diagnostics: list[Any] = []
-        for window in _chunked(misses, _matcher_window_size(self.matcher)):
-            miss_candidates = [candidate for _, candidate in window]
-            resolved_matches = list(await self.matcher.match(registry, miss_candidates))
-            resolved_by_candidate = _matches_by_candidate(miss_candidates, resolved_matches)
-            for index, candidate in window:
-                matches = resolved_by_candidate.get(candidate.key, [])
-                resolved_by_index[index] = matches
-                self.cache.store(candidate, matches)
-            self.cache.flush()
-            diagnostics.extend(list(getattr(self.matcher, "diagnostics", [])))
-
-        combined: list[tuple[int, LLMMatch]] = []
-        for index, matches in cached_matches:
-            combined.extend((index, match) for match in matches)
-        for index, matches in resolved_by_index.items():
-            combined.extend((index, match) for match in matches)
-        self.diagnostics = diagnostics
-        self.stats = RelationCacheStats(
-            reused_count=len(cached_matches),
-            resolved_count=len(misses),
-            stored_count=len(misses),
-        )
-        combined.sort(
-            key=lambda item: (item[0], item[1].source_id, item[1].target_id),
-        )
-        return [match for _index, match in combined]
-
-    def manifest_metadata(self) -> dict[str, Any]:
-        metadata_method = getattr(self.matcher, "manifest_metadata", None)
-        if callable(metadata_method):
-            metadata = _sanitize_matcher_metadata(dict(metadata_method()))
-        else:
-            metadata = {"matcher": self.matcher.__class__.__name__}
-        metadata["relation_cache"] = {
-            "schema_version": CACHE_RECORD_SCHEMA,
-            "reused_count": self.stats.reused_count,
-            "resolved_count": self.stats.resolved_count,
-        }
-        return metadata
-
-    @property
-    def thresholds(self) -> dict[str, float]:
-        return dict(getattr(self.matcher, "thresholds", {}))
-
-
 class RelationMatchCache:
     """JSON cache keyed by candidate evidence, graph identity, and matcher config."""
 
@@ -138,42 +39,50 @@ class RelationMatchCache:
         path: str | Path,
         *,
         matcher_signature: dict[str, Any],
-        fingerprints: Iterable[FingerprintInput],
+        fingerprints: Iterable[FingerprintLike],
     ) -> None:
         self.path = Path(path).resolve()
         self._lock = _path_lock(self.path)
-        self.matcher_signature = _sanitize_matcher_metadata(dict(matcher_signature))
-        normalized = (coerce_fingerprint(item) for item in fingerprints)
-        self.fingerprint_hashes = {item.id: _stable_sha256(item.graph_identity_dict()) for item in normalized}
-        with self._lock:
-            self._records = self._load()
+        self._process_lock = FileLock(str(self.path) + ".lock", timeout=30)
+        self.matcher_signature = sanitize_matcher_metadata(dict(matcher_signature))
+        self.fingerprint_hashes = {item.id: _stable_sha256(item.graph_identity_dict()) for item in fingerprints}
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._records: dict[str, Any] = {}
         self._pending: dict[str, dict[str, Any]] = {}
 
-    def load(self, candidate: RelationCandidate) -> list[LLMMatch] | None:
-        with self._lock:
-            self._records = _merge_records(self._load(), self._pending)
-            record = self._records.get(self._key(candidate))
-        if not isinstance(record, dict) or record.get("schema_version") != CACHE_RECORD_SCHEMA:
-            return None
-        matches = record.get("matches", [])
-        if not isinstance(matches, list):
-            return None
-        return [_match_from_dict(item) for item in matches if isinstance(item, dict)]
+    def load(self, candidate: RelationCandidate) -> tuple[list[LLMMatch], list[GraphDiagnostic]] | None:
+        return self.load_many([candidate])[0]
 
-    def store(self, candidate: RelationCandidate, matches: list[LLMMatch]) -> None:
+    def load_many(
+        self,
+        candidates: Iterable[RelationCandidate],
+    ) -> list[tuple[list[LLMMatch], list[GraphDiagnostic]] | None]:
+        candidate_list = list(candidates)
+        with self._lock, self._process_lock:
+            self._records = _merge_records(self._load(), self._pending)
+            records = [self._records.get(self._key(candidate)) for candidate in candidate_list]
+        return [_decode_record(record) for record in records]
+
+    def store(
+        self,
+        candidate: RelationCandidate,
+        matches: list[LLMMatch],
+        diagnostics: list[GraphDiagnostic] | None = None,
+    ) -> None:
         with self._lock:
             key = self._key(candidate)
             record = {
                 "schema_version": CACHE_RECORD_SCHEMA,
                 "candidate_id": candidate.key,
                 "matches": [match.to_dict() for match in matches],
+                "diagnostics": [diagnostic.to_dict() for diagnostic in diagnostics or []],
                 "updated_at": _utc_now(),
             }
             self._records[key] = record
             self._pending[key] = record
 
     def flush(self) -> None:
-        with self._lock:
+        with self._lock, self._process_lock:
             if not self._pending:
                 return
             records = _merge_records(self._load(), self._pending)
@@ -208,7 +117,24 @@ class RelationMatchCache:
         )
 
 
-def _matches_by_candidate(
+def _decode_record(
+    record: Any,
+) -> tuple[list[LLMMatch], list[GraphDiagnostic]] | None:
+    if not isinstance(record, dict) or record.get("schema_version") != CACHE_RECORD_SCHEMA:
+        return None
+    matches = record.get("matches", [])
+    if not isinstance(matches, list):
+        return None
+    diagnostics = record.get("diagnostics", [])
+    if not isinstance(diagnostics, list):
+        return None
+    return (
+        [_match_from_dict(item) for item in matches if isinstance(item, dict)],
+        [_diagnostic_from_dict(item) for item in diagnostics if isinstance(item, dict)],
+    )
+
+
+def matches_by_candidate(
     candidates: list[RelationCandidate],
     matches: list[LLMMatch],
 ) -> dict[str, list[LLMMatch]]:
@@ -224,61 +150,50 @@ def _matches_by_candidate(
     return output
 
 
-def _matcher_signature(matcher: Any) -> dict[str, Any]:
-    metadata_method = getattr(matcher, "manifest_metadata", None)
-    if callable(metadata_method):
-        metadata = _sanitize_matcher_metadata(dict(metadata_method()))
-    else:
-        metadata = {"matcher": matcher.__class__.__name__}
-    signature = dict(metadata)
-    thresholds = getattr(matcher, "thresholds", None)
-    if thresholds is not None:
-        signature["thresholds"] = dict(thresholds)
-    return signature
-
-
-def _sanitize_matcher_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    sanitized: dict[str, Any] = {}
-    for key, value in metadata.items():
-        normalized_key = key.strip().lower().replace("-", "_")
-        if _is_secret_field(normalized_key):
-            continue
-        if normalized_key in _ENDPOINT_MATCHER_FIELDS:
-            if value is not None:
-                sanitized[f"{key}_sha256"] = _sha256_text(_normalize_endpoint(str(value)))
-            continue
-        if isinstance(value, dict):
-            sanitized[key] = _sanitize_matcher_metadata(value)
-        elif isinstance(value, (list, tuple)):
-            sanitized[key] = [_sanitize_matcher_metadata(item) if isinstance(item, dict) else item for item in value]
+def diagnostics_by_candidate(
+    candidates: list[RelationCandidate],
+    diagnostics: list[GraphDiagnostic],
+) -> dict[str, list[GraphDiagnostic]]:
+    output: dict[str, list[GraphDiagnostic]] = {candidate.key: [] for candidate in candidates}
+    by_key = {candidate.key: candidate for candidate in candidates}
+    by_pair: dict[tuple[str, str], str] = {}
+    for candidate in candidates:
+        by_pair[(candidate.source_id, candidate.target_id)] = candidate.key
+        by_pair[(candidate.target_id, candidate.source_id)] = candidate.key
+    for diagnostic in diagnostics:
+        details = diagnostic.details
+        match = details.get("match") if isinstance(details.get("match"), dict) else {}
+        candidate_id = str(details.get("candidate_id") or match.get("candidate_id") or "")
+        keys: list[str] = []
+        if candidate_id in by_key:
+            keys = [candidate_id]
         else:
-            sanitized[key] = value
-    return sanitized
+            source_id = str(details.get("source_id") or match.get("source_id") or "")
+            target_id = str(details.get("target_id") or match.get("target_id") or "")
+            pair_key = by_pair.get((source_id, target_id))
+            if pair_key is not None:
+                keys = [pair_key]
+        if not keys and diagnostic.skill_id:
+            keys = [
+                candidate.key
+                for candidate in candidates
+                if diagnostic.skill_id in {candidate.source_id, candidate.target_id}
+            ]
+        for key in keys or list(output):
+            output[key].append(diagnostic)
+    return output
 
 
-def _is_secret_field(normalized_key: str) -> bool:
-    return normalized_key in _SECRET_MATCHER_FIELDS or any(
-        normalized_key.endswith(f"_{suffix}") for suffix in _SECRET_MATCHER_FIELDS
-    )
-
-
-def _normalize_endpoint(value: str) -> str:
-    text = value.strip()
-    try:
-        parsed = urlsplit(text)
-        if not parsed.scheme or not parsed.hostname:
-            return text.rstrip("/")
-        scheme = parsed.scheme.lower()
-        hostname = parsed.hostname.lower()
-        if ":" in hostname and not hostname.startswith("["):
-            hostname = f"[{hostname}]"
-        port = parsed.port
-        if port is not None and not ((scheme == "https" and port == 443) or (scheme == "http" and port == 80)):
-            hostname = f"{hostname}:{port}"
-        path = parsed.path.rstrip("/")
-        return urlunsplit((scheme, hostname, path, "", ""))
-    except ValueError:
-        return text.rstrip("/")
+def dedupe_diagnostics(diagnostics: Iterable[GraphDiagnostic]) -> list[GraphDiagnostic]:
+    output = []
+    seen = set()
+    for diagnostic in diagnostics:
+        marker = json.dumps(diagnostic.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if marker in seen:
+            continue
+        seen.add(marker)
+        output.append(diagnostic)
+    return output
 
 
 def _path_lock(path: Path) -> threading.RLock:
@@ -321,13 +236,13 @@ def _matcher_positive_int(matcher: Any, name: str) -> int:
         return 1
 
 
-def _matcher_window_size(matcher: Any) -> int:
+def matcher_window_size(matcher: Any) -> int:
     batch_size = _matcher_positive_int(matcher, "batch_size")
     max_workers = _matcher_positive_int(matcher, "max_workers")
     return batch_size * max_workers
 
 
-def _chunked(values: list[Any], size: int) -> list[list[Any]]:
+def chunked(values: list[Any], size: int) -> list[list[Any]]:
     chunk_size = max(1, size)
     chunks = []
     for index in range(0, len(values), chunk_size):
@@ -351,6 +266,19 @@ def _match_from_dict(payload: dict[str, Any]) -> LLMMatch:
         accepted=bool(payload.get("accepted", False)),
         diagnostics=[str(item) for item in payload.get("diagnostics", [])],
         raw=payload.get("raw") if isinstance(payload.get("raw"), dict) else {},
+    )
+
+
+def _diagnostic_from_dict(payload: dict[str, Any]) -> GraphDiagnostic:
+    details = payload.get("details")
+    capability_id = payload.get("capability_id")
+    return GraphDiagnostic(
+        stage=str(payload.get("stage") or "llm_match"),
+        severity=str(payload.get("severity") or "warning"),
+        code=str(payload.get("code") or "cached_diagnostic"),
+        message=str(payload.get("message") or ""),
+        skill_id=str(capability_id) if capability_id is not None else None,
+        details=details if isinstance(details, dict) else {},
     )
 
 

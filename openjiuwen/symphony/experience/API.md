@@ -1,13 +1,14 @@
 # Experience 模块接口文档
 
 本模块提供经验知识库的构建、检索与评估能力。典型流程：
-0. 将轨迹数据转换为诶 `TraceRecord`
-1. 用 `TraceEvaluator` 评估轨迹
-2. 用 `EmbeddingClient` 初始化向量能力
-3. 用 `ExperienceBank` 创建持久化知识库
-4. 用 `ExperienceBankBuildConfig` 配置经验构建
-4. 用 `ExperienceBaseBuilder` 蒸馏并写入知识库
-5. 用 `ExperienceRetriever` 在运行时快速检索经验
+
+1. 将轨迹数据转换为 `TraceRecord`
+2. 用 `TraceEvaluator` 评估轨迹
+3. 用 `EmbeddingClient` 初始化向量能力
+4. 用 `ExperienceBank` 创建持久化知识库
+5. 用 `ExperienceBankBuildConfig` 配置经验构建
+6. 用 `ExperienceBaseBuilder` 蒸馏并写入知识库
+7. 用 `ExperienceRetriever` 在运行时快速检索经验
 
 ### 类型索引
 
@@ -430,7 +431,7 @@ builder.flush()
 | 函数 | 签名 | 说明 |
 |------|------|------|
 | `list_session_ids` | `(sessions_dir: Path) -> list[str]` | 列出 sessions 目录下所有 session ID（排除 `heartbeat_` 前缀） |
-| `parse_session` | `(session_id: str, sessions_dir: Path) -> list[TraceRecord]` | 解析单个 session，按 `request_id` 切分轨迹段，从 `skill_tool`/`symphony_compose_score` 抽取 skill 名 |
+| `parse_session` | `(session_id: str, sessions_dir: Path) -> list[TraceRecord]` | 解析单个 session，按 `request_id` 切分轨迹段，从 `skill_tool`/`symphony_compose_graph` 抽取 skill 名 |
 | `parse_all_sessions` | `(sessions_dir: Path) -> list[TraceRecord]` | 解析全部 session，跳过无法解析的 |
 | `parse_and_store` | `(sessions_dir: Path) -> list[TraceRecord]` | 仅解析新（未处理）session，追加到 `sessions_dir.parent/trace_store/records.jsonl`，返回新增记录 |
 | `load_all_records` | `(sessions_dir: Path) -> list[TraceRecord]` | 从 `trace_store` 加载已解析的全部 `TraceRecord` |

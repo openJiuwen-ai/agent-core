@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
-from openjiuwen.symphony.interfaces import LLMClient, OrchestrationCapabilityProvider
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.orchestration import OrchestrationConfig, OrchestrationService, PrepareArtifactHook
-from openjiuwen.symphony.orchestration.graph import OntologyMatcher
+from openjiuwen.symphony.orchestration.model import ModelResponseObserver
 from openjiuwen.symphony.shared.fingerprint import Fingerprint
 
 
@@ -18,10 +18,10 @@ class SymphonyRuntime:
         self,
         *,
         graph_artifact_root: str | Path,
-        capability_provider: OrchestrationCapabilityProvider | Sequence[Any],
-        llm_client: LLMClient | None,
+        capability_provider: Sequence[Any] | Callable[[], Sequence[Any] | Awaitable[Sequence[Any]]],
+        model: Model | None,
+        model_response_observer: ModelResponseObserver | None = None,
         orchestration_config: OrchestrationConfig | None = None,
-        matcher: OntologyMatcher | None = None,
         source_snapshot: dict[str, Any] | Callable[[Sequence[Fingerprint]], dict[str, Any]] | None = None,
         graph_config: dict[str, Any] | None = None,
         prepare_artifact: PrepareArtifactHook | None = None,
@@ -29,9 +29,9 @@ class SymphonyRuntime:
         self.orchestration = OrchestrationService(
             graph_artifact_root=graph_artifact_root,
             capability_provider=capability_provider,
-            llm_client=llm_client,
+            model=model,
+            model_response_observer=model_response_observer,
             config=orchestration_config,
-            matcher=matcher,
             source_snapshot=source_snapshot,
             graph_config=graph_config,
             prepare_artifact=prepare_artifact,

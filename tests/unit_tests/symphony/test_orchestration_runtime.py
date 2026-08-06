@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,9 +14,10 @@ from openjiuwen.symphony import (
     ParameterSpec,
     SymphonyRuntime,
 )
-from openjiuwen.symphony.orchestration.graph import (
-    CandidateGenerator,
-    GraphBuilder,
+from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
+from openjiuwen.symphony.orchestration.graph.candidates import CandidateGenerator
+from openjiuwen.symphony.orchestration.graph.models import (
+    GraphDiagnostic,
     LLMMatch,
     SkillRegistry,
 )
@@ -40,6 +42,7 @@ def _capability(
 
 class _AcceptMatcher:
     thresholds = {"can_feed": 0.7}
+    diagnostics: list[GraphDiagnostic] = []
 
     async def match(self, registry, candidates):
         del registry
@@ -65,34 +68,49 @@ class _FakeLLM:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def complete_json_async(self, **kwargs):
-        self.calls.append(kwargs)
-        payload = json.loads(kwargs["user_content"])
+    async def invoke(self, messages, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        payload = json.loads(messages[-1]["content"])
+        if "candidates" in payload and "current_skill" not in payload:
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "matches": [
+                            {"id": item["id"], "direction": "forward", "confidence": 0.9, "accepted": True}
+                            for item in payload["candidates"]
+                        ]
+                    }
+                )
+            )
         if "candidate_plans" in payload:
-            return json.dumps({"selected_plan_index": 1})
+            return SimpleNamespace(content=json.dumps({"selected_plan_index": 1}))
         if "candidates" in payload and "current_skill" in payload:
-            return json.dumps(
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "judgements": [
+                            {
+                                "candidate_id": item["candidate_id"],
+                                "score": 0.9,
+                                "reason": "useful",
+                            }
+                            for item in payload["candidates"]
+                        ]
+                    }
+                )
+            )
+        return SimpleNamespace(
+            content=json.dumps(
                 {
-                    "judgements": [
-                        {
-                            "candidate_id": item["candidate_id"],
-                            "score": 0.9,
-                            "reason": "useful",
-                        }
-                        for item in payload["candidates"]
-                    ]
+                    "title": "Plan",
+                    "status": "ready",
+                    "steps": [
+                        {"skill_id": "extract"},
+                        {"skill_id": "summarize"},
+                    ],
+                    "can_feed_edges": [{"source_id": "extract", "target_id": "summarize"}],
                 }
             )
-        return json.dumps(
-            {
-                "title": "Plan",
-                "status": "ready",
-                "steps": [
-                    {"skill_id": "extract"},
-                    {"skill_id": "summarize"},
-                ],
-                "can_feed_edges": [{"source_id": "extract", "target_id": "summarize"}],
-            }
         )
 
 
@@ -120,7 +138,7 @@ def test_exact_io_candidate_and_graph_materialization() -> None:
 
 @pytest.mark.asyncio
 async def test_graph_builder_materializes_accepted_exact_io() -> None:
-    result = await GraphBuilder(matcher=_AcceptMatcher()).build(_inventory())
+    result = await GraphBuildPipeline(resolver=_AcceptMatcher()).build(_inventory())
 
     assert [node.properties["capability_id"] for node in result.graph.nodes] == [
         "extract",
@@ -138,8 +156,7 @@ async def test_service_build_and_plan_fast_or_beam(tmp_path: Path, mode: str) ->
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_FakeLLM(),
+        model=_FakeLLM(),
         config=OrchestrationConfig(mode=mode, max_depth=2),
     )
 
@@ -163,8 +180,7 @@ async def test_artifact_status_read_schema_and_atomic_failed_build(tmp_path: Pat
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_FakeLLM(),
+        model=_FakeLLM(),
     )
     first = await service.build()
     before = (tmp_path / "current.json").read_bytes()
@@ -181,16 +197,15 @@ async def test_artifact_status_read_schema_and_atomic_failed_build(tmp_path: Pat
     assert (tmp_path / "versions" / first.version / "graph.json").is_file()
     assert (tmp_path / ".build_runs").is_dir()
 
-    class _FailMatcher:
-        async def match(self, registry, candidates):
-            del registry, candidates
+    class _FailLLM(_FakeLLM):
+        async def invoke(self, messages, **kwargs):
+            del messages, kwargs
             raise RuntimeError("boom")
 
     failing = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_FailMatcher(),
-        llm_client=_FakeLLM(),
+        model=_FailLLM(),
     )
     with pytest.raises(RuntimeError, match="boom"):
         await failing.build(force=True)
@@ -203,25 +218,23 @@ async def test_cancel_build_preserves_last_success(tmp_path: Path) -> None:
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_FakeLLM(),
+        model=_FakeLLM(),
     )
     await service.build()
     before = (tmp_path / "current.json").read_bytes()
 
     started = asyncio.Event()
 
-    class _BlockingMatcher:
-        async def match(self, registry, candidates):
-            del registry, candidates
+    class _BlockingLLM(_FakeLLM):
+        async def invoke(self, messages, **kwargs):
+            del messages, kwargs
             started.set()
             await asyncio.Event().wait()
 
     blocking = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_BlockingMatcher(),
-        llm_client=_FakeLLM(),
+        model=_BlockingLLM(),
     )
     task = asyncio.create_task(blocking.build(force=True))
     await started.wait()
@@ -238,8 +251,7 @@ async def test_read_rejects_unsupported_schema_major(tmp_path: Path) -> None:
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_FakeLLM(),
+        model=_FakeLLM(),
     )
     built = await service.build()
     graph_path = tmp_path / "versions" / built.version / "graph.json"
@@ -257,8 +269,7 @@ def test_runtime_exposes_orchestration_and_package_has_no_jiuwenswarm_dependency
     runtime = SymphonyRuntime(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_FakeLLM(),
+        model=_FakeLLM(),
     )
     assert runtime.orchestration.graph_artifact_root == tmp_path
 

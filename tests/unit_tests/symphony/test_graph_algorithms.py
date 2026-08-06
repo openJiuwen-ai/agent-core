@@ -5,10 +5,10 @@ from openjiuwen.symphony.shared.fingerprint import (
     ParameterSpec,
     Fingerprint,
 )
-from openjiuwen.symphony.orchestration.graph.builders import GraphLookupBuilder
+from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline, _build_lookup
 from openjiuwen.symphony.orchestration.graph.candidates import CandidateGenerator
-from openjiuwen.symphony.orchestration.graph.pipeline import GraphBuilder
 from openjiuwen.symphony.orchestration.graph.models import (
+    GraphDiagnostic,
     GraphEdge,
     LLMMatch,
     SkillGraph,
@@ -527,7 +527,7 @@ def test_candidate_generator_skips_remote_reference_for_broad_web_descriptions()
 
 @pytest.mark.asyncio
 async def test_graph_builder_does_not_materialize_rejected_exact_io_match():
-    result = await GraphBuilder(matcher=_RejectedExactMatcher()).build(
+    result = await GraphBuildPipeline(resolver=_RejectedExactMatcher()).build(
         [
             _skill("source", outputs=[ArtifactSpec(name="summary", type="text")]),
             _skill("target", inputs=[ParameterSpec(name="summary", type="text")]),
@@ -551,7 +551,7 @@ async def test_graph_builder_does_not_materialize_rejected_exact_io_match():
 
 @pytest.mark.asyncio
 async def test_graph_builder_materializes_accepted_exact_io_match():
-    result = await GraphBuilder(matcher=_AcceptedExactMatcher()).build(
+    result = await GraphBuildPipeline(resolver=_AcceptedExactMatcher()).build(
         [
             _skill("source", outputs=[ArtifactSpec(name="summary", type="text")]),
             _skill("target", inputs=[ParameterSpec(name="summary", type="text")]),
@@ -598,7 +598,7 @@ def test_graph_lookup_emits_text_term_lookup():
         ],
     )
 
-    lookup = GraphLookupBuilder().build(registry, graph).to_dict()
+    lookup = _build_lookup(registry, graph).to_dict()
 
     assert "by_text_term" in lookup
     assert lookup["by_output"] == {
@@ -645,6 +645,7 @@ def _skill(
 
 class _RejectedExactMatcher:
     thresholds = {"can_feed": 0.7}
+    diagnostics: list[GraphDiagnostic] = []
 
     async def match(self, registry, candidates):
         del registry
@@ -667,6 +668,7 @@ class _RejectedExactMatcher:
 
 class _AcceptedExactMatcher:
     thresholds = {"can_feed": 0.7}
+    diagnostics: list[GraphDiagnostic] = []
 
     async def match(self, registry, candidates):
         del registry

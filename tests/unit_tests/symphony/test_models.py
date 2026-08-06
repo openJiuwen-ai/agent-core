@@ -21,7 +21,8 @@ from openjiuwen.symphony.models import (
     QualityResult,
     SourceSnapshot,
 )
-from openjiuwen.symphony.orchestration.graph import CandidateGenerator, SkillRegistryBuilder
+from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
+from openjiuwen.symphony.orchestration.graph.models import GraphDiagnostic, SkillRegistry
 from openjiuwen.symphony.shared.fingerprint import Fingerprint, capability_content_hash, coerce_fingerprint
 
 
@@ -162,7 +163,8 @@ def test_graph_bridge_revalidates_mutable_compatibility_metadata() -> None:
     assert graph_fingerprint.static_data["api_key"] == "<redacted>"
 
 
-def test_canonical_fingerprint_is_normalized_at_the_graph_registry_boundary() -> None:
+@pytest.mark.asyncio
+async def test_canonical_fingerprint_is_normalized_at_the_graph_registry_boundary() -> None:
     source = CapabilityFingerprint(
         capability_id="render",
         capability_type="skill",
@@ -178,11 +180,26 @@ def test_canonical_fingerprint_is_normalized_at_the_graph_registry_boundary() ->
         inputs=(CapabilityIO(name="image", type="image"),),
     )
 
-    registry = SkillRegistryBuilder.register((source, target))
-    candidates = CandidateGenerator().generate(registry)
+    class CapturingResolver:
+        thresholds = {"can_feed": 0.7}
+        diagnostics: list[GraphDiagnostic] = []
 
-    assert all(isinstance(item, Fingerprint) for item in registry.skills.values())
-    assert any(item.source_id == "render" and item.target_id == "inspect" for item in candidates)
+        def __init__(self) -> None:
+            self.registry: SkillRegistry | None = None
+
+        async def match(self, registry, candidates):
+            self.registry = registry
+            return []
+
+        def manifest_metadata(self):
+            return {}
+
+    resolver = CapturingResolver()
+    result = await GraphBuildPipeline(resolver=resolver).build((source, target))
+
+    assert resolver.registry is not None
+    assert all(isinstance(item, Fingerprint) for item in resolver.registry.skills.values())
+    assert any(item.source_id == "render" and item.target_id == "inspect" for item in result.candidates)
 
 
 def test_quality_metrics_preserve_observations_without_composite_score() -> None:

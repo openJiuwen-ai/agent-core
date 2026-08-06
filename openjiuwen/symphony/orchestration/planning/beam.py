@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable, Sequence
 
-from openjiuwen.symphony.interfaces import LLMConfig, create_llm_client, llm_usage_context
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
 from openjiuwen.symphony.orchestration.language import (
     default_beam_plan_title,
@@ -28,6 +28,7 @@ from openjiuwen.symphony.orchestration.planning.plan_builder import (
     edge_plan_item,
     state_to_plan,
 )
+from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
 from openjiuwen.symphony.orchestration.planning.utils import (
     eligible_can_feed_edges,
     normalize_known_skill_ids,
@@ -319,8 +320,8 @@ class BidirectionalBeamPlanner:
         self,
         artifacts: GraphArtifacts,
         *,
-        llm_config: LLMConfig | None,
-        llm_client: Any | None,
+        model: Model,
+        model_response_observer: ModelResponseObserver | None = None,
         min_edge_confidence: float,
         top_k: int,
         max_depth: int,
@@ -330,8 +331,8 @@ class BidirectionalBeamPlanner:
         language: str = "cn",
     ) -> None:
         self.artifacts = artifacts
-        self.llm_config = llm_config
-        self.llm_client = llm_client
+        self.model = model
+        self.model_response_observer = model_response_observer
         self.min_edge_confidence = min_edge_confidence
         self.top_k = max(1, int(top_k))
         self.max_depth = max(1, int(max_depth))
@@ -494,11 +495,13 @@ class BidirectionalBeamPlanner:
             "current_skill": skill_payload(current_skill),
             "candidates": [self._candidate_payload(expansion) for expansion in expansions],
         }
-        with llm_usage_context("orchestration", "bidirectional_beam_judgement"):
-            raw = await self._client().complete_json_async(
+        with model_usage_context("orchestration", "bidirectional_beam_judgement"):
+            raw = await invoke_json(
+                self.model,
                 system_prompt=(f"{BEAM_JUDGE_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
                 user_content=json.dumps(payload, ensure_ascii=False),
                 error_context="Symphony bidirectional beam judgement",
+                response_observer=self.model_response_observer,
             )
         data = json.loads(raw)
         items = data.get("judgements") if isinstance(data, dict) else data
@@ -544,12 +547,14 @@ class BidirectionalBeamPlanner:
         )
         self._final_rerank_call_count += 1
         try:
-            with llm_usage_context("orchestration", "beam_final_rerank"):
-                raw = await self._client().complete_json_async(
+            with model_usage_context("orchestration", "beam_final_rerank"):
+                raw = await invoke_json(
+                    self.model,
                     system_prompt=(f"{BEAM_FINAL_RERANK_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
                     user_content=json.dumps(payload, ensure_ascii=False),
                     error_context="Symphony beam final rerank",
                     request_overrides={"extra_body": {"thinking": {"type": "disabled"}}},
+                    response_observer=self.model_response_observer,
                 )
             selection = json.loads(raw)
         except Exception as exc:
@@ -817,14 +822,6 @@ class BidirectionalBeamPlanner:
             "connectivity_trace": ["can_feed"] if edge_items else [],
             "source": "bidirectional_beam_final_rerank",
         }
-
-    def _client(self) -> Any:
-        if self.llm_client is not None:
-            return self.llm_client
-        if self.llm_config is None:
-            raise ValueError("beam Symphony planning requires llm_config or llm_client.")
-        self.llm_client = create_llm_client(self.llm_config)
-        return self.llm_client
 
     async def _judge_groups(
         self,

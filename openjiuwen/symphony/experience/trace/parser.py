@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from ..models import TraceRecord
 
@@ -15,11 +16,7 @@ def list_session_ids(sessions_dir: Path) -> list[str]:
     """Return all session IDs from ``sessions_dir``, excluding heartbeat directories."""
     if not sessions_dir.exists() or not sessions_dir.is_dir():
         return []
-    return [
-        d.name
-        for d in sessions_dir.iterdir()
-        if d.is_dir() and not d.name.startswith("heartbeat_")
-    ]
+    return [d.name for d in sessions_dir.iterdir() if d.is_dir() and not d.name.startswith("heartbeat_")]
 
 
 def _read_json(path: Path) -> object | None:
@@ -34,7 +31,9 @@ def _read_json(path: Path) -> object | None:
         # (which returns None without logging) in production.
         LOGGER.error(
             "Failed to read trace file %s: %s: %s",
-            path, type(exc).__name__, exc,
+            path,
+            type(exc).__name__,
+            exc,
         )
         return None
 
@@ -61,7 +60,7 @@ def _extract_skills_from_tool_call(tool_call: dict) -> list[str]:
 
     Recognizes several patterns:
     - ``skill_tool``: arguments contain ``skill_name``
-    - ``symphony_compose_score``: arguments contain ``candidate_skill_ids``
+    - ``symphony_compose_graph``: arguments contain ``candidate_skill_ids``
       or the result's ``raw_output.plan.steps[].skill_id``
     """
     name = tool_call.get("name", "")
@@ -75,7 +74,7 @@ def _extract_skills_from_tool_call(tool_call: dict) -> list[str]:
         skill_name = args.get("skill_name", "")
         return [skill_name] if skill_name else []
 
-    if name == "symphony_compose_score":
+    if name == "symphony_compose_graph":
         # Primary: candidate_skill_ids from arguments
         candidate_ids = args.get("candidate_skill_ids", [])
         if isinstance(candidate_ids, list) and candidate_ids:
@@ -92,6 +91,7 @@ def _extract_skills_from_tool_call(tool_call: dict) -> list[str]:
                     # Python-style repr (single quotes); try ast.literal_eval
                     try:
                         import ast
+
                         raw_output = ast.literal_eval(result_raw)
                     except Exception:
                         raw_output = None
@@ -117,7 +117,7 @@ def _extract_skills_from_tool_call(tool_call: dict) -> list[str]:
 def _extract_skills_from_raw_output(raw_output: dict) -> list[str]:
     """Extract skill names from a tool_result's raw_output.
 
-    Used for ``symphony_compose_score`` results where the plan.steps
+    Used for ``symphony_compose_graph`` results where the plan.steps
     contain the selected skill_ids.
     """
     skill_ids: list[str] = []
@@ -137,7 +137,7 @@ def parse_session(session_id: str, sessions_dir: Path) -> list[TraceRecord]:
     """Parse a single session directory into TraceRecords.
 
     Uses request_id as traceId. A new request_id indicates a new user query segment.
-    Skill names are extracted from ``skill_tool`` and ``symphony_compose_score`` calls.
+    Skill names are extracted from ``skill_tool`` and ``symphony_compose_graph`` calls.
     """
     session_dir = sessions_dir / session_id
     if not session_dir.is_dir():
@@ -157,11 +157,11 @@ def parse_session(session_id: str, sessions_dir: Path) -> list[TraceRecord]:
     query = ""
     reasoning = ""
     assistant_content = ""
-    skills = []
-    trace_records = []
-    messages = []
+    skills: list[str] = []
+    trace_records: list[TraceRecord] = []
+    messages: list[dict[str, Any]] = []
 
-    def _flush_record():
+    def _flush_record() -> None:
         # Commit accumulated assistant_content/reasoning before flushing
         if assistant_content:
             messages.append({"role": "assistant", "content": assistant_content, "reasoning": reasoning})
@@ -173,13 +173,15 @@ def parse_session(session_id: str, sessions_dir: Path) -> list[TraceRecord]:
             if msg.get("role") == "assistant":
                 result = _extract_text(msg.get("content", ""))
                 break
-        trace_records.append(TraceRecord(
-            trace_id=current_request_id,
-            query=query,
-            skills=skills,
-            messages=messages,
-            result=result,
-        ))
+        trace_records.append(
+            TraceRecord(
+                trace_id=current_request_id,
+                query=query,
+                skills=skills,
+                messages=messages,
+                result=result,
+            )
+        )
 
     for record in history_data:
         if not isinstance(record, dict):
@@ -210,18 +212,19 @@ def parse_session(session_id: str, sessions_dir: Path) -> list[TraceRecord]:
                     for s in extracted:
                         if s and s not in skills:
                             skills.append(s)
-                messages.append({"role": "assistant", "content": assistant_content, "reasoning": reasoning,
-                                 "tool_call": tool_call})
+                messages.append(
+                    {"role": "assistant", "content": assistant_content, "reasoning": reasoning, "tool_call": tool_call}
+                )
                 assistant_content = ""
                 reasoning = ""
             elif event_type == "chat.tool_result":
                 tool_result = _extract_text(record.get("result")).strip()
                 messages.append({"role": "tool", "content": tool_result})
-                # Extract skills from raw_output (e.g. symphony_compose_score plan)
+                # Extract skills from raw_output (e.g. symphony_compose_graph plan)
                 raw_output = record.get("raw_output")
                 if isinstance(raw_output, dict):
                     tool_name = record.get("tool_name", "")
-                    if tool_name == "symphony_compose_score":
+                    if tool_name == "symphony_compose_graph":
                         extracted = _extract_skills_from_raw_output(raw_output)
                         for s in extracted:
                             if s and s not in skills:

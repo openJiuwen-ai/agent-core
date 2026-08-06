@@ -3,6 +3,7 @@ import json
 import logging
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,10 +20,11 @@ from openjiuwen.symphony import (
     ParameterSpec,
     SymphonyRuntime,
 )
-from openjiuwen.symphony.orchestration.graph import GraphBuilder, LLMMatch
+from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
+from openjiuwen.symphony.orchestration.graph.models import GraphDiagnostic, LLMMatch
 from openjiuwen.symphony.orchestration.artifacts import load_graph_artifacts
 from openjiuwen.symphony.orchestration.execution_graph import build_execution_graph
-from openjiuwen.symphony.orchestration.matcher import LLMRelationMatcher
+from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
 
 
 def test_public_artifact_contract_uses_graph_terminology() -> None:
@@ -38,10 +40,13 @@ def test_public_artifact_contract_uses_graph_terminology() -> None:
         "ScoreArtifactStatus",
         "ScoreBuildResult",
     }
+    ambiguous_artifact_aliases = {"ArtifactBuild", "ArtifactStatus"}
 
     assert graph_exports.issubset(symphony.__all__)
     assert legacy_score_exports.isdisjoint(symphony.__all__)
     assert all(not hasattr(symphony, name) for name in legacy_score_exports)
+    assert ambiguous_artifact_aliases.isdisjoint(symphony.__all__)
+    assert all(not hasattr(symphony, name) for name in ambiguous_artifact_aliases)
 
 
 def _capability(
@@ -71,6 +76,7 @@ def _inventory() -> list[CapabilityFingerprint]:
 
 class _AcceptMatcher:
     thresholds = {"can_feed": 0.7}
+    diagnostics: list[GraphDiagnostic] = []
 
     async def match(self, registry, candidates):
         del registry
@@ -93,9 +99,21 @@ class _AcceptMatcher:
 
 
 class _PlanLLM:
-    async def complete_json_async(self, **kwargs):
+    async def invoke(self, messages, **kwargs):
         del kwargs
-        return json.dumps({"status": "no_plan", "steps": []})
+        payload = json.loads(messages[-1]["content"])
+        if "candidates" in payload:
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "matches": [
+                            {"id": item["id"], "direction": "forward", "confidence": 0.9, "accepted": True}
+                            for item in payload["candidates"]
+                        ]
+                    }
+                )
+            )
+        return SimpleNamespace(content=json.dumps({"status": "no_plan", "steps": []}))
 
 
 @pytest.mark.asyncio
@@ -103,8 +121,7 @@ async def test_build_then_load_preserves_graph_nodes_and_lookup(tmp_path: Path) 
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
     await service.build()
 
@@ -125,8 +142,7 @@ async def test_status_detects_sync_provider_snapshot_change(tmp_path: Path) -> N
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=lambda: capabilities,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
     await service.build()
     assert service.status().fresh is True
@@ -144,8 +160,7 @@ def test_status_requires_expected_snapshot_for_async_provider(tmp_path: Path) ->
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=provider,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
 
     with pytest.raises(RuntimeError, match="explicit expected_snapshot"):
@@ -172,7 +187,8 @@ def test_json_output_does_not_feed_markdown_input() -> None:
         "target",
         inputs=[ParameterSpec(name="document", type="markdown", description="shared document")],
     )
-    from openjiuwen.symphony.orchestration.graph import CandidateGenerator, SkillRegistry
+    from openjiuwen.symphony.orchestration.graph.candidates import CandidateGenerator
+    from openjiuwen.symphony.orchestration.graph.models import SkillRegistry
 
     registry = SkillRegistry(skills={source.id: source, target.id: target})
     assert CandidateGenerator().generate(registry) == []
@@ -183,31 +199,39 @@ class _CompactMatcherLLM:
         self.accepted = accepted
         self.calls: list[dict] = []
 
-    async def complete_json_async(self, **kwargs):
-        self.calls.append(kwargs)
-        payload = json.loads(kwargs["user_content"])
-        return json.dumps(
-            {
-                "matches": [
-                    {
-                        "id": item["id"],
-                        "direction": "forward",
-                        "confidence": 0.9,
-                        "accepted": self.accepted,
-                        "reason": "ports are compatible",
-                    }
-                    for item in payload["candidates"]
-                ]
-            }
+    async def invoke(self, messages, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        payload = json.loads(messages[-1]["content"])
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "matches": [
+                        {
+                            "id": item["id"],
+                            "direction": "forward",
+                            "confidence": 0.9,
+                            "accepted": self.accepted,
+                            "reason": "ports are compatible",
+                        }
+                        for item in payload["candidates"]
+                    ]
+                }
+            )
         )
 
 
 @pytest.mark.asyncio
 async def test_default_matcher_batches_consensus_and_preserves_port_mappings() -> None:
     llm = _CompactMatcherLLM()
-    result = await GraphBuilder(matcher=LLMRelationMatcher(llm, batch_size=1, require_consensus=True)).build(
-        _inventory()
-    )
+    inventory = _inventory()
+    result = await GraphBuildPipeline(
+        resolver=OntologyMatcher(
+            llm,
+            fingerprints=inventory,
+            batch_size=1,
+            require_consensus=True,
+        )
+    ).build(inventory)
 
     assert len(llm.calls) == 2
     assert len(result.llm_matches) == 1
@@ -217,12 +241,14 @@ async def test_default_matcher_batches_consensus_and_preserves_port_mappings() -
 
 @pytest.mark.asyncio
 async def test_default_matcher_does_not_treat_string_false_as_accepted() -> None:
-    result = await GraphBuilder(
-        matcher=LLMRelationMatcher(
+    inventory = _inventory()
+    result = await GraphBuildPipeline(
+        resolver=OntologyMatcher(
             _CompactMatcherLLM(accepted="false"),
+            fingerprints=inventory,
             require_consensus=False,
         )
-    ).build(_inventory())
+    ).build(inventory)
 
     assert result.llm_matches[0].accepted is False
     assert result.graph.edges == []
@@ -245,7 +271,7 @@ async def test_graph_pipeline_emits_all_stages_and_manifest_metadata() -> None:
                 for item in matches
             ]
 
-    result = await GraphBuilder(matcher=_DiagnosticMatcher()).build(
+    result = await GraphBuildPipeline(resolver=_DiagnosticMatcher()).build(
         _inventory(),
         progress=lambda stage, **details: events.append(stage),
     )
@@ -291,8 +317,7 @@ async def test_dynamic_overlay_respects_config(
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
         config=OrchestrationConfig(dynamic_graph_enabled=enabled),
     )
     await service.build()
@@ -321,8 +346,7 @@ async def test_dynamic_graph_enabled_reports_config_without_overlay(
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
         config=OrchestrationConfig(dynamic_graph_enabled=True),
     )
     await service.build()
@@ -334,26 +358,42 @@ async def test_dynamic_graph_enabled_reports_config_without_overlay(
 
 
 class _MixedPlanLLM:
-    async def complete_json_async(self, **kwargs):
-        payload = json.loads(kwargs["user_content"])
+    async def invoke(self, messages, **kwargs):
+        del kwargs
+        payload = json.loads(messages[-1]["content"])
+        if "candidates" in payload and "current_skill" not in payload:
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "matches": [
+                            {"id": item["id"], "direction": "forward", "confidence": 0.9, "accepted": True}
+                            for item in payload["candidates"]
+                        ]
+                    }
+                )
+            )
         if "candidate_plans" in payload:
-            return json.dumps({"selected_plan_index": 1})
+            return SimpleNamespace(content=json.dumps({"selected_plan_index": 1}))
         if "current_skill" in payload:
-            return json.dumps(
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "judgements": [
+                            {"candidate_id": item["candidate_id"], "score": 0.9, "reason": "useful"}
+                            for item in payload["candidates"]
+                        ]
+                    }
+                )
+            )
+        return SimpleNamespace(
+            content=json.dumps(
                 {
-                    "judgements": [
-                        {"candidate_id": item["candidate_id"], "score": 0.9, "reason": "useful"}
-                        for item in payload["candidates"]
-                    ]
+                    "status": "ready",
+                    "reason": "capability:reason must stay",
+                    "steps": [{"skill_id": "extract"}, {"skill_id": "summarize"}],
+                    "can_feed_edges": [{"source_id": "extract", "target_id": "summarize"}],
                 }
             )
-        return json.dumps(
-            {
-                "status": "ready",
-                "reason": "capability:reason must stay",
-                "steps": [{"skill_id": "extract"}, {"skill_id": "summarize"}],
-                "can_feed_edges": [{"source_id": "extract", "target_id": "summarize"}],
-            }
         )
 
 
@@ -371,8 +411,7 @@ async def test_mixed_capability_types_survive_plan_projection(tmp_path: Path, mo
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_MixedPlanLLM(),
+        model=_MixedPlanLLM(),
         config=OrchestrationConfig(mode=mode, max_depth=2),
     )
     await service.build()
@@ -424,8 +463,7 @@ async def test_activate_is_terminal_before_post_publish_callback(tmp_path: Path)
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
     task = asyncio.create_task(service.build(progress_callback=progress))
     await entered.wait()
@@ -446,8 +484,7 @@ async def test_cancel_during_stage_never_switches_current(
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
     await service.build()
     current_before = (tmp_path / "current.json").read_bytes()
@@ -487,8 +524,7 @@ async def test_public_service_contracts_accept_planned_call_shapes(tmp_path: Pat
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=provider,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
 
     built = await service.build(False, progress=progress_events.append)
@@ -527,8 +563,7 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=inventory,
-        matcher=None,
-        llm_client=llm,
+        model=llm,
         graph_config={
             "batch_size": 1,
             "workers": 3,
@@ -541,7 +576,20 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
     graph = service.read()
 
     assert len(llm.calls) == 1
-    assert graph["config"]["llm"] == {
+    llm_metadata = graph["config"]["llm"]
+    assert {
+        key: llm_metadata[key]
+        for key in (
+            "model",
+            "backend",
+            "temperature",
+            "prompt_version",
+            "batch_size",
+            "max_workers",
+            "require_consensus",
+            "consensus_runs",
+        )
+    } == {
         "model": None,
         "backend": None,
         "temperature": None,
@@ -551,6 +599,9 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
         "require_consensus": False,
         "consensus_runs": 1,
     }
+    assert llm_metadata["matcher_version"] == "Symphony-ontology-matcher-v2"
+    assert llm_metadata["match_schema_version"] == "Symphony-ontology-match-schema-v1"
+    assert llm_metadata["relation_cache"]["resolved_count"] == 1
     assert graph["config"]["candidate_generation"]["max_candidates_per_skill_relation"] == 1
     assert any(item.event == "graph.resolve.progress" for item in events)
 
@@ -560,8 +611,7 @@ async def test_execution_graph_fallback_normalizes_prefixed_edge_endpoints(tmp_p
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
     await service.build()
     artifacts = load_graph_artifacts(tmp_path)
@@ -591,10 +641,10 @@ async def test_async_build_progress_is_serial_and_completed_before_return(tmp_pa
             self.entered = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def complete_json_async(self, **kwargs):
+        async def invoke(self, messages, **kwargs):
             self.entered.set()
             await self.release.wait()
-            return await super().complete_json_async(**kwargs)
+            return await super().invoke(messages, **kwargs)
 
     llm = _BlockingMatcherLLM()
     events: list[tuple[str, str | None]] = []
@@ -618,8 +668,7 @@ async def test_async_build_progress_is_serial_and_completed_before_return(tmp_pa
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=None,
-        llm_client=llm,
+        model=llm,
         graph_config={"require_consensus": False},
     )
 
@@ -666,8 +715,7 @@ async def test_async_build_progress_failures_are_logged_and_do_not_break_publish
         service = OrchestrationService(
             graph_artifact_root=tmp_path,
             capability_provider=_inventory,
-            matcher=_AcceptMatcher(),
-            llm_client=_PlanLLM(),
+            model=_PlanLLM(),
         )
         built = await service.build(progress=progress)
         await asyncio.sleep(0)
@@ -696,8 +744,7 @@ async def test_cancel_during_async_progress_drain_leaves_no_pending_dispatch_tas
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
     task = asyncio.create_task(service.build(progress=progress), name="symphony-progress-build")
     await callback_entered.wait()
@@ -724,8 +771,7 @@ async def test_prepare_artifact_sync_hook_writes_before_activation(tmp_path: Pat
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
 
     built = await service.build(prepare_artifact=prepare_artifact)
@@ -748,8 +794,7 @@ async def test_runtime_forwards_async_prepare_artifact_default(tmp_path: Path) -
     runtime = SymphonyRuntime(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
         prepare_artifact=prepare_artifact,
     )
 
@@ -764,8 +809,7 @@ async def test_prepare_artifact_failure_preserves_current_version(tmp_path: Path
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
     first = await service.build()
     current_before = (tmp_path / "current.json").read_bytes()
@@ -786,8 +830,7 @@ async def test_prepare_artifact_cancellation_preserves_current_version(tmp_path:
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
-        matcher=_AcceptMatcher(),
-        llm_client=_PlanLLM(),
+        model=_PlanLLM(),
     )
     first = await service.build()
     current_before = (tmp_path / "current.json").read_bytes()
