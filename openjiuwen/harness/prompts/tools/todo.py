@@ -65,9 +65,10 @@ TODO_LIST_DESCRIPTION_CN = """
 - 需要查看当前任务全貌和各任务ID，再决定如何更新
 - 不确定当前有哪些任务处于 in_progress 或 pending
 
-使用 todo_modify 的场景（不需要先调用 todo_list）：
+使用 todo_modify 的场景（必要时再触发 todo_list）：
 - 已知任务 ID，直接更新任务信息
 - 任务刚完成，立即标记为 completed
+- 重要：不确定任务 ID 是否准确时，调用 todo_list 获取最新的任务列表和准确的 ID，再调用 todo_modify。因为错误的 ID（即使只错一个字符）会导致操作失败。
 """
 
 TODO_LIST_DESCRIPTION_EN = """
@@ -79,9 +80,10 @@ Use todo_list when:
 - You need an overview of all tasks and their IDs before deciding how to update
 - You are unsure which tasks are currently in_progress or pending
 
-Use todo_modify directly (no need to call todo_list first) when:
+Use todo_modify directly (Trigger todo_list when necessary) when:
 - You already know the task ID and want to update task information
 - A task just finished and you want to mark it completed immediately
+- Important: If you are not 100% sure about the task IDs, call todo_list first to get the accurate ID list, then call todo_modify. An incorrect ID (even one wrong character) will cause the operation to fail.
 """
 
 TODO_LIST_DESCRIPTION: Dict[str, str] = {
@@ -158,6 +160,10 @@ insert_before：在指定任务之前插入新任务（目标任务状态须为 
 - insert_after：目标任务状态必须为 in_progress 或 pending
 - insert_before：目标任务状态必须为 pending
 - 如果任务的 selected_model_id 为空时，任何操作都不要更改 selected_model_id 字段
+
+ID 精确性要求（极其重要）：
+- 禁止凭记忆推测或修改 ID 中的任何字符，即使只错一个字符也会导致操作失败
+- 如果不确定任务 ID，请先调用 todo_list 获取准确的 ID 列表
 """
 
 TODO_MODIFY_DESCRIPTION_EN = """
@@ -226,6 +232,10 @@ Core rules:
 - insert_after: target task status must be in_progress or pending
 - insert_before: target task status must be pending
 - If the task's selected_model_id is empty, do not modify the selected_model_id field in any operation.
+
+ID Accuracy Requirement (Critical):
+- Do NOT guess or modify any character in the ID — even a single wrong character will cause the operation to fail
+- If unsure about task IDs, call todo_list first to get the accurate ID list
 """
 
 TODO_MODIFY_DESCRIPTION: Dict[str, str] = {

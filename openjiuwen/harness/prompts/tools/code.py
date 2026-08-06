@@ -13,12 +13,20 @@ DESCRIPTION: Dict[str, str] = {
     "cn": (
         "执行代码（Python 或 JavaScript）。\n\n"
         "每次调用在独立进程中执行，变量与对象不跨调用保留，请提交可独立运行的完整代码。\n\n"
+        "多语言内容处理规则：\n"
+         "1. 检测输入内容的语言（中文、英文、日文等）\n"
+         "2. 生成文件时必须使用支持该语言的字体：\n"
+         "3. 禁止对内容进行翻译，来绕过字体限制。\n\n"
     ),
 
     "en": (
         "Execute code (Python or JavaScript).\n\n"
         "Each invocation runs in an isolated process; variables and objects do not persist"
         "across calls—submit self-contained code every time\n\n"
+         "Multi-language content rules:\n"
+         "1. Detect the language of input content (Chinese, English, Japanese, etc.)\n"
+         "2. When generating files, you MUST use fonts that support the detected language:\n"
+         "3. Do NOT translate content to avoid font limitations.\n\n"
     )
 }
 

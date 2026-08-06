@@ -988,10 +988,11 @@ class AbilityManager:
                 except Exception as e:
                     logger.warning(f"Failed to trigger TOOL_CALL_ERROR event: {e}")
 
-                tool_result = None
+                from openjiuwen.harness.tools.base_tool import ToolOutput
+                tool_result = ToolOutput(success=False, error=error_msg)
                 tool_message = None
                 if isinstance(tool_ctx.inputs, ToolCallInputs):
-                    tool_result = tool_ctx.inputs.tool_result
+                    tool_result = tool_ctx.inputs.tool_result or tool_result
                     tool_message = tool_ctx.inputs.tool_msg
 
                 if (
