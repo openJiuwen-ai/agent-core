@@ -9,7 +9,7 @@ import dataclasses
 import os
 import sys
 import uuid
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager, suppress
 import warnings
 from pathlib import Path
 from typing import (
@@ -182,6 +182,8 @@ _SUB_AGENTS_DIR = "sub_agents"
 
 _ROUND_BOUNDARY = object()
 
+FreshInputContextFactory = Callable[[], AbstractAsyncContextManager[None]]
+
 
 def _render_identity_prompt(prompt_builder: SystemPromptBuilder, language: str) -> str:
     """Render the identity section alone, for ReActAgent's prompt template.
@@ -245,6 +247,7 @@ class DeepAgent(BaseAgent):
         self._interaction_send_lock = asyncio.Lock()
         self._interaction_wakeup = asyncio.Event()
         self._interaction_started = False
+        self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
         self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
         self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
         super().__init__(card)
@@ -252,6 +255,15 @@ class DeepAgent(BaseAgent):
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
         """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
+
+    def set_fresh_input_context_factory(
+        self,
+        factory: Optional[FreshInputContextFactory],
+    ) -> None:
+        """Set or clear the host context entered around fresh input enqueue."""
+        if factory is not None and not callable(factory):
+            raise TypeError("fresh input context factory must be callable")
+        self._fresh_input_context_factory = factory
 
     def register_task_resource_cleanup(
         self,
@@ -3004,6 +3016,7 @@ class DeepAgent(BaseAgent):
 
     async def stop(self) -> None:
         """Terminate the interaction loop and wake any attached output consumer."""
+        self._fresh_input_context_factory = None
         if not self._interaction_started:
             return
         self._interaction_phase = InteractionPhase.TERMINATED
@@ -3139,10 +3152,18 @@ class DeepAgent(BaseAgent):
 
             # Fresh user turn.  Output lease ownership stays with the host via
             # ``attach_output``; send_input never steals or creates a stream.
-            self._event_manager.push_user(
-                RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
-            )
-            self._notify_work()
+            context_factory = self._fresh_input_context_factory
+            if context_factory is None:
+                self._event_manager.push_user(
+                    RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
+                )
+                self._notify_work()
+            else:
+                async with context_factory():
+                    self._event_manager.push_user(
+                        RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
+                    )
+                    self._notify_work()
 
     async def _attach_output_locked(self) -> Optional[InteractionOutputStream]:
         lease = await self._interaction_output.attach()

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -119,6 +120,182 @@ async def test_send_input_preserves_text_validation_and_queueing(
     assert work is not None
     assert work.query == "continue"
     assert work.reset_loop is True
+
+
+@pytest.mark.asyncio
+async def test_fresh_input_context_spans_enqueue_and_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def fresh_context():
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    original_push = agent._event_manager.push_user
+
+    def push_user(work: RoundWorkItem) -> None:
+        events.append("enqueue")
+        original_push(work)
+
+    agent.set_fresh_input_context_factory(fresh_context)
+    monkeypatch.setattr(agent._event_manager, "push_user", push_user)
+    monkeypatch.setattr(agent, "_notify_work", lambda: events.append("notify"))
+
+    await agent.send_input(SendInputRequest(request_id="fresh-1", inputs={"query": "start"}))
+
+    assert events == ["enter", "enqueue", "notify", "exit"]
+    assert agent._event_manager.next_work().request_id == "fresh-1"
+
+
+@pytest.mark.asyncio
+async def test_continuation_inputs_bypass_fresh_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+
+    @asynccontextmanager
+    async def unexpected_context():
+        raise AssertionError("continuation entered fresh context")
+        yield
+
+    agent.set_fresh_input_context_factory(unexpected_context)
+    monkeypatch.setattr(agent, "_notify_work", MagicMock())
+
+    resume = InteractiveInput()
+    resume.update("call-1", {"action": "allow_once"})
+    await agent.send_input(SendInputRequest(request_id="resume-1", inputs={"query": resume}))
+
+    monkeypatch.setattr(agent, "_should_keep_interaction_open_locked", lambda: True)
+    await agent.send_input(SendInputRequest(request_id="follow-1", inputs={"query": "continue"}))
+
+    loop = MagicMock()
+    agent._loop_controller = loop
+    agent._active_interaction_round = ActiveInteractionRound(
+        work=RoundWorkItem.user(request_id="active", inputs={"query": "active"})
+    )
+    await agent.send_input(
+        SendInputRequest(
+            request_id="steer-1",
+            inputs={"query": "adjust"},
+            mode=InputDispatchMode.STEER,
+        )
+    )
+
+    assert agent._event_manager.next_work().request_id == "resume-1"
+    assert agent._event_manager.next_work().request_id == "follow-1"
+    loop.enqueue_steer.assert_called_once_with("adjust")
+
+
+@pytest.mark.asyncio
+async def test_fresh_context_entry_failure_enqueues_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+
+    @asynccontextmanager
+    async def failing_context():
+        raise RuntimeError("fresh_context_failed")
+        yield
+
+    agent.set_fresh_input_context_factory(failing_context)
+    notify = MagicMock()
+    monkeypatch.setattr(agent, "_notify_work", notify)
+
+    with pytest.raises(RuntimeError, match="fresh_context_failed"):
+        await agent.send_input(SendInputRequest(request_id="fresh-1", inputs={"query": "start"}))
+
+    assert agent._event_manager.next_work() is None
+    notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fresh_context_cancellation_enqueues_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @asynccontextmanager
+    async def blocking_context():
+        entered.set()
+        await release.wait()
+        yield
+
+    agent.set_fresh_input_context_factory(blocking_context)
+    notify = MagicMock()
+    monkeypatch.setattr(agent, "_notify_work", notify)
+    task = asyncio.create_task(agent.send_input(SendInputRequest(request_id="fresh-1", inputs={"query": "start"})))
+    await entered.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert agent._event_manager.next_work() is None
+    notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_failure_exits_fresh_context_and_preserves_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def fresh_context():
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    def fail_enqueue(_work: RoundWorkItem) -> None:
+        events.append("enqueue")
+        raise RuntimeError("enqueue_failed")
+
+    agent.set_fresh_input_context_factory(fresh_context)
+    monkeypatch.setattr(agent._event_manager, "push_user", fail_enqueue)
+
+    with pytest.raises(RuntimeError, match="enqueue_failed"):
+        await agent.send_input(SendInputRequest(request_id="fresh-1", inputs={"query": "start"}))
+
+    assert events == ["enter", "enqueue", "exit"]
+
+
+@pytest.mark.asyncio
+async def test_fresh_context_factory_replacement_and_stop_cleanup() -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    entered: list[str] = []
+
+    def factory(name: str):
+        @asynccontextmanager
+        async def context():
+            entered.append(name)
+            yield
+
+        return context
+
+    agent.set_fresh_input_context_factory(factory("old"))
+    agent.set_fresh_input_context_factory(factory("new"))
+    await agent.send_input(SendInputRequest(request_id="fresh-1", inputs={"query": "start"}))
+    await agent.stop()
+
+    assert entered == ["new"]
+    assert agent._fresh_input_context_factory is None
 
 
 @pytest.mark.parametrize("mode", list(InputDispatchMode))
