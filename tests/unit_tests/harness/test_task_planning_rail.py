@@ -255,6 +255,98 @@ async def test_after_task_iteration_syncs_todo_status_from_plan() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sync_todos_from_plan_terminal_guard() -> None:
+    """Terminal todo states (COMPLETED/CANCELLED) are not overwritten by plan."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    todos = _make_todos([
+        ("task-a", TodoStatus.COMPLETED),
+        ("task-b", TodoStatus.CANCELLED),
+        ("task-c", TodoStatus.IN_PROGRESS),
+    ])
+    todo_a_id = todos[0].id
+    todo_b_id = todos[1].id
+    todo_c_id = todos[2].id
+
+    existing_plan = TaskPlan(
+        goal="existing",
+        tasks=[
+            TodoItem(id=todo_a_id, content="task-a", status=TodoStatus.IN_PROGRESS),
+            TodoItem(id=todo_b_id, content="task-b", status=TodoStatus.PENDING),
+            TodoItem(id=todo_c_id, content="task-c", status=TodoStatus.PENDING),
+        ],
+    )
+    state = DeepAgentState(iteration=2, task_plan=existing_plan)
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-guard-1"
+    ctx.agent.load_state.return_value = state
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+    tool.save_todos = AsyncMock()
+
+    await rail.after_task_iteration(ctx)
+
+    tool.save_todos.assert_awaited_once()
+    saved_todos = tool.save_todos.call_args[0][1]
+    status_map = {t.id: t.status for t in saved_todos}
+    # Terminal states are not regressed
+    assert status_map[todo_a_id] == TodoStatus.COMPLETED
+    assert status_map[todo_b_id] == TodoStatus.CANCELLED
+    # Non-terminal todo is still synced from plan
+    assert status_map[todo_c_id] == TodoStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_sync_plan_from_todos_syncs_terminal_states() -> None:
+    """_sync_plan_from_todos syncs COMPLETED/CANCELLED from todo.json to TaskPlan."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    todos = _make_todos([
+        ("task-a", TodoStatus.COMPLETED),
+        ("task-b", TodoStatus.CANCELLED),
+        ("task-c", TodoStatus.IN_PROGRESS),
+    ])
+    todo_a_id = todos[0].id
+    todo_b_id = todos[1].id
+    todo_c_id = todos[2].id
+
+    existing_plan = TaskPlan(
+        goal="existing",
+        tasks=[
+            TodoItem(id=todo_a_id, content="task-a", status=TodoStatus.IN_PROGRESS),
+            TodoItem(id=todo_b_id, content="task-b", status=TodoStatus.PENDING),
+            TodoItem(id=todo_c_id, content="task-c", status=TodoStatus.IN_PROGRESS),
+        ],
+    )
+    state = DeepAgentState(iteration=2, task_plan=existing_plan)
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-reverse-1"
+    ctx.agent.load_state.return_value = state
+    ctx.agent.save_state = MagicMock()
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+
+    await rail._sync_plan_from_todos(ctx)
+
+    ctx.agent.save_state.assert_called_once()
+    plan = state.task_plan
+    # COMPLETED todo -> COMPLETED task
+    assert plan.tasks[0].status == TodoStatus.COMPLETED
+    # CANCELLED todo -> CANCELLED task
+    assert plan.tasks[1].status == TodoStatus.CANCELLED
+    # IN_PROGRESS todo is not terminal -> unchanged
+    assert plan.tasks[2].status == TodoStatus.IN_PROGRESS
+
+
+@pytest.mark.asyncio
 async def test_bridge_skips_when_plan_exists() -> None:
     """Existing plan with no pending tasks -> no overwrite."""
     rail = _make_rail()
