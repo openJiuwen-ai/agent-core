@@ -1057,3 +1057,26 @@ class TestLogDirectoryCreation:
 
         assert exc_info.value.code == StatusCode.COMMON_LOG_PATH_INVALID.code
         assert "common log_path is invalid" in exc_info.value.message.lower()
+
+class TestSetLogPath:
+    """Tests for runtime set_log_path API."""
+
+    @staticmethod
+    def test_set_log_path_updates_root_and_resolves_files(temp_config_dir):
+        import openjiuwen.core.common.logging.log_config as log_config_module
+        from openjiuwen.core.common.logging.default.config_provider import (
+            build_default_logger_config,
+        )
+        from openjiuwen.core.common.logging.log_config import set_log_path
+
+        target = os.path.join(temp_config_dir.name, "runtime_logs", "openjiuwen")
+        applied = set_log_path(target)
+
+        assert applied.rstrip("\\/") == os.path.realpath(target)
+        assert os.path.isdir(target)
+
+        snap = log_config_module.log_config.get_snapshot()
+        assert snap["log_path"].rstrip("\\/") == os.path.realpath(target)
+
+        common = build_default_logger_config(snap, "common")
+        assert common["log_file"].startswith(os.path.realpath(target))
