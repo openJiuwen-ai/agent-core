@@ -210,18 +210,20 @@ async def test_run_raises_when_structured_output_not_submitted(fake_harness) -> 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_run_retries_in_same_session_when_structured_output_is_not_submitted(fake_harness) -> None:
-    fake_harness.submit_after_attempt = 2
+    fake_harness.submit_after_attempt = 3
     agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
 
     out = await agent.run("question", schema=_DICT_SCHEMA)
 
     assert out == {"answer": "42"}
     harness = fake_harness.instances[-1]
-    assert len(harness.sent) == 2
+    assert len(harness.sent) == 3
     assert harness.sent[0].startswith("question\n\n")
     assert harness.sent[1] == agent._t("structured_output", key="reminder")
+    assert harness.sent[2] == agent._t("structured_output", key="reminder")
     assert harness.run_sessions[0] is harness.run_sessions[1]
-    assert harness.ability_manager.add_history == ["structured_output"]
+    assert harness.run_sessions[1] is harness.run_sessions[2]
+    assert harness.ability_manager.add_history == ["structured_output", "structured_output"]
 
 
 @pytest.mark.asyncio
@@ -287,12 +289,9 @@ def test_create_tiny_agent_keeps_a_minimal_footprint() -> None:
     assert spec.prompt_mode == "none"
     # The submit tool is the only tool it owns.
     assert [type(tool).__name__ for tool in (spec.tools or [])] == ["StructuredOutputTool"]
-    # A schema turn requires the model to call that tool on its first response.
-    assert spec.model.model_request_config.tool_choice == {
-        "type": "function",
-        "function": {"name": "structured_output"},
-    }
-    # The shared base spec remains unchanged for later free-text calls.
+    # Schema turns keep the original model config. Tool selection remains auto,
+    # while a missing submission is recovered by the bounded reminder turn.
+    assert spec.model is agent._spec.model
     assert agent._spec.model.model_request_config is None
 
 
@@ -355,16 +354,17 @@ async def test_chat_with_schema_captures_and_detaches_tool(fake_harness) -> None
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_chat_retries_with_user_reminder_when_structured_output_is_not_submitted(fake_harness) -> None:
-    fake_harness.submit_after_attempt = 2
+    fake_harness.submit_after_attempt = 3
     agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
 
     out = await agent.chat("question", schema=_DICT_SCHEMA)
 
     assert out == {"answer": "42"}
     harness = fake_harness.instances[0]
-    assert len(harness.sent) == 2
+    assert len(harness.sent) == 3
     assert harness.sent[0].startswith("question\n\n")
     assert harness.sent[1] == agent._t("structured_output", key="reminder")
+    assert harness.sent[2] == agent._t("structured_output", key="reminder")
     assert "structured_output" not in harness.ability_manager.added
     await agent.aclose()
 
