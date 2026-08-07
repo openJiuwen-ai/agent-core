@@ -892,6 +892,45 @@ def test_claude_sdk_ssh_transport_uses_options_cli_path(fake_claude_sdk):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_claude_sdk_ssh_transport_uses_exec_by_default(fake_claude_sdk):
+    config = SshTransportConfig(host="127.0.0.1", username="u", password="pw")
+    options = _FakeOptions(cwd="/remote/project", env={"OPENJIUWEN_TEAM_JOIN": "{}"})
+    transport = build_claude_sdk_ssh_transport(prompt=[], options=options, config=config)
+
+    await transport.connect()
+
+    asyncssh_module = sys.modules["asyncssh"]
+    assert isinstance(asyncssh_module, _RecordingAsyncSshModule)
+    command = asyncssh_module.connection.command
+    assert command is not None
+    assert "; exec claude " in command
+
+    await transport.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_ssh_transport_can_disable_exec_and_use_empty_password(fake_claude_sdk):
+    config = SshTransportConfig(host="127.0.0.1", username="u", password="", use_exec=False)
+    options = _FakeOptions(cwd="/remote/project", env={"OPENJIUWEN_TEAM_JOIN": "{}"})
+    transport = build_claude_sdk_ssh_transport(prompt=[], options=options, config=config)
+
+    await transport.connect()
+
+    asyncssh_module = sys.modules["asyncssh"]
+    assert isinstance(asyncssh_module, _RecordingAsyncSshModule)
+    command = asyncssh_module.connection.command
+    assert command is not None
+    assert "; claude " in command
+    assert "; exec claude " not in command
+    assert asyncssh_module.connect_kwargs is not None
+    assert asyncssh_module.connect_kwargs["password"] == ""
+
+    await transport.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_claude_sdk_ssh_read_messages_survives_concurrent_close(fake_claude_sdk):
     config = SshTransportConfig(host="127.0.0.1", username="u", password="pw")
     options = _FakeOptions(env={"OPENJIUWEN_TEAM_JOIN": "{}"})
