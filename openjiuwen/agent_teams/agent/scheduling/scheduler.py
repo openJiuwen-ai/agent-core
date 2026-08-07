@@ -375,10 +375,10 @@ class TeamScheduler:
             dispatch_mode=self._blueprint.spec.dispatch_mode,
         )
         language = self._blueprint.language or "cn"
-        t = make_translator(language)
+        tr = make_translator(language)
 
-        verify_tool = VerifyTaskTool(reviewer_tm, t, desc_key="verify_task_scheduled")
-        view_tool = ViewTaskToolV2(backend, t)
+        verify_tool = VerifyTaskTool(reviewer_tm, tr, desc_key="verify_task_scheduled")
+        view_tool = ViewTaskToolV2(backend, tr)
 
         member_name = reviewer
         harness = None
@@ -502,7 +502,10 @@ class TeamScheduler:
         if round_key in self._escalated:
             return
         self._escalated.add(round_key)
-        team_logger.info("[scheduler] escalating task %s round %s to the leader, message: %s", task.task_id, task.review_round, content)
+        team_logger.info(
+            "[scheduler] escalating task %s round %s to the leader, message: %s",
+            task.task_id, task.review_round, content,
+        )
         await self._host.deliver_input(content, use_steer=False)
 
     async def _digest_task_done(self, task_manager, task_id: str, title: str, *, verified: bool) -> None:

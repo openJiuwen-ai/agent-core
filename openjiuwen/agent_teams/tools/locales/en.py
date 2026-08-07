@@ -273,7 +273,10 @@ STRINGS: dict[str, str] = {
     ),
     "create_task.task.reviewer_type": "Reviewer type: verifier / inspector / challenger",
     "create_task.task.reviewer_id": "Reviewer identifier (auto-generated, do not provide)",
-    "create_task.task.reviewer_desc": "Supplementary description (verifier: verification guidance; inspector: scoring rubric; challenger: not needed)",
+    "create_task.task.reviewer_desc": (
+        "Supplementary description (verifier: verification guidance; "
+        "inspector: scoring rubric; challenger: not needed)"
+    ),
     "create_task.task.max_review_rounds": (
         "Review-round ceiling for this task's rework loop (optional, integer >= 1, requires "
         "'reviewer'); omitted uses the team default. Each failed verification sends the task "
@@ -311,7 +314,10 @@ STRINGS: dict[str, str] = {
     ),
     "update_task.reviewer_type": "Reviewer type: verifier / inspector / challenger",
     "update_task.reviewer_id": "Reviewer identifier (auto-generated, do not provide)",
-    "update_task.reviewer_desc": "Supplementary description (verifier: verification guidance; inspector: scoring rubric; challenger: not needed)",
+    "update_task.reviewer_desc": (
+        "Supplementary description (verifier: verification guidance; "
+        "inspector: scoring rubric; challenger: not needed)"
+    ),
     "update_task.max_review_rounds": (
         "Set this task's review-round ceiling (integer >= 1; the task must carry reviewers, or set "
         "'reviewer' in the same call). Beyond the ceiling a failed verification escalates to you "
