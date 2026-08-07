@@ -735,8 +735,6 @@ class TeamTaskManager:
             scheduled dispatch ``data`` snapshots the vote tally.
         """
         normalized = decision.strip().lower()
-        if normalized not in ("pass", "fail"):
-            return TaskOpResult.fail(f"verify_task decision must be 'pass' or 'fail', got '{decision}'")
 
         task = await self.get(task_id)
         if not task:
@@ -752,6 +750,24 @@ class TeamTaskManager:
             )
         if self.member_name == task.assignee:
             return TaskOpResult.fail(f"{self.member_name} cannot verify their own task {task_id}")
+
+        # Determine the caller's reviewer type from the task's structured
+        # reviewer list so inspector votes are validated as floats.
+        rt = self._resolve_reviewer_type(task, self.member_name)
+        if rt == "inspector":
+            try:
+                score = float(normalized)
+                if not (0.0 <= score <= 1.0):
+                    return TaskOpResult.fail(
+                        f"verify_task decision must be a number in [0.0, 1.0], got '{decision}'"
+                    )
+                normalized = f"{score:.2f}"
+            except ValueError:
+                return TaskOpResult.fail(
+                    f"verify_task decision must be a number for inspector reviewer, got '{decision}'"
+                )
+        elif normalized not in ("pass", "fail"):
+            return TaskOpResult.fail(f"verify_task decision must be 'pass' or 'fail', got '{decision}'")
 
         team_logger.info("[verify_task] reviewer=%s task=%s decision=%s", self.member_name, task_id, normalized) 
 
@@ -799,16 +815,31 @@ class TeamTaskManager:
                          tally["pass_count"], tally["fail_count"], tally["reviewer_count"]) 
         return TaskOpResult.success(data=tally)
 
+    @staticmethod
+    def _resolve_reviewer_type(task, reviewer_name: str) -> str:
+        """Look up one reviewer's type from the task's structured reviewer list."""
+        for detail in task.reviewer_details():
+            if detail.get("reviewer_id") == reviewer_name:
+                return detail.get("type", "verifier")
+        return "verifier"
+
     async def get_review_tally(self, task) -> dict[str, Any]:
         """Snapshot the current-round vote tally of one IN_REVIEW task.
 
-        Latest vote per reviewer wins; votes from members no longer on the
-        task's reviewer list are ignored. Feedback strings of the effective
-        ``fail`` votes are collected for the rework message. Shared by the
-        vote-recording path (event snapshot) and the scheduler's judge pass.
+        Groups reviewers by type: verifier and challenger form the binary
+        (pass/fail) pool; inspector votes are scored floats (0~1). Latest
+        vote per reviewer wins; votes from members no longer on the task's
+        reviewer list are ignored.
         """
         votes = await self.db.task.get_review_votes(task.task_id, task.review_round)
         reviewers = task.reviewers()
+        # Build reviewer_id → type map from the structured reviewer list.
+        type_map: dict[str, str] = {}
+        for detail in task.reviewer_details():
+            rid = detail.get("reviewer_id", "")
+            if rid:
+                type_map[rid] = detail.get("type", "verifier")
+
         latest_decision: dict[str, str] = {}
         latest_feedback: dict[str, str] = {}
         for vote in votes:
@@ -816,20 +847,67 @@ class TeamTaskManager:
                 continue
             latest_decision[vote.reviewer] = vote.decision
             latest_feedback[vote.reviewer] = vote.feedback or ""
-        fail_feedback = {
-            reviewer: latest_feedback[reviewer]
-            for reviewer, verdict in latest_decision.items()
-            if verdict == "fail" and latest_feedback[reviewer]
-        }
-        pass_count = sum(1 for verdict in latest_decision.values() if verdict == "pass")
+
+        # Binary pool: verifier + challenger (pass/fail votes)
+        verdict_pass = 0
+        verdict_fail = 0
+        verdict_total = 0
+        verdict_voted = 0
+        fail_feedback: dict[str, str] = {}
+
+        # Inspector pool: scored votes
+        inspector_scores: dict[str, float] = {}
+        inspector_count = 0
+        inspector_voted = 0
+
+        for name in reviewers:
+            rt = type_map.get(name, "verifier")
+            if rt == "inspector":
+                inspector_count += 1
+                if name in latest_decision:
+                    inspector_voted += 1
+                    try:
+                        inspector_scores[name] = float(latest_decision[name])
+                    except (ValueError, TypeError):
+                        pass
+            else:
+                # verifier or challenger
+                verdict_total += 1
+                if name in latest_decision:
+                    verdict_voted += 1
+                    d = latest_decision[name]
+                    if d == "pass":
+                        verdict_pass += 1
+                    elif d == "fail":
+                        verdict_fail += 1
+                        feedback = latest_feedback[name]
+                        if feedback:
+                            fail_feedback[name] = feedback
+
+        inspector_avg = (
+            sum(inspector_scores.values()) / len(inspector_scores)
+            if inspector_scores else None
+        )
+
         return {
             "task_id": task.task_id,
             "review_round": task.review_round,
-            "pass_count": pass_count,
-            "fail_count": len(latest_decision) - pass_count,
+            # Legacy fields — kept for backwards compatibility with render
+            # and event publishing; they reflect the binary pool only.
+            "pass_count": verdict_pass,
+            "fail_count": verdict_fail,
             "reviewer_count": len(reviewers),
             "voted": sorted(latest_decision),
             "fail_feedback": fail_feedback,
+            # New structured fields for settle_review_tally.
+            "verdict_pass_count": verdict_pass,
+            "verdict_fail_count": verdict_fail,
+            "verdict_total": verdict_total,
+            "verdict_voted": verdict_voted,
+            "inspector_count": inspector_count,
+            "inspector_voted": inspector_voted,
+            "inspector_scores": inspector_scores,
+            "inspector_avg": inspector_avg,
         }
 
     async def settle_review(self, task_id: str, decision: str, feedback: str = "") -> TaskOpResult:
@@ -1423,17 +1501,18 @@ class TeamTaskManager:
 
         return TaskOpResult.success()
 
-    async def set_reviewer(self, task_id: str, reviewer_names: list[str]) -> TaskOpResult:
+    async def set_reviewer(self, task_id: str, reviewer_entries: list[dict]) -> TaskOpResult:
         """Set a task's verify-gate reviewers (Leader only).
 
-        Persists the reviewer member-name list (empty clears the gate). Caller
-        (the tool boundary) validates that reviewers are real members and none
-        is the task's author. Independent of status — reviewers may be attached
-        before or during execution; the list is consulted at completion time.
+        Persists the structured reviewer list (type + reviewer_id + description)
+        as JSON. An empty list clears the gate. Caller (the tool boundary)
+        validates that reviewers are real members and none is the task's author.
+        Independent of status — reviewers may be attached before or during
+        execution; the list is consulted at completion time.
 
         Args:
             task_id: Task to (re)assign reviewers on.
-            reviewer_names: Reviewer member names; empty list clears reviewers.
+            reviewer_entries: Structured reviewer dicts; empty list clears.
 
         Returns:
             ``TaskOpResult`` describing the outcome.
@@ -1442,11 +1521,11 @@ class TeamTaskManager:
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
-        reviewer_json = json.dumps(list(reviewer_names)) if reviewer_names else None
+        reviewer_json = json.dumps(reviewer_entries) if reviewer_entries else None
         ok = await self.db.task.set_reviewer(task_id, reviewer_json)
         if not ok:
             return TaskOpResult.fail(f"Task {task_id} reviewer could not be set")
-        team_logger.info("Task %s reviewers set to %s", task_id, reviewer_names or "[]")
+        team_logger.info("Task %s reviewers set to %s", task_id, reviewer_entries or "[]")
         return TaskOpResult.success()
 
     async def set_max_review_rounds(self, task_id: str, max_review_rounds: int) -> TaskOpResult:

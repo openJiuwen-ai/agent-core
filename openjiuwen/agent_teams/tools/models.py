@@ -152,7 +152,10 @@ class TeamTaskBase(SQLModel):
         return {"task_id": self.task_id, "title": self.title, "status": self.status}
 
     def reviewers(self) -> list[str]:
-        """Parse the ``reviewer`` JSON column into a member-name list.
+        """Parse the ``reviewer`` JSON column into a member-name (reviewer_id) list.
+
+        Old format (list of strings like ``["name1", "name2"]``) is auto-upgraded
+        to the new object format on read.
 
         Returns an empty list when unset or malformed — an absent reviewer set
         means "no verify gate", which the completion path treats as direct
@@ -165,7 +168,49 @@ class TeamTaskBase(SQLModel):
             parsed = json.loads(raw)
         except (ValueError, TypeError):
             return []
-        return [str(name) for name in parsed] if isinstance(parsed, list) else []
+        if not isinstance(parsed, list):
+            return []
+        ids: list[str] = []
+        for entry in parsed:
+            if isinstance(entry, dict):
+                rid = entry.get("reviewer_id", "")
+                if rid:
+                    ids.append(str(rid))
+            elif isinstance(entry, str):
+                ids.append(entry)
+        return ids
+
+    def reviewer_details(self) -> list[dict[str, str]]:
+        """Parse the ``reviewer`` JSON column into a structured list.
+
+        Each entry contains ``type``, ``reviewer_id`` and ``description``.
+        Old string-list format is auto-upgraded to
+        ``{"type": "verifier", "reviewer_id": name, "instruction": ""}``.
+        """
+        raw = self.reviewer
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(parsed, list):
+            return []
+        result: list[dict[str, str]] = []
+        for entry in parsed:
+            if isinstance(entry, dict):
+                result.append({
+                    "type": entry.get("type", "verifier"),
+                    "reviewer_id": str(entry.get("reviewer_id", "")),
+                    "instruction": str(entry.get("instruction", "")),
+                })
+            elif isinstance(entry, str):
+                result.append({
+                    "type": "verifier",
+                    "reviewer_id": entry,
+                    "instruction": "",
+                })
+        return result
 
 
 class TeamTaskDependencyBase(SQLModel):

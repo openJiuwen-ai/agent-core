@@ -74,6 +74,7 @@ def _backend(db, member_name: str, is_leader: bool, dispatch_mode: str = "autono
         db=db,
         messager=AsyncMock(spec=Messager),
         dispatch_mode=dispatch_mode,
+        enable_task_verification=True,
     )
 
 
@@ -701,3 +702,96 @@ async def test_view_task_in_review_lists_reviewers_tasks(db):
     result = await view.invoke({"action": "in_review"})
     assert result.success
     assert [task["task_id"] for task in result.data["tasks"]] == ["v1"]
+
+
+# ---------------------------------------------------------------------------
+# Structured reviewer (F_73): object input + auto-numbering
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_structured_reviewer(db):
+    """Scheduled create_task with structured reviewer objects persists type
+    and auto-generates reviewer_id."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke({
+        "tasks": [{
+            "task_id": "sr1",
+            "title": "t",
+            "content": "c",
+            "assignee": DEV_1,
+            "reviewer": [
+                {"type": "verifier", "instruction": "check correctness"},
+                {"type": "inspector", "instruction": ""},
+                {"type": "challenger", "instruction": ""},
+            ],
+        }]
+    })
+    assert result.success, result.error
+    task = await backend.task_manager.get("sr1")
+    details = task.reviewer_details()
+    assert len(details) == 3
+
+    assert details[0]["type"] == "verifier"
+    assert details[0]["reviewer_id"] == "verifier_1"
+    assert details[0]["instruction"] == "check correctness"
+
+    assert details[1]["type"] == "inspector"
+    assert details[1]["reviewer_id"] == "inspector_1"
+
+    assert details[2]["type"] == "challenger"
+    assert details[2]["reviewer_id"] == "challenger_1"
+
+    # reviewers() returns flat name list for verify_task identity guard
+    assert task.reviewers() == ["verifier_1", "inspector_1", "challenger_1"]
+
+
+@pytest.mark.level0
+def test_reviewer_id_auto_numbering():
+    """_clean_reviewers assigns per-type sequential counters."""
+    from openjiuwen.agent_teams.tools.tool_task import _clean_reviewers
+
+    spec = {"reviewer": [
+        {"type": "verifier"},
+        {"type": "inspector"},
+        {"type": "verifier"},
+        {"type": "challenger"},
+        {"type": "inspector"},
+    ]}
+    result = _clean_reviewers(spec)
+    assert [d["reviewer_id"] for d in result] == [
+        "verifier_1",
+        "inspector_1",
+        "verifier_2",
+        "challenger_1",
+        "inspector_2",
+    ]
+
+
+@pytest.mark.level0
+def test_reviewer_id_preserves_existing():
+    """_clean_reviewers keeps a caller-supplied reviewer_id untouched."""
+    from openjiuwen.agent_teams.tools.tool_task import _clean_reviewers
+
+    spec = {"reviewer": [
+        {"type": "verifier", "reviewer_id": "custom-name"},
+    ]}
+    result = _clean_reviewers(spec)
+    assert result[0]["reviewer_id"] == "custom-name"
+
+
+@pytest.mark.level0
+def test_reviewer_id_old_format_compat():
+    """_clean_reviewers upgrades old string-list entries."""
+    from openjiuwen.agent_teams.tools.tool_task import _clean_reviewers
+
+    spec = {"reviewer": ["alice", {"type": "inspector"}]}
+    result = _clean_reviewers(spec)
+    assert result[0]["type"] == "verifier"
+    assert result[0]["reviewer_id"] == "alice"
+    assert result[1]["type"] == "inspector"
+    assert result[1]["reviewer_id"] == "inspector_1"

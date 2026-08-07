@@ -31,6 +31,7 @@ _TASK_START_PLAN = "scheduler_task_start_plan"
 _REVIEW_REQUEST = "scheduler_review_request"
 _REVIEW_RENUDGE = "scheduler_review_renudge"
 _REWORK = "scheduler_rework"
+_REWORK_SUMMARY = "scheduler_rework_summary"
 _VERIFIED_REPORT = "scheduler_verified_report"
 
 
@@ -62,6 +63,20 @@ def meta_rework(task, max_rounds: int, feedback: str) -> dict:
         _REWORK,
         refs={"task": task.task_id},
         params={"max_rounds": str(max_rounds), "feedback": feedback or t("scheduler.none")},
+    )
+
+
+def meta_rework_summary(task, max_rounds: int) -> dict:
+    """Delivery payload asking the assignee to send a rework summary to the leader.
+
+    Sent alongside an escalation when the review round ceiling is exhausted,
+    so the leader receives both reviewer feedback and the assignee's
+    self-assessment in the same decision window.
+    """
+    return build_meta(
+        _REWORK_SUMMARY,
+        refs={"task": task.task_id},
+        params={"max_rounds": str(max_rounds)},
     )
 
 
@@ -111,12 +126,11 @@ def format_fail_feedback(fail_feedback: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-async def render_review_request_for_harness(task: Any, *, language: str = "cn") -> str:
+async def render_review_request_for_harness(task: Any, *, language: str = "cn", reviewer: str = "") -> str:
     """Render the review request as a plain user prompt for a temp reviewer harness."""
     from openjiuwen.agent_teams.prompts.loader import load_template
 
     template = load_template(_REVIEW_REQUEST, language)
-    # Simple task field substitution for the common `{{task.*}}` placeholders.
     body = template.content
     body = body.replace("{{task.task_id}}", str(getattr(task, "task_id", "")))
     body = body.replace("{{task.title}}", getattr(task, "title", "") or "")
@@ -126,4 +140,12 @@ async def render_review_request_for_harness(task: Any, *, language: str = "cn") 
     body = body.replace("{{task.review_round}}", str(getattr(task, "review_round", 0)))
     body = body.replace("{{task.max_review_rounds}}", str(getattr(task, "max_review_rounds") or ""))
     body = body.replace("{{task.reviewer}}", ", ".join(getattr(task, "reviewers", lambda: [])() or []))
+    # Inject per-reviewer instruction from the structured reviewer list.
+    instruction = ""
+    if reviewer:
+        for detail in (task.reviewer_details() if hasattr(task, 'reviewer_details') else []):
+            if detail.get("reviewer_id") == reviewer:
+                instruction = detail.get("instruction", "")
+                break
+    body = body.replace("{{task.reviewer_instruction}}", instruction)
     return body

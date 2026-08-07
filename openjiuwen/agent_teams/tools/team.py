@@ -1301,8 +1301,7 @@ class TeamBackend:
         self._enable_bridge = effective_enable_bridge
         effective_task_verification = (
             self._spec_enable_task_verification
-            if enable_task_verification is None
-            else enable_task_verification
+            and (enable_task_verification if enable_task_verification is not None else True)
         )
         self._enable_task_verification = effective_task_verification
 

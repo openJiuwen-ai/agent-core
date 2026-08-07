@@ -71,9 +71,23 @@ def _scheduled_task_node_schema(t: Translator) -> dict:
     properties.update(
         {
             "assignee": {"type": "string", "description": t("create_task", "task.assignee")},
+            # reviewer 结构化对象数组。model 只传 type + description，
+            # reviewer_id 由代码按类型自动编号（verifier_1, inspector_1 等）。
             "reviewer": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["verifier", "inspector", "challenger"],
+                            "description": t("create_task", "task.reviewer_type"),
+                        },
+                        "reviewer_id": {"type": "string", "description": t("create_task", "task.reviewer_id")},
+                        "instruction": {"type": "string", "description": t("create_task", "task.reviewer_instruction")},
+                    },
+                    "required": ["type"],
+                },
                 "description": t("create_task", "task.reviewer"),
             },
             "max_review_rounds": {
@@ -148,9 +162,39 @@ def _validate_task_batch(tasks: list[dict]) -> str | None:
     return None
 
 
-def _clean_reviewers(spec: dict) -> list[str]:
-    """Extract a spec's reviewer list, trimmed and de-blanked."""
-    return [str(r).strip() for r in (spec.get("reviewer") or ()) if str(r).strip()]
+def _clean_reviewers(spec: dict) -> list[dict]:
+    """Extract a spec's reviewer list as structured dicts.
+
+    Handles both old (plain string) and new (object) formats on read.
+    Old format entries are upgraded to ``{"type": "verifier", ...}``.
+
+    ``reviewer_id`` is auto-generated from the type with a per-type counter
+    (``verifier_1``, ``inspector_1``, ``challenger_2`` …) when not
+    already provided by an old-format entry.
+
+    Returns ``list[dict]`` with keys ``type``, ``reviewer_id``, ``description``.
+    """
+    raw = spec.get("reviewer") or ()
+    result: list[dict] = []
+    counter: dict[str, int] = {}
+    for entry in raw:
+        if isinstance(entry, dict):
+            rtype = entry.get("type", "verifier")
+            counter[rtype] = counter.get(rtype, 0) + 1
+            rid = entry.get("reviewer_id") or f"{rtype}_{counter[rtype]}"
+            if isinstance(rid, str):
+                rid = rid.strip()
+            if rid:
+                result.append({
+                    "type": rtype,
+                    "reviewer_id": rid,
+                    "instruction": str(entry.get("instruction", "")),
+                })
+        elif isinstance(entry, str):
+            stripped = str(entry).strip()
+            if stripped:
+                result.append({"type": "verifier", "reviewer_id": stripped, "instruction": ""})
+    return result
 
 
 async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str | None:
@@ -159,6 +203,8 @@ async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str
     Reviewers no longer must be pre-existing team members — the scheduler
     spawns a temporary harness for any reviewer name not found in the roster.
     Only the self-review guard remains.
+
+    reviewer 条目现在是结构化对象，通过 ``reviewer_id`` 字段与 assignee 比较。
     """
     for spec in tasks:
         reviewers = _clean_reviewers(spec)
@@ -166,9 +212,11 @@ async def _validate_reviewers(agent_team: TeamBackend, tasks: list[dict]) -> str
             continue
         assignee = (spec.get("assignee") or "").strip()
         for reviewer in reviewers:
-            if assignee and reviewer == assignee:
+            # 从结构化对象中取 reviewer_id，而非旧版的裸字符串
+            rid = reviewer.get("reviewer_id", "")
+            if assignee and rid == assignee:
                 return (
-                    f"Task {_spec_label(spec)!r}: reviewer {reviewer!r} cannot review their own task "
+                    f"Task {_spec_label(spec)!r}: reviewer {rid!r} cannot review their own task "
                     f"(they are the assignee)"
                 )
     return None
@@ -343,6 +391,8 @@ class ScheduledTaskCreateTool(TeamTool):
         if error:
             return ToolOutput(success=False, error=error)
 
+        verify_disabled = not self.agent_team.task_verification_enabled()
+
         result = await self.task_manager.add_graph(
             [
                 TaskGraphSpec(
@@ -352,7 +402,7 @@ class ScheduledTaskCreateTool(TeamTool):
                     depends_on=tuple(spec.get("depends_on") or ()),
                     depended_by=tuple(spec.get("depended_by") or ()),
                     assignee=(spec.get("assignee") or "").strip() or None,
-                    reviewer=tuple(_clean_reviewers(spec)),
+                    reviewer=() if verify_disabled else tuple(_clean_reviewers(spec)),
                     max_review_rounds=spec.get("max_review_rounds"),
                 )
                 for spec in tasks
@@ -518,9 +568,21 @@ class UpdateTaskTool(TeamTool):
                 "title": {"type": "string", "description": t("update_task", "title")},
                 "content": {"type": "string", "description": t("update_task", "content")},
                 "assignee": {"type": "string", "description": t("update_task", "assignee")},
+                # reviewer 结构化对象数组，与 create_task 一致
                 "reviewer": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["verifier", "inspector", "challenger"],
+                                "description": t("update_task", "reviewer_type"),
+                            },
+                            "instruction": {"type": "string", "description": t("update_task", "reviewer_instruction")},
+                        },
+                        "required": ["type"],
+                    },
                     "description": t("update_task", "reviewer"),
                 },
                 "max_review_rounds": {
@@ -679,18 +741,24 @@ class UpdateTaskTool(TeamTool):
             updated.append("assignee")
 
         # Set / clear verify-gate reviewers. A leader may (re)assign reviewers
-        # at any status; an empty list clears the gate. Reviewers must be real
-        # members and none may be the task's author (no self-verification).
+        # at any status; an empty list clears the gate. Reviewers are structured
+        # objects (type + reviewer_id + description); none may be the task's
+        # author (no self-verification).
         if reviewer is not None:
-            reviewer_names = [str(r).strip() for r in reviewer if str(r).strip()]
+            # 用 _clean_reviewers 将输入（可能是对象数组或旧格式字符串数组）统一为结构化 dict 列表
+            reviewer_entries = _clean_reviewers({"reviewer": reviewer})
+            if not self.agent_team.task_verification_enabled():
+                reviewer_entries = []  # silently stripped when verification is disabled
             current_assignee = (assignee or task.assignee or "").strip()
-            for name in reviewer_names:
-                if current_assignee and name == current_assignee:
+            for entry in reviewer_entries:
+                rid = entry.get("reviewer_id", "")
+                if current_assignee and rid == current_assignee:
                     return ToolOutput(
                         success=False,
-                        error=f"Reviewer '{name}' cannot review their own task (they are the assignee)",
+                        error=f"Reviewer '{rid}' cannot review their own task (they are the assignee)",
                     )
-            reviewer_result = await self.task_manager.set_reviewer(task_id, reviewer_names)
+            # set_reviewer 现在是 list[dict]，内部 json.dumps 后写入 DB
+            reviewer_result = await self.task_manager.set_reviewer(task_id, reviewer_entries)
             if not reviewer_result.ok:
                 return ToolOutput(success=False, error=reviewer_result.reason)
             updated.append("reviewer")
@@ -702,8 +770,10 @@ class UpdateTaskTool(TeamTool):
         if max_review_rounds is not None:
             if not isinstance(max_review_rounds, int) or isinstance(max_review_rounds, bool) or max_review_rounds < 1:
                 return ToolOutput(success=False, error="'max_review_rounds' must be an integer >= 1")
+            # effective_reviewers 检查是否有 reviewer：优先取本次调用的输入，否则取 task 已有的
+            # _clean_reviewers 返回 list[dict]，len > 0 表示有 reviewer
             effective_reviewers = (
-                [str(r).strip() for r in reviewer if str(r).strip()] if reviewer is not None else task.reviewers()
+                _clean_reviewers({"reviewer": reviewer}) if reviewer is not None else task.reviewers()
             )
             if not effective_reviewers:
                 return ToolOutput(
@@ -1021,7 +1091,6 @@ class VerifyTaskTool(TeamTool):
                 "task_id": {"type": "string", "description": t("verify_task", "task_id")},
                 "decision": {
                     "type": "string",
-                    "enum": ["pass", "fail"],
                     "description": t("verify_task", "decision"),
                 },
                 "feedback": {"type": "string", "description": t("verify_task", "feedback")},

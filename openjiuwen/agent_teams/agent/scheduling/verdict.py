@@ -3,41 +3,44 @@
 
 """Pure review-vote verdict math (F_62). No IO, no state.
 
-The verdict policy lives here — outside ``verify_task``'s transaction — so a
-future policy (weighted votes, veto reviewers, LLM arbitration) replaces this
-function without touching the vote store or the state machine.
+Multi-type reviewer settlement: ``settle_review_tally`` merges the
+binary-vote pool (verifier + challenger) and the score pool (inspector) into
+a single three-value verdict. The binary pool uses one-vote veto — any fail
+vote fails the round; the inspector pool requires every inspector's
+average score to meet or exceed 0.85.
 """
-
-import math
 
 VERDICT_PASS = "pass"
 VERDICT_FAIL = "fail"
 VERDICT_UNDECIDED = "undecided"
 
 
-def judge(pass_count: int, fail_count: int, reviewer_count: int, threshold: float) -> str:
-    """Judge one review round's tally against a pass-quorum threshold.
+def settle_review_tally(tally: dict, inspector_threshold: float = 0.85) -> str:
+    """Judge a multi-type review tally.
 
-    The quorum is ``ceil(threshold * reviewer_count)`` pass votes. The round
-    fails as soon as that quorum becomes unreachable — i.e. the fail votes
-    exceed the slack ``reviewer_count - quorum`` — so a doomed round settles
-    on the decisive vote instead of waiting for stragglers. A single reviewer
-    under the default 2/3 threshold degenerates to first-verdict-wins.
+    Binary pool (verifier + challenger): waits for all votes, then any
+    fail fails the round.
 
-    Args:
-        pass_count: Distinct reviewers currently voting pass.
-        fail_count: Distinct reviewers currently voting fail.
-        reviewer_count: Total reviewers assigned to the task.
-        threshold: Pass quorum fraction in (0, 1].
+    Score pool (inspector): waits for all votes, then the average must
+    meet or exceed ``inspector_threshold``.
 
-    Returns:
-        ``VERDICT_PASS`` / ``VERDICT_FAIL`` / ``VERDICT_UNDECIDED``.
+    Either pool still waiting (voted < total) returns UNDECIDED.
     """
-    if reviewer_count <= 0:
-        return VERDICT_UNDECIDED
-    quorum = math.ceil(threshold * reviewer_count)
-    if pass_count >= quorum:
-        return VERDICT_PASS
-    if fail_count > reviewer_count - quorum:
-        return VERDICT_FAIL
-    return VERDICT_UNDECIDED
+    # — binary pool: verifier + challenger —
+    bin_total = tally.get("verdict_total", 0)
+    if bin_total > 0:
+        if tally.get("verdict_voted", 0) < bin_total:
+            return VERDICT_UNDECIDED
+        if tally.get("verdict_fail_count", 0) > 0:
+            return VERDICT_FAIL
+
+    # — score pool: inspector —
+    insp_total = tally.get("inspector_count", 0)
+    if insp_total > 0:
+        if tally.get("inspector_voted", 0) < insp_total:
+            return VERDICT_UNDECIDED
+        avg = tally.get("inspector_avg")
+        if avg is None or avg < inspector_threshold:
+            return VERDICT_FAIL
+
+    return VERDICT_PASS

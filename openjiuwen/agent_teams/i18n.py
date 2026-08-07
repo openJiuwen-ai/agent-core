@@ -135,9 +135,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "scheduler.leader_task_done_how_direct": "无验证直接完成",
         "scheduler.leader_escalation_rounds": (
             "[调度器·需你处置] 任务 [{task_id}]「{title}」连续 {rounds} 轮验收未通过，"
-            "已停止自动返工，任务停在 in_review。最近一轮验证反馈：\n{feedback}\n"
-            "可选处置：update_task 调整承担者/验证者/任务内容（先 reset），"
-            "update_task(status='cancelled') 取消，或增删成员后重新规划。"
+            "已停止自动返工，任务停在 in_review。已通知承担者向你发送返工总结（通过 inbox）。"
+            "最近一轮验证反馈：\n{feedback}\n"
+            "收到承担者的返工总结后，综合判断并决定下一步：retry（继续修复）、"
+            "replan（调整承担者/验证者/需求）、或 rollback+replan（先回退产物再重分配）。"
         ),
         "scheduler.leader_escalation_stall": (
             "[调度器·需你处置] 任务 [{task_id}]「{title}」第 {round} 轮验收停摆超过 {minutes} 分钟："
@@ -147,6 +148,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "scheduler.leader_all_done": (
             "[调度器] 任务看板已全部终结（共 {count} 个任务）。请汇总团队执行结果，向用户交付最终结论。"
         ),
+        "scheduler.inspector_avg_line": (
+            "\n- [检视者平均分] {avg:.2f} / 0.85 ({status})\n"
+        ),
+        "scheduler.inspector_avg_pass": "达标",
+        "scheduler.inspector_avg_fail": "未达标",
         "scheduler.none": "（无）",
         "dispatcher.msg_type_broadcast": "广播消息",
         "dispatcher.msg_type_direct": "单播消息",
@@ -396,10 +402,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "scheduler.leader_task_done_how_direct": "no review, completed directly",
         "scheduler.leader_escalation_rounds": (
             "[Scheduler · Action Needed] Task [{task_id}] \"{title}\" failed {rounds} review "
-            "round(s) in a row; automatic rework stopped and the task stays in_review. Latest "
-            "round feedback:\n{feedback}\n"
-            "Options: update_task to adjust assignee/reviewers/content (reset first), "
-            "update_task(status='cancelled') to cancel, or reshape the roster and re-plan."
+            "round(s) in a row; automatic rework stopped and the task stays in_review. "
+            "The assignee has been asked to send you a rework summary (via your inbox). "
+            "Latest round feedback:\n{feedback}\n"
+            "After receiving the assignee's summary, decide: retry, "
+            "replan (reassign / adjust reviewers / change requirements), "
+            "or rollback+replan (undo file changes before reassigning)."
         ),
         "scheduler.leader_escalation_stall": (
             "[Scheduler · Action Needed] Task [{task_id}] \"{title}\" review round {round} has "
@@ -411,6 +419,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "[Scheduler] Every task on the board is terminal ({count} task(s) total). Summarize "
             "the team's results and deliver the final conclusion to the user."
         ),
+        "scheduler.inspector_avg_line": (
+            "\n- [Inspector avg] {avg:.2f} / 0.85 ({status})\n"
+        ),
+        "scheduler.inspector_avg_pass": "pass",
+        "scheduler.inspector_avg_fail": "fail",
         "scheduler.none": "(none)",
         "dispatcher.msg_type_broadcast": "broadcast",
         "dispatcher.msg_type_direct": "direct message",

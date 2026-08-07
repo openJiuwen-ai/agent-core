@@ -38,8 +38,9 @@ from openjiuwen.agent_teams.agent.scheduling import render
 from openjiuwen.agent_teams.agent.scheduling.verdict import (
     VERDICT_FAIL,
     VERDICT_PASS,
-    judge,
+    settle_review_tally,
 )
+from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -62,6 +63,13 @@ _REVIEW_RENUDGE_SECONDS = 600
 # scan a few times converges immediately instead. Idempotent CAS writes make
 # extra passes no-ops.
 _MAX_SCAN_PASSES = 4
+
+# Map reviewer type to prompt template basename.
+_REVIEWER_TEMPLATE_MAP = {
+    "verifier": "reviewer_verifier",
+    "inspector": "reviewer_inspector",
+    "challenger": "reviewer_challenger",
+}
 
 
 @runtime_checkable
@@ -97,9 +105,8 @@ class TeamScheduler:
         self._host = host
         self._blueprint = blueprint
         self._infra = infra
-        self._build_context: Any = build_context
+        self._build_context = build_context
         spec = blueprint.spec
-        self._threshold: float = spec.verify_vote_threshold
         self._default_max_rounds: int = spec.default_max_review_rounds
         self._stall_timeout_seconds: int = spec.review_stall_timeout
         self._active = False
@@ -109,6 +116,7 @@ class TeamScheduler:
         self._review_dispatched: set[tuple[str, int]] = set()
         self._renudged_at: dict[tuple[str, int], int] = {}
         self._escalated: set[tuple[str, int]] = set()
+        self._summary_requested: set[tuple[str, int]] = set()
         self._digested_tasks: set[str] = set()
         self._all_done_announced = False
 
@@ -215,6 +223,9 @@ class TeamScheduler:
 
     async def _reconcile_reviews(self, task_manager) -> bool:
         """Dispatch, judge, settle, escalate and re-nudge open review rounds."""
+        backend = self._infra.team_backend
+        if backend is not None and not backend.task_verification_enabled():
+            return False
         in_review = await task_manager.list_tasks(status=TaskStatus.IN_REVIEW.value)
         now_ms = get_current_time()
         acted = False
@@ -233,19 +244,19 @@ class TeamScheduler:
                     await self._dispatch_to_reviewer(reviewer, task)
 
             tally = await task_manager.get_review_tally(task)
-            verdict = judge(
-                tally["pass_count"],
-                tally["fail_count"],
-                tally["reviewer_count"],
-                self._threshold,
-            )
-            team_logger.info("[judge] task=%s round=%d verdict=%s tally(pass=%d fail=%d total=%d threshold=%.2f)", 
-                 task.task_id, task.review_round, verdict, 
-                 tally["pass_count"], tally["fail_count"], tally["reviewer_count"], self._threshold)
+            verdict = settle_review_tally(tally)
             if verdict == VERDICT_PASS:
-                acted = await self._settle_pass(task_manager, task) or acted
+                if await self._settle_pass(task_manager, task):
+                    team_logger.info("[judge-pass] task=%s round=%d tally(pass=%d fail=%d total=%d)",
+                        task.task_id, task.review_round,
+                        tally["pass_count"], tally["fail_count"], tally["reviewer_count"])
+                    acted = True
             elif verdict == VERDICT_FAIL:
-                acted = await self._settle_fail_or_escalate(task_manager, task, tally) or acted
+                if await self._settle_fail_or_escalate(task_manager, task, tally):
+                    team_logger.info("[judge-fail] task=%s round=%d tally(pass=%d fail=%d total=%d)",
+                        task.task_id, task.review_round,
+                        tally["pass_count"], tally["fail_count"], tally["reviewer_count"])
+                    acted = True
             else:
                 await self._handle_undecided(task, tally, now_ms)
         return acted
@@ -263,8 +274,16 @@ class TeamScheduler:
     async def _settle_fail_or_escalate(self, task_manager, task, tally: dict) -> bool:
         max_rounds = task.max_review_rounds or self._default_max_rounds
         feedback = render.format_fail_feedback(tally["fail_feedback"])
+        inspector_avg = tally.get("inspector_avg")
+        if inspector_avg is not None:
+            status = t("scheduler.inspector_avg_pass") if inspector_avg >= 0.85 else t("scheduler.inspector_avg_fail")
+            feedback += t("scheduler.inspector_avg_line", avg=inspector_avg, status=status)
         if task.review_round >= max_rounds:
             await self._escalate(task, render.render_leader_escalation_rounds(task, feedback))
+            round_key = (task.task_id, task.review_round)
+            if task.assignee and round_key not in self._summary_requested:
+                self._summary_requested.add(round_key)
+                await self._send_as_leader(task.assignee, render.meta_rework_summary(task, max_rounds))
             return False
         result = await task_manager.settle_review(task.task_id, "fail", feedback)
         if not result.ok:
@@ -306,13 +325,13 @@ class TeamScheduler:
     # ------------------------------------------------------------------
 
     async def _dispatch_to_reviewer(self, reviewer: str, task: Any) -> None:
-        """Send a review request to one reviewer, spawning a temp harness if needed.
+        """Dispatch a review request by spawning a one-shot temp reviewer harness.
 
-        When ``reviewer`` names an existing team member the legacy
-        ``_send_as_leader`` path applies: a mailbox message is sent and the
-        member is lazily started.  When the reviewer does *not* match any
-        member row it is treated as a role label — the scheduler builds a
-        one-shot ``TeamHarness``, runs the review, and disposes it.
+        The harness inherits the team's base agent spec (model, filesystem
+        tools) augmented with ``verify_task`` + ``view_task`` so it can
+        inspect the deliverable and cast its vote.  The harness is built,
+        run once, and disposed — a crash is logged and the next scheduler
+        scan retries via ``_review_dispatched.discard()``.
         """
         team_logger.info("[scheduler] spawning temp harness", reviewer)
         asyncio.create_task(self._spawn_temp_reviewer(reviewer, task))
@@ -356,17 +375,36 @@ class TeamScheduler:
             dispatch_mode=self._blueprint.spec.dispatch_mode,
         )
         language = self._blueprint.language or "cn"
-        t = make_translator(language)
+        tr = make_translator(language)
 
-        verify_tool = VerifyTaskTool(reviewer_tm, t, desc_key="verify_task_scheduled")
-        view_tool = ViewTaskToolV2(backend, t)
+        verify_tool = VerifyTaskTool(reviewer_tm, tr, desc_key="verify_task_scheduled")
+        view_tool = ViewTaskToolV2(backend, tr)
 
         member_name = reviewer
         harness = None
         try:
+            # Resolve the reviewer's type and instruction from the task's
+            # structured reviewer list so the correct prompt template is used.
+            reviewer_type = "verifier"
+            instruction = ""
+            for detail in (task.reviewer_details() if hasattr(task, 'reviewer_details') else []):
+                if detail.get("reviewer_id") == reviewer:
+                    reviewer_type = detail.get("type", "verifier")
+                    instruction = detail.get("instruction", "")
+                    break
+            template_name = _REVIEWER_TEMPLATE_MAP.get(reviewer_type, "reviewer_verifier")
+            # Inspector loads its scoring dimensions from a shared template
+            # when the leader did not provide one; verifier uses the per-task
+            # ``instruction``. Challenger needs neither.
+            if reviewer_type == "inspector" and not instruction:
+                instruction = load_template("reviewer_dims_for_inspector", language).content
+            system_prompt = load_template(template_name, language).content.format(
+                reviewer=reviewer,
+                instruction=instruction,
+            )
             reviewer_spec = base_agent_spec.model_copy(
                 update={
-                    "system_prompt": load_template("reviewer", language).content.format(reviewer=reviewer), 
+                    "system_prompt": system_prompt,
                     "tools": list(base_agent_spec.tools or []) + [verify_tool, view_tool],
                 }
             )
@@ -376,29 +414,50 @@ class TeamScheduler:
                 language=language,
             ) if self._build_context is not None else None
 
-            harness = TeamHarness.build(
-                agent_spec=reviewer_spec,
-                role=TeamRole.TEAMMATE,
-                member_name=member_name,
-                build_context=reviewer_ctx,
-            )
-            team_logger.info(
-                "[reviewer_built] temp reviewer harness built for %s, task=%s",
-                reviewer,
-                task.task_id,
-            )
             # Use the review request message as the prompt: template
             # rendered at delivery-time against the current task row.
             review_prompt = await render.render_review_request_for_harness(
-                task, language=language,
+                task, language=language, reviewer=reviewer,
             )
-            result = await harness.run_once(review_prompt)
+            # Retry transient model-call failures up to 3 times.
+            # Each attempt builds a fresh harness and disposes the old
+            # one — ``run_once`` tears down tools on every invocation.
+            result = None
+            for attempt in range(3):
+                harness = TeamHarness.build(
+                    agent_spec=reviewer_spec,
+                    role=TeamRole.TEAMMATE,
+                    member_name=member_name,
+                    build_context=reviewer_ctx,
+                )
+                if attempt == 0:
+                    team_logger.info(
+                        "[reviewer_built] temp reviewer harness built for %s, task=%s",
+                        reviewer,
+                        task.task_id,
+                    )
+                result = await harness.run_once(review_prompt)
+                output_str = str(result)
+                if "181001" not in output_str:
+                    break
+                team_logger.warning(
+                    "[reviewer_retry] reviewer %s task=%s attempt=%d/3: %s",
+                    reviewer, task.task_id, attempt + 1, output_str[:200],
+                )
+                try:
+                    await harness.dispose()
+                except Exception:
+                    team_logger.debug("[scheduler] temp reviewer dispose failed for %s", reviewer)
+                await asyncio.sleep(2 * attempt)
             team_logger.info(
                 "[reviewer_finish] reviewer %s, task=%s, output=%s",
                 reviewer,
                 task.task_id,
-                str(result)[:2000]
+                str(result)[:2000] if result else "",
             )
+            # If all retries exhausted, let the next scan re-dispatch.
+            if result is not None and "181001" in str(result):
+                self._review_dispatched.discard((task.task_id, task.review_round))
         except Exception:
             team_logger.error(
                 "[reviewer_fail] temp reviewer %s failed for task %s",
@@ -443,7 +502,10 @@ class TeamScheduler:
         if round_key in self._escalated:
             return
         self._escalated.add(round_key)
-        team_logger.info("[scheduler] escalating task %s round %s to the leader", task.task_id, task.review_round)
+        team_logger.info(
+            "[scheduler] escalating task %s round %s to the leader, message: %s",
+            task.task_id, task.review_round, content,
+        )
         await self._host.deliver_input(content, use_steer=False)
 
     async def _digest_task_done(self, task_manager, task_id: str, title: str, *, verified: bool) -> None:

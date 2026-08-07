@@ -309,7 +309,7 @@ class TeamAgentSpec(BaseModel):
     "predefined" to lock the roster and drop the leader's
     ``spawn_member`` tool.
     """
-    dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
+    dispatch_mode: Literal["autonomous", "scheduled"] = "scheduled"
     """How a task reaches the member that executes it. Static configuration.
 
     Orthogonal to ``team_mode`` (which governs whether the roster can
@@ -323,7 +323,7 @@ class TeamAgentSpec(BaseModel):
     in favour of ``member_complete_task``. Prompts and tool shapes are
     assembled per mode at build time; the mode never changes at runtime.
     """
-    enable_task_verification: bool = False
+    enable_task_verification: bool = True
     """Team-level "verification expected" switch for the verify gate.
 
     Purely prompt-driven: when True the leader's task-creation guidance
@@ -332,15 +332,6 @@ class TeamAgentSpec(BaseModel):
     reviewer). The reviewer machinery itself (column, guards, voting) is
     always available regardless of this flag. Overridable per team
     instance at ``build_team`` time. See F_62.
-    """
-    verify_vote_threshold: float = 2 / 3
-    """Pass quorum for multi-reviewer verification under scheduled dispatch.
-
-    A task in review completes when ``pass_votes >= ceil(threshold * n)``
-    over ``n = len(reviewer)``, and is sent back for rework as soon as
-    that quorum becomes unreachable. Consumed only by the leader-side
-    scheduler (single judge), so it is not mirrored onto ``TeamSpec``.
-    Range ``0 < threshold <= 1``. See F_62.
     """
     default_max_review_rounds: int = 3
     """Default per-task review-round ceiling (scheduled dispatch).
@@ -614,10 +605,6 @@ class TeamAgentSpec(BaseModel):
         The scheduler consumes these without further guarding, so an
         out-of-range value must fail at spec time, not mid-run.
         """
-        if not 0 < self.verify_vote_threshold <= 1:
-            raise ValueError(
-                f"verify_vote_threshold must be in (0, 1], got {self.verify_vote_threshold}",
-            )
         if self.default_max_review_rounds < 1:
             raise ValueError(
                 f"default_max_review_rounds must be >= 1, got {self.default_max_review_rounds}",
