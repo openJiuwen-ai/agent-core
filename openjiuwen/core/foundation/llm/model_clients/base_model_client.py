@@ -206,41 +206,97 @@ class BaseModelClient(ABC):
 
     @staticmethod
     def _extract_cost_info(obj: Any) -> tuple:
-        """Extract cost information from a response or chunk object.
-        Supports three formats:
-        1. ``cost`` as a simple numeric value (int/float)
-        2. ``cost`` / ``usage_cost`` as an object with input/output/total cost attributes
+        """Extract cost information from a response or chunk usage object.
+
+        Supports:
+        1. ``cost`` as a simple numeric value (OpenRouter)
+        2. ``cost`` / ``usage_cost`` as an object/dict with input/output/total
         3. ``cost_details`` with upstream_inference_*_cost fields as fallback
+
+        The OpenAI SDK often strips unknown fields from typed ``Usage`` models.
+        Providers like OpenRouter still put ``cost`` on the wire; it may land in
+        ``model_extra`` / ``__pydantic_extra__``, or the usage object may be a
+        plain dict. Look in all three places.
+
         Returns:
             tuple: (input_cost, output_cost, total_cost)
         """
-        input_cost = 0.
-        output_cost = 0.
-        total_cost = 0.
-        cost_info = getattr(obj, 'cost', None) or getattr(obj, 'usage_cost', None)
-        cost_details = getattr(obj, 'cost_details', None)
-        if cost_info:
-            if isinstance(cost_info, (int, float)):
-                total_cost = float(cost_info)
-            else:
-                input_cost = float(getattr(cost_info, 'input_cost', 0) or
-                                   getattr(cost_info, 'prompt_cost', 0) or 0)
-                output_cost = float(getattr(cost_info, 'output_cost', 0) or
-                                    getattr(cost_info, 'completion_cost', 0) or 0)
-                total_cost = float(getattr(cost_info, 'total_cost', 0) or 0)
+
+        def _get(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            value = getattr(source, key, None)
+            if value is not None:
+                return value
+            extra = getattr(source, "model_extra", None) or getattr(
+                source, "__pydantic_extra__", None
+            )
+            if isinstance(extra, dict):
+                return extra.get(key)
+            return None
+
+        def _to_float(value: Any) -> float:
+            if value is None or isinstance(value, bool):
+                return 0.0
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except ValueError:
+                    return 0.0
+            return 0.0
+
+        def _field_float(source: Any, *keys: str) -> float:
+            for key in keys:
+                amount = _to_float(_get(source, key))
+                if amount:
+                    return amount
+            return 0.0
+
+        input_cost = 0.0
+        output_cost = 0.0
+        total_cost = 0.0
+        cost_info = _get(obj, "cost")
+        if cost_info is None:
+            cost_info = _get(obj, "usage_cost")
+        cost_details = _get(obj, "cost_details")
+
+        if cost_info is not None and cost_info != "":
+            if isinstance(cost_info, (int, float, str)):
+                total_cost = _to_float(cost_info)
+            elif isinstance(cost_info, dict):
+                input_cost = _field_float(cost_info, "input_cost", "prompt_cost")
+                output_cost = _field_float(
+                    cost_info, "output_cost", "completion_cost"
+                )
+                total_cost = _field_float(cost_info, "total_cost", "cost")
                 if not total_cost:
                     total_cost = input_cost + output_cost
-        if cost_details and not input_cost and not output_cost:
-            if isinstance(cost_details, dict):
-                input_cost = float(cost_details.get('upstream_inference_prompt_cost', 0) or 0)
-                output_cost = float(cost_details.get('upstream_inference_completions_cost', 0) or 0)
-                detail_total = float(cost_details.get('upstream_inference_cost', 0) or 0)
             else:
-                input_cost = float(getattr(cost_details, 'upstream_inference_prompt_cost', 0) or 0)
-                output_cost = float(getattr(cost_details, 'upstream_inference_completions_cost', 0) or 0)
-                detail_total = float(getattr(cost_details, 'upstream_inference_cost', 0) or 0)
-            if not total_cost:
-                total_cost = detail_total or (input_cost + output_cost)
+                input_cost = _field_float(cost_info, "input_cost", "prompt_cost")
+                output_cost = _field_float(
+                    cost_info, "output_cost", "completion_cost"
+                )
+                total_cost = _field_float(cost_info, "total_cost", "cost")
+                if not total_cost:
+                    total_cost = input_cost + output_cost
+
+        # cost_details is a fallback only when top-level cost/usage_cost did
+        # not supply any amount (OpenRouter may send both; prefer ``cost``).
+        no_top_level_cost = not (total_cost or input_cost or output_cost)
+        if cost_details is not None and no_top_level_cost:
+            input_cost = _field_float(
+                cost_details, "upstream_inference_prompt_cost"
+            )
+            output_cost = _field_float(
+                cost_details, "upstream_inference_completions_cost"
+            )
+            detail_total = _field_float(cost_details, "upstream_inference_cost")
+            total_cost = detail_total or (input_cost + output_cost)
+
         return input_cost, output_cost, total_cost
 
     def _get_client_name(self) -> str:
