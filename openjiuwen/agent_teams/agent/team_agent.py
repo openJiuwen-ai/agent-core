@@ -1055,8 +1055,10 @@ class TeamAgent(BaseAgent):
                             )
                             compact = False
 
+                    # Default is a live fork (fork="true"/True): full
+                    # injection. Named branches override the capture below.
+                    fork_ctx = ForkContext.from_agent(native)
                     if compact:
-                        fork_ctx = ForkContext.from_agent(native)
                         if ckpt_idx is not None and 0 <= ckpt_idx < len(fork_ctx.messages):
                             fork_ctx.compact_split = ckpt_idx
                         else:
@@ -1067,12 +1069,10 @@ class TeamAgent(BaseAgent):
                             "member=%s; falling back to full context",
                             fork_value, teammate_id,
                         )
-                        fork_ctx = ForkContext.from_agent(native)
                     elif is_named:
                         fork_ctx = ForkContext.from_agent(
                             native, checkpoint=ckpt_idx,
                         )
-                        fork_ctx = ForkContext.from_agent(native)
                     team_logger.debug(
                         "[fork] ForkContext created: msgs=%d empty=%s",
                         len(fork_ctx.messages), fork_ctx.is_empty(),
@@ -1083,7 +1083,7 @@ class TeamAgent(BaseAgent):
                         "checkpoint fork" if is_named else "live fork",
                         teammate_id,
                         len(fork_ctx.messages),
-                        f" split_at={fork_ctx.compact_split}" if fork_ctx.compact_split else "",
+                        f" split_at={fork_ctx.compact_split}" if fork_ctx.compact_split is not None else "",
                     )
 
         ctx = await self._spawn_manager.build_context_from_db(teammate_id)
@@ -1113,7 +1113,12 @@ class TeamAgent(BaseAgent):
                 return agent.resources.harness.get_deep_agent()
 
         team_logger.warning(
-            "Fork source '%s' not found or not in-process", source_name
+            "[fork] fork source '%s' not found or not in-process "
+            "(leader=%s, spawned=%s); fork inheritance will be SKIPPED — "
+            "member starts without inherited context",
+            source_name,
+            self._member_name() or "?",
+            list(self._spawn_manager.spawned_handles.keys()),
         )
         return None
 

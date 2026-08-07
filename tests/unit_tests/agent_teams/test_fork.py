@@ -402,3 +402,197 @@ class TestCompactContext:
         await compact_context(agent, split_at=5)
         ctx = agent.react_agent.context_engine.get_context.return_value
         ctx.set_messages.assert_not_called()
+
+
+# ── _on_teammate_created fork resolution (assembly path) ────────────────────
+
+
+class TestOnTeammateCreatedFork:
+    """Assembly-path tests for ``TeamAgent._on_teammate_created`` fork
+    resolution.
+
+    These guard the runtime wiring that unit-level ``ForkContext`` tests
+    cannot see: live / boolean / named / compact fork handling, the
+    missing-``else``-branch crash regression, and the silent no-fork
+    fallback when the fork source cannot be resolved.
+    """
+
+    # Native context: 1 SystemMessage + 4 conversation messages.
+    # After SystemMessage stripping ForkContext captures 4 messages.
+    _ROLES = ["system", "user", "assistant", "user", "assistant"]
+    _MESSAGE_COUNT = 4
+
+    @classmethod
+    def _make_native(cls):
+        """Return a mock DeepAgent whose context has cls._ROLES messages."""
+        native = MagicMock()
+        msgs = []
+        for i, role in enumerate(cls._ROLES):
+            if role == "system":
+                msgs.append(SystemMessage(content="sys"))
+            elif role == "user":
+                msgs.append(UserMessage(content=f"u{i}"))
+            else:
+                msgs.append(AssistantMessage(content=f"a{i}"))
+        native.get_current_context = MagicMock(return_value=msgs)
+        return native
+
+    @classmethod
+    def _make_agent(
+        cls,
+        fork_info,
+        *,
+        checkpoints=None,
+        source=None,
+    ):
+        """Build a TeamAgent with its runtime parts mocked.
+
+        Args:
+            fork_info: What ``consume_fork_on_spawn`` returns (None = no fork).
+            checkpoints: The leader's ``_named_checkpoints`` mapping.
+            source: When given, register an in-process spawned member under
+                this name so ``_resolve_fork_native`` resolves it.
+        """
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+
+        agent = object.__new__(TeamAgent)
+        agent._configurator = MagicMock()
+        agent._configurator.member_name = "leader-1"
+        agent._configurator.resources = MagicMock()
+        agent._configurator.resources.harness = MagicMock()
+        agent._configurator.resources.harness.get_deep_agent = MagicMock(
+            return_value=cls._make_native()
+        )
+        agent._configurator.team_backend = MagicMock()
+        agent._configurator.team_backend.consume_fork_on_spawn = MagicMock(
+            return_value=fork_info
+        )
+        agent._named_checkpoints = dict(checkpoints or {})
+        agent._spawn_manager = MagicMock()
+        agent._spawn_manager.spawned_handles = {}
+        if source is not None:
+            handle = MagicMock()
+            handle.agent_ref = MagicMock()
+            handle.agent_ref.resources = MagicMock()
+            handle.agent_ref.resources.harness = MagicMock()
+            handle.agent_ref.resources.harness.get_deep_agent = MagicMock(
+                return_value=cls._make_native()
+            )
+            agent._spawn_manager.spawned_handles[source] = handle
+        agent._spawn_manager.build_context_from_db = AsyncMock(
+            return_value=MagicMock()
+        )
+        agent._spawn_manager.spawn_teammate = AsyncMock(return_value=None)
+        return agent
+
+    async def _run(self, agent, member="rectangle-dev"):
+        """Run ``_on_teammate_created`` and return the injected ``fork_from``."""
+        token = set_session_id("fork-assembly-test")
+        try:
+            await agent._on_teammate_created(member)
+        finally:
+            reset_session_id(token)
+        return agent._spawn_manager.spawn_teammate.call_args.kwargs["fork_from"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_live_fork_string_true_injects_full_context(self):
+        agent = self._make_agent(
+            {"fork": "true", "since": None, "source": None, "compact": False}
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert len(fork_from.messages) == self._MESSAGE_COUNT
+        assert fork_from.compact_split is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_live_fork_boolean_true_injects_full_context(self):
+        agent = self._make_agent(
+            {"fork": True, "since": None, "source": None, "compact": False}
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert len(fork_from.messages) == self._MESSAGE_COUNT
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_named_fork_truncates_to_checkpoint(self):
+        agent = self._make_agent(
+            {"fork": "code-ready", "since": None, "source": None, "compact": False},
+            checkpoints={"code-ready": 2},
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert len(fork_from.messages) == 2
+        assert fork_from.compact_split is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_named_fork_missing_falls_back_to_full(self):
+        agent = self._make_agent(
+            {"fork": "no-such", "since": None, "source": None, "compact": False},
+            checkpoints={},
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert len(fork_from.messages) == self._MESSAGE_COUNT
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_named_fork_with_compact_sets_split(self):
+        agent = self._make_agent(
+            {"fork": "code-ready", "since": None, "source": None, "compact": True},
+            checkpoints={"code-ready": 2},
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert len(fork_from.messages) == self._MESSAGE_COUNT
+        assert fork_from.compact_split == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_compact_without_named_ignored(self):
+        agent = self._make_agent(
+            {"fork": "true", "since": None, "source": None, "compact": True},
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert fork_from.compact_split is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_no_fork_injects_none(self):
+        agent = self._make_agent(None)
+        fork_from = await self._run(agent)
+        assert fork_from is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_unresolvable_source_skips_fork(self):
+        agent = self._make_agent(
+            {"fork": "true", "since": None, "source": "base-designer", "compact": False},
+        )
+        fork_from = await self._run(agent)
+        assert fork_from is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_resolvable_source_injects_full_context(self):
+        agent = self._make_agent(
+            {"fork": "true", "since": None, "source": "shape-base", "compact": False},
+            source="shape-base",
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert len(fork_from.messages) == self._MESSAGE_COUNT
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_source_equal_leader_uses_own_native(self):
+        agent = self._make_agent(
+            {"fork": "true", "since": None, "source": "leader-1", "compact": False},
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert len(fork_from.messages) == self._MESSAGE_COUNT
