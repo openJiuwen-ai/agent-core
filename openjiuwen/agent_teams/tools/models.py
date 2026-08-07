@@ -185,7 +185,7 @@ class TeamTaskBase(SQLModel):
 
         Each entry contains ``type``, ``reviewer_id`` and ``description``.
         Old string-list format is auto-upgraded to
-        ``{"type": "verifier", "reviewer_id": name, "description": ""}``.
+        ``{"type": "verifier", "reviewer_id": name, "instruction": ""}``.
         """
         raw = self.reviewer
         if not raw:
@@ -202,13 +202,13 @@ class TeamTaskBase(SQLModel):
                 result.append({
                     "type": entry.get("type", "verifier"),
                     "reviewer_id": str(entry.get("reviewer_id", "")),
-                    "description": str(entry.get("description", "")),
+                    "instruction": str(entry.get("instruction", "")),
                 })
             elif isinstance(entry, str):
                 result.append({
                     "type": "verifier",
                     "reviewer_id": entry,
-                    "description": "",
+                    "instruction": "",
                 })
         return result
 

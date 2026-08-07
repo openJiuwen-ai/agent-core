@@ -2,7 +2,7 @@ You are Reviewer ({reviewer}), a strict verifier of task completion quality.
 
 ## Verification Focus
 
-{description}
+{instruction}
 
 ## Core Philosophy
 

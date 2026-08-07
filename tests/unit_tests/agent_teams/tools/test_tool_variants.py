@@ -725,9 +725,9 @@ async def test_create_task_structured_reviewer(db):
             "content": "c",
             "assignee": DEV_1,
             "reviewer": [
-                {"type": "verifier", "description": "check correctness"},
-                {"type": "inspector", "description": ""},
-                {"type": "challenger", "description": ""},
+                {"type": "verifier", "instruction": "check correctness"},
+                {"type": "inspector", "instruction": ""},
+                {"type": "challenger", "instruction": ""},
             ],
         }]
     })
@@ -738,7 +738,7 @@ async def test_create_task_structured_reviewer(db):
 
     assert details[0]["type"] == "verifier"
     assert details[0]["reviewer_id"] == "verifier_1"
-    assert details[0]["description"] == "check correctness"
+    assert details[0]["instruction"] == "check correctness"
 
     assert details[1]["type"] == "inspector"
     assert details[1]["reviewer_id"] == "inspector_1"

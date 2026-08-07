@@ -2,7 +2,7 @@
 
 ## 验证侧重点
 
-{description}
+{instruction}
 
 ## 核心理念
 

@@ -16,7 +16,7 @@
 
 ### 打分表
 
-{description}
+{instruction}
 
 ### 逐维度打分
 

@@ -383,24 +383,24 @@ class TeamScheduler:
         member_name = reviewer
         harness = None
         try:
-            # Resolve the reviewer's type and description from the task's
+            # Resolve the reviewer's type and instruction from the task's
             # structured reviewer list so the correct prompt template is used.
             reviewer_type = "verifier"
-            description = ""
+            instruction = ""
             for detail in (task.reviewer_details() if hasattr(task, 'reviewer_details') else []):
                 if detail.get("reviewer_id") == reviewer:
                     reviewer_type = detail.get("type", "verifier")
-                    description = detail.get("description", "")
+                    instruction = detail.get("instruction", "")
                     break
             template_name = _REVIEWER_TEMPLATE_MAP.get(reviewer_type, "reviewer_verifier")
             # Inspector loads its scoring dimensions from a shared template
             # when the leader did not provide one; verifier uses the per-task
-            # ``description``. Challenger needs neither.
-            if reviewer_type == "inspector" and not description:
-                description = load_template("reviewer_dims_for_inspector", language).content
+            # ``instruction``. Challenger needs neither.
+            if reviewer_type == "inspector" and not instruction:
+                instruction = load_template("reviewer_dims_for_inspector", language).content
             system_prompt = load_template(template_name, language).content.format(
                 reviewer=reviewer,
-                description=description,
+                instruction=instruction,
             )
             reviewer_spec = base_agent_spec.model_copy(
                 update={

@@ -5,7 +5,8 @@
 - `create_task` 创建任务时**必须指定 assignee**，把任务直接指派给承担它的成员
 - **成员必须先于任务存在，且不能是 leader**：`assignee` 只能填已经创建出来的非 leader 成员名，所以先 `spawn_teammate` 建人，再 `create_task` 派活。**reviewer 不需要提前 spawn**——以结构化对象写入 `reviewer` 字段即可
 - **调度框架代你完成全部交接**：任务解锁自动开工并通知承担者、完成后自动派发验收、验收通过/打回自动通知——**不要用 `send_message` 广播启动成员，也不要逐个通知开工**
-- 每个关键交付任务必须指派 1~N 个 `reviewer`（琐碎任务可不配）；多验证者按一票否决制判定（任一 reviewer 投 fail 即打回），可用 `max_review_rounds` 限制返工轮数。reviewer 是结构化对象 `{type, reviewer_id, description}`，调度框架会根据 type 自动创建对应类型的临时验证智能体
+- 每个关键交付任务必须指派 1~N 个 `reviewer`（琐碎任务可不配）；多验证者按一票否决制判定（任一 reviewer 投 fail 即打回），可用 `max_review_rounds` 限制返工轮数。reviewer 是结构化对象 `{type, reviewer_id, instruction}`，调度框架会根据 type 自动创建对应类型的临时验证智能体
+
 - 你会收到调度器的输入：任务终态摘要、**升级消息（验收轮数耗尽 / 验收停摆——需要你处置：改派、调整验证者、取消或重新规划）**、全部完成的收尾提示
 - **成员不会自主认领**：没有 assignee 的任务永远不会有人执行。每个任务都必须有明确的承担者
 - 执行中发现能力缺口时，同样先 `spawn_teammate` 建人，再 `create_task`（或 `update_task(assignee=...)` 改派已有任务）
@@ -13,17 +14,16 @@
 
 ## 验证者类型与分配
 
-`create_task` 的 `reviewer` 字段填写结构化对象列表。reviewer 系统是否生效取决于 build_team 的 `enable_task_verification` 参数（详见 build_team 的工具说明）。每项两个字段——`type` 和 `description`：
+`create_task` 的 `reviewer` 字段填写结构化对象列表。reviewer 系统是否生效取决于 build_team 的 `enable_task_verification` 参数（详见 build_team 的工具说明）。每项两个字段——`type` 和 `instruction`：
 
 | 字段 | 必填 | 说明 |
 |------|:---:|------|
 | `type` | 必填 | `"verifier"` / `"inspector"` / `"challenger"` |
-| `description` | 按需 | **verifier**：怎么验（跑什么测试、关注什么方面），不重复 content 中已有的数值。**inspector**：打分维度表（见下方说明），留空则使用默认 6 维通用打分表。**challenger**：不需要 |
-
+| `instruction` | 按需 | **verifier**：怎么验（跑什么测试、关注什么方面），不重复 content 中已有的数值。**inspector**：打分维度表（见下方说明），留空则使用默认 6 维通用打分表。**challenger**：不需要 |
 ### 三种验证者
 
-- **verifier（验证者）**：逐项对照验收标准，可执行测试。通过=pass，不通过=fail。任何 verifier 投 fail → 打回返工。`description` 字段告知验证者**怎么验**
-- **inspector（检视者）**：从验收标准中提取维度，每个维度 0~1 分，加权求和输出 0~1 总分。全部 inspector 平均分 ≥ 0.85 才算通过。`description` 字段填写打分维度表（编写指南见下方），留空则使用默认 6 维通用打分表。
+- **verifier（验证者）**：逐项对照验收标准，可执行测试。通过=pass，不通过=fail。任何 verifier 投 fail → 打回返工。`instruction` 字段告知验证者**怎么验**
+- **inspector（检视者）**：从验收标准中提取维度，每个维度 0~1 分，加权求和输出 0~1 总分。全部 inspector 平均分 ≥ 0.85 才算通过。`instruction` 字段填写打分维度表（编写指南见下方），留空则使用默认 6 维通用打分表。
 - **challenger（挑战者）**：从对抗性视角发现盲区和弱点。pass 是默认结果——只在确认存在会导致崩溃、数据错误、安全漏洞或违反核心验收标准的阻塞性缺陷时才投 fail。建议仅限于文档完善、代码风格优化等非阻塞性改进时投 pass，把建议附在 feedback 中供作者参考
 
 ### 打分表编写指南
@@ -91,9 +91,9 @@ create_task(tasks=[{
   "content": "实现原地快速排序算法...",
   "assignee": "algo-dev",
   "reviewer": [
-    {"type": "verifier", "description": "运行单元测试，重点验证边界情况（空、单元素、重复）与 sorted() 结果的一致性"},
-    {"type": "verifier", "description": "跑性能测试，对比 sorted() 的耗时倍率，并检查是否真正原地排序"},
-    {"type": "inspector", "description": "| 维度 | 权重 | 描述 |\n| --- | --- | --- |\n| 正确 | 0.3 | ..."}
+    {"type": "verifier", "instruction": "运行单元测试，重点验证边界情况（空、单元素、重复）与 sorted() 结果的一致性"},
+    {"type": "verifier", "instruction": "跑性能测试，对比 sorted() 的耗时倍率，并检查是否真正原地排序"},
+    {"type": "inspector", "instruction": "| 维度 | 权重 | 描述 |\n| --- | --- | --- |\n| 正确 | 0.3 | ..."}
   ]
 }])
 ```

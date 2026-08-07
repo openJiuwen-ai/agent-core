@@ -84,7 +84,7 @@ def _scheduled_task_node_schema(t: Translator) -> dict:
                             "description": t("create_task", "task.reviewer_type"),
                         },
                         "reviewer_id": {"type": "string", "description": t("create_task", "task.reviewer_id")},
-                        "description": {"type": "string", "description": t("create_task", "task.reviewer_desc")},
+                        "instruction": {"type": "string", "description": t("create_task", "task.reviewer_instruction")},
                     },
                     "required": ["type"],
                 },
@@ -188,12 +188,12 @@ def _clean_reviewers(spec: dict) -> list[dict]:
                 result.append({
                     "type": rtype,
                     "reviewer_id": rid,
-                    "description": str(entry.get("description", "")),
+                    "instruction": str(entry.get("instruction", "")),
                 })
         elif isinstance(entry, str):
             stripped = str(entry).strip()
             if stripped:
-                result.append({"type": "verifier", "reviewer_id": stripped, "description": ""})
+                result.append({"type": "verifier", "reviewer_id": stripped, "instruction": ""})
     return result
 
 
@@ -579,7 +579,7 @@ class UpdateTaskTool(TeamTool):
                                 "enum": ["verifier", "inspector", "challenger"],
                                 "description": t("update_task", "reviewer_type"),
                             },
-                            "description": {"type": "string", "description": t("update_task", "reviewer_desc")},
+                            "instruction": {"type": "string", "description": t("update_task", "reviewer_instruction")},
                         },
                         "required": ["type"],
                     },

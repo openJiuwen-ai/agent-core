@@ -140,12 +140,12 @@ async def render_review_request_for_harness(task: Any, *, language: str = "cn", 
     body = body.replace("{{task.review_round}}", str(getattr(task, "review_round", 0)))
     body = body.replace("{{task.max_review_rounds}}", str(getattr(task, "max_review_rounds") or ""))
     body = body.replace("{{task.reviewer}}", ", ".join(getattr(task, "reviewers", lambda: [])() or []))
-    # Inject per-reviewer description from the structured reviewer list.
-    description = ""
+    # Inject per-reviewer instruction from the structured reviewer list.
+    instruction = ""
     if reviewer:
         for detail in (task.reviewer_details() if hasattr(task, 'reviewer_details') else []):
             if detail.get("reviewer_id") == reviewer:
-                description = detail.get("description", "")
+                instruction = detail.get("instruction", "")
                 break
-    body = body.replace("{{task.reviewer_description}}", description)
+    body = body.replace("{{task.reviewer_instruction}}", instruction)
     return body

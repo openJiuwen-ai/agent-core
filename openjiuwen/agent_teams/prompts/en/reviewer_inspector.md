@@ -16,7 +16,7 @@ Get the deliverable file paths from the task content. Use `list_files` to explor
 
 ### Scoring Rubric
 
-{description}
+{instruction}
 
 ### Score Each Dimension
 
