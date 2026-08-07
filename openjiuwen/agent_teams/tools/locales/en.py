@@ -39,6 +39,10 @@ STRINGS: dict[str, str] = {
         "reviewers; trivial chores may skip them); a reviewed task only completes after "
         "verification passes"
     ),
+    # ===== checkpoint ==========================================================
+    # checkpoint._desc lives in descs/en/checkpoint.md
+    "checkpoint.name": "Semantic snapshot name (e.g. code-ready). Used by later fork calls to reference this snapshot",
+    "checkpoint.description": "Optional description of why this checkpoint was taken",
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/clean_team.md
     # ===== spawn_teammate ======================================================
@@ -83,6 +87,23 @@ STRINGS: dict[str, str] = {
         "Narrow the teammate's tool permissions (only tightening, never loosening). "
         "Keys are tool names, values are permission levels: 'allow', 'ask', or 'deny'. "
         "Example: {\"bash\": \"deny\", \"write_file\": \"ask\"}"
+    ),
+    "spawn_teammate.fork": (
+        "Inherit context from an existing member to skip repeated file reading "
+        "and searching. true: inherit the caller's full current context. "
+        "A string (e.g. 'code-ready'): inherit from the named checkpoint snapshot. "
+        "Omit for a fresh empty context. All inherited SystemMessages are stripped "
+        "during capture — the source member's role identity never leaks to the new member"
+    ),
+    "spawn_teammate.fork_source": (
+        "Name of the member whose context to fork from. Defaults to the leader. "
+        "Set to a teammate name (e.g. 'understander') to fork from that member. "
+        "The source member must already be spawned and running in-process"
+    ),
+    "spawn_teammate.compact": (
+        "Compact the inherited context before injection. Messages before "
+        "the checkpoint are compressed into a summary; messages after "
+        "are kept verbatim. Only effective with a named checkpoint fork"
     ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/en/spawn_human_agent.md

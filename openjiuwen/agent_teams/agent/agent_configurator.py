@@ -879,6 +879,17 @@ class AgentConfigurator:
             on_team_built=on_team_built,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
         )
+
+        def _snapshot_length() -> int:
+            h = self.harness
+            if h is not None and hasattr(h, "get_deep_agent"):
+                native = h.get_deep_agent()
+                if native is not None:
+                    return len(native.get_current_context())
+            return 0
+
+        agent_team.set_snapshot_length(_snapshot_length)
+
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager
         self.message_manager = agent_team.message_manager

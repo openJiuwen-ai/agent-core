@@ -293,6 +293,12 @@ class TeamBackend:
         # only the default ones.
         self._cleanup_paths: set[str] = set()
 
+        # Fork / checkpoint support
+        self._pending_forks: dict[str, dict] = {}    # member_name → {fork, since, source}
+        self._checkpoints: dict[str, int] = {}       # name → message_count
+        self._snapshot_length: Callable[[], int] | None = None
+        self._store_checkpoint_fn: Callable[[str, int], None] | None = None
+
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
 
     def register_cleanup_path(self, path: Optional[str]) -> None:
@@ -304,6 +310,80 @@ class TeamBackend:
         if not path:
             return
         self._cleanup_paths.add(str(Path(path).expanduser()))
+
+    # ------------------------------------------------------------------
+    # Fork / checkpoint support
+    # ------------------------------------------------------------------
+
+    def set_snapshot_length(self, fn) -> None:
+        """Register the callback that returns this member's message count."""
+        self._snapshot_length = fn
+
+    def set_store_checkpoint_fn(self, fn) -> None:
+        """Register the callback for persisting a named checkpoint."""
+        self._store_checkpoint_fn = fn
+
+    def mark_fork_on_spawn(
+        self,
+        member: str,
+        fork_value,
+        *,
+        fork_source: str | None = None,
+        compact: bool = False,
+    ) -> None:
+        self._pending_forks[member] = {
+            "fork": fork_value,
+            "since": None,
+            "source": fork_source,
+            "compact": compact,
+        }
+        team_logger.debug(
+            "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s "
+            "compact=%s team_name=%s pending_keys=%s",
+            member, fork_value, fork_source, compact,
+            self.team_name, list(self._pending_forks.keys()),
+        )
+
+    def consume_fork_on_spawn(self, member: str) -> dict | None:
+        result = self._pending_forks.pop(member, None)
+        team_logger.debug(
+            "[fork] consume_fork_on_spawn: member=%s result=%s "
+            "remaining_pending=%s team_name=%s",
+            member, result, list(self._pending_forks.keys()),
+            self.team_name,
+        )
+        return result
+
+    def snapshot_context_length(self) -> int:
+        if self._snapshot_length is not None:
+            result = self._snapshot_length()
+            team_logger.debug(
+                "[fork] snapshot_context_length: member=%s len=%d",
+                self.member_name, result,
+            )
+            return result
+        team_logger.debug(
+            "[fork] snapshot_context_length: member=%s NO callback",
+            self.member_name,
+        )
+        return 0
+
+    def store_checkpoint(self, name: str, count: int) -> None:
+        team_logger.debug(
+            "[fork] store_checkpoint: member=%s name=%s count=%d "
+            "has_store_fn=%s",
+            self.member_name, name, count,
+            self._store_checkpoint_fn is not None,
+        )
+        if self._store_checkpoint_fn is not None:
+            self._store_checkpoint_fn(name, count)
+        else:
+            self._checkpoints[name] = count
+
+    def get_checkpoints(self) -> dict[str, int]:
+        return dict(self._checkpoints)
+
+    # ------------------------------------------------------------------
 
     async def _remove_cleanup_paths(self) -> None:
         """Remove every registered cleanup path with ``shutil.rmtree``.

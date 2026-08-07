@@ -47,6 +47,7 @@ SHARED_TOOLS: set[str] = {
     # Messaging tools
     "send_message",   # Send a message (point-to-point or broadcast)
     "workspace_meta", # Workspace lock management and version history
+    "checkpoint",     # Save a named snapshot of current conversation context
 }
 
 # Member-only tools under scheduled dispatch. The leader assigns every task,

@@ -30,6 +30,10 @@ STRINGS: dict[str, str] = {
         "开启后你在创建任务时应按自己的判断为任务指派 0~N 个 reviewer（关键交付必配、"
         "琐碎任务可不配）；带 reviewer 的任务完成后进入验收，通过才算完成"
     ),
+    # ===== checkpoint ==========================================================
+    # checkpoint._desc lives in descs/cn/checkpoint.md
+    "checkpoint.name": "快照名（语义化 slug，如 code-ready）。后续 fork 通过此名引用",
+    "checkpoint.description": "可选描述，说明为何在此打快照",
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/cn/clean_team.md
     # ===== spawn_teammate ======================================================
@@ -64,6 +68,21 @@ STRINGS: dict[str, str] = {
         "收窄该 teammate 的工具权限（只能收紧，不能放宽）。"
         "键为工具名，值为权限级别：'allow'、'ask' 或 'deny'。"
         "示例：{\"bash\": \"deny\", \"write_file\": \"ask\"}"
+    ),
+    "spawn_teammate.fork": (
+        "从已有成员继承上下文，跳过重复的文件读取和搜索。"
+        "true：继承调用者当前全部上下文。"
+        "字符串（如 'code-ready'）：从该名称的 checkpoint 快照继承上下文。"
+        "不传则新成员从空上下文启动。所有继承的消息中，SystemMessage 会被自动剥离——"
+        "源成员的角色身份不会泄漏给新成员"
+    ),
+    "spawn_teammate.fork_source": (
+        "上下文来源成员名。不填默认从 leader 取。填某 teammate 名（如 'understander'）"
+        "则从该成员取上下文。该成员必须已通过 spawn_teammate 拉起来，且为 in-process 模式"
+    ),
+    "spawn_teammate.compact": (
+        "启用上下文压缩。checkpoint 之前的旧消息压缩为摘要，"
+        "checkpoint 之后的分析全量保留。仅配合 checkpoint fork 使用"
     ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/cn/spawn_human_agent.md
