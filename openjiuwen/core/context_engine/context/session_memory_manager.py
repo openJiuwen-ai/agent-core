@@ -370,11 +370,12 @@ class SessionMemoryUpdateAgent:
         model: Model,
         prompt_messages: List[BaseMessage],
     ):
+        from openjiuwen.core.context_engine.processor.base import _invoke_via_stream
         attempts = self._config.direct_replace_max_retries + 1
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                return await model.invoke(messages=prompt_messages, tools=None)
+                return await _invoke_via_stream(model, messages=prompt_messages, tools=None)
             except Exception as exc:
                 last_error = exc
                 if attempt >= attempts:

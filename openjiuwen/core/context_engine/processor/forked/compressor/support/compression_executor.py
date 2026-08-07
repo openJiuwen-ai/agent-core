@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any
 
 from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.context_engine.processor.base import _invoke_via_stream
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 
 
@@ -130,7 +131,7 @@ class CompressionExecutor:
         if request.output_parser is not None:
             kwargs["output_parser"] = request.output_parser
         try:
-            response = await self._model.invoke(**kwargs)
+            response = await _invoke_via_stream(self._model, **kwargs)
         except Exception as exc:
             raise classify_compression_error(exc) from exc
         self._last_response = response

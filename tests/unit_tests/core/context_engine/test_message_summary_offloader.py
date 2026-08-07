@@ -27,6 +27,26 @@ from tests.unit_tests.core.context_engine._stream_state_helpers import (
 )
 
 
+def _stream_side_effect(response):
+    """Convert a response object into an async gen function for mocking model.stream."""
+    content = getattr(response, 'content', '') or ''
+    parser_content = getattr(response, 'parser_content', None)
+    tool_calls = getattr(response, 'tool_calls', None)
+    if not isinstance(tool_calls, list):
+        tool_calls = None
+    chunk = AssistantMessage(
+        content=content,
+        tool_calls=tool_calls,
+        parser_content=parser_content,
+        finish_reason='stop',
+    )
+
+    async def _gen(*args, **kwargs):
+        yield chunk
+
+    return _gen
+
+
 def assert_offload_saved(context: SessionModelContext, offload_msg: OffloadMixin, expected_content: str) -> None:
     saved_messages = context.save_state()["offload_messages"].get(offload_msg.offload_handle)
     assert saved_messages
@@ -79,7 +99,7 @@ class TestMessageSummaryOffloader:
         with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
               as mock_model_class):
             mock_model_instance = MagicMock()
-            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content="summarized content"))
+            mock_model_instance.stream = MagicMock(side_effect=_stream_side_effect(AssistantMessage(content="summarized content")))
             mock_model_class.return_value = mock_model_instance
             engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
             context = await engine.create_context(
@@ -152,7 +172,7 @@ class TestMessageSummaryOffloader:
         with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
               as mock_model_class):
             mock_model_instance = MagicMock()
-            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=summarized_content))
+            mock_model_instance.stream = MagicMock(side_effect=_stream_side_effect(AssistantMessage(content=summarized_content)))
             mock_model_class.return_value = mock_model_instance
             
             offloader = MessageSummaryOffloader(default_config)
@@ -167,8 +187,8 @@ class TestMessageSummaryOffloader:
             assert summarized_content in result.content
             assert_offload_saved(context, result, original_message.content)
             
-            mock_model_instance.invoke.assert_called_once()
-            call_args = mock_model_instance.invoke.call_args[0][0]
+            mock_model_instance.stream.assert_called_once()
+            call_args = mock_model_instance.stream.call_args.kwargs["messages"]
             assert len(call_args) == 1
             assert isinstance(call_args[0], UserMessage)
             assert original_content in call_args[0].content
@@ -183,7 +203,7 @@ class TestMessageSummaryOffloader:
         with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
               as mock_model_class):
             mock_model_instance = MagicMock()
-            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=summarized_content))
+            mock_model_instance.stream = MagicMock(side_effect=_stream_side_effect(AssistantMessage(content=summarized_content)))
             mock_model_class.return_value = mock_model_instance
             
             offloader = MessageSummaryOffloader(custom_config)
@@ -198,7 +218,7 @@ class TestMessageSummaryOffloader:
             assert summarized_content in result.content
             assert_offload_saved(context, result, original_message.content)
 
-            call_args = mock_model_instance.invoke.call_args[0][0]
+            call_args = mock_model_instance.stream.call_args.kwargs["messages"]
             assert len(call_args) == 1
             assert original_content in call_args[0].content
 
@@ -222,7 +242,7 @@ class TestMessageSummaryOffloader:
             with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
                   as mock_model_class):
                 mock_model_instance = MagicMock()
-                mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=response_content))
+                mock_model_instance.stream = MagicMock(side_effect=_stream_side_effect(AssistantMessage(content=response_content)))
                 mock_model_class.return_value = mock_model_instance
                 
                 offloader = MessageSummaryOffloader(default_config)
@@ -249,7 +269,7 @@ class TestMessageSummaryOffloader:
         with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
               as mock_model_class):
             mock_model_instance = MagicMock()
-            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=response_content))
+            mock_model_instance.stream = MagicMock(side_effect=_stream_side_effect(AssistantMessage(content=response_content)))
             mock_model_class.return_value = mock_model_instance
             
             offloader = MessageSummaryOffloader(default_config)
@@ -270,7 +290,7 @@ class TestMessageSummaryOffloader:
         with (patch('openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model')
               as mock_model_class):
             mock_model_instance = MagicMock()
-            mock_model_instance.invoke = AsyncMock(return_value=AssistantMessage(content=summarized_content))
+            mock_model_instance.stream = MagicMock(side_effect=_stream_side_effect(AssistantMessage(content=summarized_content)))
             mock_model_class.return_value = mock_model_instance
             
             offloader = MessageSummaryOffloader(default_config)

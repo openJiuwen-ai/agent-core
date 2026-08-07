@@ -511,7 +511,7 @@ class FullCompactProcessor(ContextProcessor):
             UserMessage(content=self._serialize_messages(messages)),
         ]
         try:
-            response = await self._model.invoke(messages=prompt_messages, tools=None)
+            response = await _invoke_via_stream(self._model, messages=prompt_messages, tools=None)
             self._record_compression_usage(response)
             content = (response.content or "").strip()
             if not content:

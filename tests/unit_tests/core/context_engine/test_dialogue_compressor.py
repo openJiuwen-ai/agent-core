@@ -26,6 +26,26 @@ from tests.unit_tests.core.context_engine._stream_state_helpers import (
 )
 
 
+def _stream_side_effect(response):
+    """Convert a response object into an async gen function for mocking model.stream."""
+    content = getattr(response, "content", "") or ""
+    parser_content = getattr(response, "parser_content", None)
+    tool_calls = getattr(response, "tool_calls", None)
+    if not isinstance(tool_calls, list):
+        tool_calls = None
+    chunk = AssistantMessage(
+        content=content,
+        tool_calls=tool_calls,
+        parser_content=parser_content,
+        finish_reason="stop",
+    )
+
+    async def _gen(*args, **kwargs):
+        yield chunk
+
+    return _gen
+
+
 def create_tool_call_list(ids: list[str]) -> list[ToolCall]:
     return [ToolCall(id=tool_call_id, name="test-tool", type="function", arguments="") for tool_call_id in ids]
 
@@ -118,7 +138,7 @@ class TestDialogueCompressor:
             "openjiuwen.core.context_engine.processor.compressor.dialogue_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
 
             compressor = _TestableDialogueCompressor(
@@ -215,7 +235,7 @@ class TestDialogueCompressor:
             "openjiuwen.core.context_engine.processor.compressor.dialogue_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
             ctx = await create_context_with_dialogue_compressor(
                 DialogueCompressorConfig(
@@ -278,7 +298,7 @@ class TestDialogueCompressor:
             "openjiuwen.core.context_engine.processor.compressor.dialogue_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
 
             compressor = DialogueCompressor(
@@ -302,5 +322,5 @@ class TestDialogueCompressor:
                 ],
             )
 
-            model_messages = mock_model.invoke.call_args[0][0]
+            model_messages = mock_model.stream.call_args.kwargs["messages"]
             assert "Task Data Preservation Expert" in model_messages[0].content
