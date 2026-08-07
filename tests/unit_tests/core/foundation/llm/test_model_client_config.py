@@ -7,8 +7,13 @@ from pydantic import ValidationError
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.foundation.llm import BaseModelClient
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ProviderType
+from openjiuwen.core.foundation.llm import AnthropicModelClient, BaseModelClient
+from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
+    LLMApiMode,
+    ModelClientConfig,
+    ProviderType,
+)
 
 
 class _TempMockClient(BaseModelClient):
@@ -93,6 +98,47 @@ def test_model_client_config_requires_api_key_for_non_openai_account_provider():
 
     assert error.value.code == StatusCode.MODEL_SERVICE_CONFIG_ERROR.code
     assert "api_key is required for provider OpenAI" in str(error.value)
+
+
+def test_model_client_config_allows_openai_without_api_key_for_none_auth():
+    cfg = ModelClientConfig(
+        client_provider=ProviderType.OpenAI,
+        api_base="http://localhost:11434/v1",
+        auth_mode=LLMAuthMode.NoneAuth,
+        endpoint_profile="ollama",
+    )
+
+    assert cfg.client_provider == ProviderType.OpenAI
+    assert cfg.auth_mode == LLMAuthMode.NoneAuth.value
+    assert cfg.api_key == ""
+
+
+def test_model_client_config_fills_local_profile_default_api_base():
+    cfg = ModelClientConfig(
+        client_provider=ProviderType.OpenAI,
+        auth_mode=LLMAuthMode.NoneAuth,
+        endpoint_profile="ollama",
+    )
+
+    assert cfg.api_base == "http://localhost:11434/v1"
+
+
+def test_anthropic_model_client_is_exported_from_llm_package():
+    assert AnthropicModelClient.__name__ == "AnthropicModelClient"
+
+
+def test_model_client_config_allows_openai_responses_oauth_without_api_key():
+    cfg = ModelClientConfig(
+        client_provider=ProviderType.OpenAI,
+        api_base="https://chatgpt.com/backend-api/codex",
+        api_mode=LLMApiMode.Responses,
+        auth_mode=LLMAuthMode.OpenAIAccountOAuth,
+    )
+
+    assert cfg.client_provider == ProviderType.OpenAI
+    assert cfg.api_mode == LLMApiMode.Responses.value
+    assert cfg.auth_mode == LLMAuthMode.OpenAIAccountOAuth.value
+    assert cfg.api_key == ""
 
 
 def test_model_client_config_requires_api_base_for_top_level_provider():

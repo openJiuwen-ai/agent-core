@@ -1279,6 +1279,7 @@ class ReActAgent(BaseAgent):
             return AssistantMessage(content="", tool_calls=[])
         return AssistantMessage(
             content=chunk.content or "",
+            metadata=chunk.metadata,
             tool_calls=chunk.tool_calls or [],
             usage_metadata=chunk.usage_metadata,
             reasoning_content=chunk.reasoning_content,
@@ -2412,6 +2413,7 @@ class ReActAgent(BaseAgent):
                             await context.add_messages(
                                 AssistantMessage(
                                     content=ai_message.content,
+                                    metadata=ai_message.metadata,
                                     tool_calls=ai_message.tool_calls,
                                     reasoning_content=ai_message.reasoning_content,
                                     usage_metadata=ai_message.usage_metadata,
