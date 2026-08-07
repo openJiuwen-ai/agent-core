@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import copy
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import yaml
 
@@ -20,6 +20,7 @@ from openjiuwen.core.common.logging.loguru.config_provider import (
     build_loguru_logger_config,
     load_loguru_backend_config,
 )
+from openjiuwen.core.common.logging.utils import normalize_and_validate_log_path
 
 _BACKEND_LOADERS = {
     "default": load_default_backend_config,
@@ -45,6 +46,27 @@ class LogConfig:
 
     def load_from_dict(self, logging_config: Dict[str, Any]) -> None:
         self._log_config = self._normalize_loaded_config(copy.deepcopy(logging_config))
+
+    def set_log_path(self, log_path: Union[str, os.PathLike[str]]) -> str:
+        """Update the logging root directory on the current config snapshot.
+
+        Expands ``~``, resolves to an absolute path, and creates the directory
+        when missing. Relative ``*_log_file`` values continue to resolve under
+        this root.
+
+        Returns:
+            Normalized absolute ``log_path`` with a trailing separator.
+        """
+        expanded = os.path.expanduser(os.fspath(log_path))
+        normalized = normalize_and_validate_log_path(expanded)
+        os.makedirs(normalized, exist_ok=True)
+        if not normalized.endswith(("/", "\\")):
+            normalized = normalized + os.sep
+
+        cfg = self.get_snapshot()
+        cfg["log_path"] = normalized
+        self.load_from_dict(cfg)
+        return normalized
 
     def get_snapshot(self) -> Dict[str, Any]:
         return copy.deepcopy(self._log_config)
@@ -159,6 +181,22 @@ def configure_log_config(logging_config: Dict[str, Any]) -> None:
     from openjiuwen.core.common.logging.manager import LogManager
 
     LogManager.reset()
+
+
+def set_log_path(log_path: Union[str, os.PathLike[str]]) -> str:
+    """Set the global logging root directory and recreate loggers.
+
+    Intended for hosts that choose a runtime log directory (for example under
+    an application data dir) instead of hardcoding ``log_path`` in YAML.
+
+    Returns:
+        Normalized absolute ``log_path`` with a trailing separator.
+    """
+    normalized = log_config.set_log_path(log_path)
+    from openjiuwen.core.common.logging.manager import LogManager
+
+    LogManager.reset()
+    return normalized
 
 
 def get_log_config_snapshot() -> Dict[str, Any]:

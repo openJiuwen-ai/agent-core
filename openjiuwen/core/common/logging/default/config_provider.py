@@ -183,18 +183,18 @@ def build_default_logger_config(logging_config: Dict[str, Any], log_type: str) -
 
 def _get_log_path(logging_config: Dict[str, Any]) -> str:
     log_path = logging_config.get("log_path", DEFAULT_INNER_LOG_CONFIG.get("log_path", "./logs/"))
-    normalize_and_validate_log_path(log_path)
-    return log_path
+    expanded_log_path = os.path.expanduser(os.fspath(log_path))
+    return normalize_and_validate_log_path(expanded_log_path)
 
 
 def _resolve_log_file(log_path: str, log_file: str) -> str:
-    expanded_log_file = os.path.expanduser(log_file)
+    expanded_log_file = os.path.expanduser(os.fspath(log_file))
     if os.path.isabs(expanded_log_file):
         full_log_file = os.path.abspath(expanded_log_file)
     else:
-        full_log_file = os.path.join(log_path, log_file)
-    normalize_and_validate_log_path(full_log_file)
-    return full_log_file
+        expanded_log_path = os.path.expanduser(os.fspath(log_path))
+        full_log_file = os.path.join(expanded_log_path, expanded_log_file)
+    return normalize_and_validate_log_path(full_log_file)
 
 
 def _get_logger_level_override(logging_config: Dict[str, Any], log_type: str) -> Optional[int]:
