@@ -21,6 +21,17 @@ Once HITT is on, the following rules apply to every `role=human_agent` member:
 - Once one of them has claimed a task, you cannot cancel or reassign it — only `send_message` nudges addressed to that specific human are allowed;
 - Direct conversation with a human member **must** go through `send_message(to="<human_member_name>", ...)`; plain text is invisible.
 
+## enable_task_verification
+
+Controls whether the reviewer system is active. Uses two-layer semantics — the user's config is a ceiling; you choose within it:
+
+- User config false → your setting is ignored, the reviewer system is force-disabled
+- User config true → you may choose freely:
+  - true (default): active. Production code, formal design, core features — critical tasks must carry reviewers
+  - false: disabled. Prototypes, quick experiments, one-off temporary work — tasks complete directly with no review; any reviewers in create_task are silently stripped
+
+This primarily affects scheduled dispatch mode. When unsure, use true.
+
 ## Task Design Principles
 - Describe goals, not steps: content should contain goals, acceptance criteria, and constraints — not specific operations
 - Single owner: each task is carried by exactly one teammate who owns delivery

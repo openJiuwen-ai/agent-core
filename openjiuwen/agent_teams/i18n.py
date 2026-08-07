@@ -148,6 +148,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "scheduler.leader_all_done": (
             "[调度器] 任务看板已全部终结（共 {count} 个任务）。请汇总团队执行结果，向用户交付最终结论。"
         ),
+        "scheduler.inspector_avg_line": (
+            "\n- [检视者平均分] {avg:.2f} / 0.85 ({status})\n"
+        ),
+        "scheduler.inspector_avg_pass": "达标",
+        "scheduler.inspector_avg_fail": "未达标",
         "scheduler.none": "（无）",
         "dispatcher.msg_type_broadcast": "广播消息",
         "dispatcher.msg_type_direct": "单播消息",
@@ -414,6 +419,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "[Scheduler] Every task on the board is terminal ({count} task(s) total). Summarize "
             "the team's results and deliver the final conclusion to the user."
         ),
+        "scheduler.inspector_avg_line": (
+            "\n- [Inspector avg] {avg:.2f} / 0.85 ({status})\n"
+        ),
+        "scheduler.inspector_avg_pass": "pass",
+        "scheduler.inspector_avg_fail": "fail",
         "scheduler.none": "(none)",
         "dispatcher.msg_type_broadcast": "broadcast",
         "dispatcher.msg_type_direct": "direct message",

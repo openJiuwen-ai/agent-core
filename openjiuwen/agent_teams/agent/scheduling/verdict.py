@@ -15,11 +15,6 @@ VERDICT_FAIL = "fail"
 VERDICT_UNDECIDED = "undecided"
 
 
-def review_type(name: str) -> str:
-    """Alias kept for backwards compatibility with callers that import this."""
-    return "verifier"
-
-
 def settle_review_tally(tally: dict, inspector_threshold: float = 0.85) -> str:
     """Judge a multi-type review tally.
 
@@ -44,7 +39,8 @@ def settle_review_tally(tally: dict, inspector_threshold: float = 0.85) -> str:
     if insp_total > 0:
         if tally.get("inspector_voted", 0) < insp_total:
             return VERDICT_UNDECIDED
-        if (tally.get("inspector_avg") or 0) < inspector_threshold:
+        avg = tally.get("inspector_avg")
+        if avg is None or avg < inspector_threshold:
             return VERDICT_FAIL
 
     return VERDICT_PASS

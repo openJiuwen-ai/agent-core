@@ -9,5 +9,5 @@
 ## 验收步骤
 
 1. 对照上面的验收标准检查交付产物。
-2. 调用 `verify_task(task_id='{{task.task_id}}', decision='pass'|'fail')` 投票；`fail` 时在 `feedback` 中写明具体返工要求。
+2. 调用 `verify_task(task_id='{{task.task_id}}', decision=<验决>)` 投票——验证者投 `'pass'` 或 `'fail'`，检视者投 `'0.85'` 这类 0~1 的分数；`fail` 时在 `feedback` 中写明具体返工要求。
 3. 投票后无需跟进——调度框架按票数判定并推进（本任务验证者：{{task.reviewer}}）。

@@ -439,3 +439,121 @@ async def test_task_list_drained_announces_once(db, bus):
     await scheduler.on_event(event)
     await scheduler.on_event(event)
     assert len(host.leader_inputs) == 1
+
+
+# ---------------------------------------------------------------------------
+# settle_review_tally — pure math (F_73)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.level0
+def test_settle_review_tally_binary_pool():
+    """Binary pool: all voted, any fail → FAIL."""
+    from openjiuwen.agent_teams.agent.scheduling.verdict import settle_review_tally
+
+    # 3 verifiers, all pass
+    assert settle_review_tally({
+        "verdict_pass_count": 3, "verdict_fail_count": 0,
+        "verdict_total": 3, "verdict_voted": 3,
+        "inspector_count": 0, "inspector_voted": 0, "inspector_avg": None,
+    }) == VERDICT_PASS
+
+    # 3 verifiers, 1 fail → FAIL
+    assert settle_review_tally({
+        "verdict_pass_count": 2, "verdict_fail_count": 1,
+        "verdict_total": 3, "verdict_voted": 3,
+        "inspector_count": 0, "inspector_voted": 0, "inspector_avg": None,
+    }) == VERDICT_FAIL
+
+    # 3 verifiers, only 2 voted → UNDECIDED
+    assert settle_review_tally({
+        "verdict_pass_count": 2, "verdict_fail_count": 0,
+        "verdict_total": 3, "verdict_voted": 2,
+        "inspector_count": 0, "inspector_voted": 0, "inspector_avg": None,
+    }) == VERDICT_UNDECIDED
+
+
+@pytest.mark.level0
+def test_settle_review_tally_inspector_pool():
+    """Inspector pool: all voted, avg ≥ 0.85 → PASS."""
+    from openjiuwen.agent_teams.agent.scheduling.verdict import settle_review_tally
+
+    # 2 inspectors, avg 0.90 → PASS
+    assert settle_review_tally({
+        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
+        "inspector_count": 2, "inspector_voted": 2, "inspector_avg": 0.90,
+    }) == VERDICT_PASS
+
+    # 2 inspectors, avg 0.80 → FAIL
+    assert settle_review_tally({
+        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
+        "inspector_count": 2, "inspector_voted": 2, "inspector_avg": 0.80,
+    }) == VERDICT_FAIL
+
+    # 2 inspectors, only 1 voted → UNDECIDED
+    assert settle_review_tally({
+        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
+        "inspector_count": 2, "inspector_voted": 1, "inspector_avg": 0.95,
+    }) == VERDICT_UNDECIDED
+
+
+@pytest.mark.level0
+def test_settle_review_tally_mixed():
+    """Mixed binary + inspector pool: both must pass."""
+    from openjiuwen.agent_teams.agent.scheduling.verdict import settle_review_tally
+
+    # Both pass
+    assert settle_review_tally({
+        "verdict_pass_count": 2, "verdict_fail_count": 0,
+        "verdict_total": 2, "verdict_voted": 2,
+        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": 0.87,
+    }) == VERDICT_PASS
+
+    # Binary pass, inspector fail
+    assert settle_review_tally({
+        "verdict_pass_count": 2, "verdict_fail_count": 0,
+        "verdict_total": 2, "verdict_voted": 2,
+        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": 0.72,
+    }) == VERDICT_FAIL
+
+    # Binary fail, inspector pass
+    assert settle_review_tally({
+        "verdict_pass_count": 1, "verdict_fail_count": 1,
+        "verdict_total": 2, "verdict_voted": 2,
+        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": 0.90,
+    }) == VERDICT_FAIL
+
+    # Binary not yet fully voted → UNDECIDED (even if inspector is done)
+    assert settle_review_tally({
+        "verdict_pass_count": 1, "verdict_fail_count": 0,
+        "verdict_total": 2, "verdict_voted": 1,
+        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": 0.90,
+    }) == VERDICT_UNDECIDED
+
+    # No reviewers at all → PASS (edge case)
+    assert settle_review_tally({
+        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
+        "inspector_count": 0, "inspector_voted": 0, "inspector_avg": None,
+    }) == VERDICT_PASS
+
+
+@pytest.mark.level0
+def test_settle_review_tally_boundary():
+    """Inspector avg exactly at threshold (0.85) → PASS."""
+    from openjiuwen.agent_teams.agent.scheduling.verdict import settle_review_tally
+
+    assert settle_review_tally({
+        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
+        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": 0.85,
+    }) == VERDICT_PASS
+
+
+@pytest.mark.level0
+def test_settle_review_tally_inspector_avg_none():
+    """Inspector voted but avg is None (broken tally) → FAIL (safety)."""
+    from openjiuwen.agent_teams.agent.scheduling.verdict import settle_review_tally
+
+    assert settle_review_tally({
+        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
+        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": None,
+    }) == VERDICT_FAIL

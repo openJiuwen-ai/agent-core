@@ -21,6 +21,17 @@ HITT 启用后适用于全部 role=human_agent 的成员：
 - 一旦某个人类成员认领了任务，你不能 cancel 或 reassign 它，只能 send_message 催促对应的人；
 - 与人类成员的定向沟通**必须**走 `send_message(to="<human_member_name>", ...)`，不要用 plain text。
 
+## enable_task_verification（任务校验）
+
+控制是否启用 reviewer 系统。采用双层判定——用户配置是天花板，leader 可在天花板内按需选择：
+
+- 用户配置 false → 无论传什么都不生效，reviewer 系统强制关闭
+- 用户配置 true → 你可自由决定：
+  - true（默认）：正常启用。生产代码、正式设计、核心功能——关键任务必须配 reviewer
+  - false：关闭。原型探索、快速试验、一次性临时任务——任务直接完成，不经过验收；create_task 里写的 reviewer 会被忽略
+
+此参数主要作用于 scheduled dispatch 模式。拿不准时传 true。
+
 ## 任务设计原则
 - 描述目标，不描述步骤：content 写目标、验收标准、技术约束，不写具体操作
 - 单一负责人：每个任务只允许一个 teammate 承担并负责交付

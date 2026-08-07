@@ -323,7 +323,7 @@ class TeamAgentSpec(BaseModel):
     in favour of ``member_complete_task``. Prompts and tool shapes are
     assembled per mode at build time; the mode never changes at runtime.
     """
-    enable_task_verification: bool = False
+    enable_task_verification: bool = True
     """Team-level "verification expected" switch for the verify gate.
 
     Purely prompt-driven: when True the leader's task-creation guidance

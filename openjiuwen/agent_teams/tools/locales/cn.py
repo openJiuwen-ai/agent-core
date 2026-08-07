@@ -27,8 +27,8 @@ STRINGS: dict[str, str] = {
     ),
     "build_team.enable_task_verification": (
         "本团队实例是否要求任务校验。可选 true / false / 不传（继承 TeamAgentSpec 配置）。"
-        "开启后你在创建任务时应按自己的判断为任务指派 0~N 个 reviewer（关键交付必配、"
-        "琐碎任务可不配）；带 reviewer 的任务完成后进入验收，通过才算完成"
+        "开启后 teammate 完成任务将进入 IN_REVIEW 等验证者裁决；关闭则直接标记完成。"
+        "reviewer 分配不受此开关影响——无论开关值如何，你都应为关键交付任务指派 reviewer"
     ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/cn/clean_team.md
@@ -182,14 +182,13 @@ STRINGS: dict[str, str] = {
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
     "create_task.task.reviewer": (
-        "该任务的验证者列表（可选，可多个），每一项为包含 type/reviewer_id/description "
-        "的对象。type 可选值：verifier（验证者，逐项对照验收标准）、inspector（检视者，按维度打分）、"
-        "challenger（挑战者，发现盲区和弱点）。reviewer_id 不能等于 assignee 本人。"
-        "reviewer 不需要提前 spawn——调度框架会自动创建临时验证智能体。"
+        "该任务的验证者列表（可选，可多个），每一项为包含 type/description "
+        "的对象。type 可选值：verifier / inspector / challenger。"
+        "reviewer_id 由系统按类型自动编号，无需填写。"
     ),
     "create_task.task.reviewer_type": "验证者类型：verifier / inspector / challenger",
-    "create_task.task.reviewer_id": "验证者标识名称，如「功能正确性审查」",
-    "create_task.task.reviewer_desc": "验证侧重点的补充描述（仅 verifier 类型需要）",
+    "create_task.task.reviewer_id": "验证者标识名称（系统自动编号，无需手动填写）",
+    "create_task.task.reviewer_desc": "验证侧重点的补充描述（verifier：验证方法指引；inspector：打分维度表；challenger：不需要）",
     "create_task.task.max_review_rounds": (
         "该任务验证返工的轮数上限（可选，整数 ≥1，需同时配 reviewer）；不传用团队默认值。"
         "验证不通过会打回重做开新一轮，超过上限后不再自动打回，而是升级给你处置"
@@ -213,12 +212,13 @@ STRINGS: dict[str, str] = {
     "update_task.content": "新任务内容",
     "update_task.assignee": "指派任务的目标 member_name（仅当任务当前无 assignee 时生效）。系统会向被指派成员发送通知",
     "update_task.reviewer": (
-        "设置该任务的验证者列表（传空列表清除验证），每一项为包含 type/reviewer_id/description "
-        "的对象。type 可选值：verifier / inspector / challenger。reviewer_id 不能等于 assignee。"
+        "设置该任务的验证者列表（传空列表清除验证），每一项为包含 type/description "
+        "的对象。type 可选值：verifier / inspector / challenger。"
+        "reviewer_id 由系统按类型自动编号，无需填写。"
     ),
+    "update_task.reviewer_id": "验证者标识名称（系统自动编号，无需手动填写）",
+    "update_task.reviewer_desc": "验证侧重点的补充描述（verifier：验证方法指引；inspector：打分维度表；challenger：不需要）",
     "update_task.reviewer_type": "验证者类型：verifier / inspector / challenger",
-    "update_task.reviewer_id": "验证者标识名称",
-    "update_task.reviewer_desc": "验证侧重点的补充描述（仅 verifier 类型需要）",
     "update_task.max_review_rounds": (
         "设置该任务验证返工的轮数上限（整数 ≥1，任务需已配或同时配 reviewer）。"
         "超过上限后验证失败不再自动打回，而是升级给你处置"
@@ -247,7 +247,7 @@ STRINGS: dict[str, str] = {
     # ===== verify_task ========================================================
     # verify_task._desc lives in descs/cn/verify_task.md
     "verify_task.task_id": "要验证的任务 ID（必须是指派给你验证、当前处于 in_review 的任务）",
-    "verify_task.decision": "验证结论：'pass'（通过，任务转 completed）或 'fail'（打回，任务转回 in_progress 让 author 返工）",
+    "verify_task.decision": "验证结论：verifier/challenger 投 'pass'/'fail'；inspector 投 0~1 的浮点分数（如 '0.85'）",
     "verify_task.feedback": "验证反馈（打回时会定向发给 author 指导返工，通过时可选）",
     # ===== send_message ========================================================
     # send_message._desc lives in descs/cn/send_message.md
