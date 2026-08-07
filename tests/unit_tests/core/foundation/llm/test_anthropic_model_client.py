@@ -10,12 +10,19 @@ are covered separately and require the optional ``anthropic`` SDK.
 
 from unittest.mock import MagicMock
 
+import pytest
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
 )
+from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
 from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
+    _ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY,
     AnthropicModelClient,
     _apply_messages_cache_breakpoint,
     _apply_static_cache_breakpoints,
@@ -143,6 +150,94 @@ class TestConvertMessageSchemas:
         tool_use = [b for b in messages[0]["content"] if b["type"] == "tool_use"]
         assert tool_use[0]["input"] == {"_raw_arguments": "not json"}
 
+    def test_signed_thinking_blocks_are_replayed_unchanged(self):
+        thinking = {
+            "type": "thinking",
+            "thinking": "inspect the inputs",
+            "signature": "opaque-signature",
+        }
+        tool_use = {
+            "type": "tool_use",
+            "id": "tool-1",
+            "name": "search",
+            "input": {"q": "x"},
+        }
+        _, messages = _convert_message_schemas([{
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "display copy only",
+            "tool_calls": [{
+                "id": "tool-1",
+                "type": "function",
+                "function": {"name": "search", "arguments": '{"q":"x"}'},
+            }],
+            "metadata": {
+                _ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY: [thinking, tool_use],
+            },
+        }])
+
+        assert messages == [{
+            "role": "assistant",
+            "content": [thinking, tool_use],
+        }]
+        assert "reasoning_content" not in messages[0]
+
+    def test_openai_base64_image_is_converted_to_anthropic_source(self):
+        _, messages = _convert_message_schemas([{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,abc", "detail": "low"},
+            }],
+        }])
+
+        assert messages[0]["content"] == [{
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "abc",
+            },
+        }]
+
+    def test_openai_remote_image_is_converted_to_anthropic_source(self):
+        _, messages = _convert_message_schemas([{
+            "role": "user",
+            "content": [{
+                "type": "image_url",
+                "image_url": {"url": "https://example.com/image.webp"},
+            }],
+        }])
+
+        assert messages[0]["content"] == [{
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": "https://example.com/image.webp",
+            },
+        }]
+
+    def test_unsupported_image_data_url_fails_before_request(self):
+        with pytest.raises(ValueError, match="JPEG, PNG, GIF, or WebP"):
+            _convert_message_schemas([{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/svg+xml;base64,abc"},
+                }],
+            }])
+
+    @pytest.mark.parametrize("image_value", [{}, {"url": ""}, {"url": None}, None])
+    def test_empty_openai_image_url_fails_before_request(self, image_value):
+        with pytest.raises(ValueError, match="non-empty image URL"):
+            _convert_message_schemas([{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": image_value,
+                }],
+            }])
+
     def test_tool_result_empty_content_padded(self):
         _, messages = _convert_message_schemas([
             {"role": "tool", "tool_call_id": "t1", "content": ""},
@@ -244,6 +339,15 @@ class TestCacheControlPlacement:
     def test_mark_cache_control_noop_on_empty(self):
         # Should not raise on empty list
         _mark_cache_control([], "1h")
+
+    def test_mark_cache_control_skips_signed_thinking_block(self):
+        blocks = [
+            {"type": "text", "text": "answer"},
+            {"type": "thinking", "thinking": "hidden", "signature": "sig"},
+        ]
+        _mark_cache_control(blocks, "5m")
+        assert "cache_control" not in blocks[1]
+        assert _is_5m_ephemeral(blocks[0]["cache_control"])
 
     def test_apply_static_breakpoints_marks_last_tool_and_last_system(self):
         tools = [{"name": "a"}, {"name": "b"}]
@@ -376,6 +480,12 @@ class TestNormalizeBaseUrl:
             == "https://api.anthropic.com"
         )
 
+    def test_strips_full_messages_endpoint(self):
+        assert (
+            AnthropicModelClient._normalize_base_url("https://proxy.example/anthropic/v1/messages")
+            == "https://proxy.example/anthropic"
+        )
+
     def test_empty_string_returns_none(self):
         assert AnthropicModelClient._normalize_base_url("") is None
 
@@ -443,6 +553,105 @@ class TestClientIdentity:
     def test_get_client_name(self):
         assert _make_client()._get_client_name() == "Anthropic client"
 
+    def test_anthropic_client_requires_api_key_even_when_auth_mode_is_not_api_key(self):
+        client_config = ModelClientConfig(
+            client_provider=ProviderType.Anthropic,
+            api_base="https://api.anthropic.com",
+            auth_mode=LLMAuthMode.NoneAuth,
+            verify_ssl=False,
+        )
+
+        with pytest.raises(BaseError) as error:
+            AnthropicModelClient(ModelRequestConfig(model="claude-opus-4"), client_config)
+
+        assert error.value.code == StatusCode.MODEL_SERVICE_CONFIG_ERROR.code
+        assert "api_key is required for Anthropic client" in str(error.value)
+
+
+class TestResponseReasoning:
+    @staticmethod
+    def _block(**values):
+        block = MagicMock()
+        for key, value in values.items():
+            setattr(block, key, value)
+        block.model_dump.return_value = dict(values)
+        return block
+
+    @pytest.mark.asyncio
+    async def test_non_stream_response_normalizes_and_preserves_thinking(self):
+        response = MagicMock()
+        response.content = [
+            self._block(type="thinking", thinking="plan", signature="sig"),
+            self._block(type="tool_use", id="t1", name="lookup", input={"x": 1}),
+        ]
+        response.usage = None
+        response.stop_reason = "tool_use"
+
+        message = await _make_client()._parse_response(response)
+
+        assert message.reasoning_content == "plan"
+        assert message.tool_calls and message.tool_calls[0].id == "t1"
+        assert message.metadata[_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY] == [
+            {"type": "thinking", "thinking": "plan", "signature": "sig"},
+            {"type": "tool_use", "id": "t1", "name": "lookup", "input": {"x": 1}},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_gateway_top_level_reasoning_is_display_only(self):
+        response = MagicMock()
+        response.content = [self._block(type="text", text="answer")]
+        response.reasoning_content = "gateway plan"
+        response.usage = None
+        response.stop_reason = "end_turn"
+
+        message = await _make_client()._parse_response(response)
+
+        assert message.reasoning_content == "gateway plan"
+        assert message.metadata[_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY] == [
+            {"type": "text", "text": "answer"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_redacted_thinking_is_preserved_but_not_exposed(self):
+        response = MagicMock()
+        response.content = [
+            self._block(type="redacted_thinking", data="opaque-data"),
+            self._block(type="text", text="answer"),
+        ]
+        response.reasoning_content = None
+        response.usage = None
+        response.stop_reason = "end_turn"
+
+        message = await _make_client()._parse_response(response)
+
+        assert message.reasoning_content is None
+        assert message.metadata[_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY][0] == {
+            "type": "redacted_thinking",
+            "data": "opaque-data",
+        }
+
+    def test_stream_thinking_and_signature_are_preserved(self):
+        client = _make_client()
+        state = {}
+
+        start = MagicMock(type="content_block_start", index=0)
+        start.content_block = MagicMock(type="thinking", thinking="", signature="")
+        assert client._event_to_chunk(start, state) is None
+
+        thinking_event = MagicMock(type="content_block_delta", index=0)
+        thinking_event.delta = MagicMock(type="thinking_delta", thinking="plan")
+        thinking_chunk = client._event_to_chunk(thinking_event, state)
+        assert thinking_chunk.reasoning_content == "plan"
+
+        signature_event = MagicMock(type="content_block_delta", index=0)
+        signature_event.delta = MagicMock(type="signature_delta", signature="sig")
+        signature_chunk = client._event_to_chunk(signature_event, state)
+        assert signature_chunk.metadata[_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY] == [{
+            "type": "thinking",
+            "thinking": "plan",
+            "signature": "sig",
+        }]
+
 
 # ---------------------------------------------------------------------------
 # F. Sampling params: Anthropic forbids temperature + top_p together
@@ -469,11 +678,11 @@ class TestSamplingParams:
         assert params["temperature"] == 0.6
         assert "top_p" not in params
 
-    def test_config_defaults_send_temperature_only(self):
-        # ModelRequestConfig defaults both (temperature=0.95, top_p=0.1); the
-        # base builder backfills them, so a plain call must still drop top_p.
+    def test_config_defaults_do_not_override_anthropic_sampling(self):
+        # Common config defaults are OpenAI-oriented. Omitting both lets the
+        # Anthropic model choose its protocol default and avoids Claude 4.7+ 400s.
         params = self._params(_make_client())
-        assert "temperature" in params
+        assert "temperature" not in params
         assert "top_p" not in params
 
     def test_top_p_forwarded_when_temperature_absent(self):
@@ -491,3 +700,60 @@ class TestSamplingParams:
         params = self._params(client, top_p=1.0)
         assert "top_p" not in params
         assert "temperature" not in params
+
+    def test_anthropic_native_reasoning_controls_are_forwarded(self):
+        client = _make_client()
+        client.model_config = ModelRequestConfig(
+            model="claude-opus-4-6",
+            thinking={"type": "adaptive"},
+            output_config={"effort": "high"},
+        )
+        params = self._params(client, model="claude-opus-4-6")
+        assert params["thinking"] == {"type": "adaptive"}
+        assert params["output_config"] == {"effort": "high"}
+        assert "temperature" not in params
+        assert "top_p" not in params
+
+    def test_compatible_endpoint_reasoning_effort_is_forwarded(self):
+        client = _make_client()
+        client.model_config = ModelRequestConfig(model="glm-5", reasoning_effort="high")
+        params = self._params(client, model="glm-5")
+        assert "reasoning_effort" not in params
+        assert params["extra_body"]["reasoning_effort"] == "high"
+
+    def test_compatible_endpoint_extensions_merge_with_extra_body(self):
+        client = _make_client()
+        client.model_config = ModelRequestConfig(
+            model="glm-5",
+            reasoning_effort="high",
+            extra_body={"vendor_flag": True},
+        )
+        params = self._params(client, model="glm-5")
+        assert params["extra_body"] == {
+            "vendor_flag": True,
+            "reasoning_effort": "high",
+        }
+
+    def test_current_claude_model_drops_explicit_custom_sampling(self):
+        params = self._params(
+            _make_client(),
+            model="claude-opus-4-8",
+            temperature=0.6,
+            top_p=0.8,
+        )
+        assert "temperature" not in params
+        assert "top_p" not in params
+
+    def test_base_message_metadata_survives_common_conversion(self):
+        client = _make_client()
+        thinking = {"type": "thinking", "thinking": "plan", "signature": "sig"}
+        tool_use = {"type": "tool_use", "id": "t1", "name": "lookup", "input": {}}
+        message = AssistantMessage(
+            content="",
+            tool_calls=[{"id": "t1", "type": "function", "name": "lookup", "arguments": "{}"}],
+            metadata={_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY: [thinking, tool_use]},
+        )
+        params = self._params(client, messages=[message])
+        replayed = params["messages"][0]["content"]
+        assert replayed[0] == thinking
+        assert {key: replayed[1][key] for key in tool_use} == tool_use

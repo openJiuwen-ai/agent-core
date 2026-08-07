@@ -4,7 +4,28 @@ from openjiuwen.core.common.clients import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig, ProviderType
+from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
+    ModelRequestConfig,
+    ModelClientConfig,
+    ProviderType,
+)
+from openjiuwen.core.foundation.llm.utils.endpoint_profiles import normalize_model_client_config
+
+
+def _value(value):
+    return value.value if hasattr(value, "value") else value
+
+
+def _implementation_provider(client_config: ModelClientConfig) -> str:
+    provider = _value(client_config.client_provider)
+    if provider != ProviderType.OpenAI.value:
+        return provider
+
+    auth_mode = _value(getattr(client_config, "auth_mode", LLMAuthMode.ApiKey.value))
+    if auth_mode == LLMAuthMode.OpenAIAccountOAuth.value:
+        return ProviderType.OpenAIAccount.value
+    return ProviderType.OpenAI.value
 
 
 def _builtin_model_client(provider, client_config: ModelClientConfig, model_config: ModelRequestConfig):
@@ -18,38 +39,9 @@ def _builtin_model_client(provider, client_config: ModelClientConfig, model_conf
         from openjiuwen.core.foundation.llm.model_clients.openai_account_model_client import OpenAIAccountModelClient
         return OpenAIAccountModelClient(model_config=model_config, model_client_config=client_config)
 
-    if provider == ProviderType.OpenRouter.value:
-        from openjiuwen.core.foundation.llm.model_clients.openrouter_model_client import OpenRouterModelClient
-        return OpenRouterModelClient(model_config=model_config, model_client_config=client_config)
-
     if provider == ProviderType.Anthropic.value:
         from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import AnthropicModelClient
         return AnthropicModelClient(model_config=model_config, model_client_config=client_config)
-
-    if provider == ProviderType.SiliconFlow.value:
-        from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import \
-            SiliconFlowModelClient
-        return SiliconFlowModelClient(model_config=model_config, model_client_config=client_config)
-
-    if provider == ProviderType.DashScope.value:
-        from openjiuwen.core.foundation.llm.model_clients.dashscope_model_client import \
-            DashScopeModelClient
-        return DashScopeModelClient(model_config=model_config, model_client_config=client_config)
-
-    if provider == ProviderType.InferenceAffinity.value:
-        from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import \
-            InferenceAffinityModelClient
-        return InferenceAffinityModelClient(model_config=model_config, model_client_config=client_config)
-
-    if provider == ProviderType.AscendAffinity.value:
-        from openjiuwen.core.foundation.llm.model_clients.ascend_affinity_model_client import \
-            AscendAffinityModelClient
-        return AscendAffinityModelClient(model_config=model_config, model_client_config=client_config)
-
-    if provider == ProviderType.DeepSeek.value:
-        from openjiuwen.core.foundation.llm.model_clients.deepseek_model_client import \
-            DeepSeekModelClient
-        return DeepSeekModelClient(model_config=model_config, model_client_config=client_config)
 
     if provider == ProviderType.IntelliRouter.value:
         from openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client import \
@@ -78,7 +70,10 @@ def create_model_client(client_config: ModelClientConfig, model_config: ModelReq
                           error_msg="model client config client_id is none")
     provider = client_config.client_provider.value if isinstance(client_config.client_provider, ProviderType)\
         else client_config.client_provider
-    client = _builtin_model_client(provider, client_config, model_config)
+    normalized_config = normalize_model_client_config(client_config)
+    dispatch_provider = _implementation_provider(normalized_config)
+    dispatch_config = normalized_config
+    client = _builtin_model_client(dispatch_provider, dispatch_config, model_config)
     if client is not None:
         return client
     try:

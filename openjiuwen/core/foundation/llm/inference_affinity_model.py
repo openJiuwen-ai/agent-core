@@ -9,14 +9,14 @@ from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
-from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import InferenceAffinityModelClient
+from openjiuwen.core.foundation.llm.model_clients import create_model_client
 
 
 class InferenceAffinityModel:
     """InferenceAffinity (vLLM) model unified invocation entry point
 
     Responsibilities:
-    1. Manage InferenceAffinityModelClient instances
+    1. Manage OpenAI-compatible clients configured for KV cache release
     2. Provide unified asynchronous interfaces (ainvoke, astream)
     3. Support release functionality
 
@@ -38,10 +38,10 @@ class InferenceAffinityModel:
         """
         self.model_config = model_config
         self.model_client_config = model_client_config
-        self._client: Optional[InferenceAffinityModelClient] = None
+        self._client = None
 
         if model_client_config is not None:
-            self._client = InferenceAffinityModelClient(model_config, model_client_config)
+            self._client = create_model_client(model_client_config, model_config)
         else:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg="model client config is none")

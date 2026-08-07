@@ -7,7 +7,15 @@ from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseM
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 
 # Configuration
-from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig, ProviderType
+from openjiuwen.core.foundation.llm.schema.config import (
+    LLMApiMode,
+    LLMAuthMode,
+    LLMExtensionsConfig,
+    KVCacheExtensionConfig,
+    ModelRequestConfig,
+    ModelClientConfig,
+    ProviderType,
+)
 from openjiuwen.core.foundation.llm.schema.mode_info import BaseModelInfo, ModelConfig
 # Messages
 from openjiuwen.core.foundation.llm.schema.message import (
@@ -26,8 +34,8 @@ from openjiuwen.core.foundation.llm.schema.message_chunk import (
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
 # Built-in implementations
+from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import AnthropicModelClient
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
-from openjiuwen.core.foundation.llm.model_clients.ascend_affinity_model_client import AscendAffinityModelClient
 from openjiuwen.core.foundation.llm.output_parsers.json_output_parser import JsonOutputParser
 from openjiuwen.core.foundation.llm.output_parsers.markdown_output_parser import MarkdownOutputParser
 
@@ -47,6 +55,10 @@ _CONFIG_CLASSES = [
     "ModelRequestConfig",
     "ModelClientConfig",
     "ProviderType",
+    "LLMApiMode",
+    "LLMAuthMode",
+    "LLMExtensionsConfig",
+    "KVCacheExtensionConfig",
     "BaseModelInfo",
     "ModelConfig"
 ]
@@ -73,8 +85,8 @@ _TOOL_CLASSES = [
 
 # Built-in ModelClient implementations
 _PREBUILT_MODEL_CLIENTS = [
+    "AnthropicModelClient",
     "OpenAIModelClient",
-    "AscendAffinityModelClient",
 ]
 
 # Built-in OutputParser implementations

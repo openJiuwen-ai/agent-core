@@ -6,7 +6,7 @@ Integration tests for ContextEngine processors and the agent-owned KV-cache hook
 
 **Scope**: Full flow from ContextEngine.create_context + MessageSummaryOffloader to
 get_context_window() + KVCacheModelCallHook and release() call/logs. Uses mocked
-InferenceAffinityModel invoke and patched InferenceAffinityModelClient.release. Verifies:
+InferenceAffinityModel invoke and patched OpenAIModelClient.release. Verifies:
 - When processors (e.g. MessageSummaryOffloader) modify context, release is triggered and
   session_id / block_released / cache_salt are correct in call and logs.
 - When no processors modify context, release is NOT called and no release logs.
@@ -109,8 +109,7 @@ def _extract_metadata_from_record(record) -> dict:
 
 
 @pytest.mark.asyncio
-@patch(
-    'openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client.InferenceAffinityModelClient.release')
+@patch('openjiuwen.core.foundation.llm.model_clients.openai_model_client.OpenAIModelClient.release')
 async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_release, caplog):
     """
     Test KV cache release when MessageSummaryOffloader modifies context messages.
@@ -123,7 +122,7 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
     5. Release operation is properly logged with correct session_id and block count
 
     Args:
-        mock_release: Mocked release method from InferenceAffinityModelClient
+        mock_release: Mocked release method from OpenAIModelClient
         caplog: Pytest fixture for capturing log messages
     """
     # Dictionary to track release call details for verification
@@ -320,8 +319,7 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
 
 
 @pytest.mark.asyncio
-@patch(
-    'openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client.InferenceAffinityModelClient.release')
+@patch('openjiuwen.core.foundation.llm.model_clients.openai_model_client.OpenAIModelClient.release')
 async def test_inference_affinity_kv_cache_no_release_without_modification(mock_release, caplog):
     """
     Test that KV cache is NOT released when context messages remain unchanged.
@@ -336,7 +334,7 @@ async def test_inference_affinity_kv_cache_no_release_without_modification(mock_
     releases cache when necessary, avoiding unnecessary performance overhead.
 
     Args:
-        mock_release: Mocked release method from InferenceAffinityModelClient
+        mock_release: Mocked release method from OpenAIModelClient
         caplog: Pytest fixture for capturing log messages
     """
     caplog.set_level(logging.INFO)
