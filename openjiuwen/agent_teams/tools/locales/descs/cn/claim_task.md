@@ -3,8 +3,10 @@
 ## 使用场景
 
 **领取任务开始工作：**
-- 从 view_task 中找到 pending 且无人认领的任务后，设置 status=claimed 领取
-- 应选择匹配自己领域专长的任务
+- 从 view_task 中找到 **pending 且 assignee 是你**（或尚无 assignee）的任务后，设置 status=claimed 领取
+- Leader 创建时若已把任务指派给你：对 PENDING(assignee=你) 调用 claim_task 会直接开工，**不会**因为已有 assignee 而失败
+- **不要**认领 assignee 指向其他成员的任务（会被拒绝）
+- 应选择匹配自己领域专长的未指派任务；指派给你的任务应优先处理
 - **同一时刻只能有一个进行中（in_progress）的任务**：若你已有认领在做的任务，需先完成它再领取新任务，否则领取会被拒绝
 
 **标记任务完成：**

@@ -203,6 +203,40 @@ class TestClaimConflict:
         assert task_state.status == TaskStatus.IN_PROGRESS.value
         assert task_state.assignee == "m1"
 
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_claim_starts_create_time_assignee(self, db, message_bus):
+        """PENDING(assignee=self) claim uses start_task instead of rejecting."""
+        await db.team.create_team(
+            team_name="preassign_team",
+            display_name="Preassign Team",
+            leader_member_name="leader",
+        )
+        await db.member.create_member(
+            member_name="m1",
+            team_name="preassign_team",
+            display_name="m1",
+            agent_card=AgentCard().model_dump_json(),
+            status="BUSY",
+            mode=MemberMode.BUILD_MODE.value,
+        )
+        tm = TeamTaskManager(
+            team_name="preassign_team", member_name="m1", db=db, messager=message_bus,
+        )
+        created = await tm.add_graph(
+            [TaskGraphSpec(title="T", content="c", task_id="owned", assignee="m1")]
+        )
+        assert created.ok, created.reason
+        seeded = await tm.get("owned")
+        assert seeded.assignee == "m1"
+        assert seeded.status == TaskStatus.PENDING.value
+
+        claimed = await tm.claim("owned")
+        assert claimed.ok, claimed.reason
+        started = await tm.get("owned")
+        assert started.status == TaskStatus.IN_PROGRESS.value
+        assert started.assignee == "m1"
+
 
 class TestTaskCompletionWithDependencyResolution:
     """Test task completion and dependency resolution"""
