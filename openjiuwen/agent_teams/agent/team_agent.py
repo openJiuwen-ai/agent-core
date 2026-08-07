@@ -772,9 +772,11 @@ class TeamAgent(BaseAgent):
         await self._coordination.pause()
 
     async def pause_coordination(self) -> None:
-        """Pause coordination: abort LLM, kill teammate handles, stop harness.
+        """Pause coordination: abort LLM, park round, kill teammate handles.
 
-        Task board rows stay in SQLite for resume via ``recover_team``.
+        Leaves the leader harness PAUSED (not stopped). ``pending_resume``
+        plus the next ``kernel.start`` continue the round. Task board rows
+        stay in SQLite for resume via ``recover_team``.
         """
         await self._pause_coordination()
 

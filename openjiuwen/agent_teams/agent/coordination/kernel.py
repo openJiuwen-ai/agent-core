@@ -254,9 +254,9 @@ class CoordinationKernel:
         if self._scheduler is not None and team_row_present:
             await self._scheduler.activate()
         self._lifecycle_state = "running"
-        # Resume a paused round from checkpoint. Pause stops the harness;
-        # ``recover_team`` re-spawns members, ``pending_resume`` replays
-        # the leader round.
+        # Resume a paused round from checkpoint. ``recover_team`` re-spawns
+        # members; ``pending_resume`` replays the suspended round for each
+        # recovered member (leader and teammates).
         await self.resume_paused_round()
 
     def _build_wake_callback(self):
@@ -323,9 +323,11 @@ class CoordinationKernel:
         # Runner-level finally can safely call pause even after an external
         # stop_coordination has already torn things down.
         #
-        # Abort LLM, kill member handles, stop harness. Task board rows in
-        # SQLite are untouched so ``view_task`` still lists unfinished work
-        # after resume / process restart.
+        # Abort in-flight LLM streams, park the round at an iteration boundary
+        # (harness stays PAUSED, not stopped), then tear down teammate handles.
+        # ``pending_resume`` / next ``kernel.start`` continue the round.
+        # Task board rows in SQLite are untouched so ``view_task`` still lists
+        # unfinished work after resume / process restart.
         if self._lifecycle_state != "running":
             return
         host = self._host
@@ -336,16 +338,9 @@ class CoordinationKernel:
         mark_member_pausing(host.team_name, host.member_name)
         if self._scheduler is not None:
             self._scheduler.deactivate()
-        # Stop this host's LLM tokens immediately (leader may still be
-        # generating while members are torn down below).
+        # Stop this host's LLM tokens before member teardown.
         self._abort_host_llm_stream()
-        if host.role == TeamRole.LEADER:
-            await host.spawn_manager.cancel_recovery_tasks()
-            await self._mark_live_teammates(MemberStatus.PAUSED)
-            # force_kill aborts each member LLM stream before cancelling tasks.
-            await host.spawn_manager.shutdown_all_handles()
-        # Pause leader round at a clean boundary, then stop the harness so
-        # the next cycle rebuilds native.
+        # Park the round; leave harness PAUSED for later resume.
         await self.pause_agent_round()
         await self._await_harness_paused()
         host.persist_allocator_state()
@@ -353,6 +348,10 @@ class CoordinationKernel:
         if memory_manager:
             await memory_manager.extract_after_round()
         if host.role == TeamRole.LEADER:
+            await self._mark_live_teammates(MemberStatus.PAUSED)
+            await host.spawn_manager.cancel_recovery_tasks()
+            # force_kill aborts each member LLM stream before cancelling tasks.
+            await host.spawn_manager.shutdown_all_handles()
             self._persist_team_lifecycle("paused")
             # Persist pending_resume so a later request can continue this
             # round from checkpoint; task rows remain in DB regardless.
@@ -379,16 +378,6 @@ class CoordinationKernel:
         if self._event_bus:
             await self._event_bus.stop()
         self.close_stream()
-        harness = getattr(host.resources, "harness", None)
-        if harness is not None and getattr(harness, "state", None) is not HarnessState.TERMINATED:
-            try:
-                await harness.stop()
-            except Exception as exc:
-                team_logger.warning(
-                    "[{}] harness.stop during pause failed: {}",
-                    host.member_name or "?",
-                    exc,
-                )
         host.session_manager.release_session()
         # Pause teardown is complete; clear mutation gates so a later recover
         # is not blocked if start() is skipped. start() also clears.
@@ -777,15 +766,8 @@ class CoordinationKernel:
             self._clear_pending_resume()
             return
 
-        # Teammates do not own the shared ``pending_resume`` marker.
-        if self._host.role != TeamRole.LEADER:
-            team_logger.warning(
-                "[{}] teammate harness not PAUSED (state={}); skip cold pending_resume",
-                self._host.member_name or "?",
-                getattr(harness, "state", None),
-            )
-            return
-
+        # Cold path: harness is IDLE after restart. Leader and teammates both
+        # replay ``pending_resume`` so recovered members continue from checkpoint.
         pending = self._read_pending_resume()
         if pending is None:
             return

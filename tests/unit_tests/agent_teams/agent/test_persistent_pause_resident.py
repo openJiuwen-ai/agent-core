@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Persistent pause matches classic develop standby (kill handles, stop harness)."""
+"""Persistent pause: abort LLM, kill handles, keep harness PAUSED."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ async def test_finalize_round_stops_non_paused_harness() -> None:
 
 
 @pytest.mark.asyncio
-async def test_leader_pause_shuts_down_handles_and_stops_harness() -> None:
+async def test_leader_pause_shuts_down_handles_keeps_harness_paused() -> None:
     shutdown_all = AsyncMock()
     cancel_recovery = AsyncMock()
     mark = AsyncMock()
@@ -103,7 +103,7 @@ async def test_leader_pause_shuts_down_handles_and_stops_harness() -> None:
     shutdown_all.assert_awaited_once()
     mark.assert_awaited_once()
     pause_round.assert_awaited_once()
-    stop.assert_awaited_once()
+    stop.assert_not_awaited()
     assert kernel._lifecycle_state == "paused"
 
 
