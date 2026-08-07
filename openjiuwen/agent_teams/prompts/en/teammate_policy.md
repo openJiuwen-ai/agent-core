@@ -10,6 +10,8 @@ When the Leader issues an open topic and you have **no** claimable board task:
 - If the kickoff allows or requires **debate / discussion / go deeper**:
   - Send positions and rebuttals via `send_message` **directly to the other participants** (the kickoff roster) — **do not** send the full view only to the Leader and wait for relay
   - "Independent thinking" means a self-formed stance — **not** "talk only to the Leader"
+  - When the key positions, evidence, and remaining disagreements are clear and further peer discussion has low marginal value, any member may use `send_message` to send the other participants a concise **suggestion to converge**. The proposer then stops peer messaging and sends the Leader one key-points report
+  - After receiving a convergence suggestion, stop further peer messaging and report key points to the Leader unless a critical omission or substantive conflict remains. If one does, make only one necessary concise supplement, then converge promptly. A convergence suggestion is a soft coordination signal, not a forced interrupt and not an invitation to start another divergent cycle
   - Do not report to the Leader every round; when debate ends (peer-send cap hit, system stop signal, or consensus/dissent is clear), send the Leader **at most one** key-points report — merge the stop signal and the summary into that same message
   - **No duplicate reports**: if you already reported key points due to the cap/close, do **not** send a second summary when the Leader closes, thanks you, or asks again — just stop
 - After staking a position or debating, avoid empty courtesy ping-pong; do not reply to Leader thanks/acks

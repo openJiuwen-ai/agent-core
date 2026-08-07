@@ -17,13 +17,16 @@ from openjiuwen.agent_teams.tools.locales import make_translator
             "cn",
             (
                 "多 Agent 入口判断",
-                "按以下优先级判断",
-                "明确交付或实际执行",
-                "必须启用多 Agent",
-                "实质增益",
-                "严格简单例外（直接回答）",
-                "批量或成套产出",
-                "只要有一项不满足，就不得直接回答",
+                "多 Agent 为默认、Leader 直接回答为极窄例外",
+                "任务型请求默认启用多 Agent",
+                "思考型请求默认启用多 Agent",
+                "质量能够受益时启用多 Agent",
+                "不同专业能力、受众立场、构思路径或评价维度",
+                "有意义的互补",
+                "极简直答例外",
+                "单步即可可靠完成",
+                "任务短小、产物单一或容易完成本身不构成直答理由",
+                "或者不确定是否满足例外，就启用多 Agent",
                 "最终结果形态",
                 "区分“怎么处理”与“最终要得到什么”",
                 "独立可验收",
@@ -33,13 +36,16 @@ from openjiuwen.agent_teams.tools.locales import make_translator
             "en",
             (
                 "Multi-Agent Entry Decision",
-                "following order of priority",
-                "Explicit delivery or real execution",
-                "multi-agent execution is mandatory",
-                "material value",
-                "Strict simple exception (direct answer)",
-                "Batch or suite-style output",
-                "If any condition is not met, do not answer directly",
+                "multi-agent execution is the default and a direct Leader answer is a very narrow exception",
+                "Task requests default to multi-agent execution",
+                "Thinking requests default to multi-agent execution",
+                "Use multiple agents whenever quality can benefit",
+                "different areas of expertise, audience perspectives, ideation approaches, or evaluation dimensions",
+                "meaningfully complementary contributions",
+                "Ultra-simple direct-answer exception",
+                "completed reliably in one step",
+                "A short task, a single deliverable, or ease of completion is not by itself a reason to answer directly",
+                "if unsure whether the exception applies—use multi-agent execution",
                 "form of the final result",
                 "separate *how to process the request* from *what the user ultimately wants*",
                 "independently verifiable",
@@ -47,11 +53,47 @@ from openjiuwen.agent_teams.tools.locales import make_translator
         ),
     ],
 )
-def test_leader_policy_routes_by_multi_agent_value_and_final_result(language, markers):
+def test_leader_policy_defaults_to_multi_agent_and_routes_by_final_result(language, markers):
     policy = load_template("leader_policy", language).content
 
     for marker in markers:
         assert marker in policy
+
+
+@pytest.mark.parametrize(
+    ("language", "leader_markers", "teammate_markers"),
+    [
+        (
+            "cn",
+            ("识别提前收束建议", "关键遗漏或实质冲突", "软信号", "一次必要的简短补充"),
+            ("建议收束", "边际收益很低", "软协作信号", "一次必要的简短补充", "各自向 Leader 汇报要点"),
+        ),
+        (
+            "en",
+            (
+                "Recognize an early convergence suggestion",
+                "critical omission or substantive conflict",
+                "soft signal",
+                "one necessary concise supplement",
+            ),
+            (
+                "suggestion to converge",
+                "low marginal value",
+                "soft coordination signal",
+                "one necessary concise supplement",
+                "report key points to the Leader",
+            ),
+        ),
+    ],
+)
+def test_debate_prompts_allow_soft_early_convergence(language, leader_markers, teammate_markers):
+    leader_policy = load_template("leader_policy", language).content
+    teammate_policy = load_template("teammate_policy", language).content
+
+    for marker in leader_markers:
+        assert marker in leader_policy
+    for marker in teammate_markers:
+        assert marker in teammate_policy
 
 
 @pytest.mark.parametrize("team_mode", ["default", "predefined", "hybrid"])
