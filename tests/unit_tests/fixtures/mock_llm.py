@@ -274,6 +274,7 @@ def create_text_response(
     """
     return AssistantMessage(
         content=content,
+        finish_reason=finish_reason,
         usage_metadata=UsageMetadata(
             model_name=model_name,
         )
