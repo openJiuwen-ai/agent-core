@@ -13,6 +13,7 @@ Created on: 2025-11-25
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import sys
 import time
 from abc import ABC
@@ -58,6 +59,107 @@ SLOW_RAIL_INIT_SECONDS = 0.1
 # rails each doing modest setup add up without any one of them being at fault,
 # so the batch bar sits higher than the per-rail one.
 SLOW_RAIL_INIT_BATCH_SECONDS = 0.25
+
+_CURRENT_USAGE_INVOCATION_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_usage_invocation_id",
+    default=None,
+)
+_CURRENT_USAGE_ATTRIBUTION: contextvars.ContextVar[Dict[str, Any]] = contextvars.ContextVar(
+    "current_usage_attribution",
+    default={},
+)
+_CURRENT_USAGE_DELEGATION: contextvars.ContextVar[Dict[str, Any]] = contextvars.ContextVar(
+    "current_usage_delegation",
+    default={},
+)
+
+
+def current_usage_invocation_id() -> Optional[str]:
+    """Return the invocation id active in the current async execution path."""
+    return _CURRENT_USAGE_INVOCATION_ID.get()
+
+
+def bind_usage_invocation_id(invocation_id: str) -> contextvars.Token:
+    """Bind one invocation id until the returned token is reset."""
+    return _CURRENT_USAGE_INVOCATION_ID.set(invocation_id)
+
+
+def reset_usage_invocation_id(token: contextvars.Token) -> None:
+    """Restore the parent invocation binding."""
+    _CURRENT_USAGE_INVOCATION_ID.reset(token)
+
+
+def current_usage_attribution() -> Dict[str, Any]:
+    """Return the active agent's request lineage for the current async path."""
+    return dict(_CURRENT_USAGE_ATTRIBUTION.get() or {})
+
+
+def bind_usage_attribution(attribution: Dict[str, Any]) -> contextvars.Token:
+    """Bind the active agent attribution until the returned token is reset."""
+    return _CURRENT_USAGE_ATTRIBUTION.set(dict(attribution or {}))
+
+
+def reset_usage_attribution(token: contextvars.Token) -> None:
+    """Restore the parent agent attribution."""
+    _CURRENT_USAGE_ATTRIBUTION.reset(token)
+
+
+def current_usage_delegation() -> Dict[str, Any]:
+    """Return metadata prepared for the child invocation about to start."""
+    return dict(_CURRENT_USAGE_DELEGATION.get() or {})
+
+
+def bind_usage_delegation(delegation: Dict[str, Any]) -> contextvars.Token:
+    """Bind one child-delegation attribution without replacing the parent."""
+    return _CURRENT_USAGE_DELEGATION.set(dict(delegation or {}))
+
+
+def reset_usage_delegation(token: contextvars.Token) -> None:
+    """Restore the previous child-delegation binding."""
+    _CURRENT_USAGE_DELEGATION.reset(token)
+
+
+def build_usage_delegation_attribution(
+    *,
+    agent_id: str | None,
+    parent_session_id: str | None,
+    delegation_id: str | None,
+    parent_attribution: Dict[str, Any] | None = None,
+    parent_invocation_id: str | None = None,
+) -> Dict[str, Any]:
+    """Build request-local metadata for a delegated child Agent.
+
+    The result is carried by a ``ContextVar`` at in-process boundaries and can
+    be serialized by task schedulers at process/async boundaries.  It is kept
+    out of the legacy ``Agent.invoke`` payload so callers that do not opt into
+    cache-affinity fields retain their old input shape.
+    """
+    parent = dict(parent_attribution or current_usage_attribution())
+    parent_path = list(parent.get("agent_path") or [])
+    child_id = str(agent_id or "agent")
+    agent_path = parent_path + [child_id] if parent_path else [child_id]
+    parent_depth = int(parent.get("depth") or 0)
+    resolved_parent_invocation_id = (
+        parent_invocation_id
+        or current_usage_invocation_id()
+        or parent.get("invocation_id")
+    )
+    return {
+        "agent_id": agent_id,
+        "product_session_id": (
+            parent.get("product_session_id")
+            or parent.get("execution_session_id")
+            or parent_session_id
+        ),
+        "parent_session_id": parent_session_id,
+        "parent_invocation_id": resolved_parent_invocation_id,
+        "delegation_id": delegation_id,
+        "agent_path": agent_path,
+        "depth": parent_depth + 1 if parent_path else 0,
+        "parent_cache_identity": parent.get("cache_identity"),
+        "cache_mode": parent.get("cache_mode") or "provider",
+        "cache_scope": parent.get("cache_scope") or "session",
+    }
 
 
 def init_rail(rail_instance: "AgentRail", agent: Any) -> float:
@@ -163,6 +265,11 @@ class InvokeInputs:
         run_kind: Run kind (normal or heartbeat)
         run_context: Structured runtime context
         parent_session_id: Optional parent session id for lineage-aware runtimes
+        invocation_id: Optional agent execution id
+        parent_invocation_id: Optional parent execution id
+        delegation_id: Optional task/delegation id
+        agent_path: Optional root-to-current agent path
+        depth: Invocation tree depth
     """
     query: Optional[str, InteractiveInput]
     conversation_id: Optional[str] = None
@@ -170,6 +277,11 @@ class InvokeInputs:
     run_kind: Optional[RunKind] = None
     run_context: Optional[RunContext] = None
     parent_session_id: Optional[str] = None
+    invocation_id: Optional[str] = None
+    parent_invocation_id: Optional[str] = None
+    delegation_id: Optional[str] = None
+    agent_path: Optional[List[str]] = None
+    depth: int = 0
 
     def is_heartbeat(self) -> bool:
         """Check if this is a heartbeat run."""
@@ -195,11 +307,18 @@ class ModelCallInputs:
         tools: Optional tool definitions
         model_context: Current ModelContext used to build the final LLM window
         response: LLM response (filled after call)
+        context_usage_report: Request-local report for the final context window
+        context_usage_request_id: Request-local context usage event id
+        context_usage_sequence: Request-local execution sequence
     """
     messages: List[Any] = field(default_factory=list)
     tools: Optional[List[Any]] = None
     model_context: Optional[ModelContext] = None
     response: Optional[Any] = None
+    context_usage_report: Optional[Any] = None
+    context_usage_request_id: Optional[str] = None
+    context_usage_sequence: Optional[int] = None
+    context_usage_attribution: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -420,6 +539,11 @@ class AgentCallbackContext:
         retry_attempt: Current failed-attempt index
         retry_history: Chronological list of every failed attempt
             inside the @rail retry loop for this invoke.
+        context_usage_report: Request-local token report shared by the
+            before/after model-call hooks.
+        context_usage_request_id: Request-local context usage event id.
+        context_usage_sequence: Request-local execution sequence.
+        context_usage_attribution: Request-local owner and invocation metadata.
     """
     agent: 'BaseAgent'
     event: Optional[AgentCallbackEvent] = None
@@ -431,6 +555,10 @@ class AgentCallbackContext:
     exception: Optional[Exception] = None
     retry_attempt: int = 0
     retry_history: List[RetryRecord] = field(default_factory=list)
+    context_usage_report: Optional[Any] = None
+    context_usage_request_id: Optional[str] = None
+    context_usage_sequence: Optional[int] = None
+    context_usage_attribution: Dict[str, Any] = field(default_factory=dict)
     invoke_start_time: float = 0.0
     _retry_request: Optional[RetryRequest] = field(
         default=None, init=False, repr=False

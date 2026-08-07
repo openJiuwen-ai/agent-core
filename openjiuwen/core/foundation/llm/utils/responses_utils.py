@@ -560,6 +560,10 @@ def _usage_from_payload(usage: Any, *, model_name: str) -> Optional[UsageMetadat
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         cache_tokens=cache_tokens,
+        cache_read_tokens=cache_tokens if token_details is not None else None,
+        cache_status="observed" if token_details is not None else None,
+        cache_source="provider_usage" if token_details is not None else None,
+        cache_authoritative=token_details is not None,
     )
 
 

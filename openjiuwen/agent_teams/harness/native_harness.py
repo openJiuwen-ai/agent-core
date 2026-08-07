@@ -165,6 +165,12 @@ class NativeHarness(DeepAgent):
 
         self._agent_spec = agent_spec
         self._build_context = build_context
+        if self._react_agent is not None:
+            # The inner ReActAgent emits model-call usage events.  Keep the
+            # team member's build-time identity on that request path without
+            # coupling core usage code to the team package.
+            self._react_agent._usage_build_context = build_context
+            self._react_agent._usage_agent_id = self.card.id
         self._extra_rails: list[AgentRail] = list(extra_rails) if extra_rails else []
         self._session: Session | None = None
         self._owns_session: bool = False

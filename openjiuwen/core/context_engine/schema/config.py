@@ -5,6 +5,8 @@ from typing import Dict, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from openjiuwen.core.context_engine.token.tokenizer_spec import TokenizerSpec
+
 
 class CompressionRecallConfig(BaseModel):
     """Global configuration for archiving and recalling compressed context."""
@@ -55,9 +57,10 @@ class ContextEngineConfig(BaseModel):
         conversation, and offloaded content is never automatically restored.
 
     enable_tiktoken_counter : bool, default False
-        Whether to create a default TiktokenCounter when ``create_context`` is
-        called without an explicit token counter. When disabled, context token
-        budgets use the built-in character-based estimation fallbacks.
+        Enable the historical tiktoken fallback for contexts without a
+        configured model. Configured model contexts use an already available
+        native artifact when present and otherwise fall back to Unicode string
+        length. Context creation never downloads a tokenizer.
 
     context_window_tokens : int, optional
         Total context window supported by the runtime model, including input and
@@ -66,6 +69,27 @@ class ContextEngineConfig(BaseModel):
     model_name : str, optional
         Name of the LLM used by this context. Used to look up the default
         context window size from ``model_context_window_tokens``.
+
+    model_provider : str, optional
+        Provider name used by tokenizer selection.
+
+    tokenizer_spec : TokenizerSpec, optional
+        Exact tokenizer artifact and explicitly declared same-family fallbacks.
+
+    tokenizer_registry : list[TokenizerSpec]
+        Additional exact model entries used by ``TokenizerSelector``.
+
+    tokenizer_cache_dir : str, optional
+        Backend cache directory for downloaded tokenizer artifacts.
+
+    enable_tokenizer_download : bool, default False
+        Compatibility field for application-level tokenizer warm-up. Context
+        initialization is always local-only and never downloads a missing
+        tokenizer artifact.
+
+    tokenizer_offline : bool, default False
+        Compatibility field for application-level tokenizer warm-up. Context
+        initialization is always forced to local cache/files only.
 
     model_context_window_tokens : dict[str, int], optional
         Best-effort fallback mapping from model name to total context window
@@ -84,11 +108,13 @@ class ContextEngineConfig(BaseModel):
         compression and making those archives available for recall.
 
     enable_context_debug : bool, default False
-        Unified debug toggle for the forked context processors. When on,
-        processors persist JSONL records at each pipeline stage (threshold
-        checks, span splits, compression retries, before/after diffs) to
-        ``context_debug_dir`` so developers can quickly locate context
-        compression issues. Zero overhead when off.
+        Unified debug toggle for context processing and outbound model calls.
+        When on, processors persist JSONL records at each pipeline stage
+        (threshold checks, span splits, compression retries, before/after
+        diffs) and the ReAct agent persists the exact final messages/tools
+        payload sent to the model in ``llm_request.jsonl`` under
+        ``context_debug_dir``. This can contain user data and system prompts;
+        keep it disabled outside debugging. Zero overhead when off.
 
     context_debug_dir : str, optional
         Directory for context-debug records. When None, falls back to the
@@ -103,7 +129,13 @@ class ContextEngineConfig(BaseModel):
     enable_tiktoken_counter: bool = Field(default=False)
     context_window_tokens: Optional[int] = Field(default=None, gt=0)
     model_name: Optional[str] = Field(default=None)
+    model_provider: Optional[str] = Field(default=None)
     model_context_window_tokens: Optional[Dict[str, int]] = Field(default=None)
+    tokenizer_spec: Optional[TokenizerSpec] = Field(default=None)
+    tokenizer_registry: list[TokenizerSpec] = Field(default_factory=list)
+    tokenizer_cache_dir: Optional[str] = Field(default=None)
+    enable_tokenizer_download: bool = Field(default=False)
+    tokenizer_offline: bool = Field(default=False)
     enable_openrouter_model_context_window_tokens: bool = Field(default=False)
     openrouter_request_timeout: float = Field(default=3.0, gt=0)
     compression_recall_config: CompressionRecallConfig = Field(

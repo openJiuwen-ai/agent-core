@@ -388,13 +388,30 @@ class IntelliRouterModelClient(BaseModelClient):
         # Convert usage metadata
         usage_metadata = None
         if msg.usage_metadata:
+            source_usage = msg.usage_metadata
+
+            def _optional_int(name: str) -> int | None:
+                value = getattr(source_usage, name, None)
+                if value is None or isinstance(value, bool):
+                    return None
+                return value if isinstance(value, (int, float, str)) else None
+
+            cache_status = getattr(source_usage, "cache_status", None)
+            cache_source = getattr(source_usage, "cache_source", None)
+            cache_authoritative = getattr(source_usage, "cache_authoritative", False)
             usage_metadata = UsageMetadata(
-                input_tokens=msg.usage_metadata.input_tokens,
-                output_tokens=msg.usage_metadata.output_tokens,
-                total_tokens=msg.usage_metadata.total_tokens,
-                cache_tokens=msg.usage_metadata.cache_tokens,
-                reasoning_tokens=self._extract_reasoning_tokens(msg.usage_metadata),
-                model_name=msg.usage_metadata.model_name or "",
+                input_tokens=source_usage.input_tokens,
+                output_tokens=source_usage.output_tokens,
+                total_tokens=source_usage.total_tokens,
+                cache_tokens=source_usage.cache_tokens,
+                cache_read_tokens=_optional_int("cache_read_tokens"),
+                cache_miss_tokens=_optional_int("cache_miss_tokens"),
+                cache_write_tokens=_optional_int("cache_write_tokens"),
+                cache_status=cache_status if isinstance(cache_status, str) else None,
+                cache_source=cache_source if isinstance(cache_source, str) else None,
+                cache_authoritative=cache_authoritative if isinstance(cache_authoritative, bool) else False,
+                reasoning_tokens=self._extract_reasoning_tokens(source_usage),
+                model_name=source_usage.model_name or "",
             )
 
         return AssistantMessage(

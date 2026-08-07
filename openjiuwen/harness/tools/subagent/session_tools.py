@@ -16,6 +16,10 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.rail.base import (
+    current_usage_attribution,
+    current_usage_invocation_id,
+)
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 
 if TYPE_CHECKING:
@@ -314,7 +318,14 @@ class SessionsSpawnTool(Tool):
             "task_description": task_description,
             "sub_session_id": sub_session_id,
             "parent_session_id": parent_session_id,
+            "delegation_id": task_id,
         }
+        parent_invocation_id = current_usage_invocation_id()
+        if parent_invocation_id:
+            task_metadata["parent_invocation_id"] = parent_invocation_id
+        parent_usage_attribution = current_usage_attribution()
+        if parent_usage_attribution:
+            task_metadata["parent_usage_attribution"] = parent_usage_attribution
         if browser_capabilities is not None:
             task_metadata["browser_capabilities"] = browser_capabilities
 

@@ -27,6 +27,10 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
     ToolCallInputs,
+    bind_usage_delegation,
+    build_usage_delegation_attribution,
+    current_usage_invocation_id,
+    reset_usage_delegation,
     rail,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -1332,9 +1336,32 @@ class AbilityManager:
                     tool_call,
                     f"Agent instance not found in resource_mgr: {agent_id}"
                 )
+            parent_invocation_id = current_usage_invocation_id()
+            delegation_token = bind_usage_delegation(
+                build_usage_delegation_attribution(
+                    agent_id=agent_id,
+                    parent_session_id=session.get_session_id(),
+                    delegation_id=str(tool_call.id),
+                    parent_invocation_id=parent_invocation_id,
+                )
+            )
             try:
                 child_session_id = f"{session.get_session_id()}:{tool_call.id}"
                 tool_args["conversation_id"] = child_session_id
+                agent_config_fn = getattr(agent, "config", None)
+                agent_config = agent_config_fn() if callable(agent_config_fn) else getattr(agent, "_config", None)
+                affinity_enabled = (
+                    getattr(
+                        getattr(agent_config, "kv_cache_affinity_config", None),
+                        "enable_kv_cache_affinity",
+                        False,
+                    )
+                    is True
+                )
+                if affinity_enabled:
+                    tool_args.setdefault("delegation_id", str(tool_call.id))
+                    if parent_invocation_id:
+                        tool_args.setdefault("parent_invocation_id", parent_invocation_id)
 
                 stream_writer_manager = self._get_stream_writer_manager(session)
                 child_session_kwargs = kv_cache_hooks.build_child_session_kwargs(
@@ -1366,6 +1393,8 @@ class AbilityManager:
                     tool_call,
                     error_msg,
                 ) from e
+            finally:
+                reset_usage_delegation(delegation_token)
         elif tool_name in self._mcp_servers:
             # Execute MCP tool
             raise self._build_execution_error(

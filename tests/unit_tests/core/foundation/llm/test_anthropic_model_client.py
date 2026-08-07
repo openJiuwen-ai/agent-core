@@ -525,6 +525,7 @@ class TestUsageFromAnthropic:
         assert meta.output_tokens == 50
         assert meta.total_tokens == 200
         assert meta.cache_tokens == 30  # cache_read only
+        assert meta.cache_miss_tokens == 120  # uncached + cache_write overlap
         assert meta.model_name == "claude-opus-4"
 
     def test_zero_cache_fields_handled(self):

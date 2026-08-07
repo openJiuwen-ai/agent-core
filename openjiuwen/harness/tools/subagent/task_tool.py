@@ -17,6 +17,12 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.rail.base import (
+    bind_usage_delegation,
+    build_usage_delegation_attribution,
+    current_usage_invocation_id,
+    reset_usage_delegation,
+)
 from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
@@ -174,6 +180,7 @@ class TaskTool(Tool):
         affinity_enabled = False
         try:
             await prepare_subagent_task_resources(subagent)
+            parent_invocation_id = current_usage_invocation_id()
             affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
             if affinity_enabled:
                 kv_cache_hooks.prefetch_sticky_subagent(
@@ -189,7 +196,25 @@ class TaskTool(Tool):
             }
             if affinity_enabled:
                 subagent_inputs["parent_session_id"] = parent_session_id
-            result = await subagent.invoke(subagent_inputs)
+                # The child owns a new request-local report.  Keep the
+                # delegation boundary explicit when the child/cache lineage
+                # feature is enabled, without changing the legacy disabled
+                # invocation payload.
+                subagent_inputs["delegation_id"] = sub_session_id
+                if parent_invocation_id:
+                    subagent_inputs["parent_invocation_id"] = parent_invocation_id
+            delegation_token = bind_usage_delegation(
+                build_usage_delegation_attribution(
+                    agent_id=getattr(getattr(subagent, "card", None), "id", None),
+                    parent_session_id=parent_session_id,
+                    delegation_id=sub_session_id,
+                    parent_invocation_id=parent_invocation_id,
+                )
+            )
+            try:
+                result = await subagent.invoke(subagent_inputs)
+            finally:
+                reset_usage_delegation(delegation_token)
             succeeded = True
             output = result.get("output", "")
             return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)

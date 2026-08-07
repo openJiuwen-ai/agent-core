@@ -1086,12 +1086,23 @@ class AnthropicModelClient(BaseModelClient):
         # is available, leave zeros -- the postrun script applies pricing.
         input_cost, output_cost, total_cost = self._extract_cost_info(usage)
 
+        # ``cache_write`` is a subset of the uncached/miss portion for the
+        # canonical usage contract.  It must therefore be included in miss,
+        # while remaining separately exposed as an overlap diagnostic.
+        cache_miss = uncached + cache_write
+
         return UsageMetadata(
             model_name=self.model_config.model_name,
             input_tokens=total_input,
             output_tokens=output,
             total_tokens=total_input + output,
             cache_tokens=cache_read,
+            cache_read_tokens=cache_read,
+            cache_miss_tokens=cache_miss,
+            cache_write_tokens=cache_write,
+            cache_status="observed",
+            cache_source="provider_usage",
+            cache_authoritative=True,
             input_cost=input_cost,
             output_cost=output_cost,
             total_cost=total_cost,

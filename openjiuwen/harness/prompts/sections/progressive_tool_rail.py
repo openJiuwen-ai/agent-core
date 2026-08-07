@@ -63,6 +63,7 @@ def build_progressive_tool_rules_prompt(language: str = "cn") -> str:
     return PROGRESSIVE_TOOL_RULES_HEADER[lang] + PROGRESSIVE_TOOL_RULES_BODY[lang]
 
 
+
 def build_navigation_prompt(
     entries: Iterable[str],
     language: str = "cn",
@@ -83,6 +84,7 @@ def build_navigation_section(
         name=SectionName.TOOL_NAVIGATION,
         content={language: build_navigation_prompt(entries, language)},
         priority=70,
+        category="system_prompt",
     )
 
 
@@ -93,6 +95,7 @@ def build_progressive_tool_rules_section(
         name=SectionName.PROGRESSIVE_TOOL_RULES,
         content={language: build_progressive_tool_rules_prompt(language)},
         priority=75,
+        category="system_prompt",
     )
 
 
@@ -120,6 +123,7 @@ def build_multilingual_navigation_section(
             "en": build_navigation_prompt(entries_en, "en"),
         },
         priority=70,
+        category="system_prompt",
     )
 
 
@@ -131,4 +135,5 @@ def build_multilingual_progressive_tool_rules_section() -> "PromptSection":
             "en": build_progressive_tool_rules_prompt("en"),
         },
         priority=75,
+        category="tools",
     )

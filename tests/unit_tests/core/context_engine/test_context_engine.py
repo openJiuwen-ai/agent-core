@@ -20,6 +20,10 @@ from openjiuwen.core.common.exception.errors import (
 from openjiuwen.core.context_engine import (
     ContextEngine,
     ContextEngineConfig,
+    NativeTokenizerCounter,
+    StringLengthCounter,
+    TiktokenCounter,
+    TokenizerSpec,
 )
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
@@ -405,6 +409,158 @@ class TestContextEngine:
             context_id="ctx", session=session, token_counter=token_counter
         )
         assert context.token_counter() is token_counter
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("enabled", "expected_counter"),
+        [
+            (True, TiktokenCounter),
+            (False, StringLengthCounter),
+        ],
+    )
+    async def test_create_context_without_model_respects_tiktoken_switch(
+        self, session, enabled, expected_counter
+    ):
+        engine = ContextEngine(
+            ContextEngineConfig(enable_tiktoken_counter=enabled)
+        )
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert isinstance(context.token_counter(), expected_counter)
+        if not enabled:
+            assert (
+                context.token_counter().measurement_fallback_reason
+                == "tiktoken_disabled"
+            )
+
+    @pytest.mark.asyncio
+    async def test_create_context_without_local_tokenizer_uses_string_length(self, session):
+        engine = ContextEngine(
+            ContextEngineConfig(
+                enable_tiktoken_counter=False,
+                model_name="deepseek-chat",
+                model_provider="DeepSeek",
+            )
+        )
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert isinstance(context.token_counter(), StringLengthCounter)
+        assert context.token_counter().measurement_fallback_reason == "model_tokenizer_spec_missing"
+
+    @pytest.mark.asyncio
+    async def test_create_context_uses_local_native_tokenizer_without_download(
+        self, session, tmp_path
+    ):
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from tokenizers.pre_tokenizers import Whitespace
+
+        artifact = tmp_path / "tokenizer.json"
+        tokenizer = Tokenizer(
+            WordLevel({"[UNK]": 0, "hello": 1}, unk_token="[UNK]")
+        )
+        tokenizer.pre_tokenizer = Whitespace()
+        tokenizer.save(str(artifact))
+
+        engine = ContextEngine(
+            ContextEngineConfig(
+                enable_tiktoken_counter=True,
+                enable_tokenizer_download=True,
+                tokenizer_offline=False,
+                tokenizer_spec=TokenizerSpec(
+                    provider="deepseek",
+                    model="deepseek-chat",
+                    source="local",
+                    artifact_path=str(artifact),
+                ),
+            )
+        )
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert isinstance(context.token_counter(), NativeTokenizerCounter)
+
+    @pytest.mark.asyncio
+    async def test_create_context_uses_cached_family_tokenizer_when_switch_is_false(
+        self, session, tmp_path
+    ):
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from tokenizers.pre_tokenizers import Whitespace
+
+        artifact = tmp_path / "tokenizer.json"
+        tokenizer = Tokenizer(
+            WordLevel({"[UNK]": 0, "hello": 1}, unk_token="[UNK]")
+        )
+        tokenizer.pre_tokenizer = Whitespace()
+        tokenizer.save(str(artifact))
+
+        engine = ContextEngine(
+            ContextEngineConfig(
+                enable_tiktoken_counter=False,
+                model_provider="openai",
+                model_name="GLM-5.2_Thinking",
+                tokenizer_registry=[
+                    TokenizerSpec(
+                        provider="OpenAI",
+                        model="glm-5.2",
+                        source="LOCAL",
+                        artifact_path=str(artifact),
+                    )
+                ],
+            )
+        )
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert isinstance(context.token_counter(), NativeTokenizerCounter)
+        assert context.token_counter().measurement_source == "family_tokenizer_fallback"
+
+    @pytest.mark.asyncio
+    async def test_create_context_missing_tokenizer_falls_back_without_download(
+        self, session, monkeypatch
+    ):
+        from openjiuwen.core.context_engine.token.tokenizer_manager import (
+            TokenizerArtifactManager,
+        )
+
+        manager_options = {}
+        original_init = TokenizerArtifactManager.__init__
+
+        def capture_init(manager, **kwargs):
+            manager_options.update(kwargs)
+            original_init(manager, **kwargs)
+
+        monkeypatch.setattr(TokenizerArtifactManager, "__init__", capture_init)
+        monkeypatch.setattr(
+            TokenizerArtifactManager,
+            "_resolve_huggingface",
+            lambda _manager, _spec: None,
+        )
+
+        engine = ContextEngine(
+            ContextEngineConfig(
+                enable_tiktoken_counter=True,
+                enable_tokenizer_download=True,
+                tokenizer_offline=False,
+                model_provider="DeepSeek",
+                model_name="deepseek-chat",
+                tokenizer_spec=TokenizerSpec(
+                    provider="DeepSeek",
+                    model="deepseek-chat",
+                    source="huggingface",
+                    id="missing/tokenizer",
+                ),
+            )
+        )
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert isinstance(context.token_counter(), StringLengthCounter)
+        assert manager_options["enable_download"] is False
+        assert manager_options["offline"] is True
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("refactored_context_processors")

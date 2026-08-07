@@ -16,6 +16,10 @@ from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.token.tokenizer_manager import TokenizerArtifactManager
+from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
+from openjiuwen.core.context_engine.token.tokenizer_selector import TokenizerSelector
+from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
@@ -108,10 +112,11 @@ class ContextEngine:
         """
         Create or retrieve a ModelContext for the given session & context ID.
 
-        Token counting: an explicitly provided `token_counter` is always used.
-        When it is omitted, `TiktokenCounter` is created only if
-        `config.enable_tiktoken_counter` is enabled; otherwise the context uses
-        its built-in character-based estimation fallbacks.
+        Token counting: an explicitly provided ``token_counter`` is always used.
+        Otherwise a configured local tokenizer is used when available; an
+        unavailable local tokenizer falls back to ``StringLengthCounter``
+        without downloading anything. The application-level warm-up service is
+        responsible for remote downloads before context creation.
 
         Message seeding:
         - if `history_messages` is provided, it is used as-is;
@@ -124,11 +129,10 @@ class ContextEngine:
             session: Session object supplying session_id; if None, a default
                      session ID is used.
             history_messages: Initial message list.
-            token_counter: Strategy for counting tokens. If omitted,
-                           ``TiktokenCounter`` is used only when
-                           ``enable_tiktoken_counter`` is enabled in the engine
-                           config; otherwise token counting falls back to
-                           character-based estimates.
+            token_counter: Strategy for counting tokens. If omitted, the
+                           selector only reads local tokenizer artifacts and
+                           falls back to character-length counting for a
+                           configured model.
 
         Returns:
             ModelContext: The newly created or cached context instance.
@@ -148,22 +152,42 @@ class ContextEngine:
         ]
 
         if token_counter is None:
-            if self._config.enable_tiktoken_counter:
-                context_engine_logger.info(
-                    "tiktoken counter enabled; initializing default tokenizer, "
-                    "session_id=%s context_id=%s",
-                    session_id,
-                    context_id,
+            has_model_tokenizer_target = bool(
+                self._config.model_name
+                or self._config.model_provider
+                or self._config.tokenizer_spec
+                or self._config.tokenizer_registry
+            )
+            try:
+                token_counter = TokenizerSelector(
+                    provider=self._config.model_provider or "",
+                    model=self._config.model_name or "",
+                    spec=self._config.tokenizer_spec,
+                    registry=TokenizerRegistry(self._config.tokenizer_registry),
+                    # Context creation is deliberately read-only. Remote
+                    # tokenizer downloads belong to the application-level
+                    # warm-up path and must never be retried here.
+                    manager=TokenizerArtifactManager(
+                        cache_dir=self._config.tokenizer_cache_dir,
+                        enable_download=False,
+                        offline=True,
+                    ),
+                    # The switch only controls the model-less compatibility
+                    # path. Configured model contexts always use strict
+                    # native-or-string resolution, regardless of the switch.
+                    allow_tiktoken_fallback=(
+                        self._config.enable_tiktoken_counter
+                        and not has_model_tokenizer_target
+                    ),
+                ).select()
+            except Exception as exc:  # noqa: BLE001 - context creation must fail open
+                context_engine_logger.warning(
+                    "local tokenizer selection failed; using string-length fallback: %s",
+                    exc,
                 )
-                from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
-
-                token_counter = TiktokenCounter()
-            else:
-                context_engine_logger.info(
-                    "tiktoken counter disabled; using character-based token estimation, "
-                    "session_id=%s context_id=%s",
-                    session_id,
-                    context_id,
+                token_counter = StringLengthCounter(
+                    model=self._config.model_name or "",
+                    fallback_reason="local_tokenizer_selection_failed",
                 )
 
         if self._config.enable_openrouter_model_context_window_tokens:

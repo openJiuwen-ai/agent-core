@@ -618,10 +618,10 @@ async def test_get_context_usage_prefers_model_usage_metadata() -> None:
     await context.add_messages(
         [
             UserMessage(content="hello"),
-            AssistantMessage(
-                content="world",
-                usage_metadata=UsageMetadata(total_tokens=250),
-            ),
+                AssistantMessage(
+                    content="world",
+                    usage_metadata=UsageMetadata(input_tokens=250, total_tokens=250),
+                ),
         ]
     )
 

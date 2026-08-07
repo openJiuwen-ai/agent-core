@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Any, List, Optional
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.llm import BaseMessage
@@ -219,6 +219,19 @@ class ModelContext(ABC):
         Return a TokenCounter instance that can accurately count tokens
         for the model family used by this context.
         """
+
+    def message_revision(self) -> int:
+        """Return the current monotonic message revision, when supported."""
+        return 0
+
+    def build_context_usage_report(self, context_window: "ContextWindow", **kwargs: Any) -> Any:
+        """Build a request-local token report for a final context window.
+
+        The default keeps third-party ``ModelContext`` implementations
+        compatible.  The built-in ``SessionModelContext`` provides the actual
+        report/cache implementation.
+        """
+        raise NotImplementedError("context usage reports are not supported by this ModelContext")
 
     def compression_recall_config(self) -> CompressionRecallConfig:
         """Return the context-wide compression recall configuration."""

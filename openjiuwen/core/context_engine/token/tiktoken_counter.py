@@ -211,8 +211,13 @@ def _image_block_tokens(part: dict) -> int:
 
 class TiktokenCounter(TokenCounter):
     """
-    A fast and exact token counter powered by tiktoken.
-    Supports all publicly released OpenAI models (gpt-3.5-turbo, gpt-4, gpt-4o, ...).
+    A token counter powered by tiktoken.
+
+    Known OpenAI model names use the encoding resolved by tiktoken. Unknown
+    model names deliberately use the project's default ``cl100k_base``
+    encoding and expose ``tiktoken_fallback`` metadata instead of pretending
+    that the count is model-native.
+
     Thread-safe: tiktoken.Encoding objects are stateless and reusable.
     """
 
@@ -228,18 +233,52 @@ class TiktokenCounter(TokenCounter):
         "text-embedding-3-large": "cl100k_base",
     }
 
-    __slots__ = ("_enc", "_model", "_fallback_warning_printed")
+    __slots__ = (
+        "_enc",
+        "_model",
+        "_fallback_warning_printed",
+        "measurement_source",
+        "measurement_tokenizer",
+        "measurement_fallback_reason",
+        "measurement_fallback_tokenizer_model",
+    )
 
-    def __init__(self, model: str = "gpt-4") -> None:
+    def __init__(
+        self,
+        model: str = "gpt-4",
+        *,
+        default_encoding: str = "cl100k_base",
+        source_override: str | None = None,
+        fallback_reason: str | None = None,
+        fallback_tokenizer_model: str | None = None,
+    ) -> None:
         self._model = model
-        enc_name = self._MODEL2ENC.get(model, "cl100k_base")
+        self.measurement_source = source_override or "tiktoken"
+        self.measurement_tokenizer = None
+        self.measurement_fallback_reason = fallback_reason
+        self.measurement_fallback_tokenizer_model = fallback_tokenizer_model
         try:
             import tiktoken
 
-            self._enc = tiktoken.get_encoding(enc_name)
+            if model in self._MODEL2ENC:
+                self._enc = tiktoken.get_encoding(self._MODEL2ENC[model])
+            else:
+                try:
+                    self._enc = tiktoken.encoding_for_model(model)
+                except KeyError:
+                    self._enc = tiktoken.get_encoding(default_encoding)
+                    if source_override is None:
+                        self.measurement_source = "tiktoken_fallback"
+                    if self.measurement_fallback_reason is None:
+                        self.measurement_fallback_reason = "model_not_registered"
+            self.measurement_tokenizer = getattr(self._enc, "name", default_encoding)
             self._fallback_warning_printed = False
         except Exception:
             self._enc = None
+            self.measurement_source = "string_length_fallback"
+            self.measurement_tokenizer = "unicode_codepoints"
+            if self.measurement_fallback_reason is None:
+                self.measurement_fallback_reason = "tiktoken_unavailable"
             self._fallback_warning_printed = False
 
     # ------------------------------------------------------------------
@@ -250,12 +289,15 @@ class TiktokenCounter(TokenCounter):
             try:
                 return len(self._enc.encode(text, disallowed_special=()))
             except UnicodeEncodeError:
-                logger.warning(f"Tiktoken encoding failed for text (len={len(text)}), using len//4 fallback.")
-                return len(text) // 4
+                logger.warning(f"Tiktoken encoding failed for text (len={len(text)}), using Unicode length fallback.")
+                self.measurement_source = "string_length_fallback"
+                self.measurement_tokenizer = "unicode_codepoints"
+                self.measurement_fallback_reason = "text_encoding_failed"
+                return len(text)
         if not self._fallback_warning_printed:
             self._fallback_warning_printed = True
-            logger.warning("Tiktoken initialization failed, using len(text)//4 as fallback for token counting. ")
-        return len(text) // 4
+            logger.warning("Tiktoken initialization failed, using Unicode string length fallback for token counting.")
+        return len(text)
 
     def count_messages(self, messages: List[BaseMessage], *, model: str = "", **kwargs) -> int:
         if not messages:

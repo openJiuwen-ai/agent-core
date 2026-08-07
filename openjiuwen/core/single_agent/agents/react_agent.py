@@ -15,6 +15,7 @@ import hashlib
 import inspect
 import json
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -38,6 +39,13 @@ from openjiuwen.core.context_engine import (
     ContextEngine,
     ContextEngineConfig,
     ModelContext
+)
+from openjiuwen.core.context_engine.usage import (
+    CacheAggregationKey,
+    ContextCategory,
+    ContextUsageAnalyzer,
+    SessionKVCacheAggregator,
+    request_usage_from_metadata,
 )
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -71,6 +79,13 @@ from openjiuwen.core.single_agent.rail.base import (
     ModelCallInputs,
     SteeringDrainInputs,
     UserMessageInputs,
+    bind_usage_attribution,
+    bind_usage_invocation_id,
+    current_usage_attribution,
+    current_usage_invocation_id,
+    current_usage_delegation,
+    reset_usage_attribution,
+    reset_usage_invocation_id,
     rail,
 )
 from openjiuwen.core.single_agent.prompts.builder import (
@@ -162,6 +177,58 @@ def log_llm_request(
         if tool_call_id:
             parts.append(f"tool_call_id={tool_call_id}")
         log.info(", ".join(parts))
+
+
+def _write_llm_request_debug_record(
+    context: ModelContext | None,
+    config: ContextEngineConfig | None,
+    *,
+    messages: Optional[List[Any]],
+    tools: Optional[List[Any]],
+    model: str | None,
+    provider: str | None,
+    request_id: str | None,
+    sequence: int | None,
+    context_window: Any,
+    usage_report: Any = None,
+) -> None:
+    """Write the final outbound context without affecting model execution."""
+    if context is None or config is None or not bool(getattr(config, "enable_context_debug", False)):
+        return
+
+    try:
+        from openjiuwen.core.context_engine.processor.forked.support.context_debug import (
+            write_llm_request_record,
+        )
+
+        context_max = None
+        context_window_tokens = getattr(context, "context_window_tokens", None)
+        if callable(context_window_tokens):
+            try:
+                context_max = context_window_tokens()
+            except Exception:
+                context_max = None
+
+        log_path = write_llm_request_record(
+            context,
+            enabled=True,
+            dump_dir=getattr(config, "context_debug_dir", None),
+            model=model,
+            provider=provider,
+            request_id=request_id,
+            sequence=sequence,
+            messages=messages,
+            tools=tools,
+            context_window_tokens=context_max,
+            system_message_count=len(getattr(context_window, "system_messages", None) or []),
+            context_message_count=len(getattr(context_window, "context_messages", None) or []),
+            statistic=getattr(context_window, "statistic", None),
+            usage_report=usage_report,
+        )
+        if log_path:
+            logger.debug("[ContextDebug] final LLM request written to %s", log_path)
+    except Exception:  # pragma: no cover - debug tracing must never break an LLM call
+        logger.warning("Failed to write final LLM request context debug record", exc_info=True)
 
 
 def log_llm_response(log: Any, ai_message: Any) -> None:
@@ -539,6 +606,8 @@ class ReActAgent(BaseAgent):
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
         self._kv_cache_model_call_hook = kv_cache_hooks.KVCacheModelCallHook()
+        self._context_usage_aggregator = SessionKVCacheAggregator()
+        self._context_usage_sequences: dict[str, int] = {}
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -556,21 +625,40 @@ class ReActAgent(BaseAgent):
                 return candidate.strip()
         return ""
 
+    @staticmethod
+    def _resolve_context_engine_model_provider(config: ReActAgentConfig) -> str:
+        """Resolve provider from the direct config or its model client."""
+        configured = str(getattr(config, "model_provider", None) or "").strip()
+        client_provider = getattr(getattr(config, "model_client_config", None), "client_provider", None)
+        client_provider = getattr(client_provider, "value", client_provider)
+        client_provider = str(client_provider or "").strip()
+        # ``openai`` is the historical ReActAgent default. Prefer the actual
+        # client provider when the caller did not override that default.
+        if client_provider and (not configured or configured.lower() == "openai"):
+            return client_provider
+        return configured
+
     @classmethod
     def _with_context_engine_model_name(cls, config: ReActAgentConfig) -> ReActAgentConfig:
         context_config = config.context_engine_config
-        if getattr(context_config, "model_name", None):
-            return config
+        context_updates = {}
 
-        model_name = cls._resolve_context_engine_model_name(config)
-        if not model_name:
+        if not getattr(context_config, "model_name", None):
+            model_name = cls._resolve_context_engine_model_name(config)
+            if model_name:
+                context_updates["model_name"] = model_name
+
+        if not getattr(context_config, "model_provider", None):
+            model_provider = cls._resolve_context_engine_model_provider(config)
+            if model_provider:
+                context_updates["model_provider"] = model_provider
+
+        if not context_updates:
             return config
 
         return config.model_copy(
             update={
-                "context_engine_config": context_config.model_copy(
-                    update={"model_name": model_name}
-                )
+                "context_engine_config": context_config.model_copy(update=context_updates)
             }
         )
 
@@ -672,11 +760,13 @@ class ReActAgent(BaseAgent):
         return self._llm
 
     def add_prompt_builder_section(
-            self,
-            name: str,
-            content: Optional[str],
-            *,
-            priority: int,
+        self,
+        name: str,
+        content: Optional[str],
+        *,
+        priority: int,
+        category: str | None = None,
+        carrier: str = "system_message",
     ) -> None:
         """Add/update one text section, or remove it when content is empty."""
         text = (content or "").strip()
@@ -684,11 +774,15 @@ class ReActAgent(BaseAgent):
             self.prompt_builder.remove_section(name)
             return
 
-        self.prompt_builder.add_section(PromptSection(
-            name=name,
-            content={"cn": text, "en": text},
-            priority=priority,
-        ))
+        self.prompt_builder.add_section(
+            PromptSection(
+                name=name,
+                content={"cn": text, "en": text},
+                priority=priority,
+                category=category,
+                carrier=carrier,
+            )
+        )
 
     def _build_rendered_system_prompt(
             self,
@@ -728,6 +822,7 @@ class ReActAgent(BaseAgent):
             _SKILLS_SECTION,
             self._skill_util.get_skill_prompt(),
             priority=_SKILLS_SECTION_PRIORITY,
+            category=ContextCategory.SKILLS.value,
         )
 
     async def _admit_user_message(
@@ -997,6 +1092,269 @@ class ReActAgent(BaseAgent):
                     exc,
                     exc_info=True,
                 )
+    def _context_usage_prompt_sections(self) -> list[tuple[ContextCategory, str, str]]:
+        """Return builder sections using the four-category product taxonomy."""
+        sections: list[tuple[ContextCategory, str, str]] = []
+        get_sections_for_build = getattr(self.prompt_builder, "_get_sections_for_build", None)
+        prompt_sections = (
+            get_sections_for_build()
+            if callable(get_sections_for_build)
+            else self.prompt_builder.get_all_sections().values()
+        )
+        for section in prompt_sections:
+            name = getattr(section, "name", "")
+            content = section.render(self.prompt_builder.language)
+            if not content.strip():
+                continue
+            raw_category = getattr(section, "category", None)
+            raw_category = getattr(raw_category, "value", raw_category)
+            try:
+                category = ContextCategory(raw_category) if raw_category else ContextCategory.SYSTEM_PROMPT
+            except ValueError:
+                category = ContextCategory.SKILLS if "skill" in str(name).lower() else ContextCategory.SYSTEM_PROMPT
+            sections.append((category, content, str(getattr(section, "carrier", "system_message"))))
+        return sections
+
+    def _context_usage_attribution(
+        self,
+        ctx: AgentCallbackContext,
+        session: Session,
+    ) -> dict[str, Any]:
+        """Resolve owner and invocation metadata for one model-call report.
+
+        The resolver is deliberately capability-based.  Core ``Session``
+        exposes cache identity and team sessions add source metadata, while a
+        plain standalone session still produces a complete single-agent
+        attribution without importing team or subagent packages.
+        """
+        usage_metadata_getter = getattr(session, "get_context_usage_metadata", None)
+        session_usage_metadata = (
+            usage_metadata_getter()
+            if callable(usage_metadata_getter)
+            else dict(getattr(session, "_context_usage_metadata", {}) or {})
+        )
+        values = {
+            **dict(session_usage_metadata or {}),
+            **dict(getattr(ctx, "context_usage_attribution", {}) or {}),
+        }
+        source_metadata_getter = getattr(session, "get_source_metadata", None)
+        source_metadata = (
+            source_metadata_getter()
+            if callable(source_metadata_getter)
+            else dict(getattr(session, "_source_metadata", {}) or {})
+        )
+        build_context = getattr(self, "_usage_build_context", None)
+        agent_id = (
+            values.get("agent_id")
+            or getattr(self, "_usage_agent_id", None)
+            or getattr(self.card, "id", None)
+            or getattr(self.card, "name", None)
+        )
+        team_id = (
+            values.get("team_id")
+            or source_metadata.get("source_team_id")
+            or getattr(session, "get_team_id", lambda: None)()
+        )
+        member_name = values.get("member_name") or source_metadata.get("source_member_name")
+        if not member_name and build_context is not None:
+            member_name = getattr(build_context, "member_name", None)
+        if not member_name:
+            member_name = getattr(self, "member_name", None)
+
+        execution_session_id = str(session.get_session_id())
+        parent_session_id_getter = getattr(session, "get_parent_session_id", None)
+        parent_session_id = (
+            values.get("parent_session_id")
+            or (parent_session_id_getter() if callable(parent_session_id_getter) else None)
+        )
+        if not parent_session_id:
+            get_env = getattr(session, "get_env", None)
+            if callable(get_env):
+                parent_session_id = get_env(KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV)
+        product_session_id = values.get("product_session_id") or parent_session_id or execution_session_id
+
+        cache_identity = values.get("cache_identity")
+        parent_cache_identity = values.get("parent_cache_identity")
+        identity_getter = getattr(session, "get_cache_identity", None)
+        if callable(identity_getter):
+            try:
+                identity = identity_getter()
+                cache_identity = cache_identity or getattr(identity, "cache_id", None)
+                parent_cache_identity = parent_cache_identity or getattr(identity, "parent_cache_id", None)
+            except Exception:  # pragma: no cover - defensive for third-party sessions
+                logger.debug("Failed to resolve session cache identity for usage telemetry", exc_info=True)
+
+        context_id = ctx.context.context_id() if ctx.context is not None else "default"
+        context_owner_id = values.get("context_owner_id")
+        if not context_owner_id:
+            owner_parts = [team_id, member_name or agent_id or "agent", execution_session_id, context_id]
+            context_owner_id = "|".join(str(part) for part in owner_parts if part)
+
+        agent_path = list(values.get("agent_path") or [])
+        if not agent_path:
+            agent_path = [str(member_name or agent_id or "agent")]
+        return {
+            **values,
+            "product_session_id": str(product_session_id),
+            "execution_session_id": execution_session_id,
+            "context_owner_id": context_owner_id,
+            "agent_id": agent_id,
+            "team_id": team_id,
+            "member_name": member_name,
+            "agent_path": agent_path,
+            "depth": int(values.get("depth") or max(len(agent_path) - 1, 0)),
+            "cache_identity": cache_identity or execution_session_id,
+            "parent_cache_identity": parent_cache_identity or product_session_id,
+            "cache_mode": values.get("cache_mode") or "provider",
+            "cache_scope": values.get("cache_scope") or "session",
+        }
+
+    async def _emit_context_usage(
+        self,
+        ctx: AgentCallbackContext,
+        context_window,
+        *,
+        phase: str,
+        usage_metadata=None,
+    ) -> None:
+        """Send a context usage snapshot without affecting model execution."""
+        session = ctx.session
+        if session is None or not hasattr(session, "write_stream"):
+            return
+
+        context_config = self._config.context_engine_config
+        model_name = str(getattr(context_config, "model_name", None) or self._config.model_name or "")
+        model_provider = str(
+            getattr(context_config, "model_provider", None)
+            or self._resolve_context_engine_model_provider(self._config)
+            or ""
+        )
+
+        if phase == "pre_call":
+            request_id = uuid.uuid4().hex
+            ctx.context_usage_request_id = request_id
+            session_id = session.get_session_id()
+            sequence = self._context_usage_sequences.get(session_id, 0)
+            self._context_usage_sequences[session_id] = sequence + 1
+            ctx.context_usage_sequence = sequence
+        else:
+            request_id = ctx.context_usage_request_id or uuid.uuid4().hex
+            sequence = int(ctx.context_usage_sequence or 0)
+
+        attribution = self._context_usage_attribution(ctx, session)
+        ctx.context_usage_attribution.clear()
+        ctx.context_usage_attribution.update(attribution)
+        if isinstance(ctx.inputs, ModelCallInputs):
+            ctx.inputs.context_usage_request_id = request_id
+            ctx.inputs.context_usage_sequence = sequence
+            ctx.inputs.context_usage_attribution = dict(attribution)
+
+        report = ctx.context_usage_report
+        if report is None and isinstance(ctx.inputs, ModelCallInputs):
+            report = ctx.inputs.context_usage_report
+        if report is None:
+            build_report = getattr(ctx.context, "build_context_usage_report", None)
+            if callable(build_report):
+                try:
+                    report = build_report(
+                        context_window,
+                        system_prompt_sections=tuple(self._context_usage_prompt_sections()),
+                        model=model_name,
+                        provider=model_provider or None,
+                        deployment=str(self._config.api_base or "") or None,
+                        attribution=attribution,
+                    )
+                    ctx.context_usage_report = report
+                    if isinstance(ctx.inputs, ModelCallInputs):
+                        ctx.inputs.context_usage_report = report
+                except Exception:
+                    logger.debug("Failed to build request-local context usage report", exc_info=True)
+
+        request_usage = request_usage_from_metadata(usage_metadata)
+        scope_key = CacheAggregationKey(
+            session_id=session.get_session_id(),
+            provider=model_provider,
+            model=model_name,
+            deployment=str(self._config.api_base or ""),
+            product_session_id=attribution.get("product_session_id"),
+            execution_session_id=attribution.get("execution_session_id"),
+            cache_identity=attribution.get("cache_identity"),
+            parent_cache_identity=attribution.get("parent_cache_identity"),
+            team_id=attribution.get("team_id"),
+            agent_id=attribution.get("agent_id"),
+            member_name=attribution.get("member_name"),
+            cache_mode=attribution.get("cache_mode") or "provider",
+            cache_scope=attribution.get("cache_scope") or "session",
+        )
+        if phase == "post_call":
+            session_usage = self._context_usage_aggregator.record(
+                request_id=request_id,
+                scope_key=scope_key,
+                usage=request_usage,
+            )
+        else:
+            # A pre-call event also carries the aggregate from completed calls
+            # in this scope, so the value means "session to date" at every
+            # emission point rather than only on post-call events.
+            session_usage = self._context_usage_aggregator.snapshot(scope_key)
+
+        try:
+            analyzer = ContextUsageAnalyzer(
+                ctx.context.token_counter(),
+                model=model_name,
+                context_window_limit=ctx.context.context_window_tokens(),
+            )
+            kv_cache = {
+                "request": (
+                    request_usage.model_dump(mode="json")
+                    if phase == "post_call"
+                    else {"status": "unknown", "source": "awaiting_provider_response"}
+                ),
+                "session": session_usage.model_dump(mode="json") if session_usage is not None else {},
+                "measurement_cache": getattr(report, "measurement_cache", {}) if report is not None else {},
+                "context_changes": getattr(report, "context_changes", {}) if report is not None else {},
+                "management": {},
+                "diagnostics": {"status": "not_collected"},
+            }
+            event_session_id = attribution.get("product_session_id") or session.get_session_id()
+            if report is not None:
+                snapshot = analyzer.analyze_from_report(
+                    report,
+                    request_id=request_id,
+                    session_id=event_session_id,
+                    phase=phase,
+                    provider=model_provider or None,
+                    agent_id=attribution.get("agent_id") or getattr(self.card, "id", None),
+                    sequence=sequence,
+                    provider_input_tokens=request_usage.input_tokens if phase == "post_call" else None,
+                    kv_cache=kv_cache,
+                    deployment=str(self._config.api_base or "") or None,
+                    attribution=attribution,
+                )
+            else:
+                snapshot = analyzer.analyze(
+                    context_window,
+                    request_id=request_id,
+                    session_id=event_session_id,
+                    phase=phase,
+                    provider=model_provider or None,
+                    agent_id=attribution.get("agent_id") or getattr(self.card, "id", None),
+                    sequence=sequence,
+                    provider_input_tokens=request_usage.input_tokens if phase == "post_call" else None,
+                    system_prompt_sections=tuple(self._context_usage_prompt_sections()),
+                    kv_cache=kv_cache,
+                    deployment=str(self._config.api_base or "") or None,
+                    attribution=attribution,
+                )
+            await session.write_stream(
+                OutputSchema(
+                    type="context.usage",
+                    index=sequence,
+                    payload=snapshot.model_dump(mode="json"),
+                )
+            )
+        except Exception as exc:  # telemetry must never fail an LLM call
+            logger.warning("Failed to emit context usage snapshot: %s", exc)
 
     @rail(
         before=AgentCallbackEvent.BEFORE_MODEL_CALL,
@@ -1019,6 +1377,7 @@ class ReActAgent(BaseAgent):
         falls back to llm.invoke() otherwise.
         """
         # --- Finalize system message and context window (post-rails) ---
+        usage_prompt_sections = tuple(self._context_usage_prompt_sections())
         final_system = [SystemMessage(content=self.prompt_builder.build())]
         await self._sync_prompt_attachments(ctx, ctx.context)
         llm = self._get_llm()
@@ -1039,6 +1398,53 @@ class ReActAgent(BaseAgent):
         ctx.inputs.messages = context_window.get_messages()
         ctx.inputs.tools = context_window.get_tools()
 
+        # Freeze the final-window report before the provider call.  The same
+        # request-local object is used by post_call; post_call must not ask the
+        # shared SessionModelContext for its latest window after a concurrent
+        # request has advanced it.
+        usage_attribution = self._context_usage_attribution(ctx, ctx.session)
+        ctx.context_usage_attribution.clear()
+        ctx.context_usage_attribution.update(usage_attribution)
+        usage_context_config = self._config.context_engine_config
+        usage_model_provider = str(
+            getattr(usage_context_config, "model_provider", None)
+            or self._resolve_context_engine_model_provider(self._config)
+            or ""
+        )
+        build_report = getattr(ctx.context, "build_context_usage_report", None)
+        if callable(build_report):
+            try:
+                ctx.context_usage_report = build_report(
+                    context_window,
+                    system_prompt_sections=usage_prompt_sections,
+                    model=self._config.model_name,
+                    provider=usage_model_provider or None,
+                    deployment=str(self._config.api_base or "") or None,
+                    attribution=usage_attribution,
+                )
+                ctx.inputs.context_usage_report = ctx.context_usage_report
+                ctx.inputs.context_usage_attribution = dict(usage_attribution)
+            except NotImplementedError:
+                # Preserve compatibility with external ModelContext
+                # implementations that have not adopted the report API yet.
+                logger.debug("ModelContext does not provide a context usage report")
+            except Exception:
+                logger.warning("Failed to build context usage report; using compatibility analyzer path", exc_info=True)
+
+        await self._emit_context_usage(ctx, context_window, phase="pre_call")
+
+        _write_llm_request_debug_record(
+            ctx.context,
+            self._config.context_engine_config,
+            messages=ctx.inputs.messages,
+            tools=ctx.inputs.tools,
+            model=self._config.model_name,
+            provider=usage_model_provider,
+            request_id=ctx.context_usage_request_id,
+            sequence=ctx.context_usage_sequence,
+            context_window=context_window,
+            usage_report=ctx.context_usage_report,
+        )
         log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
         # --- End context window finalization ---
 
@@ -1087,8 +1493,19 @@ class ReActAgent(BaseAgent):
                 if image_input_present and self._is_image_input_unsupported_error(exc):
                     ai_message = self._build_image_input_unsupported_message()
                 else:
+                    await self._emit_context_usage(
+                        ctx,
+                        context_window,
+                        phase="post_call",
+                    )
                     raise
             ctx.inputs.response = ai_message
+            await self._emit_context_usage(
+                ctx,
+                context_window,
+                phase="post_call",
+                usage_metadata=getattr(ai_message, "usage_metadata", None),
+            )
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
@@ -1145,12 +1562,24 @@ class ReActAgent(BaseAgent):
             if image_input_present and self._is_image_input_unsupported_error(exc):
                 ai_message = self._build_image_input_unsupported_message()
                 ctx.inputs.response = ai_message
-                await session.write_stream(OutputSchema(
-                    type="llm_output",
-                    index=chunk_index,
-                    payload={"content": ai_message.content, "result_type": "answer"},
-                ))
+                await self._emit_context_usage(
+                    ctx,
+                    context_window,
+                    phase="post_call",
+                )
+                await session.write_stream(
+                    OutputSchema(
+                        type="llm_output",
+                        index=chunk_index,
+                        payload={"content": ai_message.content, "result_type": "answer"},
+                    )
+                )
                 return ai_message
+            await self._emit_context_usage(
+                ctx,
+                context_window,
+                phase="post_call",
+            )
             raise
 
         if accumulated_chunk is None:
@@ -1168,6 +1597,12 @@ class ReActAgent(BaseAgent):
                 logprobs=accumulated_chunk.logprobs,
             )
         ctx.inputs.response = ai_message
+        await self._emit_context_usage(
+            ctx,
+            context_window,
+            phase="post_call",
+            usage_metadata=ai_message.usage_metadata,
+        )
         if ai_message.usage_metadata:
 
             perf_metrics = {}
@@ -1914,6 +2349,8 @@ class ReActAgent(BaseAgent):
                 inputs.get("parent_session_id")
                 if isinstance(inputs, dict)
                 else None
+            ) or getattr(self, "_usage_parent_session_id", None) or current_usage_delegation().get(
+                "parent_session_id"
             )
             session_kwargs = {}
             if parent_session_id:
@@ -1930,11 +2367,78 @@ class ReActAgent(BaseAgent):
 
     @with_session()
     async def _inner_invoke(self, session, inputs, query, need_cleanup, conversation_id, **kwargs):
-        invoke_inputs = InvokeInputs(query=query, conversation_id=conversation_id)
+        parent_usage_attribution = current_usage_attribution()
+        delegation_attribution = current_usage_delegation()
+        raw_invocation_id = inputs.get("invocation_id") if isinstance(inputs, dict) else None
+        invocation_id = str(raw_invocation_id or uuid.uuid4().hex)
+        parent_session_id = (
+            inputs.get("parent_session_id") if isinstance(inputs, dict) else None
+        ) or getattr(self, "_usage_parent_session_id", None) or delegation_attribution.get("parent_session_id")
+        parent_invocation_id = (
+            inputs.get("parent_invocation_id")
+            if isinstance(inputs, dict)
+            else None
+        ) or getattr(self, "_usage_parent_invocation_id", None) or delegation_attribution.get(
+            "parent_invocation_id"
+        ) or current_usage_invocation_id()
+        delegation_id = (
+            inputs.get("delegation_id") if isinstance(inputs, dict) else None
+        ) or getattr(self, "_usage_delegation_id", None) or delegation_attribution.get("delegation_id")
+        raw_agent_path = (
+            inputs.get("agent_path") if isinstance(inputs, dict) else None
+        ) or getattr(self, "_usage_agent_path", None) or delegation_attribution.get("agent_path")
+        if isinstance(raw_agent_path, (list, tuple)):
+            agent_path = list(raw_agent_path)
+        elif parent_usage_attribution.get("agent_path"):
+            agent_path = list(parent_usage_attribution["agent_path"])
+            agent_path.append(str(getattr(self.card, "id", None) or getattr(self.card, "name", None) or "agent"))
+        else:
+            agent_path = [str(getattr(self.card, "id", None) or getattr(self.card, "name", None) or "agent")]
+
+        if isinstance(inputs, dict) and "depth" in inputs:
+            depth = int(inputs.get("depth") or 0)
+        elif getattr(self, "_usage_depth", None) is not None:
+            depth = int(getattr(self, "_usage_depth", 0) or 0)
+        elif "depth" in delegation_attribution:
+            depth = int(delegation_attribution.get("depth") or 0)
+        elif parent_usage_attribution.get("agent_path"):
+            depth = int(parent_usage_attribution.get("depth") or 0) + 1
+        else:
+            depth = 0
+        invoke_inputs = InvokeInputs(
+            query=query,
+            conversation_id=conversation_id,
+            parent_session_id=parent_session_id,
+            invocation_id=invocation_id,
+            parent_invocation_id=parent_invocation_id,
+            delegation_id=delegation_id,
+            agent_path=agent_path,
+            depth=depth,
+        )
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
         abort_persisted = False
         stream_lifecycle_owner = bool(kwargs.get("_stream_lifecycle_owner"))
         commit_on_abort = self._session_supports_agent_lifecycle(session)
+        invocation_token = bind_usage_invocation_id(invocation_id)
+        ctx.context_usage_attribution = {
+            **{
+                key: delegation_attribution[key]
+                for key in (
+                    "product_session_id",
+                    "parent_cache_identity",
+                    "cache_mode",
+                    "cache_scope",
+                )
+                if key in delegation_attribution
+            },
+            "parent_session_id": parent_session_id,
+            "invocation_id": invocation_id,
+            "parent_invocation_id": parent_invocation_id,
+            "delegation_id": delegation_id,
+            "agent_path": agent_path,
+            "depth": depth,
+        }
+        attribution_token = bind_usage_attribution(ctx.context_usage_attribution)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
         if isinstance(inputs, dict):
             ctx.extra["user_id"] = inputs.get("user_id", "")
@@ -2181,12 +2685,16 @@ class ReActAgent(BaseAgent):
             )
             raise  # Preserve the original ReAct failure for the caller
         finally:
-            if need_cleanup and not stream_lifecycle_owner:
-                if not abort_persisted:
-                    await self.context_engine.save_contexts(session)
-                await session.close_stream()
-                if not abort_persisted:
-                    await session.commit()
+            try:
+                if need_cleanup and not stream_lifecycle_owner:
+                    if not abort_persisted:
+                        await self.context_engine.save_contexts(session)
+                    await session.close_stream()
+                    if not abort_persisted:
+                        await session.commit()
+            finally:
+                reset_usage_attribution(attribution_token)
+                reset_usage_invocation_id(invocation_token)
 
     async def write_invoke_result_to_stream(
             self,
@@ -2347,6 +2855,9 @@ class ReActAgent(BaseAgent):
         from openjiuwen.core.runner import Runner
         await Runner.release(session_id=session_id)
         await self.context_engine.clear_context(session_id=session_id)
+        # A session ID is the aggregation scope.  Clearing the in-memory
+        # context does not end that logical session, so its usage totals and
+        # sequence remain cumulative when the ID is reused.
 
     async def clear_context_messages(
             self,

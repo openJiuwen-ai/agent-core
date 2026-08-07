@@ -21,6 +21,11 @@ from openjiuwen.core.controller.schema.dataframe import (
 )
 from openjiuwen.core.controller.schema.event import EventType
 from openjiuwen.core.controller.modules.task_manager import TaskFilter
+from openjiuwen.core.single_agent.rail.base import (
+    bind_usage_delegation,
+    build_usage_delegation_attribution,
+    reset_usage_delegation,
+)
 from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
@@ -95,13 +100,29 @@ class SessionSpawnExecutor(TaskExecutor):
             else:
                 subagent = self._deep_agent.create_subagent(subagent_type, cid)
             await prepare_subagent_task_resources(subagent)
+            parent_invocation_id = meta.get("parent_invocation_id")
             subagent_inputs = {
                 "query": query,
                 "conversation_id": cid,
             }
             if affinity_enabled:
                 subagent_inputs["parent_session_id"] = parent_session_id
-            result = await subagent.invoke(subagent_inputs)
+                subagent_inputs["delegation_id"] = task_id
+                if parent_invocation_id:
+                    subagent_inputs["parent_invocation_id"] = parent_invocation_id
+            delegation_token = bind_usage_delegation(
+                build_usage_delegation_attribution(
+                    agent_id=getattr(getattr(subagent, "card", None), "id", None),
+                    parent_session_id=parent_session_id,
+                    delegation_id=task_id,
+                    parent_attribution=meta.get("parent_usage_attribution"),
+                    parent_invocation_id=parent_invocation_id,
+                )
+            )
+            try:
+                result = await subagent.invoke(subagent_inputs)
+            finally:
+                reset_usage_delegation(delegation_token)
             payload = result.get("output", "") if isinstance(result, dict) else str(result)
 
             logger.info(

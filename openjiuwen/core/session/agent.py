@@ -108,6 +108,10 @@ class Session:
     def get_agent_description(self):
         return self._card.description
 
+    def get_source_metadata(self) -> dict[str, Any]:
+        """Return immutable-by-convention metadata describing the session owner."""
+        return dict(self._source_metadata)
+
     def set_team_cache_scope(self, *, team_id: str, agent_id: str) -> None:
         """Bind the Team scope used to derive this member Session's cache id."""
         if not team_id or not agent_id:

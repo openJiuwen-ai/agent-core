@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, UserMessage
 
 
 class PromptAttachmentKind(str, Enum):
@@ -88,6 +88,12 @@ def _canonical_json(value: Any) -> str:
 
 def _kind_value(kind: PromptAttachmentKind | str) -> str:
     return kind.value if isinstance(kind, PromptAttachmentKind) else str(kind)
+
+
+def _context_usage_category(kind: PromptAttachmentKind | str) -> str:
+    """Map dynamic prompt content to the token usage protocol categories."""
+
+    return "skills" if _kind_value(kind).lower() == PromptAttachmentKind.SKILL.value else "system_prompt"
 
 
 def _content_sha256(content: str | None) -> str:
@@ -602,9 +608,65 @@ class PromptAttachmentManager:
                     session_id,
                     len(context_history_messages),
                 )
+
+            # Keep compatibility with callers that build a window before
+            # persisting attachment history.  The normal ReAct path calls
+            # ``sync_to_context`` first and therefore uses the append-only
+            # snapshot/delta path above.
+            prompt_attachments = await self.collect_for_session(session_id)
+            rendered = self.render(prompt_attachments)
+            if rendered:
+                categories = [_context_usage_category(item.kind) for item in prompt_attachments]
+                fragments = [
+                    {
+                        "category": category,
+                        "carrier": "context_message",
+                        "order": index,
+                        "stable_id": item.id,
+                        "source": item.source,
+                        "text": item.content or "",
+                    }
+                    for index, (item, category) in enumerate(zip(prompt_attachments, categories))
+                ]
+                homogeneous_category = categories[0] if categories and len(set(categories)) == 1 else None
+                messages = self.inject_messages(
+                    list(window.context_messages),
+                    rendered,
+                    context_usage_category=homogeneous_category,
+                    context_usage_fragments=fragments,
+                )
+                logger.info(
+                    "[PromptAttachmentManager] injected unsaved prompt attachments: "
+                    "session_id=%s, prompt_attachment_ids=%s, rendered_prompt_attachment_hash=%s",
+                    session_id,
+                    [item.id for item in prompt_attachments],
+                    hash_rendered(rendered),
+                )
+                return window.model_copy(update={"context_messages": messages})
             return window
 
         return mutator
+
+    @staticmethod
+    def inject_messages(
+        messages: list[BaseMessage],
+        rendered_prompt_attachments: str,
+        *,
+        context_usage_category: str | None = None,
+        context_usage_fragments: list[dict[str, Any]] | None = None,
+    ) -> list[BaseMessage]:
+        """Append rendered prompt attachments as a classified context message."""
+
+        if not rendered_prompt_attachments:
+            return list(messages)
+
+        metadata: dict[str, Any] = {}
+        if context_usage_category is not None:
+            metadata["_context_usage_category"] = context_usage_category
+            metadata["_context_usage_carrier"] = "context_message"
+        if context_usage_fragments:
+            metadata["_context_usage_fragments"] = [dict(fragment) for fragment in context_usage_fragments]
+        return [*messages, UserMessage(content=rendered_prompt_attachments, metadata=metadata)]
 
     @staticmethod
     def _state_by_section(prompt_attachments: Iterable[PromptAttachment]) -> dict[str, str]:

@@ -147,6 +147,102 @@ class BaseModelClient(ABC):
         return 0
 
     @staticmethod
+    def _cache_usage_metadata(obj: Any) -> dict[str, Any]:
+        """Normalize cache read/miss/write fields while preserving zero values.
+
+        The legacy ``cache_tokens`` field cannot distinguish an authoritative
+        zero hit from an omitted field. This helper keeps that distinction for
+        the context-usage aggregator without changing the legacy field.
+        """
+
+        def _get_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        def _get_path(source: Any, path: tuple[str, ...]) -> Any:
+            current = source
+            for key in path:
+                current = _get_value(current, key)
+                if current is None:
+                    return None
+            return current
+
+        def _to_int(value: Any) -> int | None:
+            if value is None or isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(value) if value.is_integer() else None
+            if isinstance(value, str):
+                text = value.strip()
+                if text.startswith(("+", "-")):
+                    digits = text[1:]
+                else:
+                    digits = text
+                if digits.isdigit():
+                    return int(text)
+            return None
+
+        def _first(paths: tuple[tuple[str, ...], ...]) -> int | None:
+            for path in paths:
+                value = _to_int(_get_path(obj, path))
+                if value is not None:
+                    return value
+            return None
+
+        read_tokens = _first(
+            (
+                ("prompt_tokens_details", "cached_tokens"),
+                ("promptTokensDetails", "cachedTokens"),
+                ("input_tokens_details", "cached_tokens"),
+                ("input_token_details", "cached_tokens"),
+                ("inputTokensDetails", "cachedTokens"),
+                ("inputTokenDetails", "cachedTokens"),
+                ("usageMetadata", "cachedContentTokenCount"),
+                ("usage_metadata", "cached_content_token_count"),
+                ("prompt_cache_hit_tokens",),
+                ("cache_read_input_tokens",),
+                ("cachedContentTokenCount",),
+                ("cached_content_token_count",),
+                ("cache_read_tokens",),
+                ("cache_tokens",),
+                ("cached_tokens",),
+                ("cache_hit_tokens",),
+                ("cached_input_tokens",),
+                ("prompt_cache_tokens",),
+                ("prompt_cached_tokens",),
+            )
+        )
+        miss_tokens = _first(
+            (
+                ("prompt_cache_miss_tokens",),
+                ("cache_miss_tokens",),
+                ("cache_miss_input_tokens",),
+                ("uncached_tokens",),
+            )
+        )
+        write_tokens = _first(
+            (
+                ("cache_write_tokens",),
+                ("cache_creation_input_tokens",),
+                ("cache_creation_tokens",),
+            )
+        )
+        has_cache_usage = any(value is not None for value in (read_tokens, miss_tokens, write_tokens))
+        return {
+            "cache_read_tokens": read_tokens,
+            "cache_miss_tokens": miss_tokens,
+            "cache_write_tokens": write_tokens,
+            "cache_status": "observed" if has_cache_usage else None,
+            "cache_source": "provider_usage" if has_cache_usage else None,
+            "cache_authoritative": has_cache_usage,
+        }
+
+    @staticmethod
     def _extract_reasoning_tokens(obj: Any) -> int:
         """Extract reasoning/thinking token count from provider usage metadata.
 

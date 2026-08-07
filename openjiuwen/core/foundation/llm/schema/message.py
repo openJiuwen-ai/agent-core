@@ -20,6 +20,12 @@ class UsageMetadata(BaseModel):
     output_tokens: int = 0
     total_tokens: int = 0
     cache_tokens: int = 0
+    cache_read_tokens: Optional[int] = None
+    cache_miss_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
+    cache_status: Optional[str] = None
+    cache_source: Optional[str] = None
+    cache_authoritative: bool = False
     reasoning_tokens: int = 0
     input_cost: float = 0.
     output_cost: float = 0.

@@ -30,6 +30,7 @@ async def create_context(
         ContextEngineConfig(
             context_window_tokens=context_window_tokens,
             default_window_message_num=default_window_message_num,
+            enable_tiktoken_counter=True,
         ),
         workspace=workspace,
     )
