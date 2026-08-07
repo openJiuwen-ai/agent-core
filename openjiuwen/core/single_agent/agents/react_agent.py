@@ -1115,6 +1115,7 @@ class ReActAgent(BaseAgent):
         else:
             ai_message = AssistantMessage(
                 content=accumulated_chunk.content or "",
+                metadata=accumulated_chunk.metadata,
                 tool_calls=accumulated_chunk.tool_calls or [],
                 usage_metadata=accumulated_chunk.usage_metadata,
                 reasoning_content=accumulated_chunk.reasoning_content,
@@ -2048,6 +2049,7 @@ class ReActAgent(BaseAgent):
                         await context.add_messages(
                             AssistantMessage(
                                 content=ai_message.content,
+                                metadata=ai_message.metadata,
                                 tool_calls=ai_message.tool_calls,
                                 reasoning_content=ai_message.reasoning_content,
                                 usage_metadata=ai_message.usage_metadata,

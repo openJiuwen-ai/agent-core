@@ -16,7 +16,21 @@ Promp caching layout:
   3. messages
 """
 
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+import copy
+import json
+import re
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import httpx
 
@@ -38,6 +52,7 @@ from openjiuwen.core.foundation.llm.schema import (
     VideoGenerationResponse,
 )
 from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
@@ -58,6 +73,160 @@ if TYPE_CHECKING:
     import anthropic
 
 
+_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY = "anthropic_content_blocks"
+_ANTHROPIC_INTERNAL_CONTENT_BLOCKS_KEY = "__anthropic_content_blocks"
+_ANTHROPIC_CACHEABLE_BLOCK_TYPES = frozenset({
+    "text", "image", "document", "tool_use", "tool_result",
+})
+_IMAGE_DATA_URL_PATTERN = re.compile(
+    r"^data:(image/(?:jpeg|png|gif|webp));base64,(.+)$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _to_plain_data(value: Any) -> Any:
+    """Convert Anthropic SDK models into JSON-compatible data."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump(exclude_none=True)
+    if isinstance(value, Mapping):
+        return {key: _to_plain_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_plain_data(item) for item in value]
+    return value
+
+
+def _sanitize_replay_block(block: Any) -> Optional[dict]:
+    """Keep only fields accepted by Anthropic's message input schema."""
+    data = _to_plain_data(block)
+    if not isinstance(data, Mapping):
+        return None
+
+    block_type = data.get("type")
+    if block_type == "thinking":
+        return {
+            "type": "thinking",
+            "thinking": str(data.get("thinking") or ""),
+            "signature": str(data.get("signature") or ""),
+        }
+    if block_type == "redacted_thinking":
+        opaque_data = data.get("data")
+        if not opaque_data:
+            return None
+        return {"type": "redacted_thinking", "data": opaque_data}
+    if block_type == "text":
+        result = {"type": "text", "text": str(data.get("text") or "")}
+        if data.get("citations") is not None:
+            result["citations"] = copy.deepcopy(data["citations"])
+        return result
+    if block_type == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": str(data.get("id") or ""),
+            "name": str(data.get("name") or ""),
+            "input": copy.deepcopy(data.get("input") or {}),
+        }
+    return None
+
+
+def _preserved_content_blocks(message: Mapping[str, Any]) -> List[dict]:
+    raw_blocks = message.get(_ANTHROPIC_INTERNAL_CONTENT_BLOCKS_KEY)
+    if raw_blocks is None:
+        metadata = message.get("metadata")
+        if isinstance(metadata, Mapping):
+            raw_blocks = metadata.get(_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY)
+    if not isinstance(raw_blocks, list):
+        return []
+    blocks: List[dict] = []
+    for block in raw_blocks:
+        sanitized = _sanitize_replay_block(block)
+        if sanitized is not None:
+            blocks.append(sanitized)
+    return blocks
+
+
+def _copy_preserved_blocks_to_converted_messages(
+        source_messages: Union[str, List[BaseMessage], List[dict]],
+        converted_messages: List[dict],
+) -> None:
+    """Restore provider-private metadata stripped by the common converter."""
+    if not isinstance(source_messages, list) or len(source_messages) != len(converted_messages):
+        return
+    for source, converted in zip(source_messages, converted_messages):
+        metadata = source.get("metadata") if isinstance(source, dict) else getattr(source, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            continue
+        raw_blocks = metadata.get(_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY)
+        if isinstance(raw_blocks, list):
+            converted[_ANTHROPIC_INTERNAL_CONTENT_BLOCKS_KEY] = copy.deepcopy(raw_blocks)
+
+
+def _stream_blocks_metadata(block_acc: Mapping[int, dict]) -> dict[str, Any]:
+    blocks = []
+    for _, block in sorted(block_acc.items()):
+        sanitized = _sanitize_replay_block(block)
+        if sanitized is not None:
+            blocks.append(sanitized)
+    if not blocks:
+        return {}
+    return {_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY: blocks}
+
+
+def _convert_tool_choice(tool_choice: Any) -> Optional[dict]:
+    """Translate common/OpenAI tool-choice shapes into Anthropic's shape."""
+    if tool_choice is None or tool_choice == "auto":
+        return None
+    if isinstance(tool_choice, str):
+        mapped = {"required": "any", "none": "none", "any": "any"}.get(tool_choice)
+        return {"type": mapped} if mapped else None
+    if not isinstance(tool_choice, Mapping):
+        return None
+    if tool_choice.get("type") == "function":
+        function = tool_choice.get("function") or {}
+        return {"type": "tool", "name": function.get("name", "")}
+    if tool_choice.get("type") in {"auto", "any", "none", "tool"}:
+        return copy.deepcopy(dict(tool_choice))
+    return None
+
+
+def _model_forbids_custom_sampling(model: str) -> bool:
+    """Return whether a current Claude family accepts only default sampling."""
+    normalized = str(model or "").lower().replace(".", "-")
+    if not normalized.startswith("claude-"):
+        return False
+    if any(name in normalized for name in ("fable", "mythos")):
+        return True
+    if re.search(r"claude-(?:opus|sonnet)-5(?:-|$)", normalized):
+        return True
+    return bool(re.search(r"claude-opus-4-(?:7|8)(?:-|$)", normalized))
+
+
+def _image_source_block(value: Any) -> dict:
+    """Convert an OpenAI-style image value to an Anthropic image block."""
+    if isinstance(value, Mapping):
+        value = value.get("url")
+    if not isinstance(value, str) or not value:
+        raise ValueError("Anthropic image input requires a non-empty image URL.")
+
+    data_url = _IMAGE_DATA_URL_PATTERN.fullmatch(value)
+    if data_url:
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": data_url.group(1).lower(),
+                "data": data_url.group(2),
+            },
+        }
+    if value.startswith("data:"):
+        raise ValueError(
+            "Anthropic image inputs support base64 JPEG, PNG, GIF, or WebP data URLs only."
+        )
+    return {
+        "type": "image",
+        "source": {"type": "url", "url": value},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Shape converters: openJiuwen BaseMessage list  <->  Anthropic Messages API payload
 # ---------------------------------------------------------------------------
@@ -72,6 +241,15 @@ def _content_to_blocks(content: Any) -> List[dict]:
         blocks2: List[dict] = []
         for item in content:
             if isinstance(item, dict):
+                item_type = item.get("type")
+                image_value = None
+                if item_type in {"image_url", "input_image"}:
+                    image_value = item.get("image_url")
+                elif item_type == "image" and "source" not in item:
+                    image_value = item.get("data_url", item.get("image"))
+                if image_value is not None or item_type in {"image_url", "input_image"}:
+                    blocks2.append(_image_source_block(image_value))
+                    continue
                 blocks2.append(dict(item))
             elif isinstance(item, str):
                 if item:
@@ -88,12 +266,13 @@ def _mark_cache_control(blocks: List[dict], ttl: str) -> None:
     Anthropic caches the prefix up to and including the marked block; only the
     final block in a message needs the marker to anchor the prefix there.
     """
-    if not blocks:
-        return
     marker: dict = {"type": "ephemeral"}
     if ttl == "1h":
         marker["ttl"] = "1h"
-    blocks[-1]["cache_control"] = marker
+    for block in reversed(blocks):
+        if block.get("type") in _ANTHROPIC_CACHEABLE_BLOCK_TYPES:
+            block["cache_control"] = marker
+            return
 
 
 def _convert_message_schemas(
@@ -140,13 +319,17 @@ def _convert_message_schemas(
         _flush_tool_results()
 
         if role == "assistant":
+            preserved_blocks = _preserved_content_blocks(msg)
+            if preserved_blocks:
+                out.append({"role": "assistant", "content": preserved_blocks})
+                continue
+
             blocks = _content_to_blocks(msg.get("content", ""))
             tool_calls = msg.get("tool_calls") or []
             for tc in tool_calls:
                 fn = tc.get("function", {}) if isinstance(tc, dict) else {}
                 args_str = fn.get("arguments", "{}") or "{}"
                 try:
-                    import json
                     args_obj = json.loads(args_str) if isinstance(args_str, str) else args_str
                 except Exception:
                     args_obj = {"_raw_arguments": args_str}
@@ -261,6 +444,14 @@ class AnthropicModelClient(BaseModelClient):
         super().__init__(model_config, model_client_config)
         self._base_headers = build_base_headers(custom_headers=model_client_config.custom_headers)
 
+    def _validate_config(self):
+        super()._validate_config()
+        if not str(self.model_client_config.api_key or "").strip():
+            raise build_error(
+                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                error_msg="model client config api_key is required for Anthropic client.",
+            )
+
     def _get_client_name(self) -> str:
         return "Anthropic client"
 
@@ -284,7 +475,9 @@ class AnthropicModelClient(BaseModelClient):
         :meth:`aclose_connections`.
         """
         cfg = model_client_config
+        auth_mode = cfg.auth_mode.value if isinstance(cfg.auth_mode, LLMAuthMode) else cfg.auth_mode
         return (
+            auth_mode,
             cfg.api_key,
             cls._normalize_base_url(cfg.api_base),
             cfg.verify_ssl,
@@ -315,7 +508,9 @@ class AnthropicModelClient(BaseModelClient):
         if not api_base:
             return None
         b = api_base.rstrip("/")
-        if b.endswith("/v1"):
+        if b.endswith("/v1/messages"):
+            b = b[:-12]
+        elif b.endswith("/v1"):
             b = b[:-3]
         return b or None
 
@@ -462,6 +657,7 @@ class AnthropicModelClient(BaseModelClient):
 
         oai_messages: List[dict] = openai_params.get("messages") or []
         oai_tools: Optional[List[dict]] = openai_params.get("tools")
+        _copy_preserved_blocks_to_converted_messages(messages, oai_messages)
 
         system_blocks, anthropic_messages = _convert_message_schemas(oai_messages)
         anthropic_tools = _convert_tool_schemas(oai_tools)
@@ -483,20 +679,61 @@ class AnthropicModelClient(BaseModelClient):
             params["system"] = system_blocks
         if anthropic_tools:
             params["tools"] = anthropic_tools
-        # Anthropic rejects temperature and top_p together (400 invalid_request
-        # for models such as Claude Haiku 4.5). Both carry non-None defaults in
-        # ModelRequestConfig, so we cannot rely on the caller to unset one:
-        # prefer temperature and only forward top_p when temperature is absent.
+
+        # Forward Anthropic-native controls that the common OpenAI-shaped
+        # builder intentionally treats as extras.
+        for key in (
+                "thinking", "output_config", "metadata", "service_tier", "top_k",
+        ):
+            if key in openai_params:
+                params[key] = openai_params[key]
+
+        # Compatible gateways may add fields that are not keyword parameters
+        # in the Anthropic SDK. Send them through extra_body so the SDK merges
+        # them into JSON instead of raising TypeError before the HTTP request.
+        extra_body = copy.deepcopy(openai_params.get("extra_body") or {})
+        for key in (
+                "reasoning_effort", "thinking_budget", "thinking_strategy",
+                "enable_thinking",
+        ):
+            if key in openai_params:
+                extra_body[key] = openai_params[key]
+        if extra_body:
+            params["extra_body"] = extra_body
+        anthropic_tool_choice = _convert_tool_choice(openai_params.get("tool_choice"))
+        if anthropic_tool_choice is not None:
+            params["tool_choice"] = anthropic_tool_choice
+
+        # ModelRequestConfig carries OpenAI-oriented defaults. Treat those as
+        # "unset" for Anthropic unless the caller explicitly configured them;
+        # current Claude families reject non-default sampling with HTTP 400.
+        temperature_explicit = temperature is not None or "temperature" in self.model_config.model_fields_set
+        top_p_explicit = top_p is not None or "top_p" in self.model_config.model_fields_set
         temperature = openai_params.get("temperature")
         top_p = openai_params.get("top_p")
-        if temperature is not None:
+        thinking_payload = params.get("thinking")
+        thinking_type = (
+            (thinking_payload or {}).get("type")
+            if isinstance(thinking_payload, Mapping)
+            else None
+        )
+        sampling_forbidden = _model_forbids_custom_sampling(params["model"])
+        thinking_restricts_sampling = thinking_type in {"enabled", "adaptive"}
+
+        if sampling_forbidden or thinking_restricts_sampling:
+            if temperature_explicit or top_p_explicit:
+                llm_logger.debug(
+                    "Anthropic: dropping sampling overrides that are incompatible "
+                    "with this model/thinking mode."
+                )
+        elif temperature_explicit and temperature is not None:
             params["temperature"] = temperature
-            if top_p is not None:
+            if top_p_explicit and top_p is not None:
                 llm_logger.debug(
                     "Anthropic: dropping top_p because temperature is set "
                     "(the API forbids specifying both)."
                 )
-        elif top_p is not None and top_p != 1.0:
+        elif top_p_explicit and top_p is not None and top_p != 1.0:
             # top_p=1.0 is the default (no nucleus truncation); skip it so we
             # send the API only meaningful overrides.
             params["top_p"] = top_p
@@ -679,7 +916,10 @@ class AnthropicModelClient(BaseModelClient):
 
             # Accumulator state across the stream
             current_text = ""
-            tool_use_acc: dict[int, dict] = {}      # index -> {id, name, args_str}
+            # Ordered content-block state. Besides assembling tool arguments it
+            # retains thinking signatures so the next agent iteration can replay
+            # the assistant turn exactly as Anthropic returned it.
+            tool_use_acc: dict[int, dict] = {}
             last_usage: Optional[UsageMetadata] = None
             final_stop_reason: Optional[str] = None
 
@@ -750,13 +990,23 @@ class AnthropicModelClient(BaseModelClient):
         """Convert an Anthropic ``Message`` response into ``AssistantMessage``."""
         content_blocks = list(getattr(response, "content", []) or [])
         text_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        replay_blocks: List[dict] = []
         tool_calls: List[ToolCall] = []
         for idx, block in enumerate(content_blocks):
             btype = getattr(block, "type", None)
+            replay_block = _sanitize_replay_block(block)
+            if replay_block is not None:
+                replay_blocks.append(replay_block)
             if btype == "text":
                 text_parts.append(getattr(block, "text", "") or "")
+            elif btype == "thinking":
+                reasoning_parts.append(getattr(block, "thinking", "") or "")
+            elif btype == "redacted_thinking":
+                # The encrypted data is retained in metadata for replay, but it
+                # has no displayable reasoning text.
+                continue
             elif btype == "tool_use":
-                import json
                 input_obj = getattr(block, "input", None) or {}
                 args_str = json.dumps(input_obj) if not isinstance(input_obj, str) else input_obj
                 tool_calls.append(ToolCall(
@@ -766,10 +1016,20 @@ class AnthropicModelClient(BaseModelClient):
                     arguments=args_str,
                     index=idx,
                 ))
-            # thinking / redacted_thinking blocks: ignored for now -- could be
-            # surfaced as reasoning_content if/when OJ wants to display them.
 
         content = "".join(text_parts)
+        reasoning_content = "".join(reasoning_parts) or None
+        if reasoning_content is None:
+            # A few Anthropic-compatible gateways expose an OpenAI-style extra
+            # response field. It is safe to normalize for display, but it must
+            # never replace signed Anthropic thinking blocks during replay.
+            extra_reasoning = getattr(response, "reasoning_content", None)
+            if extra_reasoning is None:
+                model_extra = getattr(response, "model_extra", None)
+                if isinstance(model_extra, Mapping):
+                    extra_reasoning = model_extra.get("reasoning_content")
+            if isinstance(extra_reasoning, str) and extra_reasoning:
+                reasoning_content = extra_reasoning
 
         usage_metadata = self._usage_from_anthropic(getattr(response, "usage", None))
 
@@ -798,6 +1058,11 @@ class AnthropicModelClient(BaseModelClient):
             usage_metadata=usage_metadata,
             finish_reason=finish_reason,
             parser_content=parser_content,
+            reasoning_content=reasoning_content,
+            metadata=(
+                {_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY: replay_blocks}
+                if replay_blocks else {}
+            ),
         )
 
     def _usage_from_anthropic(self, usage: Any) -> Optional[UsageMetadata]:
@@ -865,11 +1130,37 @@ class AnthropicModelClient(BaseModelClient):
         if etype == "content_block_start":
             block = getattr(event, "content_block", None)
             idx = getattr(event, "index", None)
-            if block is not None and getattr(block, "type", None) == "tool_use" and idx is not None:
+            if block is None or idx is None:
+                return None
+            block_type = getattr(block, "type", None)
+            if block_type == "tool_use":
                 tool_use_acc[idx] = {
+                    "type": "tool_use",
                     "id": getattr(block, "id", "") or "",
                     "name": getattr(block, "name", "") or "",
+                    "input": getattr(block, "input", None) or {},
                     "args_str": "",
+                }
+            elif block_type == "thinking":
+                tool_use_acc[idx] = {
+                    "type": "thinking",
+                    "thinking": getattr(block, "thinking", "") or "",
+                    "signature": getattr(block, "signature", "") or "",
+                }
+            elif block_type == "redacted_thinking":
+                tool_use_acc[idx] = {
+                    "type": "redacted_thinking",
+                    "data": getattr(block, "data", "") or "",
+                }
+                return AssistantMessageChunk(
+                    content="",
+                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    finish_reason="null",
+                )
+            elif block_type == "text":
+                tool_use_acc[idx] = {
+                    "type": "text",
+                    "text": getattr(block, "text", "") or "",
                 }
             return None
 
@@ -883,14 +1174,48 @@ class AnthropicModelClient(BaseModelClient):
                 text = getattr(delta, "text", "") or ""
                 if not text:
                     return None
+                if idx is not None:
+                    state = tool_use_acc.setdefault(idx, {"type": "text", "text": ""})
+                    state["text"] = (state.get("text") or "") + text
                 return AssistantMessageChunk(
                     content=text,
                     reasoning_content=None,
+                    metadata=_stream_blocks_metadata(tool_use_acc),
                     tool_calls=None,
                     usage_metadata=None,
                     finish_reason="null",
                 )
-            if dtype == "input_json_delta" and idx is not None and idx in tool_use_acc:
+            if dtype == "thinking_delta":
+                thinking = getattr(delta, "thinking", "") or ""
+                if not thinking:
+                    return None
+                if idx is not None:
+                    state = tool_use_acc.setdefault(
+                        idx, {"type": "thinking", "thinking": "", "signature": ""}
+                    )
+                    state["thinking"] = (state.get("thinking") or "") + thinking
+                return AssistantMessageChunk(
+                    content="",
+                    reasoning_content=thinking,
+                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    tool_calls=None,
+                    usage_metadata=None,
+                    finish_reason="null",
+                )
+            if dtype == "signature_delta":
+                signature = getattr(delta, "signature", "") or ""
+                if idx is None or not signature:
+                    return None
+                state = tool_use_acc.setdefault(
+                    idx, {"type": "thinking", "thinking": "", "signature": ""}
+                )
+                state["signature"] = (state.get("signature") or "") + signature
+                return AssistantMessageChunk(
+                    content="",
+                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    finish_reason="null",
+                )
+            if self._is_tool_input_json_delta(dtype, idx, tool_use_acc):
                 tool_use_acc[idx]["args_str"] += getattr(delta, "partial_json", "") or ""
                 return None
             return None
@@ -899,17 +1224,29 @@ class AnthropicModelClient(BaseModelClient):
             idx = getattr(event, "index", None)
             if idx is None or idx not in tool_use_acc:
                 return None
-            tu = tool_use_acc.pop(idx)
+            block = tool_use_acc[idx]
+            if block.get("type") != "tool_use":
+                return AssistantMessageChunk(
+                    content="",
+                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    finish_reason="null",
+                )
+            args_str = block.get("args_str") or "{}"
+            try:
+                block["input"] = json.loads(args_str)
+            except (TypeError, ValueError):
+                block["input"] = {"_raw_arguments": args_str}
             return AssistantMessageChunk(
                 content="",
                 reasoning_content=None,
                 tool_calls=[ToolCall(
-                    id=tu["id"],
+                    id=block["id"],
                     type="function",
-                    name=tu["name"],
-                    arguments=tu["args_str"] or "{}",
+                    name=block["name"],
+                    arguments=args_str,
                     index=idx,
                 )],
+                metadata=_stream_blocks_metadata(tool_use_acc),
                 usage_metadata=None,
                 finish_reason="null",
             )
@@ -930,6 +1267,7 @@ class AnthropicModelClient(BaseModelClient):
                 content="",
                 reasoning_content=None,
                 tool_calls=None,
+                metadata=_stream_blocks_metadata(tool_use_acc),
                 usage_metadata=usage_metadata,
                 finish_reason=finish_reason,
             )
@@ -938,6 +1276,19 @@ class AnthropicModelClient(BaseModelClient):
             return None
 
         return None
+
+    @staticmethod
+    def _is_tool_input_json_delta(
+            dtype: str,
+            idx: Optional[int],
+            tool_use_acc: Mapping[int, dict],
+    ) -> bool:
+        return (
+            dtype == "input_json_delta"
+            and idx is not None
+            and idx in tool_use_acc
+            and tool_use_acc[idx].get("type") == "tool_use"
+        )
 
     # ------------------------------------------------------------------
     # unsupported media methods (mirror OpenAI client's stub style)

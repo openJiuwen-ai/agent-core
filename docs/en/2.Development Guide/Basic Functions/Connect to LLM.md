@@ -6,7 +6,7 @@ openJiuwen provides a unified **model client + configuration** system through `o
 
 - Use `ModelClientConfig` to describe "how to connect to the model service" (client_provider/api_base/api_key/custom_headers/SSL, etc.);
 - Use `ModelRequestConfig` to describe "which model to use for this call + call parameters" (model/temperature/top_p, etc.);
-- Use the unified entry class `Model`, and call via `invoke/stream`. The framework will automatically select the corresponding model client implementation based on `client_provider`.
+- Use the unified entry class `Model`, and call via `invoke/stream`. The framework picks a protocol implementation from `client_provider`: OpenAI-compatible or Anthropic. Legacy vendor names stay valid as aliases.
 
 ## Using Model to Call Models
 
@@ -23,7 +23,7 @@ from openjiuwen.core.foundation.llm import (
 
 # 1. Configure client connection information (client_provider/api_base/api_key, etc.)
 model_client_config = ModelClientConfig(
-    client_provider="SiliconFlow",              # Model provider identifier, framework automatically selects client implementation based on this value
+    client_provider="SiliconFlow",              # Model provider identifier; the framework picks a protocol from this value
     api_base="https://api.siliconflow.cn/v1",   # Model service URL
     api_key="sk-****************************",  # Authentication Token
     custom_headers={                            # Optional: inject custom headers for OpenAI-compatible requests
@@ -49,7 +49,7 @@ model = Model(
 
 > **Note**
 > - Users need to register accounts on SiliconFlow or OpenAI vendor websites to obtain available model `api_key` and model invocation URL address `api_base`.
-> - `client_provider` currently has built-in support for `OpenAI` and `SiliconFlow`. The framework will automatically select the corresponding model client implementation based on this configuration.
+> - `client_provider` currently has built-in support for the `ProviderType` values `OpenAI`, `OpenAIAccount`, `OpenRouter`, `Anthropic`, `SiliconFlow`, `DashScope`, `DeepSeek`, `InferenceAffinity`, `AscendAffinity`, and `IntelliRouter`. Protocol implementations are OpenAI-compatible and Anthropic. `DeepSeek`, `OpenRouter`, `SiliconFlow`, `DashScope`, `InferenceAffinity`, and `AscendAffinity` are legacy aliases mapped to `endpoint_profile` / `extensions` when a client is created. See [LLM Protocol Consolidation](LLM%20Protocol%20Consolidation.md).
 
 ### Sign In with OpenAI Account OAuth
 

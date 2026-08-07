@@ -7,6 +7,7 @@
   - [Basic Functions](2.Development%20Guide/Basic%20Functions/README.md)
     - [Filling Prompt Template](2.Development%20Guide/Basic%20Functions/Filling%20Prompt%20Template.md)
     - [Connect to LLM](2.Development%20Guide/Basic%20Functions/Connect%20to%20LLM.md)
+    - [LLM Protocol Consolidation](2.Development%20Guide/Basic%20Functions/LLM%20Protocol%20Consolidation.md)
     - [Custom Tools](2.Development%20Guide/Basic%20Functions/Custom%20Tools.md)
   - [Workflows](2.Development%20Guide/Workflows/README.md)
     - [Overview](2.Development%20Guide/Workflows/Overview.md)
