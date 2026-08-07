@@ -16,6 +16,8 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.interaction import (
     ActiveInteractionRound,
     InputDispatchMode,
+    InteractionPhase,
+    RoundOutcome,
     RoundWorkItem,
     SendInputRequest,
 )
@@ -120,6 +122,11 @@ async def test_send_input_preserves_text_validation_and_queueing(
     assert work is not None
     assert work.query == "continue"
     assert work.reset_loop is True
+
+    await agent.send_input(SendInputRequest(request_id="text-2", inputs={"query": "next turn"}))
+    next_work = agent._event_manager.next_work()
+    assert next_work is not None
+    assert next_work.request_id == "text-2"
 
 
 @pytest.mark.asyncio
@@ -276,7 +283,7 @@ async def test_enqueue_failure_exits_fresh_context_and_preserves_error(
 
 
 @pytest.mark.asyncio
-async def test_fresh_context_factory_replacement_and_stop_cleanup() -> None:
+async def test_fresh_context_factory_replacement_clear_and_stop_cleanup() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test"))
     agent._interaction_started = True
     entered: list[str] = []
@@ -292,10 +299,369 @@ async def test_fresh_context_factory_replacement_and_stop_cleanup() -> None:
     agent.set_fresh_input_context_factory(factory("old"))
     agent.set_fresh_input_context_factory(factory("new"))
     await agent.send_input(SendInputRequest(request_id="fresh-1", inputs={"query": "start"}))
+    agent._event_manager.next_work()
+    agent.set_fresh_input_context_factory(None)
+    await agent.send_input(SendInputRequest(request_id="fresh-2", inputs={"query": "continue"}))
     await agent.stop()
 
     assert entered == ["new"]
     assert agent._fresh_input_context_factory is None
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_work_without_replacing_event_queues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    event_manager = agent._event_manager
+    user_queue = event_manager._user_queue
+    goal_queue = event_manager._goal_queue
+    event_manager.push_user(RoundWorkItem.user(request_id="pending", inputs={"query": "pending"}))
+    shutdown_entered = asyncio.Event()
+    shutdown_release = asyncio.Event()
+
+    async def shutdown():
+        shutdown_entered.set()
+        await shutdown_release.wait()
+
+    cancel_active = AsyncMock()
+    monkeypatch.setattr(agent._interaction_output, "shutdown", shutdown)
+    monkeypatch.setattr(agent, "_cancel_active_round", cancel_active)
+
+    stop_task = asyncio.create_task(agent.stop())
+    await shutdown_entered.wait()
+    event_manager.push_user(RoundWorkItem.user(request_id="during-stop", inputs={"query": "late"}))
+    shutdown_release.set()
+    await stop_task
+
+    assert agent._event_manager is event_manager
+    assert event_manager._user_queue is user_queue
+    assert event_manager._goal_queue is goal_queue
+    assert event_manager.next_work() is None
+    cancel_active.assert_awaited_once_with(reason="stop")
+
+
+def test_live_phase_transition_rejects_terminal_state_and_target() -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+
+    assert agent._try_set_live_phase(InteractionPhase.RUNNING) is True
+    assert agent.phase is InteractionPhase.RUNNING
+    assert agent._try_set_live_phase(InteractionPhase.IDLE) is True
+    assert agent.phase is InteractionPhase.IDLE
+    with pytest.raises(ValueError, match="idle or running"):
+        agent._try_set_live_phase(InteractionPhase.TERMINATED)
+
+    agent._interaction_phase = InteractionPhase.TERMINATED
+    assert agent._try_set_live_phase(InteractionPhase.IDLE) is False
+    assert agent._try_set_live_phase(InteractionPhase.RUNNING) is False
+    assert agent.phase is InteractionPhase.TERMINATED
+
+
+@pytest.mark.asyncio
+async def test_stop_while_waiting_for_send_lock_prevents_late_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    notify = MagicMock()
+    send_user = AsyncMock()
+    monkeypatch.setattr(agent, "_notify_work", notify)
+    monkeypatch.setattr(agent, "_send_user", send_user)
+    await agent._interaction_send_lock.acquire()
+    task = asyncio.create_task(agent.send_input(SendInputRequest(request_id="late", inputs={"query": "late"})))
+    await asyncio.sleep(0)
+
+    await agent.stop()
+    agent._interaction_send_lock.release()
+
+    with pytest.raises(RuntimeError, match="interaction_terminated"):
+        await task
+    send_user.assert_not_awaited()
+    assert agent._event_manager.next_work() is None
+    notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_while_waiting_for_control_lock_prevents_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    notify = MagicMock()
+    monkeypatch.setattr(agent, "_notify_work", notify)
+    resume = InteractiveInput()
+    resume.update("call-1", {"action": "allow_once"})
+    await agent._interaction_control_lock.acquire()
+    task = asyncio.create_task(agent.send_input(SendInputRequest(request_id="late-resume", inputs={"query": resume})))
+    for _ in range(10):
+        if agent._interaction_send_lock.locked():
+            break
+        await asyncio.sleep(0)
+    assert agent._interaction_send_lock.locked()
+
+    await agent.stop()
+    agent._interaction_control_lock.release()
+
+    with pytest.raises(RuntimeError, match="interaction_terminated"):
+        await task
+    assert agent._event_manager.next_work() is None
+    notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_during_fresh_context_entry_prevents_late_enqueue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    exited = asyncio.Event()
+
+    @asynccontextmanager
+    async def blocking_context():
+        entered.set()
+        await release.wait()
+        try:
+            yield
+        finally:
+            exited.set()
+
+    agent.set_fresh_input_context_factory(blocking_context)
+    notify = MagicMock()
+    monkeypatch.setattr(agent, "_notify_work", notify)
+    task = asyncio.create_task(agent.send_input(SendInputRequest(request_id="late-fresh", inputs={"query": "late"})))
+    await entered.wait()
+
+    await agent.stop()
+    release.set()
+
+    with pytest.raises(RuntimeError, match="interaction_terminated"):
+        await task
+    assert exited.is_set()
+    assert agent._event_manager.next_work() is None
+    notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_prevents_active_round_from_requeueing_next_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    agent._interaction_session = MagicMock()
+    round_entered = asyncio.Event()
+    round_release = asyncio.Event()
+    shutdown_entered = asyncio.Event()
+    shutdown_release = asyncio.Event()
+    next_work = RoundWorkItem.user(request_id="next", inputs={"query": "next"})
+
+    async def run_one_round(*_args):
+        round_entered.set()
+        await round_release.wait()
+        return RoundOutcome(next_work=next_work)
+
+    async def shutdown():
+        shutdown_entered.set()
+        await shutdown_release.wait()
+
+    monkeypatch.setattr(agent, "run_one_round", run_one_round)
+    monkeypatch.setattr(agent._interaction_output, "has_consumer", lambda: True)
+    monkeypatch.setattr(agent._interaction_output, "shutdown", shutdown)
+    monkeypatch.setattr(agent, "_emit_round_boundary", AsyncMock(return_value=True))
+    work = RoundWorkItem.user(request_id="active", inputs={"query": "active"})
+    round_task = asyncio.create_task(agent._execute_round(work))
+    await round_entered.wait()
+
+    stop_task = asyncio.create_task(agent.stop())
+    await shutdown_entered.wait()
+    round_release.set()
+    await round_task
+    shutdown_release.set()
+    await stop_task
+
+    assert agent.phase is InteractionPhase.TERMINATED
+    assert agent._event_manager.next_work() is None
+
+
+@pytest.mark.asyncio
+async def test_stop_during_attach_await_prevents_goal_requeue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    attach_entered = asyncio.Event()
+    attach_release = asyncio.Event()
+    load_goal = MagicMock()
+    agent.goal_manager = MagicMock()
+
+    async def blocking_attach():
+        attach_entered.set()
+        await attach_release.wait()
+        return MagicMock()
+
+    monkeypatch.setattr(agent, "_attach_output_locked", blocking_attach)
+    monkeypatch.setattr(agent, "_load_goal_record_locked", load_goal)
+    attach_task = asyncio.create_task(agent.attach_output())
+    await attach_entered.wait()
+
+    await agent.stop()
+    attach_release.set()
+
+    with pytest.raises(RuntimeError, match="interaction_terminated"):
+        await attach_task
+    load_goal.assert_not_called()
+    assert agent._event_manager.next_work() is None
+
+
+@pytest.mark.asyncio
+async def test_supervisor_cannot_restore_idle_after_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    close_entered = asyncio.Event()
+    close_release = asyncio.Event()
+
+    async def blocking_close():
+        close_entered.set()
+        await close_release.wait()
+
+    monkeypatch.setattr(agent._interaction_output, "has_consumer", lambda: True)
+    monkeypatch.setattr(agent, "_close_idle_output_if_finished", blocking_close)
+    supervisor_task = asyncio.create_task(agent._supervisor_loop())
+    await close_entered.wait()
+
+    await agent.stop()
+    close_release.set()
+    await supervisor_task
+
+    assert agent.phase is InteractionPhase.TERMINATED
+    with pytest.raises(RuntimeError, match="interaction_terminated"):
+        await agent.send_input(SendInputRequest(request_id="late", inputs={"query": "late"}))
+    with pytest.raises(RuntimeError, match="interaction_terminated"):
+        await agent.attach_output()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_exception_cannot_restore_idle_after_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    promote_entered = asyncio.Event()
+    promote_release = asyncio.Event()
+
+    async def failing_promote():
+        promote_entered.set()
+        await promote_release.wait()
+        raise RuntimeError("promote_failed")
+
+    monkeypatch.setattr(agent._interaction_output, "has_consumer", lambda: True)
+    monkeypatch.setattr(agent, "_promote_loop_follow_ups", failing_promote)
+    supervisor_task = asyncio.create_task(agent._supervisor_loop())
+    await promote_entered.wait()
+
+    await agent.stop()
+    promote_release.set()
+    await supervisor_task
+
+    assert agent.phase is InteractionPhase.TERMINATED
+
+
+@pytest.mark.asyncio
+async def test_fresh_context_cannot_suppress_enqueue_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    primary_error = RuntimeError("enqueue_failed")
+
+    class SuppressingContext:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_args):
+            return True
+
+    agent.set_fresh_input_context_factory(SuppressingContext)
+    monkeypatch.setattr(
+        agent._event_manager,
+        "push_user",
+        MagicMock(side_effect=primary_error),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await agent.send_input(SendInputRequest(request_id="fresh", inputs={"query": "start"}))
+    assert raised.value is primary_error
+
+
+@pytest.mark.parametrize("exit_error_type", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.asyncio
+async def test_fresh_context_exit_error_cannot_replace_enqueue_error(
+    monkeypatch: pytest.MonkeyPatch,
+    exit_error_type: type[BaseException],
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    primary_error = RuntimeError("enqueue_failed")
+    exit_error = exit_error_type("exit_failed")
+
+    class FailingExitContext:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_args):
+            raise exit_error
+
+    agent.set_fresh_input_context_factory(FailingExitContext)
+    monkeypatch.setattr(
+        agent._event_manager,
+        "push_user",
+        MagicMock(side_effect=primary_error),
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await agent.send_input(SendInputRequest(request_id="fresh", inputs={"query": "start"}))
+    assert raised.value is primary_error
+    assert raised.value.__cause__ is exit_error
+
+
+@pytest.mark.asyncio
+async def test_task_cancellation_during_context_exit_cannot_replace_enqueue_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    primary_error = RuntimeError("enqueue_failed")
+    exit_entered = asyncio.Event()
+
+    class BlockingExitContext:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_args):
+            exit_entered.set()
+            await asyncio.Event().wait()
+
+    agent.set_fresh_input_context_factory(BlockingExitContext)
+    monkeypatch.setattr(
+        agent._event_manager,
+        "push_user",
+        MagicMock(side_effect=primary_error),
+    )
+    send_task = asyncio.create_task(
+        agent.send_input(SendInputRequest(request_id="fresh", inputs={"query": "start"}))
+    )
+    await exit_entered.wait()
+
+    send_task.cancel()
+    with pytest.raises(RuntimeError) as raised:
+        await send_task
+    assert raised.value is primary_error
+    assert isinstance(raised.value.__cause__, asyncio.CancelledError)
 
 
 @pytest.mark.parametrize("mode", list(InputDispatchMode))
