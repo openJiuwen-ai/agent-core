@@ -426,6 +426,33 @@ def build_tools_content(
         lines.append(f"- task_tool: {_tool_summary('task_tool')}")
         rendered_names.add("task_tool")
 
+    # Soft hint: prefer converging after a first-pass directory scan.
+    if any(name in tool_descriptions for name in ("glob", "list_files")):
+        if language == "cn":
+            lines.extend(
+                [
+                    "",
+                    "## 项目/多文件探索提示",
+                    "",
+                    "- 盘点或调研大目录时，首轮 `glob` / `list_files` 摸清结构后，优先转入 `read_file` / `grep` 与综合",
+                    "- 同一目录或实质相同的 glob 已有结果时，尽量复用，避免反复列举",
+                    "- 步数临近上限时，优先基于已有信息给出结论",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "## Project / Multi-file Exploration Tips",
+                    "",
+                    "- For large-directory surveys, after a first-pass `glob` / `list_files`, prefer "
+                    "`read_file` / `grep` and synthesis",
+                    "- When a directory or equivalent glob already has results, reuse them instead of "
+                    "listing again",
+                    "- Near the step limit, prefer concluding from what you already have",
+                ]
+            )
+
     if "bash" in rendered_names:
         if language == "cn":
             lines.extend(
