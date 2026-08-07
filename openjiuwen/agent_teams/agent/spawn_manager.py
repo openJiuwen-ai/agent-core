@@ -14,7 +14,10 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.context import get_session_id
-from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.status import (
+    ExecutionStatus,
+    MemberStatus,
+)
 from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamRuntimeContext,
@@ -276,6 +279,19 @@ class SpawnManager:
         team_backend = self._configurator.team_backend
         if team_backend is None:
             return False
+
+        # A restart begins a fresh round: re-base execution_status at IDLE so the
+        # member's next ``_map_round("started")`` can legally take ``IDLE ->
+        # STARTING``. Reset unconditionally — the old process is already gone, so
+        # a residual ``RUNNING``/``STARTING``/``CANCELLED`` is stale and safe to
+        # overwrite. (``RUNNING -> IDLE`` is NOT a legal CAS edge, so a guarded
+        # write would itself be rejected here — pause/kill can leave the DB in
+        # exactly that state.)
+        team_name = self._configurator.team_name
+        if team_name:
+            await team_backend.db.member.reset_member_execution_status(
+                member_name, team_name, ExecutionStatus.IDLE.value
+            )
 
         # Restart / recover must not replay the member's first-start
         # instruction: ``initial_message`` stays None so no harness.send is
