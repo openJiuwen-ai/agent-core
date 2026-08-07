@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
+import textwrap
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
@@ -342,21 +345,153 @@ async def test_stop_drains_work_without_replacing_event_queues(
     cancel_active.assert_awaited_once_with(reason="stop")
 
 
-def test_live_phase_transition_rejects_terminal_state_and_target() -> None:
+def test_interaction_phase_transition_keeps_terminal_absorbing() -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+
+    assert agent._try_transition_interaction_phase(InteractionPhase.RUNNING) is True
+    assert agent.phase is InteractionPhase.RUNNING
+    assert agent._try_transition_interaction_phase(InteractionPhase.IDLE) is True
+    assert agent.phase is InteractionPhase.IDLE
+    assert agent._try_transition_interaction_phase(InteractionPhase.TERMINATED) is True
+    assert agent._try_transition_interaction_phase(InteractionPhase.TERMINATED) is True
+    assert agent._try_transition_interaction_phase(InteractionPhase.IDLE) is False
+    assert agent._try_transition_interaction_phase(InteractionPhase.RUNNING) is False
+    assert agent.phase is InteractionPhase.TERMINATED
+    with pytest.raises(TypeError, match="must be InteractionPhase"):
+        agent._try_transition_interaction_phase("idle")  # type: ignore[arg-type]
+
+
+def test_interaction_phase_has_only_initial_and_transition_writers() -> None:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(DeepAgent)))
+    writers: set[str] = set()
+    for member in tree.body[0].body:
+        if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(member):
+            targets: list[ast.expr] = []
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = list(node.targets) if isinstance(node, ast.Assign) else [node.target]
+            elif isinstance(node, ast.AugAssign):
+                targets = [node.target]
+            if any(
+                isinstance(target, ast.Attribute)
+                and target.attr == "_interaction_phase"
+                for target in targets
+            ):
+                writers.add(member.name)
+
+    assert writers == {"__init__", "_try_transition_interaction_phase"}
+
+
+@pytest.mark.asyncio
+async def test_stop_retires_unstarted_agent_before_default_session_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openjiuwen.core.session import agent as agent_session_module
+
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    create_session = MagicMock()
+    monkeypatch.setattr(agent_session_module, "create_agent_session", create_session)
+
+    await agent.stop()
+
+    with pytest.raises(RuntimeError, match="interaction_terminated"):
+        await agent.start()
+    create_session.assert_not_called()
+
+
+@pytest.mark.parametrize("blocked_stage", ["pre_run", "prepare", "register"])
+@pytest.mark.asyncio
+async def test_stop_waits_for_in_progress_start_setup(
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_stage: str,
+) -> None:
+    from openjiuwen.core.session import agent as agent_session_module
+
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    session = MagicMock()
+    session.get_session_id.return_value = "serialized-start"
+    session.close_stream = AsyncMock()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def block(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+
+    session.pre_run = block if blocked_stage == "pre_run" else AsyncMock()
+
+    async def prepare(_session):
+        if blocked_stage == "prepare":
+            await block()
+
+    async def register(_rail):
+        if blocked_stage == "register":
+            await block()
+
+    monkeypatch.setattr(agent_session_module, "create_agent_session", MagicMock(return_value=session))
+    monkeypatch.setattr(agent, "prepare_interaction_task_loop", prepare)
+    monkeypatch.setattr(agent, "register_rail", register)
+    monkeypatch.setattr(agent, "_forward_session_stream", AsyncMock())
+    monkeypatch.setattr(agent, "_ensure_supervisor_running", MagicMock())
+    agent._task_completion_rail = None if blocked_stage == "register" else object()  # type: ignore[assignment]
+    start_task = asyncio.create_task(
+        agent.start(session=None if blocked_stage == "pre_run" else session)
+    )
+    await entered.wait()
+
+    stop_task = asyncio.create_task(agent.stop())
+    await asyncio.sleep(0)
+    assert not stop_task.done()
+    release.set()
+    await start_task
+    await stop_task
+
+    assert agent.interaction_started is False
+    assert agent.phase is InteractionPhase.TERMINATED
+
+
+@pytest.mark.asyncio
+async def test_same_session_start_waits_for_stop_then_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test"))
     agent._interaction_started = True
+    agent._bound_session_id = "same-session"
+    session = MagicMock()
+    session.get_session_id.return_value = "same-session"
+    shutdown_entered = asyncio.Event()
+    shutdown_release = asyncio.Event()
 
-    assert agent._try_set_live_phase(InteractionPhase.RUNNING) is True
-    assert agent.phase is InteractionPhase.RUNNING
-    assert agent._try_set_live_phase(InteractionPhase.IDLE) is True
-    assert agent.phase is InteractionPhase.IDLE
-    with pytest.raises(ValueError, match="idle or running"):
-        agent._try_set_live_phase(InteractionPhase.TERMINATED)
+    async def shutdown():
+        shutdown_entered.set()
+        await shutdown_release.wait()
 
-    agent._interaction_phase = InteractionPhase.TERMINATED
-    assert agent._try_set_live_phase(InteractionPhase.IDLE) is False
-    assert agent._try_set_live_phase(InteractionPhase.RUNNING) is False
+    monkeypatch.setattr(agent._interaction_output, "shutdown", shutdown)
+    stop_task = asyncio.create_task(agent.stop())
+    await shutdown_entered.wait()
+    assert agent.interaction_started is True
     assert agent.phase is InteractionPhase.TERMINATED
+    start_task = asyncio.create_task(agent.start(session=session))
+    await asyncio.sleep(0)
+    assert not start_task.done()
+
+    shutdown_release.set()
+    await stop_task
+    with pytest.raises(RuntimeError, match="interaction_terminated"):
+        await start_task
+
+
+@pytest.mark.asyncio
+async def test_unstarted_execute_round_has_no_side_effects() -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    work = RoundWorkItem.user(request_id="unstarted", inputs={"query": "ignored"})
+
+    await agent._execute_round(work)
+
+    assert agent.phase is InteractionPhase.IDLE
+    assert agent.active_round is None
+    assert agent._event_manager.active_work is None
 
 
 @pytest.mark.asyncio

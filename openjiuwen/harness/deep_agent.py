@@ -2956,8 +2956,16 @@ class DeepAgent(BaseAgent):
         Hosts should pass the product ``Session`` they own.  When ``session`` is
         omitted, a fresh agent session is created with id ``\"default\"`` (useful
         for unit tests and simple embeddings).
+
+        Lifecycle callbacks awaited while the start lock is held must not
+        re-enter ``start()`` or ``stop()`` on this agent.
         """
         async with self._interaction_start_lock:
+            if self._interaction_started:
+                self._ensure_interaction_running()
+            elif not self._try_transition_interaction_phase(InteractionPhase.IDLE):
+                raise RuntimeError("interaction_terminated")
+
             if session is None:
                 from openjiuwen.core.session.agent import create_agent_session
 
@@ -3001,7 +3009,6 @@ class DeepAgent(BaseAgent):
                 emit_event=self._emit_interaction_event,
                 notify_work=self._notify_work,
             )
-            self._interaction_phase = InteractionPhase.IDLE
             self._interaction_started = True
             self._interaction_forwarder_task = asyncio.create_task(
                 self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
@@ -3019,11 +3026,16 @@ class DeepAgent(BaseAgent):
             logger.info("[DeepAgent] Started for session %s", sid)
 
     async def stop(self) -> None:
-        """Terminate the interaction loop and wake any attached output consumer."""
+        """Serialize teardown with start and terminate this interaction runtime."""
+        async with self._interaction_start_lock:
+            await self._stop_interaction_locked()
+
+    async def _stop_interaction_locked(self) -> None:
+        """Teardown helper; awaited callbacks must not re-enter start or stop."""
         self._fresh_input_context_factory = None
+        self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
         if not self._interaction_started:
             return
-        self._interaction_phase = InteractionPhase.TERMINATED
         self._event_manager.discard_all_work()
         await self._interaction_output.shutdown()
         await self._cancel_active_round(reason="stop")
@@ -3057,7 +3069,7 @@ class DeepAgent(BaseAgent):
 
         self._interaction_started = False
         self._event_manager.discard_all_work()
-        self._interaction_phase = InteractionPhase.TERMINATED
+        self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
         self._active_interaction_round = None
         self._interaction_round_task = None
 
@@ -3070,8 +3082,7 @@ class DeepAgent(BaseAgent):
         call does not obtain the lease, so an already-attached reader continues
         to receive goal progress (session switch / concurrent attach_goal).
         """
-        if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
-            raise RuntimeError("interaction_terminated")
+        self._ensure_interaction_running()
 
         async with self._interaction_send_lock:
             self._ensure_interaction_running()
@@ -3107,10 +3118,13 @@ class DeepAgent(BaseAgent):
     def _is_interaction_running(self) -> bool:
         return self._interaction_started and self._interaction_phase is not InteractionPhase.TERMINATED
 
-    def _try_set_live_phase(self, target: InteractionPhase) -> bool:
-        if target not in (InteractionPhase.IDLE, InteractionPhase.RUNNING):
-            raise ValueError("live interaction phase must be idle or running")
-        if not self._is_interaction_running():
+    def _try_transition_interaction_phase(self, target: InteractionPhase) -> bool:
+        if not isinstance(target, InteractionPhase):
+            raise TypeError("interaction phase target must be InteractionPhase")
+        if (
+            self._interaction_phase is InteractionPhase.TERMINATED
+            and target is not InteractionPhase.TERMINATED
+        ):
             return False
         self._interaction_phase = target
         return True
@@ -3372,9 +3386,9 @@ class DeepAgent(BaseAgent):
 
     async def _supervisor_loop(self) -> None:
         try:
-            while self._interaction_started and self._interaction_phase is not InteractionPhase.TERMINATED:
+            while self._is_interaction_running():
                 if not self._interaction_output.has_consumer():
-                    if not self._try_set_live_phase(InteractionPhase.IDLE):
+                    if not self._try_transition_interaction_phase(InteractionPhase.IDLE):
                         return
                     self._interaction_wakeup.clear()
                     await self._interaction_wakeup.wait()
@@ -3390,7 +3404,7 @@ class DeepAgent(BaseAgent):
                     await self._close_idle_output_if_finished()
                     if not self._is_interaction_running():
                         return
-                    if not self._try_set_live_phase(InteractionPhase.IDLE):
+                    if not self._try_transition_interaction_phase(InteractionPhase.IDLE):
                         return
                     self._interaction_wakeup.clear()
                     if self._event_manager.has_pending_work():
@@ -3409,7 +3423,7 @@ class DeepAgent(BaseAgent):
             logger.debug("[DeepAgent] supervisor cancelled")
         except Exception:
             logger.exception("[DeepAgent] supervisor failed")
-            self._try_set_live_phase(InteractionPhase.IDLE)
+            self._try_transition_interaction_phase(InteractionPhase.IDLE)
 
     async def _promote_loop_follow_ups(self) -> None:
         controller = self.loop_controller
@@ -3490,7 +3504,9 @@ class DeepAgent(BaseAgent):
             return False
 
     async def _execute_round(self, work: RoundWorkItem) -> None:
-        if not self._try_set_live_phase(InteractionPhase.RUNNING):
+        if not self._is_interaction_running():
+            return
+        if not self._try_transition_interaction_phase(InteractionPhase.RUNNING):
             return
         session = self._interaction_session
         task_id = uuid.uuid4().hex
@@ -3543,7 +3559,7 @@ class DeepAgent(BaseAgent):
                 if not emitted:
                     forwarded.set()
             self._active_interaction_round = None
-            self._try_set_live_phase(InteractionPhase.IDLE)
+            self._try_transition_interaction_phase(InteractionPhase.IDLE)
 
     def _load_goal_record_locked(self) -> Optional[GoalRecord]:
         if self.goal_manager is None:
