@@ -64,13 +64,16 @@ class SubagentSessionManager:
         if affinity_enabled(self._parent_agent):
             envs[KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV] = parent_session_id
 
-        session = create_agent_session(
-            session_id=subagent_id,
-            card=subagent.card,
-            envs=envs,
-        )
+        card = subagent.card
+
+        def session_factory() -> Any:
+            return create_agent_session(
+                session_id=subagent_id,
+                card=card,
+                envs=envs,
+            )
+
         try:
-            await session.pre_run()
             instance = SubagentInstance(
                 subagent_id=subagent_id,
                 subagent_type=subagent_type,
@@ -78,12 +81,11 @@ class SubagentSessionManager:
                 role=role,
                 parent_session_id=parent_session_id,
                 agent=subagent,
-                session=session,
+                session_factory=session_factory,
                 running_semaphore=self._running_semaphore,
             )
             await instance.start_worker()
         except Exception:
-            await _close_session_quietly(session)
             raise
 
         self._instances[subagent_id] = instance

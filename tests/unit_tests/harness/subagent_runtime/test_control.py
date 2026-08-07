@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
@@ -31,7 +32,12 @@ class ControlParentAgent(MockParentAgent):
         browser_capabilities: list[str] | None = None,
     ) -> MockAgent:
         super().create_subagent(subagent_type, subsession_id, browser_capabilities)
-        return self.mock_agent
+        return MockAgent(
+            output=self.mock_agent.output,
+            delay_s=self.mock_agent.delay_s,
+            stream_error=self.mock_agent.stream_error,
+            prepare_error=self.mock_agent.prepare_error,
+        )
 
 
 def _control(
@@ -48,22 +54,42 @@ def _control(
 
 
 def _patch_create_session(session: ManagerSession | None = None):
+    def _factory(**kwargs) -> ManagerSession:
+        return session or ManagerSession()
+
     return patch(
         "openjiuwen.harness.subagent_runtime.session_manager.create_agent_session",
-        return_value=session or ManagerSession(),
+        side_effect=_factory,
     )
+
+
+@asynccontextmanager
+async def _patched_control(*, parent: ControlParentAgent | None = None, config: SubagentRuntimeConfig | None = None):
+    control = _control(parent=parent, config=config)
+    with _patch_create_session(), patch(
+        "openjiuwen.harness.subagent_runtime.control.WAIT_TIMEOUT_MS_MIN",
+        100,
+    ):
+        try:
+            yield control
+        finally:
+            for sid in list(control._manager.list_ids()):
+                await control._manager.remove(sid, reason="test_cleanup")
+                control._registry.release(sid)
+
+
+async def _wait_for_turn(agent: MockAgent, *, extra_s: float = 0.05) -> None:
+    await asyncio.sleep(agent.delay_s + extra_s)
 
 
 @pytest.mark.asyncio
 async def test_spawn_returns_pending_init() -> None:
-    control = _control()
-
-    with _patch_create_session():
+    async with _patched_control() as control:
         result = await control.spawn("explore", "hello")
 
-    assert result.status.kind is SubagentStatusKind.PENDING_INIT
-    assert control.get_status(result.subagent_id).kind is SubagentStatusKind.PENDING_INIT
-    assert control._registry.find_metadata(result.subagent_id) is not None
+        assert result.status.kind is SubagentStatusKind.PENDING_INIT
+        assert control.get_status(result.subagent_id).kind is SubagentStatusKind.PENDING_INIT
+        assert control._registry.find_metadata(result.subagent_id) is not None
 
 
 @pytest.mark.asyncio
@@ -106,181 +132,162 @@ async def test_spawn_enqueue_failure_releases_quota_and_removes_instance() -> No
 @pytest.mark.asyncio
 async def test_wait_all_semantics() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.05))
-    control = _control(parent=parent)
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent) as control:
         first = await control.spawn("explore", "one")
         second = await control.spawn("explore", "two")
+        await _wait_for_turn(parent.mock_agent)
 
-    wait_result = await control.wait([first.subagent_id, second.subagent_id], timeout_ms=5_000)
+        wait_result = await control.wait([first.subagent_id, second.subagent_id], timeout_ms=500)
 
-    assert wait_result.timed_out is False
-    assert wait_result.statuses[first.subagent_id].kind is SubagentStatusKind.COMPLETED
-    assert wait_result.statuses[second.subagent_id].kind is SubagentStatusKind.COMPLETED
-    assert set(wait_result.results) == {first.subagent_id, second.subagent_id}
+        assert wait_result.timed_out is False
+        assert wait_result.statuses[first.subagent_id].kind is SubagentStatusKind.COMPLETED
+        assert wait_result.statuses[second.subagent_id].kind is SubagentStatusKind.COMPLETED
+        assert set(wait_result.results) == {first.subagent_id, second.subagent_id}
 
 
 @pytest.mark.asyncio
 async def test_wait_not_found_does_not_short_circuit() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.05))
-    control = _control(parent=parent)
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent) as control:
         live = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
 
-    wait_result = await control.wait(["missing-id", live.subagent_id], timeout_ms=5_000)
+        wait_result = await control.wait(["missing-id", live.subagent_id], timeout_ms=500)
 
-    assert wait_result.statuses["missing-id"].kind is SubagentStatusKind.NOT_FOUND
-    assert wait_result.statuses[live.subagent_id].kind is SubagentStatusKind.COMPLETED
-    assert wait_result.timed_out is False
+        assert wait_result.statuses["missing-id"].kind is SubagentStatusKind.NOT_FOUND
+        assert wait_result.statuses[live.subagent_id].kind is SubagentStatusKind.COMPLETED
+        assert wait_result.timed_out is False
 
 
 @pytest.mark.asyncio
 async def test_wait_timeout_keeps_subagent_running() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.2))
-    control = _control(parent=parent)
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent) as control:
         spawned = await control.spawn("explore", "slow")
 
-    with patch("openjiuwen.harness.subagent_runtime.control.WAIT_TIMEOUT_MS_MIN", 50):
-        first_wait = await control.wait([spawned.subagent_id], timeout_ms=50)
-    assert first_wait.timed_out is True
-    assert first_wait.statuses[spawned.subagent_id].kind is SubagentStatusKind.RUNNING
+        with patch("openjiuwen.harness.subagent_runtime.control.WAIT_TIMEOUT_MS_MIN", 50):
+            first_wait = await control.wait([spawned.subagent_id], timeout_ms=50)
+        assert first_wait.timed_out is True
+        assert first_wait.statuses[spawned.subagent_id].kind is SubagentStatusKind.RUNNING
 
-    second_wait = await control.wait([spawned.subagent_id], timeout_ms=5_000)
-    assert second_wait.timed_out is False
-    assert second_wait.statuses[spawned.subagent_id].kind is SubagentStatusKind.COMPLETED
+        await _wait_for_turn(parent.mock_agent)
+        second_wait = await control.wait([spawned.subagent_id], timeout_ms=500)
+        assert second_wait.timed_out is False
+        assert second_wait.statuses[spawned.subagent_id].kind is SubagentStatusKind.COMPLETED
 
 
 @pytest.mark.asyncio
 async def test_wait_deduplicates_ids() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent())
-    control = _control(parent=parent)
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent) as control:
         spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
 
-    wait_result = await control.wait([spawned.subagent_id, spawned.subagent_id], timeout_ms=5_000)
+        wait_result = await control.wait([spawned.subagent_id, spawned.subagent_id], timeout_ms=500)
 
-    assert set(wait_result.statuses) == {spawned.subagent_id}
-    assert wait_result.timed_out is False
+        assert set(wait_result.statuses) == {spawned.subagent_id}
+        assert wait_result.timed_out is False
 
 
 @pytest.mark.asyncio
 async def test_get_status_and_subscribe_status() -> None:
-    control = _control()
+    async with _patched_control() as control:
+        assert control.get_status("missing").kind is SubagentStatusKind.NOT_FOUND
 
-    assert control.get_status("missing").kind is SubagentStatusKind.NOT_FOUND
+        with pytest.raises(AgentError):
+            control.subscribe_status("missing")
 
-    with pytest.raises(AgentError):
-        control.subscribe_status("missing")
-
-    with _patch_create_session():
         spawned = await control.spawn("explore", "hello")
-
-    receiver = control.subscribe_status(spawned.subagent_id)
-    assert receiver.current().kind is SubagentStatusKind.PENDING_INIT
+        receiver = control.subscribe_status(spawned.subagent_id)
+        assert receiver.current().kind is SubagentStatusKind.PENDING_INIT
 
 
 @pytest.mark.asyncio
 async def test_close_idle_instance() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent())
-    control = _control(parent=parent, config=SubagentRuntimeConfig(max_subagents=1))
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent, config=SubagentRuntimeConfig(max_subagents=1)) as control:
         spawned = await control.spawn("explore", "hello")
-        await control.wait([spawned.subagent_id], timeout_ms=5_000)
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
 
-    previous = await control.close(spawned.subagent_id, reason="manual")
+        previous = await control.close(spawned.subagent_id, reason="manual")
 
-    assert previous.kind is SubagentStatusKind.COMPLETED
-    assert control.get_status(spawned.subagent_id).kind is SubagentStatusKind.NOT_FOUND
-    assert control._registry.count == 0
-    assert control.list_live() == []
+        assert previous.kind is SubagentStatusKind.COMPLETED
+        assert control.get_status(spawned.subagent_id).kind is SubagentStatusKind.NOT_FOUND
+        assert control._registry.count == 0
+        assert control.list_live() == []
 
 
 @pytest.mark.asyncio
 async def test_close_running_instance_raises() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.2))
-    control = _control(parent=parent)
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent) as control:
         spawned = await control.spawn("explore", "slow")
+        await asyncio.sleep(0.02)
 
-    await asyncio.sleep(0.02)
+        with pytest.raises(ExecutionError, match="cannot close running subagent"):
+            await control.close(spawned.subagent_id)
 
-    with pytest.raises(ExecutionError, match="cannot close running subagent"):
-        await control.close(spawned.subagent_id)
-
-    assert control._manager.find(spawned.subagent_id) is not None
+        assert control._manager.find(spawned.subagent_id) is not None
 
 
 @pytest.mark.asyncio
 async def test_lru_evicts_idle_instance_when_full() -> None:
     config = SubagentRuntimeConfig(max_subagents=1, enable_lru_eviction=True)
     parent = ControlParentAgent(mock_agent=MockAgent())
-    control = _control(parent=parent, config=config)
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent, config=config) as control:
         first = await control.spawn("explore", "first")
-        await control.wait([first.subagent_id], timeout_ms=5_000)
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([first.subagent_id], timeout_ms=500)
         second = await control.spawn("explore", "second")
 
-    assert first.subagent_id != second.subagent_id
-    assert control.get_status(first.subagent_id).kind is SubagentStatusKind.NOT_FOUND
-    assert control._registry.find_metadata(first.subagent_id) is None
-    assert control._registry.find_metadata(second.subagent_id) is not None
+        assert first.subagent_id != second.subagent_id
+        assert control.get_status(first.subagent_id).kind is SubagentStatusKind.NOT_FOUND
+        assert control._registry.find_metadata(first.subagent_id) is None
+        assert control._registry.find_metadata(second.subagent_id) is not None
 
 
 @pytest.mark.asyncio
 async def test_lru_does_not_evict_running_instance() -> None:
     config = SubagentRuntimeConfig(max_subagents=1, enable_lru_eviction=True)
     parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.2))
-    control = _control(parent=parent, config=config)
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent, config=config) as control:
         running = await control.spawn("explore", "slow")
+        await asyncio.sleep(0.02)
 
-    await asyncio.sleep(0.02)
+        with pytest.raises(ValidationError):
+            await control.spawn("explore", "blocked")
 
-    with pytest.raises(ValidationError):
-        await control.spawn("explore", "blocked")
-
-    assert control._manager.find(running.subagent_id) is not None
+        assert control._manager.find(running.subagent_id) is not None
 
 
 @pytest.mark.asyncio
 async def test_list_live_matches_spawned_metadata() -> None:
-    control = _control()
-
-    with _patch_create_session():
+    async with _patched_control() as control:
         spawned = await control.spawn("explore", "hello", display_name="Explorer", role="researcher")
 
-    live = control.list_live()
-    assert len(live) == 1
-    assert live[0].subagent_id == spawned.subagent_id
-    assert live[0].display_name == "Explorer"
-    assert live[0].role == "researcher"
+        live = control.list_live()
+        assert len(live) == 1
+        assert live[0].subagent_id == spawned.subagent_id
+        assert live[0].display_name == "Explorer"
+        assert live[0].role == "researcher"
 
 
 @pytest.mark.asyncio
 async def test_wait_timeout_ms_is_clamped() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.2))
-    control = _control(parent=parent)
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent) as control:
         spawned = await control.spawn("explore", "slow")
 
-    with patch("openjiuwen.harness.subagent_runtime.control.WAIT_TIMEOUT_MS_MIN", 50):
-        short_wait = await control.wait([spawned.subagent_id], timeout_ms=1)
-    assert short_wait.timed_out is True
-    assert short_wait.statuses[spawned.subagent_id].kind is SubagentStatusKind.RUNNING
+        with patch("openjiuwen.harness.subagent_runtime.control.WAIT_TIMEOUT_MS_MIN", 50):
+            short_wait = await control.wait([spawned.subagent_id], timeout_ms=1)
+        assert short_wait.timed_out is True
+        assert short_wait.statuses[spawned.subagent_id].kind is SubagentStatusKind.RUNNING
 
-    with patch("openjiuwen.harness.subagent_runtime.control.WAIT_TIMEOUT_MS_MAX", 100):
-        missing = await control.wait(["missing"], timeout_ms=999_999)
-    assert missing.statuses["missing"].kind is SubagentStatusKind.NOT_FOUND
-    assert missing.timed_out is False
+        with patch("openjiuwen.harness.subagent_runtime.control.WAIT_TIMEOUT_MS_MAX", 100):
+            missing = await control.wait(["missing"], timeout_ms=999_999)
+        assert missing.statuses["missing"].kind is SubagentStatusKind.NOT_FOUND
+        assert missing.timed_out is False
 
 
 # ---------------------------------------------------------------------------
@@ -292,22 +299,22 @@ async def test_wait_timeout_ms_is_clamped() -> None:
 async def test_flow_spawn_wait_single() -> None:
     """spawn → wait：秒回只有 id/status，wait 才拿到 output。"""
     parent = ControlParentAgent(mock_agent=MockAgent(output="analysis done"))
-    control = _control(parent=parent)
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent) as control:
         spawned = await control.spawn("explore", "analyze this")
 
-    assert spawned.status.kind is SubagentStatusKind.PENDING_INIT
-    assert spawned.subagent_id
-    assert spawned.task_id
-    assert control._registry.count == 1
+        assert spawned.status.kind is SubagentStatusKind.PENDING_INIT
+        assert spawned.subagent_id
+        assert spawned.task_id
+        assert control._registry.count == 1
 
-    waited = await control.wait([spawned.subagent_id], timeout_ms=5_000)
+        await _wait_for_turn(parent.mock_agent)
+        waited = await control.wait([spawned.subagent_id], timeout_ms=500)
 
-    assert waited.timed_out is False
-    assert waited.statuses[spawned.subagent_id].kind is SubagentStatusKind.COMPLETED
-    assert waited.results[spawned.subagent_id] == "analysis done"
-    assert parent.mock_agent.invoke_calls == 1
+        assert waited.timed_out is False
+        assert waited.statuses[spawned.subagent_id].kind is SubagentStatusKind.COMPLETED
+        assert waited.results[spawned.subagent_id] == "analysis done"
+        instance = control._manager.get(spawned.subagent_id)
+        assert instance._agent.stream_calls == 1
 
 
 @pytest.mark.asyncio
@@ -315,11 +322,10 @@ async def test_flow_spawn_wait_close_release() -> None:
     """spawn → wait → close → release → 再次 spawn 成功（名额复用）。"""
     config = SubagentRuntimeConfig(max_subagents=1)
     parent = ControlParentAgent(mock_agent=MockAgent())
-    control = _control(parent=parent, config=config)
-
-    with _patch_create_session():
+    async with _patched_control(parent=parent, config=config) as control:
         first = await control.spawn("explore", "first")
-        first_wait = await control.wait([first.subagent_id], timeout_ms=5_000)
+        await _wait_for_turn(parent.mock_agent)
+        first_wait = await control.wait([first.subagent_id], timeout_ms=500)
         assert first_wait.timed_out is False
         assert first_wait.statuses[first.subagent_id].kind is SubagentStatusKind.COMPLETED
 
@@ -330,37 +336,39 @@ async def test_flow_spawn_wait_close_release() -> None:
         assert control.get_status(first.subagent_id).kind is SubagentStatusKind.NOT_FOUND
 
         second = await control.spawn("explore", "second")
-        second_wait = await control.wait([second.subagent_id], timeout_ms=5_000)
+        await _wait_for_turn(parent.mock_agent)
+        second_wait = await control.wait([second.subagent_id], timeout_ms=500)
 
-    assert second.subagent_id != first.subagent_id
-    assert control._registry.count == 1
-    assert control._manager.find(first.subagent_id) is None
-    assert control._manager.find(second.subagent_id) is not None
-    assert second_wait.timed_out is False
-    assert second_wait.statuses[second.subagent_id].kind is SubagentStatusKind.COMPLETED
-    assert second_wait.results[second.subagent_id] == "done"
+        assert second.subagent_id != first.subagent_id
+        assert control._registry.count == 1
+        assert control._manager.find(first.subagent_id) is None
+        assert control._manager.find(second.subagent_id) is not None
+        assert second_wait.timed_out is False
+        assert second_wait.statuses[second.subagent_id].kind is SubagentStatusKind.COMPLETED
+        assert second_wait.results[second.subagent_id] == "done"
 
 
 @pytest.mark.asyncio
 async def test_flow_spawn_failure_then_success() -> None:
     """create 失败 rollback 后，同 session 可再次 spawn 成功。"""
     parent = ControlParentAgent()
-    control = _control(parent=parent, config=SubagentRuntimeConfig(max_subagents=1))
-
     parent.create_error = build_error(
         StatusCode.DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND,
         error_msg="missing",
     )
+    control = _control(parent=parent, config=SubagentRuntimeConfig(max_subagents=1))
     with _patch_create_session():
         with pytest.raises(AgentError):
             await control.spawn("explore", "will fail")
-        assert control._registry.count == 0
+    assert control._registry.count == 0
 
-        parent.create_error = None
-        parent.mock_agent = MockAgent(output="recovered")
+    parent.create_error = None
+    parent.mock_agent = MockAgent(output="recovered")
+    async with _patched_control(parent=parent, config=SubagentRuntimeConfig(max_subagents=1)) as control:
         succeeded = await control.spawn("explore", "retry")
+        await _wait_for_turn(parent.mock_agent)
+        waited = await control.wait([succeeded.subagent_id], timeout_ms=500)
 
-    waited = await control.wait([succeeded.subagent_id], timeout_ms=5_000)
-    assert waited.timed_out is False
-    assert waited.results[succeeded.subagent_id] == "recovered"
-    assert control._registry.count == 1
+        assert waited.timed_out is False
+        assert waited.results[succeeded.subagent_id] == "recovered"
+        assert control._registry.count == 1

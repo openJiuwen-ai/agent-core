@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -23,46 +24,79 @@ from openjiuwen.harness.subagent_runtime.models import (
     UserInputOp,
 )
 from openjiuwen.harness.subagent_runtime.registry import SubagentRegistry
+from openjiuwen.harness.subagent_runtime.stream_output import TurnOutputAggregator
 
 
 @dataclass
 class MockSession:
-    commit_calls: int = 0
+    pre_run_calls: int = 0
+    close_stream_calls: int = 0
+    pre_run_error: BaseException | None = None
 
-    async def commit(self) -> None:
-        self.commit_calls += 1
+    async def pre_run(self, **kwargs) -> None:
+        self.pre_run_calls += 1
+        if self.pre_run_error is not None:
+            raise self.pre_run_error
+
+    async def close_stream(self) -> None:
+        self.close_stream_calls += 1
 
 
 @dataclass
 class MockAgent:
     output: str = "done"
     delay_s: float = 0.0
-    error: BaseException | None = None
-    invoke_calls: int = 0
-    active_invokes: int = 0
-    max_active_invokes: int = 0
+    stream_error: BaseException | None = None
+    prepare_error: BaseException | None = None
+    stream_calls: int = 0
+    active_streams: int = 0
+    max_active_streams: int = 0
     prepare_calls: int = 0
     cleanup_calls: int = 0
+    received_generator_exit: bool = False
     card: SimpleNamespace = field(default_factory=lambda: SimpleNamespace(id="sub-card"))
-
-    async def invoke(self, inputs: dict[str, str], *, session: MockSession) -> dict[str, str]:
-        self.invoke_calls += 1
-        self.active_invokes += 1
-        self.max_active_invokes = max(self.max_active_invokes, self.active_invokes)
-        try:
-            if self.delay_s:
-                await asyncio.sleep(self.delay_s)
-            if self.error is not None:
-                raise self.error
-            return {"output": self.output, "conversation_id": inputs["conversation_id"]}
-        finally:
-            self.active_invokes -= 1
 
     def prepare_task_resources(self) -> None:
         self.prepare_calls += 1
+        if self.prepare_error is not None:
+            raise self.prepare_error
 
     def cleanup_task_resources(self) -> None:
         self.cleanup_calls += 1
+
+    async def stream(
+        self,
+        inputs: dict[str, str],
+        *,
+        session: MockSession,
+    ) -> AsyncIterator[dict[str, object]]:
+        _ = session
+        _ = inputs
+        self.stream_calls += 1
+        self.active_streams += 1
+        self.max_active_streams = max(self.max_active_streams, self.active_streams)
+        try:
+            if self.delay_s:
+                await asyncio.sleep(self.delay_s)
+            if self.stream_error is not None:
+                yield {
+                    "type": "answer",
+                    "payload": {
+                        "output": str(self.stream_error),
+                        "result_type": "error",
+                    },
+                }
+                return
+            yield {"type": "llm_output", "payload": {"content": self.output}}
+            yield {
+                "type": "answer",
+                "payload": {"output": self.output, "result_type": "answer"},
+            }
+        except GeneratorExit:
+            self.received_generator_exit = True
+            raise
+        finally:
+            self.active_streams -= 1
 
 
 def _metadata(subagent_id: str, *, parent_session_id: str = "parent") -> SubagentMetadata:
@@ -84,9 +118,21 @@ def _make_instance(
     agent: MockAgent | None = None,
     session: MockSession | None = None,
     semaphore: asyncio.Semaphore | None = None,
-) -> tuple[SubagentInstance, MockAgent, MockSession]:
+) -> tuple[SubagentInstance, MockAgent, list[MockSession]]:
     mock_agent = agent or MockAgent()
-    mock_session = session or MockSession()
+    sessions: list[MockSession] = []
+    session_template = session
+
+    def session_factory() -> MockSession:
+        nonlocal session_template
+        if session_template is not None:
+            created = session_template
+            session_template = None
+        else:
+            created = MockSession()
+        sessions.append(created)
+        return created
+
     instance = SubagentInstance(
         subagent_id=subagent_id,
         subagent_type="explore",
@@ -94,10 +140,10 @@ def _make_instance(
         role="researcher",
         parent_session_id="parent",
         agent=mock_agent,
-        session=mock_session,
+        session_factory=session_factory,
         running_semaphore=semaphore or asyncio.Semaphore(5),
     )
-    return instance, mock_agent, mock_session
+    return instance, mock_agent, sessions
 
 
 @pytest.mark.asyncio
@@ -111,7 +157,7 @@ async def test_instance_starts_pending_init_without_worker() -> None:
 
 @pytest.mark.asyncio
 async def test_user_input_runs_to_completed() -> None:
-    instance, agent, session = _make_instance()
+    instance, agent, sessions = _make_instance()
     await instance.start_worker()
     task_id = new_task_id()
 
@@ -121,28 +167,31 @@ async def test_user_input_runs_to_completed() -> None:
     assert instance.agent_status() == SubagentStatus.completed("done")
     assert instance.last_output == "done"
     assert instance.last_task_id == task_id
-    assert agent.invoke_calls == 1
-    assert session.commit_calls == 1
+    assert agent.stream_calls == 1
+    assert len(sessions) == 1
+    assert sessions[0].pre_run_calls == 1
+    assert sessions[0].close_stream_calls == 1
 
 
 @pytest.mark.asyncio
 async def test_two_user_inputs_run_serially() -> None:
-    instance, agent, _ = _make_instance()
+    instance, agent, sessions = _make_instance()
     await instance.start_worker()
 
     await instance.enqueue(UserInputOp(query="first", task_id="t1"))
     await instance.enqueue(UserInputOp(query="second", task_id="t2"))
     await asyncio.sleep(0.05)
 
-    assert agent.invoke_calls == 2
+    assert agent.stream_calls == 2
+    assert len(sessions) == 2
     assert instance.agent_status() == SubagentStatus.completed("done")
     assert instance.last_task_id == "t2"
 
 
 @pytest.mark.asyncio
-async def test_invoke_error_sets_errored_and_worker_survives() -> None:
-    agent = MockAgent(error=RuntimeError("boom"))
-    instance, _, session = _make_instance(agent=agent)
+async def test_stream_error_sets_errored_and_worker_survives() -> None:
+    agent = MockAgent(stream_error=RuntimeError("boom"))
+    instance, _, sessions = _make_instance(agent=agent)
     await instance.start_worker()
 
     await instance.enqueue(UserInputOp(query="fail", task_id="t1"))
@@ -151,21 +200,22 @@ async def test_invoke_error_sets_errored_and_worker_survives() -> None:
     status = instance.agent_status()
     assert status.kind == SubagentStatusKind.ERRORED
     assert status.message == "boom"
-    assert session.commit_calls == 1
+    assert len(sessions) == 1
+    assert sessions[0].close_stream_calls == 1
 
-    agent.error = None
+    agent.stream_error = None
     await instance.enqueue(UserInputOp(query="retry", task_id="t2"))
     await asyncio.sleep(0.05)
     assert instance.agent_status().kind == SubagentStatusKind.COMPLETED
 
 
 @pytest.mark.asyncio
-async def test_invoke_base_error_preserves_error_code() -> None:
+async def test_prepare_base_error_preserves_error_code() -> None:
     base_error = build_error(
         StatusCode.DEEPAGENT_SUBAGENT_RUNTIME_ERROR,
         error_msg="worker failed",
     )
-    instance, _, _ = _make_instance(agent=MockAgent(error=base_error))
+    instance, _, _ = _make_instance(agent=MockAgent(prepare_error=base_error))
     await instance.start_worker()
 
     await instance.enqueue(UserInputOp(query="fail", task_id="t1"))
@@ -178,7 +228,7 @@ async def test_invoke_base_error_preserves_error_code() -> None:
 
 @pytest.mark.asyncio
 async def test_interrupt_active_turn() -> None:
-    instance, _, session = _make_instance(agent=MockAgent(delay_s=0.2))
+    instance, _, sessions = _make_instance(agent=MockAgent(delay_s=0.2))
     await instance.start_worker()
     await instance.enqueue(UserInputOp(query="slow", task_id="t1"))
     await asyncio.sleep(0.02)
@@ -190,7 +240,8 @@ async def test_interrupt_active_turn() -> None:
     assert instance.agent_status().kind == SubagentStatusKind.INTERRUPTED
     assert instance._worker_task is not None
     assert not instance._worker_task.done()
-    assert session.commit_calls == 1
+    assert len(sessions) == 1
+    assert sessions[0].close_stream_calls == 1
 
 
 @pytest.mark.asyncio
@@ -278,7 +329,7 @@ async def test_shutdown_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shared_semaphore_serializes_invokes_across_instances() -> None:
+async def test_shared_semaphore_serializes_streams_across_instances() -> None:
     semaphore = asyncio.Semaphore(1)
     agent_a = MockAgent(delay_s=0.1)
     agent_b = MockAgent(delay_s=0.1)
@@ -294,8 +345,8 @@ async def test_shared_semaphore_serializes_invokes_across_instances() -> None:
     await instance_b.enqueue(UserInputOp(query="b", task_id="b1"))
     await asyncio.sleep(0.25)
 
-    assert agent_a.max_active_invokes == 1
-    assert agent_b.max_active_invokes == 1
+    assert agent_a.max_active_streams == 1
+    assert agent_b.max_active_streams == 1
 
 
 @pytest.mark.asyncio
@@ -304,7 +355,6 @@ async def test_running_only_after_semaphore_acquired() -> None:
     blocker = MockAgent(delay_s=0.2)
     waiter = MockAgent(delay_s=0.05)
     holder, _, _ = _make_instance(agent=blocker, semaphore=semaphore)
-    waiting, _, _ = _make_instance(agent=waiter, semaphore=semaphore)
     waiting, _, _ = _make_instance(
         subagent_id="parent_sub_wait",
         agent=waiter,
@@ -322,9 +372,9 @@ async def test_running_only_after_semaphore_acquired() -> None:
 
 
 @pytest.mark.asyncio
-async def test_finalize_runs_cleanup_and_commit_on_cancel() -> None:
+async def test_finalize_runs_cleanup_and_closes_session_on_cancel() -> None:
     agent = MockAgent(delay_s=0.2)
-    instance, _, session = _make_instance(agent=agent)
+    instance, _, sessions = _make_instance(agent=agent)
     await instance.start_worker()
     await instance.enqueue(UserInputOp(query="slow", task_id="t1"))
     await asyncio.sleep(0.02)
@@ -332,7 +382,8 @@ async def test_finalize_runs_cleanup_and_commit_on_cancel() -> None:
     await asyncio.sleep(0.05)
 
     assert agent.cleanup_calls == 1
-    assert session.commit_calls == 1
+    assert len(sessions) == 1
+    assert sessions[0].close_stream_calls == 1
 
 
 @pytest.mark.asyncio
@@ -364,6 +415,53 @@ async def test_subscribe_status_wait_for_final() -> None:
     assert status.kind == SubagentStatusKind.COMPLETED
 
 
+def test_aggregator_prefers_answer_over_llm_output() -> None:
+    aggregator = TurnOutputAggregator()
+    aggregator.consume({"type": "llm_output", "payload": {"content": "partial"}})
+    aggregator.consume(
+        {"type": "answer", "payload": {"output": "final", "result_type": "answer"}},
+    )
+
+    assert aggregator.output() == "final"
+    assert aggregator.is_error() is False
+
+
+def test_aggregator_joins_llm_output_when_no_answer() -> None:
+    aggregator = TurnOutputAggregator()
+    aggregator.consume({"type": "llm_output", "payload": {"content": "hel"}})
+    aggregator.consume({"type": "llm_output", "payload": {"content": "lo"}})
+
+    assert aggregator.output() == "hello"
+
+
+def test_aggregator_detects_error_result_type() -> None:
+    aggregator = TurnOutputAggregator()
+    aggregator.consume(
+        {
+            "type": "answer",
+            "payload": {"output": "boom", "result_type": "error"},
+        },
+    )
+
+    assert aggregator.output() == "boom"
+    assert aggregator.is_error() is True
+
+
+@pytest.mark.asyncio
+async def test_stream_generator_closed_on_interrupt() -> None:
+    agent = MockAgent(delay_s=0.2)
+    instance, _, sessions = _make_instance(agent=agent)
+    await instance.start_worker()
+    await instance.enqueue(UserInputOp(query="slow", task_id="t1"))
+    await asyncio.sleep(0.02)
+    await instance.interrupt()
+    await asyncio.sleep(0.05)
+
+    assert agent.cleanup_calls == 1
+    assert len(sessions) == 1
+    assert sessions[0].close_stream_calls == 1
+
+
 # ---------------------------------------------------------------------------
 # Flow tests: Registry + Instance multi-step lifecycle
 # ---------------------------------------------------------------------------
@@ -390,7 +488,7 @@ async def test_flow_reserve_run_shutdown_release() -> None:
     status = await asyncio.wait_for(wait_task, timeout=1.0)
 
     assert status.kind == SubagentStatusKind.COMPLETED
-    assert agent.invoke_calls == 1
+    assert agent.stream_calls == 1
     assert instance.last_task_id == task_id
 
     await instance.shutdown("manual")
@@ -449,8 +547,8 @@ async def test_flow_two_instances_registry_and_semaphore() -> None:
     await inst2.enqueue(UserInputOp(query="b", task_id="t2"))
     await asyncio.sleep(0.25)
 
-    assert agent1.max_active_invokes == 1
-    assert agent2.max_active_invokes == 1
+    assert agent1.max_active_streams == 1
+    assert agent2.max_active_streams == 1
 
     await inst1.shutdown("manual")
     await inst2.shutdown("manual")

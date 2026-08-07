@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
@@ -21,10 +22,23 @@ from openjiuwen.harness.subagent_runtime.models import (
     UserInputOp,
 )
 from openjiuwen.harness.subagent_runtime.status import StatusChannel, StatusReceiver
+from openjiuwen.harness.subagent_runtime.stream_output import TurnOutputAggregator
+
+
+async def _close_session_quietly(session: Any) -> None:
+    close_stream = getattr(session, "close_stream", None)
+    if not callable(close_stream):
+        return
+    try:
+        result = close_stream()
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception:
+        return
 
 
 class SubagentInstance:
-    """One live subagent with a resident session and serial worker."""
+    """One live subagent with a per-turn session factory and serial worker."""
 
     def __init__(
         self,
@@ -35,8 +49,9 @@ class SubagentInstance:
         role: str,
         parent_session_id: str,
         agent: Any,
-        session: Any,
+        session_factory: Callable[[], Any],
         running_semaphore: asyncio.Semaphore,
+        on_chunk: Callable[[Any], Awaitable[None]] | None = None,
     ) -> None:
         self.subagent_id = subagent_id
         self.subagent_type = subagent_type
@@ -50,7 +65,8 @@ class SubagentInstance:
         self.current_task_id: str | None = None
 
         self._agent = agent
-        self._session = session
+        self._session_factory = session_factory
+        self._on_chunk = on_chunk
 
         self._ops: asyncio.Queue[SubagentOp] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
@@ -145,16 +161,22 @@ class SubagentInstance:
         raise
 
     async def _run_one_turn(self, op: UserInputOp) -> None:
-        await prepare_subagent_task_resources(self._agent)
+        session = self._session_factory()
+        aggregator = TurnOutputAggregator()
         try:
-            result = await self._agent.invoke(
-                {"query": op.query, "conversation_id": self.subagent_id},
-                session=self._session,
-            )
-            output = str(result.get("output") or "")
-            self.last_output = output
-            self.last_task_id = op.task_id
-            await self.status.set(SubagentStatus.completed(output))
+            await session.pre_run()
+            await prepare_subagent_task_resources(self._agent)
+            inputs = {
+                "query": op.query,
+                "conversation_id": self.subagent_id,
+            }
+            gen = self._agent.stream(inputs, session=session)
+            async with contextlib.aclosing(gen):
+                async for chunk in gen:
+                    aggregator.consume(chunk)
+                    if self._on_chunk is not None:
+                        await self._on_chunk(chunk)
+            await self._settle_turn(op, aggregator)
         except BaseError as exc:
             await self.status.set(
                 SubagentStatus.errored(str(exc), code=exc.status.name),
@@ -164,16 +186,27 @@ class SubagentInstance:
             await self.status.set(SubagentStatus.errored(str(exc)))
             raise
         finally:
-            await self._finalize_turn()
+            await self._finalize_turn(session)
 
-    async def _finalize_turn(self) -> None:
-        task = asyncio.create_task(self._finalize_turn_inner())
+    async def _settle_turn(self, op: UserInputOp, aggregator: TurnOutputAggregator) -> None:
+        output = aggregator.output()
+        if aggregator.is_error():
+            await self.status.set(
+                SubagentStatus.errored(output or "subagent stream reported error"),
+            )
+            return
+        self.last_output = output
+        self.last_task_id = op.task_id
+        await self.status.set(SubagentStatus.completed(output))
+
+    async def _finalize_turn(self, session: Any) -> None:
+        task = asyncio.create_task(self._finalize_turn_inner(session))
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.shield(task)
 
-    async def _finalize_turn_inner(self) -> None:
+    async def _finalize_turn_inner(self, session: Any) -> None:
         await cleanup_subagent_task_resources(self._agent)
-        await self._session.commit()
+        await _close_session_quietly(session)
 
     async def _handle_shutdown(self, reason: str) -> None:
         if self._closed:

@@ -30,6 +30,7 @@ from openjiuwen.harness.subagent_runtime.models import (
 )
 from openjiuwen.harness.subagent_runtime.registry import SpawnReservation, SubagentRegistry
 from openjiuwen.harness.subagent_runtime.status import StatusChannel, StatusReceiver
+from openjiuwen.harness.subagent_runtime.stream_output import TurnOutputAggregator
 
 __all__ = [
     "WAIT_TIMEOUT_MS_DEFAULT",
@@ -49,6 +50,7 @@ __all__ = [
     "SubagentSessionManager",
     "SubagentStatus",
     "SubagentStatusKind",
+    "TurnOutputAggregator",
     "UserInputOp",
     "WaitResult",
     "build_subagent_id",

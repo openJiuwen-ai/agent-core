@@ -26,6 +26,7 @@ def test_public_exports_match_all() -> None:
         "SubagentSessionManager",
         "SubagentStatus",
         "SubagentStatusKind",
+        "TurnOutputAggregator",
         "UserInputOp",
         "WaitResult",
         "build_subagent_id",
