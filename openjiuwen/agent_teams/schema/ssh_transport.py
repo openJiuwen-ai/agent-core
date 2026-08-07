@@ -26,6 +26,7 @@ class SshTransportConfig(BaseModel):
             is enabled.
         disable_host_key_check: Skip host-key verification entirely.
         connect_timeout_s: Connect timeout in seconds.
+        use_exec: Replace the remote shell with the Claude command via ``exec``.
     """
 
     model_config = ConfigDict(protected_namespaces=())
@@ -39,6 +40,7 @@ class SshTransportConfig(BaseModel):
     known_hosts: str | None = None
     disable_host_key_check: bool = False
     connect_timeout_s: float = 15.0
+    use_exec: bool = True
 
     @model_validator(mode="after")
     def _require_auth(self) -> "SshTransportConfig":
@@ -47,10 +49,10 @@ class SshTransportConfig(BaseModel):
         Raises:
             BaseError: ``AGENT_TEAM_CONFIG_INVALID`` when no auth is set.
         """
-        if not self.key_file and not self.password and not self.agent:
+        if not self.key_file and self.password is None and not self.agent:
             raise_error(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="SshTransportConfig requires at least one auth method (key_file / password / agent=True)",
+                reason="SshTransportConfig requires at least one auth method (key_file / password set / agent=True)",
             )
             raise AssertionError  # pragma: no cover - raise_error always raises
         return self
