@@ -5,7 +5,7 @@
 |---|---|
 | 日期 | 2026-08-06 |
 | 范围 | `agent_teams/fork.py` · `fork_compact.py`（新增），`tools/tool_member.py`（新增 `CheckpointTool` + `SpawnTeammateTool` 扩展），`tools/team.py`（`_pending_forks` / `_checkpoints` + `set_snapshot_length` / `set_store_checkpoint_fn`），`agent/team_agent.py`（`_on_teammate_created` 重写 + `_resolve_fork_native` + `share_checkpoints_with`），`agent/agent_configurator.py`（`_snapshot_length` 回调），`spawn/inprocess_spawn.py`（注入 + compaction 调用），`harness/team_harness.py`（`get_deep_agent`），`tools/tool_factory.py`（注册 `checkpoint`），`tools/tool_permissions.py`（`SHARED_TOOLS` 加 `checkpoint`），`external/`（`client.py` / `sdk_mcp.py` 排除 checkpoint），`tools/locales/`（中英文参数 + 描述），`tools/locales/descs/*/checkpoint.md`（新增）+ `spawn_teammate.md`（fork 文档段） |
-| 测试基线 | `tests/unit_tests/agent_teams/test_fork.py` 25 passed；全量 `tests/unit_tests/` 0 新增失败 |
+| 测试基线 | `tests/unit_tests/agent_teams/test_fork.py` 35 passed；全量 `tests/unit_tests/` 0 新增失败 |
 | Refs | — |
 
 ## 背景
@@ -76,7 +76,8 @@ fork 决策在 `_on_teammate_created` 中执行 — `spawn_teammate` 工具仅�
 
 ## 验证
 
-- `test_fork.py`（25 passed）：覆盖 `ForkContext.from_agent`（全量 / 截断 / 边界 / SystemMessage 剥离 / roundtrip），`CheckpointTool`（invoke / map_result），`TeamBackend` fork 方法（mark→consume / 无回调 / 回调写入 / fallback），`SpawnTeammateTool` fork 参数（fork / fork_source / compact / 无 fork 不标记），`compact_context`（分段替换 / split_at=0 跳过 / ≥len 跳过）。
+- `test_fork.py`（35 passed）：覆盖 `ForkContext.from_agent`（全量 / 截断 / 边界 / SystemMessage 剥离 / roundtrip），`CheckpointTool`（invoke / map_result），`TeamBackend` fork 方法（mark→consume / 无回调 / 回调写入 / fallback），`SpawnTeammateTool` fork 参数（fork / fork_source / compact / 无 fork 不标记），`compact_context`（分段替换 / split_at=0 跳过 / ≥len 跳过）。
+- `test_fork.py::TestOnTeammateCreatedFork`（10 cases，装配路径）：覆盖 `TeamAgent._on_teammate_created` 的 fork 解析——live fork（字符串 / 布尔）/ 命名 checkpoint 截断 / checkpoint 缺失回退 / compact split / compact 无命名降级 / 无 fork / `fork_source` 可解析与不可解析 / `fork_source` 指向 leader。这组用例是两次运行时 crash（`'NoneType' object has no attribute 'messages'`）的回归护栏：修复前 live fork 与 checkpoint 截断两条路径均抛 `AttributeError`，修复后全绿。
 - `test_mcp_server.py`（8 passed）：验证外部 MCP 成员排除 `checkpoint` 工具。
 - 全量 `tests/unit_tests/agent_teams/` 0 新增失败。
 
