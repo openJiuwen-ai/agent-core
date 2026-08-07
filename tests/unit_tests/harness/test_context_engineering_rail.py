@@ -289,6 +289,24 @@ async def test_build_context_section_skips_when_today_daily_memory_missing(tmp_p
 # build_tools_content Tests
 # =============================================================================
 
+def test_build_tools_content_project_exploration_convergence():
+    """When glob/list_files exist, inject soft scan-then-synthesize tips."""
+    mock_manager = Mock()
+    mock_manager.list.return_value = [
+        ToolCard(name="list_files", description="list directory"),
+        ToolCard(name="glob", description="glob files"),
+        ToolCard(name="read_file", description="read"),
+    ]
+    cn = build_tools_content(mock_manager, "cn")
+    assert cn is not None
+    assert "## 项目/多文件探索提示" in cn
+    assert "尽量复用" in cn
+    en = build_tools_content(mock_manager, "en")
+    assert en is not None
+    assert "## Project / Multi-file Exploration Tips" in en
+    assert "reuse them" in en
+
+
 def test_build_tools_content():
     """build_tools_content should return correct format per language."""
     mock_manager = Mock()
