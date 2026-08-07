@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextvars import Context
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -179,3 +181,84 @@ async def test_trajectory_rail_archives_one_execution_at_most_once() -> None:
     archives = store.query(session_id="s")
     assert len(archives) == 1
     assert len(list(iter_spans(archives[0]))) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_root_trace_routes_spans_ended_outside_subscription_context(
+) -> None:
+    """A single-agent root trace must bridge callbacks in a detached task context."""
+    from openjiuwen.extensions.observability import span_context
+
+    processor = TrajectorySpanProcessor()
+    store = InMemoryTrajectoryStore()
+    rail = TrajectoryRail(
+        trajectory_span_processor=processor,
+        trajectory_store=store,
+    )
+    root = SimpleNamespace(
+        name="agent.agent.session-a",
+        context=SimpleNamespace(trace_id=1),
+        is_recording=lambda: True,
+    )
+    span_context.set_root_span(root, session_id="session-a")
+    ctx = _ctx(
+        AgentCallbackEvent.BEFORE_INVOKE,
+        InvokeInputs(query="q", conversation_id="session-a"),
+    )
+
+    await rail.before_invoke(ctx)
+    Context().run(processor.on_end, _span("llm.call", 1))
+    await rail.after_invoke(ctx)
+
+    archives = store.query(session_id="session-a")
+    assert len(archives) == 1
+    assert [span["name"] for span in iter_spans(archives[0])] == ["llm.call"]
+    span_context.clear_root_span(expected_span=root)
+
+
+@pytest.mark.asyncio
+async def test_agent_callbacks_resolve_invoke_capture_across_task_contexts() -> None:
+    processor = TrajectorySpanProcessor()
+    rail = _HookRail(processor)
+    session = SimpleNamespace(
+        get_session_id=lambda: "session-a",
+        get_agent_id=lambda: "agent-a",
+    )
+    invoke_ctx = _ctx(
+        AgentCallbackEvent.BEFORE_INVOKE,
+        InvokeInputs(query="q", conversation_id="session-a"),
+        session=session,
+    )
+    await rail.before_invoke(invoke_ctx)
+    processor.on_end(_span("llm.call", 1))
+
+    model_ctx = _ctx(
+        AgentCallbackEvent.AFTER_MODEL_CALL,
+        ModelCallInputs(messages=[], response={}),
+        session=session,
+    )
+    assert Context().run(rail._current_capture) is None
+    task = Context().run(asyncio.create_task, rail.after_model_call(model_ctx))
+    await task
+
+    trajectory = rail.get_trajectory(session_id="session-a", member_id="agent-a")
+    assert trajectory is not None
+    assert [span["name"] for span in iter_spans(trajectory)] == ["llm.call"]
+    assert (
+        rail._resolve_capture(
+            session_id="other-session",
+            member_id="agent-a",
+        )
+        is None
+    )
+
+    task = Context().run(asyncio.create_task, rail.after_invoke(invoke_ctx))
+    await task
+    assert not rail._active_captures
+    assert (
+        rail._resolve_capture(
+            session_id="session-a",
+            member_id="agent-a",
+        )
+        is None
+    )

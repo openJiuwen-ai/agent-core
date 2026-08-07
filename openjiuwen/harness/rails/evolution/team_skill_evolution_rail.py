@@ -568,11 +568,10 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         ctx: Optional[AgentCallbackContext] = None,
     ) -> bool:
         """Mark the current invoke for configured team completion evolution handling."""
-        del ctx
         if not self._signal_trigger and not self._review_trigger:
             logger.info("[TeamSkillEvolutionRail] notify_team_completed ignored because signal_trigger is disabled")
             return False
-        capture = self._current_capture()
+        capture = self._resolve_capture(ctx=ctx)
         if capture is None:
             logger.warning(
                 "[TeamSkillEvolutionRail] notify_team_completed: no active trajectory capture "

@@ -191,16 +191,17 @@ class _TeamTrajectoryCaptureMixin:
             raise RuntimeError("team trajectory capture requires AT_TEAM_NAME on the root span")
         return f"{trace_id:032x}", team_id
 
-    def _subscription_categories(self) -> Collection[str]:
-        return self._TEAM_SUBSCRIPTION_CATEGORIES
+    @staticmethod
+    def _subscription_categories() -> Collection[str]:
+        return _TeamTrajectoryCaptureMixin._TEAM_SUBSCRIPTION_CATEGORIES
 
     def _capture_route(self, ctx: AgentCallbackContext) -> tuple[str | None, str | None, str]:
         del ctx
         trace_id, team_id = self._team_span_identity()
         return None, team_id, trace_id
 
+    @staticmethod
     def _scope_key(
-        self,
         *,
         session_id: str,
         member_id: str | None,
@@ -373,13 +374,17 @@ class EvolutionRail(DeepAgentRail):
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Drain the current subscription, enrich RL fields, then hook."""
         inputs = ctx.inputs
-        trajectory, increment, issues = self._drain_for_hook(ctx, required_category="llm", merge=False)
-        if isinstance(inputs, ModelCallInputs) and increment is not None and not issues:
-            enriched_increment = self._enrich_latest_llm(increment, inputs.response)
-            trajectory = self._merge_clean_increment(enriched_increment)
-        elif increment is not None and trajectory is None:
-            # Preserve the gate result when the current increment had an issue.
-            trajectory = None
+        capture = self._resolve_capture(ctx=ctx)
+        trajectory, increment, issues = self._drain_for_hook(
+            ctx,
+            required_category="llm",
+            merge=False,
+            capture=capture,
+        )
+        if capture is not None and isinstance(inputs, ModelCallInputs):
+            if increment is not None and not issues:
+                enriched_increment = self._enrich_latest_llm(increment, inputs.response)
+                trajectory = self._merge_clean_increment(capture, enriched_increment)
         await self._on_after_model_call(ctx, trajectory)
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_MODEL_CALL and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_MODEL_CALL, ctx
@@ -410,8 +415,9 @@ class EvolutionRail(DeepAgentRail):
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         """Final-drain an invoke and release its isolated subscription."""
+        capture = self._resolve_capture(ctx=ctx)
         try:
-            trajectory, _, _ = self._drain_for_hook(ctx)
+            trajectory, _, _ = self._drain_for_hook(ctx, capture=capture)
             await self._on_after_invoke(ctx, trajectory)
 
             # Trigger evolution if configured for after_invoke
@@ -422,7 +428,6 @@ class EvolutionRail(DeepAgentRail):
                     await self._trigger_evolution(trajectory, ctx)
                     await self._on_after_evolution_triggered(trajectory, ctx)
         finally:
-            capture = self._invoke_capture.get()
             if capture is not None:
                 self._unsubscribe_capture(capture)
 
@@ -439,7 +444,8 @@ class EvolutionRail(DeepAgentRail):
             return str(session.get_session_id())
         return inputs.conversation_id or ""
 
-    def _subscription_categories(self) -> Collection[str]:
+    @staticmethod
+    def _subscription_categories() -> Collection[str]:
         """Return categories selected by this rail's invoke subscription."""
 
         return ("llm", "tool")
@@ -466,11 +472,30 @@ class EvolutionRail(DeepAgentRail):
         return (
             str(member_id) if member_id else None,
             str(team_id) if team_id else None,
-            None,
+            self._single_agent_trace_id(),
         )
 
+    @staticmethod
+    def _single_agent_trace_id() -> str | None:
+        """Return an active single-agent root trace for cross-task routing."""
+        root = get_root_span()
+        if root is None or not str(getattr(root, "name", "")).startswith("agent."):
+            return None
+        recording = getattr(root, "is_recording", None)
+        if callable(recording):
+            try:
+                recording = recording()
+            except Exception:
+                recording = False
+        if not recording:
+            return None
+        trace_id = getattr(getattr(root, "context", None), "trace_id", None)
+        if not isinstance(trace_id, int) or trace_id <= 0:
+            return None
+        return f"{trace_id:032x}"
+
+    @staticmethod
     def _scope_key(
-        self,
         *,
         session_id: str,
         member_id: str | None,
@@ -571,6 +596,103 @@ class EvolutionRail(DeepAgentRail):
     def _current_capture(self) -> _InvokeCapture | None:
         return self._invoke_capture.get()
 
+    @staticmethod
+    def _capture_matches(
+        capture: _InvokeCapture,
+        *,
+        session_id: str | None,
+        member_id: str | None,
+        team_id: str | None,
+    ) -> bool:
+        """Return whether a capture matches every provided scope locator."""
+        if session_id is not None and capture.session_id != str(session_id):
+            return False
+        if member_id is not None and capture.member_id != str(member_id):
+            return False
+        if team_id is not None and capture.team_id != str(team_id):
+            return False
+        return True
+
+    def _find_active_capture(self, scope_key: tuple[str, ...]) -> _InvokeCapture | None:
+        """Return the unique active capture for an exact scope key."""
+
+        with self._subscription_lock:
+            matches = [
+                capture
+                for capture in self._active_captures.values()
+                if capture.scope_key == scope_key
+            ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning(
+                "[%s] multiple active trajectory captures match scope=%s",
+                type(self).__name__,
+                scope_key,
+            )
+        return None
+
+    def _resolve_capture(
+        self,
+        *,
+        ctx: AgentCallbackContext | None = None,
+        session_id: str | None = None,
+        member_id: str | None = None,
+        team_id: str | None = None,
+    ) -> _InvokeCapture | None:
+        """Resolve an invoke capture locally or by its explicit execution scope."""
+
+        if ctx is not None:
+            session = getattr(ctx, "session", None)
+            if session_id is None:
+                get_session_id = getattr(session, "get_session_id", None)
+                if callable(get_session_id):
+                    session_id = str(get_session_id())
+            if member_id is None:
+                get_agent_id = getattr(session, "get_agent_id", None)
+                if callable(get_agent_id):
+                    member_id = str(get_agent_id())
+            if team_id is None:
+                get_team_id = getattr(session, "get_team_id", None)
+                if callable(get_team_id):
+                    team_id = str(get_team_id())
+            if member_id is None or team_id is None:
+                try:
+                    route_member_id, route_team_id, _ = self._capture_route(ctx)
+                except RuntimeError:
+                    route_member_id = route_team_id = None
+                member_id = member_id or route_member_id
+                team_id = team_id or route_team_id
+
+        capture = self._current_capture()
+        if capture is not None:
+            with self._subscription_lock:
+                is_active = self._active_captures.get(capture.subscription) is capture
+            if is_active and self._capture_matches(
+                capture,
+                session_id=session_id,
+                member_id=member_id,
+                team_id=team_id,
+            ):
+                return capture
+        if not session_id:
+            return None
+
+        scope_key = None
+        try:
+            scope_key = self._scope_key(
+                session_id=str(session_id),
+                member_id=member_id,
+                team_id=team_id,
+            )
+        except RuntimeError:
+            # Team capture resolution is allowed to fail when no Team root is
+            # active; callers treat that as no matching invoke capture.
+            scope_key = None
+        if scope_key is None:
+            return None
+        return self._find_active_capture(scope_key)
+
     def _unsubscribe_capture(self, capture: _InvokeCapture) -> None:
         self._trajectory_span_processor.unsubscribe(capture.subscription)
         with self._subscription_lock:
@@ -584,10 +706,11 @@ class EvolutionRail(DeepAgentRail):
             else:
                 self._invoke_capture.set(None)
 
-    def _merge_clean_increment(self, increment: Trajectory) -> Trajectory | None:
-        capture = self._current_capture()
-        if capture is None:
-            return None
+    def _merge_clean_increment(
+        self,
+        capture: _InvokeCapture,
+        increment: Trajectory,
+    ) -> Trajectory:
         with self._scope_lock(capture.scope_key):
             current = self._scope_windows.get(capture.scope_key)
             merged = merge_trajectories(current, increment) if current is not None else increment
@@ -640,10 +763,11 @@ class EvolutionRail(DeepAgentRail):
         *,
         required_category: str | None = None,
         merge: bool = True,
+        capture: _InvokeCapture | None = None,
     ) -> tuple[Trajectory | None, Trajectory | None, tuple[Mapping[str, object], ...]]:
         """Drain one subscription and apply the clean-window quality gate."""
 
-        capture = self._current_capture()
+        capture = capture or self._resolve_capture(ctx=ctx)
         if capture is None:
             return None, None, ()
         increment, issues = self._trajectory_span_processor.drain(capture.subscription)
@@ -666,13 +790,13 @@ class EvolutionRail(DeepAgentRail):
                     (MappingProxyType({"code": "missing_required_span", "category": required_category}),),
                 )
         if increment is not None and merge:
-            return self._merge_clean_increment(increment), increment, ()
+            return self._merge_clean_increment(capture, increment), increment, ()
         if increment is not None:
             return self._project_window(capture), increment, ()
         return self._project_window(capture), None, ()
 
+    @staticmethod
     def _record_execution_increment(
-        self,
         capture: _InvokeCapture,
         increment: Trajectory,
     ) -> None:
@@ -680,7 +804,8 @@ class EvolutionRail(DeepAgentRail):
 
         del capture, increment
 
-    def _enrich_latest_llm(self, trajectory: Trajectory, response: Any) -> Trajectory:
+    @staticmethod
+    def _enrich_latest_llm(trajectory: Trajectory, response: Any) -> Trajectory:
         """Return a copy with token fields attached to the latest LLM span."""
 
         _, prompt_ids, completion_ids, logprobs = _split_response_token_fields(response)
