@@ -12,11 +12,47 @@ from pydantic import BaseModel, Field
 from openjiuwen.core.context_engine import ModelContext, ContextWindow
 from openjiuwen.core.context_engine.context.session_memory_manager import group_completed_api_rounds
 from openjiuwen.core.context_engine.schema.messages import create_offload_message
-from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage
 from openjiuwen.core.sys_operation import SysOperation
 
 
 _PROCESSOR_TYPE_ATTR: str = "__processor_type"
+
+
+async def _invoke_via_stream(model, messages, **kwargs):
+    """用流式调用替代非流式 invoke，收集所有 chunk 后聚合为 AssistantMessage 返回。
+
+    底层 HTTP 使用 stream=True，保持 invoke 的返回类型和调用方接口不变。
+    """
+    accumulated = None
+    final_usage = None
+    finish_reason = None
+    async for chunk in model.stream(messages=messages, **kwargs):
+        if accumulated is None:
+            accumulated = chunk
+        else:
+            accumulated = accumulated + chunk
+        chunk_usage = getattr(chunk, "usage_metadata", None)
+        if chunk_usage:
+            final_usage = chunk_usage
+        chunk_finish = getattr(chunk, "finish_reason", None)
+        if chunk_finish and chunk_finish != "null":
+            finish_reason = chunk_finish
+
+    if accumulated is None:
+        return AssistantMessage(role="assistant", content="")
+
+    return AssistantMessage(
+        role="assistant",
+        content=getattr(accumulated, "content", None) or "",
+        tool_calls=getattr(accumulated, "tool_calls", None) or [],
+        usage_metadata=final_usage or getattr(accumulated, "usage_metadata", None),
+        finish_reason=finish_reason or getattr(accumulated, "finish_reason", None),
+        parser_content=getattr(accumulated, "parser_content", None),
+        reasoning_content=getattr(accumulated, "reasoning_content", None),
+    )
+
+
 _OFFLOAD_MESSAGE_HANDLE: str = "[[OFFLOAD: handle={handle}, type={type}]]"
 _OFFLOAD_MESSAGE_HANDLE_WITH_PATH: str = "[[OFFLOAD: handle={handle}, type={type}, path={path}]]"
 

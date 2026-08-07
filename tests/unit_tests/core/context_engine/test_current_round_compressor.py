@@ -30,6 +30,26 @@ from tests.unit_tests.core.context_engine._stream_state_helpers import (
 )
 
 
+def _stream_side_effect(response):
+    """Convert a response object into an async gen function for mocking model.stream."""
+    content = getattr(response, 'content', '') or ''
+    parser_content = getattr(response, 'parser_content', None)
+    tool_calls = getattr(response, 'tool_calls', None)
+    if not isinstance(tool_calls, list):
+        tool_calls = None
+    chunk = AssistantMessage(
+        content=content,
+        tool_calls=tool_calls,
+        parser_content=parser_content,
+        finish_reason='stop',
+    )
+
+    async def _gen(*args, **kwargs):
+        yield chunk
+
+    return _gen
+
+
 def create_tool_call_list(ids: List[str], names: List[str] = None) -> List[ToolCall]:
     """Create a list of ToolCall objects."""
     names = names or ["test-tool"] * len(ids)
@@ -108,7 +128,7 @@ class TestCurrentRoundCompressor:
             "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
 
             config = CurrentRoundCompressorConfig(
@@ -153,7 +173,7 @@ class TestCurrentRoundCompressor:
             "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
 
             config = CurrentRoundCompressorConfig(
@@ -197,7 +217,7 @@ class TestCurrentRoundCompressor:
             "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
 
             config = CurrentRoundCompressorConfig(
@@ -243,7 +263,7 @@ class TestCurrentRoundCompressor:
             "openjiuwen.core.context_engine.processor.compressor.current_round_compressor.Model"
         ) as mock_model_cls:
             mock_model = MagicMock()
-            mock_model.invoke = AsyncMock(return_value=mock_response)
+            mock_model.stream = MagicMock(side_effect=_stream_side_effect(mock_response))
             mock_model_cls.return_value = mock_model
 
             config = CurrentRoundCompressorConfig(
@@ -311,7 +331,7 @@ class TestCurrentRoundCompressor:
     async def test_no_compression_when_usermessage_is_last(self):
         """No compression when the last message is UserMessage (get_compress_idx returns -1)."""
         mock_model = MagicMock()
-        mock_model.invoke = AsyncMock()
+        mock_model.stream = MagicMock()
         
         mock_token_counter = create_mock_token_counter(10)
 
@@ -336,7 +356,7 @@ class TestCurrentRoundCompressor:
             result = ctx.get_messages()
             assert len(result) >= 3
             # Model.invoke should NOT be called when last message is UserMessage
-            mock_model.invoke.assert_not_called()
+            mock_model.stream.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_multi_compress_replaces_selected_span_with_memory_block(self):

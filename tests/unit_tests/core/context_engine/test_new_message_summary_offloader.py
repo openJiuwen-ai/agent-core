@@ -79,6 +79,41 @@ from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 
 
+def _stream_side_effect(response):
+    """Convert a response object into an async gen function for mocking model.stream."""
+    content = getattr(response, "content", "") or ""
+    parser_content = getattr(response, "parser_content", None)
+    tool_calls = getattr(response, "tool_calls", None)
+    if not isinstance(tool_calls, list):
+        tool_calls = None
+    chunk = AssistantMessage(
+        content=content,
+        tool_calls=tool_calls,
+        parser_content=parser_content,
+        finish_reason="stop",
+    )
+
+    async def _gen(*args, **kwargs):
+        yield chunk
+
+    return _gen
+
+
+def _stream_side_effect_sequence(items):
+    """Build a side_effect list for model.stream from a sequence of responses/exceptions.
+
+    Exceptions are raised on the corresponding call; responses are converted into
+    ready-to-iterate async generators so ``async for chunk in model.stream(...)`` works.
+    """
+    sequence = []
+    for item in items:
+        if isinstance(item, BaseException):
+            sequence.append(item)
+        else:
+            sequence.append(_stream_side_effect(item)())
+    return sequence
+
+
 class ToolMessageWithMetadata(ToolMessage):
     metadata: dict = {}
 
@@ -119,8 +154,8 @@ class TestMessageSummaryOffloader:
     def test_on_add_messages_offloads_only_new_large_tool_message(adaptive_config, context):
         with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model") as model_cls:
             model = MagicMock()
-            model.invoke = AsyncMock(
-                return_value=AssistantMessage(
+            model.stream = MagicMock(
+                side_effect=_stream_side_effect(AssistantMessage(
                     content=json.dumps(
                         {
                             "compression_strategy": "extractive",
@@ -132,7 +167,7 @@ class TestMessageSummaryOffloader:
                             },
                         }
                     )
-                )
+                ))
             )
             model_cls.return_value = model
             offloader = MessageSummaryOffloader(adaptive_config)
@@ -168,8 +203,8 @@ class TestMessageSummaryOffloader:
 
         with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model") as model_cls:
             model = MagicMock()
-            model.invoke = AsyncMock(
-                return_value=AssistantMessage(
+            model.stream = MagicMock(
+                side_effect=_stream_side_effect(AssistantMessage(
                     content=json.dumps(
                         {
                             "compression_strategy": "abstractive",
@@ -177,7 +212,7 @@ class TestMessageSummaryOffloader:
                             "offload_data_explanation": {},
                         }
                     )
-                )
+                ))
             )
             model_cls.return_value = model
             offloader = MessageSummaryOffloader(adaptive_config)
@@ -267,7 +302,7 @@ class TestMessageSummaryOffloader:
 
         with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model") as model_cls:
             model = MagicMock()
-            model.invoke = AsyncMock(return_value=AssistantMessage(content="latest task"))
+            model.stream = MagicMock(side_effect=_stream_side_effect(AssistantMessage(content="latest task")))
             model_cls.return_value = model
             offloader = MessageSummaryOffloader(adaptive_config)
 
@@ -281,7 +316,7 @@ class TestMessageSummaryOffloader:
         result = asyncio.run(offloader._get_step_from_chain_precise(messages))
 
         assert result == "latest task"
-        prompt = model.invoke.await_args.args[0][0].content
+        prompt = model.stream.call_args.kwargs["messages"][0].content
         assert "first task" not in prompt
         assert "first answer" not in prompt
         assert "second task" in prompt
@@ -293,8 +328,8 @@ class TestMessageSummaryOffloader:
 
         with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model") as model_cls:
             model = MagicMock()
-            model.invoke = AsyncMock(
-                side_effect=[
+            model.stream = MagicMock(
+                side_effect=_stream_side_effect_sequence([
                     Exception("context length exceeded"),
                     AssistantMessage(
                         content=json.dumps(
@@ -305,7 +340,7 @@ class TestMessageSummaryOffloader:
                             }
                         )
                     ),
-                ]
+                ])
             )
             model_cls.return_value = model
             offloader = MessageSummaryOffloader(adaptive_config)
@@ -319,16 +354,16 @@ class TestMessageSummaryOffloader:
         )
 
         assert result["summary"] == "fallback summary"
-        assert model.invoke.await_count == 2
-        retry_prompt = model.invoke.await_args_list[1].args[0][0].content
+        assert model.stream.call_count == 2
+        retry_prompt = model.stream.call_args_list[1].kwargs["messages"][0].content
         assert TRUNCATED_MARKER in retry_prompt
 
     @staticmethod
     def test_offload_prompt_contains_default_step_and_function_call(adaptive_config, context):
         with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model") as model_cls:
             model = MagicMock()
-            model.invoke = AsyncMock(
-                return_value=AssistantMessage(
+            model.stream = MagicMock(
+                side_effect=_stream_side_effect(AssistantMessage(
                     content=json.dumps(
                         {
                             "compression_strategy": "extractive",
@@ -336,7 +371,7 @@ class TestMessageSummaryOffloader:
                             "offload_data_explanation": {},
                         }
                     )
-                )
+                ))
             )
             model_cls.return_value = model
             offloader = MessageSummaryOffloader(adaptive_config)
@@ -360,7 +395,7 @@ class TestMessageSummaryOffloader:
 
         asyncio.run(offloader._offload_message(tool_message, context))
 
-        prompt = model.invoke.await_args.args[0][0].content
+        prompt = model.stream.call_args.kwargs["messages"][0].content
         assert "Look at the weather tool result" in prompt
         assert "get_weather" in prompt
         assert "Shenzhen" in prompt
@@ -373,11 +408,11 @@ class TestMessageSummaryOffloader:
 
         with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model") as model_cls:
             model = MagicMock()
-            model.invoke = AsyncMock(
-                side_effect=[
+            model.stream = MagicMock(
+                side_effect=_stream_side_effect_sequence([
                     Exception("context window exceeded"),
                     AssistantMessage(content="trimmed task"),
-                ]
+                ])
             )
             model_cls.return_value = model
             offloader = MessageSummaryOffloader(adaptive_config)
@@ -392,8 +427,8 @@ class TestMessageSummaryOffloader:
         result = asyncio.run(offloader._get_step_from_chain_precise(messages))
 
         assert result == "trimmed task"
-        first_prompt = model.invoke.await_args_list[0].args[0][0].content
-        second_prompt = model.invoke.await_args_list[1].args[0][0].content
+        first_prompt = model.stream.call_args_list[0].kwargs["messages"][0].content
+        second_prompt = model.stream.call_args_list[1].kwargs["messages"][0].content
         assert "task 1" in first_prompt
         assert "reply 1" in first_prompt
         assert "task 1" not in second_prompt
@@ -452,7 +487,7 @@ class TestMessageSummaryOffloader:
     ):
         with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model") as model_cls:
             model = MagicMock()
-            model.invoke = AsyncMock(return_value=AssistantMessage(content="plain fallback summary"))
+            model.stream = MagicMock(side_effect=_stream_side_effect(AssistantMessage(content="plain fallback summary")))
             model_cls.return_value = model
             offloader = MessageSummaryOffloader(adaptive_config)
 
@@ -474,7 +509,7 @@ class TestMessageSummaryOffloader:
     ):
         with patch("openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.Model") as model_cls:
             model = MagicMock()
-            model.invoke = AsyncMock(return_value=AssistantMessage(content="B" * 200))
+            model.stream = MagicMock(side_effect=_stream_side_effect(AssistantMessage(content="B" * 200)))
             model_cls.return_value = model
             offloader = MessageSummaryOffloader(adaptive_config)
 

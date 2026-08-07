@@ -15,7 +15,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context_engine import ContextEngine
-from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor, _invoke_via_stream
 from openjiuwen.core.context_engine.processor.compressor.util import (
     build_team_collaboration_reinjected_messages,
     message_to_text,
@@ -366,7 +366,7 @@ class DialogueCompressor(ContextProcessor):
             UserMessage(content=self._build_targets_payload(targets)),
         ]
         try:
-            response = await self._model.invoke(model_messages, output_parser=JsonOutputParser())
+            response = await _invoke_via_stream(self._model, model_messages, output_parser=JsonOutputParser())
             self._record_compression_usage(response)
             return response
         except Exception as exc:
