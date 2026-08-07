@@ -40,6 +40,21 @@ from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
 
 
+def illegal_tool_call_reason(tool_call: Any) -> Optional[str]:
+    """Return a short reason if the model tool_call must not enter the execute loop.
+
+    Empty name / missing tool_call_id corrupt permission persist, pairing, and
+    downstream ModelArts validation — discard before BEFORE_TOOL_CALL rails.
+    """
+    name = str(getattr(tool_call, "name", None) or "").strip()
+    tid = str(getattr(tool_call, "id", None) or "").strip()
+    if not name:
+        return "empty_tool_name"
+    if not tid:
+        return "empty_tool_call_id"
+    return None
+
+
 @dataclass
 class AddAbilityResult:
     """Ability add result."""
@@ -920,14 +935,22 @@ class AbilityManager:
                     ctx.steering_queue
                 )
             tool_contexts.append(tool_ctx)
-            tasks.append(
-                self._railed_execute_single_tool_call(
-                    ctx=tool_ctx,
-                    tool_call=single_tool_call,
-                    session=session,
-                    tag=tag,
+            illegal_reason = illegal_tool_call_reason(single_tool_call)
+            if illegal_reason:
+                tasks.append(
+                    self._discard_illegal_tool_call(
+                        tool_ctx, single_tool_call, illegal_reason
+                    )
                 )
-            )
+            else:
+                tasks.append(
+                    self._railed_execute_single_tool_call(
+                        ctx=tool_ctx,
+                        tool_call=single_tool_call,
+                        session=session,
+                        tag=tag,
+                    )
+                )
 
         results = []
         if parallel_tool_calls:
@@ -1077,6 +1100,32 @@ class AbilityManager:
             )
 
         return final_results
+
+    async def _discard_illegal_tool_call(
+            self,
+            tool_ctx: AgentCallbackContext,
+            tool_call: ToolCall,
+            illegal_reason: str,
+    ) -> Tuple[Any, ToolMessage]:
+        """Return an error result without entering BEFORE_TOOL_CALL rails."""
+        from openjiuwen.harness.tools import ToolOutput
+
+        error_msg = (
+            f"[illegal_tool_call] discarded before execution: "
+            f"reason={illegal_reason} name={getattr(tool_call, 'name', '')!r} "
+            f"tool_call_id={getattr(tool_call, 'id', '')!r}"
+        )
+        logger.warning(error_msg)
+        tool_result = ToolOutput(success=False, error=error_msg)
+        tool_message = ToolMessage(
+            content=error_msg,
+            tool_call_id=getattr(tool_call, "id", "") or "",
+            metadata={"is_error": True, "illegal_tool_call": illegal_reason},
+        )
+        if isinstance(tool_ctx.inputs, ToolCallInputs):
+            tool_ctx.inputs.tool_result = tool_result
+            tool_ctx.inputs.tool_msg = tool_message
+        return tool_result, tool_message
 
     @rail(
         before=AgentCallbackEvent.BEFORE_TOOL_CALL,

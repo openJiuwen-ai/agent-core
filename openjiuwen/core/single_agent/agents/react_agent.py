@@ -56,6 +56,7 @@ from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.ability_manager import illegal_tool_call_reason
 from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext
 from openjiuwen.core.single_agent.interrupt.state import (
     BaseInterruptionState,
@@ -2033,6 +2034,29 @@ class ReActAgent(BaseAgent):
                             invoke_inputs.result = ai_message if isinstance(ai_message, dict) else {}
                             break
 
+                        if ai_message.tool_calls:
+                            kept_tool_calls = []
+                            for tc in ai_message.tool_calls:
+                                illegal_reason = illegal_tool_call_reason(tc)
+                                if illegal_reason:
+                                    session_id = ""
+                                    if session is not None:
+                                        try:
+                                            session_id = str(session.get_session_id() or "")
+                                        except Exception:
+                                            session_id = ""
+                                    logger.warning(
+                                        "[ReActAgent] illegal tool_call stripped before context "
+                                        "session_id=%s reason=%s name=%r tool_call_id=%r",
+                                        session_id,
+                                        illegal_reason,
+                                        getattr(tc, "name", ""),
+                                        getattr(tc, "id", ""),
+                                    )
+                                    continue
+                                kept_tool_calls.append(tc)
+                            ai_message.tool_calls = kept_tool_calls
+
                         await context.add_messages(
                             AssistantMessage(
                                 content=ai_message.content,
@@ -2051,7 +2075,29 @@ class ReActAgent(BaseAgent):
                             if ctx.has_pending_steering():
                                 continue
                             await self.context_engine.save_contexts(session)
-                            result = {"output": ai_message.content, "result_type": "answer"}
+                            content = (getattr(ai_message, "content", None) or "").strip()
+                            reasoning = (
+                                getattr(ai_message, "reasoning_content", None) or ""
+                            ).strip()
+                            if not content and not reasoning:
+                                result = {
+                                    "output": (
+                                        "模型未返回有效内容（空响应），"
+                                        "请重试或检查上下文。"
+                                    ),
+                                    "result_type": "error",
+                                    "finish_reason": getattr(
+                                        ai_message, "finish_reason", "null"
+                                    ),
+                                }
+                            else:
+                                result = {
+                                    "output": ai_message.content,
+                                    "result_type": "answer",
+                                    "finish_reason": getattr(
+                                        ai_message, "finish_reason", "null"
+                                    ),
+                                }
                             invoke_inputs.result = result
                             break
 

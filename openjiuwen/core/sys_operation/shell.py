@@ -97,7 +97,7 @@ class BaseShellOperation(BaseOperation, ABC):
             *,
             cwd: Optional[str] = None,
             environment: Optional[Dict[str, str]] = None,
-            grace: float = 3.0,
+            grace: Optional[float] = None,
             shell_type: Literal["auto", "cmd", "powershell", "bash", "sh"] = "auto",
     ) -> ExecuteCmdBackgroundResult:
         """
@@ -107,7 +107,8 @@ class BaseShellOperation(BaseOperation, ABC):
             command: Command to execute.
             cwd: Working directory for command execution (default: current directory).
             environment: Key-value dict of custom environment variables.
-            grace: Seconds to wait for early failure detection (default: 3.0).
+            grace: Seconds to wait for early failure detection. When omitted, uses
+                ``BASH_BACKGROUND_GRACE_SECONDS`` or 5.0 seconds.
             shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
 
         Returns:
