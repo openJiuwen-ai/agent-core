@@ -372,3 +372,77 @@ async def test_flow_spawn_failure_then_success() -> None:
         assert waited.timed_out is False
         assert waited.results[succeeded.subagent_id] == "recovered"
         assert control._registry.count == 1
+
+
+@pytest.mark.asyncio
+async def test_capacity_and_describe_live() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    config = SubagentRuntimeConfig(max_subagents=3)
+    async with _patched_control(parent=parent, config=config) as control:
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+
+        assert control.capacity() == {"used": 1, "max": 3}
+        rows = control.describe_live()
+        assert len(rows) == 1
+        assert rows[0]["subagent_id"] == spawned.subagent_id
+        assert rows[0]["status"] == SubagentStatusKind.COMPLETED.value
+        assert rows[0]["result"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_closes_running_subagents() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.2))
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "running")
+        await asyncio.sleep(0.05)
+        assert control.get_status(spawned.subagent_id).kind is SubagentStatusKind.RUNNING
+
+        closed = await control.cancel_all(reason="parent_ended")
+
+        assert spawned.subagent_id in closed
+        assert control._registry.count == 0
+        assert control._manager.list_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_duplicate_sticky_spawn_rejected() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        first = await control.spawn("browser_agent", "first")
+        await _wait_for_turn(parent.mock_agent)
+
+        with pytest.raises(Exception, match="subagent already live"):
+            await control.spawn("browser_agent", "second")
+
+        assert control._manager.find(first.subagent_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_releases_slots_when_one_remove_fails() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.05))
+    async with _patched_control(
+        parent=parent,
+        config=SubagentRuntimeConfig(max_subagents=2),
+    ) as control:
+        first = await control.spawn("explore", "one")
+        second = await control.spawn("explore", "two")
+        await asyncio.sleep(0.02)
+
+        original_remove = control._manager.remove
+        calls = {"count": 0}
+
+        async def remove_maybe_fail(sid: str, reason: str = "manual"):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("remove failed")
+            return await original_remove(sid, reason=reason)
+
+        with patch.object(control._manager, "remove", side_effect=remove_maybe_fail):
+            closed = await control.cancel_all(reason="parent_ended")
+
+        assert first.subagent_id in closed
+        assert second.subagent_id in closed
+        assert control._registry.count == 0
+        # Registry slots are always released; a failed remove may leave a ghost instance.
+        assert len(control._manager.list_ids()) <= 1

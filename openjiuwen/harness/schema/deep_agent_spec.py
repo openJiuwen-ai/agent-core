@@ -440,6 +440,7 @@ class DeepAgentSpec(BaseModel):
     rails: Optional[list[RailSpec]] = None
     enable_task_loop: bool = True
     enable_async_subagent: bool = False
+    enable_subagent_runtime: bool = False
     add_general_purpose_agent: bool = False
     enable_security_rail: bool = True
     enable_tool_resilience_rail: bool = True
@@ -588,6 +589,7 @@ class DeepAgentSpec(BaseModel):
             rails=rails,
             enable_task_loop=self.enable_task_loop,
             enable_async_subagent=self.enable_async_subagent,
+            enable_subagent_runtime=self.enable_subagent_runtime,
             add_general_purpose_agent=self.add_general_purpose_agent,
             enable_security_rail=self.enable_security_rail,
             enable_tool_resilience_rail=self.enable_tool_resilience_rail,

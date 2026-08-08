@@ -62,6 +62,7 @@ _LEGACY_AGENT_CONTROL_KEYS = {
     "context",
     "default_mode",
     "enable_async_subagent",
+    "enable_subagent_runtime",
     "enable_task_loop",
     "enable_task_planning",
     "language",

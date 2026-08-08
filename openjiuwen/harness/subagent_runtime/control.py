@@ -9,6 +9,8 @@ import time
 from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.logging import logger
+from openjiuwen.harness.kv_cache.kv_cache_hooks import is_sticky_subagent_type
 from openjiuwen.harness.subagent_runtime.config import (
     WAIT_TIMEOUT_MS_DEFAULT,
     WAIT_TIMEOUT_MS_MAX,
@@ -60,11 +62,18 @@ class SubagentControl:
         role: str | None = None,
         browser_capabilities: list[str] | None = None,
     ) -> SpawnResult:
+        sticky = is_sticky_subagent_type(subagent_type)
         sid = subagent_id or build_subagent_id(
             self._parent_session_id,
             subagent_type,
-            sticky=False,
+            sticky=sticky,
         )
+        existing = self._manager.find(sid)
+        if existing is not None and not existing.is_closed():
+            raise build_subagent_runtime_error(
+                f"subagent already live: {sid}; use subagent_wait to collect its result",
+            )
+
         task_id = new_task_id()
         resolved_name, resolved_role = resolve_presentation(
             subagent_type=subagent_type,
@@ -182,6 +191,36 @@ class SubagentControl:
     def list_live(self) -> list[SubagentMetadata]:
         return self._registry.list_live()
 
+    def capacity(self) -> dict[str, int]:
+        """Return current slot usage for the parent session."""
+        return {
+            "used": self._registry.count,
+            "max": self._config.max_subagents,
+        }
+
+    def describe_live(self) -> list[dict[str, Any]]:
+        """Return a serializable summary of every live subagent."""
+        rows: list[dict[str, Any]] = []
+        for metadata in self._registry.list_live():
+            instance = self._manager.find(metadata.subagent_id)
+            if instance is None:
+                continue
+            status = instance.agent_status()
+            rows.append(
+                {
+                    "subagent_id": metadata.subagent_id,
+                    "subagent_type": metadata.subagent_type,
+                    "display_name": metadata.display_name,
+                    "role": metadata.role,
+                    "status": status.kind.value,
+                    "revision": instance.revision(),
+                    "result": instance.last_output
+                    if status.kind is SubagentStatusKind.COMPLETED
+                    else None,
+                }
+            )
+        return rows
+
     async def close(self, subagent_id: str, reason: str = "manual") -> SubagentStatus:
         instance = self._manager.get(subagent_id)
         previous = instance.agent_status()
@@ -192,6 +231,19 @@ class SubagentControl:
         await self._manager.remove(subagent_id, reason=reason)
         self._registry.release(subagent_id)
         return previous
+
+    async def cancel_all(self, reason: str = "parent_ended") -> list[str]:
+        """Force-close every live subagent regardless of RUNNING state."""
+        closed: list[str] = []
+        for sid in self._manager.list_ids():
+            try:
+                await self._manager.remove(sid, reason=reason)
+            except Exception:
+                logger.warning("[SubagentControl] cancel_all failed: sid=%s", sid)
+            finally:
+                self._registry.release(sid)
+                closed.append(sid)
+        return closed
 
     async def _acquire_slot(self) -> SpawnReservation:
         try:

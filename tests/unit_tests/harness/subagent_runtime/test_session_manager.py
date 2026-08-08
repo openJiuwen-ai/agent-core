@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -267,3 +267,36 @@ async def test_session_factory_creates_new_session_per_turn() -> None:
     assert created_sessions[0] is not created_sessions[1]
     assert created_sessions[0].pre_run_calls == 1
     assert created_sessions[1].pre_run_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_kv_cache_hooks_called_when_affinity_enabled() -> None:
+    from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+
+    parent = MockParentAgent()
+    parent.deep_config = SimpleNamespace(
+        kv_cache_affinity_config=KVCacheAffinityConfig(enable_kv_cache_affinity=True),
+    )
+    manager = _manager(parent=parent)
+
+    with _patch_create_session(), patch(
+        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_hooks.prefetch_sticky_subagent",
+    ) as prefetch_mock, patch(
+        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_hooks.finish_subagent",
+        new=AsyncMock(),
+    ) as finish_mock:
+        instance = await manager.create(
+            subagent_type="browser_agent",
+            subagent_id="parent_sub_browser_agent",
+            parent_session_id="parent",
+            display_name="Browser",
+            role="automation",
+        )
+        instance._agent = MockAgent()
+        await instance.enqueue(UserInputOp(query="hello", task_id="t1"))
+        await asyncio.sleep(0.05)
+
+    prefetch_mock.assert_called_once()
+    finish_mock.assert_awaited_once()
+    assert finish_mock.await_args.kwargs["succeeded"] is True
+    assert instance._include_parent_session_id is True

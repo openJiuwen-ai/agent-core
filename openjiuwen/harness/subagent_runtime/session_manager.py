@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openjiuwen.core.foundation.kv_cache import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
 from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.kv_cache.kv_cache_hooks import affinity_enabled
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.errors import (
@@ -44,6 +46,35 @@ class SubagentSessionManager:
         self._running_semaphore = running_semaphore
         self._instances: dict[str, SubagentInstance] = {}
 
+    def _build_turn_hooks(
+        self,
+        subagent_type: str,
+        subagent_id: str,
+        parent_session_id: str,
+    ) -> tuple[Callable[[], None] | None, Callable[[bool], Awaitable[None]] | None]:
+        parent = self._parent_agent
+        if not affinity_enabled(parent):
+            return None, None
+
+        def on_turn_start() -> None:
+            kv_cache_hooks.prefetch_sticky_subagent(
+                parent,
+                subagent_type=subagent_type,
+                sub_session_id=subagent_id,
+                parent_session_id=parent_session_id,
+            )
+
+        async def on_turn_finished(succeeded: bool) -> None:
+            await kv_cache_hooks.finish_subagent(
+                parent,
+                subagent_type=subagent_type,
+                sub_session_id=subagent_id,
+                parent_session_id=parent_session_id,
+                succeeded=succeeded,
+            )
+
+        return on_turn_start, on_turn_finished
+
     async def create(
         self,
         *,
@@ -73,6 +104,12 @@ class SubagentSessionManager:
                 envs=envs,
             )
 
+        on_turn_start, on_turn_finished = self._build_turn_hooks(
+            subagent_type,
+            subagent_id,
+            parent_session_id,
+        )
+
         try:
             instance = SubagentInstance(
                 subagent_id=subagent_id,
@@ -83,6 +120,10 @@ class SubagentSessionManager:
                 agent=subagent,
                 session_factory=session_factory,
                 running_semaphore=self._running_semaphore,
+                turn_timeout_s=self._config.turn_timeout_s,
+                include_parent_session_id=affinity_enabled(self._parent_agent),
+                on_turn_start=on_turn_start,
+                on_turn_finished=on_turn_finished,
             )
             await instance.start_worker()
         except Exception:

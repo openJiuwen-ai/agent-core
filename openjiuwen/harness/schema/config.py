@@ -190,6 +190,8 @@ class DeepAgentConfig:
         enable_async_subagent: Enable async subagent mode (default False).
             When True, SubagentRail registers session tools for async subagent spawning;
             when False, it registers synchronous task tools.
+        enable_subagent_runtime: Enable persistent subagent runtime tools
+            (subagent_spawn/wait/list). Takes precedence over enable_async_subagent.
         add_general_purpose_agent: Add general-purpose agent.
             When True, a general-purpose agent is added as sub-agents.
         max_iterations: Maximum ReAct iterations per
@@ -232,6 +234,7 @@ class DeepAgentConfig:
     kv_cache_affinity_config: Optional[KVCacheAffinityConfig] = None
     enable_task_loop: bool = False
     enable_async_subagent: bool = False
+    enable_subagent_runtime: bool = False
     add_general_purpose_agent: bool = False
     max_iterations: int = 15
     subagents: Optional[List[SubAgentConfig | "DeepAgent"]] = None

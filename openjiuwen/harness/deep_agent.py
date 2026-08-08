@@ -92,6 +92,7 @@ from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
 )
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
+from openjiuwen.harness.tools.subagent._control_registry import release_subagent_control
 from openjiuwen.harness.goal.manager import GoalManager
 from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
 from openjiuwen.harness.schema.interaction import (
@@ -2468,6 +2469,10 @@ class DeepAgent(BaseAgent):
             # Without this, await task could wait for a long-running
             # operation (e.g., wait_round_completion with 600s timeout).
             await self._cancel_session_deep_tasks(session.get_session_id())
+            await self._release_session_subagent_controls(
+                session,
+                reason="stream_cancelled",
+            )
             await self._cancel_stream_process_task()
             raise
         finally:
@@ -2708,6 +2713,26 @@ class DeepAgent(BaseAgent):
                 exc_info=True,
             )
 
+    async def _release_session_subagent_controls(
+        self,
+        session: Optional[Session],
+        *,
+        reason: str,
+    ) -> None:
+        """Cancel persistent runtime subagents owned by a parent session."""
+        if session is None:
+            return
+        session_id = session.get_session_id()
+        try:
+            await release_subagent_control(self, session_id, reason=reason)
+        except Exception as e:
+            logger.warning(
+                "Failed to release subagent controls for session %s: %s",
+                session_id,
+                e,
+                exc_info=True,
+            )
+
     async def _cancel_session_deep_tasks(self, session_id: str) -> None:
         """Cancel active DeepAgent round tasks for a session.
 
@@ -2764,9 +2789,9 @@ class DeepAgent(BaseAgent):
         instead of leaving a zombie ReAct loop running.
 
         Args:
-            session: Current session (unused).
+            session: Parent session whose runtime subagents should be cancelled.
+                Falls back to the bound loop session when omitted.
         """
-        _ = session
         coordinator = self._loop_coordinator
         controller = self._loop_controller
         if coordinator is not None and controller is not None:
@@ -2777,6 +2802,10 @@ class DeepAgent(BaseAgent):
             )
             await handler.on_abort()
         await self._cancel_stream_process_task()
+        await self._release_session_subagent_controls(
+            session or self._loop_session,
+            reason="aborted",
+        )
 
     # ----------------------------------------------------------------
     # long-lived session

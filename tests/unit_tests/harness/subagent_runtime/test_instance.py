@@ -585,3 +585,51 @@ async def test_flow_interrupt_then_complete_with_registry() -> None:
     await instance.shutdown("manual")
     registry.release(subagent_id)
     assert registry.count == 0
+
+
+@pytest.mark.asyncio
+async def test_on_chunk_not_called_when_unset() -> None:
+    instance, agent, _ = _make_instance()
+    await instance.start_worker()
+
+    await instance.enqueue(UserInputOp(query="hello", task_id=new_task_id()))
+    await asyncio.sleep(0.05)
+
+    assert agent.stream_calls == 1
+    assert instance.agent_status().kind is SubagentStatusKind.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_on_chunk_called_for_each_stream_chunk() -> None:
+    chunks_seen: list[dict[str, object]] = []
+
+    async def on_chunk(chunk: dict[str, object]) -> None:
+        chunks_seen.append(chunk)
+
+    mock_agent = MockAgent()
+    sessions: list[MockSession] = []
+
+    def session_factory() -> MockSession:
+        session = MockSession()
+        sessions.append(session)
+        return session
+
+    instance = SubagentInstance(
+        subagent_id="parent_sub_explore",
+        subagent_type="explore",
+        display_name="Explorer",
+        role="researcher",
+        parent_session_id="parent",
+        agent=mock_agent,
+        session_factory=session_factory,
+        running_semaphore=asyncio.Semaphore(5),
+        on_chunk=on_chunk,
+    )
+    await instance.start_worker()
+
+    await instance.enqueue(UserInputOp(query="hello", task_id=new_task_id()))
+    await asyncio.sleep(0.05)
+
+    assert len(chunks_seen) == 2
+    assert chunks_seen[0]["type"] == "llm_output"
+    assert chunks_seen[1]["type"] == "answer"

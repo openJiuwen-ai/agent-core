@@ -308,7 +308,10 @@ async def _ensure_subagent_rail_ready(agent: DeepAgent) -> ResourceRef | None:
     rail = rails[0] if rails else None
     created = False
     if rail is None:
-        rail = SubagentRail(enable_async_subagent=bool(config.enable_async_subagent))
+        rail = SubagentRail(
+            enable_async_subagent=bool(config.enable_async_subagent),
+            enable_subagent_runtime=bool(config.enable_subagent_runtime),
+        )
         await agent.register_rail(rail)
         created = True
 
