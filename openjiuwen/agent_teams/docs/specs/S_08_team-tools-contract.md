@@ -65,7 +65,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
    "什么时候调"、"什么时候不要调"、"昂贵操作的代价信号"。把工具说成
    "send a message" 是简介；说成"广播是 team-size 线性的，少用"才是契约。
 5. **长描述住 Markdown，参数串住 dict**：超过几行的 `_desc` 一律落到
-   `tools/locales/descs/<lang>/<desc_key>.md`；参数描述 / 短串留在
+   `tools/locales/descs/<lang>/<domain>/<desc_key>.md`；参数描述 / 短串留在
    `locales/<lang>.py` 的 `STRINGS`。Markdown 优先级高于 dict——同一
    `_desc` 同时存在两处时 Markdown 覆盖 dict（迁移完成后必须删 dict 项）。
    `desc_key` 通常等于工具 `name`，但**同一工具的不同形态各有自己的 key**
@@ -275,7 +275,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     只说"太长"会让 LLM 原地重试或把正文拆成多条消息。
     **没有收件人豁免**——规则约束的是内容形态，不是收件人，`user` 也一样受限（用户经自己的
     助手 agent 读交接文件）。校验因此不看 `to`，是一条纯粹的长度判断。
-    上限值同时出现在共用片段 `descs/<lang>/fragments/artifact_handoff_policy.md` 里——
+    上限值同时出现在共用片段 `descs/<lang>/fragments/artifact_handoff_policy.md` 里（片段目录
+    不按领域分，见「描述文本路径约定」）——
     让 LLM 事先知道界在哪，省掉一次撞墙往返；`test_tool_message.py` 断言描述里的数字与
     常量一致，防止两者漂移。
 
@@ -348,19 +349,28 @@ Translator = Callable[..., str]
 
 ```
 openjiuwen/agent_teams/tools/locales/
-├── __init__.py                  # make_translator + _load_desc / _slots_of / _load_fragment (@cache)
-├── cn.py                        # STRINGS dict (cn)
-├── en.py                        # STRINGS dict (en)
+├── __init__.py                          # make_translator + _desc_index / _load_desc
+│                                        #   / _slots_of / _load_fragment (均 @cache)
+├── cn.py                                # STRINGS dict (cn)
+├── en.py                                # STRINGS dict (en)
 └── descs/
-    ├── cn/<desc_key>.md         # 优先于 STRINGS["<desc_key>._desc"]
-    ├── cn/fragments/<slot>.md   # 共享片段，填 <desc_key>.md 里的 {{slot}}
-    ├── en/<desc_key>.md
+    ├── cn/<domain>/<desc_key>.md        # 优先于 STRINGS["<desc_key>._desc"]
+    ├── cn/fragments/<slot>.md           # 共享片段，填 <desc_key>.md 里的 {{slot}}
+    ├── en/<domain>/<desc_key>.md
     └── en/fragments/<slot>.md
 ```
 
+`<domain>` 对齐工具实现文件：`team` / `member` / `task` / `message` / `async_task` /
+`workflow` / `workspace` / `common`。两种语言的领域布局逐字相同。
+
 - 文件名 = `desc_key`。默认等于工具 `name`（`build_team` →
-  `descs/cn/build_team.md`）；**同一工具的不同形态各有自己的 key**
+  `descs/cn/team/build_team.md`）；**同一工具的不同形态各有自己的 key**
   （`send_message_scheduled.md`），由形态类在构造时选定（不变量 18）。
+- **领域目录只是给人看的分组，`desc_key` 仍是扁平且全局唯一的命名空间**。解析走
+  `_desc_index(lang)`——按语言递归扫一次建 `desc_key → 路径` 索引并缓存，调用方
+  永远不写领域前缀，挪动一份描述的归属不需要改任何代码。两份文件同名 → 建索引时
+  `ValueError`（否则模型读到哪一份取决于目录遍历顺序）。`fragments/` 不进索引：
+  slot 名与 `desc_key` 是两套命名空间，且片段本就跨领域复用。
 - Markdown 文件存在即覆盖 dict 中同 key 的 `_desc`。迁移完一条描述后
   **必须**把 dict 里的 `_desc` 项删掉，避免出现两个 source-of-truth。
 - 占位符使用 `{{slot}}` 双大括号（`PromptTemplate`），**只允许出现在 md 里**，
@@ -534,8 +544,8 @@ all_tools = {
 3. 把名字加到 `LEADER_ONLY_TOOLS` / `MEMBER_ONLY_TOOLS` /
    `MEMBER_ONLY_TOOLS_SCHEDULED` / `SHARED_TOOLS` / `HUMAN_AGENT_TOOLS` 里需要它的
    那个集合（互斥，不重复加）。
-4. 写 `_desc`：长描述放 `locales/descs/<lang>/<desc_key>.md`，参数串放
-   `locales/<lang>.py`。两边语言都补齐——不允许只补 cn。
+4. 写 `_desc`：长描述放 `locales/descs/<lang>/<domain>/<desc_key>.md`（领域目录对齐它的
+   实现文件），参数串放 `locales/<lang>.py`。两边语言都补齐——不允许只补 cn。
 
 给**已有工具**加一个形态（不是新工具）时是另外四件事：
 
@@ -545,7 +555,7 @@ all_tools = {
    （`send_message` 走这条）。不要默认上基类。
 2. 两个类各自声明 schema 与 `desc_key`；`ToolCard.id` / `name` **保持不变**。
 3. 在 `tool_factory.py` 的形态表里登记；`all_tools` 那一行改成查表构造。
-4. 补 `descs/<lang>/<新 desc_key>.md`（cn + en）；公共段落抽成 `fragments/<slot>.md`
+4. 补 `descs/<lang>/<domain>/<新 desc_key>.md`（cn + en）；公共段落抽成 `fragments/<slot>.md`
    给两个形态共用；只为新参数加 `STRINGS` key，其余复用原 `tool.*` 命名空间。
 
 无论哪条路，`tests/.../test_tool_variants.py::test_every_toolset_assembles` 的

@@ -25,6 +25,7 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
+from openjiuwen.agent_teams.tools import locales as team_locales
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -1875,7 +1876,7 @@ class TestTranslator:
     def test_missing_desc_raises_file_not_found(self):
         """Unknown tool: no markdown and no STRINGS entry → FileNotFoundError.
 
-        Protects against silent KeyError if a descs/<lang>/<tool>.md
+        Protects against silent KeyError if a descs/<lang>/<domain>/<tool>.md
         is deleted or mis-named.
         """
         translate = make_translator("cn")
@@ -1886,6 +1887,55 @@ class TestTranslator:
         msg = str(excinfo.value)
         assert "nonexistent_tool_for_translator_test" in msg
         assert "cn" in msg
+
+
+# ========== Descriptions resolve through a domain-grouped index ==========
+
+
+@pytest.mark.level1
+def test_desc_index_maps_flat_keys_to_domain_subdirectories():
+    """Files sit under domain dirs while desc_key stays flat and prefix-free."""
+    index = team_locales._desc_index("cn")
+
+    assert index["build_team"].parent.name == "team"
+    assert index["create_task"].parent.name == "task"
+    assert index["send_message_scheduled"].parent.name == "message"
+    assert index["structured_output"].parent.name == "common"
+    assert all("/" not in key for key in index)
+
+
+@pytest.mark.level1
+def test_desc_index_excludes_fragments_and_is_language_symmetric():
+    """Slot names are a separate namespace, and both languages carry the same keys."""
+    cn_index = team_locales._desc_index("cn")
+    en_index = team_locales._desc_index("en")
+
+    assert "fork_usage" not in cn_index
+    assert "artifact_handoff_policy" not in cn_index
+    assert set(cn_index) == set(en_index)
+
+
+@pytest.mark.level1
+def test_duplicate_desc_key_across_domains_raises(tmp_path, monkeypatch):
+    """The same key filed under two domains fails loudly at index time.
+
+    Picking one would make the description a model reads depend on directory
+    walk order, which is invisible until a model behaves oddly in production.
+    """
+    for domain in ("task", "message"):
+        domain_dir = tmp_path / "cn" / domain
+        domain_dir.mkdir(parents=True)
+        (domain_dir / "duplicated_tool.md").write_text("desc", encoding="utf-8")
+    monkeypatch.setattr(team_locales, "_DESCS_DIR", tmp_path)
+
+    team_locales._desc_index.cache_clear()
+    try:
+        with pytest.raises(ValueError) as excinfo:
+            team_locales._desc_index("cn")
+    finally:
+        team_locales._desc_index.cache_clear()
+
+    assert "duplicated_tool" in str(excinfo.value)
 
 
 # ========== Team rails are provider-built fresh each cycle (never cached) ==========

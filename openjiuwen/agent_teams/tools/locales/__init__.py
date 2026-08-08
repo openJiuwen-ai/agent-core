@@ -8,8 +8,16 @@ Each language is a flat ``STRINGS`` dict in its own module (``cn.py``,
 so multiple translators can coexist in the same process.
 
 Tool ``_desc`` entries can also live in Markdown files under
-``descs/<lang>/<desc_key>.md``.  Markdown files take precedence over
-``STRINGS`` dict entries.
+``descs/<lang>/``.  Markdown files take precedence over ``STRINGS`` dict
+entries.
+
+Those files are grouped into domain sub-directories mirroring the tool
+modules they describe (``team/``, ``member/``, ``task/``, ``message/``,
+``async_task/``, ``workflow/``, ``workspace/``, ``common/``), but a
+``desc_key`` stays a flat, globally unique name: the directory layout is an
+organisational choice for humans and never appears in a key.  Resolution
+goes through a per-language index built once from a recursive scan, so
+moving a description between domains needs no code change.
 
 ``desc_key`` is usually the tool name, but a tool that ships in several
 *variants* (same ``ToolCard.name``, different schema and behaviour) gives
@@ -19,6 +27,9 @@ module never learns what a variant is.
 
 A ``_desc`` Markdown file may declare ``{{slot}}`` placeholders, each
 filled from a shared fragment at ``descs/<lang>/fragments/<slot>.md``.
+Fragments live in their own flat directory rather than under a domain —
+they are reused *across* domains, and slot names form a namespace separate
+from ``desc_key``, so the domain index skips that directory entirely.
 Fragments are variant-agnostic prose reused across descriptions.  Slots are
 enumerated from the template itself and every one of them must resolve, so
 a missing fragment fails at tool-construction time rather than leaking a
@@ -58,6 +69,42 @@ _SLOT_PATTERN = re.compile(r"\{\{(\w+)\}\}")
 
 
 @cache
+def _desc_index(lang: str) -> dict[str, Path]:
+    """Map every ``desc_key`` under a language root to its Markdown file.
+
+    Descriptions are filed under domain sub-directories for readability while
+    ``desc_key`` stays flat, so the lookup is an index rather than a path
+    join. Built once per language and cached; the ``fragments`` directory is
+    skipped because slot names are a separate namespace.
+
+    Args:
+        lang: Language code naming the sub-directory of ``descs/``.
+
+    Returns:
+        ``desc_key`` (the file stem) to its absolute path; empty when the
+        language has no directory at all.
+
+    Raises:
+        ValueError: when two files claim the same ``desc_key``. Picking one
+            would make the description a model reads depend on directory
+            walk order.
+    """
+    root = _DESCS_DIR / lang
+    index: dict[str, Path] = {}
+    for path in sorted(root.rglob("*.md")):
+        if _FRAGMENTS_DIRNAME in path.relative_to(root).parts:
+            continue
+        clash = index.get(path.stem)
+        if clash is not None:
+            raise ValueError(
+                f"Duplicate description key '{path.stem}' for language '{lang}': "
+                f"{clash} and {path}"
+            )
+        index[path.stem] = path
+    return index
+
+
+@cache
 def _load_desc(desc_key: str, lang: str) -> PromptTemplate | None:
     """Load a tool ``_desc`` from a Markdown file, cached.
 
@@ -66,8 +113,8 @@ def _load_desc(desc_key: str, lang: str) -> PromptTemplate | None:
     *uninterpolated* template; ``PromptTemplate.format`` deep-copies its
     content, so filling slots never mutates the cache entry.
     """
-    path = _DESCS_DIR / lang / f"{desc_key}.md"
-    if not path.is_file():
+    path = _desc_index(lang).get(desc_key)
+    if path is None:
         return None
     return PromptTemplate(name=f"{desc_key}._desc", content=path.read_text(encoding="utf-8").strip())
 
@@ -158,7 +205,7 @@ def make_translator(lang: str = "cn") -> Translator:
             if dict_key not in strings:
                 raise FileNotFoundError(
                     f"Missing description for tool '{desc_key}' in language '{lang}': "
-                    f"expected Markdown at {_DESCS_DIR / lang / f'{desc_key}.md'} "
+                    f"expected Markdown at {_DESCS_DIR / lang}/<domain>/{desc_key}.md "
                     f"or STRINGS['{dict_key}']"
                 )
         raw = strings[f"{desc_key}.{key}"]

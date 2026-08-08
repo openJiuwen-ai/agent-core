@@ -187,7 +187,7 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 参见 `tools/AGENTS.md`。要点：
 
 - `create_team_tools(role=..., teammate_mode=..., exclude_tools=..., lang=...)` 是唯一入口。
-- 工具描述文本是**行为契约**，不是 feature 摘要。长文案放 `tools/locales/descs/<lang>/<tool>.md`。
+- 工具描述文本是**行为契约**，不是 feature 摘要。长文案放 `tools/locales/descs/<lang>/<domain>/<tool>.md`。
 - ToolCard ID 统一 `team.{name}` 前缀。
 
 ### runtime/ — TeamAgent 对象池 + 派发 + 并发门禁

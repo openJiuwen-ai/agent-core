@@ -26,7 +26,7 @@
 | `models.py` | `Team`、`TeamMember` 静态表 + 按 session 动态生成的 `TeamTask*` / `TeamMessage*` 工厂 |
 | `member_options.py` | `TeamMemberOptions` / `MemberModelRef` / `MemberWorktreeOptions` 结构化 options 辅助（load/dump/build/merge/get_member_model_ref/get_member_permissions_override）。用统一的 `options` JSON 取代旧的 `model_ref_json` 列 |
 | `structured_output_tool.py` | `StructuredOutputTool`（`input_params=schema_json`，捕获 `captured`）+ `StructuredOutputFinishRail`（一旦捕获就强制结束本轮）。给任何无原生 `response_format` 的 agent 用的通用结构化输出工具；被 swarmflow worker/session 与 tiny agent（`tiny_agent.py`）复用 |
-| `locales/` | i18n 字符串（`cn.py`、`en.py`）与 Markdown 描述文件（`descs/<lang>/<tool>.md`） |
+| `locales/` | i18n 字符串（`cn.py`、`en.py`）与 Markdown 描述文件（`descs/<lang>/<domain>/<tool>.md`，领域目录见下文「Markdown 描述文件」） |
 
 工具从不直接伸手进 `TeamDatabase` —— 一律经 `TeamBackend` 或某个 manager，使事件发布与状态流转保持集中。
 
@@ -218,8 +218,9 @@ schema 复用走模块级纯函数，不是复制粘贴：
 
 ## 描述模板化（`{{slot}}` + 共享片段，F_57）
 
-`descs/<lang>/<desc_key>.md` 可以声明 `{{slot}}`，由 `descs/<lang>/fragments/<slot>.md`
-填充。片段是**与形态无关**的公共散文（如 `artifact_handoff_policy`），可跨工具复用。
+`descs/<lang>/<domain>/<desc_key>.md` 可以声明 `{{slot}}`，由 `descs/<lang>/fragments/<slot>.md`
+填充。片段是**与形态无关**的公共散文（如 `artifact_handoff_policy`），可跨工具、跨领域复用 ——
+故 `fragments/` 独立于领域目录平铺。
 
 - **`desc_key` 不必等于工具 name**：一个工具的多个形态各有自己的 `.md`
   （`send_message.md` / `send_message_scheduled.md`），形态类自己选 key。
@@ -393,11 +394,14 @@ Locale 文件在 `locales/` —— 每种语言一个扁平 `STRINGS` dict（`cn
 
 ### Markdown 描述文件
 
-长 `_desc` 条目可以放在 `locales/descs/<lang>/<tool_name>.md` 的 Markdown 文件里，而非
+长 `_desc` 条目可以放在 `locales/descs/<lang>/<domain>/<desc_key>.md` 的 Markdown 文件里，而非
 `STRINGS` dict。两者都存在时 Markdown 文件优先。这是可选的 —— 短描述和参数字符串仍留在
 `cn.py`/`en.py`。
 
-- 文件命名：`descs/cn/build_team.md` → 对 `desc_key` `"build_team"`、lang `"cn"` 解析为其 `_desc`。
+- **`desc_key` 是扁平且全局唯一的，目录只是给人看的分组**：`descs/cn/team/build_team.md` 对
+  `desc_key` `"build_team"`、lang `"cn"` 解析为其 `_desc`，调用方永远不写领域前缀。解析走
+  `_desc_index(lang)`（递归扫一次建 `desc_key → 路径` 索引，`@cache`），所以把一份描述在领域
+  之间挪动**不需要改任何代码**。两个文件同名 → 建索引时 `ValueError`，不静默取其一。
   **`desc_key` 通常等于工具 name，但一个工具的多个形态各有自己的 key**（`send_message_scheduled`）。
 - 文件经 `PromptTemplate` 加载（与 `agent_teams/prompts/` 相同）并用 `@cache` 缓存（缓存的是**插值前**
   的对象，`format` 内部 deepcopy，填槽不污染缓存）。
@@ -406,11 +410,23 @@ Locale 文件在 `locales/` —— 每种语言一个扁平 `STRINGS` dict（`cn
   里的运行时错误消息。
 - 把某个 `_desc` 从 `STRINGS` 迁到 `.md` 文件时，删掉 dict 条目并留一条注释。
 
-当前 `descs/` 已覆盖：`approve_plan`、`approve_tool`、`build_team`、`checkpoint`、`claim_task`、`clean_team`、`create_task`、
-`create_task_scheduled`、`list_members`、`member_complete_task`、`member_complete_task_scheduled`、`send_message`、
-`send_message_scheduled`、`verify_task`、`verify_task_scheduled`、`shutdown_member`、`spawn_bridge_agent`、`spawn_external_cli`、`spawn_human_agent`、
-`spawn_teammate`、`structured_output`、`swarmflow`、`update_task`、`view_task`、`workspace_meta`、`async_tasks_list`、
-`async_task_output`、`async_task_cancel`。
+领域目录对齐工具实现文件（`tool_task.py` → `task/`，依此类推），两种语言布局逐字相同：
+
+```
+descs/<lang>/
+├── fragments/    共享片段（不按领域分——跨领域复用，且 slot 名是独立命名空间，建索引时跳过）
+├── team/         build_team · clean_team
+├── member/       spawn_teammate · spawn_human_agent · spawn_bridge_agent · spawn_external_cli
+│                 · shutdown_member · list_members · checkpoint · approve_plan · approve_tool
+├── task/         create_task · create_task_scheduled · view_task · update_task · claim_task
+│                 · member_complete_task · member_complete_task_scheduled
+│                 · verify_task · verify_task_scheduled
+├── message/      send_message · send_message_scheduled
+├── async_task/   async_tasks_list · async_task_output · async_task_cancel
+├── workflow/     swarmflow（`workflow/tool_swarmflow.py`）
+├── workspace/    workspace_meta（`team_workspace/tools.py`）
+└── common/       structured_output（通用工具，非团队协同语义）
+```
 
 `descs/<lang>/fragments/` 已覆盖：`artifact_handoff_policy`（两个 `send_message` 形态共用；
 载明通道判据与 `MAX_CONTENT_CHARS` 上限——数字与常量的一致性由

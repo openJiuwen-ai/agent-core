@@ -47,7 +47,7 @@ class StructuredOutputTool(Tool):
     """A single-use tool that captures a worker's structured result.
 
     Follows the team tools' conventions: the description is resolved through the
-    shared i18n ``Translator`` (``descs/<lang>/structured_output.md``) so it
+    shared i18n ``Translator`` (``descs/<lang>/common/structured_output.md``) so it
     honours the worker's language, and the requested JSON Schema becomes the
     tool's ``input_params``.
 
