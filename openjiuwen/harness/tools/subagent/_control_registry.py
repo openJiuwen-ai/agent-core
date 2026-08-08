@@ -31,7 +31,7 @@ def get_subagent_control(parent_agent: "DeepAgent", session: Any) -> SubagentCon
         setattr(parent_agent, _CONTROL_ATTR, controls)
     control = controls.get(parent_session_id)
     if control is None:
-        control = SubagentControl(parent_agent, parent_session_id)
+        control = SubagentControl(parent_agent, parent_session_id, parent_session=session)
         controls[parent_session_id] = control
     return control
 

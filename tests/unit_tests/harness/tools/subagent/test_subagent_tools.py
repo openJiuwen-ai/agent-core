@@ -42,11 +42,21 @@ def _wait_tool(parent: SimpleNamespace | None = None) -> SubagentWaitTool:
     )
 
 
+def _control_mock(**kwargs) -> SimpleNamespace:
+    defaults = {
+        "spawn": AsyncMock(),
+        "wait": AsyncMock(),
+        "emit_status_update": AsyncMock(),
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
 @pytest.mark.asyncio
 async def test_subagent_spawn_delegates_to_control() -> None:
     parent = _parent()
     tool = _spawn_tool(parent)
-    control = SimpleNamespace(
+    control = _control_mock(
         spawn=AsyncMock(
             return_value=SpawnResult(
                 subagent_id="parent_sub_explore",
@@ -70,6 +80,10 @@ async def test_subagent_spawn_delegates_to_control() -> None:
         "explore_agent",
         "hello",
         browser_capabilities=None,
+    )
+    control.emit_status_update.assert_awaited_once_with(
+        "parent_sub_explore",
+        session=session,
     )
     assert result.success is True
     assert result.data["subagent_id"] == "parent_sub_explore"
@@ -100,7 +114,7 @@ async def test_subagent_spawn_requires_subagent_type_and_task_description() -> N
 async def test_subagent_spawn_browser_capabilities_validation() -> None:
     tool = _spawn_tool()
     session = Session(session_id="parent_sess")
-    control = SimpleNamespace(
+    control = _control_mock(
         spawn=AsyncMock(
             return_value=SpawnResult(
                 subagent_id="parent_sub_explore",
@@ -167,7 +181,7 @@ async def test_subagent_spawn_requires_session_kwarg() -> None:
 async def test_subagent_wait_returns_statuses_and_results() -> None:
     parent = _parent()
     tool = _wait_tool(parent)
-    control = SimpleNamespace(
+    control = _control_mock(
         wait=AsyncMock(
             return_value=WaitResult(
                 statuses={"sub1": SubagentStatus.completed("answer")},
@@ -190,6 +204,7 @@ async def test_subagent_wait_returns_statuses_and_results() -> None:
     assert result.data["results"] == {"sub1": "answer"}
     assert result.data["statuses"] == {"sub1": SubagentStatusKind.COMPLETED.value}
     assert result.data["timed_out"] is False
+    control.emit_status_update.assert_awaited_once_with("sub1", session=session)
 
 
 @pytest.mark.asyncio
@@ -217,7 +232,7 @@ async def test_subagent_list_returns_capacity_and_rows() -> None:
     )
     control = SimpleNamespace(
         capacity=lambda: {"used": 1, "max": 10},
-        describe_live=lambda: [{"subagent_id": "sub1", "status": "completed"}],
+        describe_live=lambda: [{"subagent_id": "sub1", "status": "closed"}],
     )
     session = Session(session_id="parent_sess")
 

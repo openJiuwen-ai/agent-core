@@ -31,6 +31,13 @@ from openjiuwen.harness.subagent_runtime.models import (
 from openjiuwen.harness.subagent_runtime.registry import SpawnReservation, SubagentRegistry
 from openjiuwen.harness.subagent_runtime.session_manager import SubagentSessionManager
 from openjiuwen.harness.subagent_runtime.status import StatusReceiver
+from openjiuwen.harness.subagent_runtime.status_events import (
+    build_subagent_updated_payload,
+    emit_subagent_updated,
+    is_externally_closed,
+)
+
+_TASK_DESCRIPTION_MAX_LEN = 2000
 
 
 class SubagentControl:
@@ -41,8 +48,11 @@ class SubagentControl:
         parent_agent: Any,
         parent_session_id: str,
         config: SubagentRuntimeConfig | None = None,
+        parent_session: Any | None = None,
     ) -> None:
+        self._parent_agent = parent_agent
         self._parent_session_id = parent_session_id
+        self._parent_session = parent_session
         self._config = config or SubagentRuntimeConfig()
         self._registry = SubagentRegistry(self._config)
         self._semaphore = asyncio.Semaphore(self._config.max_concurrent_running)
@@ -50,6 +60,7 @@ class SubagentControl:
             parent_agent,
             self._config,
             self._semaphore,
+            status_change_handler=self._handle_instance_status_changed,
         )
 
     async def spawn(
@@ -75,11 +86,12 @@ class SubagentControl:
             )
 
         task_id = new_task_id()
-        resolved_name, resolved_role = resolve_presentation(
-            subagent_type=subagent_type,
-            display_name=display_name,
-            role=role,
+        resolved_name, resolved_role = self._resolve_spawn_presentation(
+            subagent_type,
+            display_name,
+            role,
         )
+        task_description = self._truncate_task_description(query)
         reservation = await self._acquire_slot()
 
         try:
@@ -98,6 +110,7 @@ class SubagentControl:
                     task_id,
                     resolved_name,
                     resolved_role,
+                    task_description,
                 ),
             )
         except Exception:
@@ -198,28 +211,63 @@ class SubagentControl:
             "max": self._config.max_subagents,
         }
 
+    def describe_one(self, subagent_id: str) -> dict[str, Any] | None:
+        """Return one subagent's external status payload, or None if never registered."""
+        metadata = self._registry.find_metadata(subagent_id)
+        instance = self._manager.find(subagent_id)
+        if metadata is None and instance is None:
+            return None
+
+        if metadata is None:
+            status = instance.agent_status() if instance is not None else SubagentStatus.not_found()
+            return build_subagent_updated_payload(
+                subagent_id=subagent_id,
+                subagent_type=instance.subagent_type if instance else "",
+                display_name=instance.display_name if instance else subagent_id,
+                role=instance.role if instance else "",
+                parent_session_id=self._parent_session_id,
+                task_description="",
+                created_at_ms=0.0,
+                updated_at_ms=0.0,
+                closed_at_ms=None,
+                status=status,
+                revision=instance.revision() if instance is not None else 0,
+            )
+
+        status = instance.agent_status() if instance is not None else SubagentStatus.not_found()
+        revision = instance.revision() if instance is not None else 0
+        return self._metadata_to_payload(metadata, status=status, revision=revision)
+
     def describe_live(self) -> list[dict[str, Any]]:
-        """Return a serializable summary of every live subagent."""
+        """Return external status payloads for every live subagent."""
         rows: list[dict[str, Any]] = []
         for metadata in self._registry.list_live():
             instance = self._manager.find(metadata.subagent_id)
             if instance is None:
                 continue
-            status = instance.agent_status()
             rows.append(
-                {
-                    "subagent_id": metadata.subagent_id,
-                    "subagent_type": metadata.subagent_type,
-                    "display_name": metadata.display_name,
-                    "role": metadata.role,
-                    "status": status.kind.value,
-                    "revision": instance.revision(),
-                    "result": instance.last_output
-                    if status.kind is SubagentStatusKind.COMPLETED
-                    else None,
-                }
+                self._metadata_to_payload(
+                    metadata,
+                    status=instance.agent_status(),
+                    revision=instance.revision(),
+                )
             )
         return rows
+
+    async def emit_status_update(
+        self,
+        subagent_id: str,
+        *,
+        session: Any | None = None,
+    ) -> None:
+        """Push one subagent status update to the parent session stream."""
+        target_session = session or self._parent_session
+        if target_session is None:
+            return
+        projection = self.describe_one(subagent_id)
+        if projection is None:
+            return
+        await emit_subagent_updated(target_session, projection=projection)
 
     async def close(self, subagent_id: str, reason: str = "manual") -> SubagentStatus:
         instance = self._manager.get(subagent_id)
@@ -265,18 +313,101 @@ class SubagentControl:
         task_id: str,
         display_name: str,
         role: str,
+        task_description: str,
     ) -> SubagentMetadata:
-        now = time.monotonic()
+        now_mono = time.monotonic()
+        now_ms = time.time() * 1000
         return SubagentMetadata(
             subagent_id=sid,
             subagent_type=subagent_type,
             display_name=display_name,
             role=role,
             parent_session_id=self._parent_session_id,
-            created_at=now,
-            last_used_at=now,
+            created_at=now_mono,
+            last_used_at=now_mono,
             current_task_id=task_id,
+            task_description=task_description,
+            created_at_ms=now_ms,
+            updated_at_ms=now_ms,
         )
+
+    def _metadata_to_payload(
+        self,
+        metadata: SubagentMetadata,
+        *,
+        status: SubagentStatus,
+        revision: int,
+    ) -> dict[str, Any]:
+        return build_subagent_updated_payload(
+            subagent_id=metadata.subagent_id,
+            subagent_type=metadata.subagent_type,
+            display_name=metadata.display_name,
+            role=metadata.role,
+            parent_session_id=metadata.parent_session_id,
+            task_description=metadata.task_description,
+            created_at_ms=metadata.created_at_ms,
+            updated_at_ms=metadata.updated_at_ms,
+            closed_at_ms=metadata.closed_at_ms,
+            status=status,
+            revision=revision,
+        )
+
+    def _resolve_spawn_presentation(
+        self,
+        subagent_type: str,
+        display_name: str | None,
+        role: str | None,
+    ) -> tuple[str, str]:
+        spec = self._lookup_subagent_config(subagent_type)
+        agent_card = getattr(spec, "agent_card", None) if spec is not None else None
+        config_display = getattr(spec, "display_name", None) if spec is not None else None
+        config_role = getattr(spec, "role", None) if spec is not None else None
+        return resolve_presentation(
+            subagent_type=subagent_type,
+            display_name=display_name or config_display,
+            role=role or config_role,
+            agent_card=agent_card,
+        )
+
+    def _lookup_subagent_config(self, subagent_type: str) -> Any | None:
+        deep_config = getattr(self._parent_agent, "deep_config", None)
+        subagents = getattr(deep_config, "subagents", None) or []
+        for spec in subagents:
+            card = getattr(spec, "agent_card", None)
+            if card is None:
+                continue
+            if getattr(card, "id", None) == subagent_type or getattr(card, "name", None) == subagent_type:
+                return spec
+        return None
+
+    @staticmethod
+    def _truncate_task_description(query: str) -> str:
+        text = str(query or "").strip()
+        if len(text) <= _TASK_DESCRIPTION_MAX_LEN:
+            return text
+        return text[:_TASK_DESCRIPTION_MAX_LEN]
+
+    def _touch_metadata_timestamps(
+        self,
+        metadata: SubagentMetadata,
+        *,
+        status: SubagentStatus,
+    ) -> None:
+        metadata.updated_at_ms = time.time() * 1000
+        if is_externally_closed(status) and metadata.closed_at_ms is None:
+            metadata.closed_at_ms = metadata.updated_at_ms
+
+    async def _handle_instance_status_changed(
+        self,
+        subagent_id: str,
+        status: SubagentStatus,
+    ) -> None:
+        if not is_externally_closed(status):
+            return
+        metadata = self._registry.find_metadata(subagent_id)
+        if metadata is not None:
+            self._touch_metadata_timestamps(metadata, status=status)
+        await self.emit_status_update(subagent_id)
 
     def _resolve_final(
         self,

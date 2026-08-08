@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -31,6 +31,7 @@ async def test_spawn_wait_list_tool_chain_uses_real_control() -> None:
     )
     parent.card = SimpleNamespace(id="parent")
     session = Session(session_id="parent_chain_sess")
+    session.write_stream = AsyncMock()
     spawn_tool, wait_tool, list_tool = build_subagent_tools(
         parent,
         language="cn",
@@ -71,11 +72,24 @@ async def test_spawn_wait_list_tool_chain_uses_real_control() -> None:
             assert len(list_result.data["subagents"]) == 1
             row = list_result.data["subagents"][0]
             assert row["subagent_id"] == subagent_id
-            assert row["status"] == SubagentStatusKind.COMPLETED.value
-            assert row["result"] == "chain output"
+            assert row["status"] == "closed"
+            assert row["closed_reason"] == "completed"
+            assert "result" not in row
 
             instance = control._manager.get(subagent_id)
             assert instance._agent.stream_calls == 1
+
+            status_payloads = [
+                call.args[0].payload["subagent_updated"]
+                for call in session.write_stream.await_args_list
+            ]
+            assert any(item["status"] == "running" for item in status_payloads)
+            assert any(
+                item["status"] == "closed" and item["subagent_id"] == subagent_id
+                for item in status_payloads
+            )
+            revisions = [item["revision"] for item in status_payloads if item["subagent_id"] == subagent_id]
+            assert revisions == sorted(revisions)
         finally:
             await release_subagent_control(parent, session.get_session_id(), reason="test")
 

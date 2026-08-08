@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Union
+from typing import Any, Union
 
 
 class SubagentStatusKind(str, Enum):
@@ -96,6 +96,10 @@ class SubagentMetadata:
     created_at: float
     last_used_at: float
     current_task_id: str | None = None
+    task_description: str = ""
+    created_at_ms: float = 0.0
+    updated_at_ms: float = 0.0
+    closed_at_ms: float | None = None
 
 
 def resolve_presentation(
@@ -103,11 +107,20 @@ def resolve_presentation(
     subagent_type: str,
     display_name: str | None,
     role: str | None,
+    agent_card: Any | None = None,
 ) -> tuple[str, str]:
     """Normalize display fields before writing SubagentMetadata."""
+    card_name = ""
+    card_role = ""
+    if agent_card is not None:
+        card_name = str(getattr(agent_card, "name", "") or "").strip()
+        card_desc = str(getattr(agent_card, "description", "") or "").strip()
+        if len(card_desc) > 200:
+            card_desc = card_desc[:200]
+        card_role = card_desc
     return (
-        (display_name or "").strip() or subagent_type,
-        (role or "").strip(),
+        (display_name or "").strip() or card_name or subagent_type,
+        (role or "").strip() or card_role,
     )
 
 

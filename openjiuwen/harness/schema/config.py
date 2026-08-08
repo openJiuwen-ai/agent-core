@@ -312,3 +312,5 @@ class SubAgentConfig:
     enable_plan_mode: bool = False
     parallel_tool_calls: bool = True
     restrict_to_work_dir: bool = True
+    display_name: Optional[str] = None
+    role: Optional[str] = None

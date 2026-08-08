@@ -56,6 +56,7 @@ class SubagentInstance:
         include_parent_session_id: bool = False,
         on_turn_start: Callable[[], None] | None = None,
         on_turn_finished: Callable[[bool], Awaitable[None]] | None = None,
+        on_status_changed: Callable[[SubagentStatus], Awaitable[None]] | None = None,
     ) -> None:
         self.subagent_id = subagent_id
         self.subagent_type = subagent_type
@@ -75,6 +76,7 @@ class SubagentInstance:
         self._include_parent_session_id = include_parent_session_id
         self._on_turn_start = on_turn_start
         self._on_turn_finished = on_turn_finished
+        self._on_status_changed = on_status_changed
 
         self._ops: asyncio.Queue[SubagentOp] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
@@ -128,6 +130,11 @@ class SubagentInstance:
     def is_closed(self) -> bool:
         return self._closed
 
+    async def _set_status(self, status: SubagentStatus) -> None:
+        await self.status.set(status)
+        if self._on_status_changed is not None:
+            await self._on_status_changed(status)
+
     async def _worker_main(self) -> None:
         while True:
             op = await self._ops.get()
@@ -144,7 +151,7 @@ class SubagentInstance:
 
         async with self._running_semaphore:
             self._interrupt_requested = False
-            await self.status.set(SubagentStatus.running())
+            await self._set_status(SubagentStatus.running())
             self._current_run = asyncio.create_task(self._run_one_turn(op))
             try:
                 if self._turn_timeout_s and self._turn_timeout_s > 0:
@@ -162,13 +169,13 @@ class SubagentInstance:
 
     async def _on_turn_timeout(self) -> None:
         if not self.status.current().is_final():
-            await self.status.set(
+            await self._set_status(
                 SubagentStatus.errored("turn timeout", code="TIMEOUT"),
             )
 
     async def _on_turn_cancelled(self) -> None:
         if not self.status.current().is_final():
-            await self.status.set(SubagentStatus.interrupted())
+            await self._set_status(SubagentStatus.interrupted())
 
         if self._interrupt_requested:
             self._interrupt_requested = False
@@ -210,12 +217,12 @@ class SubagentInstance:
                 and self.status.current().kind is SubagentStatusKind.COMPLETED
             )
         except BaseError as exc:
-            await self.status.set(
+            await self._set_status(
                 SubagentStatus.errored(str(exc), code=exc.status.name),
             )
             raise
         except Exception as exc:
-            await self.status.set(SubagentStatus.errored(str(exc)))
+            await self._set_status(SubagentStatus.errored(str(exc)))
             raise
         finally:
             await self._finalize_turn(session, succeeded=succeeded)
@@ -223,13 +230,13 @@ class SubagentInstance:
     async def _settle_turn(self, op: UserInputOp, aggregator: TurnOutputAggregator) -> None:
         output = aggregator.output()
         if aggregator.is_error():
-            await self.status.set(
+            await self._set_status(
                 SubagentStatus.errored(output or "subagent stream reported error"),
             )
             return
         self.last_output = output
         self.last_task_id = op.task_id
-        await self.status.set(SubagentStatus.completed(output))
+        await self._set_status(SubagentStatus.completed(output))
 
     async def _finalize_turn(self, session: Any, *, succeeded: bool) -> None:
         task = asyncio.create_task(
@@ -252,6 +259,6 @@ class SubagentInstance:
             self._interrupt_requested = True
             run.cancel()
             await asyncio.wait({run})
-        await self.status.set(SubagentStatus.closed(reason))
+        await self._set_status(SubagentStatus.closed(reason))
         await self.status.close()
         self._closed = True

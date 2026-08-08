@@ -77,6 +77,7 @@ class SubagentSpawnTool(Tool):
             str(task_description),
             browser_capabilities=browser_capabilities,
         )
+        await control.emit_status_update(result.subagent_id, session=kwargs.get("session"))
         return ToolOutput(
             success=True,
             data={
@@ -128,6 +129,9 @@ class SubagentWaitTool(Tool):
             )
 
         result = await control.wait(list(subagent_ids), timeout_ms=timeout_ms)
+        session = kwargs.get("session")
+        for sid in subagent_ids:
+            await control.emit_status_update(str(sid), session=session)
         return ToolOutput(
             success=True,
             data={

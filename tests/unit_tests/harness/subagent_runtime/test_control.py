@@ -7,12 +7,13 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import AgentError, ExecutionError, ValidationError, build_error
+from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.control import SubagentControl
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
@@ -386,8 +387,11 @@ async def test_capacity_and_describe_live() -> None:
         rows = control.describe_live()
         assert len(rows) == 1
         assert rows[0]["subagent_id"] == spawned.subagent_id
-        assert rows[0]["status"] == SubagentStatusKind.COMPLETED.value
-        assert rows[0]["result"] == "done"
+        assert rows[0]["status"] == "closed"
+        assert rows[0]["closed_reason"] == "completed"
+        assert rows[0]["revision"] >= 1
+        assert rows[0]["task_description"] == "hello"
+        assert "result" not in rows[0]
 
 
 @pytest.mark.asyncio
@@ -446,3 +450,50 @@ async def test_cancel_all_releases_slots_when_one_remove_fails() -> None:
         assert control._registry.count == 0
         # Registry slots are always released; a failed remove may leave a ghost instance.
         assert len(control._manager.list_ids()) <= 1
+
+
+@pytest.mark.asyncio
+async def test_describe_one_returns_external_payload() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+
+        payload = control.describe_one(spawned.subagent_id)
+        assert payload is not None
+        assert payload["subagent_id"] == spawned.subagent_id
+        assert payload["status"] == "closed"
+        assert payload["closed_reason"] == "completed"
+        assert payload["task_description"] == "hello"
+        assert payload["parent_session_id"] == "parent"
+
+
+@pytest.mark.asyncio
+async def test_describe_one_missing_returns_none() -> None:
+    control = _control()
+    assert control.describe_one("missing") is None
+
+
+@pytest.mark.asyncio
+async def test_worker_terminal_emits_without_wait() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.05))
+    session = Session(session_id="parent")
+    session.write_stream = AsyncMock()
+    control = SubagentControl(parent, "parent", parent_session=session)
+
+    with _patch_create_session():
+        spawned = await control.spawn("explore", "background")
+        await _wait_for_turn(parent.mock_agent)
+        try:
+            assert session.write_stream.await_count >= 1
+            payloads = [
+                call.args[0].payload["subagent_updated"]
+                for call in session.write_stream.await_args_list
+            ]
+            closed_payloads = [item for item in payloads if item.get("status") == "closed"]
+            assert closed_payloads
+            assert closed_payloads[-1]["subagent_id"] == spawned.subagent_id
+        finally:
+            for sid in list(control._manager.list_ids()):
+                await control._manager.remove(sid, reason="test_cleanup")
+                control._registry.release(sid)

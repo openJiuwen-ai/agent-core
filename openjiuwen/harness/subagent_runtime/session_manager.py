@@ -18,6 +18,7 @@ from openjiuwen.harness.subagent_runtime.errors import (
     raise_subagent_not_found,
 )
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
+from openjiuwen.harness.subagent_runtime.models import SubagentStatus
 
 
 async def _close_session_quietly(session: Any) -> None:
@@ -40,10 +41,13 @@ class SubagentSessionManager:
         parent_agent: Any,
         config: SubagentRuntimeConfig,
         running_semaphore: asyncio.Semaphore,
+        *,
+        status_change_handler: Callable[[str, SubagentStatus], Awaitable[None]] | None = None,
     ) -> None:
         self._parent_agent = parent_agent
         self._config = config
         self._running_semaphore = running_semaphore
+        self._status_change_handler = status_change_handler
         self._instances: dict[str, SubagentInstance] = {}
 
     def _build_turn_hooks(
@@ -110,6 +114,10 @@ class SubagentSessionManager:
             parent_session_id,
         )
 
+        async def on_status_changed(status: SubagentStatus) -> None:
+            if self._status_change_handler is not None:
+                await self._status_change_handler(subagent_id, status)
+
         try:
             instance = SubagentInstance(
                 subagent_id=subagent_id,
@@ -124,6 +132,7 @@ class SubagentSessionManager:
                 include_parent_session_id=affinity_enabled(self._parent_agent),
                 on_turn_start=on_turn_start,
                 on_turn_finished=on_turn_finished,
+                on_status_changed=on_status_changed,
             )
             await instance.start_worker()
         except Exception:
