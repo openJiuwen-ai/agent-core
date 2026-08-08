@@ -12,6 +12,7 @@ def test_public_exports_match_all() -> None:
         "WAIT_TIMEOUT_MS_DEFAULT",
         "WAIT_TIMEOUT_MS_MAX",
         "WAIT_TIMEOUT_MS_MIN",
+        "ClosedSubagentRecord",
         "ShutdownOp",
         "SpawnReservation",
         "SpawnResult",

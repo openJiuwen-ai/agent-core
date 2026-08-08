@@ -175,6 +175,142 @@ class SubagentListTool(Tool):
         yield await self.invoke(inputs, **kwargs)
 
 
+class SubagentSendInputTool(Tool):
+    """Send follow-up input to an existing subagent instance."""
+
+    def __init__(
+        self,
+        card: ToolCard,
+        parent_agent: "DeepAgent",
+        language: str = "cn",
+    ) -> None:
+        super().__init__(card)
+        self._parent_agent = parent_agent
+        self._language = language
+
+    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
+        payload = _require_dict_inputs(inputs)
+        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+
+        subagent_id = payload.get("subagent_id")
+        query = payload.get("query")
+        if not subagent_id or not isinstance(subagent_id, str):
+            raise build_error(
+                StatusCode.TOOL_SESSION_TOOL_INVOKED,
+                reason="'subagent_id' is required",
+            )
+        if not query or not isinstance(query, str) or not str(query).strip():
+            raise build_error(
+                StatusCode.TOOL_SESSION_TOOL_INVOKED,
+                reason="'query' is required",
+            )
+
+        interrupt = payload.get("interrupt", False)
+        if not isinstance(interrupt, bool):
+            raise build_error(
+                StatusCode.TOOL_SESSION_TOOL_INVOKED,
+                reason="'interrupt' must be a boolean",
+            )
+
+        task_id = await control.send_input(
+            subagent_id,
+            str(query),
+            interrupt=interrupt,
+        )
+        session = kwargs.get("session")
+        await control.emit_status_update(subagent_id, session=session)
+        status = control.get_status(subagent_id)
+        return ToolOutput(
+            success=True,
+            data={
+                "subagent_id": subagent_id,
+                "task_id": task_id,
+                "status": status.kind.value,
+            },
+        )
+
+    async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
+        yield await self.invoke(inputs, **kwargs)
+
+
+class SubagentCloseTool(Tool):
+    """Close an idle subagent instance and release its capacity slot."""
+
+    def __init__(
+        self,
+        card: ToolCard,
+        parent_agent: "DeepAgent",
+        language: str = "cn",
+    ) -> None:
+        super().__init__(card)
+        self._parent_agent = parent_agent
+        self._language = language
+
+    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
+        payload = _require_dict_inputs(inputs)
+        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+
+        subagent_id = payload.get("subagent_id")
+        if not subagent_id or not isinstance(subagent_id, str):
+            raise build_error(
+                StatusCode.TOOL_SESSION_TOOL_INVOKED,
+                reason="'subagent_id' is required",
+            )
+
+        previous = await control.close(subagent_id, reason="manual")
+        session = kwargs.get("session")
+        await control.emit_status_update(subagent_id, session=session)
+        return ToolOutput(
+            success=True,
+            data={
+                "subagent_id": subagent_id,
+                "previous_status": previous.kind.value,
+            },
+        )
+
+    async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
+        yield await self.invoke(inputs, **kwargs)
+
+
+class SubagentResumeTool(Tool):
+    """Restore a closed or evicted subagent from checkpointer without enqueueing work."""
+
+    def __init__(
+        self,
+        card: ToolCard,
+        parent_agent: "DeepAgent",
+        language: str = "cn",
+    ) -> None:
+        super().__init__(card)
+        self._parent_agent = parent_agent
+        self._language = language
+
+    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
+        payload = _require_dict_inputs(inputs)
+        control = get_subagent_control(self._parent_agent, kwargs.get("session"))
+
+        subagent_id = payload.get("subagent_id")
+        if not subagent_id or not isinstance(subagent_id, str):
+            raise build_error(
+                StatusCode.TOOL_SESSION_TOOL_INVOKED,
+                reason="'subagent_id' is required",
+            )
+
+        status = await control.resume(subagent_id)
+        session = kwargs.get("session")
+        await control.emit_status_update(subagent_id, session=session)
+        return ToolOutput(
+            success=True,
+            data={
+                "subagent_id": subagent_id,
+                "status": status.kind.value,
+            },
+        )
+
+    async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
+        yield await self.invoke(inputs, **kwargs)
+
+
 def build_subagent_tools(
     parent_agent: "DeepAgent",
     *,
@@ -182,7 +318,7 @@ def build_subagent_tools(
     available_agents: str = "",
     agent_id: Optional[str] = None,
 ) -> List[Tool]:
-    """Build runtime subagent tools (spawn, wait, list)."""
+    """Build runtime subagent tools (spawn, wait, list, send_input, close, resume)."""
     format_args = {"available_agents": available_agents}
     spawn_card = build_tool_card(
         name="subagent_spawn",
@@ -203,15 +339,39 @@ def build_subagent_tools(
         language=language,
         agent_id=agent_id,
     )
+    send_input_card = build_tool_card(
+        name="subagent_send_input",
+        tool_id="subagent_send_input",
+        language=language,
+        agent_id=agent_id,
+    )
+    close_card = build_tool_card(
+        name="subagent_close",
+        tool_id="subagent_close",
+        language=language,
+        agent_id=agent_id,
+    )
+    resume_card = build_tool_card(
+        name="subagent_resume",
+        tool_id="subagent_resume",
+        language=language,
+        agent_id=agent_id,
+    )
     return [
         SubagentSpawnTool(spawn_card, parent_agent, language=language),
         SubagentWaitTool(wait_card, parent_agent, language=language),
         SubagentListTool(list_card, parent_agent, language=language),
+        SubagentSendInputTool(send_input_card, parent_agent, language=language),
+        SubagentCloseTool(close_card, parent_agent, language=language),
+        SubagentResumeTool(resume_card, parent_agent, language=language),
     ]
 
 
 __all__ = [
+    "SubagentCloseTool",
     "SubagentListTool",
+    "SubagentResumeTool",
+    "SubagentSendInputTool",
     "SubagentSpawnTool",
     "SubagentWaitTool",
     "build_subagent_tools",

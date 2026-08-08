@@ -130,6 +130,18 @@ class SubagentInstance:
     def is_closed(self) -> bool:
         return self._closed
 
+    def has_pending_work(self) -> bool:
+        """Return True when a turn is active or queued after a prior final status."""
+        if self._closed:
+            return False
+        if not self._ops.empty():
+            return True
+        run = self._current_run
+        if run is not None and not run.done():
+            return True
+        kind = self.status.current().kind
+        return kind in {SubagentStatusKind.PENDING_INIT, SubagentStatusKind.RUNNING}
+
     async def _set_status(self, status: SubagentStatus) -> None:
         await self.status.set(status)
         if self._on_status_changed is not None:

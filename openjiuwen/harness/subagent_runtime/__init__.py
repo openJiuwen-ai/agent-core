@@ -18,6 +18,7 @@ from openjiuwen.harness.subagent_runtime.control import SubagentControl
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
 from openjiuwen.harness.subagent_runtime.session_manager import SubagentSessionManager
 from openjiuwen.harness.subagent_runtime.models import (
+    ClosedSubagentRecord,
     ShutdownOp,
     SpawnResult,
     SubagentMetadata,
@@ -36,6 +37,7 @@ __all__ = [
     "WAIT_TIMEOUT_MS_DEFAULT",
     "WAIT_TIMEOUT_MS_MAX",
     "WAIT_TIMEOUT_MS_MIN",
+    "ClosedSubagentRecord",
     "ShutdownOp",
     "SpawnReservation",
     "SpawnResult",

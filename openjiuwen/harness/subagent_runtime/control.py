@@ -10,6 +10,7 @@ from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.harness.kv_cache.kv_cache_hooks import is_sticky_subagent_type
 from openjiuwen.harness.subagent_runtime.config import (
     WAIT_TIMEOUT_MS_DEFAULT,
@@ -17,9 +18,10 @@ from openjiuwen.harness.subagent_runtime.config import (
     WAIT_TIMEOUT_MS_MIN,
     SubagentRuntimeConfig,
 )
-from openjiuwen.harness.subagent_runtime.errors import build_subagent_runtime_error
+from openjiuwen.harness.subagent_runtime.errors import build_subagent_runtime_error, raise_subagent_not_found
 from openjiuwen.harness.subagent_runtime.ids import build_subagent_id, new_task_id
 from openjiuwen.harness.subagent_runtime.models import (
+    ClosedSubagentRecord,
     SpawnResult,
     SubagentMetadata,
     SubagentStatus,
@@ -56,6 +58,7 @@ class SubagentControl:
         self._config = config or SubagentRuntimeConfig()
         self._registry = SubagentRegistry(self._config)
         self._semaphore = asyncio.Semaphore(self._config.max_concurrent_running)
+        self._closed_records: dict[str, ClosedSubagentRecord] = {}
         self._manager = SubagentSessionManager(
             parent_agent,
             self._config,
@@ -152,7 +155,7 @@ class SubagentControl:
             self._registry.touch(sid)
             receiver = instance.subscribe_status()
             current = receiver.current()
-            if current.is_final():
+            if current.is_final() and not instance.has_pending_work():
                 statuses[sid] = current
                 continue
             waiters[asyncio.create_task(receiver.wait_for_final())] = sid
@@ -216,7 +219,10 @@ class SubagentControl:
         metadata = self._registry.find_metadata(subagent_id)
         instance = self._manager.find(subagent_id)
         if metadata is None and instance is None:
-            return None
+            record = self._closed_records.get(subagent_id)
+            if record is None:
+                return None
+            return self._closed_record_to_payload(record)
 
         if metadata is None:
             status = instance.agent_status() if instance is not None else SubagentStatus.not_found()
@@ -269,6 +275,64 @@ class SubagentControl:
             return
         await emit_subagent_updated(target_session, projection=projection)
 
+    async def send_input(
+        self,
+        subagent_id: str,
+        query: str,
+        *,
+        interrupt: bool = False,
+    ) -> str:
+        """Enqueue follow-up input and return a new task_id without blocking."""
+        instance = self._manager.find(subagent_id)
+        if instance is None or instance.is_closed():
+            raise build_subagent_runtime_error(
+                f"subagent closed or not found: {subagent_id}; call subagent_resume first",
+            )
+        if interrupt:
+            await instance.interrupt()
+        task_id = new_task_id()
+        await instance.enqueue(UserInputOp(query=query, task_id=task_id))
+        self._registry.touch(subagent_id)
+        metadata = self._registry.find_metadata(subagent_id)
+        if metadata is not None:
+            metadata.current_task_id = task_id
+            metadata.task_description = self._truncate_task_description(query)
+            metadata.updated_at_ms = time.time() * 1000
+        return task_id
+
+    async def resume(self, subagent_id: str) -> SubagentStatus:
+        """Restore a closed or evicted subagent from checkpointer without enqueueing work."""
+        existing = self._manager.find(subagent_id)
+        if existing is not None and not existing.is_closed():
+            return existing.agent_status()
+
+        record = self._closed_records.get(subagent_id)
+        if record is None:
+            raise_subagent_not_found(subagent_id)
+
+        checkpointer = CheckpointerFactory.get_checkpointer()
+        if not await checkpointer.session_exists(subagent_id):
+            raise_subagent_not_found(subagent_id)
+
+        reservation = await self._acquire_slot()
+        try:
+            await self._manager.restore(
+                subagent_id=subagent_id,
+                subagent_type=record.subagent_type,
+                parent_session_id=self._parent_session_id,
+                display_name=record.display_name,
+                role=record.role,
+            )
+            reservation.commit(
+                self._build_metadata_from_record(record, task_id=None),
+            )
+        except Exception:
+            reservation.rollback()
+            raise
+
+        self._closed_records.pop(subagent_id, None)
+        return SubagentStatus.pending_init()
+
     async def close(self, subagent_id: str, reason: str = "manual") -> SubagentStatus:
         instance = self._manager.get(subagent_id)
         previous = instance.agent_status()
@@ -276,22 +340,29 @@ class SubagentControl:
             raise build_subagent_runtime_error(
                 f"cannot close running subagent: {subagent_id}",
             )
-        await self._manager.remove(subagent_id, reason=reason)
-        self._registry.release(subagent_id)
+        await self._evict_from_memory(subagent_id, reason=reason)
         return previous
 
     async def cancel_all(self, reason: str = "parent_ended") -> list[str]:
         """Force-close every live subagent regardless of RUNNING state."""
         closed: list[str] = []
-        for sid in self._manager.list_ids():
+        for sid in list(self._manager.list_ids()):
             try:
-                await self._manager.remove(sid, reason=reason)
+                await self._evict_from_memory(sid, reason=reason)
             except Exception:
                 logger.warning("[SubagentControl] cancel_all failed: sid=%s", sid)
-            finally:
                 self._registry.release(sid)
-                closed.append(sid)
+            closed.append(sid)
         return closed
+
+    async def _evict_from_memory(self, subagent_id: str, *, reason: str) -> None:
+        metadata = self._registry.find_metadata(subagent_id)
+        if metadata is not None and metadata.closed_at_ms is None:
+            metadata.closed_at_ms = time.time() * 1000
+        await self._manager.remove(subagent_id, reason=reason)
+        if metadata is not None:
+            self._store_closed_record(metadata, close_reason=reason)
+        self._registry.release(subagent_id)
 
     async def _acquire_slot(self) -> SpawnReservation:
         try:
@@ -329,6 +400,74 @@ class SubagentControl:
             task_description=task_description,
             created_at_ms=now_ms,
             updated_at_ms=now_ms,
+        )
+
+    def _build_metadata_from_record(
+        self,
+        record: ClosedSubagentRecord,
+        *,
+        task_id: str | None,
+    ) -> SubagentMetadata:
+        now_mono = time.monotonic()
+        now_ms = time.time() * 1000
+        return SubagentMetadata(
+            subagent_id=record.subagent_id,
+            subagent_type=record.subagent_type,
+            display_name=record.display_name,
+            role=record.role,
+            parent_session_id=self._parent_session_id,
+            created_at=now_mono,
+            last_used_at=now_mono,
+            current_task_id=task_id,
+            task_description=record.task_description,
+            created_at_ms=record.created_at_ms,
+            updated_at_ms=now_ms,
+        )
+
+    def _store_closed_record(
+        self,
+        metadata: SubagentMetadata,
+        *,
+        close_reason: str,
+    ) -> None:
+        closed_at_ms = metadata.closed_at_ms or time.time() * 1000
+        self._closed_records[metadata.subagent_id] = ClosedSubagentRecord(
+            subagent_id=metadata.subagent_id,
+            subagent_type=metadata.subagent_type,
+            display_name=metadata.display_name,
+            role=metadata.role,
+            task_description=metadata.task_description,
+            closed_reason=close_reason,
+            closed_at_ms=closed_at_ms,
+            created_at_ms=metadata.created_at_ms,
+        )
+        self._trim_closed_records()
+
+    def _trim_closed_records(self) -> None:
+        limit = max(self._config.max_subagents * 2, 1)
+        if len(self._closed_records) <= limit:
+            return
+        excess = len(self._closed_records) - limit
+        oldest = sorted(
+            self._closed_records.values(),
+            key=lambda record: record.closed_at_ms,
+        )[:excess]
+        for record in oldest:
+            self._closed_records.pop(record.subagent_id, None)
+
+    def _closed_record_to_payload(self, record: ClosedSubagentRecord) -> dict[str, Any]:
+        return build_subagent_updated_payload(
+            subagent_id=record.subagent_id,
+            subagent_type=record.subagent_type,
+            display_name=record.display_name,
+            role=record.role,
+            parent_session_id=self._parent_session_id,
+            task_description=record.task_description,
+            created_at_ms=record.created_at_ms,
+            updated_at_ms=record.closed_at_ms,
+            closed_at_ms=record.closed_at_ms,
+            status=SubagentStatus.closed(record.closed_reason),
+            revision=0,
         )
 
     def _metadata_to_payload(

@@ -224,11 +224,71 @@ async def test_list_ids_reflects_created_instances() -> None:
 
 
 @pytest.mark.asyncio
-async def test_restore_raises_runtime_error() -> None:
+async def test_restore_returns_live_instance_without_recreating() -> None:
     manager = _manager()
 
-    with pytest.raises(ExecutionError, match="restore not supported"):
-        await manager.restore("sid-1")
+    with _patch_create_session():
+        instance = await manager.create(
+            subagent_type="explore",
+            subagent_id="sid-1",
+            parent_session_id="parent",
+            display_name="One",
+            role="a",
+        )
+
+        restored = await manager.restore(
+            subagent_type="explore",
+            subagent_id="sid-1",
+            parent_session_id="parent",
+            display_name="One",
+            role="a",
+        )
+
+    assert restored is instance
+
+
+@pytest.mark.asyncio
+async def test_restore_requires_checkpointer_history() -> None:
+    manager = _manager()
+
+    with patch(
+        "openjiuwen.harness.subagent_runtime.session_manager.CheckpointerFactory.get_checkpointer",
+    ) as get_checkpointer:
+        checkpointer = AsyncMock()
+        checkpointer.session_exists = AsyncMock(return_value=False)
+        get_checkpointer.return_value = checkpointer
+
+        with pytest.raises(AgentError):
+            await manager.restore(
+                subagent_type="explore",
+                subagent_id="sid-1",
+                parent_session_id="parent",
+                display_name="One",
+                role="a",
+            )
+
+
+@pytest.mark.asyncio
+async def test_restore_rebuilds_from_checkpointer() -> None:
+    manager = _manager()
+
+    with _patch_create_session(), patch(
+        "openjiuwen.harness.subagent_runtime.session_manager.CheckpointerFactory.get_checkpointer",
+    ) as get_checkpointer:
+        checkpointer = AsyncMock()
+        checkpointer.session_exists = AsyncMock(return_value=True)
+        get_checkpointer.return_value = checkpointer
+
+        restored = await manager.restore(
+            subagent_type="explore",
+            subagent_id="sid-1",
+            parent_session_id="parent",
+            display_name="One",
+            role="a",
+        )
+
+    assert restored.subagent_id == "sid-1"
+    assert manager.find("sid-1") is restored
 
 
 @pytest.mark.asyncio

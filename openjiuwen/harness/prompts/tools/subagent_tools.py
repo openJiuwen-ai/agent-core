@@ -45,6 +45,41 @@ SUBAGENT_LIST_DESCRIPTION: Dict[str, str] = {
     "en": "List live subagents and current capacity usage for the parent session.",
 }
 
+SUBAGENT_SEND_INPUT_DESCRIPTION: Dict[str, str] = {
+    "cn": (
+        "向已存在的 subagent_id 投递后续消息，立即返回新 task_id。"
+        "wait 超时且方向错误时可传 interrupt=true 中止当前轮并改向。"
+        "实例已 close 或被淘汰时须先 subagent_resume。"
+    ),
+    "en": (
+        "Send follow-up input to an existing subagent_id; returns a new task_id immediately. "
+        "Use interrupt=true after a timed-out wait to cancel the current turn and redirect. "
+        "If the instance was closed or evicted, call subagent_resume first."
+    ),
+}
+
+SUBAGENT_CLOSE_DESCRIPTION: Dict[str, str] = {
+    "cn": (
+        "关闭空闲子代理实例并释放名额；会话上下文保留在 checkpointer。"
+        "RUNNING 实例会被拒绝，请先 wait 或 send_input(interrupt=true)。"
+    ),
+    "en": (
+        "Close an idle subagent and release its slot; conversation history stays in checkpointer. "
+        "RUNNING instances are rejected—wait or send_input(interrupt=true) first."
+    ),
+}
+
+SUBAGENT_RESUME_DESCRIPTION: Dict[str, str] = {
+    "cn": (
+        "从 checkpointer 恢复已 close 或 LRU 淘汰的 subagent，重新占用名额，不自动投递任务。"
+        "恢复后须再 subagent_send_input 并 subagent_wait。"
+    ),
+    "en": (
+        "Restore a closed or LRU-evicted subagent from checkpointer and reclaim a slot; "
+        "does not enqueue work. Follow with subagent_send_input and subagent_wait."
+    ),
+}
+
 
 def get_subagent_spawn_input_params(language: str = "cn") -> Dict[str, Any]:
     _ = language
@@ -97,6 +132,56 @@ def get_subagent_list_input_params(language: str = "cn") -> Dict[str, Any]:
     }
 
 
+def get_subagent_send_input_input_params(language: str = "cn") -> Dict[str, Any]:
+    _ = language
+    return {
+        "type": "object",
+        "properties": {
+            "subagent_id": {
+                "type": "string",
+                "description": "Target subagent id.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Follow-up task prompt for the subagent.",
+            },
+            "interrupt": {
+                "type": "boolean",
+                "description": "Cancel the active turn before enqueueing the new input.",
+            },
+        },
+        "required": ["subagent_id", "query"],
+    }
+
+
+def get_subagent_close_input_params(language: str = "cn") -> Dict[str, Any]:
+    _ = language
+    return {
+        "type": "object",
+        "properties": {
+            "subagent_id": {
+                "type": "string",
+                "description": "Subagent id to close.",
+            },
+        },
+        "required": ["subagent_id"],
+    }
+
+
+def get_subagent_resume_input_params(language: str = "cn") -> Dict[str, Any]:
+    _ = language
+    return {
+        "type": "object",
+        "properties": {
+            "subagent_id": {
+                "type": "string",
+                "description": "Subagent id to restore from checkpointer.",
+            },
+        },
+        "required": ["subagent_id"],
+    }
+
+
 class SubagentSpawnMetadataProvider(ToolMetadataProvider):
     def get_name(self) -> str:
         return "subagent_spawn"
@@ -130,11 +215,53 @@ class SubagentListMetadataProvider(ToolMetadataProvider):
         return get_subagent_list_input_params(language)
 
 
+class SubagentSendInputMetadataProvider(ToolMetadataProvider):
+    def get_name(self) -> str:
+        return "subagent_send_input"
+
+    def get_description(self, language: str = "cn") -> str:
+        return SUBAGENT_SEND_INPUT_DESCRIPTION.get(
+            language,
+            SUBAGENT_SEND_INPUT_DESCRIPTION["cn"],
+        )
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return get_subagent_send_input_input_params(language)
+
+
+class SubagentCloseMetadataProvider(ToolMetadataProvider):
+    def get_name(self) -> str:
+        return "subagent_close"
+
+    def get_description(self, language: str = "cn") -> str:
+        return SUBAGENT_CLOSE_DESCRIPTION.get(language, SUBAGENT_CLOSE_DESCRIPTION["cn"])
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return get_subagent_close_input_params(language)
+
+
+class SubagentResumeMetadataProvider(ToolMetadataProvider):
+    def get_name(self) -> str:
+        return "subagent_resume"
+
+    def get_description(self, language: str = "cn") -> str:
+        return SUBAGENT_RESUME_DESCRIPTION.get(language, SUBAGENT_RESUME_DESCRIPTION["cn"])
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return get_subagent_resume_input_params(language)
+
+
 __all__ = [
+    "SubagentCloseMetadataProvider",
     "SubagentListMetadataProvider",
+    "SubagentResumeMetadataProvider",
+    "SubagentSendInputMetadataProvider",
     "SubagentSpawnMetadataProvider",
     "SubagentWaitMetadataProvider",
+    "get_subagent_close_input_params",
     "get_subagent_list_input_params",
+    "get_subagent_resume_input_params",
+    "get_subagent_send_input_input_params",
     "get_subagent_spawn_input_params",
     "get_subagent_wait_input_params",
 ]

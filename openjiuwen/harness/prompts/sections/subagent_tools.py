@@ -11,7 +11,7 @@ from openjiuwen.harness.prompts.sections import SectionName
 if TYPE_CHECKING:
     from openjiuwen.harness.prompts.builder import PromptSection
 
-SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具（subagent_spawn / subagent_wait / subagent_list）
+SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具（subagent_spawn / subagent_wait / subagent_list / subagent_send_input / subagent_close / subagent_resume）
 
 ### 何时委派
 
@@ -32,10 +32,14 @@ SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具（subagent_spawn / subag
 - subagent_spawn 立即返回 subagent_id，**不含**最终 output。
 - **同一 turn 内 spawn 后必须 subagent_wait** 收集结果；research / coding 类任务传**分钟级** timeout_ms。
 - 一轮结束后实例仍常驻；同一 sticky 类型不要重复 spawn。
+- 追问同一实例用 subagent_send_input，不要为相同意图重复 spawn。
+- wait 超时且方向错误时，用 subagent_send_input(interrupt=true) 纠偏后再 wait。
+- 确认不再需要时用 subagent_close 释放名额；满 10 个会 LRU 淘汰，可用 subagent_resume 拉回。
+- close 或淘汰后必须先 subagent_resume，再 subagent_send_input + subagent_wait。
 - subagent_list 可查看存活子代理与容量占用。
 """
 
-SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools (subagent_spawn / subagent_wait / subagent_list)
+SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools (subagent_spawn / subagent_wait / subagent_list / subagent_send_input / subagent_close / subagent_resume)
 
 ### When to delegate
 
@@ -56,6 +60,10 @@ SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools (subagent_spawn / su
 - subagent_spawn returns subagent_id immediately and does **not** include the final output.
 - **Call subagent_wait in the same turn after spawn**; use minute-scale timeout_ms for research/coding tasks.
 - Instances stay alive after one turn completes; do not respawn the same sticky type.
+- Follow up on the same instance with subagent_send_input instead of respawning the same intent.
+- After a timed-out wait with the wrong direction, use subagent_send_input(interrupt=true), then wait again.
+- Call subagent_close when an instance is no longer needed; LRU may evict when full—use subagent_resume to bring it back.
+- After close or eviction, call subagent_resume before subagent_send_input + subagent_wait.
 - Use subagent_list to inspect live subagents and capacity usage.
 """
 

@@ -497,3 +497,125 @@ async def test_worker_terminal_emits_without_wait() -> None:
             for sid in list(control._manager.list_ids()):
                 await control._manager.remove(sid, reason="test_cleanup")
                 control._registry.release(sid)
+
+
+@pytest.mark.asyncio
+async def test_close_writes_closed_record_and_describe_one_returns_closed() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "hello", display_name="Explorer", role="researcher")
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
+
+        await control.close(spawned.subagent_id, reason="manual")
+
+        assert spawned.subagent_id in control._closed_records
+        payload = control.describe_one(spawned.subagent_id)
+        assert payload is not None
+        assert payload["status"] == "closed"
+        assert payload["closed_reason"] == "manual"
+        assert payload["display_name"] == "Explorer"
+
+
+@pytest.mark.asyncio
+async def test_send_input_on_completed_instance() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent(output="first", delay_s=0.05))
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "first")
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
+
+        parent.mock_agent.output = "second"
+        instance = control._manager.get(spawned.subagent_id)
+        instance._agent.output = "second"
+        task_id = await control.send_input(spawned.subagent_id, "continue")
+
+        assert task_id
+        await _wait_for_turn(parent.mock_agent)
+        waited = await control.wait([spawned.subagent_id], timeout_ms=500)
+        assert waited.results[spawned.subagent_id] == "second"
+        instance = control._manager.get(spawned.subagent_id)
+        assert instance._agent.stream_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_send_input_on_closed_instance_raises() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
+        await control.close(spawned.subagent_id)
+
+        with pytest.raises(ExecutionError, match="subagent_resume first"):
+            await control.send_input(spawned.subagent_id, "too late")
+
+
+@pytest.mark.asyncio
+async def test_send_input_interrupt_redirects_running_turn() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent(output="wrong", delay_s=0.2))
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "slow")
+        await asyncio.sleep(0.02)
+
+        parent.mock_agent.output = "redirected"
+        parent.mock_agent.delay_s = 0.05
+        instance = control._manager.get(spawned.subagent_id)
+        instance._agent.output = "redirected"
+        instance._agent.delay_s = 0.05
+        await control.send_input(spawned.subagent_id, "change direction", interrupt=True)
+        waited = await control.wait([spawned.subagent_id], timeout_ms=500)
+
+        assert waited.timed_out is False
+        assert waited.results[spawned.subagent_id] == "redirected"
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_closed_instance() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
+        await control.close(spawned.subagent_id)
+
+        with patch(
+            "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+        ) as get_checkpointer:
+            checkpointer = AsyncMock()
+            checkpointer.session_exists = AsyncMock(return_value=True)
+            get_checkpointer.return_value = checkpointer
+
+            status = await control.resume(spawned.subagent_id)
+
+        assert status.kind is SubagentStatusKind.PENDING_INIT
+        assert control._manager.find(spawned.subagent_id) is not None
+        assert spawned.subagent_id not in control._closed_records
+        assert control._registry.find_metadata(spawned.subagent_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_resume_missing_closed_record_raises_not_found() -> None:
+    async with _patched_control() as control:
+        with pytest.raises(AgentError):
+            await control.resume("missing-id")
+
+
+@pytest.mark.asyncio
+async def test_resume_no_checkpointer_history_raises_not_found() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
+        await control.close(spawned.subagent_id)
+
+        with patch(
+            "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+        ) as get_checkpointer:
+            checkpointer = AsyncMock()
+            checkpointer.session_exists = AsyncMock(return_value=False)
+            get_checkpointer.return_value = checkpointer
+
+            with pytest.raises(AgentError):
+                await control.resume(spawned.subagent_id)

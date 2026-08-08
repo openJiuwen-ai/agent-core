@@ -140,3 +140,17 @@ class WaitResult:
     statuses: dict[str, SubagentStatus]
     results: dict[str, str]
     timed_out: bool
+
+
+@dataclass(frozen=True)
+class ClosedSubagentRecord:
+    """Metadata retained after an instance leaves memory, so resume can rebuild it."""
+
+    subagent_id: str
+    subagent_type: str
+    display_name: str
+    role: str
+    task_description: str
+    closed_reason: str
+    closed_at_ms: float
+    created_at_ms: float

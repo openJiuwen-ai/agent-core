@@ -10,6 +10,7 @@ from typing import Any
 
 from openjiuwen.core.foundation.kv_cache import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
 from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.kv_cache.kv_cache_hooks import affinity_enabled
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
@@ -168,7 +169,30 @@ class SubagentSessionManager:
     async def persist(self, subagent_id: str) -> None:
         _ = subagent_id
 
-    async def restore(self, subagent_id: str) -> SubagentInstance:
-        raise build_subagent_runtime_error(
-            f"restore not supported: subagent_id={subagent_id}",
-        ) from None
+    async def restore(
+        self,
+        *,
+        subagent_type: str,
+        subagent_id: str,
+        parent_session_id: str,
+        display_name: str,
+        role: str,
+        browser_capabilities: list[str] | None = None,
+    ) -> SubagentInstance:
+        """Rebuild a subagent instance; conversation history is restored in session.pre_run()."""
+        existing = self.find(subagent_id)
+        if existing is not None and not existing.is_closed():
+            return existing
+
+        checkpointer = CheckpointerFactory.get_checkpointer()
+        if not await checkpointer.session_exists(subagent_id):
+            raise_subagent_not_found(subagent_id)
+
+        return await self.create(
+            subagent_type=subagent_type,
+            subagent_id=subagent_id,
+            parent_session_id=parent_session_id,
+            display_name=display_name,
+            role=role,
+            browser_capabilities=browser_capabilities,
+        )
