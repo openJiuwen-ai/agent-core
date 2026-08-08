@@ -20,8 +20,10 @@ from openjiuwen.core.foundation.llm import (
     SystemMessage,
     ToolCall,
     ToolMessage,
+    UsageMetadata,
     UserMessage,
 )
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session.agent import Session
 from tests.unit_tests.core.context_engine._stream_state_helpers import (
     assert_context_state_pair,
@@ -113,7 +115,7 @@ class TestFullCompactProcessor:
         session = Session(session_id="full-compact-summary-session")
         ctx = await create_context_with_full_compact(
             FullCompactProcessorConfig(
-                trigger_total_tokens=1,
+                trigger_total_tokens=500,
                 compression_call_max_tokens=2000,
                 messages_to_keep=0,
                 session_memory_enabled=False,
@@ -641,3 +643,185 @@ class TestFullCompactProcessor:
 
         assert runtime["last_summarized_message_count"] == 99
         assert runtime["notes_upto_message_id"] == "anchor-id"
+
+
+class TestFullCompactContextWindowAccounting:
+    def _processor(self, **kwargs):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+
+        return FullCompactProcessor(FullCompactProcessorConfig(**kwargs))
+
+    def test_case1_trigger_counts_system_and_tools(self):
+        processor = self._processor(trigger_total_tokens=50)
+        ctx = MagicMock()
+        ctx.get_messages.return_value = [UserMessage(content="hello")]
+        ctx.token_counter.return_value = MagicMock(
+            count_messages=lambda messages: sum(len(getattr(m, "content", "") or "") for m in messages),
+            count_tools=lambda tools: sum(len(t.name) * 10 for t in tools),
+        )
+
+        system = [SystemMessage(content="x" * 40)]
+        tools = [
+            ToolInfo(
+                name="search",
+                description="search tool",
+                parameters={"type": "object", "properties": {}},
+            )
+        ]
+        without_tools = processor._count_context_window_tokens([], ctx.get_messages(), [], ctx)
+        with_tools = processor._count_context_window_tokens(system, ctx.get_messages(), tools, ctx)
+        assert with_tools > without_tools
+
+        larger_system = processor._count_context_window_tokens(
+            [SystemMessage(content="x" * 400)],
+            ctx.get_messages(),
+            tools,
+            ctx,
+        )
+        assert larger_system > with_tools
+
+    def test_case2_baseline_never_lowers_estimate(self):
+        processor = self._processor(trigger_total_tokens=10_000)
+        ctx = MagicMock()
+        messages = [
+            UserMessage(content="u1"),
+            AssistantMessage(
+                content="a1",
+                usage_metadata=UsageMetadata(total_tokens=5000),
+            ),
+            UserMessage(content="u2" * 100),
+        ]
+        ctx.token_counter.return_value = MagicMock(
+            count_messages=lambda msgs: 100 * len(msgs),
+            count_tools=lambda tools: 0,
+        )
+
+        full_only = processor._count_context_window_tokens([], messages, [], ctx, use_baseline=False)
+        with_baseline = processor._count_context_window_tokens([], messages, [], ctx, use_baseline=True)
+        assert with_baseline >= full_only
+
+        no_usage = [
+            UserMessage(content="only"),
+            AssistantMessage(content="no usage"),
+        ]
+        assert processor._count_context_window_tokens(
+            [], no_usage, [], ctx, use_baseline=True
+        ) == processor._count_context_window_tokens(
+            [], no_usage, [], ctx, use_baseline=False
+        )
+
+        high_baseline_messages = [
+            AssistantMessage(content="anchor", usage_metadata=UsageMetadata(total_tokens=9000)),
+            UserMessage(content="tail"),
+        ]
+        via_baseline = processor._count_context_window_tokens(
+            [], high_baseline_messages, [], ctx, use_baseline=True
+        )
+        full_small = processor._count_context_window_tokens(
+            [], high_baseline_messages, [], ctx, use_baseline=False
+        )
+        assert via_baseline > full_small
+
+    def test_baseline_prefers_input_tokens_over_total(self):
+        processor = self._processor()
+        _, baseline = processor._find_recent_usage_baseline(
+            [
+                AssistantMessage(
+                    content="a",
+                    usage_metadata=UsageMetadata(
+                        input_tokens=8000,
+                        output_tokens=2000,
+                        total_tokens=10000,
+                    ),
+                ),
+            ]
+        )
+        assert baseline == 8000
+
+    def test_count_tools_includes_non_toolinfo_when_counter_available(self):
+        processor = self._processor()
+        token_counter = MagicMock(count_tools=lambda tool_infos: len(tool_infos) * 100)
+        tools = [
+            ToolInfo(name="a", description="d", parameters={}),
+            {"name": "raw_tool", "description": "x" * 50},
+        ]
+        total = processor._count_tools_with_fallback(token_counter, tools)
+        assert total > 100
+
+    @pytest.mark.asyncio
+    async def test_case3_replacement_rejected_when_system_tools_push_over_threshold(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=30,
+                session_memory_enabled=False,
+            )
+        )
+        ctx = await create_context_with_full_compact(processor.config)
+        processor._generate_summary = AsyncMock(return_value="Summary:\nshort")  # type: ignore[method-assign]
+        processor.build_reinjected_state_messages = MagicMock(return_value=[])  # type: ignore[method-assign]
+
+        system_messages = [SystemMessage(content="s" * 200)]
+        tools = [
+            ToolInfo(
+                name="heavy",
+                description="d" * 200,
+                parameters={"type": "object", "properties": {}},
+            )
+        ]
+        all_messages = [UserMessage(content="payload " * 20)]
+
+        result = await processor._build_replacement_messages(
+            ctx,
+            all_messages,
+            system_messages,
+            tools,
+        )
+        assert result[1] is None
+
+    @pytest.mark.asyncio
+    async def test_case4_adaptive_chain_picks_first_fitting_attempt(self):
+        from openjiuwen.core.context_engine.processor.compressor.full_compact_processor import (
+            FullCompactProcessor,
+        )
+
+        processor = FullCompactProcessor(
+            FullCompactProcessorConfig(
+                trigger_total_tokens=500,
+                messages_to_keep=2,
+                session_memory_enabled=False,
+            )
+        )
+        ctx = await create_context_with_full_compact(
+            processor.config,
+            history_messages=[UserMessage(content="history " * 5)],
+        )
+        processor._generate_summary = AsyncMock(return_value="Summary:\n" + ("x" * 50))  # type: ignore[method-assign]
+        processor.build_reinjected_state_messages = MagicMock(return_value=[])  # type: ignore[method-assign]
+
+        calls: list[int] = []
+
+        original_select = processor._select_messages_to_keep
+
+        def _tracking_select(messages, *, keep_recent=None):
+            calls.append(keep_recent if keep_recent is not None else processor._messages_to_keep)
+            return original_select(messages, keep_recent=keep_recent)
+
+        processor._select_messages_to_keep = _tracking_select  # type: ignore[method-assign]
+
+        active = [UserMessage(content="u"), AssistantMessage(content="a")]
+        result = await processor._try_full_compact_adaptive_chain(
+            context=ctx,
+            prefix=[],
+            active_messages=active,
+            system_messages=[],
+            tools=[],
+            threshold=500,
+        )
+        assert result is not None
+        assert calls[0] == 2
