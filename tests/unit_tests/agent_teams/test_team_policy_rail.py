@@ -8,6 +8,7 @@ import pytest
 
 from openjiuwen.agent_teams.prompts import (
     TeamSectionName,
+    build_leader_policy_disclosure,
     build_team_extra_section,
     build_team_identity_section,
     build_team_lifecycle_section,
@@ -444,12 +445,12 @@ def _leader_rail(backend: _FakeTeamBackend | None = None, **overrides) -> TeamPo
 
 
 class TestTeamPolicyRailStaticSections:
-    """Static-only behaviour (team_backend is None): the rail still registers
-    role / workflow / lifecycle / extra without touching the DB."""
+    """Static-only behaviour (team_backend is None): the rail registers the
+    leader's bootstrap + extra, and the full static set for everyone else."""
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_leader_rail_registers_static_sections_without_backend(self):
+    async def test_leader_rail_registers_only_bootstrap_and_extra(self):
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
 
@@ -458,15 +459,20 @@ class TestTeamPolicyRailStaticSections:
         await rail.before_model_call(_StubContext())
 
         sections = builder.get_all_sections()
+        # F_76: the leader's prefix is the routing bootstrap plus the caller's
+        # own instructions. Every collaboration convention is disclosed by the
+        # build_team result instead.
+        assert set(sections) == {TeamSectionName.BOOTSTRAP, TeamSectionName.EXTRA}
         for name in (
             TeamSectionName.ROLE,
             TeamSectionName.WORKFLOW,
             TeamSectionName.LIFECYCLE,
-            TeamSectionName.EXTRA,
+            TeamSectionName.DISPATCH,
+            TeamSectionName.INBOUND_TAGS,
+            # The per-member content never enters the builder.
+            TeamSectionName.IDENTITY,
         ):
-            assert name in sections
-        # The per-member content never enters the builder.
-        assert TeamSectionName.IDENTITY not in sections
+            assert name not in sections
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -481,8 +487,8 @@ class TestTeamPolicyRailStaticSections:
             rail.init(agent)
             await rail.before_model_call(_StubContext())
 
-            role_text = builder.get_all_sections()[TeamSectionName.ROLE].render("cn")
-            assert ("swarmflow" in role_text.lower()) is swarmflow_enabled
+            bootstrap = builder.get_all_sections()[TeamSectionName.BOOTSTRAP].render("cn")
+            assert ("swarmflow" in bootstrap.lower()) is swarmflow_enabled
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -831,15 +837,27 @@ class TestTeamPolicyRailTeamContext:
         )
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = _leader_rail(backend, base_prompt=None)
+        rail = _leader_rail(backend, base_prompt="Stay sharp")
         rail.init(agent)
         await rail.before_model_call(_StubContext())
 
+        # The leader's prefix is bootstrap-then-extra; the priority ordering
+        # that used to be visible across role/workflow/lifecycle now belongs to
+        # the disclosure (asserted below).
         prompt = builder.build()
-        idx_role = prompt.index("# 团队角色")
-        idx_workflow = prompt.index("# 工作流程")
-        idx_lifecycle = prompt.index("# 团队生命周期")
-        assert idx_role < idx_workflow < idx_lifecycle
+        assert prompt.index("TeamLeader") < prompt.index("Stay sharp")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_disclosure_keeps_the_section_ordering(self):
+        # The build_team result reuses the same priority-ordered assembly the
+        # system prompt used to have, so the leader reads them in one order.
+        policy = build_leader_policy_disclosure(language="cn")
+        idx_role = policy.index("# 团队角色")
+        idx_workflow = policy.index("# 工作流程")
+        idx_lifecycle = policy.index("# 团队生命周期")
+        idx_dispatch = policy.index("# 任务下发与获取")
+        assert idx_role < idx_workflow < idx_lifecycle < idx_dispatch
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -851,18 +869,13 @@ class TestTeamPolicyRailTeamContext:
         )
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = _leader_rail(backend)
+        rail = _leader_rail(backend, base_prompt="Stay sharp")
         rail.init(agent)
         await rail.before_model_call(_StubContext())
-        assert builder.has_section(TeamSectionName.ROLE)
+        assert builder.has_section(TeamSectionName.BOOTSTRAP)
 
         rail.uninit(agent)
-        for name in (
-            TeamSectionName.ROLE,
-            TeamSectionName.WORKFLOW,
-            TeamSectionName.LIFECYCLE,
-            TeamSectionName.EXTRA,
-        ):
+        for name in (TeamSectionName.BOOTSTRAP, TeamSectionName.EXTRA):
             assert not builder.has_section(name)
 
 
@@ -876,7 +889,7 @@ class TestTeamPolicyRailHitt:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_contract_in_builder_and_human_tagged_in_roster(self):
+    async def test_contract_disclosed_to_leader_and_human_tagged_in_roster(self):
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
             members=[_StubMember("alice", "Alice", role="human_agent")],
@@ -891,12 +904,18 @@ class TestTeamPolicyRailHitt:
         message = await _admit(rail, ctx, "go")
         await rail.before_model_call(ctx)
 
-        assert builder.has_section(TeamSectionName.HITT)
-        assert "禁止" in builder.get_section(TeamSectionName.HITT).render("cn")
+        # F_76: the leader's HITT contract rides the build_team disclosure —
+        # that call is also what settles the effective enable_hitt value, so
+        # the contract and the capability now appear together.
+        assert not builder.has_section(TeamSectionName.HITT)
+        disclosure = build_leader_policy_disclosure(language="cn", hitt_enabled=True)
+        assert "禁止" in disclosure
+        assert disclosure != build_leader_policy_disclosure(language="cn", hitt_enabled=False)
+        # The roster message is the state lane and is unaffected.
         body = message.content
         assert "member_name=alice" in body
         assert "[human]" in body
-        logger.info("HITT contract in builder; human tagged in the roster message")
+        logger.info("HITT contract disclosed via build_team; human tagged in the roster message")
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -963,15 +982,22 @@ class TestTeamPolicyRailHitt:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_uninit_strips_hitt_contract_from_builder(self):
+        # A teammate still carries the contract in its prefix — its conventions
+        # are fixed at spawn and it has no build_team call to disclose them.
         backend = _FakeTeamBackend(
             team=_StubTeam("Beta", "Test"),
             members=[],
             hitt_enabled=True,
-            self_member_name="leader1",
+            self_member_name="dev1",
         )
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = _leader_rail(backend, member_prompt="")
+        rail = TeamPolicyRail(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            language="cn",
+            team_backend=backend,
+        )
         rail.init(agent)
         await rail.before_model_call(_StubContext())
         assert builder.has_section(TeamSectionName.HITT)
@@ -1015,10 +1041,23 @@ class TestTagNoticeInclusion:
     async def test_rail_static_sections_include_the_notice(self):
         builder = SystemPromptBuilder(language="cn")
         agent = _StubAgent(builder)
-        rail = TeamPolicyRail(role=TeamRole.LEADER, member_name="l", language="cn")
+        rail = TeamPolicyRail(role=TeamRole.TEAMMATE, member_name="dev1", language="cn")
         rail.init(agent)
         await rail.before_model_call(_StubContext())
         assert TeamSectionName.INBOUND_TAGS in builder.get_all_sections()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_leader_reads_the_notice_from_the_disclosure(self):
+        # The leader gets the same notice, just later: the tags only start
+        # appearing in its inputs once the team exists.
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = TeamPolicyRail(role=TeamRole.LEADER, member_name="l", language="cn")
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+        assert TeamSectionName.INBOUND_TAGS not in builder.get_all_sections()
+        assert "team-inbound" in build_leader_policy_disclosure(language="cn")
 
 
 class TestMemberSpecificInclusion:
