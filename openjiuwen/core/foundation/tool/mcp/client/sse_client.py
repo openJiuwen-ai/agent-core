@@ -157,8 +157,7 @@ class SseClient(McpClient):
         except Exception as e:
             logger.error("[SseClient] SSE connection failed to %s: %s: %r", self._server_path,
                          type(e).__name__, e)
-            # Clean up whatever partial state we have, but don't let cleanup
-            # exceptions mask the original connection error.
+            self._last_connect_error = e
             try:
                 await self._do_disconnect(timeout=NO_TIMEOUT)
             except Exception as cleanup_exc:
