@@ -4,11 +4,29 @@
 """Unit tests for InMemoryKVStore."""
 
 import asyncio
+import time
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
 
 from openjiuwen.core.foundation.store.kv.in_memory_kv_store import InMemoryKVStore
+
+_STORE_MODULE = "openjiuwen.core.foundation.store.kv.in_memory_kv_store"
+
+
+@contextmanager
+def _clock_advanced_by(seconds: float):
+    """Run the block as if ``seconds`` of wall time had already passed.
+
+    The store decides expiry by comparing a stored deadline against
+    ``time.time()``, so moving that clock forward drives exactly the
+    comparison a real wait would — deterministically, and without pinning a
+    second of wall time to every expiry test.
+    """
+    real_time = time.time
+    with patch(f"{_STORE_MODULE}.time.time", lambda: real_time() + seconds):
+        yield
 
 
 class TestInMemoryKVStoreBasicOperations:
@@ -114,8 +132,8 @@ class TestInMemoryKVStoreExclusiveSet:
         await store.exclusive_set("key1", "value1", expiry=1)
 
         assert await store.exists("key1") is True
-        await asyncio.sleep(1.1)
-        assert await store.exists("key1") is False
+        with _clock_advanced_by(1.1):
+            assert await store.exists("key1") is False
 
     @pytest.mark.asyncio
     async def test_exclusive_set_allows_setting_after_expiry(self):
@@ -124,11 +142,9 @@ class TestInMemoryKVStoreExclusiveSet:
         result1 = await store.exclusive_set("key1", "value1", expiry=1)
         assert result1 is True
 
-        # Wait for expiry
-        await asyncio.sleep(1.1)
-
-        # Should be able to set again
-        result2 = await store.exclusive_set("key1", "value2", expiry=1)
+        # Should be able to set again once the first value has expired
+        with _clock_advanced_by(1.1):
+            result2 = await store.exclusive_set("key1", "value2", expiry=1)
         assert result2 is True
 
 
@@ -356,8 +372,8 @@ class TestInMemoryKVStoreExpiry:
         await store.exclusive_set("key1", "value1", expiry=1)
 
         assert await store.exists("key1") is True
-        await asyncio.sleep(1.1)
-        assert await store.exists("key1") is False
+        with _clock_advanced_by(1.1):
+            assert await store.exists("key1") is False
 
     @pytest.mark.asyncio
     async def test_expired_key_returns_none(self):
@@ -365,8 +381,8 @@ class TestInMemoryKVStoreExpiry:
         store = InMemoryKVStore()
         await store.exclusive_set("key1", "value1", expiry=1)
 
-        await asyncio.sleep(1.1)
-        result = await store.get("key1")
+        with _clock_advanced_by(1.1):
+            result = await store.get("key1")
 
         assert result is None
 
@@ -377,8 +393,8 @@ class TestInMemoryKVStoreExpiry:
         await store.set("prefix:key1", "value1")
         await store.exclusive_set("prefix:key2", "value2", expiry=1)
 
-        await asyncio.sleep(1.1)
-        result = await store.get_by_prefix("prefix:")
+        with _clock_advanced_by(1.1):
+            result = await store.get_by_prefix("prefix:")
 
         # Expired keys are still in the store but return None
         assert result == {"prefix:key1": "value1", "prefix:key2": None}
@@ -389,8 +405,8 @@ class TestInMemoryKVStoreExpiry:
         store = InMemoryKVStore()
         await store.exclusive_set("key1", "value1", expiry=1)
 
-        await asyncio.sleep(1.1)
-        await store.set("key1", "value2")
+        with _clock_advanced_by(1.1):
+            await store.set("key1", "value2")
 
         assert await store.get("key1") == "value2"
 

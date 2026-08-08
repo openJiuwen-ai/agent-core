@@ -15,7 +15,8 @@ from openjiuwen.core.workflow import WorkflowComponent
 from openjiuwen.core.workflow.components.flow.workflow_comp import SubWorkflowComponent
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.executable import Executable
-from openjiuwen.core.session import END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY, WORKFLOW_EXECUTE_TIMEOUT
+from openjiuwen.core.session import (END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY,
+                                     END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY, WORKFLOW_EXECUTE_TIMEOUT)
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.workflow import create_workflow_session
@@ -28,6 +29,17 @@ from tests.unit_tests.core.workflow.mock_nodes import (ComputeComponent2, DualAb
 pytestmark = pytest.mark.asyncio
 
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
+
+# The End component holds a template placeholder open until its input arrives
+# or the matching timeout expires — 5s each by default, for the stream
+# position and the batch reader. Tests that deliberately leave a placeholder
+# unfilled assert on what gets rendered once the wait is over, not on how long
+# it waited, so they pass the waits down explicitly instead of idling for the
+# production defaults.
+_FAST_RENDER_TIMEOUT = {
+    END_COMP_TEMPLATE_RENDER_POSITION_TIMEOUT_KEY: 0.05,
+    END_COMP_TEMPLATE_BATCH_READER_TIMEOUT_KEY: 0.05,
+}
 
 
 class MockStreamNode(WorkflowComponent):
@@ -435,7 +447,8 @@ async def test_interaction_with_stream():
     wf2 = create_workflow()
     chunks = []
     interaction = False
-    async for chunk in wf1.stream({"inputs": [1, 2, 3]}, create_workflow_session(session_id="123"),
+    async for chunk in wf1.stream({"inputs": [1, 2, 3]},
+                                  create_workflow_session(session_id="123", envs=_FAST_RENDER_TIMEOUT),
                                   stream_modes=[BaseStreamMode.OUTPUT]):
         assert chunk is not None
         logger.info(chunk)
@@ -444,7 +457,7 @@ async def test_interaction_with_stream():
     assert interaction
 
     logger.info("human in the loop...")
-    session = create_workflow_session(session_id="123")
+    session = create_workflow_session(session_id="123", envs=_FAST_RENDER_TIMEOUT)
     actual_chunks = []
     expect_chunks = [OutputSchema(type='end node stream', index=0, payload={'response': 'a: '}),
                      OutputSchema(type='end node stream', index=1, payload={'response': '; batch: '}),
@@ -924,7 +937,10 @@ class MockLLMComponent(WorkflowComponent):
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
         for output in self.stream_outputs:
             yield {"a": output}
-        await asyncio.sleep(2)
+        # Keep the component alive past its last frame so the batch path is
+        # still running while the stream path is already draining. Only the
+        # emitted chunks are asserted, so a suspension point is enough.
+        await asyncio.sleep(0.01)
 
 
 async def test_stream_call_fast_than_call():
@@ -1022,18 +1038,18 @@ def create_workflow_with_intent_node(mode, classification_id):
 
 async def test_workflow_with_intent_node():
     flow = create_workflow_with_intent_node("node1", classification_id=0)
-    workflow_output = await flow.invoke({"query": "旅游"}, session=create_workflow_session())
+    workflow_output = await flow.invoke({"query": "旅游"}, session=create_workflow_session(envs=_FAST_RENDER_TIMEOUT))
     assert workflow_output.result == {'response': "输出:{'data': {'classification_id': 0}} 输出2:"}
 
     flow = create_workflow_with_intent_node("node2", classification_id=1)
-    workflow_output = await flow.invoke({"query": "旅游2"}, session=create_workflow_session())
+    workflow_output = await flow.invoke({"query": "旅游2"}, session=create_workflow_session(envs=_FAST_RENDER_TIMEOUT))
     assert workflow_output.result == {
         'response': "输出: 输出2:{'data3': 0}{'data3': 1}{'data3': 2}{'data3': 3}{'data3': 4}"}
 
     flow = create_workflow_with_intent_node("all", classification_id=0)
-    workflow_output = await flow.invoke({"query": "旅游"}, session=create_workflow_session())
+    workflow_output = await flow.invoke({"query": "旅游"}, session=create_workflow_session(envs=_FAST_RENDER_TIMEOUT))
     assert workflow_output.result is None
 
     flow = create_workflow_with_intent_node("all", classification_id=1)
-    workflow_output = await flow.invoke({"query": "旅游2"}, session=create_workflow_session())
+    workflow_output = await flow.invoke({"query": "旅游2"}, session=create_workflow_session(envs=_FAST_RENDER_TIMEOUT))
     assert workflow_output.result is None

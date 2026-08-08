@@ -160,7 +160,11 @@ async def test_leader_single_iteration_trace_via_runner(
                     return
 
         try:
-            await asyncio.wait_for(_consume(), timeout=8.0)
+            # The stream never emits team_completed here, so this wait always
+            # expires — it is a cap on how long the team is left running, not
+            # an expected duration. Only exported spans are asserted, and the
+            # run that produces them finishes well under a second.
+            await asyncio.wait_for(_consume(), timeout=3.0)
         except asyncio.TimeoutError:
             team_logger.info("[UT] stream timed out (expected)")
 

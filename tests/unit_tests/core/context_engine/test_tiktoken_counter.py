@@ -12,6 +12,7 @@ bug that previously required a process-global monkey-patch to work around.
 
 import base64
 import json
+import random
 
 from openjiuwen.core.context_engine.token.tiktoken_counter import (
     DEFAULT_IMAGE_PLACEHOLDER_TOKENS,
@@ -19,8 +20,13 @@ from openjiuwen.core.context_engine.token.tiktoken_counter import (
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
 
-# Decodes to non-image bytes: exercises the unparseable-payload fallback.
-_FAKE_DATA_URL = "data:image/jpeg;base64," + ("A" * 200_000)
+# A 200 KB payload that decodes to non-image bytes: exercises the
+# unparseable-payload fallback. The bytes are seeded-random rather than a run
+# of one character because that is what a real base64 attachment looks like —
+# and because tiktoken's BPE is quadratic on a long single-character run,
+# which cost seconds per call while pricing the payload *lower* than real
+# base64 does (25k tokens vs 143k), weakening the very anchor it stands in for.
+_FAKE_DATA_URL = "data:image/jpeg;base64," + base64.b64encode(random.Random(0).randbytes(150_000)).decode()
 
 
 def _counter() -> TiktokenCounter:
