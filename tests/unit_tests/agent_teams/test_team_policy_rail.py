@@ -15,7 +15,9 @@ from openjiuwen.agent_teams.prompts import (
     build_team_member_system_prompt,
     build_team_role_section,
     build_team_static_sections,
+    build_team_task_state_section,
     build_team_workflow_section,
+    load_template,
 )
 from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.rails import TeamPolicyRail
@@ -258,6 +260,88 @@ class TestTeamLifecycleSection:
             build_team_lifecycle_section(
                 role=TeamRole.TEAMMATE,
                 lifecycle="temporary",
+                language="cn",
+            )
+            is None
+        )
+
+
+class TestTeamTaskStateSection:
+    """The task state machine has one template per dispatch mode (F_76).
+
+    The two modes differ on more than wording: who drives
+    ``pending -> in_progress``, and whether a verify gate exists at all.
+    """
+
+    @pytest.mark.level0
+    def test_autonomous_state_machine(self):
+        section = build_team_task_state_section(
+            role=TeamRole.LEADER,
+            dispatch_mode="autonomous",
+            language="cn",
+        )
+        assert section is not None
+        assert section.name == TeamSectionName.TASK_STATE
+        assert section.priority == 16
+        content = section.render("cn")
+        assert "# 任务状态流转" in content
+        assert "自主认领" in content
+
+    @pytest.mark.level0
+    def test_scheduled_state_machine(self):
+        section = build_team_task_state_section(
+            role=TeamRole.LEADER,
+            dispatch_mode="scheduled",
+            language="cn",
+        )
+        assert section is not None
+        content = section.render("cn")
+        assert "调度指派模式" in content
+        assert "in_review" in content
+
+    @pytest.mark.level1
+    def test_autonomous_never_mentions_the_verify_gate(self):
+        """The regression guard for the mode-neutral wording of 1208ed1d.
+
+        An autonomous ``create_task`` has no ``reviewer`` parameter, and the
+        mode has no scheduling runtime to summon reviewers — a task pushed into
+        ``in_review`` there stalls forever. The template therefore does not
+        *describe* the gate, not even to warn about it: naming a capability
+        that does not exist is what makes a model reach for it. Same rule as
+        the fork section vanishing when ``enable_fork`` is off.
+        """
+        for language in ("cn", "en"):
+            autonomous = build_team_task_state_section(
+                role=TeamRole.LEADER,
+                dispatch_mode="autonomous",
+                language=language,
+            ).render(language)
+            scheduled = build_team_task_state_section(
+                role=TeamRole.LEADER,
+                dispatch_mode="scheduled",
+                language=language,
+            ).render(language)
+
+            for absent in ("reviewer", "in_review", "verify_task", "验证"):
+                assert absent not in autonomous, f"{language}: autonomous leaks {absent!r}"
+            # Scheduled keeps the whole gate.
+            assert "create_task(reviewer" in scheduled
+            assert "in_review" in scheduled
+
+    @pytest.mark.level1
+    def test_leader_policy_carries_no_state_machine(self):
+        """The section moved out of leader_policy — it must not linger there."""
+        for language in ("cn", "en"):
+            policy = load_template("leader_policy", language).content
+            assert "in_review" not in policy
+            assert "reviewer" not in policy
+
+    @pytest.mark.level0
+    def test_teammate_returns_none(self):
+        assert (
+            build_team_task_state_section(
+                role=TeamRole.TEAMMATE,
+                dispatch_mode="scheduled",
                 language="cn",
             )
             is None

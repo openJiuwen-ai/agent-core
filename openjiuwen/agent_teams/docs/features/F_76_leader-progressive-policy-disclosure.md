@@ -6,8 +6,8 @@
 |---|---|
 | 日期 | 2026-08-08 |
 | 状态 | **已实现** |
-| 范围 | `prompts/`（新增 `leader_bootstrap.md` cn/en、`build_leader_bootstrap_section` / `build_leader_policy_disclosure`、`leader_policy.md` 去槽、`leader_swarmflow.md` 收尾句改写）、`rails/team_policy_rail.py`（leader 分支）、`tools/tool_team.py`（`BuildTeamTool` 承载披露）、`tools/tool_factory.py` + `rails/team_tool_rail.py` + `rails/elements.py` + `agent/agent_configurator.py`（`team_mode` 接线）、`tools/locales/descs/*/build_team.md`（返回内容说明）、`core/context_engine/processor/compressor/`（压缩后重注入） |
-| 测试基线 | `python -m pytest tests/unit_tests --override-ini="addopts="` → **14442 passed, 308 skipped, 3 xfailed** |
+| 范围 | `prompts/`（新增 `leader_bootstrap.md` + `task_state_autonomous.md` / `task_state_scheduled.md` cn/en、`build_leader_bootstrap_section` / `build_leader_policy_disclosure` / `build_team_task_state_section`、`leader_policy.md` 去槽 + 摘除状态机一节、`leader_swarmflow.md` 收尾句改写）、`rails/team_policy_rail.py`（leader 分支）、`tools/tool_team.py`（`BuildTeamTool` 承载披露）、`tools/tool_factory.py` + `rails/team_tool_rail.py` + `rails/elements.py` + `agent/agent_configurator.py`（`team_mode` 接线）、`tools/locales/descs/*/build_team.md`（返回内容说明）、`core/context_engine/processor/compressor/`（压缩后重注入） |
+| 测试基线 | `python -m pytest tests/unit_tests --override-ini="addopts="` → **14448 passed, 308 skipped, 3 xfailed** |
 | Refs | #984 |
 | 关系 | 直接动因是 F_62 / F_73 把调度模式的验证层做厚之后暴露的问题。复用 F_57 的"工具形态在构造期分化"思路，把它从工具 schema 扩展到提示词投递。与 F_70（团队状态走对话历史）同源：都在回答"这段内容该在什么时刻、以什么身份到达成员" |
 
@@ -52,6 +52,43 @@ leader 的系统提示词是一次性拼死的：role policy、workflow、dispat
 
 **HITT 契约的 gate 因此变准了**：`map_result` 读的是 `output.data["enable_hitt"]`，即 `build_team` 解析后的**实际生效值**，而非 spec 天花板。这是本次改动顺带修掉的一处旧偏差。
 
+### 2a. 「任务状态流转」按 dispatch_mode 拆成两份模板
+
+披露只解决"什么时候讲"，不解决"讲的内容本身混了两种模式"。`leader_policy.md` 的「任务状态流转」
+一节就是后者的典型：同一节并列描述 `pending → in_progress` 的两种驱动（自主认领 / 调度框架），
+并无条件地教 leader 用 `create_task(reviewer=[...])` 配验证闸。
+
+**这是一次真实回归**。该节原本是模式感知的：
+
+```diff
+- 用 `update_task(reviewer=[...])` 指派；在 `create_task` schema 暴露 `reviewer` 的调度形态里，
+- 也可以创建时直接设置。验证者须是真实成员且不能是 assignee 本人。
++ 用 `create_task(reviewer=[...])` 或 `update_task(reviewer=[...])` 指派（不能是 assignee 本人）
+```
+
+改动它的那次提交（`1208ed1d`，scheduled-only 的临时 reviewer harness）在 PR 描述里写的是
+"回退模式无关文件中的 reviewer 特定描述，**避免污染 autonomous dispatch 模式**"——实际做反了：
+把模式感知措辞抹平成了无条件措辞，正好污染了 autonomous。它同时删掉的"验证者须是真实成员"
+对 scheduled 是正确的（scheduler 会为非成员名建临时 harness），对 autonomous 则不是。
+
+于是拆成 `task_state_autonomous.md` / `task_state_scheduled.md`，由
+`build_team_task_state_section`（P:16，LEADER only）按 `dispatch_mode` 挑版。
+
+**autonomous 版对验证闸一字不提**——连"本模式没有验证闸、不要试图绕出一个"这样的警告也不写。
+最初的草稿写了那句警告，是错的：**点名一个不存在的能力，恰恰是让模型去够它的原因**。这与
+`spawn_teammate` 关掉 fork 时那整节散文直接消失、而不是变成"本团队不支持 fork"是同一条规则
+（`prompts/AGENTS.md` 编辑规则 2）。autonomous 模板因此就是一份自洽的状态机：状态集里没有
+`in_review`，转换表里没有验证边，正文不出现 `reviewer` / `验证` 任何字样，只在末尾给出这个模式
+真正可用的质量把关方式（content 写验收标准 + leader 亲自审阅）。
+
+门控的实质理由仍然成立：`TaskCreateTool` 不暴露 `reviewer`；即便用 `update_task` 硬配，
+`TeamScheduler` 只在 `dispatch_mode == "scheduled"` 的 leader 上构造，没有任何东西会去唤起
+那些验证者，任务会永久停在 `in_review` 并占死该成员唯一的活跃任务名额（`in_review` 属于活跃态）。
+但这个理由属于设计文档和代码注释，不属于喂给 leader 的提示词。
+
+`test_autonomous_never_mentions_the_verify_gate` 是这条的回归闸：双语断言 `reviewer` /
+`in_review` / `verify_task` / `验证` 四个词在 autonomous 模板里一个都不出现。
+
 ### 3. 只有 leader 走这条路
 
 teammate / human_agent / bridge 保持原逻辑不变：它们的协同约定在 spawn 时就已固定，也没有 `build_team` 调用可以挂载披露。`TeamPolicyRail._build_static_sections` 用一个 `role == LEADER` 分支分流，其余角色走原来的 `build_team_static_sections`。
@@ -74,5 +111,9 @@ core 层按工具名 `build_team` 匹配，不 import `agent_teams`——与既�
 ## 已知遗留
 
 1. **cold recovery 的 leader 拿不到准则**。团队已存在、leader 经 `recover_team()` 重启时不会再调 `build_team`，历史里若已无那条 tool result（跨 session 重建），准则就缺失。用户已知悉并接受（选项二的代价），未来若要补，最小改法是 recovery 路径主动补投一条披露消息。
-2. **`leader_policy.md` 的「任务状态流转」一节仍同时描述两种模式**的状态转换（`in_progress` 那段既讲自主认领也讲调度框架）。本次改动刻意不动模板正文（要求是"内容与之前完全一致"），所以这处模式混杂被搬进了 disclosure 而非被消除。真要彻底隔离，需要把该节按 dispatch_mode 拆成两份模板。
+2. **`create_task` 的 autonomous 形态没有对称的偷传拒绝**。它靠"schema 里就没有 `reviewer` 字段"挡住
+   宿主 LLM，但 `TaskCreateTool.invoke` 不像 `UpdateTaskTool` 那样显式拒绝偷传的 reviewer——它是直接
+   忽略（构造 `TaskGraphSpec` 时压根不读那个键）。忽略在这里是安全的（不会写进库），所以没有卡死风险，
+   只是 MCP 客户端偷传时不会得到"这个模式没有验证闸"的反馈。要补的话是在 `TaskCreateTool.invoke`
+   加一条与 `UpdateTaskTool` 同形的 guard。
 3. **external CLI leader 未覆盖**。`build_team_member_system_prompt` 仍渲染全量静态 section；当前 external CLI 成员都是 teammate，暂不构成问题。

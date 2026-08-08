@@ -112,7 +112,7 @@ PostgreSQL / MySQL 后端（`engine.py`），不要用 SQLite。
 | `approve_tool` | ✓（仅 plan_mode） | | 与 `approve_plan` 相同的门控 |
 | `list_members` | ✓ | | 结果里排除调用者自身 |
 | `create_task` | ✓ | | 整次调用经 `add_graph` 做**一次原子图变更**：批内依赖只用 `depends_on`（允许前向引用），`depended_by` 仅可指向已有任务（指向批内任务在工具边界拒绝）；全批成功或整体失败并返回真实 reason。单 spec 返回 `brief()`，批量返回 `tasks`+`count`。**两个形态**（见下文「工具形态」）：autonomous 的 `assignee` 可选（省略则进入公共认领池，填写则必须是已存在且非 leader 的成员），不暴露 `reviewer`；scheduled 的 `assignee` 必填，随同一事务落库、任务默认停在 `PENDING(assignee)`（由调度器 `start_task` 开工），且额外带可选 `reviewer`（verify 闸验证者列表，须是真实成员且 ≠ assignee）与 `max_review_rounds`（≥1，须伴随 reviewer，验证返工轮数上限，F_62）。例外：`assignee` 是仍在队的人类成员且任务已可运行时，`TeamTaskManager` 会在创建后或依赖解除后自动 `start_task`，避免 human 因没有 `claim_task` 卡在 `PENDING`。见 F_55 / F_57 / F_59 / F_62 |
-| `update_task` | ✓ | | 一个工具处理标题/内容编辑、取消、指派、`reviewer`（设置/清除 verify 闸验证者，须真实成员且 ≠ assignee）、`max_review_rounds`（≥1，任务须已配或同时配 reviewer，F_62）以及 `add_blocked_by`。改派走 `TeamTaskManager.reassign`（DAO 原子 CAS 交换 assignee，发 `TASK_REVOKED`+`TASK_CLAIMED`，不发 `TASK_RELEASED`）；取消/编辑发 `TASK_CANCELLED`/`TASK_UPDATED`（带 `member_name`）——三者都**不再** `cancel_member`（编辑保持任务 `IN_PROGRESS`；仅 `IN_REVIEW` 锁）。强制「目标成员至多一个活跃任务」（活跃 = `{PLANNING, IN_PROGRESS, IN_REVIEW}`，见 F_59）；**在队**人类持有的任务对 cancel / reassign / 改标题·内容均 leader-immutable（HITT 锁 key 在 `is_live_human_agent` / `live_human_agent_names`，**非**裸 role：leader `shutdown_member` 让人类退队后锁即解除，遗留任务按普通遗留任务处置——否则踢掉一个不响应的人类会把他手上的任务永久搁浅。见 S_07 运行约束 3）。见 F_54 / F_56 |
+| `update_task` | ✓ | | 一个工具处理标题/内容编辑、取消、指派、`reviewer`（设置/清除 verify 闸验证者，≠ assignee）、`max_review_rounds`（≥1，任务须已配或同时配 reviewer，F_62）以及 `add_blocked_by`。**verify 闸是 dispatch 门控的能力（F_76）**：`dispatch_mode == "scheduled"` 才挂 `reviewer` / `max_review_rounds` 两个属性并填上描述里的 `{{update_task_verify_gate}}` 槽；autonomous 下两个属性与那节散文一起消失，`invoke` 把偷传进来的参数在任何写库之前**报错拒掉而非静默剥离**（静默剥离会让 leader 以为验证已开启，然后一直等一个永远不来的裁决）。门控不是洁癖：autonomous 没有 `TeamScheduler` 去唤起验证者，被推进 `IN_REVIEW` 的任务会永久停在那儿并占死 assignee 唯一的活跃任务名额。**不拆成两个类**——两形态的 `invoke` 有 209 行里的 177 行逐字相同（cancel / cancel_all / HITT 活体锁 / 改派 / 编辑 / 依赖，且全是有状态行为），差异只有 15%，属性级门控（同 `spawn_teammate` 的 fork）才是这里的正确手段。改派走 `TeamTaskManager.reassign`（DAO 原子 CAS 交换 assignee，发 `TASK_REVOKED`+`TASK_CLAIMED`，不发 `TASK_RELEASED`）；取消/编辑发 `TASK_CANCELLED`/`TASK_UPDATED`（带 `member_name`）——三者都**不再** `cancel_member`（编辑保持任务 `IN_PROGRESS`；仅 `IN_REVIEW` 锁）。强制「目标成员至多一个活跃任务」（活跃 = `{PLANNING, IN_PROGRESS, IN_REVIEW}`，见 F_59）；**在队**人类持有的任务对 cancel / reassign / 改标题·内容均 leader-immutable（HITT 锁 key 在 `is_live_human_agent` / `live_human_agent_names`，**非**裸 role：leader `shutdown_member` 让人类退队后锁即解除，遗留任务按普通遗留任务处置——否则踢掉一个不响应的人类会把他手上的任务永久搁浅。见 S_07 运行约束 3）。见 F_54 / F_56 |
 | `view_task` | ✓ | ✓ | `action ∈ {list, get, claimable, in_review}`；默认 `list`。`in_review` 列出指派给本成员验证、当前 `IN_REVIEW` 的任务（verify 闸拉取入口，见 F_59） |
 | `claim_task` | | ✓（仅 autonomous） | `status ∈ {claimed, completed}`（工具动词；claim 后任务落 `IN_PROGRESS`）；claim 前强制「本成员至多一个活跃任务」（活跃 = `{PLANNING, IN_PROGRESS, IN_REVIEW}`，见 F_54 / F_59）；完成路径追加一句下一步 nudge。scheduled 下**不注册**——没有自主认领 |
 | `send_message` | ✓ | ✓ | **两个形态**：`SendMessageTool`（leader 全模式 + autonomous 成员）`to == "*"` → 广播，leader 调用会自动拉起 UNSTARTED 成员；leader `to == "user"` 会被拒绝，直接普通输出即可；`ReportToLeaderTool`（scheduled 成员）`to` 收成 `enum ["leader", "user"]`（角色词，投递时翻译成真实 leader），无多播/广播。也挂到 `human_agent` 作为一条用户驱动的转发通道 —— HITT prompt section 禁止自主使用；只有用户下达的"tell `<member>` …"指令才可触发。**`content` 硬上限** `MAX_CONTENT_CHARS`（2000 字符）：`invoke` 内、`_dispatch` 之前校验，一处覆盖两形态 × 三路径 + MCP 客户端；超限返回教 LLM 改走文件通道的错误（`write_file` → `.team/` → 重发路径 + 摘要）。**无收件人豁免**——约束的是内容形态，`user` 也一样（用户经自己的助手 agent 读文件），故长度校验不看 `to`。见 F_64 与 `S_08` 不变量 22 |
@@ -225,7 +225,8 @@ schema 复用走模块级纯函数，不是复制粘贴：
   （`send_message.md` / `send_message_scheduled.md`），形态类自己选 key。
 - **capability 槽**：描述一个可选能力的槽，构造工具时传
   `t(desc_key, omit={"<slot>"})` 让它收敛为空串（`spawn_teammate` 的
-  `fork_usage`，gate 是 `fork_enabled()`）。**omit 用的信号必须与塑造 schema
+  `fork_usage`，gate 是 `fork_enabled()`；`update_task` 的
+  `update_task_verify_gate`，gate 是 `dispatch_mode == "scheduled"`）。**omit 用的信号必须与塑造 schema
   的那个信号同源**——参数与讲这个参数的散文一起出现、一起消失。渲染后统一
   `strip()`，文末的槽被省略时不留空行。这与 `prompts/` 侧 `leader_policy` 的
   `{{collaboration_mechanism}}`（gate `swarmflow_enabled`）是同一个模式：
@@ -415,7 +416,8 @@ Locale 文件在 `locales/` —— 每种语言一个扁平 `STRINGS` dict（`cn
 载明通道判据与 `MAX_CONTENT_CHARS` 上限——数字与常量的一致性由
 `test_tool_message.py` 断言，改常量必须同步改片段）、
 `create_task_edge_semantics`、`create_task_granularity`（两个 `create_task` 形态共用）、
-`fork_usage`（**capability 槽**，`spawn_teammate` 专用，gate `fork_enabled()`）。
+`fork_usage`（**capability 槽**，`spawn_teammate` 专用，gate `fork_enabled()`）、
+`update_task_verify_gate`（**capability 槽**，`update_task` 专用，gate `dispatch_mode == "scheduled"`，F_76）。
 
 ## Prompt 分层：工具描述 vs 系统提示词
 

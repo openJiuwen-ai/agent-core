@@ -34,6 +34,10 @@ Section layout (aligned with ``prompt_design.md``):
   P:14  team_lifecycle   — team lifecycle policy (LEADER only)
   P:15  team_dispatch    — how tasks reach members: autonomous claim vs
                           scheduled assignment (LEADER + TEAMMATE)
+  P:16  team_task_state  — the task state machine, one template per dispatch
+                          mode (LEADER only). Autonomous documents no verify
+                          gate — that mode has neither the ``reviewer``
+                          parameter nor the runtime to drive one.
   P:17  team_extra       — user-supplied base prompt (when set)
 
 Team *state* (team metadata, peer roster) is not a section at all: it is
@@ -65,6 +69,7 @@ class TeamSectionName:
     BRIDGE = "team_bridge"
     WORKFLOW = "team_workflow"
     DISPATCH = "team_dispatch"
+    TASK_STATE = "team_task_state"
     LIFECYCLE = "team_lifecycle"
     EXTRA = "team_extra"
     INBOUND_TAGS = "team_inbound_tags"
@@ -79,6 +84,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "role_heading": "# 团队角色",
         "workflow_heading": "# 工作流程",
         "dispatch_heading": "# 任务下发与获取",
+        "task_state_heading": "# 任务状态流转",
         "lifecycle_heading": "# 团队生命周期",
         "leader_mode_plan": (
             "团队成员执行模式: plan_mode（成员选择或接到任务后需直接通过 submit_plan 提交计划，"
@@ -96,6 +102,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "role_heading": "# Team Role",
         "workflow_heading": "# Workflow",
         "dispatch_heading": "# Task Dispatch",
+        "task_state_heading": "# Task State Transitions",
         "lifecycle_heading": "# Team Lifecycle",
         "leader_mode_plan": (
             "Teammate execution mode: plan_mode (teammates must submit a plan "
@@ -369,6 +376,51 @@ def build_team_dispatch_section(
         name=TeamSectionName.DISPATCH,
         content={language: body},
         priority=15,
+    )
+
+
+def build_team_task_state_section(
+    *,
+    role: TeamRole,
+    dispatch_mode: str = "autonomous",
+    language: str = "cn",
+) -> Optional[PromptSection]:
+    """Build the task state-machine section (LEADER only).
+
+    The state machine is not mode-neutral, so it gets one template per dispatch
+    mode rather than one template with mode caveats inside it. Two edges differ
+    outright — who drives ``pending -> in_progress``, and whether a verify gate
+    exists at all — and a single text describing both had to hedge every line,
+    which is how the autonomous leader ended up being told to call
+    ``create_task(reviewer=[...])``: a parameter that mode's ``create_task``
+    does not have.
+
+    Autonomous therefore documents no verify gate. That is not an omission:
+    ``TaskCreateTool`` exposes no ``reviewer``, and the gate cannot be reached
+    by hand either — the reviewer machinery is driven by the scheduling runtime,
+    which only a scheduled-dispatch leader has, so a task pushed into
+    ``in_review`` there would stall with nobody to rule on it.
+
+    Args:
+        role: Team role; only LEADER owns the board-level state machine.
+        dispatch_mode: ``"autonomous"`` or ``"scheduled"``; unknown values fall
+            back to ``"autonomous"``, matching ``build_team_dispatch_section``.
+        language: Prompt language.
+
+    Returns:
+        PromptSection wrapping the matching ``task_state_<mode>.md`` under an
+        H1 heading; ``None`` for non-leader roles.
+    """
+    if role != TeamRole.LEADER:
+        return None
+    mode = dispatch_mode if dispatch_mode in _DISPATCH_MODES else "autonomous"
+    labels = _labels_for(language)
+    state_text = load_template(f"task_state_{mode}", language).content.strip()
+    body = f"{labels['task_state_heading']}\n\n{state_text}\n"
+    return PromptSection(
+        name=TeamSectionName.TASK_STATE,
+        content={language: body},
+        priority=16,
     )
 
 
@@ -677,6 +729,11 @@ def build_team_static_sections(
             dispatch_mode=dispatch_mode,
             language=language,
         ),
+        build_team_task_state_section(
+            role=role,
+            dispatch_mode=dispatch_mode,
+            language=language,
+        ),
         build_team_lifecycle_section(
             role=role,
             lifecycle=lifecycle,
@@ -827,5 +884,6 @@ __all__ = [
     "build_team_member_system_prompt",
     "build_team_role_section",
     "build_team_static_sections",
+    "build_team_task_state_section",
     "build_team_workflow_section",
 ]

@@ -23,7 +23,7 @@ Update task content, dependencies, assignee, or cancel tasks (Leader only).
 **Cancel all tasks:**
 - Use task_id="*" with status=cancelled when fundamental goal changes require complete re-planning
 - The system tells each executing member to stop its own task; tasks claimed by `human_agent` are preserved
-
+{{update_task_verify_gate}}
 ## HITT Constraint
 This tool **refuses** to cancel, reassign, or edit the title/content of any task currently held (in flight: planning / in_progress / in_review) by a human-agent member (any member whose role is `human_agent`, regardless of name). Tasks locked by a human member must be completed by that human; the only leader-level intervention is `send_message(to="<the human's member_name>")` to nudge or coordinate. Even if the team stalls waiting for the human, the stall must remain — the lock is not overridable.
 

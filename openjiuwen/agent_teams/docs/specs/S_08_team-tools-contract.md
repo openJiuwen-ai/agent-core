@@ -254,6 +254,17 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `team_mode` / `dispatch_mode`（`create_team_tools` 的 `team_mode` 参数即为此新增，它不改变
     任何工具的 schema）。这不违反不变量 21——模式仍由 spec 静态决定，`build_team` 只是**读**它
     来决定披露哪一套。
+
+21b. **verify 闸是 dispatch 门控的能力，`update_task` 双层执法**（[[F_76]]）。`reviewer` /
+    `max_review_rounds` 两个属性只在 `dispatch_mode == "scheduled"` 时进 `update_task` 的 schema，
+    描述里的 `{{update_task_verify_gate}}` 槽用**同一个信号**门控——参数与讲这个参数的散文一起出现、
+    一起消失。第二层在 `invoke`：偷传（MCP 客户端不过 schema）**报错拒掉，不静默剥离**，且在任何写库
+    之前。静默剥离在这里是有害的——leader 会以为验证已开启，然后一直等一个永远不来的裁决。门控的实质
+    理由是 autonomous 没有 `TeamScheduler` 唤起验证者，被推进 `IN_REVIEW` 的任务会永久停住并占死
+    assignee 唯一的活跃任务名额。**不拆成两个工具类**：两形态 `invoke` 的 209 行里 177 行逐字相同且
+    全是有状态行为，按本 spec 的形态判据应走属性级门控（同 `spawn_teammate` 的 fork），不是独立类。
+    与不变量 21 不冲突——模式仍由 spec 静态决定，工具只是读它来决定挂不挂这两个属性。
+
 22. **`send_message` 的 `content` 有硬上限，超限即拒、且提示如何改走文件通道**（F_64）。
     `tool_message.MAX_CONTENT_CHARS`（当前 2000）以**字符**计——不依赖 tokenizer、不按语言
     分支，这个界只需量级正确。校验落在 `_SendMessageBase.invoke` 里、**`_dispatch` 之前**：

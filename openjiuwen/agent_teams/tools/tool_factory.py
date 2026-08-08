@@ -205,7 +205,7 @@ def create_team_tools(
         "approve_tool": ApproveToolCallTool(agent_team, t),
         # Task management
         "create_task": create_task_cls(agent_team, t),
-        "update_task": UpdateTaskTool(agent_team, t),
+        "update_task": UpdateTaskTool(agent_team, t, dispatch_mode=dispatch_mode),
         "view_task": ViewTaskToolV2(task_mgr, t),
         "claim_task": ClaimTaskTool(task_mgr, t),
         "submit_plan": SubmitPlanTool(task_mgr, t),

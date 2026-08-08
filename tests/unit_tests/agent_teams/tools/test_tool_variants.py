@@ -795,3 +795,118 @@ def test_reviewer_id_old_format_compat():
     assert result[0]["reviewer_id"] == "alice"
     assert result[1]["type"] == "inspector"
     assert result[1]["reviewer_id"] == "inspector_1"
+
+
+# ---------------------------------------------------------------------------
+# update_task's verify gate is a dispatch-gated capability (F_76)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_hides_verify_gate_under_autonomous(db):
+    """Autonomous dispatch has no verify gate, so the schema must not offer one.
+
+    The reviewer machinery is driven by the scheduling runtime, which only a
+    scheduled-dispatch leader has. Offering ``reviewer`` here would let the
+    leader push a task into ``in_review`` with nobody to rule on it — stalled
+    forever, holding its assignee's only active-task slot.
+    """
+    tools = create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True))
+    properties = _by_name(tools, "update_task").card.input_params["properties"]
+
+    assert "reviewer" not in properties
+    assert "max_review_rounds" not in properties
+    # Everything else the tool does is unaffected.
+    for name in ("task_id", "status", "title", "content", "assignee", "add_blocked_by"):
+        assert name in properties
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_offers_verify_gate_under_scheduled(db):
+    """Scheduled dispatch keeps the full verify-gate surface."""
+    tools = create_team_tools(
+        role="leader",
+        agent_team=_backend(db, LEADER_NAME, True, dispatch_mode="scheduled"),
+        dispatch_mode="scheduled",
+    )
+    properties = _by_name(tools, "update_task").card.input_params["properties"]
+
+    assert "reviewer" in properties
+    assert "max_review_rounds" in properties
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_update_task_description_gates_with_the_schema(db):
+    """Prose and parameters appear and disappear together."""
+    autonomous = _by_name(
+        create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True)),
+        "update_task",
+    ).card.description
+    scheduled = _by_name(
+        create_team_tools(
+            role="leader",
+            agent_team=_backend(db, LEADER_NAME, True, dispatch_mode="scheduled"),
+            dispatch_mode="scheduled",
+        ),
+        "update_task",
+    ).card.description
+
+    assert "reviewer" not in autonomous
+    assert "{{" not in autonomous  # the slot collapsed, it did not leak
+    assert "reviewer" in scheduled
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_update_task_rejects_smuggled_reviewer_under_autonomous(db):
+    """An MCP client bypasses the schema, so invoke enforces the gate too.
+
+    Rejected loudly rather than stripped: a silently dropped reviewer reads as
+    "verification is on" to the leader, which then waits for a verdict that is
+    never coming.
+    """
+    backend = _backend(db, LEADER_NAME, True)
+    tools = create_team_tools(role="leader", agent_team=backend)
+    create = _by_name(tools, "create_task")
+    update = _by_name(tools, "update_task")
+
+    created = await create.invoke({"tasks": [{"title": "t", "content": "c"}]})
+    task_id = created.data["task_id"]
+
+    result = await update.invoke({
+        "task_id": task_id,
+        "reviewer": [{"type": "verifier", "instruction": "check it"}],
+    })
+    assert result.success is False
+    assert "verify gate does not exist" in result.error
+
+    # The rejection happens before any mutation: the task keeps no reviewers.
+    task = await backend.task_manager.get(task_id)
+    assert task.reviewers() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_update_task_sets_reviewers_under_scheduled(db):
+    """The gate still works where it is real."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create = _by_name(tools, "create_task")
+    update = _by_name(tools, "update_task")
+
+    created = await create.invoke({
+        "tasks": [{"title": "t", "content": "c", "assignee": DEV_1}],
+    })
+    task_id = created.data["task_id"]
+
+    result = await update.invoke({
+        "task_id": task_id,
+        "reviewer": [{"type": "verifier", "instruction": "check it"}],
+    })
+    assert result.success is True
+
+    task = await backend.task_manager.get(task_id)
+    assert task.reviewers() == ["verifier_1"]
