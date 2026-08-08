@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.tools.models import (
     _get_task_dependency_model,
     _get_task_model,
     _sanitize_session_id_for_table,
+    static_tables,
 )
 from openjiuwen.core.common.logging import team_logger
 
@@ -210,6 +211,19 @@ def _clear_table(sync_conn, table_name: str) -> None:
     """Delete all rows from one reflected table."""
     quoted_name = table_name.replace('"', '""')
     sync_conn.exec_driver_sql(f'DELETE FROM "{quoted_name}"')
+
+
+def _create_static_tables(sync_conn) -> None:
+    """Create the static team-scoped schema, and only that.
+
+    Scoped to ``static_tables()`` rather than the whole ``SQLModel.metadata``:
+    the metadata registry also holds the per-session tables of every session
+    the process has bound so far, which belong to
+    ``create_cur_session_tables()`` and must not leak into an unrelated
+    database. Creating them here would also make schema setup cost grow with
+    the process's session history instead of with the schema itself.
+    """
+    SQLModel.metadata.create_all(sync_conn, tables=static_tables())
 
 
 def _ensure_team_member_role_column(sync_conn) -> None:
@@ -696,7 +710,7 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
 
     # DDL + migrations run on the writer engine (they are writes).
     async with write_engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.run_sync(_create_static_tables)
         await conn.run_sync(_ensure_team_member_role_column)
         await conn.run_sync(_ensure_team_member_options_column)
         await conn.run_sync(_ensure_team_info_capability_columns)
