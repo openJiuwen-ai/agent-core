@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.context_engine.base import ModelContext, ContextWindow
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     find_last_completed_api_round_end,
@@ -258,6 +258,12 @@ class FullCompactProcessor(ContextProcessor):
         self._session_memory_enabled = config.session_memory_enabled
         self._session_memory_marker = config.session_memory_marker
         self._session_memory_intro = config.session_memory_intro
+        # 413 / context-overflow 恢复链（ContextOverflowRecoveryRail）使用的兜底开关：
+        # set_force_compact(True) 后下一次 get_context_window 无条件触发 FullCompact；
+        # set_overflow_threshold_override() 用模型真实窗口*0.85 作为压缩预算。
+        # 正常 ADD 路径两者均为 None/False，行为不变。
+        self._force_compact: bool = False
+        self._overflow_threshold_override: Optional[int] = None
         self._state_reinjector = FullCompactStateReinjector()
         self._state_reinjector.register_builder(
             name="skills",
@@ -282,6 +288,24 @@ class FullCompactProcessor(ContextProcessor):
     def config(self) -> FullCompactProcessorConfig:
         return self._config
 
+    def set_force_compact(self, value: bool = True) -> None:
+        """设置 force_compact 标志，下一次 get_context_window 无条件触发压缩。
+
+        ContextOverflowRecoveryRail 在 LLM 413/上下文溢出时调用此方法，
+        使下一次 get_context_window 绕过 trigger_total_tokens/_api_round 直接压缩。
+        标志在一次 trigger_get_context_window 后自动清零（one-shot）。
+        ADD 路径不受影响。
+        """
+        self._force_compact = value
+
+    def set_overflow_threshold_override(self, threshold_override: int) -> None:
+        """设置 413 恢复时的压缩预算阈值（= 模型真实窗口 * RECOVERY_THRESHOLD_RATIO）。
+
+        使 FullCompact 自适应模型真实窗口而非预防性 trigger_total_tokens。
+        在 _truncate_for_prompt_budget 中一次性消费后清零。
+        """
+        self._overflow_threshold_override = threshold_override
+
     @property
     def state_marker(self) -> str:
         return self._state_marker
@@ -289,6 +313,67 @@ class FullCompactProcessor(ContextProcessor):
     @property
     def advanced_config(self) -> FullCompactProcessorConfig:
         return self.config
+
+    async def trigger_get_context_window(
+        self,
+        context: ModelContext,
+        context_window: ContextWindow,
+        **kwargs: Any,
+    ) -> bool:
+        """GET 路径触发判定（_railed_model_call 重试时调用）。
+
+        force_compact 标志（由 ContextOverflowRecoveryRail 在 413 后设置）为 True 时
+        无条件返回 True，绕过 trigger_total_tokens/_api_round，使上下文真正溢出后强制再次压缩。
+        标志一次性消费后清零。
+        """
+        if self._force_compact:
+            logger.info("[FullCompact] force_compact flag set on GET path, bypassing all trigger checks")
+            self._force_compact = False
+            return True
+        return False
+
+    async def on_get_context_window(
+        self,
+        context: ModelContext,
+        context_window: ContextWindow,
+        **kwargs: Any,
+    ) -> Tuple[ContextEvent | None, ContextWindow]:
+        """GET 路径执行 FullCompact（force_compact 场景）。
+
+        复用 ADD 路径的 _build_replacement_messages 保持压缩逻辑一致。
+        失败（无可用替换）时 warning 并原样返回 window，由恢复 rail 的 retry/_circuit_break 兜底回传错误。
+        """
+        system_messages = list(context_window.system_messages or [])
+        tools = context_window.tools or []
+        all_messages = list(context_window.context_messages or [])
+
+        self._reset_compression_usage()
+        event, new_context_messages, session_memory_message = await self._build_replacement_messages(
+            context,
+            all_messages,
+        )
+        if new_context_messages is None:
+            logger.warning("[FullCompact] on_get_context_window: force_compact produced no replacement")
+            return None, context_window
+
+        context.set_messages(new_context_messages)
+        logger.info(
+            "[FullCompact] on_get_context_window: force_compact succeeded, "
+            "messages_before=%d messages_after=%d replacement_kind=%s",
+            len(all_messages), len(new_context_messages),
+            "session_memory" if session_memory_message is not None else "full_compact",
+        )
+        if event is not None:
+            event.compression_usage = self._current_compression_usage()
+        if session_memory_message is None:
+            self._invalidate_session_memory_anchor(context)
+
+        new_window = ContextWindow(
+            system_messages=system_messages,
+            context_messages=new_context_messages,
+            tools=tools,
+        )
+        return event, new_window
 
     async def trigger_add_messages(
         self,
@@ -334,6 +419,15 @@ class FullCompactProcessor(ContextProcessor):
         context: ModelContext,
         all_messages: List[BaseMessage],
     ) -> Tuple[ContextEvent | None, Optional[List[BaseMessage]], Optional[UserMessage]]:
+        # 413 恢复（force_compact）时 threshold 取 overflow_threshold_override（=模型窗口*0.85），
+        # 自适应模型真实窗口；正常 ADD 路径 override 为 None，回退 trigger_total_tokens，行为不变。
+        threshold = self._overflow_threshold_override or self._trigger_total_tokens
+        if self._overflow_threshold_override is not None:
+            logger.info(
+                "[FullCompact] Using overflow_threshold_override=%d as threshold (trigger_total_tokens=%d)",
+                self._overflow_threshold_override,
+                self._trigger_total_tokens,
+            )
         boundary_index = self._find_last_compaction_boundary_index(all_messages)
         prefix, active_messages = self._split_messages_at_compaction_boundary(
             all_messages,
@@ -356,7 +450,7 @@ class FullCompactProcessor(ContextProcessor):
                 tools=[],
                 context=context,
             )
-            if session_memory_tokens <= self._trigger_total_tokens:
+            if session_memory_tokens <= threshold:
                 logger.info("[FullCompact] using session_memory replacement")
                 return (
                     ContextEvent(
@@ -531,13 +625,26 @@ class FullCompactProcessor(ContextProcessor):
         messages: List[BaseMessage],
         context: ModelContext,
     ) -> List[BaseMessage]:
+        # 413 恢复时用 overflow_threshold_override 作 budget（自适应模型窗口），一次性消费；
+        # 正常路径取 min(compression_call_max_tokens, trigger_total_tokens)，避免压缩动作自身溢出。
+        if self._overflow_threshold_override is not None:
+            budget = self._overflow_threshold_override
+            logger.info(
+                "[FullCompact] Using overflow_threshold_override=%d as compression budget "
+                "(compression_call_max_tokens=%d)",
+                self._overflow_threshold_override,
+                self._compression_call_max_tokens,
+            )
+            self._overflow_threshold_override = None  # 一次性消费
+        else:
+            budget = min(self._compression_call_max_tokens, self._trigger_total_tokens)
         groups = self._group_messages_by_api_round(messages)
         while groups:
             candidate = [msg for group in groups for msg in group]
-            if self._count_prompt_tokens(candidate, context) <= self._compression_call_max_tokens:
+            if self._count_prompt_tokens(candidate, context) <= budget:
                 return candidate
             if len(groups) == 1:
-                return self._truncate_messages_from_head(candidate, context)
+                return self._truncate_messages_from_head(candidate, context, budget=budget)
             groups = groups[1:]
             if groups and isinstance(groups[0][0], AssistantMessage):
                 groups[0] = [UserMessage(content=self._synthetic_user_marker), *groups[0]]
@@ -547,10 +654,13 @@ class FullCompactProcessor(ContextProcessor):
         self,
         messages: List[BaseMessage],
         context: ModelContext,
+        *,
+        budget: Optional[int] = None,
     ) -> List[BaseMessage]:
+        effective_budget = budget or self._compression_call_max_tokens
         candidate = list(messages)
         while candidate:
-            if self._count_prompt_tokens(candidate, context) <= self._compression_call_max_tokens:
+            if self._count_prompt_tokens(candidate, context) <= effective_budget:
                 return candidate
             if self._is_synthetic_marker_message(candidate[0]):
                 if len(candidate) == 1:

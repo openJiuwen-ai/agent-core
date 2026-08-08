@@ -662,18 +662,15 @@ class TodoModifyTool(TodoTool):
     async def _update_todos(self, session_id: str, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
         todo_map = {todo.id: todo for todo in current_todos}
         updated_count = 0
+        errors: list[str] = []
         for todo_data in todos_data:
             todo_id = todo_data.get("id")
             if not todo_id:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason="Batch update failed: Missing required field: 'id'"
-                )
+                errors.append(f"Missing required field 'id' in: {todo_data}")
+                continue
             if todo_id not in todo_map:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Batch update failed: Task with ID '{todo_id}' not found"
-                )
+                errors.append(f"Task with ID '{todo_id}' not found in current todo list")
+                continue
             current_todo = todo_map[todo_id]
             if "content" in todo_data:
                 current_todo.content = todo_data["content"]
@@ -688,7 +685,11 @@ class TodoModifyTool(TodoTool):
             updated_count += 1
         self._validate_single_in_progress(current_todos)
         await self.save_todos(session_id, current_todos)
-        return f"Successfully updated {updated_count} task(s)"
+        if errors:
+            result_msg = f"Updated {updated_count} task(s). {len(errors)} item(s) failed: {'; '.join(errors)}"
+        else:
+            result_msg = f"Successfully updated {updated_count} task(s)"
+        return result_msg
 
     async def _append_todos(self, session_id: str, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
         todo_ids = {todo.id for todo in current_todos}
