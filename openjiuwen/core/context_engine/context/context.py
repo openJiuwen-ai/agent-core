@@ -207,6 +207,9 @@ class SessionModelContext(ModelContext):
         **kwargs,
     ) -> str | dict[str, Any]:
         return_state = bool(kwargs.pop("return_state", False))
+        compression_trigger = kwargs.get("compression_trigger")
+        if compression_trigger is None:
+            compression_trigger = "manual"
         if self._processor_lock.locked():
             history_start = len(self._processor_state_recorder.history())
             logger.info("skip active compression because context processor is already running")
@@ -215,7 +218,7 @@ class SessionModelContext(ModelContext):
                     operation_id=uuid.uuid4().hex,
                     status="skipped",
                     phase="active_compress",
-                    trigger="manual",
+                    trigger=compression_trigger,
                     processor=None,
                     reason="busy",
                     before_messages=self.get_messages(),
@@ -265,7 +268,7 @@ class SessionModelContext(ModelContext):
                         operation_id=uuid.uuid4().hex,
                         status="skipped",
                         phase="active_compress",
-                        trigger="manual",
+                        trigger=compression_trigger,
                         processor=None,
                         reason="no_matching_processor",
                         before_messages=self.get_messages(),
@@ -702,7 +705,9 @@ class SessionModelContext(ModelContext):
             before_messages = None
             started_emitted = False
             phase = "active_compress" if force else "add_messages"
-            trigger = kwargs.get("compression_trigger") or ("manual" if force else "passive")
+            trigger = kwargs.get("compression_trigger")
+            if trigger is None:
+                trigger = "manual" if force else "passive"
             try:
                 should_run = force or await processor.trigger_add_messages(self, messages_to_add, **kwargs)
                 if should_run:
@@ -824,7 +829,9 @@ class SessionModelContext(ModelContext):
             context_messages=self.get_messages(),
             tools=[],
         )
-        trigger = kwargs.get("compression_trigger") or "manual"
+        trigger = kwargs.get("compression_trigger")
+        if trigger is None:
+            trigger = "manual"
         for processor in processors:
             operation_id = None
             started_at = None
