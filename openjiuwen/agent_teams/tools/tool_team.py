@@ -5,6 +5,7 @@
 
 from typing import Any
 
+from openjiuwen.agent_teams.prompts import build_leader_policy_disclosure
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.team import CapabilityOverrides, TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
@@ -17,9 +18,33 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
 class BuildTeamTool(TeamTool):
-    """Create a new team"""
+    """Create a new team, and disclose the leader's collaboration policy.
 
-    def __init__(self, team: TeamBackend, t: Translator):
+    The leader's system prompt carries no collaboration policy (F_76): it holds
+    only the bootstrap section that routes to this tool. Everything else — role
+    policy, workflow, dispatch conventions, lifecycle wrap-up, the HITT
+    contract, the inbound-tag notice — is rendered into this tool's result, so
+    the leader reads exactly the variant its own ``build_team`` call selected
+    and never the conventions of a mode its team does not run.
+
+    The assembly parameters that decide those variants are static team
+    configuration and arrive at construction time; the two runtime flags
+    (``enable_hitt`` / dispatch-relevant capability state) are read back off the
+    backend *after* ``build_team`` resolves them, so the disclosed text matches
+    what the team actually got rather than what the spec allowed.
+    """
+
+    def __init__(
+        self,
+        team: TeamBackend,
+        t: Translator,
+        *,
+        language: str = "cn",
+        lifecycle: str = "temporary",
+        teammate_mode: str = "build_mode",
+        team_mode: str = "default",
+        dispatch_mode: str = "autonomous",
+    ):
         super().__init__(
             ToolCard(
                 id="team.build_team",
@@ -30,6 +55,11 @@ class BuildTeamTool(TeamTool):
         self.team = team
         self.db = team.db
         self.messager = team.messager
+        self._language = language
+        self._lifecycle = lifecycle
+        self._teammate_mode = teammate_mode
+        self._team_mode = team_mode
+        self._dispatch_mode = dispatch_mode
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -76,16 +106,33 @@ class BuildTeamTool(TeamTool):
         )
 
     def map_result(self, output: ToolOutput) -> str:
+        """Render the creation facts, then disclose the collaboration policy.
+
+        The policy is appended only on success — a failed ``build_team`` leaves
+        the leader on the bootstrap path, where re-reading the routing guide is
+        what it needs, not a rulebook for a team that does not exist.
+        """
         if not output.success:
             return output.error or "Failed to build team"
         d = output.data or {}
-        return (
+        facts = (
             f"Team created: team_name={d.get('team_name')} "
             f"display_name={d.get('display_name')} "
             f"leader_member_name={d.get('leader_member_name')} "
             f"leader_display_name={d.get('leader_display_name')} "
             f"hitt_enabled={d.get('enable_hitt')}"
         )
+        policy = build_leader_policy_disclosure(
+            lifecycle=self._lifecycle,
+            teammate_mode=self._teammate_mode,
+            team_mode=self._team_mode,
+            dispatch_mode=self._dispatch_mode,
+            language=self._language,
+            hitt_enabled=bool(d.get("enable_hitt")),
+        )
+        if not policy:
+            return facts
+        return f"{facts}\n\n{policy}"
 
 
 class CleanTeamTool(TeamTool):

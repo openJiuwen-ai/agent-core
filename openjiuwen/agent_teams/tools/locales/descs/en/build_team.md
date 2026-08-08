@@ -1,5 +1,8 @@
 Assemble a team and register yourself as Leader. Call as soon as you have a goal — don't hesitate.
 
+## What It Returns
+Besides the creation result, this tool returns **your full collaboration policy** — core responsibilities, hand-off conventions, decision principles, response cadence, task state transitions, how tasks reach members, team lifecycle wrap-up, and the inbound-tag system. It is tailored to the parameters of this very call, and it is **the basis for everything you do afterwards: read it and follow it**. Do not treat it as a one-off notice to skim past.
+
 ## Call Order
 build_team → spawn_teammate → create_task → put the members to work (how depends on the team's dispatch mode). Members exist before tasks, so work lands on named people.
 No other team tool may be called before build_team.

@@ -31,6 +31,8 @@ from openjiuwen.agent_teams.prompts.messages import (
 from openjiuwen.agent_teams.prompts.section_cache import MtimeSectionCache
 from openjiuwen.agent_teams.prompts.sections import (
     TeamSectionName,
+    build_leader_bootstrap_section,
+    build_leader_policy_disclosure,
     build_team_bridge_section,
     build_team_dispatch_section,
     build_team_extra_section,
@@ -72,6 +74,8 @@ __all__ = [
     "TeamSectionName",
     "apply_team_plan_agent_prompt",
     "build_identity_text",
+    "build_leader_bootstrap_section",
+    "build_leader_policy_disclosure",
     "build_roster_delta_text",
     "build_roster_snapshot_text",
     "build_team_bridge_section",

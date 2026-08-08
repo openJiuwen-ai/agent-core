@@ -59,6 +59,7 @@ class TeamSectionName:
     """Centralized section names owned by ``TeamPolicyRail``."""
 
     IDENTITY = "team_identity"
+    BOOTSTRAP = "team_bootstrap"
     ROLE = "team_role"
     HITT = "team_hitt"
     BRIDGE = "team_bridge"
@@ -180,38 +181,42 @@ def build_team_identity_section(
     )
 
 
-def _render_role_policy(
+def build_leader_bootstrap_section(
     *,
-    policy_name: str,
-    role: TeamRole,
     swarmflow_enabled: bool,
-    language: str,
-) -> str:
-    """Load a role policy template and fill its capability-gated slots.
+    language: str = "cn",
+) -> PromptSection:
+    """Build the leader's only system-prompt team section (F_76).
 
-    ``leader_policy`` carries one such slot, ``collaboration_mechanism``: the
-    build_team-versus-swarmflow decision guide, kept in its own
-    ``leader_swarmflow`` template. The signal that gates the ``swarmflow`` tool
-    gates the text describing it, so a leader without the tool never reads about
-    the mechanism — and never deliberates over one it has no way to run. Every
-    other policy template is static and returned as-is.
+    The leader's system prompt carries no collaboration policy at all — just
+    who it is, which mechanism to route to, and the instruction to call
+    ``build_team``. Everything else is disclosed in that tool's result, so a
+    leader never reads the conventions of a dispatch mode its team does not
+    run (see :func:`build_leader_policy_disclosure`).
+
+    The ``collaboration_mechanism`` slot carries the build_team-versus-swarmflow
+    decision guide, kept in its own ``leader_swarmflow`` template and filled
+    only when the leader actually holds the ``swarmflow`` tool — the same signal
+    the tool factory gates that tool on. Without the tool the slot collapses to
+    empty and the bootstrap is a bare "form the team first" instruction, so the
+    leader never deliberates over a mechanism it has no way to run.
 
     Args:
-        policy_name: Template name resolved from the member's role.
-        role: The role whose policy is being rendered.
         swarmflow_enabled: Whether the leader holds the ``swarmflow`` tool.
         language: Prompt language ('cn' or 'en').
 
     Returns:
-        The rendered policy text, stripped.
+        PromptSection carrying the leader bootstrap body.
     """
-    template = load_template(policy_name, language)
-    if role != TeamRole.LEADER:
-        return template.content.strip()
     mechanism = ""
     if swarmflow_enabled:
         mechanism = "\n" + load_template("leader_swarmflow", language).content.strip() + "\n"
-    return template.format({"collaboration_mechanism": mechanism}).content.strip()
+    body = load_template("leader_bootstrap", language).format({"collaboration_mechanism": mechanism}).content.strip()
+    return PromptSection(
+        name=TeamSectionName.BOOTSTRAP,
+        content={language: f"{body}\n"},
+        priority=11,
+    )
 
 
 def build_team_role_section(
@@ -219,7 +224,6 @@ def build_team_role_section(
     role: TeamRole,
     teammate_mode: str = "build_mode",
     workspace_prompt_variant: Literal["native", "external"] = "native",
-    swarmflow_enabled: bool = False,
     language: str = "cn",
 ) -> PromptSection:
     """Build the role policy + execution mode section.
@@ -246,11 +250,6 @@ def build_team_role_section(
         workspace_prompt_variant: Workspace wording variant. Native teammates
             receive the ``.team`` mount instructions; external CLI teammates
             receive path-based shared workspace instructions.
-        swarmflow_enabled: Whether the leader actually has the ``swarmflow``
-            tool. Gates the mechanism-choice subsection of the leader policy —
-            with the tool gated out, telling the leader to weigh build_team
-            against swarmflow only makes it deliberate over a mechanism it
-            cannot invoke.
         language: Prompt language ('cn' or 'en').
 
     Returns:
@@ -266,12 +265,7 @@ def build_team_role_section(
         policy_name = "teammate_policy_external"
     else:
         policy_name = "teammate_policy"
-    role_text = _render_role_policy(
-        policy_name=policy_name,
-        role=role,
-        swarmflow_enabled=swarmflow_enabled,
-        language=language,
-    )
+    role_text = load_template(policy_name, language).content.strip()
 
     # The execution mode describes how a member plans and completes work it
     # took on itself. An avatar never does — it acts only on its controller's
@@ -600,7 +594,6 @@ def build_team_static_sections(
     expose_human_agents_to_teammates: bool = False,
     include_member_specific: bool = False,
     workspace_prompt_variant: Literal["native", "external"] = "native",
-    swarmflow_enabled: bool = False,
 ) -> list[PromptSection]:
     """Build the never-changing team sections for one member.
 
@@ -641,8 +634,6 @@ def build_team_static_sections(
             system-prompt prefix stays identical across the team.
         workspace_prompt_variant: Workspace wording variant forwarded to the
             teammate role policy section.
-        swarmflow_enabled: Whether the leader holds the ``swarmflow`` tool;
-            gates the mechanism-choice subsection of the leader policy.
 
     Returns:
         The non-None sections, unsorted (the caller orders by priority).
@@ -662,7 +653,6 @@ def build_team_static_sections(
             role=role,
             teammate_mode=teammate_mode,
             workspace_prompt_variant=workspace_prompt_variant,
-            swarmflow_enabled=swarmflow_enabled,
             language=language,
         ),
         build_team_hitt_section(
@@ -704,6 +694,65 @@ def build_team_static_sections(
     # included.
     sections.append(build_team_inbound_tags_section(language=language))
     return sections
+
+
+def build_leader_policy_disclosure(
+    *,
+    lifecycle: str = "temporary",
+    teammate_mode: str = "build_mode",
+    team_mode: str = "default",
+    dispatch_mode: str = "autonomous",
+    language: str = "cn",
+    hitt_enabled: bool = False,
+) -> str:
+    """Render the leader's collaboration policy for the ``build_team`` result.
+
+    This is the disclosure half of the leader's progressive-disclosure split
+    (F_76): the same sections that used to sit in the leader's system prompt,
+    assembled the same way (priority-ordered, ``\\n\\n``-joined), but delivered
+    as the ``build_team`` tool result instead. Which variant of each section
+    the leader reads is decided by the arguments of the very call that created
+    the team, so the conventions of a dispatch mode the team does not run never
+    reach it.
+
+    Excluded on purpose:
+
+    * ``team_identity`` — per-member, delivered through the conversation by
+      ``TeamContextTracker``.
+    * ``team_extra`` — the user-supplied base prompt is the caller's own
+      instruction to this leader, not team policy, and has to be in force
+      *before* the team exists. It stays in the system prompt.
+    * ``team_bootstrap`` — already in the system prompt; repeating the routing
+      guide after the route has been taken is noise.
+
+    Args:
+        lifecycle: Team lifecycle ("temporary" / "persistent").
+        teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
+        team_mode: Team mode ("default" / "predefined" / "hybrid").
+        dispatch_mode: How tasks reach members ("autonomous" / "scheduled").
+        language: Prompt language ("cn" / "en").
+        hitt_enabled: The team's effective HITT flag, as resolved by this
+            ``build_team`` call — not the spec ceiling.
+
+    Returns:
+        The rendered policy text, or ``""`` when no section produced content.
+    """
+    sections = build_team_static_sections(
+        role=TeamRole.LEADER,
+        member_name=None,
+        lifecycle=lifecycle,
+        teammate_mode=teammate_mode,
+        team_mode=team_mode,
+        dispatch_mode=dispatch_mode,
+        base_prompt=None,
+        language=language,
+        hitt_enabled=hitt_enabled,
+        include_member_specific=False,
+    )
+    builder = SystemPromptBuilder(language=language)
+    for section in sections:
+        builder.add_section(section)
+    return builder.build()
 
 
 def build_team_member_system_prompt(
@@ -766,6 +815,8 @@ def build_team_member_system_prompt(
 
 __all__ = [
     "TeamSectionName",
+    "build_leader_bootstrap_section",
+    "build_leader_policy_disclosure",
     "build_team_bridge_section",
     "build_team_dispatch_section",
     "build_team_extra_section",

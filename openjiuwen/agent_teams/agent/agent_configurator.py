@@ -534,6 +534,7 @@ class AgentConfigurator:
                     "teammate_mode": teammate_mode,
                     "dispatch_mode": spec.dispatch_mode,
                     "lifecycle": spec.lifecycle,
+                    "team_mode": _resolve_team_mode(spec),
                     "exclude_tools": exclude,
                     "qualify_ids": spec.spawn_mode == "inprocess",
                     "team_name": resolved_team_name,

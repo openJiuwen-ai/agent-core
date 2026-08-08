@@ -100,6 +100,7 @@ def create_team_tools(
     teammate_mode: str = "build_mode",
     dispatch_mode: str = "autonomous",
     lifecycle: str = "temporary",
+    team_mode: str = "default",
     on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
     exclude_tools: set[str] | None = None,
@@ -139,6 +140,9 @@ def create_team_tools(
             teams are torn down through operator-level SDK facades
             (``delete_agent_team`` etc.), so exposing a leader-callable
             tear-down tool inside a round would race the pool invariants.
+        team_mode: Team operating mode — "default" / "predefined" / "hybrid".
+            Selects the workflow variant disclosed in the ``build_team``
+            result; it does not change any tool's shape.
         on_teammate_created: Callback invoked when a teammate is created.
         model_config_allocator: Callback that returns the next
             ``Allocation`` for teammate allocation. Receives an
@@ -172,8 +176,18 @@ def create_team_tools(
     send_message_cls = _SEND_MESSAGE_CLASS[(dispatch_mode, "leader" if role == "leader" else "member")]
 
     all_tools = {
-        # Team management
-        "build_team": BuildTeamTool(agent_team, t),
+        # Team management. ``build_team`` carries the leader's collaboration
+        # policy in its result (F_76), so it needs the same assembly parameters
+        # the policy rail used to consume.
+        "build_team": BuildTeamTool(
+            agent_team,
+            t,
+            language=lang,
+            lifecycle=lifecycle,
+            teammate_mode=teammate_mode,
+            team_mode=team_mode,
+            dispatch_mode=dispatch_mode,
+        ),
         "clean_team": CleanTeamTool(agent_team, t),
         # Member management — one tool per role_type (flat schema, no role branching)
         "spawn_teammate": SpawnTeammateTool(
