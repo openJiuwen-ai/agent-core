@@ -20,7 +20,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
 | 最近一次修订日期 | 2026-08-08 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md |
 
 ## 范围 / 边界
 
@@ -244,6 +244,16 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     工具描述按模式在构建期装配、每套一份、互不混写；`build_team` 的运行时开关只有
     `enable_hitt` / `enable_task_verification`（后者是提示词驱动的"验证预期"开关，覆盖值
     随 spec 记录的 `dispatch_mode` 一起写进 `team_info` 行——行是记录，spec 是运行时真相）。
+
+21a. **`build_team` 的返回值承载 leader 的全部协同准则**（[[F_76]]）。leader 的系统提示词只留
+    一段 bootstrap（身份 + build_team/swarmflow 分流 + "先建队"），role / workflow / dispatch /
+    lifecycle / HITT / inbound-tags 全部由 `map_result` 附在建队结果之后下发，内容经
+    `prompts.build_leader_policy_disclosure(...)` 按本次调用选定的模式裁剪。三条约束：
+    **只在成功路径附加**；**HITT 段按 `output.data["enable_hitt"]` 即实际生效值 gate，不是 spec
+    天花板**；`BuildTeamTool` 因此需要构造期拿到 `language` / `lifecycle` / `teammate_mode` /
+    `team_mode` / `dispatch_mode`（`create_team_tools` 的 `team_mode` 参数即为此新增，它不改变
+    任何工具的 schema）。这不违反不变量 21——模式仍由 spec 静态决定，`build_team` 只是**读**它
+    来决定披露哪一套。
 22. **`send_message` 的 `content` 有硬上限，超限即拒、且提示如何改走文件通道**（F_64）。
     `tool_message.MAX_CONTENT_CHARS`（当前 2000）以**字符**计——不依赖 tokenizer、不按语言
     分支，这个界只需量级正确。校验落在 `_SendMessageBase.invoke` 里、**`_dispatch` 之前**：
@@ -494,7 +504,13 @@ manager / backend。新增工具如果发现"我得绕过 manager 直接写表"�
 
 ```python
 all_tools = {
-    "build_team": BuildTeamTool(agent_team, t),
+    # build_team also discloses the leader's collaboration policy (F_76), so it
+    # takes the assembly parameters that decide which variant to render.
+    "build_team": BuildTeamTool(
+        agent_team, t,
+        language=lang, lifecycle=lifecycle,
+        teammate_mode=teammate_mode, team_mode=team_mode, dispatch_mode=dispatch_mode,
+    ),
     "clean_team": CleanTeamTool(agent_team, t),
     ...
 }

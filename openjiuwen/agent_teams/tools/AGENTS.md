@@ -100,7 +100,7 @@ PostgreSQL / MySQL 后端（`engine.py`），不要用 SQLite。
 
 | 工具 | Leader | Teammate | 说明 |
 |---|---|---|---|
-| `build_team` | ✓ | | 入口工具 —— 描述里承载完整工作流。F_62：`enable_task_verification` 参数可覆盖 spec 默认（提示词驱动的"验证预期"开关）；dispatch_mode 是静态 spec 配置，**不在此选择**，spec 值随行记录进 `team_info` |
+| `build_team` | ✓ | | 入口工具 —— 描述里承载完整工作流。F_62：`enable_task_verification` 参数可覆盖 spec 默认（提示词驱动的"验证预期"开关）；dispatch_mode 是静态 spec 配置，**不在此选择**，spec 值随行记录进 `team_info`。**F_76：`map_result` 在建队结果之后附上 leader 的完整协同准则**（`prompts.build_leader_policy_disclosure` 按本次调用选定的 `dispatch_mode` / `team_mode` / `lifecycle` / `teammate_mode` 与**实际生效的** `enable_hitt` 裁剪）——leader 的系统提示词里只留一段 bootstrap，其余全部经这条返回值渐进式披露。因此工厂要给它传那几个装配参数（`create_team_tools` 的 `team_mode` 参数就是为它加的） |
 | `clean_team` | ✓（仅 temporary） | | 要求先关停每个 teammate；`lifecycle="persistent"` 时不接线（那类团队由 operator 经 SDK facade 拆除） |
 | `spawn_teammate` | ✓ | | 拉起一个普通 LLM teammate；可选 `model_config_allocator` 回调；扁平 schema `member_name`/`display_name`/`desc`/`prompt?`/`model_name?`/`isolation?`/`permissions?`。始终接线，但**上下文继承是属性级门控**：`fork_enabled()` 为真才加 `fork`/`fork_source`/`compact` 三个属性，并同时填上描述里的 `{{fork_usage}}` 槽；关时三个属性与那一整节散文一起消失，`invoke` 把偷传进来的 fork 参数在建成员行之前拒掉（MCP 客户端不过 schema）。见 F_75 |
 | `checkpoint` | ✓ | ✓ | 为本成员当前上下文存一个命名快照，供 `spawn_teammate(fork="<name>")` 继承；仅 `fork_enabled()`（`TeamAgentSpec.enable_fork`）时接线，`invoke` 内保留同源兜底。外部成员（`external/client.py` / `sdk_mcp.py`）另行 `exclude_tools` 排除——它们没有 `DeepAgent`，快照无从取起 |
@@ -425,6 +425,12 @@ Locale 文件在 `locales/` —— 每种语言一个扁平 `STRINGS` dict（`cn
 | 系统提示词（`agent_teams/prompts/`） | 角色身份、决策原则、状态流转 | `leader_policy.md` |
 
 规则：**不要跨层重复内容**。如果工作流住在工具描述里，系统提示词就不应重复它。
+
+**分层不等于投递时刻（F_76）**：leader 侧 `prompts/` 那一层的内容**不再进系统提示词**，而是经
+`BuildTeamTool.map_result` 附在 `build_team` 的返回值里下发。这不改变分层归属——角色身份 /
+决策原则 / 状态流转仍然由 `prompts/leader_policy.md` 拥有，工具描述仍然只讲怎么调这个工具；
+变的只是"它什么时候到达 leader"。所以往 `build_team.md` 里塞角色策略、或往 `leader_policy.md`
+里塞调用顺序，依然是越层，不会因为两者现在同处一条 ToolResult 而变得可接受。
 
 ### 统一读工具：Action 分派 + 分档输出
 
