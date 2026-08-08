@@ -9,6 +9,8 @@ import platform
 import re
 import shlex
 import shutil
+import subprocess
+import sys
 from typing import Optional, Dict, Any, AsyncIterator, Callable, List, Literal, Tuple
 
 import pathlib
@@ -39,6 +41,8 @@ _POWERSHELL_CANDIDATES = ("pwsh", "powershell", "powershell.exe")
 _BG_PIPE_MAX_BYTES = 512 * 1024
 _DEFAULT_BACKGROUND_GRACE_SECONDS = 5.0
 _BACKGROUND_PIPE_DISCARD_TASKS: set[asyncio.Task[None]] = set()
+
+_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def _resolve_background_grace_seconds(grace: Optional[float]) -> float:
@@ -278,6 +282,7 @@ class ShellOperation(BaseShellOperation):
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
+                creationflags=_CREATION_FLAGS,
             )
         else:
             process = await asyncio.create_subprocess_exec(
@@ -287,6 +292,7 @@ class ShellOperation(BaseShellOperation):
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=stdout,
                 stderr=stderr,
+                creationflags=_CREATION_FLAGS,
             )
 
         return process
