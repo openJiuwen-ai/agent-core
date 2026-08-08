@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -90,6 +91,23 @@ class CapabilityFingerprintExtractor:
     ) -> list[ExtractionOutcome]:
         """Extract in bounded batches, preserving inventory order."""
 
+        return await self._extract_many(
+            descriptors,
+            io_name_vocabulary=io_name_vocabulary,
+            is_cancelled=is_cancelled,
+            on_complete=None,
+        )
+
+    async def _extract_many(
+        self,
+        descriptors: Sequence[CapabilityDescriptor],
+        *,
+        io_name_vocabulary: IONameVocabulary | None,
+        is_cancelled: Callable[[], bool] | None,
+        on_complete: Callable[[ExtractionOutcome], Any] | None,
+    ) -> list[ExtractionOutcome]:
+        """Internal extraction path with an optional completion observer."""
+
         cancelled = is_cancelled or (lambda: False)
         name_vocabulary = io_name_vocabulary or build_io_name_vocabulary(descriptors)
         results: list[ExtractionOutcome] = []
@@ -99,12 +117,17 @@ class CapabilityFingerprintExtractor:
         async def extract_bounded(descriptor: CapabilityDescriptor) -> ExtractionOutcome:
             async with semaphore:
                 try:
-                    return await self.extract(descriptor, io_name_vocabulary=name_vocabulary)
+                    outcome = await self.extract(descriptor, io_name_vocabulary=name_vocabulary)
                 except BaseError:
                     # Configuration and other framework-wide failures must abort publication.
                     raise
                 except Exception as exc:  # noqa: BLE001 -- isolate one malformed capability from its peers.
-                    return _failed_extraction_outcome(descriptor, exc, name_vocabulary)
+                    outcome = _failed_extraction_outcome(descriptor, exc, name_vocabulary)
+                if on_complete is not None:
+                    result = on_complete(outcome)
+                    if inspect.isawaitable(result):
+                        await result
+                return outcome
 
         for start in range(0, len(descriptors), batch_size):
             if cancelled():
@@ -147,6 +170,9 @@ class CapabilityFingerprintExtractor:
                 else:
                     payload = parsed
                     used_llm = True
+            except BaseError:
+                # Framework model failures must abort the enclosing build.
+                raise
             except Exception as exc:  # noqa: BLE001 -- injected LLMs expose provider-specific failures.
                 failures.append(
                     FailureReason(

@@ -114,6 +114,7 @@ class FingerprintService:
         *,
         force: bool = False,
         traces: Sequence[EvaluationCase | dict[str, Any]] = (),
+        progress_callback: Callable[[dict[str, Any]], Any] | None = None,
     ) -> FingerprintArtifact:
         """Build and publish ``fingerprint.json`` from the provider snapshot."""
 
@@ -158,6 +159,7 @@ class FingerprintService:
                     cached,
                     io_name_vocabulary,
                     normalization_signature,
+                    progress_callback,
                 )
                 fingerprints = [outcome.fingerprint for outcome in outcomes]
                 self._raise_if_cancelled()
@@ -340,6 +342,7 @@ class FingerprintService:
         cached: dict[str, dict[str, Any]],
         io_name_vocabulary: IONameVocabulary,
         normalization_signature: str | None,
+        progress_callback: Callable[[dict[str, Any]], Any] | None,
     ) -> tuple[list[ExtractionOutcome], int, dict[str, str], IONameVocabulary]:
         resolved: dict[str, ExtractionOutcome] = {}
         changed: list[CapabilityDescriptor] = []
@@ -366,10 +369,30 @@ class FingerprintService:
                 resolved[descriptor.capability_id] = cached_outcome
                 reused_count += 1
 
-        outcomes = await self._extractor.extract_many(
+        total = len(changed)
+        if total:
+            await _emit_extraction_progress(progress_callback, current=0, total=total)
+        completed = 0
+        progress_lock = asyncio.Lock()
+
+        async def extraction_completed(outcome: ExtractionOutcome) -> None:
+            nonlocal completed
+            async with progress_lock:
+                if self._cancel_requested:
+                    return
+                completed += 1
+                await _emit_extraction_progress(
+                    progress_callback,
+                    current=completed,
+                    total=total,
+                    capability_id=outcome.fingerprint.capability_id,
+                )
+
+        outcomes = await self._extractor._extract_many(  # noqa: SLF001 -- package-private completion hook.
             changed,
             io_name_vocabulary=io_name_vocabulary,
             is_cancelled=lambda: self._cancel_requested,
+            on_complete=extraction_completed,
         )
         if len(outcomes) != len(changed):
             self._raise_if_cancelled()
@@ -531,6 +554,38 @@ def _normalization_cache_signature(
         separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def _emit_extraction_progress(
+    progress_callback: Callable[[dict[str, Any]], Any] | None,
+    *,
+    current: int,
+    total: int,
+    capability_id: str | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+    event: dict[str, Any] = {
+        "event": "fingerprint.extract.progress",
+        "current": current,
+        "total": total,
+    }
+    if capability_id is not None:
+        event["capability_id"] = capability_id
+    try:
+        result = progress_callback(event)
+        if inspect.isawaitable(result):
+            await result
+    except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise
+        logger.warning("Symphony fingerprint progress callback was cancelled")
+    except Exception as exc:  # noqa: BLE001 -- progress reporting must not abort the build.
+        logger.warning(
+            "Symphony fingerprint progress callback failed: %s",
+            type(exc).__name__,
+        )
 
 
 def _cached_extraction(
