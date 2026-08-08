@@ -3,10 +3,10 @@
 ## 元信息
 | 项 | 值 |
 |---|---|
-| 日期 | 2026-08-06 |
-| 范围 | `agent_teams/fork.py` · `fork_compact.py`（新增），`tools/tool_member.py`（新增 `CheckpointTool` + `SpawnTeammateTool` 扩展），`tools/team.py`（`_pending_forks` / `_checkpoints` + `set_snapshot_length` / `set_store_checkpoint_fn`），`agent/team_agent.py`（`_on_teammate_created` 重写 + `_resolve_fork_native` + `share_checkpoints_with`），`agent/agent_configurator.py`（`_snapshot_length` 回调），`spawn/inprocess_spawn.py`（注入 + compaction 调用），`harness/team_harness.py`（`get_deep_agent`），`tools/tool_factory.py`（注册 `checkpoint`），`tools/tool_permissions.py`（`SHARED_TOOLS` 加 `checkpoint`），`external/`（`client.py` / `sdk_mcp.py` 排除 checkpoint），`tools/locales/`（中英文参数 + 描述），`tools/locales/descs/*/checkpoint.md`（新增）+ `spawn_teammate.md`（fork 文档段） |
-| 测试基线 | `tests/unit_tests/agent_teams/test_fork.py` 35 passed；全量 `tests/unit_tests/` 0 新增失败 |
-| Refs | — |
+| 日期 | 2026-08-06（D6 / D7 能力开关补充：2026-08-08） |
+| 范围 | `agent_teams/fork.py` · `fork_compact.py`（新增），`tools/tool_member.py`（新增 `CheckpointTool` + `SpawnTeammateTool` 扩展），`tools/team.py`（`_pending_forks` / `_checkpoints` + `set_snapshot_length` / `set_store_checkpoint_fn` + `fork_enabled`），`agent/team_agent.py`（`_on_teammate_created` 重写 + `_resolve_fork_native` + `share_checkpoints_with`），`agent/agent_configurator.py`（`_snapshot_length` 回调 + `enable_fork` 透传），`spawn/inprocess_spawn.py`（注入 + compaction 调用），`harness/team_harness.py`（`get_deep_agent`），`schema/blueprint.py`（`TeamAgentSpec.enable_fork`），`tools/tool_factory.py`（注册 `checkpoint` + `fork_enabled()` 门控），`tools/tool_permissions.py`（`SHARED_TOOLS` 加 `checkpoint`），`tools/locales/__init__.py`（`omit` capability 槽），`external/`（`client.py` / `sdk_mcp.py` 排除 checkpoint），`tools/locales/`（中英文参数 + 描述），`tools/locales/descs/*/checkpoint.md`（新增）+ `spawn_teammate.md`（`{{fork_usage}}` 槽）+ `descs/*/fragments/fork_usage.md`（新增） |
+| 测试基线 | `tests/unit_tests/agent_teams/test_fork.py` 48 passed；`tools/` + `external/` + `agent/` + `test_team_tools` + `test_hitt` + `test_predefined_team` 612 passed / 14 skipped；`rails/` + `prompts/` + `test_policy` + `test_persistent_team` + `test_language_propagation` + `test_harness` 93 passed |
+| Refs | #984 |
 
 ## 背景
 
@@ -59,7 +59,55 @@ fork 代码需要访问几个 "protected" 属性（`_native`、`_named_checkpoin
 - `TeamBackend.set_snapshot_length()` / `set_store_checkpoint_fn()` — 替代直接赋 `_xxx`
 - `fork_compact` 使用已有的公开 `react_agent` property 替代 `_react_agent`
 
-### D6 触发时机与校验
+### D6 能力开关 `TeamAgentSpec.enable_fork`（默认关）
+
+fork 首版把三个表面都无条件打开了：`checkpoint` 进 `SHARED_TOOLS`（每个成员都看得到），
+`spawn_teammate` 的 schema 硬编码 `fork` / `fork_source` / `compact`，描述里常驻一整节 fork 文档。
+这与同仓其余可选能力的做法相反——`swarmflow`（`enable_swarmflow`）、`spawn_human_agent`
+（`enable_hitt`）、`spawn_bridge_agent`（`enable_bridge`）、`spawn_external_cli`
+（`external_cli_agents` 非空）全都有 spec 级 capability ceiling。fork 也应如此：
+它只在 `spawn_mode="inprocess"` 下可用，且并非所有团队都需要上下文继承，
+却让每个成员为它常驻工具与描述 token。
+
+新增 `TeamAgentSpec.enable_fork: bool = False` → `TeamBackend(enable_fork=...)` →
+`fork_enabled()`，**一个信号门控三处**：
+
+| 表面 | 门控点 |
+|---|---|
+| `checkpoint` 工具注册 | `tool_factory` 减法链 `allowed - {"checkpoint"}` |
+| `spawn_teammate` 的 `fork`/`fork_source`/`compact` 属性 | `SpawnTeammateTool.__init__` 按 `fork_enabled` 拼 `properties` |
+| 描述里的「上下文继承（Fork）」整节 | 同一构造传 `omit={"fork_usage"}`，槽收敛为空串 |
+
+**三者必须同源**：schema 有参数而描述不提，LLM 不知道怎么用；描述讲了而 schema 没有，
+LLM 会围绕一个填不了的参数反复权衡——后者比完全不提更糟。这条与 `leader_policy` 的
+`{{collaboration_mechanism}}`（gate `swarmflow_enabled`）是同一个模式。
+
+沿用现有的能力门风格，`invoke` 内保留防御性检查作为 MCP 兜底：MCP server 直接
+`await tool.invoke(arguments)`、不校验 `input_params`，所以被省略的属性必须在
+`invoke` 里被拒，**且拒在写成员行之前**（否则成员已建、fork 却没生效）。
+`CheckpointTool` 同理。
+
+不给 `build_team` 加运行时下调参数（不同于 `enable_hitt`）：fork 是执行期优化，
+不是 leader 该按团队实例挑的团队形态。
+
+**行为变更**：升级后 fork 默认不可用，需要的部署显式 `TeamAgentSpec(enable_fork=True)`。
+capability 默认关是本仓一贯的 fail-safe 取向，且 fork 合入仅一天，无存量依赖。
+
+### D7 描述模板化扩展：capability 槽
+
+`{{slot}}` 机制原本只有一种语义——从 `fragments/<slot>.md` 加载，缺文件即构造期炸
+（S_08 不变量 6）。fork 段落需要"按开关出现或消失"，加一种最小扩展：
+`t(desc_key, omit={"<slot>"})`，被点名的槽填空串、不读片段文件。
+
+没有走"两份 md（`spawn_teammate.md` / `spawn_teammate_fork.md`）"的形态路线：fork
+只是描述里的一节，复制整份 md 会让另外 50 行同步维护两遍，必然漂移——AGENTS.md 对
+调度器消息已经下过同样的判断（"同一条消息两处文案必然漂移"）。
+
+`omit` 是**调用方显式点名**，不是"槽找不到片段就当空"的隐式回退——后者会把拼错的
+槽名静默吞掉，正是不变量 6 要堵的洞。渲染后统一 `strip()`，使位于文末的槽被省略时
+不留悬空空行。
+
+### D8 触发时机与校验
 
 fork 决策在 `_on_teammate_created` 中执行 — `spawn_teammate` 工具仅标记意图，实际上下文注入发生在成员初始化完成的异步时刻。
 对非法组合打 warning 并降级：
@@ -73,15 +121,19 @@ fork 决策在 `_on_teammate_created` 中执行 — `spawn_teammate` 工具仅�
 - **`fork="ckpt"` 时 compact 截断后再压缩**：截断后再压缩全部语义不清，不如 `compact=true` 统一为 "全量注入 + ckpt 分界"。
 - **第三方 CLI 成员 fork**：外部 CLI 对话存于外进程，无 `DeepAgent` / `ContextEngine`，无法取或注入上下文。永久不做。
 - **直接访问 protected 成员**：`_native` / `_react_agent` / `_named_checkpoints` 等多处 external access 违反 `G.CLS.11`。已通过 D5 的封装约定解决。
+- **fork 无条件开放**（首版做法）：见 D6。可选能力常驻每个成员的工具列表与描述，与同仓四个 capability ceiling 的做法相反。
+- **fork 描述拆成两份 md**：`spawn_teammate.md` + `spawn_teammate_fork.md` 的形态路线会把与 fork 无关的 50 行复制两份，必然漂移。改用 capability 槽（D7）。
+- **`build_team(enable_fork=...)` 运行时下调**：fork 是执行期优化，不是 leader 该按团队实例挑的团队形态；`enable_hitt` 那套 ceiling + 实例开关在这里没有对应场景。
 
 ## 验证
 
 - `test_fork.py`（35 passed）：覆盖 `ForkContext.from_agent`（全量 / 截断 / 边界 / SystemMessage 剥离 / roundtrip），`CheckpointTool`（invoke / map_result），`TeamBackend` fork 方法（mark→consume / 无回调 / 回调写入 / fallback），`SpawnTeammateTool` fork 参数（fork / fork_source / compact / 无 fork 不标记），`compact_context`（分段替换 / split_at=0 跳过 / ≥len 跳过）。
 - `test_fork.py::TestOnTeammateCreatedFork`（10 cases，装配路径）：覆盖 `TeamAgent._on_teammate_created` 的 fork 解析——live fork（字符串 / 布尔）/ 命名 checkpoint 截断 / checkpoint 缺失回退 / compact split / compact 无命名降级 / 无 fork / `fork_source` 可解析与不可解析 / `fork_source` 指向 leader。这组用例是两次运行时 crash（`'NoneType' object has no attribute 'messages'`）的回归护栏：修复前 live fork 与 checkpoint 截断两条路径均抛 `AttributeError`，修复后全绿。
 - `test_mcp_server.py`（8 passed）：验证外部 MCP 成员排除 `checkpoint` 工具。
+- `test_fork.py` 的 capability gate 组（13 cases）：`enable_fork=False` × (cn/en) × (leader/teammate) 下 `checkpoint` 不注册、`spawn_teammate` 无 fork 属性、描述里不含 "fork" 字样且无残留 `{{`；`enable_fork=True` 下三者齐备；`CheckpointTool.invoke` 与 `SpawnTeammateTool.invoke`（三组 fork 参数）在关闭时拒绝并给出 `enable_fork` 指引，且拒绝时**不写成员行**；不传 fork 参数的普通 spawn 不受影响。
 - 全量 `tests/unit_tests/agent_teams/` 0 新增失败。
 
 ## 已知遗留
 
 - **Checkpoint 非持久化**：~~存于内存，进程重启后丢失。后续可接入 session state。~~ **已解决**，见 [[F_76_fork-checkpoint-persistence]]——checkpoints 现持久化于 session per-team namespace，冷恢复（`recover_from_session`）自动还原；顺带修复了 leader 自身 `checkpoint()` 工具的路由缺口（此前落 `TeamBackend._checkpoints` 兜底 dict，fork 读不到）。
-- **subprocess spawn fork**：跨进程 fork 的 payload 未接线，当前仅支持 `spawn_mode="inprocess"`。
+- **subprocess spawn fork**：跨进程 fork 的 payload 未接线，当前仅支持 `spawn_mode="inprocess"`。`enable_fork=True` 配 `spawn_mode="process"` 不报错，fork 静默失效——门控只管能力开关，不校验 spawn 模式的组合。

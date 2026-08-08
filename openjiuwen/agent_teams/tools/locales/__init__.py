@@ -24,6 +24,14 @@ enumerated from the template itself and every one of them must resolve, so
 a missing fragment fails at tool-construction time rather than leaking a
 raw ``{{slot}}`` literal into the model-facing description.
 
+A slot may also describe an optional *capability*, in which case the tool
+passes ``omit={"<slot>"}`` and the slot collapses to an empty string instead
+of loading its fragment.  The caller names the omitted slots explicitly —
+nothing is inferred — and the gate must be the same signal that shapes the
+tool's schema, so prose describing a parameter and the parameter itself
+always appear and disappear together.  A model that reads about a mechanism
+it has no argument to invoke is worse off than one that never heard of it.
+
 Two interpolation paths exist and must not be confused: Markdown ``_desc``
 slots use ``{{slot}}`` and are filled from fragments by this module, while
 ``STRINGS`` values use ``{key}`` / ``str.format_map`` and are filled by the
@@ -41,7 +49,7 @@ from typing import Callable
 from openjiuwen.core.foundation.prompt import PromptTemplate
 
 Translator = Callable[..., str]
-"""``(desc_key, key="_desc", **kwargs) -> str`` — resolves a locale string."""
+"""``(desc_key, key="_desc", *, omit=None, **kwargs) -> str`` — resolves a locale string."""
 
 _DESCS_DIR = Path(__file__).parent / "descs"
 _FRAGMENTS_DIRNAME = "fragments"
@@ -88,8 +96,16 @@ def _load_fragment(slot: str, lang: str) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
-def _render_desc(tmpl: PromptTemplate, desc_key: str, lang: str) -> str:
+def _render_desc(tmpl: PromptTemplate, desc_key: str, lang: str, omit: frozenset[str]) -> str:
     """Fill every ``{{slot}}`` in a ``_desc`` template, or fail loudly.
+
+    Args:
+        tmpl: The uninterpolated ``_desc`` template.
+        desc_key: Description key, used only in error messages.
+        lang: Language code the fragments are loaded for.
+        omit: Slots whose capability is switched off; each collapses to an
+            empty string and its fragment file is never read. Slots outside
+            this set must still resolve.
 
     Raises:
         FileNotFoundError: when a declared slot has no fragment file.
@@ -98,8 +114,9 @@ def _render_desc(tmpl: PromptTemplate, desc_key: str, lang: str) -> str:
     slots = _slots_of(tmpl.content)
     if not slots:
         return tmpl.content
-    fills = {slot: _load_fragment(slot, lang) for slot in slots}
-    rendered = tmpl.format(fills).content
+    fills = {slot: "" if slot in omit else _load_fragment(slot, lang) for slot in slots}
+    # Strip so an omitted trailing slot leaves no dangling blank lines.
+    rendered = tmpl.format(fills).content.strip()
     # Guard against a fragment carrying its own placeholder, and against the
     # assembler's silent "reinstate the {{literal}}" behaviour ever reaching a
     # model-facing string.
@@ -120,10 +137,11 @@ def make_translator(lang: str = "cn") -> Translator:
         lang: Language code; anything other than ``"en"`` resolves to ``cn``.
 
     Returns:
-        ``t(desc_key, key="_desc", **kwargs) -> str``. ``kwargs`` interpolate
-        ``{key}`` placeholders in ``STRINGS`` values (runtime error messages
-        use this); Markdown ``_desc`` slots are filled from shared fragments
-        and take no ``kwargs``.
+        ``t(desc_key, key="_desc", *, omit=None, **kwargs) -> str``. ``kwargs``
+        interpolate ``{key}`` placeholders in ``STRINGS`` values (runtime error
+        messages use this); Markdown ``_desc`` slots are filled from shared
+        fragments and take no ``kwargs``. ``omit`` names capability slots to
+        collapse to empty (``_desc`` only) — see the module docstring.
     """
     if lang == "en":
         from openjiuwen.agent_teams.tools.locales import en as mod
@@ -131,11 +149,11 @@ def make_translator(lang: str = "cn") -> Translator:
         from openjiuwen.agent_teams.tools.locales import cn as mod
     strings: dict[str, str] = mod.STRINGS
 
-    def t(desc_key: str, key: str = "_desc", **kwargs: str) -> str:
+    def t(desc_key: str, key: str = "_desc", *, omit: frozenset[str] | None = None, **kwargs: str) -> str:
         if key == "_desc":
             tmpl = _load_desc(desc_key, lang)
             if tmpl is not None:
-                return _render_desc(tmpl, desc_key, lang)
+                return _render_desc(tmpl, desc_key, lang, omit or frozenset())
             dict_key = f"{desc_key}._desc"
             if dict_key not in strings:
                 raise FileNotFoundError(

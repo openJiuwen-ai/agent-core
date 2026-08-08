@@ -119,6 +119,12 @@ def create_team_tools(
     Args:
         role: "leader" or "teammate".
         agent_team: AgentTeam instance providing task/message/db/messager.
+            Also carries the capability gates the toolset is filtered on:
+            ``hitt_enabled`` / ``bridge_enabled`` / ``external_cli_kinds``
+            select the spawn tools, and ``fork_enabled``
+            (``TeamAgentSpec.enable_fork``) drops the ``checkpoint`` tool
+            plus ``spawn_teammate``'s fork properties and the description
+            section documenting them.
         teammate_mode: Execution mode for teammates — "build_mode" or
             "plan_mode". Leader's approval tools (approve_plan / approve_tool)
             are only wired when teammate_mode == "plan_mode", since that's the
@@ -170,7 +176,12 @@ def create_team_tools(
         "build_team": BuildTeamTool(agent_team, t),
         "clean_team": CleanTeamTool(agent_team, t),
         # Member management — one tool per role_type (flat schema, no role branching)
-        "spawn_teammate": SpawnTeammateTool(agent_team, t, model_config_allocator=model_config_allocator),
+        "spawn_teammate": SpawnTeammateTool(
+            agent_team,
+            t,
+            model_config_allocator=model_config_allocator,
+            fork_enabled=agent_team.fork_enabled(),
+        ),
         "checkpoint": CheckpointTool(agent_team, t),
         "spawn_human_agent": SpawnHumanAgentTool(agent_team, t),
         "spawn_bridge_agent": SpawnBridgeAgentTool(agent_team, t),
@@ -250,6 +261,13 @@ def create_team_tools(
         allowed = allowed - {"spawn_bridge_agent"}
     if not agent_team.external_cli_kinds():
         allowed = allowed - {"spawn_external_cli"}
+    # Context inheritance (F_75). One flag gates the whole capability:
+    # ``checkpoint`` disappears here, and ``SpawnTeammateTool`` reads the same
+    # ``fork_enabled()`` above to drop its fork properties and the matching
+    # section of its description. A checkpoint nobody can fork from is dead
+    # weight in every member's tool list.
+    if not agent_team.fork_enabled():
+        allowed = allowed - {"checkpoint"}
     # Swarmflow is wired only when the host supplied a worker-model resolver
     # (leader + enable_swarmflow). Same idempotent-subtraction gate as the
     # spawn tools.

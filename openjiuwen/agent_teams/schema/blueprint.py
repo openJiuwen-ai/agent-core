@@ -455,6 +455,29 @@ class TeamAgentSpec(BaseModel):
     - ``enable_bridge=True`` with no BRIDGE_AGENT predefined → allowed
       (dynamic spawn path).
     """
+    enable_fork: bool = False
+    """Spec-level capability gate for context inheritance (fork).
+
+    True opens three surfaces at once, all keyed off this one flag:
+
+    - the ``checkpoint(name)`` tool, which lets any member save a named
+      snapshot of its own conversation position;
+    - the ``fork`` / ``fork_source`` / ``compact`` properties on
+      ``spawn_teammate``'s schema;
+    - the "context inheritance" section of ``spawn_teammate``'s description.
+
+    False (default) removes all three. Schema and prose are gated on the same
+    signal deliberately: a leader that reads about ``fork`` but has no
+    ``fork`` property to fill deliberates over a mechanism it cannot invoke,
+    which is worse than never mentioning it.
+
+    Fork only takes effect under ``spawn_mode="inprocess"`` — it injects the
+    source member's live message list into the new member's context engine,
+    which requires both to share a process. Under ``spawn_mode="process"``
+    the captured context cannot cross the boundary and is dropped. For the
+    same reason ``fork_source`` must name a member the caller hosts
+    in-process (the leader itself, or a teammate it spawned).
+    """
     enable_swarmflow: bool = False
     """Spec-level capability gate for swarmflow orchestration.
 

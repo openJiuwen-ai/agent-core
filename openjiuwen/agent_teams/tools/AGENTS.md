@@ -9,7 +9,7 @@
 | `tool_base.py` | `TeamTool` ABC、`MappedToolOutput` |
 | `tool_permissions.py` | 权限集合（`LEADER_*`、`MEMBER_*`、`MEMBER_TOOLS_BY_DISPATCH`、`SHARED_TOOLS`、`HUMAN_AGENT_TOOLS`）、`_MEMBER_NAME_PATTERN` |
 | `tool_team.py` | `BuildTeamTool`、`CleanTeamTool` |
-| `tool_member.py` | `_SpawnToolBase`、`SpawnTeammateTool`、`SpawnHumanAgentTool`、`SpawnBridgeAgentTool`、`SpawnExternalCliTool`、`ShutdownMemberTool`、`ApprovePlanTool`、`ApproveToolCallTool`、`ListMembersTool` |
+| `tool_member.py` | `_SpawnToolBase`（含 `omit_slots` 传递 capability 槽）、`SpawnTeammateTool`、`CheckpointTool`、`SpawnHumanAgentTool`、`SpawnBridgeAgentTool`、`SpawnExternalCliTool`、`ShutdownMemberTool`、`ApprovePlanTool`、`ApproveToolCallTool`、`ListMembersTool` |
 | `tool_task.py` | `TaskCreateTool` / `ScheduledTaskCreateTool`（各自独立，共享模块级纯函数 `_task_node_schema` / `_validate_task_batch`）、`ViewTaskToolV2`、`UpdateTaskTool`、`SubmitPlanTool`、`ClaimTaskTool`、`MemberCompleteTaskTool` |
 | `tool_message.py` | `_SendMessageBase` → `SendMessageTool`（点对点、多播、广播）/ `ReportToLeaderTool`（scheduled 成员：仅 leader + user） |
 | `tool_factory.py` | `create_team_tools` 工厂、`_wrap_invoke_with_logging` |
@@ -102,7 +102,8 @@ PostgreSQL / MySQL 后端（`engine.py`），不要用 SQLite。
 |---|---|---|---|
 | `build_team` | ✓ | | 入口工具 —— 描述里承载完整工作流。F_62：`enable_task_verification` 参数可覆盖 spec 默认（提示词驱动的"验证预期"开关）；dispatch_mode 是静态 spec 配置，**不在此选择**，spec 值随行记录进 `team_info` |
 | `clean_team` | ✓（仅 temporary） | | 要求先关停每个 teammate；`lifecycle="persistent"` 时不接线（那类团队由 operator 经 SDK facade 拆除） |
-| `spawn_teammate` | ✓ | | 拉起一个普通 LLM teammate；可选 `model_config_allocator` 回调；扁平 schema `member_name`/`display_name`/`desc`/`prompt?`/`model_name?`。始终接线 |
+| `spawn_teammate` | ✓ | | 拉起一个普通 LLM teammate；可选 `model_config_allocator` 回调；扁平 schema `member_name`/`display_name`/`desc`/`prompt?`/`model_name?`/`isolation?`/`permissions?`。始终接线，但**上下文继承是属性级门控**：`fork_enabled()` 为真才加 `fork`/`fork_source`/`compact` 三个属性，并同时填上描述里的 `{{fork_usage}}` 槽；关时三个属性与那一整节散文一起消失，`invoke` 把偷传进来的 fork 参数在建成员行之前拒掉（MCP 客户端不过 schema）。见 F_75 |
+| `checkpoint` | ✓ | ✓ | 为本成员当前上下文存一个命名快照，供 `spawn_teammate(fork="<name>")` 继承；仅 `fork_enabled()`（`TeamAgentSpec.enable_fork`）时接线，`invoke` 内保留同源兜底。外部成员（`external/client.py` / `sdk_mcp.py`）另行 `exclude_tools` 排除——它们没有 `DeepAgent`，快照无从取起 |
 | `spawn_human_agent` | ✓ | | 拉起一个 HITT 人类成员；schema 仅 `member_name`/`display_name`/`desc`（无 `model_name`/`prompt`）；仅 `hitt_enabled()` 时接线 |
 | `spawn_bridge_agent` | ✓ | | 拉起一个到远程 agent 的桥接；`desc` 兼作 connect briefing；可选 `mailbox_inject_mode`/`protocol`/`adapter_config`/`model_name`；仅 `bridge_enabled()` 时接线 |
 | `spawn_external_cli` | ✓ | | 拉起一个第三方 CLI teammate；需要 `cli_agent`（在 `TeamAgentSpec.external_cli_agents` 声明的一个 kind）+ `desc`；仅 `external_cli_kinds()` 非空时接线 |
@@ -222,6 +223,13 @@ schema 复用走模块级纯函数，不是复制粘贴：
 
 - **`desc_key` 不必等于工具 name**：一个工具的多个形态各有自己的 `.md`
   （`send_message.md` / `send_message_scheduled.md`），形态类自己选 key。
+- **capability 槽**：描述一个可选能力的槽，构造工具时传
+  `t(desc_key, omit={"<slot>"})` 让它收敛为空串（`spawn_teammate` 的
+  `fork_usage`，gate 是 `fork_enabled()`）。**omit 用的信号必须与塑造 schema
+  的那个信号同源**——参数与讲这个参数的散文一起出现、一起消失。渲染后统一
+  `strip()`，文末的槽被省略时不留空行。这与 `prompts/` 侧 `leader_policy` 的
+  `{{collaboration_mechanism}}`（gate `swarmflow_enabled`）是同一个模式：
+  **能力关掉时，讲这个能力的文案必须跟着消失**。
 - **槽由 loader 从模板里枚举并强制填满**，缺片段 → 构造期 `FileNotFoundError`（带期望路径）；
   渲染后残留 `{{` → `ValueError`。这是为了堵住 `PromptAssembler.prompt_assemble` 的静默回填
   行为（缺 key 时把 `{{key}}` 原样写回，会直接喂给 LLM）。**不要**把不完整的 kwargs 交给
@@ -397,7 +405,7 @@ Locale 文件在 `locales/` —— 每种语言一个扁平 `STRINGS` dict（`cn
   里的运行时错误消息。
 - 把某个 `_desc` 从 `STRINGS` 迁到 `.md` 文件时，删掉 dict 条目并留一条注释。
 
-当前 `descs/` 已覆盖：`approve_plan`、`approve_tool`、`build_team`、`claim_task`、`clean_team`、`create_task`、
+当前 `descs/` 已覆盖：`approve_plan`、`approve_tool`、`build_team`、`checkpoint`、`claim_task`、`clean_team`、`create_task`、
 `create_task_scheduled`、`list_members`、`member_complete_task`、`member_complete_task_scheduled`、`send_message`、
 `send_message_scheduled`、`verify_task`、`verify_task_scheduled`、`shutdown_member`、`spawn_bridge_agent`、`spawn_external_cli`、`spawn_human_agent`、
 `spawn_teammate`、`structured_output`、`swarmflow`、`update_task`、`view_task`、`workspace_meta`、`async_tasks_list`、
@@ -406,7 +414,8 @@ Locale 文件在 `locales/` —— 每种语言一个扁平 `STRINGS` dict（`cn
 `descs/<lang>/fragments/` 已覆盖：`artifact_handoff_policy`（两个 `send_message` 形态共用；
 载明通道判据与 `MAX_CONTENT_CHARS` 上限——数字与常量的一致性由
 `test_tool_message.py` 断言，改常量必须同步改片段）、
-`create_task_edge_semantics`、`create_task_granularity`（两个 `create_task` 形态共用）。
+`create_task_edge_semantics`、`create_task_granularity`（两个 `create_task` 形态共用）、
+`fork_usage`（**capability 槽**，`spawn_teammate` 专用，gate `fork_enabled()`）。
 
 ## Prompt 分层：工具描述 vs 系统提示词
 

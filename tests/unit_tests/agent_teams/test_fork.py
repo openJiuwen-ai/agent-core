@@ -78,6 +78,7 @@ async def agent_team(db, messager):
         is_leader=True,
         db=db,
         messager=messager,
+        enable_fork=True,
     )
     t._snapshot_length = lambda: 0
     yield t
@@ -279,7 +280,7 @@ class TestSpawnTeammateForkParams:
             agent_card='{"name":"x"}',
             status=MemberStatus.READY,
         )
-        yield SpawnTeammateTool(agent_team, t)
+        yield SpawnTeammateTool(agent_team, t, fork_enabled=True)
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -905,3 +906,126 @@ class TestTeamAgentCheckpointPersistence:
 
         assert agent._named_checkpoints == {"code-ready": 5}
         assert TEAMS_KEY not in session.state
+
+
+# ── enable_fork capability gate ────────────────────────────────────────────
+#
+# One flag shapes three surfaces at once (F_75): the ``checkpoint`` tool, the
+# fork properties on ``spawn_teammate``'s schema, and the fork section of its
+# description. They are asserted together on purpose — a leader that reads
+# about ``fork`` but has no ``fork`` property to fill deliberates over a
+# mechanism it cannot invoke.
+
+_FORK_PROPS = {"fork", "fork_source", "compact"}
+
+
+@pytest_asyncio.fixture
+async def fork_disabled_team(db, messager):
+    """A TeamBackend with the default (closed) fork capability."""
+    await db.team.create_team(
+        team_name="no-fork-team",
+        display_name="No Fork Team",
+        leader_member_name="leader-1",
+    )
+    yield TeamBackend(
+        team_name="no-fork-team",
+        member_name="leader-1",
+        is_leader=True,
+        db=db,
+        messager=messager,
+    )
+
+
+def _spawn_schema_props(tools) -> set[str]:
+    """Property names on the assembled ``spawn_teammate`` schema."""
+    spawn = next(tool for tool in tools if tool.card.name == "spawn_teammate")
+    return set(spawn.card.input_params["properties"])
+
+
+def _spawn_desc(tools) -> str:
+    """Rendered description of the assembled ``spawn_teammate`` tool."""
+    return next(tool for tool in tools if tool.card.name == "spawn_teammate").card.description
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+@pytest.mark.parametrize("role", ["leader", "teammate"])
+async def test_fork_disabled_hides_every_fork_surface(fork_disabled_team, lang, role):
+    """enable_fork=False removes tool, schema properties, and prose alike."""
+    from openjiuwen.agent_teams.tools.tool_factory import create_team_tools
+
+    tools = create_team_tools(role=role, agent_team=fork_disabled_team, lang=lang)
+    assert "checkpoint" not in {tool.card.name for tool in tools}
+    if role != "leader":
+        return
+    assert _spawn_schema_props(tools) & _FORK_PROPS == set()
+    desc = _spawn_desc(tools)
+    assert "fork" not in desc.lower()
+    assert "{{" not in desc
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+@pytest.mark.parametrize("role", ["leader", "teammate"])
+async def test_fork_enabled_exposes_every_fork_surface(agent_team, lang, role):
+    """enable_fork=True wires checkpoint, the fork properties, and the prose."""
+    from openjiuwen.agent_teams.tools.tool_factory import create_team_tools
+
+    tools = create_team_tools(role=role, agent_team=agent_team, lang=lang)
+    assert "checkpoint" in {tool.card.name for tool in tools}
+    if role != "leader":
+        return
+    assert _FORK_PROPS <= _spawn_schema_props(tools)
+    desc = _spawn_desc(tools)
+    assert "fork_source" in desc
+    assert "{{" not in desc
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_checkpoint_invoke_rejected_when_fork_disabled(fork_disabled_team):
+    """MCP clients bypass the schema, so ``invoke`` re-checks the gate."""
+    tool = CheckpointTool(fork_disabled_team, make_translator("cn"))
+    result = await tool.invoke({"name": "code-ready"})
+    assert not result.success
+    assert "enable_fork" in result.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "fork_args",
+    [
+        {"fork": True},
+        {"fork": "code-ready", "compact": True},
+        {"fork_source": "reader"},
+    ],
+)
+async def test_spawn_teammate_rejects_fork_args_when_disabled(fork_disabled_team, fork_args):
+    """A fork argument smuggled past the schema fails before any member row."""
+    tool = SpawnTeammateTool(fork_disabled_team, make_translator("cn"))
+    result = await tool.invoke({
+        "member_name": "dev-9",
+        "display_name": "Dev 9",
+        "desc": "helper",
+        **fork_args,
+    })
+    assert not result.success
+    assert "enable_fork" in result.error
+    assert not await fork_disabled_team.db.member.member_exists("dev-9", "no-fork-team")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_spawn_teammate_still_works_without_fork_args(fork_disabled_team):
+    """The gate rejects fork arguments only — ordinary spawns are untouched."""
+    tool = SpawnTeammateTool(fork_disabled_team, make_translator("cn"))
+    result = await tool.invoke({
+        "member_name": "dev-8",
+        "display_name": "Dev 8",
+        "desc": "helper",
+    })
+    assert result.success
+    assert fork_disabled_team.consume_fork_on_spawn("dev-8") is None

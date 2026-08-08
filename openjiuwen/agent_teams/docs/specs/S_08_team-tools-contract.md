@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-07-28 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md |
+| 最近一次修订日期 | 2026-08-08 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md |
 
 ## 范围 / 边界
 
@@ -77,6 +77,10 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
    "善意"行为。特别地：**禁止把不完整的 kwargs 交给 `PromptTemplate.format`**，
    因为 `PromptAssembler.prompt_assemble` 会把缺失的 key 原样回填成 `{{key}}`
    字面量，静默泄漏给 LLM。槽由 loader 从模板自身枚举并强制填满。
+   **唯一的例外是 capability 槽**：调用方用 `t(desc_key, omit={"<slot>"})`
+   点名哪些槽因能力关闭而收敛为空串（`fork_usage` 是范本）。这不是"缺失回退"
+   ——省略的槽由调用方显式列出，没被点名的槽照旧必须有片段文件，缺了照旧炸。
+   omit 用的信号必须与塑造 schema 的信号同源，见不变量 12。
 7. **每条 ToolCard 描述都过 Translator**。工具构造器拿到的是同一个
    `t: Translator` 闭包，`ToolCard.description` 必须由 `t(name)` 提供，
    不许在构造器里写硬编码字面量。
@@ -122,6 +126,15 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     的 schema 中暴露（schema 即契约），无需运行时拒绝。`spawn_teammate`
     始终注册。
     后端的能力门是工具显式校验，不是隐藏断言。
+    **门控的粒度可以细到属性**：`spawn_teammate` 永远注册，但上下文继承
+    （F_75）是可选能力——`fork_enabled()`（即 `TeamAgentSpec.enable_fork`）
+    为 False 时它的 `fork` / `fork_source` / `compact` 三个属性不进 schema，
+    `checkpoint` 工具整个不注册。**schema、描述、工具注册三者必须由同一个
+    信号门控**：描述里的 `{{fork_usage}}` 槽与这些属性同生同灭（不变量 6），
+    否则 leader 会围绕一个它填不了的参数反复权衡——读得到、用不了的提示词
+    比缺失的提示词更糟。属性级门控同样保留 `invoke` 内的防御性检查：MCP
+    客户端直接调 `invoke`、不校验 schema，被省略的属性必须在那里被拒，且
+    要拒在写成员行之前。
 13. **每个 `TeamTool.invoke` 必须返回 `ToolOutput`，永不抛**。工具内部
     `try / except` 捕获后端异常，落 `team_logger.error`，转成
     `ToolOutput(success=False, error=...)` 返回；不允许把 `Exception`
@@ -333,6 +346,11 @@ openjiuwen/agent_teams/tools/locales/
   且只能由 `fragments/<slot>.md` 填充。片段是与形态无关的公共散文，可跨工具
   与跨形态复用（`artifact_handoff_policy` 同时服务两个 `send_message` 形态）。
   槽由 loader 从模板自身枚举、强制填满，缺一个就构造期炸（不变量 6）。
+- **capability 槽**：描述一个可选能力的槽，由构造工具的一方传
+  `t(desc_key, omit={"<slot>"})` 收敛为空串（`spawn_teammate` 的
+  `fork_usage`）。omit 名单由调用方显式给出，且必须与塑造 schema 的是同一个
+  信号——参数与讲这个参数的散文永远同生同灭（不变量 12）。渲染后统一 strip，
+  所以位于文末的槽被省略时不留空行。
 - 短描述（参数 / 短 `_desc`）保留在 `cn.py` / `en.py` 的 `STRINGS` 字典，
   不强制迁出去；多行长文本一律落 Markdown。**随场景变化的文案属于 md 槽
   或新 desc_key，不属于插值的 `STRINGS` 值。**
@@ -344,7 +362,7 @@ openjiuwen/agent_teams/tools/locales/
 | `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_teammate`, `spawn_human_agent`, `spawn_bridge_agent`, `spawn_external_cli`, `shutdown_member`, `approve_plan`, `approve_tool`, `create_task`, `update_task`, `swarmflow`, `async_tasks_list`, `async_task_output`, `async_task_cancel` |
 | `MEMBER_ONLY_TOOLS` | `claim_task`, `submit_plan` |
 | `MEMBER_ONLY_TOOLS_SCHEDULED` | `member_complete_task`, `submit_plan` |
-| `SHARED_TOOLS` | `view_task`, `send_message`, `workspace_meta`（后者是死条目——不在 `all_tools`，由 `TeamToolRail.init` 单独 append） |
+| `SHARED_TOOLS` | `view_task`, `send_message`, `checkpoint`（gate `fork_enabled()`），`workspace_meta`（后者是死条目——不在 `all_tools`，由 `TeamToolRail.init` 单独 append） |
 | `HUMAN_AGENT_TOOLS` | `view_task`, `member_complete_task`, `send_message` |
 | `LEADER_TOOLS` | `LEADER_ONLY_TOOLS ∪ SHARED_TOOLS`（dispatch-invariant） |
 | `MEMBER_TOOLS_BY_DISPATCH["autonomous"]` | `MEMBER_ONLY_TOOLS ∪ SHARED_TOOLS` |

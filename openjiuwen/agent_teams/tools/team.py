@@ -111,6 +111,7 @@ class TeamBackend:
         *,
         dispatch_mode: str = "autonomous",
         enable_task_verification: bool = False,
+        enable_fork: bool = False,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
@@ -159,6 +160,13 @@ class TeamBackend:
             enable_task_verification: Spec-level "verification expected"
                 ceiling (F_62); ``build_team`` may override the runtime
                 instance flag, mirroring ``enable_hitt``.
+            enable_fork: Spec-level context-inheritance capability gate
+                (``TeamAgentSpec.enable_fork``). When False the
+                ``checkpoint`` tool is not wired and ``spawn_teammate``
+                carries neither the fork properties nor the fork prose.
+                Unlike ``enable_hitt``, there is no ``build_team`` override:
+                fork is an execution-time optimization, not a team-shape
+                decision the leader gets to make per instance.
             external_cli_agents: Static launch configs for external CLI
                 agents (``TeamAgentSpec.external_cli_agents``). The
                 non-empty set of declared ``cli_agent`` names is the
@@ -293,7 +301,11 @@ class TeamBackend:
         # only the default ones.
         self._cleanup_paths: set[str] = set()
 
-        # Fork / checkpoint support
+        # Fork / checkpoint support. ``_enable_fork`` is the capability gate:
+        # the tool factory reads it to decide whether ``checkpoint`` is wired
+        # and whether ``spawn_teammate`` exposes the fork properties at all,
+        # so everything below stays dormant when fork is off.
+        self._enable_fork: bool = enable_fork
         self._pending_forks: dict[str, dict] = {}    # member_name → {fork, since, source}
         self._checkpoints: dict[str, int] = {}       # name → message_count
         self._snapshot_length: Callable[[], int] | None = None
@@ -314,6 +326,17 @@ class TeamBackend:
     # ------------------------------------------------------------------
     # Fork / checkpoint support
     # ------------------------------------------------------------------
+
+    def fork_enabled(self) -> bool:
+        """Whether context inheritance (fork) is open for this team.
+
+        Straight from ``TeamAgentSpec.enable_fork`` — no ``build_team``
+        override, unlike ``hitt_enabled`` / ``bridge_enabled``. Single gate
+        signal for all three fork surfaces: the ``checkpoint`` tool, the
+        fork properties on ``spawn_teammate``'s schema, and the fork section
+        of its description.
+        """
+        return self._enable_fork
 
     def set_snapshot_length(self, fn) -> None:
         """Register the callback that returns this member's message count."""

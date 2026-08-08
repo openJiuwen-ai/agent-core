@@ -31,12 +31,30 @@ class _SpawnToolBase(TeamTool, ABC):
     construction, and model-facing result mapping.
     """
 
-    def __init__(self, team: TeamBackend, t: Translator, tool_name: str):
+    def __init__(
+        self,
+        team: TeamBackend,
+        t: Translator,
+        tool_name: str,
+        *,
+        omit_slots: frozenset[str] | None = None,
+    ):
+        """Build the spawn tool's card.
+
+        Args:
+            team: Backend every spawn tool talks to.
+            t: Locale-bound translator.
+            tool_name: Tool name, also the ``_desc`` key and card id suffix.
+            omit_slots: Capability slots to drop from the Markdown
+                description. Pass the same gate that shaped the subclass's
+                schema, so a parameter and the prose describing it always
+                appear together.
+        """
         super().__init__(
             ToolCard(
                 id=f"team.{tool_name}",
                 name=tool_name,
-                description=t(tool_name),
+                description=t(tool_name, omit=omit_slots),
             )
         )
         self.team = team
@@ -104,7 +122,19 @@ class _SpawnToolBase(TeamTool, ABC):
 
 
 class SpawnTeammateTool(_SpawnToolBase):
-    """Spawn an ordinary LLM teammate (``role_type='teammate'``)."""
+    """Spawn an ordinary LLM teammate (``role_type='teammate'``).
+
+    Context inheritance is a gated capability: when ``fork_enabled`` is
+    False the ``fork`` / ``fork_source`` / ``compact`` properties are absent
+    from the schema *and* the fork section is dropped from the description,
+    both off the one flag. See ``TeamAgentSpec.enable_fork``.
+    """
+
+    #: Fork properties and the description slot that documents them. Schema
+    #: and prose are gated together — the model must never read about an
+    #: argument it has no way to pass.
+    _FORK_PARAMS = ("fork", "fork_source", "compact")
+    _FORK_SLOT = "fork_usage"
 
     def __init__(
         self,
@@ -112,41 +142,60 @@ class SpawnTeammateTool(_SpawnToolBase):
         t: Translator,
         *,
         model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
+        fork_enabled: bool = False,
     ):
-        super().__init__(team, t, "spawn_teammate")
+        """Build the spawn_teammate tool.
+
+        Args:
+            team: Backend that registers the member row.
+            t: Locale-bound translator.
+            model_config_allocator: Callback returning the next ``Allocation``
+                for the spawned teammate; receives the ``model_name`` hint.
+            fork_enabled: Whether context inheritance is open for this team
+                (``TeamBackend.fork_enabled()``). Gates the fork properties
+                and the fork section of the description as one unit.
+        """
+        super().__init__(
+            team,
+            t,
+            "spawn_teammate",
+            omit_slots=None if fork_enabled else frozenset({self._FORK_SLOT}),
+        )
         self._allocate_model_config = model_config_allocator
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "member_name": {
-                    "type": "string",
-                    "description": t("spawn_teammate", "member_name"),
-                },
-                "display_name": {
-                    "type": "string",
-                    "description": t("spawn_teammate", "display_name"),
-                },
-                "desc": {"type": "string", "description": t("spawn_teammate", "desc")},
-                "prompt": {"type": "string", "description": t("spawn_teammate", "prompt")},
-                "model_name": {
-                    "type": "string",
-                    "description": t("spawn_teammate", "model_name"),
-                },
-                "isolation": {
-                    "type": "string",
-                    "enum": ["worktree"],
-                    "description": (
-                        "Optional isolation mode. Set 'worktree' only when the "
-                        "user explicitly requests worktree isolation, or when "
-                        "the teammate must modify repository files in an "
-                        "isolated checkout. Omit this field for read-only, "
-                        "game, discussion, research, or standby tasks."
-                    ),
-                },
-                "permissions": {
-                    "type": "object",
-                    "description": t("spawn_teammate", "permissions"),
-                },
+        self._fork_enabled = fork_enabled
+        properties: dict[str, Any] = {
+            "member_name": {
+                "type": "string",
+                "description": t("spawn_teammate", "member_name"),
+            },
+            "display_name": {
+                "type": "string",
+                "description": t("spawn_teammate", "display_name"),
+            },
+            "desc": {"type": "string", "description": t("spawn_teammate", "desc")},
+            "prompt": {"type": "string", "description": t("spawn_teammate", "prompt")},
+            "model_name": {
+                "type": "string",
+                "description": t("spawn_teammate", "model_name"),
+            },
+            "isolation": {
+                "type": "string",
+                "enum": ["worktree"],
+                "description": (
+                    "Optional isolation mode. Set 'worktree' only when the "
+                    "user explicitly requests worktree isolation, or when "
+                    "the teammate must modify repository files in an "
+                    "isolated checkout. Omit this field for read-only, "
+                    "game, discussion, research, or standby tasks."
+                ),
+            },
+            "permissions": {
+                "type": "object",
+                "description": t("spawn_teammate", "permissions"),
+            },
+        }
+        if fork_enabled:
+            properties.update({
                 "fork": {
                     "anyOf": [{"type": "boolean"}, {"type": "string"}],
                     "description": t("spawn_teammate", "fork"),
@@ -159,7 +208,10 @@ class SpawnTeammateTool(_SpawnToolBase):
                     "type": "boolean",
                     "description": t("spawn_teammate", "compact"),
                 },
-            },
+            })
+        self.card.input_params = {
+            "type": "object",
+            "properties": properties,
             "required": ["member_name", "display_name", "desc"],
         }
 
@@ -170,6 +222,20 @@ class SpawnTeammateTool(_SpawnToolBase):
         err = self._validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
+
+        # Schema omission binds the hosting LLM; this rejects the same
+        # arguments coming from an MCP client, which calls ``invoke``
+        # directly without validating against ``input_params``. Checked
+        # before the member row is written so a rejected call spawns
+        # nothing.
+        if not self._fork_enabled:
+            passed = [key for key in self._FORK_PARAMS if inputs.get(key) is not None]
+            if passed:
+                return self._fail(
+                    f"Cannot use {', '.join(passed)}: context inheritance (fork) is "
+                    "disabled (enable_fork=False on TeamAgentSpec). Spawn the "
+                    "teammate without these arguments, or enable fork in the team spec."
+                )
 
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")
@@ -211,11 +277,25 @@ class SpawnTeammateTool(_SpawnToolBase):
         )
 
 
-class CheckpointTool(_SpawnToolBase):
-    """Save a named snapshot of current conversation context."""
+class CheckpointTool(TeamTool):
+    """Save a named snapshot of current conversation context.
+
+    Half of the fork capability: the snapshot this records is what a later
+    ``spawn_teammate(fork="<name>")`` inherits from. Gated on
+    ``TeamAgentSpec.enable_fork`` — the tool is not wired at all when fork
+    is off (see ``create_team_tools``); the check in ``invoke`` is the
+    backstop for MCP clients that call it directly.
+    """
 
     def __init__(self, team: TeamBackend, t: Translator):
-        super().__init__(team, t, "checkpoint")
+        super().__init__(
+            ToolCard(
+                id="team.checkpoint",
+                name="checkpoint",
+                description=t("checkpoint"),
+            )
+        )
+        self.team = team
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -226,6 +306,15 @@ class CheckpointTool(_SpawnToolBase):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        if not self.team.fork_enabled():
+            return ToolOutput(
+                success=False,
+                error=(
+                    "Cannot save a checkpoint: context inheritance (fork) is "
+                    "disabled (enable_fork=False on TeamAgentSpec). Checkpoints "
+                    "exist only to be forked from."
+                ),
+            )
         name = inputs["name"]
         count = self.team.snapshot_context_length()
         self.team.store_checkpoint(name, count)
