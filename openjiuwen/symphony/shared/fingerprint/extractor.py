@@ -88,6 +88,7 @@ class CapabilityFingerprintExtractor:
         *,
         io_name_vocabulary: IONameVocabulary | None = None,
         is_cancelled: Callable[[], bool] | None = None,
+        on_complete: Callable[[ExtractionOutcome], Any] | None = None,
     ) -> list[ExtractionOutcome]:
         """Extract in bounded batches, preserving inventory order."""
 
@@ -95,7 +96,7 @@ class CapabilityFingerprintExtractor:
             descriptors,
             io_name_vocabulary=io_name_vocabulary,
             is_cancelled=is_cancelled,
-            on_complete=None,
+            on_complete=on_complete,
         )
 
     async def _extract_many(

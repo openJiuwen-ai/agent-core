@@ -388,7 +388,7 @@ class FingerprintService:
                     capability_id=outcome.fingerprint.capability_id,
                 )
 
-        outcomes = await self._extractor._extract_many(  # noqa: SLF001 -- package-private completion hook.
+        outcomes = await self._extractor.extract_many(
             changed,
             io_name_vocabulary=io_name_vocabulary,
             is_cancelled=lambda: self._cancel_requested,
