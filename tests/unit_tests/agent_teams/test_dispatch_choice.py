@@ -108,7 +108,7 @@ async def test_build_team_tool_has_no_dispatch_choice(db):
     tool = BuildTeamTool(_backend(db, enable_task_verification=True), make_translator("cn"))
     properties = tool.card.input_params["properties"]
     assert "dispatch_mode" not in properties
-    assert "enable_task_verification" in properties
+    assert "enable_task_verification" not in properties
 
     result = await tool.invoke(
         {
@@ -116,11 +116,10 @@ async def test_build_team_tool_has_no_dispatch_choice(db):
             "team_desc": "d",
             "leader_display_name": "Leader",
             "leader_desc": "ld",
-            "enable_task_verification": True,
         }
     )
     assert result.success
-    assert result.data["enable_task_verification"] is True
+    assert "enable_task_verification" not in result.data
     assert "dispatch_mode" not in result.data
 
 

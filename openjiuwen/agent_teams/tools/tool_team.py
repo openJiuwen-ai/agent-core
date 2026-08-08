@@ -44,10 +44,6 @@ class BuildTeamTool(TeamTool):
                     "type": "boolean",
                     "description": t("build_team", "enable_hitt"),
                 },
-                "enable_task_verification": {
-                    "type": "boolean",
-                    "description": t("build_team", "enable_task_verification"),
-                },
             },
             "required": ["display_name", "team_desc", "leader_display_name", "leader_desc"],
         }
@@ -59,7 +55,6 @@ class BuildTeamTool(TeamTool):
         # spec ceiling. Explicit values set the runtime instance flag
         # (subject to the spec ceiling check).
         enable_hitt_arg = inputs.get("enable_hitt")
-        enable_task_verification_arg = inputs.get("enable_task_verification")
         await self.team.build_team(
             display_name=display_name,
             desc=inputs.get("team_desc"),
@@ -67,7 +62,6 @@ class BuildTeamTool(TeamTool):
             leader_desc=inputs["leader_desc"],
             overrides=CapabilityOverrides(
                 enable_hitt=enable_hitt_arg,
-                enable_task_verification=enable_task_verification_arg,
             ),
         )
         return ToolOutput(
@@ -78,7 +72,6 @@ class BuildTeamTool(TeamTool):
                 "leader_member_name": self.team.member_name,
                 "leader_display_name": leader_display_name,
                 "enable_hitt": self.team.hitt_enabled(),
-                "enable_task_verification": self.team.task_verification_enabled(),
             },
         )
 
@@ -91,8 +84,7 @@ class BuildTeamTool(TeamTool):
             f"display_name={d.get('display_name')} "
             f"leader_member_name={d.get('leader_member_name')} "
             f"leader_display_name={d.get('leader_display_name')} "
-            f"hitt_enabled={d.get('enable_hitt')} "
-            f"task_verification={d.get('enable_task_verification')}"
+            f"hitt_enabled={d.get('enable_hitt')}"
         )
 
 
