@@ -52,11 +52,16 @@ from openjiuwen.agent_teams.observability.semconv import (
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
     LANGFUSE_SESSION_ID,
+    LANGFUSE_TRACE_NAME,
+    LANGFUSE_TRACE_TAGS,
 )
 from openjiuwen.agent_teams.observability.span_context import (
     cascade_close_children,
+    clear_ambient_root_span,
     get_current_agent_span,
     get_current_tool_span,
+    get_trace_root_span,
+    set_ambient_root_span,
     set_current_agent_span,
     get_team_span,
     _tool_span_map,
@@ -175,6 +180,7 @@ class ObservabilityRail(DeepAgentRail):
     """Create an AGENT span around each outer task-loop iteration."""
 
     priority: int = 10
+    _ROOT_CTX_KEY = "_otel_standalone_root_span"
 
     def __init__(self, *, tracer: Tracer | None = None) -> None:
         super().__init__()
@@ -382,6 +388,7 @@ class ObservabilityRail(DeepAgentRail):
 
             inputs = ctx.inputs
             agent = ctx.agent
+            self._open_standalone_root_if_needed(ctx)
 
             # Decide by execution mode, NOT by whether an iteration span is
             # already open: BEFORE_INVOKE fires BEFORE BEFORE_TASK_ITERATION,
@@ -407,9 +414,6 @@ class ObservabilityRail(DeepAgentRail):
 
             team_span = get_team_span()
             if team_span is None:
-                # No team context (e.g. subagent invoked outside a team) —
-                # there is no parent span to attach to, so skip rather than
-                # create an orphan root span.
                 return
             if not team_span.is_recording():
                 return
@@ -517,7 +521,8 @@ class ObservabilityRail(DeepAgentRail):
         try:
             scope: AgentSpanScope | None = AgentSpanScope.detach(ctx)
             if scope is None or scope.kind != AgentSpanScope.KIND_INVOKE:
-                # before_invoke skipped (multi-round path) — nothing to close.
+                # before_invoke skipped the invoke-tier span (multi-round path).
+                self._close_standalone_root(ctx)
                 return
             if scope.span is self._open_invoke_span:
                 self._open_invoke_span = None
@@ -528,6 +533,7 @@ class ObservabilityRail(DeepAgentRail):
                 output = getattr(inputs, "result", None)
 
             scope.close(output=output, exception=ctx.exception)
+            self._close_standalone_root(ctx)
 
             team_logger.debug(
                 "otel rail: invoke span closed: name={} span_id={:016x}",
@@ -539,6 +545,95 @@ class ObservabilityRail(DeepAgentRail):
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
+
+    def _open_standalone_root_if_needed(self, ctx: AgentCallbackContext) -> Span | None:
+        """Open an agent root span for standalone DeepAgent invokes.
+
+        Team runs already have a ``team.<name>`` root span created by the team
+        runner. Standalone DeepAgent runs do not, so they need a root that
+        task-iteration, invoke, LLM, and tool spans can share.
+        """
+        existing = ctx.extra.get(self._ROOT_CTX_KEY)
+        if existing is not None and existing.is_recording():
+            return existing
+
+        team_span = get_team_span()
+        if team_span is not None:
+            return None
+        current_agent_span = get_current_agent_span()
+        if current_agent_span is not None and current_agent_span.is_recording():
+            return None
+
+        agent = ctx.agent
+        if getattr(agent, "team_name", ""):
+            return None
+
+        member_name = self._resolve_member_name(agent) or "unknown"
+        span = self._tracer().start_span(
+            name=f"agent.{member_name}",
+            kind=SpanKind.SERVER,
+            context=otel_context.Context(),
+        )
+
+        session_id = ""
+        session = getattr(ctx, "session", None)
+        if session is not None and hasattr(session, "get_session_id"):
+            try:
+                session_id = session.get_session_id() or ""
+            except Exception as exc:
+                team_logger.warning("rail: failed to get standalone session_id: {}", exc)
+
+        self._stamp_agent_attributes(
+            span,
+            agent=agent,
+            member_name=member_name,
+            team_name="",
+            session_id=session_id,
+            is_leader=False,
+        )
+        span.set_attribute(LANGFUSE_TRACE_NAME, f"agent.{member_name}")
+        span.set_attribute(LANGFUSE_TRACE_TAGS, ["standalone", member_name])
+
+        query = getattr(ctx.inputs, "query", "") or ""
+        if query:
+            from openjiuwen.agent_teams.observability.setup import get_config
+            config = get_config()
+            redacted_query = redact_prompt(query, config) if config else str(query)
+            span.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_query)
+            span.set_attribute(AT_AGENT_INPUT, redacted_query)
+
+        ctx.extra[self._ROOT_CTX_KEY] = span
+        set_ambient_root_span(span)
+        root_ctx = set_span_in_context(span, otel_context.get_current())
+        otel_context.attach(root_ctx)
+        return span
+
+    def _close_standalone_root(self, ctx: AgentCallbackContext) -> None:
+        span = ctx.extra.pop(self._ROOT_CTX_KEY, None)
+        if span is None:
+            return
+        try:
+            output = None
+            inputs = getattr(ctx, "inputs", None)
+            if inputs is not None:
+                output = getattr(inputs, "result", None)
+            if output:
+                from openjiuwen.agent_teams.observability.setup import get_config
+                config = get_config()
+                output_str = str(output)
+                redacted = redact_completion(output_str, config) if config else output_str
+                span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
+                span.set_attribute(AT_AGENT_OUTPUT, redacted)
+            if ctx.exception is not None:
+                span.record_exception(ctx.exception)
+                span.set_status(Status(StatusCode.ERROR, str(ctx.exception)))
+            else:
+                span.set_status(Status(StatusCode.OK))
+            if span.is_recording():
+                span.end()
+        finally:
+            if get_trace_root_span() is span:
+                clear_ambient_root_span()
 
     def _drain_or_clear_stale(self, member_name: str) -> None:
         """Resolve a leftover agent span in the current context before opening a new one.

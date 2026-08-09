@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Dict
+from typing import TYPE_CHECKING, Any, List, Optional, Dict
 from os import PathLike
 
 from openjiuwen.core.common.logging import logger
@@ -41,6 +41,9 @@ from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.observability import ObservabilityConfig
 
 
 def _collect_disabled_skills_from_state(skills_dirs: list[str]) -> list[str]:
@@ -226,6 +229,7 @@ def resolve_deep_agent_parts(
     enable_security_rail: bool = True,
     enable_llm_retry_rail: bool = True,
     enable_sys_operation: bool = True,
+    observability_config: ObservabilityConfig | None = None,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -366,6 +370,18 @@ def resolve_deep_agent_parts(
     def _already_provided(rail_cls: type) -> bool:
         return any(issubclass(t, rail_cls) for t in user_provided_rail_types)
 
+    if observability_config is not None and observability_config.enabled:
+        from openjiuwen.agent_teams.observability import (
+            ObservabilityRail,
+            init_observability,
+            is_initialized,
+        )
+
+        if not is_initialized():
+            init_observability(observability_config)
+        if not _already_provided(ObservabilityRail):
+            all_rails.append(ObservabilityRail())
+
     def _make_skill_rail() -> SkillUseRail:
         skills_dirs: list[str] = []
         skills_base = workspace_obj.get_node_path("skills")
@@ -486,6 +502,7 @@ def create_deep_agent(
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
     enable_llm_retry_rail: bool = True,
+    observability_config: ObservabilityConfig | None = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -579,6 +596,7 @@ def create_deep_agent(
         parallel_tool_calls=parallel_tool_calls,
         enable_security_rail=enable_security_rail,
         enable_llm_retry_rail=enable_llm_retry_rail,
+        observability_config=observability_config,
         **config_kwargs,
     )
     agent = DeepAgent(parts.config.card)
