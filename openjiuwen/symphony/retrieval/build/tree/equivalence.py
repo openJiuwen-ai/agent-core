@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from collections import Counter
+from itertools import combinations
 import re
 
 from .mixin import TreeBuilderMixin
-from .prompts import EQUIVALENCE_GROUPING_PROMPT
+from .prompts import EQUIVALENCE_GROUPING_PROMPT, EQUIVALENCE_PAIRWISE_PROMPT
 from .repair import TreeRepairEngine as _TreeRepairEngine
 from .schema import TreeNode
 from .shared import _GENERIC_TERMS, console
+
+
+_PAIRWISE_BATCH_SIZE = 24
+_PAIRWISE_DESCRIPTION_LIMIT = 800
 
 
 class TreeBuilderEquivalenceMixin(TreeBuilderMixin):
@@ -34,7 +40,27 @@ class TreeBuilderEquivalenceMixin(TreeBuilderMixin):
         leaf_children: list[TreeNode],
         verbose: bool = False,
     ) -> dict:
-        """Ask LLM to partition second-leaf children into equivalence groups."""
+        """Recall candidate groups, verify their pairs, then form deterministic components."""
+        candidate_groups = self._discover_equivalence_candidates(second_leaf_node, leaf_children, verbose)
+        if not candidate_groups:
+            return {}
+
+        leaf_map = {leaf.id: leaf for leaf in leaf_children}
+        candidate_pairs = self._candidate_pairs_from_groups(leaf_map, candidate_groups)
+        decisions = self._judge_candidate_pairs(second_leaf_node, leaf_map, candidate_pairs)
+        components = self._equivalent_components(sorted(leaf_map), decisions)
+        final_groups: dict[str, dict] = {}
+        for group_index, component in enumerate(components, start=1):
+            metadata = self._component_metadata(component, leaf_map, decisions)
+            final_groups[f"g{group_index}"] = {**metadata, "leaf_ids": component}
+        return final_groups
+
+    def _discover_equivalence_candidates(
+        self,
+        second_leaf_node: TreeNode,
+        leaf_children: list[TreeNode],
+        verbose: bool,
+    ) -> dict:
         leaf_lines = []
         for leaf in leaf_children:
             sample_skill_ids = ", ".join(skill.id for skill in leaf.skills[:5]) or "(none)"
@@ -54,13 +80,242 @@ class TreeBuilderEquivalenceMixin(TreeBuilderMixin):
             leaf_nodes="\n".join(leaf_lines),
             max_groups=self.settings.equiv_max_groups_per_parent,
         )
-        result = self._call_llm_json(prompt)
-        groups = result.get("groups", {})
-        if not isinstance(groups, dict):
+        expected_ids = {leaf.id for leaf in leaf_children}
+        try:
+            return self._validate_candidate_response(self._call_llm_json(prompt), expected_ids)
+        except ValueError as error:
             if verbose:
-                console.print(f"[yellow]  Equivalence grouping failed for '{second_leaf_node.id}'[/yellow]")
-            return {}
+                console.print(
+                    f"[yellow]  Correcting invalid equivalence candidates for '{second_leaf_node.id}': {error}[/yellow]"
+                )
+            correction_prompt = (
+                f"{prompt}\n\nYour previous response violated the required schema: {error}. "
+                "Return corrected groups that cover every provided leaf id at least once."
+            )
+            payload = self._call_llm_json(correction_prompt, is_retry=True)
+            return self._validate_candidate_response(payload, expected_ids)
+
+    @staticmethod
+    def _validate_candidate_response(payload: dict, expected_ids: set[str]) -> dict:
+        groups = payload.get("groups") if isinstance(payload, dict) else None
+        if not isinstance(groups, dict) or not groups:
+            raise ValueError("Equivalence candidate response must contain non-empty groups")
+
+        covered_ids: set[str] = set()
+        for group_data in groups.values():
+            if not isinstance(group_data, dict):
+                raise ValueError("Equivalence candidate groups must be objects")
+            raw_ids = group_data.get("leaf_ids")
+            if not isinstance(raw_ids, list) or not raw_ids:
+                raise ValueError("Every equivalence candidate group must contain leaf_ids")
+            for raw_id in raw_ids:
+                leaf_id = str(raw_id).strip()
+                if leaf_id not in expected_ids:
+                    raise ValueError(f"Equivalence candidate response has unknown leaf id: {leaf_id!r}")
+                covered_ids.add(leaf_id)
+
+        missing = sorted(expected_ids - covered_ids)
+        if missing:
+            raise ValueError(f"Equivalence candidate response omitted {len(missing)} leaf ids")
         return groups
+
+    def _candidate_pairs_from_groups(
+        self,
+        leaf_map: dict[str, TreeNode],
+        candidate_groups: dict,
+    ) -> list[tuple[str, str]]:
+        candidate_pairs: set[tuple[str, str]] = set()
+        for _, candidate_data in self._iter_group_items(candidate_groups):
+            if not isinstance(candidate_data, dict):
+                continue
+            raw_ids = candidate_data.get("leaf_ids", [])
+            if not isinstance(raw_ids, list):
+                continue
+            member_ids: set[str] = set()
+            for raw_id in raw_ids:
+                leaf_id = str(raw_id).strip()
+                if leaf_id in leaf_map:
+                    member_ids.add(leaf_id)
+            candidate_pairs.update(combinations(sorted(member_ids), 2))
+        return sorted(candidate_pairs)
+
+    def _judge_candidate_pairs(
+        self,
+        parent: TreeNode,
+        leaf_map: dict[str, TreeNode],
+        pairs: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], dict]:
+        decisions: dict[tuple[str, str], dict] = {}
+        for start in range(0, len(pairs), _PAIRWISE_BATCH_SIZE):
+            end = start + _PAIRWISE_BATCH_SIZE
+            batch = pairs[start:end]
+            prompt, pair_refs = self._pairwise_prompt(parent, leaf_map, batch, start)
+            payload = self._call_llm_json(prompt)
+            try:
+                validated = self._validate_pairwise_response(payload, pair_refs)
+            except ValueError as error:
+                correction_prompt = (
+                    f"{prompt}\n\nYour previous response violated the required schema: {error}. "
+                    "Return a corrected JSON object covering every pair_id exactly once."
+                )
+                payload = self._call_llm_json(correction_prompt, is_retry=True)
+                validated = self._validate_pairwise_response(payload, pair_refs)
+            decisions.update(validated)
+        return decisions
+
+    def _pairwise_prompt(
+        self,
+        parent: TreeNode,
+        leaf_map: dict[str, TreeNode],
+        pairs: list[tuple[str, str]],
+        offset: int,
+    ) -> tuple[str, dict[str, tuple[str, str]]]:
+        unique_ids: set[str] = set()
+        for left_id, right_id in pairs:
+            unique_ids.add(left_id)
+            unique_ids.add(right_id)
+        leaf_refs = {leaf_id: f"l{index:04d}" for index, leaf_id in enumerate(sorted(unique_ids), start=1)}
+        leaf_lines = []
+        for leaf_id in sorted(unique_ids):
+            leaf = leaf_map[leaf_id]
+            description = str(leaf.description or "(no description)")[:_PAIRWISE_DESCRIPTION_LIMIT]
+            leaf_lines.append(
+                f"- ref: {leaf_refs[leaf_id]}\n"
+                f"  name: {leaf.name}\n"
+                f"  description: {description}\n"
+                f"  select_when: {str(leaf.select_when or '')[:400]}\n"
+                f"  dont_select_when: {str(leaf.dont_select_when or '')[:400]}"
+            )
+
+        pair_refs: dict[str, tuple[str, str]] = {}
+        pair_lines = []
+        for index, (left_id, right_id) in enumerate(pairs, start=offset + 1):
+            pair_id = f"p{index:05d}"
+            pair_refs[pair_id] = (left_id, right_id)
+            pair_lines.append(f"- pair_id: {pair_id}; left: {leaf_refs[left_id]}; right: {leaf_refs[right_id]}")
+
+        prompt = EQUIVALENCE_PAIRWISE_PROMPT.format(
+            parent_id=parent.id,
+            parent_name=parent.name,
+            parent_description=parent.description or "(no description)",
+            leaf_nodes="\n".join(leaf_lines),
+            candidate_pairs="\n".join(pair_lines),
+        )
+        return prompt, pair_refs
+
+    @staticmethod
+    def _validate_pairwise_response(
+        payload: dict,
+        pair_refs: dict[str, tuple[str, str]],
+    ) -> dict[tuple[str, str], dict]:
+        raw_decisions = payload.get("decisions") if isinstance(payload, dict) else None
+        if not isinstance(raw_decisions, list):
+            raise ValueError("Pairwise equivalence response must contain a decisions list")
+        decisions: dict[tuple[str, str], dict] = {}
+        seen_refs: set[str] = set()
+        for item in raw_decisions:
+            if not isinstance(item, dict):
+                raise ValueError("Pairwise equivalence decisions must be objects")
+            pair_id = str(item.get("pair_id") or "").strip()
+            if pair_id not in pair_refs or pair_id in seen_refs:
+                raise ValueError(f"Pairwise equivalence response has invalid pair id: {pair_id!r}")
+            similar = item.get("similar")
+            if not isinstance(similar, bool):
+                raise ValueError(f"Pairwise equivalence decision {pair_id!r} must use a boolean similar value")
+            shared_capability = str(item.get("shared_capability") or "").strip()
+            if similar and not shared_capability:
+                raise ValueError(f"Similar pair {pair_id!r} must include shared_capability")
+            seen_refs.add(pair_id)
+            decisions[pair_refs[pair_id]] = {
+                "similar": similar,
+                "shared_capability": shared_capability,
+            }
+        missing = sorted(set(pair_refs) - seen_refs)
+        if missing:
+            raise ValueError(f"Pairwise equivalence response omitted {len(missing)} candidate pairs")
+        return decisions
+
+    @staticmethod
+    def _equivalent_components(
+        member_ids: list[str],
+        decisions: dict[tuple[str, str], dict],
+    ) -> list[list[str]]:
+        components = [[leaf_id] for leaf_id in sorted(member_ids)]
+        while True:
+            best_merge: tuple[int, tuple[str, ...], int, int] | None = None
+            for left_index, left_members in enumerate(components):
+                for right_index in range(left_index + 1, len(components)):
+                    right_members = components[right_index]
+                    if not TreeBuilderEquivalenceMixin._components_are_compatible(
+                        left_members,
+                        right_members,
+                        decisions,
+                    ):
+                        continue
+                    merged = tuple(sorted([*left_members, *right_members]))
+                    candidate = (-len(merged), merged, left_index, right_index)
+                    if best_merge is None or candidate < best_merge:
+                        best_merge = candidate
+            if best_merge is None:
+                break
+            _, merged, left_index, right_index = best_merge
+            for index in sorted((left_index, right_index), reverse=True):
+                components.pop(index)
+            components.append(list(merged))
+            components.sort(key=lambda members: members[0])
+        return sorted(components, key=lambda members: tuple(members))
+
+    @staticmethod
+    def _components_are_compatible(
+        left_members: list[str],
+        right_members: list[str],
+        decisions: dict[tuple[str, str], dict],
+    ) -> bool:
+        for left_id in left_members:
+            for right_id in right_members:
+                pair = (left_id, right_id) if left_id < right_id else (right_id, left_id)
+                if not decisions.get(pair, {}).get("similar"):
+                    return False
+        return True
+
+    @staticmethod
+    def _component_metadata(
+        component: list[str],
+        leaf_map: dict[str, TreeNode],
+        decisions: dict[tuple[str, str], dict],
+    ) -> dict:
+        if len(component) == 1:
+            leaf = leaf_map[component[0]]
+            return {
+                "name": leaf.name or leaf.id,
+                "description": leaf.description,
+                "select_when": leaf.select_when,
+                "dont_select_when": leaf.dont_select_when,
+            }
+
+        labels: list[str] = []
+        members = set(component)
+        for (left_id, right_id), decision in decisions.items():
+            label = str(decision.get("shared_capability") or "").strip()
+            if not decision.get("similar") or not label:
+                continue
+            if left_id in members and right_id in members:
+                labels.append(label)
+        if labels:
+            counts = Counter(labels)
+            name = min(counts, key=lambda item: (-counts[item], len(item), item.casefold(), item))
+        else:
+            name = leaf_map[component[0]].name or component[0]
+
+        description = f"Skill implementations with the shared capability: {name}."
+        select_when = f"Route here when the user needs {name}."
+        dont_select_when = "Do not route here when the primary requested capability is different."
+        return {
+            "name": name,
+            "description": description,
+            "select_when": select_when,
+            "dont_select_when": dont_select_when,
+        }
 
     def _normalize_equivalence_groups(self, leaf_children: list[TreeNode], groups: dict) -> list[dict]:
         """
