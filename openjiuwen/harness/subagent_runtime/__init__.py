@@ -39,11 +39,13 @@ from openjiuwen.harness.subagent_runtime.persistence import (
 )
 from openjiuwen.harness.subagent_runtime.registry import SpawnReservation, SubagentRegistry
 from openjiuwen.harness.subagent_runtime.status import StatusChannel, StatusReceiver
+from openjiuwen.harness.subagent_runtime.status_events import SUBAGENT_UPDATED_EVENT_TYPE
 from openjiuwen.harness.subagent_runtime.stream_output import TurnOutputAggregator
 
 __all__ = [
     "DEFAULT_SNAPSHOT_PAGE_SIZE",
     "SUBAGENTS_KEY",
+    "SUBAGENT_UPDATED_EVENT_TYPE",
     "WAIT_TIMEOUT_MS_DEFAULT",
     "WAIT_TIMEOUT_MS_MAX",
     "WAIT_TIMEOUT_MS_MIN",

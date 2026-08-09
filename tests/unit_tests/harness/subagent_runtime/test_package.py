@@ -11,6 +11,7 @@ def test_public_exports_match_all() -> None:
     assert set(subagent_runtime.__all__) == {
         "DEFAULT_SNAPSHOT_PAGE_SIZE",
         "SUBAGENTS_KEY",
+        "SUBAGENT_UPDATED_EVENT_TYPE",
         "WAIT_TIMEOUT_MS_DEFAULT",
         "WAIT_TIMEOUT_MS_MAX",
         "WAIT_TIMEOUT_MS_MIN",
