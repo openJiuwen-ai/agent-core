@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from openjiuwen.symphony.shared.rich_compat import Console, Panel
 
-from .schema import TreeNode
+from .schema import FIXED_ROOT_CATEGORIES, TreeNode
 
 if TYPE_CHECKING:
     from .builder import TreeBuilder
@@ -140,6 +140,15 @@ class TreeRepairEngine:
         return [skill_data for _, skill_data in self.collect_subtree_skill_locations(node)]
 
     def normalize_to_equivalence_groups(self, root: TreeNode, verbose: bool = False) -> None:
+        configured_terminal_paths = self._configured_terminal_paths(root.id)
+        if configured_terminal_paths:
+            self._normalize_configured_scopes(
+                root,
+                path=(root.id,),
+                terminal_paths=configured_terminal_paths,
+                verbose=verbose,
+            )
+            return
         if root.is_leaf:
             return
         updated_children: list[TreeNode] = []
@@ -157,6 +166,125 @@ class TreeRepairEngine:
         if verbose and split_count > 0:
             console.print(
                 f"[dim]  Equivalence regrouping updated {split_count} second-leaf nodes under '{root.id}'[/dim]"
+            )
+
+    def _configured_terminal_paths(self, root_id: str) -> set[tuple[str, ...]]:
+        config = getattr(self._builder, "config", None)
+        categories = getattr(config, "root_categories", None) or FIXED_ROOT_CATEGORIES
+        terminal_paths: set[tuple[str, ...]] = set()
+
+        def visit(entries: dict, parent_path: tuple[str, ...]) -> None:
+            for category_id, raw_payload in entries.items():
+                path = (*parent_path, str(category_id))
+                payload = raw_payload if isinstance(raw_payload, dict) else {}
+                children = payload.get("children")
+                if isinstance(children, dict) and children:
+                    visit(children, path)
+                else:
+                    terminal_paths.add(path)
+
+        visit(categories, (str(root_id),))
+        return terminal_paths
+
+    def _normalize_configured_scopes(
+        self,
+        node: TreeNode,
+        *,
+        path: tuple[str, ...],
+        terminal_paths: set[tuple[str, ...]],
+        verbose: bool,
+    ) -> None:
+        if path in terminal_paths:
+            self._normalize_configured_scope(node, verbose=verbose)
+            return
+        for child in node.children:
+            self._normalize_configured_scopes(
+                child,
+                path=(*path, child.id),
+                terminal_paths=terminal_paths,
+                verbose=verbose,
+            )
+
+    def _normalize_configured_scope(self, scope: TreeNode, *, verbose: bool) -> None:
+        builder = self._builder
+        skills = sorted(scope.collect_all_skills(), key=lambda item: item.id)
+        if not skills:
+            return
+        skill_leaves = [
+            TreeNode(
+                id=skill.id,
+                name=skill.name,
+                description=skill.description or skill.source_description,
+                select_when=skill.select_when,
+                dont_select_when=skill.dont_select_when,
+                skills=[skill],
+                depth=scope.depth + 1,
+                parent_id=scope.id,
+            )
+            for skill in skills
+        ]
+        if len(skill_leaves) == 1:
+            only_leaf = skill_leaves[0]
+            normalized_groups = [
+                {
+                    "id": only_leaf.id,
+                    "name": only_leaf.name,
+                    "description": only_leaf.description,
+                    "select_when": only_leaf.select_when,
+                    "dont_select_when": only_leaf.dont_select_when,
+                    "leaf_nodes": [only_leaf],
+                }
+            ]
+        else:
+            groups = builder.operations.discover_equivalence_groups(scope, skill_leaves, verbose=verbose)
+            if not groups:
+                return
+            normalized_groups = builder.operations.normalize_equivalence_groups(skill_leaves, groups)
+            if not normalized_groups:
+                return
+
+        expected_ids = {skill.id for skill in skills}
+        actual_ids: set[str] = set()
+        for group in normalized_groups:
+            for leaf in group.get("leaf_nodes", []):
+                actual_ids.update(skill.id for skill in leaf.skills)
+        if actual_ids != expected_ids:
+            return
+
+        replacement_nodes: list[TreeNode] = []
+        used_ids: set[str] = set()
+        for index, group in enumerate(normalized_groups, start=1):
+            base_id = builder.operations.build_equivalence_group_id(
+                group_id=str(group.get("id") or "").strip(),
+                group_name=str(group.get("name") or "").strip(),
+                fallback=f"{scope.id}-equiv-{index}",
+            )
+            group_id = base_id
+            suffix = 2
+            while group_id in used_ids:
+                group_id = f"{base_id}-{suffix}"
+                suffix += 1
+            used_ids.add(group_id)
+            group_skills = [skill for leaf in group.get("leaf_nodes", []) for skill in leaf.skills]
+            for skill in group_skills:
+                skill.path = group_id
+            replacement_nodes.append(
+                TreeNode(
+                    id=group_id,
+                    name=str(group.get("name") or group_id),
+                    description=str(group.get("description") or scope.description),
+                    select_when=str(group.get("select_when") or ""),
+                    dont_select_when=str(group.get("dont_select_when") or ""),
+                    skills=group_skills,
+                    depth=scope.depth + 1,
+                    parent_id=scope.id,
+                )
+            )
+        scope.skills = []
+        scope.children = sorted(replacement_nodes, key=lambda item: item.id)
+        if verbose:
+            console.print(
+                f"[dim]  Equivalence regrouping created {len(replacement_nodes)} groups under '{scope.id}'[/dim]"
             )
 
     @staticmethod

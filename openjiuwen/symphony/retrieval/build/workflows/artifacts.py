@@ -46,7 +46,7 @@ class BuildConfig:
     tree_equiv_grouping_enabled: bool = True
     tree_equiv_max_groups_per_parent: int = 6
     tree_equiv_allow_singleton_groups: bool = True
-    tree_equiv_min_lexical_similarity: float = 0.12
+    tree_equiv_min_lexical_similarity: float = 0.0
     tree_deterministic_prompts: bool = True
     tree_discovery_seed: int = 42
     tree_prompt_fingerprint_version: str = "v1"
