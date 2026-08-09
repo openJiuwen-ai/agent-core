@@ -166,9 +166,6 @@ class SubagentSessionManager:
     def list_ids(self) -> list[str]:
         return list(self._instances.keys())
 
-    async def persist(self, subagent_id: str) -> None:
-        _ = subagent_id
-
     async def restore(
         self,
         *,

@@ -17,7 +17,8 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.control import SubagentControl
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
-from openjiuwen.harness.subagent_runtime.models import SubagentStatusKind, UserInputOp
+from openjiuwen.harness.subagent_runtime.models import SubagentRecord, SubagentStatusKind, UserInputOp
+from openjiuwen.harness.subagent_runtime.persistence import merge_subagent_bucket, read_subagent_bucket
 from tests.unit_tests.harness.subagent_runtime.test_instance import MockAgent
 from tests.unit_tests.harness.subagent_runtime.test_session_manager import MockParentAgent, MockSession as ManagerSession
 
@@ -599,6 +600,147 @@ async def test_resume_missing_closed_record_raises_not_found() -> None:
     async with _patched_control() as control:
         with pytest.raises(AgentError):
             await control.resume("missing-id")
+
+
+
+@pytest.mark.asyncio
+async def test_append_turn_without_wait() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent(output="done", delay_s=0.05))
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "background")
+        await _wait_for_turn(parent.mock_agent)
+
+        turns = control._turns.get(spawned.subagent_id) or []
+        assert len(turns) == 1
+        assert turns[0].prompt == "background"
+        assert turns[0].answer == "done"
+        assert turns[0].closed_reason == "completed"
+
+
+@pytest.mark.asyncio
+async def test_send_input_records_distinct_turns() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent(output="first", delay_s=0.05))
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "first")
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
+
+        parent.mock_agent.output = "second"
+        instance = control._manager.get(spawned.subagent_id)
+        instance._agent.output = "second"
+        await control.send_input(spawned.subagent_id, "second prompt")
+        await _wait_for_turn(parent.mock_agent)
+
+        turns = control._turns[spawned.subagent_id]
+        assert len(turns) == 2
+        assert turns[0].prompt == "first"
+        assert turns[1].prompt == "second prompt"
+
+
+@pytest.mark.asyncio
+async def test_close_flushes_record_to_parent_session() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    session = Session(session_id="parent")
+    async with _patched_control(parent=parent) as control:
+        control._parent_session = session
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
+        await control.close(spawned.subagent_id, reason="manual")
+
+        bucket = read_subagent_bucket(session)
+        assert spawned.subagent_id in bucket["records"]
+        assert bucket["records"][spawned.subagent_id]["closed_reason"] == "manual"
+        assert spawned.subagent_id in bucket["turns"]
+
+
+@pytest.mark.asyncio
+async def test_hydrate_restores_closed_records_and_turns() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    session = Session(session_id="parent")
+    async with _patched_control(parent=parent) as control:
+        control._parent_session = session
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
+        await control.close(spawned.subagent_id, reason="manual")
+
+    fresh = SubagentControl(parent, "parent", parent_session=session)
+    fresh.hydrate()
+
+    assert spawned.subagent_id in fresh._closed_records
+    assert fresh._turns[spawned.subagent_id][0].prompt == "hello"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_returns_subagents_and_turns() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+
+        snapshot = control.snapshot()
+        assert any(row["subagent_id"] == spawned.subagent_id for row in snapshot.subagents)
+        assert len(snapshot.turns) == 1
+        assert snapshot.turns[0].prompt == "hello"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_pagination_cursor() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent(output="done", delay_s=0.02))
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "one")
+        await _wait_for_turn(parent.mock_agent)
+        instance = control._manager.get(spawned.subagent_id)
+        instance._agent.output = "two"
+        await control.send_input(spawned.subagent_id, "two")
+        await _wait_for_turn(parent.mock_agent)
+        instance._agent.output = "three"
+        await control.send_input(spawned.subagent_id, "three")
+        await _wait_for_turn(parent.mock_agent)
+
+        first_page = control.snapshot(page_size=2)
+        assert len(first_page.turns) == 2
+        assert first_page.cursor is not None
+
+        second_page = control.snapshot(cursor=first_page.cursor, page_size=2)
+        assert len(second_page.turns) == 1
+        assert second_page.cursor is None
+
+
+@pytest.mark.asyncio
+async def test_flush_without_parent_session_is_noop() -> None:
+    control = _control()
+    control.flush()
+
+
+@pytest.mark.asyncio
+async def test_hydrate_live_record_becomes_parent_ended() -> None:
+    session = Session(session_id="parent")
+    merge_subagent_bucket(
+        session,
+        {
+            "records": {
+                "sid-live": SubagentRecord(
+                    subagent_id="sid-live",
+                    subagent_type="explore",
+                    display_name="Explorer",
+                    role="r",
+                    task_description="hello",
+                    created_at_ms=1.0,
+                    updated_at_ms=2.0,
+                ).to_dict(),
+            },
+        },
+    )
+    control = SubagentControl(ControlParentAgent(), "parent", parent_session=session)
+    control.hydrate()
+
+    record = control._closed_records["sid-live"]
+    assert record.closed_reason == "parent_ended"
+    payload = control.describe_one("sid-live")
+    assert payload is not None
+    assert payload["closed_reason"] == "parent_ended"
 
 
 @pytest.mark.asyncio

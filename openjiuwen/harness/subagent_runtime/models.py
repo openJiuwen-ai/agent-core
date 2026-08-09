@@ -143,14 +143,107 @@ class WaitResult:
 
 
 @dataclass(frozen=True)
-class ClosedSubagentRecord:
-    """Metadata retained after an instance leaves memory, so resume can rebuild it."""
+class SubagentRecord:
+    """Persistable record for one subagent under a parent session."""
 
     subagent_id: str
     subagent_type: str
     display_name: str
     role: str
     task_description: str
-    closed_reason: str
-    closed_at_ms: float
     created_at_ms: float
+    updated_at_ms: float
+    closed_at_ms: float | None = None
+    closed_reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "subagent_id": self.subagent_id,
+            "subagent_type": self.subagent_type,
+            "display_name": self.display_name,
+            "role": self.role,
+            "task_description": self.task_description,
+            "created_at_ms": self.created_at_ms,
+            "updated_at_ms": self.updated_at_ms,
+            "closed_at_ms": self.closed_at_ms,
+            "closed_reason": self.closed_reason,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> SubagentRecord:
+        return cls(
+            subagent_id=str(raw.get("subagent_id") or ""),
+            subagent_type=str(raw.get("subagent_type") or ""),
+            display_name=str(raw.get("display_name") or ""),
+            role=str(raw.get("role") or ""),
+            task_description=str(raw.get("task_description") or ""),
+            created_at_ms=float(raw.get("created_at_ms") or 0.0),
+            updated_at_ms=float(raw.get("updated_at_ms") or 0.0),
+            closed_at_ms=_optional_float(raw.get("closed_at_ms")),
+            closed_reason=_optional_str(raw.get("closed_reason")),
+        )
+
+    @property
+    def is_closed(self) -> bool:
+        return self.closed_at_ms is not None
+
+
+@dataclass(frozen=True)
+class SubagentTurn:
+    """One subagent turn: parent prompt and final answer."""
+
+    subagent_id: str
+    task_id: str
+    seq: int
+    prompt: str
+    answer: str | None
+    closed_reason: str | None
+    created_at_ms: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "subagent_id": self.subagent_id,
+            "task_id": self.task_id,
+            "seq": self.seq,
+            "prompt": self.prompt,
+            "answer": self.answer,
+            "closed_reason": self.closed_reason,
+            "created_at_ms": self.created_at_ms,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> SubagentTurn:
+        return cls(
+            subagent_id=str(raw.get("subagent_id") or ""),
+            task_id=str(raw.get("task_id") or ""),
+            seq=int(raw.get("seq") or 0),
+            prompt=str(raw.get("prompt") or ""),
+            answer=_optional_str(raw.get("answer")),
+            closed_reason=_optional_str(raw.get("closed_reason")),
+            created_at_ms=float(raw.get("created_at_ms") or 0.0),
+        )
+
+
+@dataclass(frozen=True)
+class SubagentSnapshot:
+    """Read-only parent-session view of subagents and qa history."""
+
+    subagents: list[dict[str, Any]]
+    turns: list[SubagentTurn]
+    cursor: str | None
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

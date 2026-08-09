@@ -9,10 +9,12 @@ import openjiuwen.harness.subagent_runtime as subagent_runtime
 
 def test_public_exports_match_all() -> None:
     assert set(subagent_runtime.__all__) == {
+        "DEFAULT_SNAPSHOT_PAGE_SIZE",
+        "SUBAGENTS_KEY",
         "WAIT_TIMEOUT_MS_DEFAULT",
         "WAIT_TIMEOUT_MS_MAX",
         "WAIT_TIMEOUT_MS_MIN",
-        "ClosedSubagentRecord",
+        "SubagentTurn",
         "ShutdownOp",
         "SpawnReservation",
         "SpawnResult",
@@ -22,9 +24,11 @@ def test_public_exports_match_all() -> None:
         "SubagentInstance",
         "SubagentMetadata",
         "SubagentOp",
+        "SubagentRecord",
         "SubagentRegistry",
         "SubagentRuntimeConfig",
         "SubagentSessionManager",
+        "SubagentSnapshot",
         "SubagentStatus",
         "SubagentStatusKind",
         "TurnOutputAggregator",
@@ -32,9 +36,11 @@ def test_public_exports_match_all() -> None:
         "WaitResult",
         "build_subagent_id",
         "build_subagent_runtime_error",
+        "merge_subagent_bucket",
         "new_task_id",
         "raise_subagent_capacity_invalid",
         "raise_subagent_not_found",
+        "read_subagent_bucket",
         "resolve_presentation",
     }
 

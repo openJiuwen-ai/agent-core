@@ -21,14 +21,23 @@ from openjiuwen.harness.subagent_runtime.config import (
 from openjiuwen.harness.subagent_runtime.errors import build_subagent_runtime_error, raise_subagent_not_found
 from openjiuwen.harness.subagent_runtime.ids import build_subagent_id, new_task_id
 from openjiuwen.harness.subagent_runtime.models import (
-    ClosedSubagentRecord,
+    SubagentTurn,
     SpawnResult,
     SubagentMetadata,
+    SubagentRecord,
+    SubagentSnapshot,
     SubagentStatus,
     SubagentStatusKind,
     UserInputOp,
     WaitResult,
     resolve_presentation,
+)
+from openjiuwen.harness.subagent_runtime.persistence import (
+    DEFAULT_SNAPSHOT_PAGE_SIZE,
+    max_persisted_records,
+    merge_subagent_bucket,
+    read_subagent_bucket,
+    trim_persisted_bucket,
 )
 from openjiuwen.harness.subagent_runtime.registry import SpawnReservation, SubagentRegistry
 from openjiuwen.harness.subagent_runtime.session_manager import SubagentSessionManager
@@ -37,9 +46,26 @@ from openjiuwen.harness.subagent_runtime.status_events import (
     build_subagent_updated_payload,
     emit_subagent_updated,
     is_externally_closed,
+    map_status_to_view,
 )
 
 _TASK_DESCRIPTION_MAX_LEN = 2000
+
+
+def _cursor_start_index(turns: list[SubagentTurn], cursor: str | None) -> int:
+    if not cursor:
+        return 0
+    if ":" not in cursor:
+        return 0
+    subagent_id, _, seq_text = cursor.partition(":")
+    try:
+        seq = int(seq_text)
+    except ValueError:
+        return 0
+    for index, turn in enumerate(turns):
+        if turn.subagent_id == subagent_id and turn.seq > seq:
+            return index
+    return len(turns)
 
 
 class SubagentControl:
@@ -58,7 +84,10 @@ class SubagentControl:
         self._config = config or SubagentRuntimeConfig()
         self._registry = SubagentRegistry(self._config)
         self._semaphore = asyncio.Semaphore(self._config.max_concurrent_running)
-        self._closed_records: dict[str, ClosedSubagentRecord] = {}
+        self._closed_records: dict[str, SubagentRecord] = {}
+        self._turns: dict[str, list[SubagentTurn]] = {}
+        self._turn_seq: dict[str, int] = {}
+        self._hydrated = False
         self._manager = SubagentSessionManager(
             parent_agent,
             self._config,
@@ -353,7 +382,120 @@ class SubagentControl:
                 logger.warning("[SubagentControl] cancel_all failed: sid=%s", sid)
                 self._registry.release(sid)
             closed.append(sid)
+        self.flush()
         return closed
+
+    def hydrate(self) -> None:
+        """Load persisted subagent records and turns from the parent session."""
+        if self._hydrated or self._parent_session is None:
+            return
+        bucket = read_subagent_bucket(self._parent_session)
+        records = bucket.get("records") or {}
+        if isinstance(records, dict):
+            for sid, raw in records.items():
+                if not isinstance(raw, dict):
+                    continue
+                record = SubagentRecord.from_dict(raw)
+                if record.closed_at_ms is None:
+                    fallback_ms = record.updated_at_ms or record.created_at_ms
+                    record = SubagentRecord(
+                        subagent_id=record.subagent_id,
+                        subagent_type=record.subagent_type,
+                        display_name=record.display_name,
+                        role=record.role,
+                        task_description=record.task_description,
+                        created_at_ms=record.created_at_ms,
+                        updated_at_ms=record.updated_at_ms or fallback_ms,
+                        closed_at_ms=fallback_ms,
+                        closed_reason="parent_ended",
+                    )
+                self._closed_records[sid] = record
+
+        turns = bucket.get("turns") or {}
+        if isinstance(turns, dict):
+            for sid, raw_turns in turns.items():
+                if not isinstance(raw_turns, list):
+                    continue
+                items = [
+                    SubagentTurn.from_dict(item)
+                    for item in raw_turns
+                    if isinstance(item, dict)
+                ]
+                if not items:
+                    continue
+                items.sort(key=lambda item: item.seq)
+                self._turns[sid] = items
+                self._turn_seq[sid] = max(item.seq for item in items)
+        self._hydrated = True
+
+    def flush(self) -> None:
+        """Persist closed records and turns into the parent session state."""
+        if self._parent_session is None:
+            return
+        try:
+            bucket = read_subagent_bucket(self._parent_session)
+            records: dict[str, Any] = dict(bucket.get("records") or {})
+            turns: dict[str, Any] = dict(bucket.get("turns") or {})
+
+            for sid, record in self._closed_records.items():
+                records[sid] = record.to_dict()
+
+            for metadata in self._registry.list_live():
+                records[metadata.subagent_id] = self._metadata_to_record(metadata).to_dict()
+
+            for sid, items in self._turns.items():
+                existing = [
+                    SubagentTurn.from_dict(item)
+                    for item in (turns.get(sid) or [])
+                    if isinstance(item, dict)
+                ]
+                merged = self._merge_turns(existing, items)
+                turns[sid] = [item.to_dict() for item in merged]
+
+            records, turns = trim_persisted_bucket(
+                records,
+                turns,
+                max_records=max_persisted_records(self._config.max_subagents),
+            )
+            revision = int(bucket.get("revision") or 0) + 1
+            merge_subagent_bucket(
+                self._parent_session,
+                {
+                    "records": records,
+                    "turns": turns,
+                    "revision": revision,
+                },
+            )
+        except Exception as exc:
+            logger.warning("[SubagentControl] flush failed: %s", exc)
+
+    def snapshot(
+        self,
+        *,
+        cursor: str | None = None,
+        page_size: int = DEFAULT_SNAPSHOT_PAGE_SIZE,
+    ) -> SubagentSnapshot:
+        """Return a read-only parent-session view of subagents and turn history."""
+        subagents: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in self.describe_live():
+            sid = str(row.get("subagent_id") or "")
+            if sid:
+                seen.add(sid)
+            subagents.append(row)
+        for sid, record in self._closed_records.items():
+            if sid in seen:
+                continue
+            subagents.append(self._closed_record_to_payload(record))
+
+        all_turns = self._all_turns_flat()
+        start_index = _cursor_start_index(all_turns, cursor)
+        page = all_turns[start_index : start_index + page_size]
+        next_cursor = None
+        if start_index + page_size < len(all_turns) and page:
+            last = page[-1]
+            next_cursor = f"{last.subagent_id}:{last.seq}"
+        return SubagentSnapshot(subagents=subagents, turns=page, cursor=next_cursor)
 
     async def _evict_from_memory(self, subagent_id: str, *, reason: str) -> None:
         metadata = self._registry.find_metadata(subagent_id)
@@ -363,6 +505,7 @@ class SubagentControl:
         if metadata is not None:
             self._store_closed_record(metadata, close_reason=reason)
         self._registry.release(subagent_id)
+        self.flush()
 
     async def _acquire_slot(self) -> SpawnReservation:
         try:
@@ -404,7 +547,7 @@ class SubagentControl:
 
     def _build_metadata_from_record(
         self,
-        record: ClosedSubagentRecord,
+        record: SubagentRecord,
         *,
         task_id: str | None,
     ) -> SubagentMetadata:
@@ -431,17 +574,80 @@ class SubagentControl:
         close_reason: str,
     ) -> None:
         closed_at_ms = metadata.closed_at_ms or time.time() * 1000
-        self._closed_records[metadata.subagent_id] = ClosedSubagentRecord(
+        self._closed_records[metadata.subagent_id] = SubagentRecord(
             subagent_id=metadata.subagent_id,
             subagent_type=metadata.subagent_type,
             display_name=metadata.display_name,
             role=metadata.role,
             task_description=metadata.task_description,
-            closed_reason=close_reason,
-            closed_at_ms=closed_at_ms,
             created_at_ms=metadata.created_at_ms,
+            updated_at_ms=closed_at_ms,
+            closed_at_ms=closed_at_ms,
+            closed_reason=close_reason,
         )
         self._trim_closed_records()
+
+    def _metadata_to_record(self, metadata: SubagentMetadata) -> SubagentRecord:
+        return SubagentRecord(
+            subagent_id=metadata.subagent_id,
+            subagent_type=metadata.subagent_type,
+            display_name=metadata.display_name,
+            role=metadata.role,
+            task_description=metadata.task_description,
+            created_at_ms=metadata.created_at_ms,
+            updated_at_ms=metadata.updated_at_ms,
+            closed_at_ms=metadata.closed_at_ms,
+            closed_reason=None,
+        )
+
+    @staticmethod
+    def _merge_turns(existing: list[SubagentTurn], pending: list[SubagentTurn]) -> list[SubagentTurn]:
+        merged = {turn.seq: turn for turn in existing}
+        for turn in pending:
+            merged[turn.seq] = turn
+        return [merged[key] for key in sorted(merged)]
+
+    def _all_turns_flat(self) -> list[SubagentTurn]:
+        turns: list[SubagentTurn] = []
+        for sid in sorted(self._turns):
+            turns.extend(self._turns[sid])
+        turns.sort(key=lambda item: (item.subagent_id, item.seq))
+        return turns
+
+    def _append_turn(
+        self,
+        subagent_id: str,
+        metadata: SubagentMetadata,
+        instance: Any | None,
+        status: SubagentStatus,
+    ) -> None:
+        task_id = ""
+        if instance is not None and instance.last_task_id:
+            task_id = instance.last_task_id
+        elif metadata.current_task_id:
+            task_id = metadata.current_task_id
+
+        existing = self._turns.get(subagent_id) or []
+        if task_id and any(turn.task_id == task_id for turn in existing):
+            return
+
+        view = map_status_to_view(status)
+        answer = None
+        if status.kind is SubagentStatusKind.COMPLETED and instance is not None:
+            answer = instance.last_output
+
+        seq = self._turn_seq.get(subagent_id, 0) + 1
+        self._turn_seq[subagent_id] = seq
+        turn = SubagentTurn(
+            subagent_id=subagent_id,
+            task_id=task_id,
+            seq=seq,
+            prompt=metadata.task_description,
+            answer=answer,
+            closed_reason=view["closed_reason"],
+            created_at_ms=time.time() * 1000,
+        )
+        self._turns.setdefault(subagent_id, []).append(turn)
 
     def _trim_closed_records(self) -> None:
         limit = max(self._config.max_subagents * 2, 1)
@@ -450,12 +656,13 @@ class SubagentControl:
         excess = len(self._closed_records) - limit
         oldest = sorted(
             self._closed_records.values(),
-            key=lambda record: record.closed_at_ms,
+            key=lambda record: record.closed_at_ms or record.updated_at_ms,
         )[:excess]
         for record in oldest:
             self._closed_records.pop(record.subagent_id, None)
 
-    def _closed_record_to_payload(self, record: ClosedSubagentRecord) -> dict[str, Any]:
+    def _closed_record_to_payload(self, record: SubagentRecord) -> dict[str, Any]:
+        close_reason = record.closed_reason or "parent_ended"
         return build_subagent_updated_payload(
             subagent_id=record.subagent_id,
             subagent_type=record.subagent_type,
@@ -464,9 +671,9 @@ class SubagentControl:
             parent_session_id=self._parent_session_id,
             task_description=record.task_description,
             created_at_ms=record.created_at_ms,
-            updated_at_ms=record.closed_at_ms,
+            updated_at_ms=record.updated_at_ms,
             closed_at_ms=record.closed_at_ms,
-            status=SubagentStatus.closed(record.closed_reason),
+            status=SubagentStatus.closed(close_reason),
             revision=0,
         )
 
@@ -544,8 +751,10 @@ class SubagentControl:
         if not is_externally_closed(status):
             return
         metadata = self._registry.find_metadata(subagent_id)
+        instance = self._manager.find(subagent_id)
         if metadata is not None:
             self._touch_metadata_timestamps(metadata, status=status)
+            self._append_turn(subagent_id, metadata, instance, status)
         await self.emit_status_update(subagent_id)
 
     def _resolve_final(

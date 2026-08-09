@@ -292,12 +292,6 @@ async def test_restore_rebuilds_from_checkpointer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_persist_is_noop() -> None:
-    manager = _manager()
-    await manager.persist("sid-1")
-
-
-@pytest.mark.asyncio
 async def test_session_factory_creates_new_session_per_turn() -> None:
     manager = _manager()
     created_sessions: list[MockSession] = []
