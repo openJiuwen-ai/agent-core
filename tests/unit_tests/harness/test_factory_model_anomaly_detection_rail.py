@@ -2,7 +2,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.harness import create_deep_agent
+from openjiuwen.harness.observability.rail import AgentObservabilityRail
 from openjiuwen.harness.rails.model_anomaly_detection_rail import ModelAnomalyDetectionRail
 
 
@@ -48,3 +50,40 @@ def test_create_deep_agent_does_not_duplicate_manual_model_anomaly_detection_rai
 
     anomaly_rails = [rail for rail in agent._pending_rails if isinstance(rail, ModelAnomalyDetectionRail)]
     assert anomaly_rails == [manual_rail]
+
+
+def test_create_deep_agent_observability_config_auto_adds_rail(monkeypatch) -> None:
+    init_calls: list[ObservabilityConfig] = []
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.observability.acquire_observability",
+        lambda config: init_calls.append(config),
+    )
+
+    config = ObservabilityConfig(enabled=True, exporter="console")
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        observability_config=config,
+        auto_create_workspace=False,
+    )
+
+    assert init_calls == [config]
+    assert sum(1 for rail in agent._pending_rails if isinstance(rail, AgentObservabilityRail)) == 1
+
+
+def test_create_deep_agent_observability_config_does_not_duplicate_manual_rail(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "openjiuwen.harness.observability.acquire_observability",
+        lambda config: None,
+    )
+
+    manual_rail = AgentObservabilityRail()
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        rails=[manual_rail],
+        observability_config=ObservabilityConfig(enabled=True, exporter="console"),
+        auto_create_workspace=False,
+    )
+
+    obs_rails = [rail for rail in agent._pending_rails if isinstance(rail, AgentObservabilityRail)]
+    assert obs_rails == [manual_rail]

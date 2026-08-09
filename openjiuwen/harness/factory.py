@@ -44,6 +44,7 @@ from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
 
 if TYPE_CHECKING:
     from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+    from openjiuwen.extensions.observability.config import ObservabilityConfig
 
 
 def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
@@ -218,6 +219,7 @@ def resolve_deep_agent_parts(
     enable_model_anomaly_detection_rail: bool = True,
     enable_sys_operation: bool = True,
     trajectory_span_processor: TrajectorySpanProcessor | None = None,
+    observability_config: ObservabilityConfig | None = None,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -355,6 +357,16 @@ def resolve_deep_agent_parts(
     def _already_provided(rail_cls: type) -> bool:
         return any(issubclass(t, rail_cls) for t in user_provided_rail_types)
 
+    if observability_config is not None and observability_config.enabled:
+        from openjiuwen.harness.observability import (
+            AgentObservabilityRail,
+            acquire_observability,
+        )
+
+        acquire_observability(observability_config)
+        if not _already_provided(AgentObservabilityRail):
+            all_rails.append(AgentObservabilityRail())
+
     def _make_skill_rail() -> SkillUseRail:
         skills_dirs: list[str] = []
         skills_base = workspace_obj.get_node_path("skills")
@@ -483,6 +495,7 @@ def create_deep_agent(
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
     enable_model_anomaly_detection_rail: bool = True,
+    observability_config: ObservabilityConfig | None = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -578,6 +591,7 @@ def create_deep_agent(
         parallel_tool_calls=parallel_tool_calls,
         enable_security_rail=enable_security_rail,
         enable_model_anomaly_detection_rail=enable_model_anomaly_detection_rail,
+        observability_config=observability_config,
         **config_kwargs,
     )
     agent = DeepAgent(parts.config.card)
