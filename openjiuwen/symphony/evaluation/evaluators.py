@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from math import isfinite
-from typing import Any, Literal, cast
+from typing import Any
 
 from openjiuwen.symphony.evaluation.base import (
     BaseEvaluator,
@@ -43,15 +43,6 @@ def _trace_evidence(context: EvaluationContext, description: str) -> EvidenceRef
         redacted_evidence_reference("case", case.case_id) if case is not None else f"capability:{context.capability_id}"
     )
     return EvidenceRef(evidence_type="evaluation_case", reference=reference, description=description)
-
-
-def _non_negative_finite_float(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    numeric_value = float(value)
-    if not isfinite(numeric_value) or numeric_value < 0:
-        return None
-    return numeric_value
 
 
 def _has_output_evidence(value: Any) -> bool:
@@ -398,63 +389,10 @@ def latency_statistics(values: Iterable[float]) -> dict[str, Any]:
     }
 
 
-LatencyScenario = Literal["realtime_interaction", "short_task", "long"]
-
-
 class LatencyEvaluator(TraceEvaluator):
-    """Score caller-supplied latency using the configured interaction scenario."""
+    """Observe caller-supplied TTFT and end-to-end latency without scoring."""
 
     metric_id = "latency"
-
-    _DEFAULT_THRESHOLDS: dict[str, tuple[float, float, float]] = {
-        "realtime_interaction": (5_000.0, 10_000.0, 15_000.0),
-        "short_task": (30_000.0, 60_000.0, 90_000.0),
-    }
-    _SCENARIOS = frozenset({"realtime_interaction", "short_task", "long"})
-
-    def __init__(
-        self,
-        scenario: LatencyScenario | None = "short_task",
-        thresholds_ms: Sequence[float] | None = None,
-    ) -> None:
-        if scenario is not None and (not isinstance(scenario, str) or scenario not in self._SCENARIOS):
-            raise ValueError(f"unsupported latency scenario: {scenario}")
-        if scenario is None and thresholds_ms is not None:
-            raise ValueError("thresholds_ms cannot be supplied when scenario is None")
-        self.scenario = scenario
-        self.thresholds_ms = self._validate_thresholds(thresholds_ms)
-
-    @property
-    def cache_signature(self) -> str:
-        return f"latency-v2:{self.scenario}:{self.thresholds_ms}"
-
-    def _validate_thresholds(self, thresholds_ms: Sequence[float] | None) -> tuple[float, float, float] | None:
-        if thresholds_ms is None:
-            if self.scenario is None or self.scenario == "long":
-                return None
-            return self._DEFAULT_THRESHOLDS[self.scenario]
-        if not isinstance(thresholds_ms, Sequence) or isinstance(thresholds_ms, (str, bytes)):
-            raise ValueError("thresholds_ms must contain exactly three values")
-        if len(thresholds_ms) != 3:
-            raise ValueError("thresholds_ms must contain exactly three values")
-        numeric = tuple(_non_negative_finite_float(value) for value in thresholds_ms)
-        if any(value is None for value in numeric):
-            raise ValueError("thresholds_ms values must be finite non-negative numbers")
-        validated = tuple(float(value) for value in numeric if value is not None)
-        if not validated[0] < validated[1] < validated[2]:
-            raise ValueError("thresholds_ms values must be strictly increasing")
-        return cast(tuple[float, float, float], validated)
-
-    def _resolve_scenario(self, context: EvaluationContext) -> LatencyScenario | None:
-        if self.scenario is not None:
-            return self.scenario
-        evaluation = context.fingerprint.static_data.get("evaluation")
-        if not isinstance(evaluation, dict):
-            return None
-        configured = evaluation.get("latency_scenario")
-        if isinstance(configured, str) and configured in self._SCENARIOS:
-            return cast(LatencyScenario, configured)
-        return None
 
     def evaluate(self, context: EvaluationContext) -> MetricResult:
         missing = self.require_case(context)
@@ -473,48 +411,25 @@ class LatencyEvaluator(TraceEvaluator):
                 "The trace does not contain latency for the evaluated child capability.",
                 code="missing_latency_observation",
             )
-        scenario = self._resolve_scenario(context)
-        if scenario is None:
-            return self.not_applicable(
-                context,
-                "The fingerprint does not define a valid latency scenario.",
-                code="missing_latency_scenario",
-            )
         if case.latency is None:
             return self.not_applicable(context, "The trace has no latency value.", code="missing_latency_observation")
-        selected_value = case.latency.ttft if scenario == "realtime_interaction" else case.latency.e2e
-        if selected_value is None:
-            required = "ttft" if scenario == "realtime_interaction" else "e2e"
+        details: dict[str, Any] = {}
+        if case.latency.ttft is not None:
+            details["ttft_ms"] = case.latency.ttft
+        if case.latency.e2e is not None:
+            details["e2e_ms"] = case.latency.e2e
+        if not details:
             return self.not_applicable(
                 context,
-                f"The {scenario} scenario requires latency.{required}.",
+                "The trace has no latency observations.",
                 code="missing_latency_observation",
             )
-        if scenario == "long":
-            level, score = "excellent", 1.0
-        else:
-            thresholds = self.thresholds_ms or self._DEFAULT_THRESHOLDS[scenario]
-            if selected_value <= thresholds[0]:
-                level, score = "excellent", 1.0
-            elif selected_value <= thresholds[1]:
-                level, score = "good", 0.8
-            elif selected_value <= thresholds[2]:
-                level, score = "pass", 0.6
-            else:
-                level, score = "fail", 0.0
-        details: dict[str, Any] = {
-            "scenario": scenario,
-            "ttft": case.latency.ttft,
-            "e2e": case.latency.e2e,
-            "level": level,
-            "selected_latency_ms": selected_value,
-        }
-        evidence = _trace_evidence(context, "Caller-supplied latency was scored for its scenario.")
+        evidence = _trace_evidence(context, "Caller-supplied latency observations were recorded.")
         return self.result(
             context,
-            score=score,
-            status="fail" if level == "fail" else "pass",
-            reason=f"Latency for {scenario} was {selected_value:g} ms ({level}).",
+            score=None,
+            status="observed",
+            reason="Latency was observed without applying a target or admission threshold.",
             details=details,
             evidence=(evidence,),
         )

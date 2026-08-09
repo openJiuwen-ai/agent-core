@@ -601,17 +601,16 @@ class EvaluationSuite:
         if not_applicable_codes:
             details["not_applicable_codes"] = not_applicable_codes
         if metric_id == "latency":
-            samples: list[float] = []
-            for result in results:
-                selected_latency = result.details.get("selected_latency_ms")
-                if isinstance(selected_latency, (int, float)) and not isinstance(selected_latency, bool):
-                    samples.append(float(selected_latency))
-            details.update(latency_statistics(samples))
-            details.pop("samples_ms", None)
-            details["scenarios"] = sorted(
-                {str(result.details["scenario"]) for result in results if result.details.get("scenario")}
-            )
-            details["levels"] = [str(result.details["level"]) for result in results if result.details.get("level")]
+            for latency_type in ("ttft", "e2e"):
+                samples = [
+                    float(result.details[f"{latency_type}_ms"])
+                    for result in results
+                    if isinstance(result.details.get(f"{latency_type}_ms"), (int, float))
+                    and not isinstance(result.details[f"{latency_type}_ms"], bool)
+                ]
+                if samples:
+                    details[latency_type] = latency_statistics(samples)
+                    details[latency_type].pop("samples_ms", None)
         evidence = self._deduplicate(item for result in results for item in result.evidence)
         failures = self._deduplicate(item for result in results for item in result.failures)
         suggestions = self._deduplicate(item for result in results for item in result.suggestions)

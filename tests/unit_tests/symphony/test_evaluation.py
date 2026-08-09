@@ -451,7 +451,7 @@ async def test_static_missing_fields_produce_findings_and_suggestions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_window_aggregates_success_and_scenario_latency() -> None:
+async def test_window_aggregates_success_and_separate_latency_observations() -> None:
     cases = [
         case(
             case_id="inside-1",
@@ -462,7 +462,7 @@ async def test_window_aggregates_success_and_scenario_latency() -> None:
             case_id="inside-2",
             success=False,
             event_time=datetime(2026, 8, 3, 1, tzinfo=UTC),
-            latency=Latency(ttft=50, e2e=60_000),
+            latency=Latency(ttft=70),
         ),
         case(
             case_id="outside",
@@ -488,8 +488,8 @@ async def test_window_aggregates_success_and_scenario_latency() -> None:
     assert window_details["label"] == "daily"
     assert metrics["success_rate"].score == pytest.approx(0.5)
     assert metrics["success_rate"].status == "fail"
-    assert metrics["latency"].status == "pass"
-    assert metrics["latency"].score == pytest.approx(0.9)
+    assert metrics["latency"].status == "observed"
+    assert metrics["latency"].score is None
     latency_details = dict(metrics["latency"].details)
     case_references = latency_details.pop("case_references")
     assert isinstance(case_references, list)
@@ -497,86 +497,75 @@ async def test_window_aggregates_success_and_scenario_latency() -> None:
     assert all(isinstance(reference, str) and reference.startswith("case:sha256:") for reference in case_references)
     assert latency_details == {
         "window_result_count": 2,
-        "pass_count": 2,
+        "pass_count": 0,
         "fail_count": 0,
         "not_applicable_count": 0,
         "error_count": 0,
-        "observed_count": 0,
-        "avg_ms": 45_000.0,
-        "p50_ms": 45_000.0,
-        "p95_ms": 58_500.0,
-        "max_ms": 60_000.0,
-        "count": 2,
-        "scenarios": ["short_task"],
-        "levels": ["excellent", "good"],
+        "observed_count": 2,
+        "ttft": {
+            "avg_ms": 60.0,
+            "p50_ms": 60.0,
+            "p95_ms": 69.0,
+            "max_ms": 70.0,
+            "count": 2,
+        },
+        "e2e": {
+            "avg_ms": 30_000.0,
+            "p50_ms": 30_000.0,
+            "p95_ms": 30_000.0,
+            "max_ms": 30_000.0,
+            "count": 1,
+        },
     }
 
 
 @pytest.mark.parametrize(
-    ("scenario", "latency", "expected_level", "expected_score"),
+    ("latency", "expected_details"),
     [
-        ("realtime_interaction", Latency(ttft=5_000, e2e=999_999), "excellent", 1.0),
-        ("realtime_interaction", Latency(ttft=10_000, e2e=1), "good", 0.8),
-        ("realtime_interaction", Latency(ttft=15_000, e2e=1), "pass", 0.6),
-        ("realtime_interaction", Latency(ttft=15_001, e2e=1), "fail", 0.0),
-        ("short_task", Latency(ttft=999_999, e2e=30_000), "excellent", 1.0),
-        ("short_task", Latency(ttft=1, e2e=60_000), "good", 0.8),
-        ("short_task", Latency(ttft=1, e2e=90_000), "pass", 0.6),
-        ("short_task", Latency(ttft=1, e2e=90_001), "fail", 0.0),
-        ("long", Latency(ttft=999_999, e2e=999_999), "excellent", 1.0),
+        (Latency(ttft=5_000, e2e=30_000), {"ttft_ms": 5_000.0, "e2e_ms": 30_000.0}),
+        (Latency(ttft=5_000), {"ttft_ms": 5_000.0}),
+        (Latency(e2e=30_000), {"e2e_ms": 30_000.0}),
     ],
 )
-def test_latency_scenario_thresholds(
-    scenario: Any,
+def test_latency_records_ttft_and_e2e_without_scoring(
     latency: Latency,
-    expected_level: str,
-    expected_score: float,
+    expected_details: dict[str, float],
 ) -> None:
     context = EvaluationContext(fingerprint=fingerprint(), case=case(latency=latency))
-    metric = LatencyEvaluator(scenario=scenario).evaluate(context)
+    metric = LatencyEvaluator().evaluate(context)
 
-    assert metric.score == expected_score
-    assert metric.details["level"] == expected_level
-    assert metric.details["scenario"] == scenario
-    assert metric.status == (MetricStatus.FAIL if expected_level == "fail" else MetricStatus.PASS)
+    assert metric.score is None
+    assert metric.status == MetricStatus.OBSERVED
+    assert metric.details == expected_details
+    assert metric.reason == "Latency was observed without applying a target or admission threshold."
 
 
-def test_latency_uses_required_field_and_missing_value_is_not_applicable() -> None:
-    realtime = LatencyEvaluator("realtime_interaction").evaluate(
-        EvaluationContext(fingerprint=fingerprint(), case=case(latency=Latency(e2e=1)))
+@pytest.mark.parametrize("latency", [None, Latency()])
+def test_latency_without_observed_values_is_not_applicable(latency: Latency | None) -> None:
+    metric = LatencyEvaluator().evaluate(EvaluationContext(fingerprint=fingerprint(), case=case(latency=latency)))
+
+    assert metric.status == MetricStatus.NOT_APPLICABLE
+    assert metric.score is None
+    assert metric.details["not_applicable_code"] == "missing_latency_observation"
+
+
+def test_latency_ignores_scenario_and_target_fingerprint_configuration() -> None:
+    configured = fingerprint(
+        static_data={"evaluation": {"latency_scenario": "realtime_interaction"}},
+        metadata={"latency_target_ms": 1},
     )
-    short = LatencyEvaluator("short_task").evaluate(
-        EvaluationContext(fingerprint=fingerprint(), case=case(latency=Latency(ttft=1)))
+    metric = LatencyEvaluator().evaluate(
+        EvaluationContext(fingerprint=configured, case=case(latency=Latency(ttft=6_000, e2e=90_001)))
     )
 
-    assert realtime.status == MetricStatus.NOT_APPLICABLE
-    assert short.status == MetricStatus.NOT_APPLICABLE
+    assert metric.status == MetricStatus.OBSERVED
+    assert metric.score is None
+    assert metric.details == {"ttft_ms": 6_000.0, "e2e_ms": 90_001.0}
 
 
-def test_latency_scenario_none_uses_fingerprint_static_configuration() -> None:
-    configured = fingerprint(static_data={"evaluation": {"latency_scenario": "realtime_interaction"}})
-    metric = LatencyEvaluator(scenario=None).evaluate(
-        EvaluationContext(fingerprint=configured, case=case(latency=Latency(ttft=6_000, e2e=1)))
-    )
-
-    assert metric.score == 0.8
-    assert metric.details["scenario"] == "realtime_interaction"
-
-
-@pytest.mark.parametrize(
-    ("scenario", "thresholds"),
-    [
-        ("unknown", None),
-        (None, (1, 2, 3)),
-        ("short_task", (1, 2)),
-        ("short_task", (-1, 2, 3)),
-        ("short_task", (1, float("inf"), 3)),
-        ("short_task", (1, 1, 3)),
-    ],
-)
-def test_latency_rejects_invalid_configuration(scenario: Any, thresholds: Any) -> None:
-    with pytest.raises(ValueError):
-        LatencyEvaluator(scenario=scenario, thresholds_ms=thresholds)
+def test_latency_evaluator_no_longer_accepts_scenario_configuration() -> None:
+    with pytest.raises(TypeError):
+        LatencyEvaluator(scenario="short_task")
 
 
 @pytest.mark.asyncio
