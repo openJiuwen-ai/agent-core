@@ -38,6 +38,7 @@ from openjiuwen.symphony.models import (
     QualityResult,
     SourceSnapshot,
 )
+from openjiuwen.symphony.models._message_trace import message_references_fingerprint
 from openjiuwen.symphony.shared.fingerprint.artifact import FingerprintArtifactStore
 from openjiuwen.symphony.shared.fingerprint.cache import FingerprintCache
 from openjiuwen.symphony.shared.fingerprint.extractor import (
@@ -491,18 +492,9 @@ def _validate_cases(raw_cases: Sequence[EvaluationCase | dict[str, Any]]) -> tup
         cases: list[EvaluationCase] = []
         for item in raw_cases:
             case = EvaluationCase.model_validate(item)
-            calls = tuple(
-                call.model_copy(update={"capability_type": normalize_capability_type(call.capability_type)})
-                for call in case.calls
-            )
             cases.append(
-                EvaluationCase.model_validate(
-                    case.model_copy(
-                        update={
-                            "capability_type": normalize_capability_type(case.capability_type),
-                            "calls": calls,
-                        }
-                    )
+                case.model_copy(
+                    update={"capability_type": normalize_capability_type(case.capability_type)},
                 )
             )
         return tuple(cases)
@@ -662,7 +654,7 @@ def _case_references(case: EvaluationCase, fingerprint: CapabilityFingerprint) -
     identity = (fingerprint.capability_id, normalize_capability_type(fingerprint.capability_type))
     if (case.capability_id, normalize_capability_type(case.capability_type)) == identity:
         return True
-    return any((call.capability_id, normalize_capability_type(call.capability_type)) == identity for call in case.calls)
+    return message_references_fingerprint(case.message, fingerprint)
 
 
 def _with_quality(fingerprint: CapabilityFingerprint, quality: QualityResult) -> CapabilityFingerprint:

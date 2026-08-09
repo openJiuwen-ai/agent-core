@@ -16,10 +16,17 @@ from openjiuwen.symphony.models import (
     EvidenceRef,
     FailureReason,
     FingerprintArtifact,
+    Latency,
     MetricResult,
     MetricStatus,
     QualityResult,
     SourceSnapshot,
+)
+from openjiuwen.symphony.models._message_trace import (
+    matching_message_calls,
+    message_has_assistant_or_tool_evidence,
+    message_has_user_input,
+    project_message_calls,
 )
 from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
 from openjiuwen.symphony.orchestration.graph.models import GraphDiagnostic, SkillRegistry
@@ -236,22 +243,287 @@ def test_opaque_trace_and_io_values_preserve_significant_whitespace() -> None:
         capability_id="exact-output",
         capability_type="skill",
         expected_output="value ",
-        actual_output="value",
+        output="value",
         inputs={"prompt": "  keep both sides  "},
-        calls=(
-            CapabilityCall(
-                capability_id="exact-output",
-                capability_type="skill",
-                output="result ",
-            ),
-        ),
+    )
+    call = CapabilityCall(
+        capability_id="exact-output",
+        capability_type="skill",
+        output="result ",
     )
     io = CapabilityIO(name="prompt", type="text", default="  default value  ")
 
     assert trace.expected_output == "value "
     assert trace.inputs == {"prompt": "  keep both sides  "}
-    assert trace.calls[0].output == "result "
+    assert call.output == "result "
     assert io.default == "  default value  "
+
+
+def test_evaluation_case_serializes_message_output_and_latency_without_legacy_fields() -> None:
+    case = EvaluationCase(
+        capability_id="weather",
+        capability_type="skill",
+        query="Weather in Shenzhen?",
+        message=(
+            {"role": "user", "content": "Weather in Shenzhen?"},
+            {"role": "assistant", "content": "Sunny."},
+        ),
+        output="Sunny.",
+        latency=Latency(ttft=125.0, e2e=500.0),
+    )
+
+    payload = case.model_dump(mode="json")
+
+    assert payload["message"] == [
+        {"role": "user", "content": "Weather in Shenzhen?"},
+        {"role": "assistant", "content": "Sunny."},
+    ]
+    assert payload["output"] == "Sunny."
+    assert payload["latency"] == {"ttft": 125.0, "e2e": 500.0}
+    assert {"actual_output", "calls", "metadata"}.isdisjoint(payload)
+
+
+def test_assistant_content_allows_an_explicit_empty_tool_calls_list() -> None:
+    case = EvaluationCase(
+        capability_id="weather",
+        capability_type="skill",
+        message=({"role": "assistant", "content": "Sunny.", "tool_calls": []},),
+    )
+
+    assert case.message == ({"role": "assistant", "content": "Sunny.", "tool_calls": []},)
+
+
+def test_openai_content_parts_are_accepted_without_imposing_a_multimodal_schema() -> None:
+    case = EvaluationCase(
+        capability_id="weather",
+        capability_type="skill",
+        message=(
+            {"role": "user", "content": [{"type": "input_text", "text": "Weather?"}]},
+            {"role": "assistant", "content": [{"provider_extension": {"value": "Sunny."}}]},
+        ),
+    )
+
+    assert case.message[0]["content"] == [{"type": "input_text", "text": "Weather?"}]
+
+
+@pytest.mark.parametrize(
+    ("role", "content"),
+    [
+        ("system", 1),
+        ("developer", False),
+        ("user", {"type": "input_text", "text": "Weather?"}),
+        ("assistant", 1.5),
+        ("tool", None),
+        ("user", []),
+    ],
+)
+def test_evaluation_case_rejects_non_openai_content_boundaries(role: str, content: Any) -> None:
+    with pytest.raises(ValidationError, match="content"):
+        EvaluationCase(
+            capability_id="weather",
+            capability_type="skill",
+            message=({"role": role, "content": content},),
+        )
+
+
+@pytest.mark.parametrize("legacy_field", ["actual_output", "calls", "metadata"])
+def test_evaluation_case_explicitly_rejects_legacy_trace_fields(legacy_field: str) -> None:
+    with pytest.raises(ValidationError, match="legacy EvaluationCase fields"):
+        EvaluationCase.model_validate(
+            {
+                "capability_id": "weather",
+                "capability_type": "skill",
+                legacy_field: None,
+            }
+        )
+
+
+def test_openai_tool_calls_are_validated_and_projected_with_tool_responses() -> None:
+    message = (
+        {"role": "user", "content": "Weather in Shenzhen?"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-weather",
+                    "type": "function",
+                    "function": {"name": "weather", "arguments": '{"city":"Shenzhen"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-weather", "content": '{"temperature":30}'},
+        {"role": "assistant", "content": "It is 30 degrees."},
+    )
+    case = EvaluationCase(
+        capability_id="parent-agent",
+        capability_type="agent",
+        message=message,
+    )
+    fingerprint = CapabilityFingerprint(
+        capability_id="weather-v2",
+        capability_type="skill",
+        name="Weather",
+    )
+    id_fingerprint = CapabilityFingerprint(
+        capability_id="weather",
+        capability_type="skill",
+        name="Forecast",
+    )
+
+    calls = project_message_calls(case.message)
+
+    assert len(calls) == 1
+    assert calls[0].tool_call_id == "call-weather"
+    assert calls[0].function_name == "weather"
+    assert calls[0].arguments == '{"city":"Shenzhen"}'
+    assert calls[0].inputs == {"city": "Shenzhen"}
+    assert calls[0].assistant_message_index == 1
+    assert calls[0].tool_message_index == 2
+    assert calls[0].output == '{"temperature":30}'
+    assert matching_message_calls(case.message, fingerprint) == calls
+    assert matching_message_calls(case.message, id_fingerprint) == calls
+    assert message_has_user_input(case.message) is True
+    assert message_has_assistant_or_tool_evidence(case.message) is True
+
+
+def test_message_evidence_helpers_reject_blank_content() -> None:
+    blank_message = (
+        {"role": "user", "content": "  "},
+        {"role": "assistant", "content": "", "tool_calls": []},
+    )
+    case = EvaluationCase(
+        capability_id="weather",
+        capability_type="skill",
+        message=blank_message,
+    )
+
+    assert message_has_user_input(case.message) is False
+    assert message_has_assistant_or_tool_evidence(case.message) is False
+    assert (
+        message_has_assistant_or_tool_evidence(({"role": "tool", "tool_call_id": "call-weather", "content": "\t"},))
+        is False
+    )
+
+
+def test_unanswered_tool_call_projection_has_no_tool_output_or_message_index() -> None:
+    case = EvaluationCase(
+        capability_id="weather",
+        capability_type="skill",
+        message=(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-weather",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": "{}"},
+                    }
+                ],
+            },
+        ),
+    )
+
+    calls = project_message_calls(case.message)
+
+    assert len(calls) == 1
+    assert calls[0].tool_message_index is None
+    assert calls[0].output is None
+
+
+@pytest.mark.parametrize(
+    ("message", "error"),
+    [
+        (({"role": "observer", "content": "x"},), "standard OpenAI role"),
+        (
+            (
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "duplicate",
+                            "type": "function",
+                            "function": {"name": "first", "arguments": "{}"},
+                        },
+                        {
+                            "id": "duplicate",
+                            "type": "function",
+                            "function": {"name": "second", "arguments": "{}"},
+                        },
+                    ],
+                },
+            ),
+            "duplicate tool call id",
+        ),
+        (
+            ({"role": "tool", "tool_call_id": "unknown", "content": "result"},),
+            "preceding assistant tool call",
+        ),
+    ],
+)
+def test_evaluation_case_rejects_invalid_openai_message_traces(
+    message: tuple[dict[str, Any], ...],
+    error: str,
+) -> None:
+    with pytest.raises(ValidationError, match=error):
+        EvaluationCase(
+            capability_id="weather",
+            capability_type="skill",
+            message=message,
+        )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        (
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "missing-name",
+                        "type": "function",
+                        "function": {"name": "", "arguments": "{}"},
+                    }
+                ],
+            },
+        ),
+        (
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "wrong-arguments",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": {}},
+                    }
+                ],
+            },
+        ),
+    ],
+)
+def test_evaluation_case_rejects_malformed_openai_tool_calls(message: tuple[dict[str, Any], ...]) -> None:
+    with pytest.raises(ValidationError):
+        EvaluationCase(
+            capability_id="weather",
+            capability_type="skill",
+            message=message,
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"ttft": -0.1},
+        {"e2e": -1.0},
+        {"ttft": float("nan")},
+        {"e2e": float("inf")},
+    ],
+)
+def test_latency_rejects_negative_and_non_finite_values(payload: dict[str, float]) -> None:
+    with pytest.raises(ValidationError):
+        Latency.model_validate(payload)
 
 
 def test_sensitive_io_defaults_are_redacted_at_the_public_model_boundary() -> None:

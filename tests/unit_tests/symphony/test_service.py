@@ -11,7 +11,6 @@ import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.symphony.models import (
-    CapabilityCall,
     CapabilityDescriptor,
     CapabilityFingerprint,
     CapabilityIO,
@@ -864,7 +863,7 @@ async def test_missing_required_llm_is_an_explicit_configuration_error(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_invalid_raw_trace_timing_is_a_schema_error(tmp_path) -> None:
+async def test_legacy_trace_calls_are_a_schema_error(tmp_path) -> None:
     service = FingerprintService(
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
@@ -873,14 +872,7 @@ async def test_invalid_raw_trace_timing_is_a_schema_error(tmp_path) -> None:
     trace = {
         "capability_id": "summarize",
         "capability_type": "skill",
-        "calls": [
-            {
-                "capability_id": "summarize",
-                "capability_type": "skill",
-                "started_at": "2026-08-03T00:00:00",
-                "ended_at": "2026-08-03T01:00:00+00:00",
-            }
-        ],
+        "calls": [],
     }
 
     with pytest.raises(BaseError) as exc_info:
@@ -890,26 +882,16 @@ async def test_invalid_raw_trace_timing_is_a_schema_error(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_trace_model_copy_cannot_bypass_timing_validation(tmp_path) -> None:
+async def test_trace_model_copy_cannot_bypass_message_validation(tmp_path) -> None:
     service = FingerprintService(
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         evaluation_suite=NoopEvaluationSuite(),
     )
-    valid_call = CapabilityCall(
-        capability_id="summarize",
-        capability_type="skill",
-        started_at=datetime(2026, 8, 3, tzinfo=UTC),
-        ended_at=datetime(2026, 8, 3, 1, tzinfo=UTC),
-    )
-    invalid_call = valid_call.model_copy(
-        update={"started_at": datetime(2026, 8, 3)},  # noqa: DTZ001 -- deliberate bypass attempt.
-    )
     trace = EvaluationCase(
         capability_id="summarize",
         capability_type="skill",
-        calls=(valid_call,),
-    ).model_copy(update={"calls": (invalid_call,)})
+    ).model_copy(update={"message": ({"role": "unknown", "content": "invalid"},)})
 
     with pytest.raises(BaseError) as exc_info:
         await service.build(traces=(trace,))
@@ -1213,18 +1195,12 @@ async def test_known_capability_type_alias_is_canonicalized_before_cache_identit
 
 
 @pytest.mark.asyncio
-async def test_trace_call_type_alias_is_canonicalized_before_matching(tmp_path) -> None:
+async def test_trace_case_type_alias_is_canonicalized_before_matching(tmp_path) -> None:
     descriptor = _descriptors()[1].model_copy(update={"capability_type": "SubAgent"})
     trace = EvaluationCase(
-        capability_id="parent",
-        capability_type="workflow",
-        calls=(
-            CapabilityCall(
-                capability_id="researcher",
-                capability_type="SUB-AGENT",
-                success=True,
-            ),
-        ),
+        capability_id="researcher",
+        capability_type="SUB-AGENT",
+        success=True,
     )
 
     artifact = await FingerprintService(
@@ -1234,6 +1210,37 @@ async def test_trace_call_type_alias_is_canonicalized_before_matching(tmp_path) 
     ).build(traces=(trace,))
 
     assert artifact.fingerprints[0].capability_type == "agent"
+    assert artifact.fingerprints[0].quality is not None
+    assert artifact.fingerprints[0].quality.sample_count == 1
+
+
+@pytest.mark.asyncio
+async def test_trace_message_function_name_references_child_fingerprint(tmp_path) -> None:
+    descriptor = _descriptors()[1]
+    trace = EvaluationCase(
+        capability_id="parent",
+        capability_type="workflow",
+        message=(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "research-step",
+                        "type": "function",
+                        "function": {"name": "researcher", "arguments": '{"topic":"weather"}'},
+                    }
+                ],
+            },
+        ),
+    )
+
+    artifact = await FingerprintService(
+        FakeProvider("snapshot-1", [descriptor]),
+        tmp_path,
+        evaluation_suite=NoopEvaluationSuite(),
+    ).build(traces=(trace,))
+
     assert artifact.fingerprints[0].quality is not None
     assert artifact.fingerprints[0].quality.sample_count == 1
 
