@@ -27,6 +27,7 @@ from openjiuwen.harness.rails.llm_retry_rail import LLMRetryRail
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload, AskUserRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
+from openjiuwen.harness.rails.llm_stability_rail import LLMStabilityRail
 from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.rails.mcp_rail import McpRail
 from openjiuwen.harness.rails.memory import (
@@ -79,6 +80,7 @@ __all__ = [
     "ExternalMemoryRail",
     "HeartbeatRail",
     "LLMRetryRail",
+    "LLMStabilityRail",
     "LspRail",
     "McpRail",
     "MemoryRail",

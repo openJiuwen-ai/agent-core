@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import os
 from abc import (
     ABC,
     abstractmethod,
@@ -417,6 +418,14 @@ class BaseModelClient(ABC):
 
         # Add max_tokens: prioritize parameter, otherwise use model_config, only add when not None
         final_max_tokens = max_tokens if max_tokens is not None else self.model_config.max_tokens
+        # Tuning-only override: lets a small cap reproduce finish_reason=="length"
+        # truncation for debugging / validating tool-call sanitisation.
+        _tuning_max_tokens = os.getenv("OPENJIUWEN_LLM_MAX_OUTPUT_TOKENS")
+        if _tuning_max_tokens:
+            try:
+                final_max_tokens = int(_tuning_max_tokens)
+            except (TypeError, ValueError):
+                pass
         if final_max_tokens is not None:
             params["max_tokens"] = final_max_tokens
 

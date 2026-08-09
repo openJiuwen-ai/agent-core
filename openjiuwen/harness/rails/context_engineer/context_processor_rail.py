@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, List, Tuple, Union
 
 from pydantic import BaseModel
@@ -379,7 +378,6 @@ class ContextProcessorRail(DeepAgentRail):
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         self._reset_loop_bailout_counter(ctx)
-        await self.fix_incomplete_tool_context(ctx)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         self._maybe_bailout_loop_compactions(ctx)
@@ -397,14 +395,11 @@ class ContextProcessorRail(DeepAgentRail):
         self._refresh_task_state_runtime(ctx)
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
-        """Attempt to fix incomplete tool context when LLM call fails.
+        """Refresh task state when the LLM call fails.
 
-        When an LLM call fails (e.g. due to invalid context), this hook
-        validates and repairs any incomplete tool_call/ToolMessage pairs
-        before requesting a retry.
+        (Tool-call pairing repair is handled by LLMStabilityRail.)
         """
         self._refresh_task_state_runtime(ctx)
-        await self.fix_incomplete_tool_context(ctx)
 
     async def _maybe_schedule_session_memory_update(self, ctx: AgentCallbackContext) -> None:
         if self._session_memory_mgr is None:
@@ -511,104 +506,6 @@ class ContextProcessorRail(DeepAgentRail):
                 "plan_mode": serialized.get("plan_mode"),
             }
         )
-
-    @staticmethod
-    def _ensure_json_arguments(arguments: Any) -> str:
-        """Ensure tool call arguments are valid JSON string."""
-        if isinstance(arguments, dict):
-            return json.dumps(arguments)
-        if isinstance(arguments, str):
-            try:
-                parsed = json.loads(arguments)
-                if isinstance(parsed, dict):
-                    return arguments
-                logger.warning(f"Illegal Tool call arguments: {arguments}")
-                return "{}"
-            except (json.JSONDecodeError, TypeError):
-                logger.warning(f"Illegal Tool call arguments: {arguments}")
-                return "{}"
-        return "{}"
-
-    @staticmethod
-    async def fix_incomplete_tool_context(ctx: AgentCallbackContext) -> None:
-        """Validate and fix incomplete context messages before entering ReAct loop."""
-        from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
-
-        try:
-            context = ctx.context
-            if context is None:
-                return
-
-            messages = context.get_messages()
-            if not messages:
-                return
-
-            len_messages = len(messages)
-            popped = context.pop_messages(size=len_messages)
-            if not popped:
-                return
-
-            tool_message_cache = {}
-            tool_id_cache = []
-
-            async def _enqueue_tool_calls(msg: AssistantMessage) -> None:
-                tool_calls = getattr(msg, "tool_calls", None)
-                if not tool_calls:
-                    return
-                for tc in tool_calls:
-                    arguments = getattr(tc, "arguments", "{}")
-                    arguments = ContextProcessorRail._ensure_json_arguments(arguments)
-                    if hasattr(tc, "arguments"):
-                        tc.arguments = arguments
-                    tool_id_cache.append(
-                        {
-                            "tool_call_id": getattr(tc, "id", ""),
-                            "tool_name": getattr(tc, "name", ""),
-                        }
-                    )
-
-            async def _flush_pending_tools() -> None:
-                nonlocal tool_message_cache
-                for tool_msg in tool_message_cache.values():
-                    await context.add_messages(tool_msg)
-                tool_message_cache = {}
-                for tc in tool_id_cache:
-                    await context.add_messages(
-                        ToolMessage(
-                            content=f"[Tool execution interrupted] Tool {tc['tool_name']}\
-                         was interrupted by user during execution, no result available.",
-                            tool_call_id=tc["tool_call_id"],
-                        )
-                    )
-                tool_id_cache.clear()
-
-            for msg in popped:
-                if isinstance(msg, AssistantMessage):
-                    if tool_id_cache:
-                        logger.info("Fixed incomplete tool context with placeholder messages")
-                        await _flush_pending_tools()
-                    await context.add_messages(msg)
-                    await _enqueue_tool_calls(msg)
-                elif isinstance(msg, ToolMessage):
-                    if not tool_id_cache:
-                        await context.add_messages(msg)
-                    elif msg.tool_call_id == tool_id_cache[0]["tool_call_id"]:
-                        await context.add_messages(msg)
-                        tool_id_cache.pop(0)
-                    else:
-                        tool_message_cache[msg.tool_call_id] = msg
-                else:
-                    if tool_id_cache:
-                        logger.info("Fixed incomplete tool context with placeholder messages")
-                        await _flush_pending_tools()
-                    await context.add_messages(msg)
-            if tool_id_cache:
-                logger.info("Fixed incomplete tool context with placeholder messages")
-                await _flush_pending_tools()
-        except Exception as e:
-            import traceback
-
-            logger.warning("Failed to fix incomplete tool context: %s\n%s", e, traceback.format_exc())
 
     # ============================================================================
     # Offload Section Injection

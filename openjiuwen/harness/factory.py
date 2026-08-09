@@ -20,6 +20,7 @@ from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, Operat
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails import (
     LLMRetryRail,
+    LLMStabilityRail,
     SecurityRail,
     SkillUseRail,
     SubagentRail,
@@ -365,6 +366,7 @@ def resolve_deep_agent_parts(
         (SubagentRail, bool(effective_subagents),
          lambda: SubagentRail(enable_async_subagent=enable_async_subagent)),
         (ToolCallResilienceRail, config.enable_tool_resilience_rail, lambda: ToolCallResilienceRail()),
+        (LLMStabilityRail, True, lambda: LLMStabilityRail()),
     ]
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):
