@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -94,6 +95,54 @@ class RedisTrajectoryStore:
         pipe.zadd(_idx_key(normalized_user_id, "pending"), {sample_id: score})
         pipe.sadd(_USERS_SET_KEY, normalized_user_id)
         await pipe.execute()
+
+    async def save_samples_once(
+        self,
+        samples: Sequence[dict[str, Any]],
+        *,
+        user_id: str = "online",
+    ) -> set[str]:
+        """Publish new samples together without resetting an existing sample's status."""
+        prepared: list[tuple[str, str, str, str, str, float]] = []
+        for sample in samples:
+            sample_id = str(sample.get("sample_id") or "").strip()
+            if not sample_id:
+                raise ValueError("sample_id is required")
+            normalized = dict(sample)
+            normalized_user_id = str(normalized.get("user_id") or user_id or "online")
+            normalized["user_id"] = normalized_user_id
+            normalized["_store_status"] = "pending"
+            created_at = str(normalized.get("created_at") or datetime.now(timezone.utc).isoformat())
+            session_id = str(normalized.get("session_id") or "default")
+            payload = json.dumps(normalized, ensure_ascii=False)
+            score = _epoch(datetime.fromisoformat(created_at.replace("Z", "+00:00")))
+            prepared.append((sample_id, normalized_user_id, session_id, created_at, payload, score))
+
+        lookup = self._r.pipeline()
+        for sample_id, *_ in prepared:
+            lookup.hget(_traj_key(sample_id), "status")
+        statuses = await lookup.execute()
+
+        new_samples = [item for item, status in zip(prepared, statuses) if status is None]
+        if not new_samples:
+            return set()
+        pipe = self._r.pipeline()
+        for sample_id, normalized_user_id, session_id, created_at, payload, score in new_samples:
+            pipe.hset(
+                _traj_key(sample_id),
+                mapping={
+                    "sample_id": sample_id,
+                    "user_id": normalized_user_id,
+                    "session_id": session_id,
+                    "created_at": created_at,
+                    "status": "pending",
+                    "sample_json": payload,
+                },
+            )
+            pipe.zadd(_idx_key(normalized_user_id, "pending"), {sample_id: score})
+            pipe.sadd(_USERS_SET_KEY, normalized_user_id)
+        await pipe.execute()
+        return {sample_id for sample_id, *_ in new_samples}
 
     async def get_pending_count(self, user_id: str) -> int:
         return int(await self._r.zcard(_idx_key(user_id, "pending")) or 0)

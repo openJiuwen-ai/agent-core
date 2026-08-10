@@ -165,6 +165,12 @@ def _legacy_step_span(value: Any, index: int, execution_id: str) -> dict[str, An
         if step.get(source_key) is not None:
             attributes[target_key] = deepcopy(step[source_key])
 
+    detail_meta = detail.get("meta") if isinstance(detail.get("meta"), Mapping) else {}
+    for key in ("provider_response_json", "response_mask", "routed_experts", "render_fingerprint"):
+        value = meta.get(key, detail_meta.get(key))
+        if value is not None:
+            attributes[key] = deepcopy(value)
+
     if kind == "llm":
         name = str(meta.get("span_name") or "llm.call")
         attributes[semconv.GEN_AI_OPERATION_NAME] = "chat"

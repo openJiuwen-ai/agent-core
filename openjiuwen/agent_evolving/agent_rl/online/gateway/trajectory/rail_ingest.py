@@ -116,6 +116,11 @@ class RailBatchIngestor:
 
         logprobs = sample.get("logprobs")
         response_logprobs = coerce_logprobs(logprobs, len(response_ids))
+        response_mask = sample.get("response_mask")
+        if response_mask is not None:
+            if not isinstance(response_mask, list) or len(response_mask) != len(response_ids):
+                raise ValueError("response_mask must align with response_tokens")
+            response_mask = [int(value) for value in response_mask]
         user_id = str(
             sample.get("user_id")
             or payload.get("user_id")
@@ -128,7 +133,7 @@ class RailBatchIngestor:
             raise ValueError("missing user_id/tenant_id; upload batch samples require a stable user id")
         turn_num = step_index + 1
 
-        return build_sample(
+        normalized = build_sample(
             sample_id=f"{trajectory_id}:{step_index}",
             user_id=user_id,
             session_id=session_id,
@@ -146,6 +151,7 @@ class RailBatchIngestor:
             response_text=response_text,
             response_ids=response_ids,
             response_logprobs=response_logprobs,
+            response_token_mask=response_mask,
             tool_calls=response.get("tool_calls") or [],
             extra_fields={
                 "trajectory_id": trajectory_id,
@@ -158,3 +164,11 @@ class RailBatchIngestor:
                 },
             },
         )
+        routed_experts = sample.get("routed_experts")
+        if routed_experts is None:
+            sample_meta = sample.get("meta")
+            if isinstance(sample_meta, dict):
+                routed_experts = sample_meta.get("routed_experts")
+        if routed_experts is not None:
+            normalized["trajectory"]["routed_experts"] = routed_experts
+        return normalized

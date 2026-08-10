@@ -55,9 +55,59 @@ export TRAJECTORY_GATEWAY_URL=http://127.0.0.1:18080
 # export TRAJECTORY_GATEWAY_API_KEY=...  # 若 gateway 配了 API key
 ```
 
+### JiuwenSwarm Gateway 采集模式
+
+真实 JiuwenSwarm 运行时由 `jiuwenswarm-agentserver` 和 `jiuwenswarm-gateway` 两个进程组成。Gateway 采集模式
+不安装 `RLOnlineRail`，调用方在任务开始前通过 `/v1/gateway/collection/sessions` 创建 session，并在 JiuwenSwarm
+默认模型配置中将 `api_base` 指向 agent-core Gateway，同时提供稳定的 `x-user-id` 和 `x-session-id`：
+
+```yaml
+models:
+  defaults:
+    - model_client_config:
+        api_base: http://127.0.0.1:18080/v1
+        api_key: EMPTY
+        model_name: Qwen3-0.6B
+        client_provider: OpenAI
+        custom_headers:
+          x-user-id: online-user
+          x-session-id: collection-session-42
+```
+
+JiuwenSwarm 可通过 `jiuwenswarm-start app` 启动，也可以分别启动两个进程。任务成功后调用 finalize 和
+task-reward；失败或取消时调用 abort。采集 session 生命周期由调用方管理，不由 JiuwenSwarm conversation
+session 自动管理。
+
+真实进程 E2E 默认不在 CI 中运行。准备专用 Redis 和本地模型后执行：
+
+```bash
+RUN_JIUWENSWARM_E2E=1 \
+JIUWENSWARM_E2E_REDIS_URL=redis://127.0.0.1:16379/0 \
+JIUWENSWARM_E2E_MODEL_PATH=/path/to/Qwen3-0.6B \
+JIUWENSWARM_REPO=/path/to/jiuwenswarm \
+pytest -s tests/system_tests/agent_evolving/agent_rl/online/test_gateway_mode_online_loop_e2e.py
+```
+
+Gateway collection 每次成功 commit 立即生成一个与 Rail 兼容的 per-call sample：sample identity 使用
+`trajectory_id:step_index`，prompt/response token IDs、response mask、logprobs 保持真实 rollout 值。
+样本进入现有 Redis pending-judge 管线；下一次用户消息作为 follow-up feedback 评分，成功 session finalize
+按现有 session-done 语义 flush 剩余样本，abort 则丢弃该 session 的 pending 样本。评分后的样本继续由现有
+scheduler 和 `VerlDataProtoConverter` 消费。
+
+Gateway collection 同样支持调用方请求 `stream=true`。Gateway 仍由现有 Forwarder 一次性获取完整 upstream
+response，先使用完整 token IDs / logprobs 完成 capture commit 或 drop，再把该 response 合成为 SSE。每个调用
+最多产生一个 per-call sample，不按 SSE chunk 拆分。capture 失败只记录 drop，不阻止正常 SSE 返回；为 capture
+强制请求的 token 字段不会泄漏给未请求这些字段的调用方，因此 SSE chunk 顺序、usage 和 finish semantics 保持
+不变。Rail mode 的 streaming 路径不参与 gateway capture，行为保持不变。
+
+Gateway collection 对外同时支持 OpenAI `POST /v1/chat/completions` 与 Anthropic `POST /v1/messages`。Anthropic
+请求、响应、SSE 和错误 envelope 由 Gateway 内置协议模块转换为 OpenAI-compatible 请求，内部继续由
+Forwarder 调用 vLLM，以取得真实 token IDs 和 logprobs。
+
 ### Web 侧 `x-user-id` 要求
 
-在线训练按 `user_id` 聚合样本，因此 Gateway 会强制要求 `/v1/chat/completions` 请求携带稳定的 `x-user-id` header。
+在线训练按 `user_id` 聚合样本，因此 Gateway 会强制要求 `/v1/chat/completions` 和 `/v1/messages` 请求携带稳定的
+`x-user-id` header。
 
 - 走 `run_online_rl.py` 启动时，launcher 会自动向 JiuwenClaw 工作区写入 `WEB_USER_ID="local-web-user"`，并由 JiuwenClaw 出站请求自动补成 `x-user-id`。
 - 如果你本地要区分不同操作者，启动前可覆盖：
@@ -126,17 +176,28 @@ Turn N+1: user(N+1) 到来时            →  取出 pending，组装评分输�
 |------|------|
 | `prompt_ids` | 该轮 prompt 的 token ID 序列 |
 | `response_ids` | 模型回复的 token ID 序列 |
+| `response_mask` | response token 的训练 mask；canonical trajectory 中含 prompt 前缀 `0` |
 | `response_logprobs` | 每个 response token 的 log probability |
+| `routed_experts` | 可选 MoE 路由，shape 为 `[prompt + response tokens, layers, topk]` |
 | `judge.score` | 归一化奖励 ∈ [0, 1] |
 | `judge.details` | 四维度原始分（task_completion, response_quality, tool_usage, coherence） |
 
 `logprobs` 数据在 PPO 训练中作为 behavior policy 的参考（实际训练时由 actor workers 重新计算 `old_log_probs`）。
 
+Capture/Rail 上送的 response-only mask 长度必须等于 `response_ids`；缺失时每个 response token 默认取 `1`。
+Gateway canonical trajectory 会在前面补齐与 prompt 等长的 `0`，因此最终 mask 长度等于 `input_ids`；长度不匹配会
+拒绝转换。response 被截断时，trainer 会同步截断 mask。
+
+`routed_experts` 存在时必须与 canonical `input_ids` 严格逐 token 对齐，并保持非空、规则的
+`[tokens, layers, topk]` 三维结构。`VerlDataProtoConverter` 对 prompt 保留尾部、对 response 保留头部时，
+会同步裁剪对应路由；batch tensor shape 为 `[batch, padded_input_tokens, layers, topk]`，padding 值为 `0`。
+只有 batch 内每个样本都提供路由时才生成该 tensor；不同样本的 `layers/topk` shape 不一致会拒绝转换。
+
 ### Gateway 行为
 
-Gateway 默认 `disable_trajectory_collection: true`，即 chat 路径上**不**直接抓轨迹，而是：
+`rail` 启动模式会关闭 Gateway 内的 trajectory collector，即 chat 路径上**不**直接抓轨迹，而是：
 
-- 透传 `/v1/chat/completions` 到上游 vLLM，并按 `x-user-id` 注入最新 LoRA
+- 接收 `/v1/chat/completions` 或 `/v1/messages`，统一调用上游 OpenAI-compatible vLLM，并按 `x-user-id` 注入最新 LoRA
 - 经 `/v1/gateway/upload/batch` 接收 JiuwenClaw 端 `RLOnlineRail` 上送的逐轮样本
 - 在样本入队前调用 Judge 做延迟打分（取上一轮 pending + 本轮 user 触发）
 - 写入 RedisTrajectoryStore，供 OnlineTrainingScheduler 消费
@@ -166,8 +227,9 @@ make install
 cd jiuwenclaw
 pip install -e ".[dev]"
 
-# vLLM、verl、Ray
-pip install vllm verl ray
+# vLLM、VERL、Ray。agent-core 在线 RL 当前固定使用 VERL 0.8.0；
+# 由 VERL 的 vllm extra 选择兼容的 vLLM，不要使用 uni-agent 源码内的 editable VERL。
+pip install "verl[vllm]==0.8.0" ray
 ```
 
 ### 2. 确认模型路径
@@ -197,25 +259,14 @@ nvidia-smi --query-gpu=index,memory.used --format=csv,noheader
 # 确保目标 GPU 的 memory.used 接近 0 MiB
 ```
 
-环境检查脚本 `check_env.sh` 已删除；启动前请自行确保目标 GPU/端口空闲（`lsof -i :<port>`、`pkill -f vllm.entrypoints` 等），再用自定义 YAML 或 CLI 显式启动。仓库不再提供 `ctl_online_rl.sh`，本地维护自己的脚本即可。
+启动器会检查端口并在冲突时停止启动，不会清理其他用户的进程。
 
-## 一键启动
-
-```bash
-cd agent-core/examples/jiuwenrl_online
-
-# 默认读取包内置配置 openjiuwen/agent_evolving/agent_rl/online/yaml/online_rl_launcher.yaml
-python run_online_rl.py
-```
-
-脚本现在采用“**YAML 配置为主，CLI 参数覆盖为辅**”的方式：
+## 启动
 
 ```bash
-# 从包内置配置复制一份本机配置再修改
-cp ../../openjiuwen/agent_evolving/agent_rl/online/yaml/online_rl_launcher.yaml my_online_rl.yaml
-
-# 用自定义 YAML 启动（仅覆盖你写出来的字段，未写字段仍继承包内置默认 YAML）
-python run_online_rl.py --config ./my_online_rl.yaml
+cd agent-core
+python examples/jiuwenrl_online/run_online_rl.py \
+  --config ./my_online_rl.yaml
 ```
 
 推荐把以下内容放到 YAML 中维护，而不是依赖 CLI：
@@ -240,7 +291,7 @@ python run_online_rl.py --config ./my_online_rl.yaml
 ============================================================
   JiuwenClaw online RL loop started (v2: per-turn + Judge)
 
-  Config file:      .../online_rl_launcher.yaml
+  Config file:      .../online_config.py
   Web frontend:    http://127.0.0.1:5173
   JiuwenClaw WS:   ws://127.0.0.1:19000/ws
   vLLM Inference:  http://127.0.0.1:18002
@@ -435,10 +486,14 @@ Gateway 兼容 OpenAI API，同时提供管理端点：
 | `/v1/chat/completions` | POST | 透传上游 vLLM + LoRA 注入（支持 stream，需 `x-user-id`） |
 | `/v1/gateway/upload/batch` | POST | 接收 JiuwenClaw `RLOnlineRail` 上送的逐轮样本批次 |
 | `/v1/gateway/stats` | GET | Gateway 实时统计（请求数、样本数、轨迹存储 pending） |
-| `/health` | GET | 健康检查 |
+| `/health` | GET | 健康检查；返回当前 `instance_id` |
 | `/{path}` | * | 其余路径透传到上游（如 `/v1/models`） |
 
 `x-user-id` 用于按用户聚合轨迹与注入对应 LoRA；`x-session-id`/`x-request-id` 仅用作 trace。Gateway 自身不在 chat 路径上记录会话状态，逐轮状态由上送方（Rail）维护。
+
+启用 gateway collection session 模式时，session 身份和生命周期保存在 Redis，不存在需要恢复的进程内
+trajectory 状态。Gateway 重启后，未结束 session 可继续 capture、finalize 或 abort；已提交样本和 pending
+reward 同样保留。
 
 ## Judge 评分机制
 
@@ -490,7 +545,7 @@ Gateway 使用**延迟触发**的 LLM-as-Judge 评分：
 | `agent_rl/online/inference/` | vLLM 热加载通知 |
 | `agent_rl/online/judge/` | LLM-as-Judge 评分服务端 + 客户端 |
 | `agent_rl/online/yaml/ppo_online_trainer.yaml` | PPO 训练配置 |
-| `agent_rl/online/yaml/online_rl_launcher.yaml` | launcher 默认运行时配置 |
+| `agent_rl/config/online_config.py` | launcher 配置模型、Python 默认值和 PPO overlay |
 | `agent_rl/optimizer/task_runner.py` | OnlineTaskRunner（Ray actor，PPO 训练 + LoRA 导出） |
 | `agent_rl/rl_trainer/verl_executor.py` | VerlTrainingExecutor（PPO 训练核心，离线/在线共用） |
 | `agent_rl/rl_trainer/verl_converter.py` | 样本 → DataProto 转换器 |
@@ -499,6 +554,20 @@ Gateway 使用**延迟触发**的 LLM-as-Judge 评分：
 | `vLLM` | 推理服务（`--enable-lora`）+ Judge 服务 |
 | `verl` | PPO 训练后端 |
 | `Ray` | 分布式训练编排 |
+
+## 发布前 collection-mode 回归
+
+无网络闭环回归覆盖 gateway session 创建、OpenAI/Anthropic 调用、delayed/terminal reward、显式 finalize、
+trainer conversion 和 Rail 兼容路径。失败分类和重启恢复由相应单元测试覆盖：
+
+```bash
+# agent-core
+pytest -q \
+  tests/system_tests/agent_evolving/agent_rl/online/test_gateway_mode_online_loop_e2e.py \
+  tests/unit_tests/agent_evolving/agent_rl/online/gateway/test_gateway_collector.py \
+  tests/unit_tests/agent_evolving/agent_rl/online/gateway/test_anthropic_protocol.py \
+  -m "not level1"
+```
 
 ## 文件说明
 
@@ -515,7 +584,7 @@ Gateway 使用**延迟触发**的 LLM-as-Judge 评分：
 PPO 训练默认启用 FSDP `param_offload` + `optimizer_offload`，将参数和优化器状态卸载到 CPU。如果仍然 OOM，可以减少 `ppo_mini_batch_size` 或增加训练 GPU 数量。
 
 **Q: Judge vLLM 启动时报 CUDA OOM？**
-降低 `--judge-tp` 或使用更小的 Judge 模型。默认 YAML 已为 Judge 设置 `--max-model-len 8192 --max-num-seqs 16 --gpu-memory-utilization 0.85` 来适配 24GB GPU（参见 `online_rl_launcher.yaml` 的 `judge.extra_args`）。
+降低 `--judge-tp` 或使用更小的 Judge 模型。内置 Python 配置已为 Judge 设置 `--max-model-len 8192 --max-num-seqs 16 --gpu-memory-utilization 0.85` 来适配 24GB GPU（参见 `online_config.py` 的 `JudgeConfig.extra_args`）。
 
 **Q: Gateway 启动超时（tokenizer 下载失败）？**
 Gateway 需要加载 tokenizer。确保 `--model-path` 指向本地模型目录。

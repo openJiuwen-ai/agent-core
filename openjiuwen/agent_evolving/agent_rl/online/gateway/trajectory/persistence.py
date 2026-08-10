@@ -1,17 +1,20 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Trajectory persistence and rail-ingest wiring for gateway runtime."""
+"""Trajectory persistence and delayed-judge wiring for gateway runtime."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from typing import Any, Optional
 
+from ..message_utils import extract_last_user_instruction
 from .judge_dispatcher import JudgeDispatcher
 from .rail_ingest import RailBatchIngestor
 from .sample_payloads import build_sample, coerce_logprobs
 from .sample_recorder import SampleRecorder
+from .task_reward import TaskReward, TaskRewardProjector
 
 _SINGLE_USER_DEFAULT_ID = "jiuwenclaw-web"
 _UNINDEXED_FILTER_SCAN_LIMIT = 1000000
@@ -26,6 +29,7 @@ class GatewayTrajectoryRuntime:
         *,
         trajectory_store: Optional[Any] = None,
         pending_judge_store: Optional[Any] = None,
+        task_reward_redis: Optional[Any] = None,
     ) -> None:
         if trajectory_store is None:
             raise ValueError("GatewayTrajectoryRuntime requires trajectory_store")
@@ -39,7 +43,15 @@ class GatewayTrajectoryRuntime:
             dump_token_ids=config.dump_token_ids,
         )
         self._pending_judge_store = pending_judge_store
-        self._rail_ingestor: RailBatchIngestor | None = None
+        self._task_reward_projector: TaskRewardProjector | None = None
+        if task_reward_redis is not None:
+            self._task_reward_projector = TaskRewardProjector(
+                redis=task_reward_redis,
+                pending_store=self._pending_judge_store,
+                record_samples_once=self._record_samples_once,
+            )
+        self._judge_dispatcher: JudgeDispatcher
+        self._rail_ingestor: RailBatchIngestor
         self.set_judge_scorer(None)
 
     @property
@@ -48,8 +60,6 @@ class GatewayTrajectoryRuntime:
 
     @property
     def rail_ingestor(self) -> RailBatchIngestor:
-        if self._rail_ingestor is None:
-            raise RuntimeError("rail_ingestor is not initialized")
         return self._rail_ingestor
 
     def set_judge_scorer(self, judge_scorer: Optional[Any]) -> None:
@@ -58,11 +68,38 @@ class GatewayTrajectoryRuntime:
             record_sample=self.record_sample,
             judge_scorer=judge_scorer,
         )
+        self._judge_dispatcher = judge_dispatcher
         self._rail_ingestor = RailBatchIngestor(
             pending_judge_store=self._pending_judge_store,
             judge_dispatcher=judge_dispatcher,
             default_user_id=self._default_user_id,
         )
+
+    async def stage_gateway_sample(self, sample: dict[str, Any]) -> None:
+        """Persist one committed gateway call for delayed judging."""
+        await self._pending_judge_store.put(sample)
+
+    async def on_gateway_followup(self, session_id: str, messages: list[dict[str, Any]]) -> int:
+        """Use latest user message as feedback for oldest pending call."""
+        feedback = extract_last_user_instruction(messages)
+        return await self._judge_dispatcher.on_prev_feedback(
+            session_id,
+            {"raw_user_text": feedback},
+        )
+
+    async def flush_gateway_session(self, session_id: str) -> int:
+        """Apply existing session-done judge semantics to pending gateway calls."""
+        return await self._judge_dispatcher.on_session_done(session_id)
+
+    async def discard_gateway_session(self, session_id: str) -> int:
+        """Remove aborted calls without judging or publishing training samples."""
+        return len(await self._pending_judge_store.pop_all(session_id))
+
+    async def submit_task_reward(self, session_id: str, reward: TaskReward) -> int:
+        """Project a terminal verifier reward onto all calls captured for a task."""
+        if self._task_reward_projector is None:
+            raise ValueError("terminal task rewards require a Redis storage backend")
+        return await self._task_reward_projector.project(session_id, reward)
 
     async def record_sample(self, sample: dict[str, Any]) -> None:
         normalized = dict(sample)
@@ -191,6 +228,21 @@ class GatewayTrajectoryRuntime:
                 source = str(sample.get("source") or sample.get("mode") or "unknown")
                 stats["by_source"][source] = stats["by_source"].get(source, 0) + 1
         return stats
+
+    async def _record_samples_once(self, samples: Sequence[dict[str, Any]]) -> set[str]:
+        normalized_samples: list[dict[str, Any]] = []
+        for sample in samples:
+            normalized = dict(sample)
+            normalized_user_id = str(normalized.get("user_id") or self._default_user_id or "").strip()
+            if not normalized_user_id:
+                raise ValueError("missing user_id; online training requires a stable user id")
+            normalized["user_id"] = normalized_user_id
+            normalized_samples.append(normalized)
+        saved_ids = await self._trajectory_store.save_samples_once(normalized_samples)
+        for sample in normalized_samples:
+            if str(sample.get("sample_id") or "") in saved_ids:
+                await self._sample_recorder.record_sample(sample)
+        return saved_ids
 
     async def snapshot_stats(self) -> dict[str, Any]:
         sample_stats = await self._sample_recorder.snapshot_stats()

@@ -21,9 +21,6 @@ def _package_parent(package_name: str) -> Path:
     return Path(spec.origin).resolve().parent.parent
 
 
-AGENT_CORE_ROOT = _package_parent('openjiuwen')
-JIUWENCLAW_REPO = _package_parent('jiuwenclaw')
-
 from openjiuwen.agent_evolving.agent_rl.online.launcher.cli import build_arg_parser, build_cli_overrides  # noqa: E402
 from openjiuwen.agent_evolving.agent_rl.online.launcher.loader import load_runtime_config  # noqa: E402
 
@@ -45,9 +42,11 @@ def main() -> None:
         config_path=args.config,
         cli_overrides=build_cli_overrides(args),
     )
+    agent_core_root = _package_parent('openjiuwen')
+    jiuwenclaw_repo = _package_parent('jiuwenclaw') if cfg.jiuwen.enabled else _SCRIPT_DIR
     paths = LauncherPaths(
-        agent_core_root=AGENT_CORE_ROOT,
-        jiuwenclaw_repo=JIUWENCLAW_REPO,
+        agent_core_root=agent_core_root,
+        jiuwenclaw_repo=jiuwenclaw_repo,
         workspace_root=WORKSPACE,
         workspace_env=CONFIG_ENV,
         script_dir=_SCRIPT_DIR,

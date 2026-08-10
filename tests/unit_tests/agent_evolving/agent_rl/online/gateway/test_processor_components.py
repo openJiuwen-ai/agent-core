@@ -6,12 +6,12 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from openjiuwen.agent_evolving.agent_rl.online.gateway.app.server import (
-    _forward_chat_completions,
-    _inject_latest_lora,
-    build_gateway_app,
-)
+from openjiuwen.agent_evolving.agent_rl.online.gateway.app.server import build_gateway_app
 from openjiuwen.agent_evolving.agent_rl.online.gateway.app.bootstrap import build_app_from_config
+from openjiuwen.agent_evolving.agent_rl.online.gateway.app.completion_runtime import (
+    GatewayCompletionRuntime,
+    _inject_latest_lora,
+)
 from openjiuwen.agent_evolving.agent_rl.online.gateway.config import GatewayConfig
 from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.judge_dispatcher import JudgeDispatcher
 from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.sample_payloads import (
@@ -439,19 +439,20 @@ def test_gateway_bootstrap_uses_local_store_without_redis(tmp_path):
 @pytest.mark.asyncio
 async def test_processor_chat_completion_proxies_without_turn_or_sample_work():
     forwarder = _FakeForwarder()
-    config = SimpleNamespace(
-        llm_api_key="",
+    runtime = GatewayCompletionRuntime(
+        config=SimpleNamespace(llm_api_key=""),
+        forwarder=forwarder,
+        collector=None,
     )
 
     request = SimpleNamespace(headers={"x-request-id": "trace-9", "x-user-id": "user-9"})
-    result = await _forward_chat_completions(
+    result, wants_stream = await runtime.execute(
         request=request,
         body={"messages": [{"role": "user", "content": "hello"}]},
-        config=config,
-        forwarder=forwarder,
     )
 
     assert result["choices"][0]["message"]["content"] == "pong"
+    assert wants_stream is False
     assert len(forwarder.forward_calls) == 1
 
 

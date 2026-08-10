@@ -125,6 +125,8 @@ class PerTurnSample:
     response_tokens: Optional[list[int]] = None
     logprobs: Optional[list[float]] = None
     prompt_ids: Optional[list[int]] = None
+    response_mask: Optional[list[int]] = None
+    routed_experts: Any = None
     render_fingerprint: dict[str, Any] = field(default_factory=dict)
     tools: Any = None
     meta: dict[str, Any] = field(default_factory=dict)
@@ -202,6 +204,8 @@ class OnlineTrajectoryConverter:
             # Prefer immutable RL attributes captured on the canonical span;
             # fall back to provider metadata when a service exposes raw data.
             response_tokens = rl_fields.get("completion_token_ids") or extract_token_ids(token_source)
+            response_mask = decode_json_attribute(detail_meta.get("response_mask"))
+            routed_experts = decode_json_attribute(detail_meta.get("routed_experts"))
             prompt_ids = (
                 rl_fields.get("prompt_token_ids")
                 or extract_prompt_ids({"prompt_ids": detail_meta.get("prompt_ids")})
@@ -220,6 +224,8 @@ class OnlineTrajectoryConverter:
                 response_tokens=response_tokens,
                 logprobs=logprobs,
                 prompt_ids=prompt_ids,
+                response_mask=_json_value(response_mask),
+                routed_experts=_json_value(routed_experts),
                 render_fingerprint=decode_json_attribute(detail_meta.get("render_fingerprint"))
                 or _fingerprint_payload(messages, tools),
                 tools=_json_value(tools),

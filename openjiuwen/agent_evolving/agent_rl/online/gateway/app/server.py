@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import shutil
 import tempfile
@@ -21,67 +20,27 @@ from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from .http_helpers import build_upstream_headers, ensure_gateway_auth, stream_chat_response
-from .request_context import require_messages, require_user_id, resolve_trace_id
-from ...lora_runtime import build_lora_info, lora_id as build_lora_id
-from ..trajectory import GatewayTrajectoryRuntime
-from ..upstream import Forwarder, UpstreamGatewayClient
+from openjiuwen.agent_evolving.agent_rl.online.gateway.collector.ports import GatewayCollector
+from openjiuwen.core.common.logging import logger
+
 from ....storage.lora_repo import LoRAPublishRequest
 from ....storage.training_task_store import TrainingTaskStore
+from ...lora_runtime import build_lora_info
+from ...lora_runtime import lora_id as build_lora_id
+from ..trajectory import GatewayTrajectoryRuntime
+from ..upstream import Forwarder, UpstreamGatewayClient
+from .anthropic_routes import create_anthropic_router
+from .collection_routes import create_collection_router
+from .completion_runtime import GatewayCompletionRuntime
+from .http_helpers import build_upstream_headers, ensure_gateway_auth, stream_chat_response
 
-logger = logging.getLogger("online_rl.gateway")
 
-
-def _inject_latest_lora(
+async def _snapshot_stats(
     *,
-    body: dict[str, Any],
-    user_id: str,
-    lora_repo: Any = None,
-    lora_default_policy: str = "disabled",
-) -> dict[str, Any] | None:
-    if lora_repo is None or lora_default_policy != "latest_by_user":
-        return None
-    latest_lora = lora_repo.get_latest(user_id)
-    if latest_lora:
-        body["model"] = user_id
-        extra_body = body.get("extra_body")
-        if isinstance(extra_body, dict):
-            extra_body.pop("lora_name", None)
-            if not extra_body:
-                body.pop("extra_body", None)
-        return build_lora_info(user_id, latest_lora, default_policy=lora_default_policy)
-    return None
-
-
-async def _forward_chat_completions(
-    *,
-    request: Request,
-    body: dict[str, Any],
-    config: Any,
-    forwarder: Forwarder,
+    trajectory_runtime: GatewayTrajectoryRuntime,
+    total_requests: int,
+    completion_runtime: GatewayCompletionRuntime,
 ) -> dict[str, Any]:
-    t0 = time.perf_counter()
-    trace_id = resolve_trace_id(request)
-    messages = require_messages(body)
-    require_user_id(request, config)
-    upstream_headers = build_upstream_headers(request, llm_api_key=config.llm_api_key)
-
-    logger.debug(
-        "[Gateway %s] proxy_only messages=%d stream=%s",
-        trace_id,
-        len(messages),
-        bool(body.get("stream", False)),
-    )
-
-    response_json = await forwarder.forward(body=body, headers=upstream_headers)
-    logger.debug(
-        "[Gateway] chat_completions cost_ms=%.1f",
-        (time.perf_counter() - t0) * 1000,
-    )
-    return response_json
-
-
-async def _snapshot_stats(*, trajectory_runtime: GatewayTrajectoryRuntime, total_requests: int) -> dict[str, Any]:
     trajectory_stats = await trajectory_runtime.snapshot_stats()
     return {
         "total_requests": total_requests,
@@ -89,6 +48,7 @@ async def _snapshot_stats(*, trajectory_runtime: GatewayTrajectoryRuntime, total
         "trajectory_store_backend": trajectory_stats["trajectory_store_backend"],
         "trajectory_store_total": trajectory_stats["trajectory_store_total"],
         "trajectory_store_pending": trajectory_stats["trajectory_store_pending"],
+        "collection": completion_runtime.collection_stats(),
     }
 
 
@@ -232,10 +192,18 @@ def build_gateway_app(
     training_task_store: TrainingTaskStore | None = None,
     close_resources: Callable[[], Awaitable[None]],
     lora_repo: Any = None,
+    collector: GatewayCollector | None = None,
 ) -> FastAPI:
     """Assemble FastAPI app and bind gateway public/internal routes."""
     metrics_lock = asyncio.Lock()
     total_requests = 0
+    gateway_instance_id = str(getattr(config, "instance_id", "")).strip()
+    completion_runtime = GatewayCompletionRuntime(
+        config=config,
+        forwarder=forwarder,
+        collector=collector,
+        lora_repo=lora_repo,
+    )
 
     async def _inc_request_counter() -> None:
         nonlocal total_requests
@@ -352,10 +320,25 @@ def build_gateway_app(
             await close_resources()
 
     app = FastAPI(title="Online-RL Gateway", lifespan=_lifespan)
+    app.state.trajectory_collector = collector
+    app.state.gateway_instance_id = gateway_instance_id
+    app.include_router(
+        create_collection_router(
+            config=config,
+            collection_manager=collector,
+        )
+    )
+    app.include_router(
+        create_anthropic_router(
+            config=config,
+            completion_runtime=completion_runtime,
+            increment_request_counter=_inc_request_counter,
+        )
+    )
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {"status": "ok"}
+        return {"status": "ok", "instance_id": gateway_instance_id}
 
     @app.get("/v1/gateway/stats")
     async def gateway_stats(authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
@@ -365,6 +348,7 @@ def build_gateway_app(
         return await _snapshot_stats(
             trajectory_runtime=trajectory_runtime,
             total_requests=request_count,
+            completion_runtime=completion_runtime,
         )
 
     @app.post("/v1/training/tasks")
@@ -718,31 +702,7 @@ def build_gateway_app(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"invalid json: {exc}") from exc
 
-        user_id = require_user_id(request, config)
-        lora_info = _inject_latest_lora(
-            body=body,
-            user_id=user_id,
-            lora_repo=lora_repo,
-            lora_default_policy=getattr(config, "lora_default_policy", "disabled"),
-        )
-        if lora_info:
-            logger.info(
-                "[Gateway] applied LoRA adapter user=%s version=%s path=%s via model field",
-                user_id,
-                lora_info.get("version"),
-                lora_info.get("path"),
-            )
-
-        client_wants_stream = bool(body.pop("stream", False))
-
-        response_json = await _forward_chat_completions(
-            request=request,
-            body=body,
-            config=config,
-            forwarder=forwarder,
-        )
-        if lora_info:
-            response_json["rl_lora"] = lora_info
+        response_json, client_wants_stream = await completion_runtime.execute(request=request, body=body)
 
         if client_wants_stream:
             return StreamingResponse(

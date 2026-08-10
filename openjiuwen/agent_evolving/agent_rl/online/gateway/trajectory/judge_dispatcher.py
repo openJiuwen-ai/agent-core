@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Delayed-judge dispatch for pending rail-v1 samples."""
+"""Delayed-judge dispatch for pending online per-call samples."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ logger = logging.getLogger("online_rl.gateway")
 
 
 class JudgeDispatcher:
-    """Flush pending rail-v1 samples when feedback/session_done arrives."""
+    """Flush pending Rail or gateway samples on feedback/session completion."""
 
     def __init__(
         self,

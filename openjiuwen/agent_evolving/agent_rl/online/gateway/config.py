@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -36,5 +37,8 @@ class GatewayConfig:
     upstream_max_retries: int = 2
     upstream_retry_backoff_sec: float = 0.2
     upstream_retry_max_backoff_sec: float = 2.0
+    anthropic_max_completion_tokens: int = 0
+    tool_parser_name: str = ""
     disable_gateway_trajectory_collection: bool = False
     single_user_default: bool = True
+    instance_id: str = field(default_factory=lambda: uuid.uuid4().hex)
