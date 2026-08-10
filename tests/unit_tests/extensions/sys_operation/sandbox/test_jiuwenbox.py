@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator
+from unittest import mock
 
 import httpx
 import pytest
@@ -33,6 +35,7 @@ from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLaunch
 from openjiuwen.core.sys_operation.sandbox.gateway.gateway_client import SandboxGatewayClient
 from openjiuwen.extensions.sys_operation.sandbox.providers import jiuwenbox as jb
 from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import (
+    _command_matches_exclude,
     build_jiuwenbox_http_client,
     clear_jiuwenbox_shared_sandbox,
 )
@@ -1269,3 +1272,252 @@ async def test_lifecycle_hook_strict_propagates_on_delete(
             after_ids = _list_sandbox_ids(client)
             for leftover in after_ids - before_ids:
                 client.delete(f"/api/v1/sandboxes/{leftover}")
+
+
+# ===========================================================================
+# Unit tests: hybrid excluded_commands rewrite planner (no live sandbox).
+# ===========================================================================
+
+_REWRITE_CLI = "/usr/bin/jiuwenbox"
+_REWRITE_BASE = "http://127.0.0.1:9"
+_REWRITE_SID = "sid"
+
+
+class TestCommandRewrite:
+    """Pure unit coverage for hybrid leaf rewrite routing."""
+
+    @pytest.fixture(autouse=True)
+    def _require_tree_sitter_and_reset_caches(self):
+        pytest.importorskip("tree_sitter")
+        pytest.importorskip("tree_sitter_bash")
+        jb.reset_rewrite_caches_for_tests()
+        yield
+        jb.reset_rewrite_caches_for_tests()
+
+    @staticmethod
+    def _plan(command: str, patterns: list[str], **kwargs):
+        defaults = dict(
+            sandbox_id=_REWRITE_SID,
+            base_url=_REWRITE_BASE,
+            cli_bin=_REWRITE_CLI,
+            build_hybrid=True,
+        )
+        defaults.update(kwargs)
+        return jb.plan_command_rewrite(command, patterns, **defaults)
+
+    def test_r1_pipe_hybrid_adds_stdin_on_consumer(self):
+        plan = self._plan("cat f | grep a", ["cat"])
+        assert plan.mode == "hybrid"
+        assert plan.rewritten is not None
+        assert plan.rewritten.startswith("cat f |")
+        assert "sandbox exec" in plan.rewritten
+        assert "--stdin -" in plan.rewritten
+        assert "bash -lc 'grep a'" in plan.rewritten or 'bash -lc "grep a"' in plan.rewritten
+        assert plan.leaves[0].local is True
+        assert plan.leaves[1].local is False
+        assert plan.leaves[1].receives_pipe_stdin is True
+
+    def test_r2_and_hybrid_no_stdin_on_list_segment(self):
+        plan = self._plan("echo a && git status", ["git*"])
+        assert plan.mode == "hybrid"
+        assert plan.rewritten is not None
+        assert "git status" in plan.rewritten
+        assert plan.rewritten.endswith("git status") or " && git status" in plan.rewritten
+        remote_part = plan.rewritten.split("&&")[0]
+        assert "sandbox exec" in remote_part
+        assert "--stdin" not in remote_part
+
+    def test_r3_remote_all_no_rewrite(self):
+        plan = self._plan("echo a || echo b", ["git*"])
+        assert plan.mode == "remote_all"
+        assert plan.rewritten is None
+
+    def test_r4_local_all_no_rewrite(self):
+        plan = self._plan("cat a | cat b", ["cat"])
+        assert plan.mode == "local_all"
+        assert plan.rewritten is None
+
+    def test_r5_process_substitution_can_hybrid(self):
+        plan = self._plan("cat <(echo x) | grep y", ["cat"])
+        assert plan.mode == "hybrid"
+        assert plan.rewritten is not None
+        assert plan.leaves[0].local is True
+        assert plan.leaves[1].local is False
+
+    def test_r6_pipe_producer_remote_no_stdin(self):
+        plan = self._plan("grep a | cat", ["cat"])
+        assert plan.mode == "hybrid"
+        assert plan.rewritten is not None
+        assert plan.rewritten.endswith("| cat") or plan.rewritten.rstrip().endswith("cat")
+        producer = plan.rewritten.split("|")[0]
+        assert "sandbox exec" in producer
+        assert "--stdin" not in producer
+        assert plan.leaves[0].receives_pipe_stdin is False
+        assert plan.leaves[1].local is True
+
+    def test_r7_quoted_args_pass_bash_n(self):
+        plan = self._plan('cat f | grep "a b"', ["cat"])
+        assert plan.mode == "hybrid"
+        assert plan.rewritten is not None
+        completed = subprocess.run(
+            ["bash", "-n", "-c", plan.rewritten],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    def test_r8_no_tree_sitter_returns_legacy(self, monkeypatch):
+        monkeypatch.setattr(jb, "_get_tree_sitter_bash_parser", lambda: None)
+        plan = self._plan("cat f | grep a", ["cat"])
+        assert plan.mode == "legacy"
+        assert "tree-sitter" in (plan.reason or "")
+
+    def test_r9_command_matches_exclude_compatibility(self):
+        assert _command_matches_exclude("cat f | grep", ["cat"]) is True
+        assert jb.leaf_matches_exclude("cat f", "cat", ["cat"]) is True
+        assert jb.leaf_matches_exclude("grep a", "grep", ["cat"]) is False
+
+    def test_r10_assignment_prefix_matches_command_name(self):
+        plan = self._plan("FOO=bar cat f | grep a", ["cat"])
+        assert plan.mode == "hybrid"
+        assert plan.leaves[0].local is True
+        assert plan.leaves[0].command_name == "cat"
+        assert plan.leaves[0].text.startswith("FOO=bar")
+
+    def test_r11_utf8_byte_span_rewrite(self):
+        plan = self._plan("printf '你好' | wc -c", ["printf"])
+        assert plan.mode == "hybrid"
+        assert plan.rewritten is not None
+        assert "你好" in plan.rewritten
+        completed = subprocess.run(
+            ["bash", "-n", "-c", plan.rewritten],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    def test_r12_redirect_can_hybrid(self):
+        mixed = self._plan("grep x > out | cat", ["cat"])
+        assert mixed.mode == "hybrid"
+        assert mixed.leaves[0].local is False
+        assert mixed.leaves[1].local is True
+        remote = self._plan("grep x > out", ["cat"])
+        assert remote.mode == "remote_all"
+        local = self._plan("cat > out", ["cat*"])
+        assert local.mode == "local_all"
+
+    def test_r13_stateful_builtin_can_hybrid(self):
+        # Stateful builtins are not specially blocked; mixed forms may hybrid-rewrite.
+        plan = self._plan("cd /tmp && pwd", ["cd*"])
+        assert plan.mode == "hybrid"
+        assert plan.leaves[0].local is True
+        assert plan.leaves[1].local is False
+        export_plan = self._plan("export X=1; echo x", ["export*"])
+        assert export_plan.mode == "hybrid"
+        assert export_plan.leaves[0].local is True
+        assert export_plan.leaves[1].local is False
+
+    def test_r14_expansion_can_hybrid(self):
+        plan = self._plan("echo $HOME | wc -c", ["echo"])
+        assert plan.mode == "hybrid"
+        assert plan.leaves[0].local is True
+        assert plan.leaves[1].local is False
+
+    def test_r15_operators_can_hybrid(self):
+        pipe_and = self._plan("echo a |& grep b", ["echo"])
+        assert pipe_and.mode == "hybrid"
+        assert pipe_and.leaves[0].local is True
+        assert pipe_and.leaves[1].local is False
+        assert self._plan("echo a & echo b", ["echo"]).mode == "local_all"
+        bg = self._plan("echo a & git status", ["echo"])
+        assert bg.mode == "hybrid"
+        assert bg.leaves[0].local is True
+        assert bg.leaves[1].local is False
+        negated = self._plan("! false || echo ok", ["false"])
+        assert negated.mode == "hybrid"
+        assert negated.leaves[0].local is True
+        assert negated.leaves[1].local is False
+
+    def test_r16_cli_wrapper_quoting_and_no_token(self):
+        plan = self._plan(
+            "echo a && git status",
+            ["git*"],
+            cwd="/tmp/my dir",
+            env={"FOO": "bar baz", "EQ": "a=b"},
+            timeout=12,
+            http_timeout=40,
+        )
+        assert plan.mode == "hybrid"
+        rewritten = plan.rewritten or ""
+        assert "JIUWENBOX_API_TOKEN" not in rewritten
+        assert "--api-token" not in rewritten
+        assert "/usr/bin/jiuwenbox" in rewritten
+        assert "--cwd" in rewritten
+        assert "--env" in rewritten
+        assert "--timeout-seconds" in rewritten
+        completed = subprocess.run(
+            ["bash", "-n", "-c", rewritten],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    def test_r17_argv_limit_and_cli_probe(self):
+        huge_env = {f"K{i}": "x" * 200 for i in range(400)}
+        plan = self._plan("echo a | cat", ["cat"], env=huge_env, max_argv_bytes=1024)
+        assert plan.mode == "unsupported"
+        assert "argv" in (plan.reason or "")
+
+        with mock.patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="usage: ... --stdin --cwd --env --timeout-seconds\n",
+                stderr="",
+            )
+            ok, err = jb.probe_jiuwenbox_cli(_REWRITE_CLI)
+            assert ok is True
+            assert err is None
+
+        jb.reset_rewrite_caches_for_tests()
+        with mock.patch("subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="usage: sandbox exec\n",
+                stderr="",
+            )
+            ok, err = jb.probe_jiuwenbox_cli(_REWRITE_CLI)
+            assert ok is False
+            assert err and "missing flags" in err
+
+    def test_empty_patterns_remote_all_fast_path(self):
+        plan = jb.plan_command_rewrite("cat f | grep a", [])
+        assert plan.mode == "remote_all"
+        assert plan.reason == "no excluded_commands"
+
+    def test_build_orchestration_env_overrides_reserved_keys(self):
+        env = jb.build_orchestration_env(
+            base_url="http://box",
+            api_token="secret",
+            http_timeout=30,
+            caller_env={
+                "JIUWENBOX_URL": "http://evil",
+                "JIUWENBOX_API_TOKEN": "caller",
+                "JIUWENBOX_TIMEOUT": "1",
+                "FOO": "1",
+            },
+        )
+        assert env["JIUWENBOX_URL"] == "http://box"
+        assert env["JIUWENBOX_API_TOKEN"] == "secret"
+        assert env["JIUWENBOX_TIMEOUT"] == "30"
+        assert env["FOO"] == "1"
+
+    def test_semicolon_list_hybrid(self):
+        plan = self._plan("echo a; git status", ["git*"])
+        assert plan.mode == "hybrid"
+        assert plan.leaves[1].receives_pipe_stdin is False
+        assert "--stdin" not in (plan.rewritten or "")

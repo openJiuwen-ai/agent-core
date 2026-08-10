@@ -44,12 +44,12 @@ If the JiuwenBox service uses Bearer authentication, set `JIUWENBOX_API_TOKEN`. 
 | `policy` | dict | Security policy sent when creating or recreating a sandbox. |
 | `policy_mode` | str | Policy mode used when creating or recreating a sandbox. |
 | `idle_check_interval` | int | JiuwenBox server idle-check interval; `idle_ttl_seconds` supplies the idle timeout. |
-| `excluded_commands` | List[str] | Uses `fnmatch` against shell commands or the first line of code. Matches execute on the SDK host. |
-| `fallback_on_failure` | bool | Runs on the SDK host if the sandbox execution pipeline fails. Default: `False`. |
+| `excluded_commands` | List[str] | Shell: `fnmatch` per simple-command leaf. All-local / all-remote keep the original string; mixed leaves rewrite remote segments to `jiuwenbox sandbox exec` (local bash orchestrates control flow). Code: still matched on the first line only. |
+| `fallback_on_failure` | bool | Runs on the SDK host if the **whole remote** sandbox execution pipeline fails. Does **not** apply to hybrid rewritten commands. Default: `False`. |
 | `preserve_files_upload` | List[dict] | Files or directories re-uploaded after recreation. Each entry contains `host_path` and `sandbox_path`; directories may set `kind="directory"`. |
 | `lifecycle_hook` | Callable[[str, dict], None] | Synchronous callback receiving an event name and a shallow copy of its context. |
 
-> **Security warning:** `excluded_commands` and `fallback_on_failure=True` execute commands or code on the SDK host and therefore bypass sandbox isolation. Enable them only in controlled environments where this behavior is explicitly acceptable.
+> **Security warning:** `excluded_commands` and `fallback_on_failure=True` execute commands or code on the SDK host and therefore bypass sandbox isolation. Hybrid rewrite additionally requires a trusted `jiuwenbox` CLI on the host and sends auth via `JIUWENBOX_API_TOKEN` (never on the process argv). Enable them only in controlled environments where this behavior is explicitly acceptable.
 
 When a missing sandbox produces the recognized HTTP 404 response, the provider automatically recreates it and retries. `JIUWENBOX_SANDBOX_RECREATE_RETRIES` controls the number of recreation retries. The default is `3`; set it to `0` to disable retries.
 
