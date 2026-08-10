@@ -2,7 +2,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
-import logging
 import time
 from unittest.mock import (
     AsyncMock,
@@ -147,14 +146,18 @@ class TestContextEngine:
         assert ctx1 is ctx2
 
     @pytest.mark.asyncio
-    async def test_create_context_does_not_create_default_tiktoken_counter(self, session, caplog):
+    async def test_create_context_does_not_create_default_tiktoken_counter(self, session):
         engine = ContextEngine(ContextEngineConfig(enable_tiktoken_counter=False))
-        caplog.set_level(logging.INFO)
 
-        context = await engine.create_context(context_id="ctx", session=session)
+        with patch("openjiuwen.core.context_engine.context_engine.context_engine_logger") as logger:
+            context = await engine.create_context(context_id="ctx", session=session)
 
         assert context.token_counter() is None
-        assert "tiktoken counter disabled; using character-based token estimation" in caplog.text
+        logger.info.assert_called_once_with(
+            "tiktoken counter disabled; using character-based token estimation, session_id=%s context_id=%s",
+            session.get_session_id(),
+            "ctx",
+        )
 
     @pytest.mark.asyncio
     async def test_create_context_creates_default_tiktoken_counter_when_enabled(self, session):
