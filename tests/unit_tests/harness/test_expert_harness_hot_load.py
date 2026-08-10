@@ -22,6 +22,7 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.resources_manager.base import Error
+from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail, ToolCallInputs
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
@@ -508,16 +509,25 @@ async def test_hot_load_custom_subagent_task_tool_can_invoke(tmp_path: Path) -> 
     agent.react_agent.set_llm(fake_model)
 
     _orig_invoke = DeepAgent.invoke
+    _orig_stream = DeepAgent.stream
 
     async def _selective_invoke(self, inputs=None, session=None):
         if getattr(getattr(self, "card", None), "name", None) == "custom_echo":
             return {"output": "custom-ok"}
         return await _orig_invoke(self, inputs, session=session)
 
+    async def _selective_stream(self, inputs=None, session=None, stream_modes=None):
+        if getattr(getattr(self, "card", None), "name", None) == "custom_echo":
+            yield OutputSchema(type="answer", index=0, payload={"output": "custom-ok"})
+            return
+        async for chunk in _orig_stream(self, inputs, session=session, stream_modes=stream_modes):
+            yield chunk
+
     with patch.object(DeepAgent, "invoke", new=_selective_invoke):
-        result = await agent.invoke(
-            {"query": "delegate to custom_echo", "conversation_id": "hot_task_fc"},
-        )
+        with patch.object(DeepAgent, "stream", new=_selective_stream):
+            result = await agent.invoke(
+                {"query": "delegate to custom_echo", "conversation_id": "hot_task_fc"},
+            )
 
     assert fake_model.call_count >= 1
     assert "task_tool" in fake_model.last_tool_names()

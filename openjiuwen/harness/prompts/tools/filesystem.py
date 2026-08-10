@@ -18,8 +18,14 @@ _LEGACY_READ_FILE_DESCRIPTION: Dict[str, str] = {
 }
 
 READ_FILE_DESCRIPTION: Dict[str, str] = {
-    "cn": "增强版文件读取工具。支持文本、图片、PDF 与 Jupyter Notebook。",
-    "en": "Enhanced file reader for text, images, PDFs, and Jupyter notebooks.",
+    "cn": (
+        "增强版文件读取工具。支持文本、图片、PDF、Jupyter Notebook，"
+        "以及 Office 文档（.docx/.xlsx/.pptx）。"
+    ),
+    "en": (
+        "Enhanced file reader for text, images, PDFs, Jupyter notebooks, "
+        "and Office documents (.docx/.xlsx/.pptx)."
+    ),
 }
 
 WRITE_FILE_DESCRIPTION: Dict[str, str] = {

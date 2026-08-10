@@ -187,6 +187,7 @@ def resolve_deep_agent_parts(
     enable_read_image_multimodal: Optional[bool] = None,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
+    allowed_paths: Optional[List[str]] = None,
     default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
@@ -270,13 +271,16 @@ def resolve_deep_agent_parts(
         # so a rebuild does not log a spurious "resource already exist" error.
         sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
         if sys_operation_obj is None:
+            work_config_kwargs: dict[str, Any] = {
+                "shell_allowlist": None,
+                "restrict_to_sandbox": restrict_to_work_dir,
+            }
+            if allowed_paths is not None:
+                work_config_kwargs["sandbox_root"] = allowed_paths
             sysop_card = SysOperationCard(
                 id=sysop_id,
                 mode=OperationMode.LOCAL,
-                work_config=LocalWorkConfig(
-                    shell_allowlist=None,
-                    restrict_to_sandbox=restrict_to_work_dir,
-                ),
+                work_config=LocalWorkConfig(**work_config_kwargs),
             )
             add_result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if add_result.is_err():
@@ -442,6 +446,7 @@ def create_deep_agent(
     enable_read_image_multimodal: Optional[bool] = None,
     enable_task_planning: bool = False,
     restrict_to_work_dir: bool = True,
+    allowed_paths: Optional[List[str]] = None,
     default_mode: AgentMode = AgentMode.NORMAL,
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
@@ -535,6 +540,7 @@ def create_deep_agent(
         enable_read_image_multimodal=enable_read_image_multimodal,
         enable_task_planning=enable_task_planning,
         restrict_to_work_dir=restrict_to_work_dir,
+        allowed_paths=allowed_paths,
         default_mode=default_mode,
         model_selection=model_selection,
         parallel_tool_calls=parallel_tool_calls,

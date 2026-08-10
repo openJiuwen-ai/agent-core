@@ -12,6 +12,7 @@ from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelReques
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
@@ -48,6 +49,10 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
                 called_inputs.update(inputs)
                 return {"output": "done"}
+
+            async def stream(self, inputs: dict[str, str], **kwargs):
+                called_inputs.update(inputs)
+                yield OutputSchema(type="answer", index=0, payload={"output": "done"})
 
         # Match production: subagent_type must correspond to a SubAgentConfig.agent_card.name
         code_spec = SubAgentConfig(
@@ -119,6 +124,10 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
                 called_inputs.update(inputs)
                 return {"output": "done"}
 
+            async def stream(self, inputs: dict[str, str], **kwargs):
+                called_inputs.update(inputs)
+                yield OutputSchema(type="answer", index=0, payload={"output": "done"})
+
         browser_spec = SubAgentConfig(
             agent_card=AgentCard(name="browser_agent", description="browser subagent"),
             system_prompt="sub",
@@ -165,6 +174,9 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
 
             async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
                 return {"output": "done"}
+
+            async def stream(self, inputs: dict[str, str], **kwargs):
+                yield OutputSchema(type="answer", index=0, payload={"output": "done"})
 
         override = _create_dummy_model()
         parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
