@@ -104,8 +104,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             "tools_keys=%s llm_enabled=%s model_name=%s",
             sorted(self._tool_names),
             list((self._static_config.get("tools") or {}).keys()),
-            self._engine._llm is not None,
-            self._engine._model_name,
+            self._engine.llm is not None,
+            self._engine.model_name,
         )
 
     def _normalize_tool_name(self, tool_name: str) -> str:

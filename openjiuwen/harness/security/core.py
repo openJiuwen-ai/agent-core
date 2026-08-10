@@ -84,6 +84,20 @@ class PermissionEngine:
         self._model_name = model_name
 
     @property
+    def llm(self) -> Any:
+        """只读获取已绑定的 LLM；写入请走 ``update_llm``。
+
+        公开属性供 duck-typed 引擎（如 jiuwenclaw adapter）与 rail 诊断日志使用，
+        避免 rail 直接读 ``_llm`` 私有字段。
+        """
+        return self._llm
+
+    @property
+    def model_name(self) -> str | None:
+        """与 ``llm`` 配套的模型名；只读、不可绕过 ``update_llm`` 写入。"""
+        return self._model_name
+
+    @property
     def enabled(self) -> bool:
         return self._enabled
 
