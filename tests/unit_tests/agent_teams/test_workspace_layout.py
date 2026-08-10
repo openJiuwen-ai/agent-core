@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
+from openjiuwen.agent_teams.workspace_layout import (
+    ensure_member_skill_copy,
+    ensure_team_member_workspace_link,
+)
 
 
 @pytest.mark.level0
@@ -69,3 +72,44 @@ def test_ensure_team_member_workspace_link_reraises_non_permission_symlink_error
 
     with pytest.raises(OSError, match="bad target"):
         ensure_team_member_workspace_link("team-alpha", "alice")
+
+
+@pytest.mark.level0
+def test_ensure_member_skill_copy_replaces_global_link_and_preserves_private_copy(tmp_path: Path):
+    global_skills = tmp_path / "global"
+    member_skills = tmp_path / "member"
+    source = global_skills / "xlsx"
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("# global\n", encoding="utf-8")
+    member_skills.mkdir()
+    (member_skills / "xlsx").symlink_to(source, target_is_directory=True)
+
+    copied = ensure_member_skill_copy(
+        member_skills_dir=member_skills,
+        global_skills_dir=global_skills,
+        skill_name="xlsx",
+    )
+
+    assert copied.is_dir()
+    assert not copied.is_symlink()
+    assert (copied / "SKILL.md").read_text(encoding="utf-8") == "# global\n"
+
+    (copied / "SKILL.md").write_text("# private\n", encoding="utf-8")
+    assert ensure_member_skill_copy(
+        member_skills_dir=member_skills,
+        global_skills_dir=global_skills,
+        skill_name="xlsx",
+    ) == copied
+    assert (copied / "SKILL.md").read_text(encoding="utf-8") == "# private\n"
+    assert (source / "SKILL.md").read_text(encoding="utf-8") == "# global\n"
+
+
+@pytest.mark.level0
+@pytest.mark.parametrize("skill_name", ["../xlsx", "xlsx/path", "", "."])
+def test_ensure_member_skill_copy_rejects_unsafe_names(tmp_path: Path, skill_name: str):
+    with pytest.raises(ValueError, match="unsafe Skill name"):
+        ensure_member_skill_copy(
+            member_skills_dir=tmp_path / "member",
+            global_skills_dir=tmp_path / "global",
+            skill_name=skill_name,
+        )
