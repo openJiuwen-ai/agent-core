@@ -6,7 +6,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory as CanonicalTrajectory
 
 from openjiuwen.agent_evolving.trajectory.semconv import (
     CASE_ID,
@@ -45,6 +48,11 @@ from openjiuwen.agent_evolving.trajectory.semconv import (
     TRAJECTORY_SOURCE,
     TRAJECTORY_STEP_KIND,
 )
+from openjiuwen.agent_evolving.trajectory.schema import (
+    MEMBER_ID as CANONICAL_MEMBER_ID,
+    SESSION_ID as CANONICAL_SESSION_ID,
+    TEAM_ID as CANONICAL_TEAM_ID,
+)
 from openjiuwen.agent_evolving.trajectory.span_codec import (
     normalize_trace_id_hex,
     otlp_value_to_python,
@@ -65,6 +73,9 @@ RESOURCE_META_EXCLUDE_KEYS = frozenset(
         TRAJECTORY_SCHEMA_VERSION_ATTR,
         OJ_SESSION_ID,
         OLD_OJ_SESSION_ID,
+        CANONICAL_SESSION_ID,
+        CANONICAL_TEAM_ID,
+        CANONICAL_MEMBER_ID,
         CASE_ID,
         TRAJECTORY_SOURCE,
         "source",
@@ -185,15 +196,19 @@ def _otlp_trajectory_meta(resource_attrs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     aliases = {
-        "member_id": "openjiuwen.member.id",
-        "member_name": "openjiuwen.member.name",
-        "member_role": "openjiuwen.member.role",
-        "team_id": "openjiuwen.team.id",
-        "team_name": "openjiuwen.team.name",
+        "member_id": (CANONICAL_MEMBER_ID, "openjiuwen.member.id"),
+        "member_name": ("agentteam.member.name", "openjiuwen.member.name"),
+        "member_role": ("agentteam.member.role", "openjiuwen.member.role"),
+        "team_id": (CANONICAL_TEAM_ID, "openjiuwen.team.id"),
+        "team_name": ("agentteam.team.name", "openjiuwen.team.name"),
     }
-    for target, source in aliases.items():
-        if source in resource_attrs and target not in meta:
-            meta[target] = deepcopy(resource_attrs[source])
+    for target, sources in aliases.items():
+        if target in meta:
+            continue
+        for source in sources:
+            if source in resource_attrs:
+                meta[target] = deepcopy(resource_attrs[source])
+                break
     return meta
 
 
@@ -613,76 +628,99 @@ class LegacyTrajectory:
 
 
 TrajectoryRecord = Trajectory
+TrajectoryLike = Union[Trajectory, "CanonicalTrajectory"]
 
 
-def trajectory_resource_attributes(trajectory: Trajectory) -> Dict[str, Any]:
+def trajectory_otlp(trajectory: TrajectoryLike) -> Dict[str, Any]:
+    """Return a detached OTLP payload for either migration-time model."""
+
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory as CanonicalTrajectory
+
+    if isinstance(trajectory, CanonicalTrajectory):
+        return trajectory.to_otlp()
+    return deepcopy(trajectory.otlp_trace) if isinstance(trajectory.otlp_trace, dict) else {}
+
+
+def trajectory_resource_attributes(trajectory: TrajectoryLike) -> Dict[str, Any]:
     """Return trajectory-level attributes from OTLP resource spans."""
-    return _otlp_resource_attributes(trajectory.otlp_trace)
+    return _otlp_resource_attributes(trajectory_otlp(trajectory))
 
 
-def trajectory_execution_id(trajectory: Trajectory) -> str:
+def trajectory_execution_id(trajectory: TrajectoryLike) -> str:
     """Read execution id directly from OTLP resource attributes."""
     return _otlp_trajectory_id(trajectory_resource_attributes(trajectory))
 
 
-def trajectory_steps(trajectory: Trajectory) -> List[TrajectoryStep]:
+def trajectory_steps(trajectory: TrajectoryLike) -> List[TrajectoryStep]:
     """Project OTLP spans to ``TrajectoryStep`` read models.
 
     Prefer this over ``to_legacy_trajectory`` when only steps are needed.
     For a full ``LegacyTrajectory`` compatibility view, use
     ``to_legacy_trajectory``.
     """
-    return _otlp_steps(trajectory.otlp_trace)
+    return _otlp_steps(trajectory_otlp(trajectory))
 
 
-def trajectory_source(trajectory: Trajectory) -> str:
+def trajectory_source(trajectory: TrajectoryLike) -> str:
     """Read trajectory source directly from OTLP resource attributes."""
     return _otlp_trajectory_source(trajectory_resource_attributes(trajectory))
 
 
-def trajectory_case_id(trajectory: Trajectory) -> Optional[str]:
+def trajectory_case_id(trajectory: TrajectoryLike) -> Optional[str]:
     """Read case id directly from OTLP resource attributes."""
     value = trajectory_resource_attributes(trajectory).get(CASE_ID)
     return str(value) if value is not None else None
 
 
-def trajectory_session_id(trajectory: Trajectory) -> Optional[str]:
+def trajectory_session_id(trajectory: TrajectoryLike) -> Optional[str]:
     """Read session id directly from OTLP resource attributes."""
     attrs = trajectory_resource_attributes(trajectory)
-    value = attrs.get(OJ_SESSION_ID) or attrs.get(OLD_OJ_SESSION_ID)
+    value = attrs.get(CANONICAL_SESSION_ID) or attrs.get(OJ_SESSION_ID) or attrs.get(OLD_OJ_SESSION_ID)
     return str(value) if value is not None else None
 
 
-def trajectory_cost(trajectory: Trajectory) -> Optional[CostInfo]:
+def trajectory_cost(trajectory: TrajectoryLike) -> Optional[CostInfo]:
     """Read aggregate cost directly from OTLP spans."""
-    return _otlp_usage_cost(trajectory.otlp_trace)
+    return _otlp_usage_cost(trajectory_otlp(trajectory))
 
 
-def trajectory_meta(trajectory: Trajectory) -> Dict[str, Any]:
+def trajectory_meta(trajectory: TrajectoryLike) -> Dict[str, Any]:
     """Read trajectory metadata directly from OTLP resource attributes."""
     return _otlp_trajectory_meta(trajectory_resource_attributes(trajectory))
 
 
 def set_trajectory_resource_attributes(
-    trajectory: Trajectory,
+    trajectory: TrajectoryLike,
     attributes: Dict[str, Any],
-) -> Trajectory:
+) -> TrajectoryLike:
     """Set resource attributes on the OTLP trace."""
+
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory as CanonicalTrajectory
+
+    if isinstance(trajectory, CanonicalTrajectory):
+        return trajectory.with_resource_attributes(attributes)
     trajectory.otlp_trace = _set_otlp_resource_attributes(trajectory.otlp_trace, attributes)
     return trajectory
 
 
 def trajectory_with_resource_attributes(
-    trajectory: Trajectory,
+    trajectory: TrajectoryLike,
     attributes: Dict[str, Any],
-) -> Trajectory:
+) -> TrajectoryLike:
     """Return a detached OTLP trajectory with resource attributes merged in."""
+
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory as CanonicalTrajectory
+
+    if isinstance(trajectory, CanonicalTrajectory):
+        return trajectory.with_resource_attributes(attributes)
     return Trajectory(
         otlp_trace=_set_otlp_resource_attributes(trajectory.otlp_trace, attributes),
     )
 
 
-def to_legacy_trajectory(trajectory: Union[Trajectory, LegacyTrajectory]) -> LegacyTrajectory:
+def to_legacy_trajectory(
+    trajectory: Union[TrajectoryLike, LegacyTrajectory],
+) -> LegacyTrajectory:
     """Project an OTLP ``Trajectory`` (or clone a ``LegacyTrajectory``) to the
     step-based compatibility view.
 
@@ -703,14 +741,19 @@ def to_legacy_trajectory(trajectory: Union[Trajectory, LegacyTrajectory]) -> Leg
             meta=meta,
         )
 
-    resource_attrs = _otlp_resource_attributes(trajectory.otlp_trace)
+    payload = trajectory_otlp(trajectory)
+    resource_attrs = _otlp_resource_attributes(payload)
     return LegacyTrajectory(
         execution_id=_otlp_trajectory_id(resource_attrs),
-        steps=_otlp_steps(trajectory.otlp_trace),
+        steps=_otlp_steps(payload),
         source=_otlp_trajectory_source(resource_attrs),
         case_id=resource_attrs.get(CASE_ID),
-        session_id=resource_attrs.get(OJ_SESSION_ID) or resource_attrs.get(OLD_OJ_SESSION_ID),
-        cost=_otlp_usage_cost(trajectory.otlp_trace),
+        session_id=(
+            resource_attrs.get(CANONICAL_SESSION_ID)
+            or resource_attrs.get(OJ_SESSION_ID)
+            or resource_attrs.get(OLD_OJ_SESSION_ID)
+        ),
+        cost=_otlp_usage_cost(payload),
         meta=_otlp_trajectory_meta(resource_attrs),
     )
 
