@@ -104,6 +104,7 @@ class GoalAssessment:
     evidence: str
     remaining_work: Optional[str] = None
     next_instruction: Optional[str] = None
+    blocking_same_as_previous: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -111,6 +112,7 @@ class GoalAssessment:
             "evidence": self.evidence,
             "remaining_work": self.remaining_work,
             "next_instruction": self.next_instruction,
+            "blocking_same_as_previous": self.blocking_same_as_previous,
         }
 
     @classmethod
@@ -119,11 +121,15 @@ class GoalAssessment:
             status = GoalAssessmentStatus(str(data.get("status", "continue")))
         except ValueError:
             status = GoalAssessmentStatus.CONTINUE
+        same = data.get("blocking_same_as_previous")
         return cls(
             status=status,
             evidence=str(data.get("evidence") or ""),
             remaining_work=data.get("remaining_work") or None,
             next_instruction=data.get("next_instruction") or None,
+            blocking_same_as_previous=(
+                bool(same) if isinstance(same, bool) else None
+            ),
         )
 
 
@@ -239,6 +245,7 @@ class GoalRecord:
     last_assessment: Optional[GoalAssessment] = None
     last_stop_reason: Optional[str] = None
     contract: Optional[GoalContract] = None
+    blocking_history: list[str] = field(default_factory=list)
     time_used_seconds: int = 0
     active_started_at: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
@@ -284,6 +291,7 @@ class GoalRecord:
             "last_assessment": self.last_assessment.to_dict() if self.last_assessment else None,
             "last_stop_reason": self.last_stop_reason,
             "contract": self.contract.to_dict() if self.contract else None,
+            "blocking_history": list(self.blocking_history),
             "time_used_seconds": self.time_used_seconds,
             "active_started_at": self.active_started_at,
             "created_at": self.created_at,
@@ -338,6 +346,7 @@ class GoalRecord:
             contract=GoalContract.from_dict(contract_data)
             if isinstance(contract_data, dict)
             else None,
+            blocking_history=list(data.get("blocking_history") or []),
             time_used_seconds=_non_negative_int(time_used_raw, "time_used_seconds"),
             active_started_at=active_started_at,
             created_at=created_at,

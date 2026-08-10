@@ -227,6 +227,43 @@ async def test_terminal_goal_report_invokes_transcript_assessor(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_invoke_transcript_assessor_passes_blocking_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The assessor prompt must receive record.blocking_history for the audit."""
+    from openjiuwen.harness.prompts.sections import goal as goal_prompts
+
+    record = GoalRecord.create(session_id="s1", objective="ship it")
+    record.blocking_history = ["no token", "no token"]
+
+    class _FakeResponse:
+        content = '{"status":"blocked","evidence":"no token"}'
+
+    class _FakeModel:
+        async def invoke(self, messages, **kwargs):
+            return _FakeResponse()
+
+    captured: dict[str, object] = {}
+
+    def _fake_build(*args, **kwargs):
+        captured.update(kwargs)
+        return "prompt"
+
+    monkeypatch.setattr(goal_prompts, "build_transcript_assessor_prompt", _fake_build)
+    rail = TaskCompletionRail()
+    rail._goal_language = "cn"
+    rail._extract_attempt_context = lambda ctx: "[context]"  # type: ignore[method-assign]
+
+    agent = SimpleNamespace(deep_config=SimpleNamespace(model=_FakeModel()))
+    ctx = AgentCallbackContext(agent=agent, inputs=SimpleNamespace())
+
+    result = await rail._invoke_transcript_assessor(record, ctx)
+
+    assert result == '{"status":"blocked","evidence":"no token"}'
+    assert captured.get("blocking_history") == ["no token", "no token"]
+
+
+@pytest.mark.asyncio
 async def test_continue_goal_report_does_not_invoke_transcript_by_default(monkeypatch) -> None:
     """CONTINUE reports stay on the low-cost path unless spot-checking is configured."""
     rail = TaskCompletionRail()

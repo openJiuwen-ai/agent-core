@@ -627,6 +627,7 @@ class TaskCompletionRail(DeepAgentRail):
             self._extract_attempt_context(ctx),
             language,
             contract=record.contract,
+            blocking_history=record.blocking_history,
         )
         try:
             response = await model.invoke(

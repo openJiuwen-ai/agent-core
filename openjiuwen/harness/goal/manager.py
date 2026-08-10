@@ -62,6 +62,7 @@ class GoalManager:
         emit_event: Callable[[InteractionEvent], None],
         notify_work: Callable[[], None],
         language: str = "cn",
+        blocked_threshold: int = 3,
     ) -> None:
         self._store = store
         self._event_manager = event_manager
@@ -71,6 +72,7 @@ class GoalManager:
         self._emit_event = emit_event
         self._notify_work = notify_work
         self._language = language
+        self._blocked_threshold = blocked_threshold
 
     def get_store(self, session_id: str | None = None) -> GoalStore:
         """Expose the session store for read-only tools and rails only."""
@@ -208,6 +210,10 @@ class GoalManager:
                 record.settle_active_time(keep_active=False)
                 record.status = GoalStatus.ACTIVE
                 record.start_timing()
+                # Resuming a blocked goal starts a fresh blocked audit (Codex
+                # "resumed run as fresh blocked audit"): clear accumulated
+                # blocking history so the N-consecutive threshold restarts.
+                record.blocking_history = []
                 # Idle / BLOCKED resume bumps revision and may ensure a new
                 # attempt (generation token). If the same attempt is still
                 # running, keep the revision so its assessment can commit and
@@ -313,19 +319,59 @@ class GoalManager:
                 return None
             record.last_assessment = assessment
             if assessment.status is GoalAssessmentStatus.COMPLETE:
+                record.blocking_history = []
                 record.settle_active_time(keep_active=False)
                 record.status = GoalStatus.COMPLETED
                 record.last_stop_reason = "completed"
             elif assessment.status is GoalAssessmentStatus.BLOCKED:
-                record.settle_active_time(keep_active=False)
-                record.status = GoalStatus.BLOCKED
-                record.last_stop_reason = "blocked"
+                # Blocked audit: only finalize BLOCKED once the SAME blocking
+                # condition has repeated blocked_threshold consecutive times.
+                # The assessor judges sameness (blocking_same_as_previous); the
+                # mechanism counts. A different blocker resets the count; any
+                # non-blocked assessment clears it below.
+                same = assessment.blocking_same_as_previous
+                if same is not False and record.blocking_history:
+                    record.blocking_history.append(assessment.evidence)
+                else:
+                    record.blocking_history = [assessment.evidence]
+                if len(record.blocking_history) >= self._blocked_threshold:
+                    record.settle_active_time(keep_active=False)
+                    record.status = GoalStatus.BLOCKED
+                    record.last_stop_reason = "blocked"
+                else:
+                    # Threshold not reached: keep the goal ACTIVE and downgrade
+                    # this assessment to CONTINUE so the agent gets another
+                    # attempt instead of giving up on the first blocker.
+                    record.status = GoalStatus.ACTIVE
+                    record.last_assessment = GoalAssessment(
+                        status=GoalAssessmentStatus.CONTINUE,
+                        evidence=assessment.evidence,
+                        remaining_work=assessment.evidence,
+                        next_instruction=(
+                            f"Same blocking observed "
+                            f"{len(record.blocking_history)}/"
+                            f"{self._blocked_threshold} times; try an "
+                            "alternative approach or obtain the missing "
+                            "input before continuing."
+                        ),
+                    )
+                    record.settle_active_time(keep_active=True)
             elif record.status is GoalStatus.ACTIVE:
+                record.blocking_history = []
                 record.settle_active_time(keep_active=True)
             elif record.status is GoalStatus.PAUSED:
                 # Attempt finished under pause: stop the clock; resume opens a
                 # fresh segment so idle pause time is not counted.
+                record.blocking_history = []
                 record.settle_active_time(keep_active=False)
+            logger.info(
+                "[GoalLifecycle] apply assessment: status=%s goal=%s "
+                "blocking_history_len=%d blocked_threshold=%d",
+                record.status.value,
+                record.goal_id,
+                len(record.blocking_history),
+                self._blocked_threshold,
+            )
             record.touch()
             self._store.save(record)
             await self._commit_store_locked()

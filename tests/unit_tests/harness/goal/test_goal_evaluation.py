@@ -56,6 +56,38 @@ def test_parse_assessment_json_handles_nested_code_blocks_in_evidence() -> None:
     assert parsed.evidence.endswith("file ok")
 
 
+def test_parse_assessment_json_reads_blocking_same_as_previous() -> None:
+    same = _parse_assessment_json(
+        json.dumps(
+            {
+                "status": "blocked",
+                "evidence": "no token",
+                "blocking_same_as_previous": True,
+            }
+        )
+    )
+    assert same is not None
+    assert same.status is GoalAssessmentStatus.BLOCKED
+    assert same.blocking_same_as_previous is True
+
+    different = _parse_assessment_json(
+        json.dumps(
+            {
+                "status": "blocked",
+                "evidence": "disk full",
+                "blocking_same_as_previous": False,
+            }
+        )
+    )
+    assert different is not None
+    assert different.blocking_same_as_previous is False
+
+    # Missing / non-boolean signal stays None.
+    missing = _parse_assessment_json('{"status": "blocked", "evidence": "x"}')
+    assert missing is not None
+    assert missing.blocking_same_as_previous is None
+
+
 def test_agent_report_strategy_uses_report_and_falls_back_when_absent() -> None:
     assessor = GoalEvaluator(GoalStopConfig(strategy=GoalStopStrategy.AGENT_REPORT))
 

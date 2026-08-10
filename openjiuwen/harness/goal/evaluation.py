@@ -86,6 +86,11 @@ def _parse_assessment_json(text: str) -> Optional[GoalAssessment]:
         evidence=evidence,
         remaining_work=data.get("remaining_work") or None,
         next_instruction=data.get("next_instruction") or None,
+        blocking_same_as_previous=(
+            bool(data["blocking_same_as_previous"])
+            if isinstance(data.get("blocking_same_as_previous"), bool)
+            else None
+        ),
     )
 
 

@@ -133,3 +133,27 @@ def test_transcript_assessor_prompt_empty_contract_omits_block() -> None:
         contract=GoalContract(),
     )
     assert "<contract>" not in prompt  # empty contract → no block injected
+
+
+def test_transcript_assessor_prompt_injects_blocking_history() -> None:
+    prompt = build_transcript_assessor_prompt(
+        "objective",
+        "instruction",
+        "context",
+        "cn",
+        blocking_history=["no token", "no token"],
+    )
+    assert "<blocking_history>" in prompt
+    assert "- Attempt 1: no token" in prompt
+    assert "- Attempt 2: no token" in prompt
+
+
+def test_transcript_assessor_prompt_empty_blocking_history_omits_block() -> None:
+    prompt = build_transcript_assessor_prompt(
+        "objective",
+        "instruction",
+        "context",
+        "cn",
+        blocking_history=[],
+    )
+    assert "<blocking_history>" not in prompt

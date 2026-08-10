@@ -69,6 +69,28 @@ def test_assessment_round_trip_and_invalid_status() -> None:
     assert GoalAssessment.from_dict({"status": "unexpected", "evidence": "x"}).status is GoalAssessmentStatus.CONTINUE
 
 
+def test_assessment_round_trips_blocking_same_as_previous() -> None:
+    blocked = GoalAssessment(
+        status=GoalAssessmentStatus.BLOCKED,
+        evidence="no token",
+        blocking_same_as_previous=True,
+    )
+    restored = GoalAssessment.from_dict(blocked.to_dict())
+    assert restored.blocking_same_as_previous is True
+
+    assert GoalAssessment.from_dict({"status": "blocked", "evidence": "x"}).blocking_same_as_previous is None
+    assert (
+        GoalAssessment.from_dict(
+            {
+                "status": "blocked",
+                "evidence": "x",
+                "blocking_same_as_previous": "not-a-bool",
+            }
+        ).blocking_same_as_previous
+        is None
+    )
+
+
 def test_goal_record_round_trip_and_response_copy() -> None:
     record = GoalRecord.create(
         session_id="session-1",
@@ -81,6 +103,7 @@ def test_goal_record_round_trip_and_response_copy() -> None:
         status=GoalAssessmentStatus.CONTINUE,
         evidence="routes are ready",
     )
+    record.blocking_history = ["no token", "no token"]
     record.touch(bump_revision=True)
 
     restored = GoalRecord.from_dict(record.to_dict())
@@ -92,6 +115,7 @@ def test_goal_record_round_trip_and_response_copy() -> None:
     assert restored.revision == 1
     assert restored.last_assessment is not None
     assert restored.last_assessment.evidence == "routes are ready"
+    assert restored.blocking_history == ["no token", "no token"]
     assert record.objective == "Build a REST API"
 
 
