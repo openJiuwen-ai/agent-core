@@ -517,12 +517,10 @@ class AccuracyEvaluator(LLMTraceEvaluator):
             context.fingerprint.capability_id,
             context.fingerprint.capability_type,
         )
-        if (
-            directly_evaluated
-            and case.output is not None
-            and case.expected_output is not None
-            and case.output == case.expected_output
-        ):
+        outputs_match = (
+            case.output is not None and case.expected_output is not None and case.output == case.expected_output
+        )
+        if directly_evaluated and outputs_match:
             evidence = _trace_evidence(context, "Output exactly matches the supplied expected output.")
             return self.result(
                 context,
