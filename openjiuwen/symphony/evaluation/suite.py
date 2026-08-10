@@ -602,12 +602,11 @@ class EvaluationSuite:
             details["not_applicable_codes"] = not_applicable_codes
         if metric_id == "latency":
             for latency_type in ("ttft", "e2e"):
-                samples = [
-                    float(result.details[f"{latency_type}_ms"])
-                    for result in results
-                    if isinstance(result.details.get(f"{latency_type}_ms"), (int, float))
-                    and not isinstance(result.details[f"{latency_type}_ms"], bool)
-                ]
+                samples = []
+                for result in results:
+                    latency_value = result.details.get(f"{latency_type}_ms")
+                    if isinstance(latency_value, (int, float)) and not isinstance(latency_value, bool):
+                        samples.append(float(latency_value))
                 if samples:
                     details[latency_type] = latency_statistics(samples)
                     details[latency_type].pop("samples_ms", None)
