@@ -172,6 +172,7 @@ async def test_inference_affinity_kv_cache_release_with_message_offloader(mock_r
     engine_config = ContextEngineConfig(
         default_window_message_num=100,
         context_window_tokens=100,
+        enable_tiktoken_counter=True,
     )
     engine = ContextEngine(engine_config)
 

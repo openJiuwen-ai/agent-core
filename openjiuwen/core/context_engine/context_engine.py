@@ -108,7 +108,10 @@ class ContextEngine:
         """
         Create or retrieve a ModelContext for the given session & context ID.
 
-        Token counting: if `token_counter` is None, defaults to `TiktokenCounter`.
+        Token counting: an explicitly provided `token_counter` is always used.
+        When it is omitted, `TiktokenCounter` is created only if
+        `config.enable_tiktoken_counter` is enabled; otherwise the context uses
+        its built-in character-based estimation fallbacks.
 
         Message seeding:
         - if `history_messages` is provided, it is used as-is;
@@ -121,8 +124,11 @@ class ContextEngine:
             session: Session object supplying session_id; if None, a default
                      session ID is used.
             history_messages: Initial message list.
-            token_counter: Strategy for counting tokens; defaults to
-                           TiktokenCounter if not provided.
+            token_counter: Strategy for counting tokens. If omitted,
+                           ``TiktokenCounter`` is used only when
+                           ``enable_tiktoken_counter`` is enabled in the engine
+                           config; otherwise token counting falls back to
+                           character-based estimates.
 
         Returns:
             ModelContext: The newly created or cached context instance.
@@ -142,8 +148,23 @@ class ContextEngine:
         ]
 
         if token_counter is None:
-            from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
-            token_counter = TiktokenCounter()
+            if self._config.enable_tiktoken_counter:
+                context_engine_logger.info(
+                    "tiktoken counter enabled; initializing default tokenizer, "
+                    "session_id=%s context_id=%s",
+                    session_id,
+                    context_id,
+                )
+                from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
+
+                token_counter = TiktokenCounter()
+            else:
+                context_engine_logger.info(
+                    "tiktoken counter disabled; using character-based token estimation, "
+                    "session_id=%s context_id=%s",
+                    session_id,
+                    context_id,
+                )
 
         if self._config.enable_openrouter_model_context_window_tokens:
             # Scheduled, not awaited: this is the first-turn critical path and the

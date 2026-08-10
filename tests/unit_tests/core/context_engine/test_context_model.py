@@ -42,6 +42,7 @@ class TestModelContext:
         dialogue_round: int = None,
         max_context_message_num: Optional[int] = None,
         enable_reload: bool = False,
+        enable_tiktoken_counter: bool = False,
         processors: Optional[List] = None,
         token_counter=None,
     ) -> ModelContext:
@@ -50,6 +51,7 @@ class TestModelContext:
             default_window_round_num=dialogue_round,
             max_context_message_num=max_context_message_num,
             enable_reload=enable_reload,
+            enable_tiktoken_counter=enable_tiktoken_counter,
         )
         context_engine = ContextEngine(config)
         session = None
@@ -752,7 +754,7 @@ class TestModelContext:
     # ---------- token_counter ----------
     @pytest.mark.asyncio
     async def test_token_counter_returns_tokens(self):
-        context = await self.create_context()
+        context = await self.create_context(enable_tiktoken_counter=True)
         await context.add_messages([UserMessage(content="hi")])
         stat = context.statistic()
         assert stat.total_messages == 1
