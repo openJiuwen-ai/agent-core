@@ -605,8 +605,11 @@ class EvaluationSuite:
                 samples = []
                 for result in results:
                     latency_value = result.details.get(f"{latency_type}_ms")
-                    if isinstance(latency_value, (int, float)) and not isinstance(latency_value, bool):
-                        samples.append(float(latency_value))
+                    if not isinstance(latency_value, (int, float)):
+                        continue
+                    if isinstance(latency_value, bool):
+                        continue
+                    samples.append(float(latency_value))
                 if samples:
                     details[latency_type] = latency_statistics(samples)
                     details[latency_type].pop("samples_ms", None)
