@@ -340,9 +340,27 @@ class CoordinationKernel:
             self._scheduler.deactivate()
         # Stop this host's LLM tokens before member teardown.
         self._abort_host_llm_stream()
-        # Park the round; leave harness PAUSED for later resume.
-        await self.pause_agent_round()
-        await self._await_harness_paused()
+        # Park the round only when the harness is still alive. Round-end
+        # ``finalize_round`` may already have stopped it ("always stops the
+        # harness"); a missing/TERMINATED harness means the round is fully
+        # torn down — treat as a cold pause: resume rebuilds the harness
+        # from the session checkpoint (``resume_paused_round`` cold path).
+        harness = getattr(host.resources, "harness", None)
+        if harness is not None and getattr(harness, "state", None) is not HarnessState.TERMINATED:
+            # Park the round; leave harness PAUSED for later resume. The
+            # alive check above is not atomic with the command — a
+            # concurrent harness stop (e.g. ``finalize_round``) can still
+            # reject it or terminate the harness mid-park; degrade to a
+            # cold pause instead of aborting the whole pause teardown.
+            try:
+                await self.pause_agent_round()
+                await self._await_harness_paused()
+            except Exception as exc:
+                team_logger.warning(
+                    "[{}] park round failed; continuing with cold pause: {}",
+                    host.member_name or "?",
+                    exc,
+                )
         host.persist_allocator_state()
         memory_manager = host.resources.memory_manager
         if memory_manager:
