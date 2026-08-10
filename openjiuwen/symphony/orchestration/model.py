@@ -11,6 +11,7 @@ from typing import Any
 
 from json_repair import repair_json
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.shared.identity import sanitize_metadata, stable_metadata_sha256
 
@@ -63,6 +64,8 @@ async def invoke_json(
             raise ValueError("response content is empty")
         await _observe_response(response_observer, response)
         return repair_json(content, return_objects=False)
+    except BaseError:
+        raise
     except Exception as exc:
         raise RuntimeError(f"{error_context} request failed: {exc}") from exc
 
