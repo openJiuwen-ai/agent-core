@@ -51,6 +51,7 @@ class BaseFsOperation(BaseOperation, ABC):
             line_range: Optional[Tuple[int, int]] = None,
             encoding: str = "utf-8",
             chunk_size: int = DEFAULT_READ_CHUNK_SIZE,
+            only_read: bool = False,
             options: Optional[Dict[str, Any]] = None
     ) -> ReadFileResult:
         """
@@ -66,6 +67,9 @@ class BaseFsOperation(BaseOperation, ABC):
                   If start <= 0 or end <= 0 or start > end, returns empty content.
             encoding: Character encoding for text mode (default: utf-8).
             chunk_size: Maximum number of bytes to read at once (default: 0, unlimited)
+            only_read: Skip the cross-process file lock. Safe for read-only metadata
+                that no writer in this process is racing with; backends without
+                such a lock ignore it.
             options: Extended configuration options (dict, optional).
 
         Returns:

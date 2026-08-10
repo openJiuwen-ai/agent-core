@@ -10,8 +10,16 @@ from openjiuwen.harness.prompts.tools.base import (
 )
 
 DESCRIPTION: Dict[str, str] = {
-    "cn": "执行代码（Python 或 JavaScript）。",
-    "en": "Execute code (Python or JavaScript).",
+    "cn": (
+        "执行代码（Python 或 JavaScript）。\n\n"
+        "每次调用在独立进程中执行，变量与对象不跨调用保留，请提交可独立运行的完整代码。\n\n"
+    ),
+
+    "en": (
+        "Execute code (Python or JavaScript).\n\n"
+        "Each invocation runs in an isolated process; variables and objects do not persist"
+        "across calls—submit self-contained code every time\n\n"
+    )
 }
 
 CODE_PARAMS: Dict[str, Dict[str, str]] = {

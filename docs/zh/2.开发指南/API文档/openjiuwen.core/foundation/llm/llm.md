@@ -255,6 +255,21 @@ class openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client.Sili
 
 ---
 
+## class openjiuwen.core.foundation.llm.model_clients.openai_account_model_client.OpenAIAccountModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.openai_account_model_client.OpenAIAccountModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
+```
+
+继承 `BaseModelClient`，对接 OpenAI 账户后端（`chatgpt.com/backend-api/codex`）。该 provider 不要求在 `ModelClientConfig` 中配置 `api_key`，而是在请求时通过 `OpenAIAccountAuthManager` 从本地 OAuth 凭据存储中解析访问令牌，并在令牌过期时自动刷新；实现 `invoke`、`stream`，支持 tool_calls、output_parser。
+
+**参数**：
+
+* **model_config**(ModelRequestConfig)：模型请求参数。
+* **model_client_config**(ModelClientConfig)：客户端配置，`client_provider` 需为 `"OpenAIAccount"`，`api_key` 可省略。
+
+---
+
 ## class openjiuwen.core.foundation.llm.model_clients.dashscope_model_client.DashScopeModelClient
 
 ```
@@ -566,6 +581,7 @@ Chinese, English, German, Italian, Portuguese, Spanish, Japanese, Korean, French
 定义了支持的模型服务商类型。
 
 * **OpenAI**：表示 OpenAI 服务商。
+* **OpenAIAccount**：表示使用 OpenAI 账户 OAuth 凭据接入的服务商，无需 `api_key`。
 * **SiliconFlow**：表示 SiliconFlow 服务商。
 
 ---
@@ -575,9 +591,9 @@ Chinese, English, German, Italian, Portuguese, Spanish, Japanese, Korean, French
 客户端配置数据类。
 
 * **client_id**(str)：客户端唯一标识，用于在 Runner 中注册。默认值：由 `uuid.uuid4()` 自动生成。
-* **client_provider**(Union[ProviderType, str])：服务商标识。枚举值：`OpenAI`、`SiliconFlow`。
-* **api_key**(str)：API 密钥。
-* **api_base**(str)：API 基础 URL。
+* **client_provider**(Union[ProviderType, str])：服务商标识。枚举值：`OpenAI`、`OpenAIAccount`、`SiliconFlow`。
+* **api_key**(str)：API 密钥。当 `client_provider` 为 `OpenAIAccount` 时可省略（默认值：`""`），其余内置 provider 均为必填。
+* **api_base**(str)：API 基础 URL。对所有内置 provider（含 `OpenAIAccount`）均为必填，不会自动填充默认值。
 * **timeout**(float)：请求超时，单位：秒。取值范围大于 0。默认值：`60.0`。
 * **max_retries**(int)：最大重试次数。默认值：`3`。
 * **verify_ssl**(bool)：是否验证 SSL 证书。默认值：`True`。
@@ -685,6 +701,7 @@ Chinese, English, German, Italian, Portuguese, Spanish, Japanese, Korean, French
 * **name**(str)：工具名称。
 * **arguments**(str)：工具参数（JSON 字符串）。
 * **index**(int，可选)：工具调用索引，用于区分多次工具调用。默认值：`None`。
+* **response_item_id**(str，可选)：部分协议中用于区分响应条目 ID 与工具调用 ID 的厂商响应条目 ID。默认值：`None`。
 
 ---
 
@@ -816,6 +833,173 @@ class openjiuwen.core.foundation.llm.schema.generation_response.VideoGenerationR
 
 ---
 
+## class openjiuwen.core.foundation.llm.model_clients.anthropic_model_client.AnthropicModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.anthropic_model_client.AnthropicModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
+```
+
+继承 `BaseModelClient`，对接 Anthropic Messages API（Claude 系列模型）。实现 `invoke`、`stream`，支持 tool_calls、output_parser 与提示词缓存（`cache_control`）。
+
+该客户端维护进程级 `AsyncAnthropic` 客户端缓存池，按 `api_key`、`api_base`、`verify_ssl`、`ssl_cert` 分桶复用 httpx 长连接；可通过 `connection_key` 计算连接标识，通过 `aclose` / `aclose_connections` 关闭连接池。`_normalize_base_url` 会自动剥离 `api_base` 末尾的 `/v1`，避免与 SDK 自动追加的 `/v1/messages` 重复拼接。
+
+**参数**：
+
+* **model_config**(ModelRequestConfig)：模型请求参数。
+* **model_client_config**(ModelClientConfig)：客户端配置，`client_provider` 需为 `"Anthropic"`。
+
+---
+
+## class openjiuwen.core.foundation.llm.model_clients.deepseek_model_client.DeepSeekModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.deepseek_model_client.DeepSeekModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
+```
+
+继承 `OpenAIModelClient`，对接 DeepSeek（深度求索）服务。复用 OpenAI 兼容的对话与流式能力，并重写消息转换：为 assistant 消息补充 `reasoning_content` 字段，以适配 DeepSeek 推理模型的思维链输出。
+
+**参数**：
+
+* **model_config**(ModelRequestConfig)：模型请求参数。
+* **model_client_config**(ModelClientConfig)：客户端配置，`client_provider` 需为 `"DeepSeek"`。
+
+---
+
+## class openjiuwen.core.foundation.llm.model_clients.ascend_affinity_model_client.AscendAffinityModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.ascend_affinity_model_client.AscendAffinityModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
+```
+
+继承 `BaseModelClient`，对接昇腾（Ascend）推理服务的 KV-cache 亲和能力。普通推理与 KV-cache 管理共用 `/v1/chat/completions` 端点，亲和意图通过顶层 `agent_hint` 字段传递，使用 aiohttp 传输。实现 `invoke`、`stream`，支持 tool_calls、output_parser。
+
+`supports_kv_cache_affinity()` 返回 `True`，并额外提供 KV-cache 管理接口 `evict_kvc` / `offload_kvc` / `prefetch_kvc`，分别用于驱逐、卸载、预取缓存内容。三者签名一致，均返回 `bool`，内部转发到 `_manage_kvc`。
+
+**参数**：
+
+* **model_config**(ModelRequestConfig)：模型请求参数。
+* **model_client_config**(ModelClientConfig)：客户端配置，`client_provider` 需为 `"AscendAffinity"`。
+
+### async evict_kvc(*, session_id: str, parent_session_id: Optional[str] = None, target: str = "session", messages=None, tools=None, model: Optional[str] = None, msg_start: Optional[int] = None, msg_end: Optional[int] = None, tools_start: Optional[int] = None, tools_end: Optional[int] = None, include_tools: bool = False, timeout: Optional[float] = None) -> bool
+
+驱逐（evict）指定 KV-cache 内容。管理请求与 `invoke` 共享请求构造与传输，但不触发常规 LLM 输入/输出回调。
+
+**参数**：
+
+* **session_id**(str)：会话 ID，必填。
+* **parent_session_id**(str，可选)：父会话 ID，未传时回退为 `session_id`。
+* **target**(str)：操作目标，取值 `"session"`、`"messages"`、`"tools"`。默认值：`"session"`。`target` 为 `messages`/`tools` 时需传入对应 `messages`/`tools`。
+* **messages**(Union[str, List[BaseMessage], List[dict], None])：消息列表，`target` 为 `messages`/`tools` 时必填。
+* **tools**(Union[List[ToolInfo], List[dict], None])：工具列表，`target` 为 `tools` 时必填，`include_tools=True` 时必填。
+* **model**(str，可选)：模型名，默认使用 `model_config` 的 `model_name`。
+* **msg_start / msg_end**(int，可选)：消息区间起止索引（0 基）。
+* **tools_start / tools_end**(int，可选)：工具区间起止索引（0 基）。
+* **include_tools**(bool)：是否同时携带 tools。默认值：`False`。
+* **timeout**(float，可选)：覆盖该管理动作的超时；未传时按 `action`/`target` 解析默认值。
+
+**返回**：`bool`，管理成功为 `True`。
+
+**异常**：`ModelError`（`MODEL_CALL_FAILED`）：管理请求失败；配置非法时抛出 `ModelError`（`MODEL_CONFIG_ERROR`）。
+
+### async offload_kvc(...) -> bool
+
+卸载（offload）指定 KV-cache 内容。签名与参数同 `evict_kvc`，内部转发到 `_manage_kvc("offload", ...)`。
+
+### async prefetch_kvc(...) -> bool
+
+预取（prefetch）指定 KV-cache 内容，提前将相关上下文加载进缓存。签名与参数同 `evict_kvc`，内部转发到 `_manage_kvc("prefetch", ...)`。
+
+---
+
+## class openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client.InferenceAffinityModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client.InferenceAffinityModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
+```
+
+继承 `BaseModelClient`，对接 vLLM 推理服务的 Inference Affinity（推理亲和）API，支持缓存释放。使用 aiohttp 传输，每次请求新建会话；实现 `invoke`、`stream`，支持 tool_calls、output_parser，并可通过 `cache_sharing` + `cache_salt`（session_id）启用缓存共享。
+
+**参数**：
+
+* **model_config**(ModelRequestConfig)：模型请求参数。
+* **model_client_config**(ModelClientConfig)：客户端配置，`client_provider` 需为 `"InferenceAffinity"`。
+
+### async release(session_id: str, messages: List, messages_released_index: int, *, model: Optional[str] = None, tools: Optional[List] = None, tools_released_index: Optional[int] = None) -> bool
+
+释放模型缓存或资源。基于 session_id（作为 `cache_salt`）与消息/工具列表向推理服务发起释放请求，按 `messages_released_index` / `tools_released_index` 指定可释放的区间。
+
+**参数**：
+
+* **session_id**(str)：缓存盐值，用于标识具体缓存。
+* **messages**(List)：消息列表。
+* **messages_released_index**(int)：消息释放索引（0 基）。
+* **model**(str，可选)：模型名，默认使用 `model_config` 的 `model_name`。
+* **tools**(List，可选)：工具列表。
+* **tools_released_index**(int，可选)：工具释放索引（0 基）。
+
+**返回**：`bool`，释放成功为 `True`。
+
+**异常**：`BaseError`：释放请求失败时抛出。
+
+---
+
+## class openjiuwen.core.foundation.llm.model_clients.openrouter_model_client.OpenRouterModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.openrouter_model_client.OpenRouterModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
+```
+
+继承 `OpenAIModelClient`，对接 OpenRouter 聚合网关。在 OpenAI 兼容对话/流式能力之上，额外提供两类增强：
+
+1. **App Attribution 头保护**：本客户端不提供默认 attribution 头取值，需由调用方通过 `ModelClientConfig.custom_headers` 注入（如 `http-referer`、`x-openrouter-title`、`x-openrouter-categories`）。一旦在配置层注入，请求级 headers 无法覆盖这些受保护键。
+2. **显式提示词缓存**：对支持的 provider（默认 `anthropic`、`qwen`），在最后一个 tool、首条消息、末条消息以及与上一次请求的最长公共前缀处插入 `cache_control` 标记；对支持 1h TTL 的 provider（默认 `anthropic`）可附加 `ttl=1h`。
+
+**参数**：
+
+* **model_config**(ModelRequestConfig)：模型请求参数。
+* **model_client_config**(ModelClientConfig)：客户端配置，`client_provider` 需为 `"OpenRouter"`。可在 `__pydantic_extra__` 中传入以下 OpenRouter 专属字段：
+  * `openrouter_enable_explicit_prompt_caching`(bool，默认 `True`)：是否启用显式缓存标记。
+  * `openrouter_enable_prompt_cache_prefix_matching`(bool，默认 `True`)：是否与上一次请求做最长公共前缀匹配并打标。注意：同一客户端实例并发调用时前缀匹配可能串扰，可关闭。
+  * `openrouter_enable_1h_prompt_cache_ttl`(bool，默认 `False`)：是否为支持 1h TTL 的 provider 附加 `ttl=1h`。
+  * `openrouter_explicit_prompt_cache_providers`：覆盖显式缓存 provider 集合（默认 `{"anthropic", "qwen"}`）。
+  * `openrouter_prompt_cache_1h_ttl_providers`：覆盖 1h TTL provider 集合（默认 `{"anthropic"}`）。
+
+---
+
+## class openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.IntelliRouterModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.IntelliRouterModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig, router: Optional[ReliableRouter] = None)
+```
+
+继承 `BaseModelClient`，封装 `intelli_router.ReliableRouter`，提供 API 池化、智能路由、自动重试、流式输出与多模态生成（图像/语音/视频）。实现 `invoke`、`stream`；`generate_image` / `generate_speech` / `generate_video` 会解析 provider 并委托 DashScope 执行。
+
+**参数**：
+
+* **model_config**(ModelRequestConfig)：模型请求参数。
+* **model_client_config**(ModelClientConfig)：客户端配置，`client_provider` 需为 `"intelli_router"`。路由相关参数从 `__pydantic_extra__` 提取（见下 `IntelliRouterClientConfig`）。
+* **router**(ReliableRouter，可选)：外部传入已构造的 `ReliableRouter` 实例；未传时按配置自动从模块级缓存获取或创建。
+
+> **依赖**：需安装 `intelli-router` 包，否则构造时抛出 `ModelError`（`MODEL_SERVICE_CONFIG_ERROR`）。
+
+---
+
+## class openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.IntelliRouterClientConfig
+
+```
+class IntelliRouterClientConfig(deployments: list[dict] = [], strategy: str = "simple-shuffle", num_retries: int = 3, timeout: float = 30.0, strategy_kwargs: dict = {}, enable_health_check: bool = False, health_check_interval: float = 300.0, verify_ssl: bool = True, enable_observability: bool = False, web_dashboard_port: int = 0)
+```
+
+从 `ModelClientConfig` 抽取的 IntelliRouter 类型化配置（`@dataclass`）。通过 `from_model_client_config(config)` 类方法从 `ModelClientConfig.__pydantic_extra__` 读取以下字段：
+
+* `intelli_router_deployments`：部署列表，每个部署含 `id`、`model_name`、`api_key`、`api_base`、`provider`、`tpm`、`rpm` 等。
+* `intelli_router_strategy`(默认 `"simple-shuffle"`)、`intelli_router_strategy_kwargs`：路由策略及其参数。
+* `intelli_router_num_retries`(默认 `3`)、`intelli_router_timeout`(默认 `30.0`)：重试次数与超时。
+* `intelli_router_enable_health_check`(默认 `False`)、`intelli_router_health_check_interval`(默认 `300.0`)：健康检查开关与间隔。
+* `intelli_router_enable_observability`(默认 `False`)、`intelli_router_web_dashboard_port`(默认 `0`)：可观测性与 Web 仪表盘端口。
+
+---
+
 ## class openjiuwen.core.foundation.llm.output_parsers.output_parser.BaseOutputParser
 
 输出解析器抽象基类。开发者可基于此类实现自定义输出解析器。
@@ -876,4 +1060,4 @@ JSON 输出解析器，继承自 `BaseOutputParser`。从 AssistantMessage 或�
 
 ---
 
-> **说明**：`model_client_config` 不可为 `None`；`client_provider` 当前支持 `"OpenAI"`、`"SiliconFlow"`，其他值会抛出异常并提示支持的类型。未传的 `temperature`、`top_p`、`max_tokens`、`stop` 等将使用 `model_config` 中的默认值。
+> **说明**：`model_client_config` 不可为 `None`；`client_provider` 当前支持 `"OpenAI"`、`"OpenAIAccount"`、`"SiliconFlow"`、`"DashScope"`、`"Anthropic"`、`"DeepSeek"`、`"AscendAffinity"`、`"InferenceAffinity"`、`"OpenRouter"`、`"intelli_router"`，其他值会抛出异常并提示支持的类型。未传的 `temperature`、`top_p`、`max_tokens`、`stop` 等将使用 `model_config` 中的默认值。

@@ -9,10 +9,15 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from openjiuwen.core.foundation.tool import McpServerConfig
 
+from .browser_capabilities import (
+    CORE_BROWSER_CAPABILITY_NAME,
+    DEFAULT_BROWSER_CAPABILITIES,
+    POLICY_ONLY_BROWSER_CAPABILITY_NAMES,
+)
 from ..utils.env import (
     DEFAULT_BROWSER_TIMEOUT_S,
     DEFAULT_GUARDRAIL_MAX_FAILURES,
@@ -34,11 +39,21 @@ from ..utils.env import (
 )
 
 
+_playwright_mcp_capability_names: list[str] = []
+for capability_spec in DEFAULT_BROWSER_CAPABILITIES:
+    if capability_spec.name == CORE_BROWSER_CAPABILITY_NAME:
+        continue
+    if capability_spec.name in POLICY_ONLY_BROWSER_CAPABILITY_NAMES:
+        continue
+    _playwright_mcp_capability_names.append(capability_spec.name)
+PLAYWRIGHT_MCP_CAPABILITY_NAMES = tuple(_playwright_mcp_capability_names)
+
+
 @dataclass
 class BrowserRunGuardrails:
-    max_steps: int = 20
-    max_failures: int = 2
-    timeout_s: int = 180
+    max_steps: int = DEFAULT_GUARDRAIL_MAX_STEPS
+    max_failures: int = DEFAULT_GUARDRAIL_MAX_FAILURES
+    timeout_s: int = DEFAULT_BROWSER_TIMEOUT_S
     retry_once: bool = True
     resume_on_max_iterations: bool = False
 
@@ -91,6 +106,36 @@ def resolve_playwright_mcp_cwd() -> str:
     return str(Path.cwd().expanduser().resolve())
 
 
+def _ensure_capabilities(
+    args: list[str],
+    required_capabilities: Iterable[str],
+) -> list[str]:
+    """Return Playwright MCP args with the specified capabilities enabled."""
+    normalized_args: list[str] = []
+    capabilities: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--caps":
+            if index + 1 < len(args) and not args[index + 1].startswith("--"):
+                capabilities.extend(args[index + 1].split(","))
+                index += 2
+                continue
+        elif arg.startswith("--caps="):
+            capabilities.extend(arg.removeprefix("--caps=").split(","))
+            index += 1
+            continue
+        normalized_args.append(arg)
+        index += 1
+
+    capabilities = list(dict.fromkeys(capability.strip() for capability in capabilities if capability.strip()))
+    for capability in required_capabilities:
+        if capability not in capabilities:
+            capabilities.append(capability)
+    normalized_args.append(f"--caps={','.join(capabilities)}")
+    return normalized_args
+
+
 def build_browser_guardrails() -> BrowserRunGuardrails:
     return BrowserRunGuardrails(
         max_steps=resolve_int_env(
@@ -115,11 +160,21 @@ def build_browser_guardrails() -> BrowserRunGuardrails:
     )
 
 
-def build_playwright_mcp_config(instance: Optional[BrowserInstanceConfig] = None) -> McpServerConfig:
+def build_playwright_mcp_config(
+    instance: Optional[BrowserInstanceConfig] = None,
+    required_capability: Optional[list[str]] = None,
+) -> McpServerConfig:
     command = (
         os.getenv("PLAYWRIGHT_MCP_COMMAND", DEFAULT_PLAYWRIGHT_MCP_COMMAND).strip() or DEFAULT_PLAYWRIGHT_MCP_COMMAND
     )
-    args = parse_command_args(os.getenv("PLAYWRIGHT_MCP_ARGS", DEFAULT_PLAYWRIGHT_MCP_ARGS))
+    capabilities_to_enable = (
+        *PLAYWRIGHT_MCP_CAPABILITY_NAMES,
+        *(required_capability or ()),
+    )
+    args = _ensure_capabilities(
+        parse_command_args(os.getenv("PLAYWRIGHT_MCP_ARGS", DEFAULT_PLAYWRIGHT_MCP_ARGS)),
+        capabilities_to_enable,
+    )
     cwd = resolve_playwright_mcp_cwd()
     driver_mode = (os.getenv("BROWSER_DRIVER") or "").strip().lower()
     extension_mode = driver_mode == "extension" or is_truthy_env(os.getenv("PLAYWRIGHT_MCP_EXTENSION") or "")

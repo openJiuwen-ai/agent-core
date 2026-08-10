@@ -9,6 +9,7 @@ the model calling ``structured_output`` (schema path) and settling a chat round
 back to IDLE. Team-scoped wiring (get-or-create + dispose) is covered against a
 configured leader ``TeamAgent`` with the model resolver stubbed.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -23,7 +24,6 @@ from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tiny_agent import (
-    TinyAgent,
     create_summary_agent,
     create_tiny_agent,
     create_title_agent,
@@ -63,9 +63,11 @@ class _FakeAbilityManager:
 
     def __init__(self) -> None:
         self.added: dict[str, Any] = {}
+        self.add_history: list[str] = []
 
     def add_ability(self, card: Any, resource: Any) -> None:
         self.added[card.name] = resource
+        self.add_history.append(card.name)
 
     def remove_ability(self, name: str) -> None:
         self.added.pop(name, None)
@@ -78,22 +80,26 @@ class _FakeHarness:
     - ``captured_payload``: what the "model" submits to structured_output.
     - ``output_text``: the free-text round output.
     - ``submit``: whether the model calls structured_output at all.
+    - ``submit_after_attempt``: which round first calls structured_output.
     """
 
     instances: list["_FakeHarness"] = []
     captured_payload: dict[str, Any] | None = None
     output_text: str = "fake-output"
     submit: bool = True
+    submit_after_attempt: int = 1
 
     def __init__(self, spec: Any, build_context: Any = None, extra_rails: Any = None) -> None:
         self.spec = spec
         self.rails: list[Any] = []
         self.sent: list[str] = []
+        self.run_sessions: list[Any] = []
         self.started = False
         self.disposed = False
         self.ability_manager = _FakeAbilityManager()
         self._on_state = None
         self._on_round = None
+        self._submission_attempts = 0
         _FakeHarness.instances.append(self)
 
     def add_rail(self, rail: Any) -> None:
@@ -106,12 +112,18 @@ class _FakeHarness:
         return self.ability_manager.added.get("structured_output")
 
     async def _maybe_submit(self) -> None:
+        self._submission_attempts += 1
         tool = self._capture_tool()
-        if tool is not None and _FakeHarness.submit:
+        if (
+            tool is not None
+            and _FakeHarness.submit
+            and self._submission_attempts >= _FakeHarness.submit_after_attempt
+        ):
             await tool.invoke(_FakeHarness.captured_payload or {})
 
     async def run_once(self, content: str, *, session: Any = None) -> dict[str, Any]:
         self.sent.append(content)
+        self.run_sessions.append(session)
         await self._maybe_submit()
         return {"output": _FakeHarness.output_text}
 
@@ -142,6 +154,7 @@ def fake_harness(monkeypatch: pytest.MonkeyPatch):
     _FakeHarness.captured_payload = {"answer": "42"}
     _FakeHarness.output_text = "fake-output"
     _FakeHarness.submit = True
+    _FakeHarness.submit_after_attempt = 1
     monkeypatch.setattr(tiny_mod, "NativeHarness", _FakeHarness)
     return _FakeHarness
 
@@ -190,7 +203,27 @@ async def test_run_raises_when_structured_output_not_submitted(fake_harness) -> 
     agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
     with pytest.raises(Exception):
         await agent.run("question", schema=_DICT_SCHEMA)
+    assert len(fake_harness.instances[-1].sent) == tiny_mod._STRUCTURED_OUTPUT_MAX_ATTEMPTS
     assert fake_harness.instances[-1].disposed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_run_retries_in_same_session_when_structured_output_is_not_submitted(fake_harness) -> None:
+    fake_harness.submit_after_attempt = 3
+    agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
+
+    out = await agent.run("question", schema=_DICT_SCHEMA)
+
+    assert out == {"answer": "42"}
+    harness = fake_harness.instances[-1]
+    assert len(harness.sent) == 3
+    assert harness.sent[0].startswith("question\n\n")
+    assert harness.sent[1] == agent._t("structured_output", key="reminder")
+    assert harness.sent[2] == agent._t("structured_output", key="reminder")
+    assert harness.run_sessions[0] is harness.run_sessions[1]
+    assert harness.run_sessions[1] is harness.run_sessions[2]
+    assert harness.ability_manager.add_history == ["structured_output", "structured_output"]
 
 
 @pytest.mark.asyncio
@@ -214,10 +247,76 @@ async def test_run_uses_unique_card_id_per_call(fake_harness) -> None:
     assert len(ids) == 2 and ids[0] != ids[1]
 
 
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_run_hands_run_once_an_unprimed_session(fake_harness) -> None:
+    """A single-shot run has nothing to restore or persist.
+
+    ``run`` passes its own session in, which puts the harness on its
+    ``owns_session=False`` path and skips the pre_run / post_run checkpointer
+    pair. The session must therefore reach ``run_once`` un-primed -- a session
+    this side had already pre_run would mean the round trip happened anyway.
+    The other half of the contract (that ``run_once`` really does skip both
+    hooks for a caller-owned session) is covered in
+    ``tests/unit_tests/agent_teams/harness/test_run_once.py``.
+    """
+    agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
+
+    await agent.run("one")
+
+    session = fake_harness.instances[0].run_sessions[0]
+    assert session is not None
+    assert session._pre_run_done is False
+
+
+@pytest.mark.level0
+def test_create_tiny_agent_keeps_a_minimal_footprint() -> None:
+    """A tiny agent carries no machinery beyond its prompt and submit tool."""
+    agent = create_tiny_agent(
+        system_prompt="p",
+        model_name="m",
+        model_resolver=_model_resolver,
+        default_schema=_DICT_SCHEMA,
+    )
+    spec = agent._spec_for_run(_DICT_SCHEMA)
+
+    # No filesystem / shell / code surface, so no sys_operation is resolved and
+    # none of its tool resources get registered.
+    assert spec.enable_sys_operation is False
+    # No image reading either, so the modality probe never runs.
+    assert spec.enable_read_image_multimodal is False
+    # Only the caller's prompt reaches the model — no harness sections.
+    assert spec.prompt_mode == "none"
+    # The submit tool is the only tool it owns.
+    assert [type(tool).__name__ for tool in (spec.tools or [])] == ["StructuredOutputTool"]
+    # Schema turns keep the original model config. Tool selection remains auto,
+    # while a missing submission is recovered by the bounded reminder turn.
+    assert spec.model is agent._spec.model
+    assert agent._spec.model.model_request_config is None
+
+
 @pytest.mark.level0
 def test_create_tiny_agent_raises_when_model_unresolved() -> None:
     with pytest.raises(Exception):
         create_tiny_agent(system_prompt="p", model_name="missing", model_resolver=_none_resolver)
+
+
+@pytest.mark.level0
+def test_create_tiny_agent_disables_security_rail_by_default_and_can_enable_it() -> None:
+    default_agent = create_tiny_agent(
+        system_prompt="p",
+        model_name="m",
+        model_resolver=_model_resolver,
+    )
+    secured_agent = create_tiny_agent(
+        system_prompt="p",
+        model_name="m",
+        model_resolver=_model_resolver,
+        enable_security_rail=True,
+    )
+
+    assert default_agent._spec.enable_security_rail is False
+    assert secured_agent._spec.enable_security_rail is True
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +348,39 @@ async def test_chat_with_schema_captures_and_detaches_tool(fake_harness) -> None
     assert out == {"answer": "chat"}
     # Tool was detached at turn end.
     assert "structured_output" not in fake_harness.instances[0].ability_manager.added
+    await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_chat_retries_with_user_reminder_when_structured_output_is_not_submitted(fake_harness) -> None:
+    fake_harness.submit_after_attempt = 3
+    agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
+
+    out = await agent.chat("question", schema=_DICT_SCHEMA)
+
+    assert out == {"answer": "42"}
+    harness = fake_harness.instances[0]
+    assert len(harness.sent) == 3
+    assert harness.sent[0].startswith("question\n\n")
+    assert harness.sent[1] == agent._t("structured_output", key="reminder")
+    assert harness.sent[2] == agent._t("structured_output", key="reminder")
+    assert "structured_output" not in harness.ability_manager.added
+    await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_chat_raises_after_structured_output_retry_is_exhausted(fake_harness) -> None:
+    fake_harness.submit = False
+    agent = create_tiny_agent(system_prompt="p", model_name="m", model_resolver=_model_resolver)
+
+    with pytest.raises(Exception):
+        await agent.chat("question", schema=_DICT_SCHEMA)
+
+    harness = fake_harness.instances[0]
+    assert len(harness.sent) == tiny_mod._STRUCTURED_OUTPUT_MAX_ATTEMPTS
+    assert "structured_output" not in harness.ability_manager.added
     await agent.aclose()
 
 
@@ -301,7 +433,7 @@ def _make_leader(tiny_agents: dict[str, TinyAgentSpec]) -> TeamAgent:
     """Configure a minimal leader TeamAgent carrying declared tiny agents."""
     team_spec = TeamSpec(team_name="t", display_name="t", leader_member_name="leader")
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="t", tiny_agents=tiny_agents)
-    ctx = TeamRuntimeContext(role=TeamRole.LEADER, member_name="leader", persona="lead", team_spec=team_spec)
+    ctx = TeamRuntimeContext(role=TeamRole.LEADER, member_name="leader", desc="lead", team_spec=team_spec)
     agent = TeamAgent(AgentCard(id="leader", name="leader", description="t")).configure(spec, ctx)
     # Stub the resolver so a model_name resolves without a configured pool.
     agent.infra.tiny_agent_model_resolver = _model_resolver
@@ -336,6 +468,23 @@ def test_get_tiny_agent_supports_multiple_independent_agents() -> None:
     assert summ is not None and title is not None and summ is not title
     assert summ._spec.system_prompt == "summarize"
     assert title._spec.system_prompt == "title"
+
+
+@pytest.mark.level0
+def test_get_tiny_agent_propagates_security_rail_setting() -> None:
+    agent = _make_leader(
+        {
+            "secured": TinyAgentSpec(
+                system_prompt="classify",
+                model_name="m",
+                enable_security_rail=True,
+            )
+        }
+    )
+
+    tiny_agent = agent.get_tiny_agent("secured")
+    assert tiny_agent is not None
+    assert tiny_agent._spec.enable_security_rail is True
 
 
 @pytest.mark.asyncio

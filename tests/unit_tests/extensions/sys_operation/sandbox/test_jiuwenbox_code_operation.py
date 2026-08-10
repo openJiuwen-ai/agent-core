@@ -12,12 +12,13 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from openjiuwen.core.common.exception.codes import StatusCode  # noqa: E402
-from openjiuwen.core.runner import Runner  # noqa: E402
-from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig, SysOperation, SysOperationCard  # noqa: E402
-from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLauncherConfig, SandboxIsolationConfig  # noqa: E402
-from openjiuwen.core.sys_operation.local.utils import StreamEventType  # noqa: E402
-from openjiuwen.core.sys_operation.result import ExecuteCodeResult, ExecuteCodeStreamResult  # noqa: E402
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig, SysOperation, SysOperationCard
+from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLauncherConfig, SandboxIsolationConfig
+from openjiuwen.core.sys_operation.local.utils import StreamEventType
+from openjiuwen.core.sys_operation.result import ExecuteCodeResult, ExecuteCodeStreamResult
+from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import build_jiuwenbox_http_client
 
 
 LONG_RUNNING_COMMAND = ["/usr/bin/python3", "-c", "import time; time.sleep(36000)"]
@@ -37,7 +38,7 @@ class TestJiuwenboxCodeOperation:
     @pytest_asyncio.fixture
     async def sys_op(self, server_endpoint, monkeypatch) -> AsyncIterator[SysOperation]:
         base_url = _normalize_endpoint(server_endpoint)
-        with httpx.Client(base_url=base_url, timeout=30.0) as client:
+        with build_jiuwenbox_http_client(base_url) as client:
             create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
             assert create_resp.status_code == 201, create_resp.text
             sandbox_id = create_resp.json()["id"]

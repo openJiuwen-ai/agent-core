@@ -64,13 +64,16 @@ class InputEvent(Event):
     input_data: List[DataFrame] = Field(default_factory=list)
 
     @classmethod
-    def from_user_input(cls, user_input: Union[str, dict, 'InputEvent']) -> "InputEvent":
+    def from_user_input(cls, user_input: Union[str, list, dict, 'InputEvent']) -> "InputEvent":
         """Create input event from user input
 
         Convenience method to convert user input to InputEvent.
 
         Args:
-            user_input: User input, supports string, dictionary, and InputEvent
+            user_input: User input, supports string, list of strings,
+                dictionary, and InputEvent. A list is a batch of inputs that
+                queued up together and drive one round; each becomes its own
+                text frame, which is what ``input_data`` being a list is for.
 
         Returns:
             InputEvent: Input event object
@@ -82,6 +85,11 @@ class InputEvent(Event):
             return cls(
                 event_type=EventType.INPUT,
                 input_data=[TextDataFrame(text=user_input)]
+            )
+        if isinstance(user_input, list):
+            return cls(
+                event_type=EventType.INPUT,
+                input_data=[TextDataFrame(text=str(item)) for item in user_input]
             )
         if isinstance(user_input, dict):
             return cls(

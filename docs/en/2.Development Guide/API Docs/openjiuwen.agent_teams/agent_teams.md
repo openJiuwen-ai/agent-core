@@ -18,6 +18,7 @@ JSON-serializable specification for constructing a TeamAgent. Composes per-role 
 * **worktree**(WorktreeConfig, optional): Worktree isolation config for team members. Default: `None`.
 * **workspace**(TeamWorkspaceConfig, optional): Shared workspace config for team members. Default: `None`.
 * **metadata**(dict[str, Any], optional): Additional metadata. Default: `{}`.
+* **enable_permissions**(bool, optional): Enables the Team permission approval path. When enabled, `TeamPermissionRail` handles Teammate tool permissions and the Leader resolves `ask` decisions. Default: `False`. See [Team Permission Rail](./rails/team_permission_rail.md).
 
 ### model_validate
 

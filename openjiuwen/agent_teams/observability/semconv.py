@@ -25,18 +25,38 @@ GEN_AI_SYSTEM = "gen_ai.system"
 GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
 GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
 
+# Id of the LLM request this span belongs to, stamped so a trace can be read
+# back against the framework's own correlation key when a span looks wrong.
+GEN_AI_REQUEST_ID = "gen_ai.request.id"
+
 GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
 GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
 GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
 GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
 GEN_AI_REQUEST_MESSAGE_COUNT = "gen_ai.request.message_count"
 
+# Per-member prev-message-count stored on the team span to make prompt
+# delta tracking survive across iterations (each iteration opens/closes its
+# own agent span, so a count stored there is lost). Keyed by agent_id
+# (``{team}_{member}``), i.e. ``gen_ai.request.prev_message_count.<agent_id>``.
+# Distinct prefix from the standard ``gen_ai.request.message_count`` to avoid
+# collision with the per-span display count.
+GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX = "gen_ai.request.prev_message_count."
+
 GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
 GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
 GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
+GEN_AI_USAGE_CACHE_TOKENS = "gen_ai.usage.cache_tokens"
+GEN_AI_USAGE_REASONING_TOKENS = "gen_ai.usage.reasoning_tokens"
 GEN_AI_RESPONSE_FINISH_REASON = "gen_ai.response.finish_reason"
 GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
 GEN_AI_RESPONSE_TTFT_MS = "gen_ai.response.time_to_first_token_ms"
+GEN_AI_REASONING_DURATION_MS = "gen_ai.reasoning.duration_ms"
+# Why a reasoning span carries no duration. Reasoning time is measured from the
+# stream, so a non-streaming call has none to report — the attribute says so
+# rather than leaving a bare zero-length span to read as instant thinking.
+GEN_AI_REASONING_TIMING = "gen_ai.reasoning.timing"
+REASONING_TIMING_UNMEASURED = "unmeasured: non-streaming call"
 
 # Standard OpenLLMetry / GenAI keys
 GEN_AI_PROMPT = "gen_ai.prompt"

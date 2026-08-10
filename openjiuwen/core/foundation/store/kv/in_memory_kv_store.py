@@ -17,7 +17,7 @@ from openjiuwen.core.foundation.store.base_kv_store import (
 
 class InMemoryKVStore(BaseKVStore):
     def __init__(self):
-        self._store: dict[str, tuple[str | bytes, Optional[int]]] = {}  # (value, expiry_timestamp or None)
+        self._store: dict[str, tuple[str | bytes, Optional[float]]] = {}  # (value, expiry_timestamp or None)
         self._lock = asyncio.Lock()
 
     async def set(self, key: str, value: str | bytes):
@@ -47,7 +47,7 @@ class InMemoryKVStore(BaseKVStore):
             current_time = time.time()
             if key in self._store:
                 _, expiry_ts = self._store[key]
-                if expiry_ts is not None and current_time > expiry_ts:
+                if expiry_ts is not None and current_time >= expiry_ts:
                     # Expired: allow to overwrite
                     pass
                 else:
@@ -55,7 +55,7 @@ class InMemoryKVStore(BaseKVStore):
                     return False
 
             # Either not present or expired → set it
-            expiry_ts = int(current_time + expiry) if expiry is not None else None
+            expiry_ts = current_time + expiry if expiry is not None else None
             self._store[key] = (value, expiry_ts)
             return True
 
@@ -155,7 +155,7 @@ class InMemoryKVStore(BaseKVStore):
         if key not in self._store:
             return None
         value, expiry_ts = self._store[key]
-        if expiry_ts is not None and time.time() > expiry_ts:
+        if expiry_ts is not None and time.time() >= expiry_ts:
             # Note: we do NOT auto-delete expired keys to allow re-set later
             return None
         return value

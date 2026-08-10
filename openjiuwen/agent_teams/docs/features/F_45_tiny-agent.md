@@ -68,6 +68,9 @@ team-scoped 与 ephemeral 调用方共用同一解析路径。
   card id（`{name}-{seq}`）避免并发调用共享 owner id 撞工具注册。`chat()` 用持久 harness 保活。
 - **team-scoped 纯自定义**：预定义（标题 / 摘要）只服务 ephemeral；team spec 不引用预定义类型。
 - **纯 Python API**：不注册为 leader 可调的 LLM 工具。摘要 / 标题等是框架 / 应用代码调用。
+- **SecurityRail 默认关闭**：tiny agent 只暴露结构化输出工具，`create_tiny_agent` 与
+  `TinyAgentSpec` 默认不挂载安全提示；需要安全提示时可显式设置 `enable_security_rail=True`。
+  该开关只控制自动挂载，不会移除调用方显式声明的 SecurityRail。
 - **`enable_task_loop`**：`DeepAgentSpec.resolve_parts` 既有行为硬编码 `enable_task_loop=True`；
   tiny agent 走 `run_once` 单次 invoke 不触发自驱循环，与 worker 一致，未改既有逻辑。
 

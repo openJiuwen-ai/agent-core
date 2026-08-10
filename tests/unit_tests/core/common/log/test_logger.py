@@ -831,6 +831,51 @@ class TestDefaultLogger:
         assert "Exception occurred" in output
         assert "Test exception" in output or "ValueError" in output
 
+    def test_error_with_exc_info_prints_traceback(self, initialized_logger, stdout_capture):
+        """``logger.error(msg, exc_info=True)`` must print the in-flight traceback.
+
+        Stdlib logging treats ``exc_info=True`` as a contract: the logger
+        captures ``sys.exc_info()`` and appends the traceback. The custom
+        ``_emit`` must forward ``exc_info`` to the underlying stdlib logger
+        instead of dropping it, otherwise every
+        ``logger.error(..., exc_info=True)`` call silently loses its stack.
+        """
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+
+        try:
+            raise ValueError("boom-for-exc-info-test")
+        except ValueError:
+            logger.error("crash captured", exc_info=True)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+
+        output = stdout_capture.getvalue()
+        assert "crash captured" in output
+        assert "Traceback" in output
+        assert "ValueError: boom-for-exc-info-test" in output
+
+    def test_error_without_exc_info_omits_traceback(self, initialized_logger, stdout_capture):
+        """A plain ``logger.error(msg)`` (no exc_info) must not fabricate a traceback."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+
+        logger.error("plain error without exc info")
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+
+        output = stdout_capture.getvalue()
+        assert "plain error without exc info" in output
+        assert "Traceback" not in output
+
 
 class TestLogManagerReset:
     """Test the log manager reset function"""

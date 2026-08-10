@@ -31,8 +31,9 @@ Unlike regular Skills, Team Skills:
 | Module | Function |
 |--------|----------|
 | `TeamSkillCreateRail` | Auto-detect collaboration patterns, suggest team skill creation |
-| `TeamSkillRail` | Public rail for online evolution: trajectory analysis, user request, aggregated experience record generation/approval. It is the compatibility public alias for `TeamSkillEvolutionRail`. |
-| `TeamSkillExperienceOptimizer` | LLM-driven experience record generation. `TeamSkillOptimizer` remains available as a compatibility alias. |
+| `TeamSkillRail` | Public rail for online evolution. It is the compatibility public alias for `TeamSkillEvolutionRail`. |
+| `SkillExperienceOptimizer` | Shared optimizer used by the optional passive signal path with `profile="team"`. |
+| `evolution_reviewer` | Dedicated subagent used by Agent-decided active review through the rail-owned `evolve_review_task`. |
 | `ExperienceScorer` | Experience scoring and simplify maintenance |
 | `InMemoryTrajectoryRegistry` | Runtime source/sink for publishing member snapshots and aggregating team trajectory evidence |
 | `TeamTrajectoryAggregator` | Offline/debug aggregation utility for stored member trajectories |
@@ -43,7 +44,7 @@ Unlike regular Skills, Team Skills:
 
 ### Principle
 
-`TeamSkillCreateRail` detects `spawn_member` call count in `AFTER_TASK_ITERATION` callback. When threshold is reached, it injects a follow_up prompt guiding the Agent to confirm via `ask_user` and invoke `team-skill-creator` skill.
+`TeamSkillCreateRail` waits until the team task is completed, then checks whether the run spawned enough team members and did not already use an existing Team/Swarm Skill. When these gates pass, it injects a short follow_up to wake up the next round and injects system prompt text that guides the Agent to decide whether the collaboration pattern is reusable. If so, the Agent asks for confirmation in normal reply text. It must not use popup-style interaction tools for this confirmation.
 
 ### Configuration Example
 
@@ -70,11 +71,13 @@ agent = create_deep_agent(
 ### Creation Flow
 
 1. Agent executes collaboration flow (calls `build_team`, `spawn_member`, `create_task`)
-2. Rail detects `spawn_member` call count reaches threshold
-3. Rail injects prompt via `TaskLoopController.enqueue_follow_up()`
-4. Agent calls `ask_user` tool to confirm with user
-5. User selects "Create", Agent invokes `team-skill-creator` skill
-6. Skill generates Team Skill files based on trajectory
+2. Team completion callback marks the run as eligible for creation review
+3. Rail detects `spawn_member` call count reaches threshold and no existing Team/Swarm Skill was used
+4. Rail injects a short follow_up via `TaskLoopController.enqueue_follow_up()` and injects a system self-check prompt before the next model call
+5. Agent asks in normal reply text whether to create a Team/Swarm Skill when it finds reusable value
+6. User confirms or provides custom instructions
+7. Agent invokes `swarmskill-creator` or a compatible team skill creator skill
+8. Skill generates Team/Swarm Skill files based on the current team context
 
 ---
 
@@ -85,9 +88,14 @@ agent = create_deep_agent(
 ```python
 from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails import TeamSkillRail
+from openjiuwen.harness.rails import (
+    EvolutionInterruptRail,
+    EvolutionReviewRuntime,
+    TeamSkillRail,
+)
 
 trajectory_registry = InMemoryTrajectoryRegistry()
+review_runtime = EvolutionReviewRuntime()
 
 team_rail = TeamSkillRail(
     skills_dir="/path/to/skills",
@@ -97,15 +105,22 @@ team_rail = TeamSkillRail(
     team_id="research-team",
     trajectory_source=trajectory_registry,
     trajectory_sink=trajectory_registry,
+    review_runtime=review_runtime,
+    signal_trigger=False,      # opt in to passive signal generation if needed
+    review_trigger=True,       # Agent decides after team completion
     auto_save=False,           # generated records require user approval
     async_evolution=True,      # Execute evolution asynchronously
     evolution_total_timeout_secs=600.0,
+)
+interrupt_rail = EvolutionInterruptRail(
+    review_runtime=review_runtime,
+    submission_service=team_rail.experience_manager.experience_submission_service,
 )
 
 agent = create_deep_agent(
     model=model_client,
     tools=team_tools,
-    rails=[team_rail],
+    rails=[interrupt_rail, team_rail],
     skills=["research-team"],  # Load existing team skill
 )
 ```
@@ -120,23 +135,32 @@ To aggregate multiple members, every rail or agent that should contribute eviden
 
 | Trigger Method | Trigger Condition |
 |----------------|-------------------|
-| Passive trigger | `view_task` returns "all tasks completed" |
-| Active trigger | User calls `request_user_evolution()` |
+| Passive signal trigger | `signal_trigger=True` and team completion is observed |
+| Completion review trigger | `review_trigger=True` and team completion is observed |
+| User-requested review | Host calls `request_user_evolution()` and delivers its `followup_prompt` to the main Agent |
+
+Both switches default to `False`. If both are enabled, completion review takes precedence and passive signal generation is skipped for that completion.
 
 ### Evolution Paths
 
-#### 1. Trajectory Issue Analysis
+#### 1. Passive Signal Evolution
 
-Rail analyzes team execution trajectory, detecting:
+When `signal_trigger=True`, the rail aggregates team execution evidence and detects:
 
 - **Role coordination issues**: Collaboration breaks, data not passed
 - **Constraint violations**: Timeout, output format issues
 - **Workflow inefficiency**: Redundant calls, extra steps
 - **Role capability gaps**: Repeated failures, poor output quality
 
-When issues are detected, Rail aggregates signals and calls `TeamSkillExperienceOptimizer.generate_records(EvolutionContext)` to generate experience records.
+When issues are detected, the rail calls the shared `SkillExperienceOptimizer(profile="team")` to generate experience records. This path stages records directly and uses the record approval flow below.
 
-#### 2. User Request Evolution
+#### 2. Agent-Decided Active Review
+
+When `review_trigger=True`, team completion schedules a short self-check follow_up. The main Agent decides whether a used team skill needs evolution. If it does, it calls `prepare_skill_evolution(user_confirmed=true)` and passes the returned `evolution_review_ref` to the rail-owned `evolve_review_task`. That tool runs only the dedicated `evolution_reviewer`, which inspects the bounded review materials and submits proposed evolution through the shared review runtime.
+
+The active path does not need a global `SubagentRail` or general-purpose `task_tool`.
+
+#### 3. User Request Evolution
 
 User actively provides improvement suggestions:
 
@@ -147,19 +171,23 @@ result = await team_rail.request_user_evolution(
 )
 ```
 
-Rail first uses the current rail trajectory, or the aggregated team trajectory from `trajectory_source`, as the evidence window for trajectory issue detection. It then merges user intent as supplemental direction into the same `generate_records(EvolutionContext)` flow to generate experience records.
+`request_user_evolution()` returns an `EvolutionRequestResult` in `agent_prompt` mode. The host delivers `result.followup_prompt` to the main Agent; the prompt requires the same `prepare_skill_evolution` → `evolve_review_task` active-review sequence. Current rail trajectory or aggregated team trajectory becomes the default evidence window, while `user_intent` supplies additional direction.
 
-### Record Approval Flow
+### Passive Record Approval Flow
 
 1. Rail generates experience records and stages them
-2. The returned `approval_event` can be shown by the host UI
+2. The approval event from `drain_pending_host_events()` can be shown by the host UI
 3. User selects "Accept" or "Reject"
-4. On approval, call `approve_record(result.request_id)` to write to `evolutions.json`
+4. On approval, call `approve_record(request_id)` to write to `evolutions.json`
 
 ```python
-if result.approval_event:
-    await team_rail.approve_record(result.request_id)
+for event in await team_rail.drain_pending_host_events(wait=True):
+    meta = event.payload.get("evolution_meta", {})
+    if meta.get("event_kind") == "approval":
+        await team_rail.approve_record(event.payload["request_id"])
 ```
+
+Active-review proposals use the `EvolutionInterruptRail` and review tools instead of this passive `approval_event` path.
 
 ---
 

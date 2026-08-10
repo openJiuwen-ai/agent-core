@@ -13,6 +13,7 @@ trying to verify (the OTel span tree shape).
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Iterator
@@ -30,8 +31,12 @@ from openjiuwen.agent_teams.observability import (
 )
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
 from openjiuwen.agent_teams.observability.semconv import (
+    AT_AGENT_ID,
+    AT_MEMBER_NAME,
     AT_PLAN_APPROVED,
     AT_TASK_STATUS,
+    GEN_AI_REQUEST_MESSAGE_COUNT,
+    GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
 )
@@ -69,6 +74,8 @@ class _FakeUsage:
     input_tokens: int = 12
     output_tokens: int = 7
     total_tokens: int = 19
+    cache_tokens: int = 0
+    reasoning_tokens: int = 0
     model_name: str = "fake-llm-1"
 
 
@@ -88,19 +95,22 @@ class _FakeAssistantMessage:
         reasoning_content: str = "",
         finish_reason: str = "stop",
         tool_calls: list[Any] | None = None,
+        usage: _FakeUsage | None = None,
     ) -> None:
         self.content = content
         self.reasoning_content = reasoning_content
         self.finish_reason = finish_reason
         self.tool_calls = tool_calls
-        self.usage_metadata = _FakeUsage()
+        self.usage_metadata = usage or _FakeUsage()
 
 
 class _FakeChunk:
     """Stand-in for one streaming AssistantMessageChunk."""
 
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str = "", *, reasoning_content: str = "", finish_reason: str | None = None) -> None:
         self.content = content
+        self.reasoning_content = reasoning_content
+        self.finish_reason = finish_reason
 
 
 @pytest.fixture
@@ -171,24 +181,44 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
         model="fake-llm-1",
     )
 
-    for delta in ("4", "2"):
+    # Streaming chunks: first two carry reasoning deltas, then content.
+    for rc in ("Six times ", "seven equals forty-two."):
         await fw.trigger(
-        LLMCallEvents.LLM_STREAM_OUTPUT,
-        messages=messages,
-        result=_FakeChunk(content=delta),
-    )
+            LLMCallEvents.LLM_STREAM_OUTPUT,
+            messages=messages,
+            result=_FakeChunk(reasoning_content=rc),
+        )
+        # Spread reasoning chunks so first/last monotonic timestamps differ,
+        # otherwise the measured reasoning interval is 0.
+        await asyncio.sleep(0.01)
+    # Content chunks; the last one carries finish_reason, matching real
+    # OpenAI streaming where only the final chunk includes it. finish_reason
+    # is recorded from the chunk stream, not from the LLM_OUTPUT trigger.
+    for i, delta in enumerate(("4", "2")):
+        await fw.trigger(
+            LLMCallEvents.LLM_STREAM_OUTPUT,
+            messages=messages,
+            result=_FakeChunk(content=delta, finish_reason="stop" if i == 1 else None),
+        )
 
     final = _FakeAssistantMessage(
         content="42",
         reasoning_content="Six times seven equals forty-two.",
         finish_reason="stop",
+        usage=_FakeUsage(reasoning_tokens=5, cache_tokens=2),
     )
+    # Mirror the real streaming trigger (openai_model_client): response is the
+    # content string, usage is the metadata object, passed separately. The
+    # trigger does NOT carry finish_reason; content must never be mistaken for
+    # one. Earlier the handler re-derived usage from `response` via getattr,
+    # which returned None for a string and silently dropped reasoning_tokens
+    # from the reasoning span — a regression this test must guard against.
     await fw.trigger(
         LLMCallEvents.LLM_OUTPUT,
         messages=messages,
-        response=final,
-        finish_reason="stop",
-        usage=_FakeUsage(),
+        response=final.content,
+        reasoning_content=final.reasoning_content,
+        usage=final.usage_metadata,
     )
 
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
@@ -198,23 +228,120 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     assert _attr(span, "gen_ai.system") == "openjiuwen-test"
     assert _attr(span, "gen_ai.request.model") == "fake-llm-1"
     assert _attr(span, "gen_ai.request.temperature") == 0.5
-    assert _attr(span, "gen_ai.usage.prompt_tokens") == 12
-    assert _attr(span, "gen_ai.usage.completion_tokens") == 7
+    # Cached prompt and reasoning tokens are subsets of the provider's prompt /
+    # completion counts. On the langfuse backend (this fixture's default) every
+    # usage key is an additive category, so the subsets are carved out of their
+    # parent: 12 prompt = 10 fresh + 2 cached, 7 completion = 2 visible +
+    # 5 reasoning, and the four still add up to the reported 19.
+    assert _attr(span, "gen_ai.usage.prompt_tokens") == 10
+    assert _attr(span, "gen_ai.usage.completion_tokens") == 2
     assert _attr(span, "gen_ai.usage.total_tokens") == 19
+    assert _attr(span, "gen_ai.usage.cache_tokens") == 2
+    assert _attr(span, "gen_ai.usage.reasoning_tokens") == 5
+    assert (
+        _attr(span, "gen_ai.usage.prompt_tokens")
+        + _attr(span, "gen_ai.usage.completion_tokens")
+        + _attr(span, "gen_ai.usage.cache_tokens")
+        + _attr(span, "gen_ai.usage.reasoning_tokens")
+    ) == _attr(span, "gen_ai.usage.total_tokens")
 
     ttft = _attr(span, "gen_ai.response.time_to_first_token_ms")
     assert ttft is not None and ttft >= 0.0, "TTFT must be recorded on the LLM span"
 
-    assert "Compute 6 * 7" in _attr(span, "gen_ai.prompt.1.content", "")
-    assert _attr(span, "gen_ai.completion.0.content") == "42"
+    assert "Compute 6 * 7" in _attr(span, "langfuse.gen_ai.prompt.1.content", "")
+    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "42"
     assert _attr(span, "gen_ai.response.finish_reason") == "stop"
 
     reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
     assert reasoning_spans, "no llm.reasoning child span emitted"
     rs = reasoning_spans[0]
-    assert "forty-two" in _attr(rs, "gen_ai.completion.0.content", "")
+    # Content comes from the trigger's reasoning_content (the business-layer
+    # assembled text), not from the collector stitching chunk deltas.
+    assert _attr(rs, "gen_ai.completion.0.content") == "Six times seven equals forty-two."
     assert _attr(rs, "langfuse.observation.input") == "llm reasoning"
     assert rs.parent is not None and rs.parent.span_id == span.context.span_id
+    # Reasoning duration is measured from the chunk stream (first..last reasoning
+    # chunk); non-zero because the two reasoning deltas are stamped at different times.
+    rdur = _attr(rs, "gen_ai.reasoning.duration_ms")
+    assert rdur is not None and rdur > 0.0, "reasoning duration_ms must be recorded and > 0"
+    # The span's own start/end must reflect the measured interval — Langfuse UI
+    # shows span duration, not the attribute. Guard against the prior regression
+    # where start==end (duration 0) despite the attribute being set.
+    span_dur_ms = (rs.end_time - rs.start_time) / 1e6
+    assert span_dur_ms > 0, f"reasoning span duration must be > 0, got {span_dur_ms}"
+    assert abs(span_dur_ms - rdur) < 1.0, f"span dur {span_dur_ms} != attr {rdur}"
+    # reasoning_tokens mirrored onto the reasoning span (read from usage, not computed).
+    assert _attr(rs, "gen_ai.usage.reasoning_tokens") == 5
+
+
+@pytest.mark.asyncio
+async def test_backend_langfuse_only_writes_langfuse_attrs(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Verify backend='langfuse' (default) only writes langfuse.* attrs, not gen_ai.*."""
+    fw = Runner.callback_framework
+    _create_team_span("test_team")
+
+    messages = [{"role": "user", "content": "test question"}]
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+    final = _FakeAssistantMessage(content="test answer", usage=_FakeUsage())
+    await fw.trigger(
+        LLMCallEvents.LLM_OUTPUT,
+        messages=messages,
+        response=final.content,
+        usage=final.usage_metadata,
+    )
+
+    span = _spans_by_name(in_memory_exporter, "llm.call")[0]
+    # Langfuse backend: only langfuse.* attrs should be present, gen_ai.* should be absent
+    assert _attr(span, "langfuse.gen_ai.prompt.0.content") == "test question"
+    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "test answer"
+    # Standard gen_ai.* attrs should NOT be present when backend="langfuse"
+    assert _attr(span, "gen_ai.prompt.0.content") is None
+    assert _attr(span, "gen_ai.completion.0.content") is None
+
+
+@pytest.mark.asyncio
+async def test_streaming_content_not_mistaken_for_finish_reason(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Streaming content string must never be recorded as finish_reason.
+
+    The LLM_OUTPUT trigger carries the final content as `response` and does
+    not pass `finish_reason`. If no chunk in the stream carried one either,
+    finish_reason must stay unset rather than being filled from the content.
+    """
+    fw = Runner.callback_framework
+    _create_team_span("test_team")
+
+    messages = [{"role": "user", "content": "hi"}]
+    await fw.trigger(
+        LLMCallEvents.LLM_STREAM_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+    # Chunks without finish_reason — simulates a provider whose final chunk
+    # omits it. Content is a short string that must not leak into finish_reason.
+    await fw.trigger(
+        LLMCallEvents.LLM_STREAM_OUTPUT,
+        messages=messages,
+        result=_FakeChunk(content="hello"),
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_OUTPUT,
+        messages=messages,
+        response="hello",
+        usage=_FakeUsage(),
+    )
+
+    span = _spans_by_name(in_memory_exporter, "llm.call")[0]
+    finish_reason = _attr(span, "gen_ai.response.finish_reason")
+    assert finish_reason != "hello", "content string leaked into finish_reason"
+    assert finish_reason is None, f"finish_reason should be unset, got {finish_reason!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +443,169 @@ async def test_tool_call_nests_under_agent_span(
         ts.end()
 
 
+@pytest.mark.asyncio
+async def test_child_spans_inherit_member_name_from_agent_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """llm.call and tool spans copy ``agentteam.member.name`` from the agent span.
+
+    The agent iteration span is stamped ``AT_MEMBER_NAME`` by the Rail. Child
+    spans opened by the callback handler must inherit it so that, when the
+    agent span is closed abnormally, the orphaned llm.call/tool spans can
+    still be traced back to the teammate that produced them.
+    """
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackContext,
+        TaskIterationInputs,
+    )
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+
+    _create_team_span("test_team")
+
+    fw = Runner.callback_framework
+    session = MagicMock()
+    session.get_session_id.return_value = "test_session"
+    session.get_agent_id.return_value = "leader"
+    session.get_agent_name.return_value = "leader"
+    await fw.trigger(
+        AgentEvents.AGENT_INVOKE_INPUT,
+        {"agent_id": "leader", "user_input": "use the calc tool"},
+        session=session,
+    )
+
+    mock_agent = _create_mock_agent(team_name="test_team", member_name="leader")
+    rail = ObservabilityRail()
+    inputs = TaskIterationInputs(iteration=1, query="use the calc tool", loop_event=None)
+    ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
+    await rail.before_task_iteration(ctx)
+
+    messages = [{"role": "user", "content": "Use the calc tool."}]
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+    await fw.trigger(
+        ToolCallEvents.TOOL_CALL_STARTED,
+        tool_name="calc",
+        tool_id="calc-1",
+        inputs=((), {"expr": "6*7"}),
+    )
+    await fw.trigger(
+        ToolCallEvents.TOOL_CALL_FINISHED,
+        tool_name="calc",
+        tool_id="calc-1",
+        inputs=((), {"expr": "6*7"}),
+        result=42,
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=messages,
+        result=_FakeAssistantMessage(content="42"),
+    )
+
+    await rail.after_task_iteration(ctx)
+
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    tool_spans = _spans_by_name(in_memory_exporter, "tool.calc")
+    assert llm_spans, "llm.call span missing"
+    assert tool_spans, "tool span missing"
+    assert _attr(llm_spans[0], AT_MEMBER_NAME) == "leader"
+    assert _attr(tool_spans[0], AT_MEMBER_NAME) == "leader"
+
+    ts = remove_team_span("test_team")
+    if ts is not None and ts.is_recording():
+        from opentelemetry.trace import Status, StatusCode
+        ts.set_status(Status(StatusCode.OK))
+        ts.end()
+
+
+@pytest.mark.asyncio
+async def test_reasoning_span_inherits_member_name_from_agent_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """The reasoning sub-span inherits ``agentteam.member.name``.
+
+    Reasoning spans are created late, in ``_finalize_llm_span_output``,
+    after the agent span may already have ended. The handler falls back to
+    the parent llm.call span's attribute in that case; this test exercises
+    the common path where the agent span is still alive (streaming within
+    an iteration) and asserts the member name lands on the reasoning span.
+    """
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackContext,
+        TaskIterationInputs,
+    )
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+
+    _create_team_span("test_team")
+
+    fw = Runner.callback_framework
+    session = MagicMock()
+    session.get_session_id.return_value = "test_session"
+    session.get_agent_id.return_value = "leader"
+    session.get_agent_name.return_value = "leader"
+    await fw.trigger(
+        AgentEvents.AGENT_INVOKE_INPUT,
+        {"agent_id": "leader", "user_input": "think step by step"},
+        session=session,
+    )
+
+    mock_agent = _create_mock_agent(team_name="test_team", member_name="leader")
+    rail = ObservabilityRail()
+    inputs = TaskIterationInputs(iteration=1, query="think step by step", loop_event=None)
+    ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
+    await rail.before_task_iteration(ctx)
+
+    messages = [
+        {"role": "system", "content": "You are a friendly helper."},
+        {"role": "user", "content": "Compute 6 * 7."},
+    ]
+    await fw.trigger(
+        LLMCallEvents.LLM_STREAM_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+    for rc in ("Six times ", "seven equals forty-two."):
+        await fw.trigger(
+            LLMCallEvents.LLM_STREAM_OUTPUT,
+            messages=messages,
+            result=_FakeChunk(reasoning_content=rc),
+        )
+        await asyncio.sleep(0.01)
+    for delta in ("4", "2"):
+        await fw.trigger(
+            LLMCallEvents.LLM_STREAM_OUTPUT,
+            messages=messages,
+            result=_FakeChunk(content=delta),
+        )
+
+    await fw.trigger(
+        LLMCallEvents.LLM_OUTPUT,
+        messages=messages,
+        response="42",
+        reasoning_content="Six times seven equals forty-two.",
+        usage=_FakeUsage(reasoning_tokens=5),
+    )
+
+    await rail.after_task_iteration(ctx)
+
+    reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert reasoning_spans, "llm.reasoning span missing"
+    assert llm_spans, "llm.call span missing"
+    assert _attr(reasoning_spans[0], AT_MEMBER_NAME) == "leader"
+    # The parent llm.call span was stamped at open time and serves as the
+    # fallback source for the reasoning sub-span.
+    assert _attr(llm_spans[0], AT_MEMBER_NAME) == "leader"
+
+    ts = remove_team_span("test_team")
+    if ts is not None and ts.is_recording():
+        from opentelemetry.trace import Status, StatusCode
+        ts.set_status(Status(StatusCode.OK))
+        ts.end()
+
+
 # ---------------------------------------------------------------------------
 # Callback handler: LLM response with both content and tool_calls
 # ---------------------------------------------------------------------------
@@ -363,11 +653,63 @@ async def test_llm_response_with_content_and_tool_calls(
     span = llm_spans[0]
 
     # Both content and tool_calls should be recorded
-    assert "Let me check the weather for you." in _attr(span, "gen_ai.completion.0.content", "")
+    assert "Let me check the weather for you." in _attr(span, "langfuse.gen_ai.completion.0.content", "")
     tool_calls_attr = _attr(span, "gen_ai.tool_calls", "")
     assert tool_calls_attr, "tool_calls should be recorded"
     assert "get_weather" in tool_calls_attr
     assert "Beijing" in tool_calls_attr
+
+
+@pytest.mark.asyncio
+async def test_prompt_includes_tool_calls_for_assistant_message(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Assistant messages with tool_calls get gen_ai.prompt.{i}.tool_calls attributes."""
+    fw = Runner.callback_framework
+    _create_team_span("test_team")
+
+    # Simulate an LLM round where the context includes a prior assistant tool call.
+    tool_call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {
+            "name": "send_message",
+            "arguments": '{"to":"user","content":"task done"}',
+        },
+    }
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "do the task"},
+        {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+        {"role": "tool", "content": "Message sent", "tool_call_id": "call_1"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=messages,
+        result=_FakeAssistantMessage(content="ok"),
+    )
+
+    span = _spans_by_name(in_memory_exporter, "llm.call")[0]
+
+    # Assistant message at index 2 should have tool_calls attribute.
+    tc_attr = _attr(span, "langfuse.gen_ai.prompt.2.tool_calls", "")
+    assert tc_attr, "assistant message with tool_calls should have tool_calls attribute"
+    assert "send_message" in tc_attr
+    assert "task done" in tc_attr
+
+    # Messages without tool_calls should NOT have the attribute.
+    for i in (0, 1, 3, 4):
+        assert _attr(span, f"langfuse.gen_ai.prompt.{i}.tool_calls", "") == "", (
+            f"message {i} ({_attr(span, f'langfuse.gen_ai.prompt.{i}.role', '')}) "
+            f"should not have tool_calls attribute"
+        )
 
 
 @pytest.mark.asyncio
@@ -529,13 +871,13 @@ def _close_team_span(team_span: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_plan_request_advances_task_status_to_claimed(
+async def test_plan_request_advances_task_status_to_planning(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """Plan-mode: TaskCreated -> TaskPlanRequest advances AT_TASK_STATUS to 'claimed'.
+    """Plan-mode: TaskCreated -> TaskPlanRequest advances AT_TASK_STATUS to 'planning'.
 
     Plan mode never publishes TaskClaimedEvent; the request event itself carries
-    status=claimed and must be routed through _record_task_status_span.
+    status=planning and must be routed through _record_task_status_span.
     """
     from openjiuwen.agent_teams.observability.monitor_handler import _TASK_EVENT_TYPES
     from openjiuwen.agent_teams.observability.span_context import remove_team_span
@@ -553,13 +895,13 @@ async def test_plan_request_advances_task_status_to_claimed(
         )))
         await handler(EventMessage.from_event(TaskPlanRequestEvent(
             team_name=team, task_id=task_id, member_name="member-1",
-            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            status=TaskStatus.PLANNING.value, plan_id="plan-1",
             member_plan_md="/tmp/plan.md", tool_call_id="tc-1",
         )))
 
         task_span = handler._task_spans.get(task_id)
         assert task_span is not None, "task span missing after create + plan_request"
-        assert _attr(task_span, AT_TASK_STATUS) == "claimed"
+        assert _attr(task_span, AT_TASK_STATUS) == "planning"
         assert _attr(task_span, "agentteam.task.plan_id") == "plan-1"
     finally:
         _close_team_span(team_span)
@@ -570,8 +912,8 @@ async def test_plan_request_advances_task_status_to_claimed(
 async def test_plan_response_approved_and_rejected_paths(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """Plan response: approved -> plan_approved + AT_PLAN_APPROVED=True;
-    rejected -> status reverts to claimed + AT_PLAN_APPROVED=False."""
+    """Plan response: approved -> in_progress + AT_PLAN_APPROVED=True;
+    rejected -> status reverts to planning + AT_PLAN_APPROVED=False."""
     from openjiuwen.agent_teams.observability.span_context import remove_team_span
 
     team = "plan_team"
@@ -583,24 +925,24 @@ async def test_plan_response_approved_and_rejected_paths(
             team_name=team, task_id=task_id, status=TaskStatus.PENDING.value)))
         await handler(EventMessage.from_event(TaskPlanRequestEvent(
             team_name=team, task_id=task_id, member_name="member-1",
-            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            status=TaskStatus.PLANNING.value, plan_id="plan-1",
             member_plan_md="/tmp/plan.md")))
 
         # approved
         await handler(EventMessage.from_event(TaskPlanResponseEvent(
             team_name=team, task_id=task_id, approved=True,
-            status=TaskStatus.PLAN_APPROVED.value, plan_id="plan-1",
+            status=TaskStatus.IN_PROGRESS.value, plan_id="plan-1",
             member_name="member-1", feedback=feedback, tool_call_id="tc-1")))
         task_span = handler._task_spans.get(task_id)
-        assert _attr(task_span, AT_TASK_STATUS) == "plan_approved"
+        assert _attr(task_span, AT_TASK_STATUS) == "in_progress"
         assert _attr(task_span, AT_PLAN_APPROVED) is True
 
-        # rejected: status reverts to claimed
+        # rejected: status reverts to planning
         await handler(EventMessage.from_event(TaskPlanResponseEvent(
             team_name=team, task_id=task_id, approved=False,
-            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            status=TaskStatus.PLANNING.value, plan_id="plan-1",
             member_name="member-1", feedback="需要修改")))
-        assert _attr(task_span, AT_TASK_STATUS) == "claimed"
+        assert _attr(task_span, AT_TASK_STATUS) == "planning"
         assert _attr(task_span, AT_PLAN_APPROVED) is False
     finally:
         _close_team_span(team_span)
@@ -625,11 +967,11 @@ async def test_plan_event_span_io_split_on_semantic_boundary(
             team_name=team, task_id=task_id, status=TaskStatus.PENDING.value)))
         await handler(EventMessage.from_event(TaskPlanRequestEvent(
             team_name=team, task_id=task_id, member_name="member-1",
-            status=TaskStatus.CLAIMED.value, plan_id="plan-1",
+            status=TaskStatus.PLANNING.value, plan_id="plan-1",
             member_plan_md="/tmp/plan.md")))
         await handler(EventMessage.from_event(TaskPlanResponseEvent(
             team_name=team, task_id=task_id, approved=True,
-            status=TaskStatus.PLAN_APPROVED.value, plan_id="plan-1",
+            status=TaskStatus.IN_PROGRESS.value, plan_id="plan-1",
             member_name="member-1", feedback=feedback)))
 
         finished = in_memory_exporter.get_finished_spans()
@@ -640,14 +982,14 @@ async def test_plan_event_span_io_split_on_semantic_boundary(
         req_out = json.loads(_attr(plan_req_span, LANGFUSE_OBSERVATION_OUTPUT))
         assert req_in["task_id"] == task_id
         assert req_in["member_plan_md"] == "/tmp/plan.md"
-        assert req_out == {"plan_id": "plan-1", "status": "claimed"}
-        assert _attr(plan_req_span, AT_TASK_STATUS) == "claimed"
+        assert req_out == {"plan_id": "plan-1", "status": "planning"}
+        assert _attr(plan_req_span, AT_TASK_STATUS) == "planning"
 
         resp_in = json.loads(_attr(plan_resp_span, LANGFUSE_OBSERVATION_INPUT))
         resp_out = json.loads(_attr(plan_resp_span, LANGFUSE_OBSERVATION_OUTPUT))
         assert resp_in == {"plan_id": "plan-1"}
         assert resp_out == {"approved": True, "feedback": feedback}
-        assert _attr(plan_resp_span, AT_TASK_STATUS) == "plan_approved"
+        assert _attr(plan_resp_span, AT_TASK_STATUS) == "in_progress"
     finally:
         _close_team_span(team_span)
         remove_team_span(team)
@@ -822,8 +1164,8 @@ async def test_redaction_replaces_prompt_and_completion_text() -> None:
         )
         spans = [s for s in exporter.get_finished_spans() if s.name == "llm.call"]
         assert spans
-        prompt = _attr(spans[0], "gen_ai.prompt.0.content", "")
-        completion = _attr(spans[0], "gen_ai.completion.0.content", "")
+        prompt = _attr(spans[0], "langfuse.gen_ai.prompt.0.content", "")
+        completion = _attr(spans[0], "langfuse.gen_ai.completion.0.content", "")
         assert prompt.startswith("sha256:") and "secret" not in prompt
         assert completion.startswith("sha256:") and "secret" not in completion
     finally:
@@ -1309,3 +1651,953 @@ async def test_team_span_uses_agent_team_name(
     team_spans = _spans_by_name(in_memory_exporter, f"team.{real_team_name}")
     assert team_spans, f"team span 'team.{real_team_name}' should be in exporter"
     assert _attr(team_spans[0], "agentteam.team.name") == real_team_name
+
+
+@pytest.mark.asyncio
+async def test_cross_iteration_prompt_delta_uses_team_span_count(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Iteration 2's LLM call emits the full prompt (not delta).
+
+    The per-member prev message_count is stored on the team span (keyed by
+    agent_id) so it survives across iterations.  ``langfuse.observation.input``
+    still uses delta (only new messages), but per-message ``gen_ai.prompt.{i}.*``
+    attributes use the full prompt so Langfuse always shows the complete context.
+    """
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_team_span,
+        remove_team_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import finalize_team_trace
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackContext,
+        TaskIterationInputs,
+    )
+
+    _create_team_span("test_team")
+    fw = Runner.callback_framework
+    session = MagicMock()
+    session.get_session_id.return_value = "test_session"
+    mock_agent = _create_mock_agent()
+    rail = ObservabilityRail()
+
+    # --- Iteration 1: system + 3 user messages ---
+    inputs1 = TaskIterationInputs(iteration=1, query="iter1", loop_event=None)
+    ctx1 = AgentCallbackContext(agent=mock_agent, inputs=inputs1)
+    await rail.before_task_iteration(ctx1)
+    msgs1 = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "m1"},
+        {"role": "user", "content": "m2"},
+        {"role": "user", "content": "m3"},
+    ]
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=msgs1,
+        model="fake-llm-1",
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=msgs1,
+        result=_FakeAssistantMessage(content="ok"),
+    )
+    await rail.after_task_iteration(ctx1)
+
+    # Team span must now carry the per-member prev count for this agent.
+    team_span = get_team_span()
+    agent_id = _attr(_get_iter_span(in_memory_exporter, 1), AT_AGENT_ID)
+    assert agent_id, "iteration 1 span should carry agentteam.agent.id"
+    prev_count_key = f"{GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX}{agent_id}"
+    assert _attr(team_span, prev_count_key) == len(msgs1), (
+        "team span should record iteration 1's message count per-member"
+    )
+
+    # --- Iteration 2: same agent, 2 new messages appended ---
+    inputs2 = TaskIterationInputs(iteration=2, query="iter2", loop_event=None)
+    ctx2 = AgentCallbackContext(agent=mock_agent, inputs=inputs2)
+    await rail.before_task_iteration(ctx2)
+    msgs2 = msgs1 + [
+        {"role": "user", "content": "m4"},
+        {"role": "user", "content": "m5"},
+    ]
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=msgs2,
+        model="fake-llm-1",
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=msgs2,
+        result=_FakeAssistantMessage(content="ok2"),
+    )
+    await rail.after_task_iteration(ctx2)
+
+    finalize_team_trace("test_team")
+
+    # Iteration 2's llm.call span carries the FULL prompt (system + all user
+    # messages m1-m5) as attributes — not delta.
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(llm_spans) >= 2
+    iter2_llm = llm_spans[-1]
+    attrs = dict(iter2_llm.attributes or {})
+    # system always emitted.
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.0.role") == "system"
+    # m1/m2/m3 ARE re-emitted in iteration 2 (full prompt, not delta).
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.1.role") == "user", (
+        "iteration 2 should include iteration 1's m1 (full prompt)"
+    )
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.1.content") == "m1"
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.2.content") == "m2"
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.3.content") == "m3"
+    # m4/m5 are also emitted (indices 4 and 5 in the full list).
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.4.role") == "user"
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.4.content") == "m4"
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.5.role") == "user"
+    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.5.content") == "m5"
+    # observation.input still uses delta — iteration 2 only has new messages.
+    input_json = _attr(iter2_llm, "langfuse.observation.input", "")
+    assert "m4" in input_json and "m5" in input_json, (
+        "observation.input should contain new messages (delta)"
+    )
+    assert "m1" not in input_json and "m2" not in input_json, (
+        "observation.input should NOT re-emit iteration 1 messages"
+    )
+
+    remove_team_span("test_team")
+
+
+def _get_iter_span(exporter: InMemorySpanExporter, iteration: int) -> Any:
+    """Return the agent task_iteration span for the given iteration number."""
+    needle = f"task_iteration.{iteration}"
+    for s in exporter.get_finished_spans():
+        if s.name.startswith("agent.") and needle in s.name:
+            return s
+    raise AssertionError(f"no agent iteration {iteration} span found")
+
+
+@pytest.mark.asyncio
+async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A huge prompt must not evict the top-level gen_ai.* request attrs.
+
+    OTel BoundedAttributes evicts FIFO (oldest first). The top-level
+    gen_ai.system / operation.name / provider.name / request.model are written
+    before the prompt loop, so without the tail-cap they'd be evicted once the
+    prompt attributes fill the 200-attribute budget.
+    """
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackContext,
+        TaskIterationInputs,
+    )
+
+    _create_team_span("test_team")
+    fw = Runner.callback_framework
+    session = MagicMock()
+    session.get_session_id.return_value = "test_session"
+    mock_agent = _create_mock_agent()
+    rail = ObservabilityRail()
+    inputs = TaskIterationInputs(iteration=1, query="big", loop_event=None)
+    ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
+    await rail.before_task_iteration(ctx)
+
+    # 1 system + 300 user messages → far exceeds the 200-attr cap.
+    big_messages = [{"role": "system", "content": "sys"}]
+    big_messages += [{"role": "user", "content": f"msg-{i}"} for i in range(300)]
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=big_messages,
+        model="fake-llm-1",
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=big_messages,
+        result=_FakeAssistantMessage(content="ok"),
+    )
+    await rail.after_task_iteration(ctx)
+    from openjiuwen.agent_teams.observability.setup import finalize_team_trace
+
+    finalize_team_trace("test_team")
+
+    llm_span = _spans_by_name(in_memory_exporter, "llm.call")[-1]
+    # Top-level request attrs must survive (not FIFO-evicted by the prompt flood).
+    assert _attr(llm_span, "gen_ai.system") == "openjiuwen-test", (
+        "gen_ai.system must survive the prompt attribute flood"
+    )
+    assert _attr(llm_span, "gen_ai.operation.name") == "chat"
+    assert _attr(llm_span, "gen_ai.provider.name") is not None
+    assert _attr(llm_span, "gen_ai.request.model") == "fake-llm-1"
+    # The per-span message_count is still recorded.
+    assert _attr(llm_span, GEN_AI_REQUEST_MESSAGE_COUNT) == len(big_messages)
+
+    # Only the trailing N user messages are emitted (the head is dropped by
+    # the tail-cap, NOT by evicting the top-level attrs).
+    attrs = dict(llm_span.attributes or {})
+    user_prompt_idxs = sorted(
+        int(k.split(".")[3])
+        for k in attrs
+        if k.startswith("langfuse.gen_ai.prompt.") and k.endswith(".role") and attrs[k] == "user"
+    )
+    # Cap = (200 - 30) // 2 = 85 writable messages; 300 user messages → 85.
+    assert len(user_prompt_idxs) == 85, f"expected 85 trailing user prompts, got {len(user_prompt_idxs)}"
+    # The kept ones are the LAST 85 (indices 216..300), not the first.
+    assert user_prompt_idxs[0] == 216, f"expected first kept user prompt at index 216, got {user_prompt_idxs[0]}"
+    assert user_prompt_idxs[-1] == 300
+
+    remove_team_span("test_team")
+
+
+# ---------------------------------------------------------------------------
+# Concurrent worker span disambiguation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_find_llm_span_disambiguates_concurrent_workers(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Peek must return the right llm.call span, or none at all.
+
+    Covers the fallback ``_find_llm_span`` uses for callbacks that carry no
+    LLM call id (a model wrapper that bypasses ``Model``, or a test triggering
+    the events directly):
+
+    1. **Cross-worker**: two workers each with one LLM span — parent
+       matching picks the span whose parent is the current agent.
+    2. **Same-parent ambiguity**: one worker with two concurrent LLM spans —
+       parent matching cannot tell them apart, so it answers None. Writing a
+       completion onto the wrong span is worse than losing it; the id-based
+       path covered by ``test_concurrent_llm_requests_never_cross_write``
+       is what resolves this case in production.
+    """
+    from openjiuwen.agent_teams.observability.span_context import (
+        LlmSpanState,
+        get_active_span_tracker,
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from opentelemetry.trace import SpanKind, set_span_in_context
+    from opentelemetry import context as otel_context
+
+    team_span = _create_team_span("test_team")
+    tracer = get_tracer("test")
+    tracker = get_active_span_tracker()
+
+    agent_a = tracer.start_span(
+        "agent.worker_a.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    agent_b = tracer.start_span(
+        "agent.worker_b.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+
+    set_current_agent_span(agent_a)
+    llm_a = tracer.start_span(
+        "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
+        kind=SpanKind.CLIENT,
+    )
+    # Attach state under the production attribute name (``otel_llm_state``);
+    # ``_find_llm_span`` reads ``start_ns`` from it via getattr, so a name
+    # mismatch would silently fall back to 0 and make max() non-deterministic.
+    llm_a.otel_llm_state = LlmSpanState(span=llm_a, start_ns=1_000)
+
+    set_current_agent_span(agent_b)
+    llm_b = tracer.start_span(
+        "llm.call", context=set_span_in_context(agent_b, otel_context.get_current()),
+        kind=SpanKind.CLIENT,
+    )
+    llm_b.otel_llm_state = LlmSpanState(span=llm_b, start_ns=1_000)
+
+    # Cross-worker: ContextVar is agent_b → peek returns llm_b (parent match).
+    peek_b = tracker.peek_current_llm_span()
+    assert peek_b is not None and peek_b.context.span_id == llm_b.context.span_id
+
+    # Switch to agent_a → should return llm_a.
+    set_current_agent_span(agent_a)
+    peek_a = tracker.peek_current_llm_span()
+    assert peek_a is not None and peek_a.context.span_id == llm_a.context.span_id
+
+    # ── Same-parent ambiguity: two LLM spans under one worker ────────
+    # Both share agent_a as parent and neither callback carries a call id,
+    # so nothing in the current context says which of the two the caller
+    # means. Guessing by recency is what used to write one request's
+    # completion onto the other's span, so peek must answer None.
+    llm_older = tracer.start_span(
+        "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
+        kind=SpanKind.CLIENT,
+    )
+    llm_older.otel_llm_state = LlmSpanState(span=llm_older, start_ns=2_000)
+
+    llm_newer = tracer.start_span(
+        "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
+        kind=SpanKind.CLIENT,
+    )
+    llm_newer.otel_llm_state = LlmSpanState(span=llm_newer, start_ns=3_000)
+
+    set_current_agent_span(agent_a)
+    # llm_a is still open under agent_a too, so three candidates share the parent.
+    assert tracker.peek_current_llm_span() is None, (
+        "an ambiguous parent match must not be resolved by guessing"
+    )
+
+    # Once only one candidate is left, the parent match is unambiguous again.
+    llm_newer.end()
+    llm_older.end()
+    peek = tracker.peek_current_llm_span()
+    assert peek is not None and peek.context.span_id == llm_a.context.span_id
+
+    llm_a.end()
+    llm_b.end()
+    agent_a.end()
+    agent_b.end()
+    set_current_agent_span(None)
+    remove_team_span("test_team")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_llm_requests_never_cross_write(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Two LLM requests in flight at once each keep their own llm.call span.
+
+    This is the image-modality probe against a member's streaming call. The
+    probe runs in a detached background task that inherited the member's agent
+    span, so both spans hang off the same parent. It opens *first* and answers
+    while the member's call is still streaming — so at the moment the probe's
+    completion arrives, the most recently opened span in the trace is the
+    member's. Resolving "the most recently opened llm.call span" therefore
+    wrote the probe's one-word answer onto the member's span.
+
+    Matching on the LLM call id instead keeps each request on its own span, and
+    the assertions below pin prompt against completion on both.
+    """
+    from openjiuwen.agent_teams.observability.span_context import (
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    fw = Runner.callback_framework
+    team_span = _create_team_span("test_team")
+    agent_span = get_tracer("test").start_span(
+        "agent.member.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    set_current_agent_span(agent_span)
+
+    member_messages = [{"role": "user", "content": "Compute 6 * 7."}]
+    probe_messages = [{"role": "user", "content": "What color is this image?"}]
+
+    probe_opened = asyncio.Event()
+    member_streaming = asyncio.Event()
+    probe_finished = asyncio.Event()
+
+    async def _probe_call() -> None:
+        # The probe inherits the member's agent span through the context copy
+        # asyncio.create_task takes — exactly how schedule_image_support_probe
+        # lands its background task.
+        with LlmCallScope():
+            await fw.trigger(
+                LLMCallEvents.LLM_INVOKE_INPUT,
+                messages=probe_messages,
+                model="member-llm",
+            )
+            probe_opened.set()
+            # The member's call opens while the probe is in flight, which is
+            # what makes "most recently opened" the wrong answer below.
+            await member_streaming.wait()
+            await fw.trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                messages=probe_messages,
+                response="red",
+                usage=_FakeUsage(input_tokens=9, output_tokens=1, total_tokens=10),
+            )
+        probe_finished.set()
+
+    async def _member_call() -> None:
+        with LlmCallScope():
+            await fw.trigger(
+                LLMCallEvents.LLM_STREAM_INPUT,
+                messages=member_messages,
+                model="member-llm",
+            )
+            await fw.trigger(
+                LLMCallEvents.LLM_STREAM_OUTPUT,
+                messages=member_messages,
+                result=_FakeChunk(content="4"),
+            )
+            member_streaming.set()
+            await probe_finished.wait()
+            await fw.trigger(
+                LLMCallEvents.LLM_STREAM_OUTPUT,
+                messages=member_messages,
+                result=_FakeChunk(content="2"),
+            )
+            await fw.trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                messages=member_messages,
+                response="42",
+                usage=_FakeUsage(input_tokens=100, output_tokens=1, total_tokens=101),
+            )
+
+    probe_task = asyncio.get_running_loop().create_task(_probe_call())
+    await probe_opened.wait()
+    member_task = asyncio.get_running_loop().create_task(_member_call())
+    await asyncio.gather(member_task, probe_task)
+
+    set_current_agent_span(None)
+    agent_span.end()
+    remove_team_span("test_team")
+    team_span.end()
+
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(llm_spans) == 2, f"expected one span per request, got {len(llm_spans)}"
+
+    by_prompt = {_attr(s, "langfuse.gen_ai.prompt.0.content"): s for s in llm_spans}
+    assert set(by_prompt) == {"Compute 6 * 7.", "What color is this image?"}
+
+    member_span = by_prompt["Compute 6 * 7."]
+    probe_span = by_prompt["What color is this image?"]
+
+    assert _attr(member_span, "langfuse.gen_ai.completion.0.content") == "42"
+    assert _attr(member_span, "gen_ai.usage.total_tokens") == 101
+    assert _attr(probe_span, "langfuse.gen_ai.completion.0.content") == "red"
+    assert _attr(probe_span, "gen_ai.usage.total_tokens") == 10
+
+    # Both spans carry the id their request ran under, and the two differ.
+    member_id = _attr(member_span, "gen_ai.request.id")
+    probe_id = _attr(probe_span, "gen_ai.request.id")
+    assert member_id and probe_id and member_id != probe_id
+
+
+@pytest.mark.asyncio
+async def test_stream_callbacks_resolve_across_per_frame_task_hops(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A stream driven through ``asyncio.wait_for`` still lands on its own span.
+
+    ``Model.stream`` pulls every frame through ``wait_for``, so each chunk
+    callback runs in a fresh task with a *copied* context. The call id has to
+    survive that hop, otherwise the chunk and completion callbacks fall back to
+    guessing — which is where a second open request gets robbed.
+    """
+    from openjiuwen.agent_teams.observability.span_context import (
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    fw = Runner.callback_framework
+    team_span = _create_team_span("test_team")
+    agent_span = get_tracer("test").start_span(
+        "agent.member.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    set_current_agent_span(agent_span)
+
+    messages = [{"role": "user", "content": "stream please"}]
+
+    with LlmCallScope():
+        await fw.trigger(LLMCallEvents.LLM_STREAM_INPUT, messages=messages, model="member-llm")
+        # A second request opened after this stream and left in flight under
+        # the same agent span. It is the more recently opened of the two, so a
+        # resolver that guesses by recency sends this stream's chunks and
+        # completion to it instead.
+        with LlmCallScope():
+            await fw.trigger(
+                LLMCallEvents.LLM_INVOKE_INPUT,
+                messages=[{"role": "user", "content": "other"}],
+            )
+        for delta in ("4", "2"):
+            await asyncio.wait_for(
+                fw.trigger(LLMCallEvents.LLM_STREAM_OUTPUT, messages=messages, result=_FakeChunk(content=delta)),
+                timeout=5,
+            )
+        await asyncio.wait_for(
+            fw.trigger(LLMCallEvents.LLM_OUTPUT, messages=messages, response="42"),
+            timeout=5,
+        )
+
+    set_current_agent_span(None)
+    agent_span.end()
+    remove_team_span("test_team")
+    team_span.end()
+
+    finished = [
+        s for s in _spans_by_name(in_memory_exporter, "llm.call")
+        if _attr(s, "langfuse.gen_ai.prompt.0.content") == "stream please"
+    ]
+    assert len(finished) == 1
+    span = finished[0]
+    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "42"
+    assert _attr(span, "gen_ai.response.time_to_first_token_ms") is not None, (
+        "the first chunk callback must have reached this span"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Subagent invoke span nesting under leader iteration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subagent_invoke_span_nests_under_leader_iteration(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A subagent invoke span must nest under the parent agent iteration span."""
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_current_agent_span,
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.semconv import AT_MEMBER_NAME, AT_AGENT_NAME
+    from opentelemetry.trace import SpanKind, set_span_in_context
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+    team_span = _create_team_span("test_team")
+    tracer = get_tracer("test")
+
+    # Leader iteration span.
+    leader_span = tracer.start_span(
+        "agent.leader.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    leader_span.set_attribute(AT_MEMBER_NAME, "leader")
+    leader_span.set_attribute(AT_AGENT_NAME, "leader")
+    set_current_agent_span(leader_span)
+
+    # Simulate ObservabilityRail.before_invoke for a subagent (enable_task_loop=False).
+    rail = ObservabilityRail()
+    ctx = AgentCallbackContext(
+        inputs=type("In", (), {"query": "list files"})(),
+        agent=type("A", (), {
+            "member_name": "explore_agent",
+            "team_name": "test_team",
+            "deep_config": type("DC", (), {"enable_task_loop": False})(),
+            "card": type("C", (), {"name": "explore_agent"})(),
+            "role": None,
+        })(),
+        exception=None,
+    )
+    await rail.before_invoke(ctx)
+
+    # Verify invoke span nests under leader iteration.
+    invoke_span = get_current_agent_span()
+    assert invoke_span is not None
+    assert ".invoke" in invoke_span.name
+    assert invoke_span.parent is not None
+    assert invoke_span.parent.span_id == leader_span.context.span_id, (
+        f"subagent invoke parent should be leader iteration"
+    )
+
+    # after_invoke restores the parent agent span.
+    await rail.after_invoke(ctx)
+    restored = get_current_agent_span()
+    assert restored is not None and restored.context.span_id == leader_span.context.span_id
+
+    set_current_agent_span(None)
+    leader_span.end()
+    remove_team_span("test_team")
+
+
+# ---------------------------------------------------------------------------
+# Ambient root span: hosts whose root span is unreachable via the ContextVar
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ambient_root_span_keeps_llm_span_findable_across_tasks(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """LLM callbacks fired from a context without the ContextVar still close the span.
+
+    A single-agent host opens its root span per request while the agent runs in
+    a task created earlier, which never inherits ``_team_span_ctx``. With the
+    root span registered as ambient, the tracker still resolves the trace, so
+    ``LLM_OUTPUT`` finds the open ``llm.call`` span and writes its completion
+    instead of leaving it to the orphan sweep.
+    """
+    import contextvars
+
+    from openjiuwen.agent_teams.observability import (
+        clear_ambient_team_span,
+        set_ambient_team_span,
+    )
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+
+    fw = Runner.callback_framework
+    # Snapshot a context taken before the root span exists — the supervisor task.
+    supervisor_ctx = contextvars.copy_context()
+
+    root_span = get_tracer("test").start_span(name="agent.code.normal.sess-1")
+    set_ambient_team_span(root_span)
+
+    async def _agent_side() -> None:
+        await fw.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "ping"}],
+            model="fake-llm-1",
+        )
+        await fw.trigger(LLMCallEvents.LLM_OUTPUT, response="pong")
+
+    try:
+        task = asyncio.get_running_loop().create_task(
+            _agent_side(), context=supervisor_ctx
+        )
+        await task
+    finally:
+        root_span.end()
+        clear_ambient_team_span()
+
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert llm_spans, "no llm.call span captured"
+    span = llm_spans[0]
+    assert span.parent is not None
+    assert span.parent.span_id == root_span.context.span_id
+    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "pong"
+    assert _attr(span, LANGFUSE_OBSERVATION_OUTPUT), "llm span exported without output"
+
+
+@pytest.mark.asyncio
+async def test_flush_spares_a_non_team_named_root_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """The trace's root span is spared by identity, not by a ``team.`` name prefix.
+
+    A host whose root span is named after its mode and session used to be swept
+    up as a leaked child: reported as an ORPHAN, force-ended by the tracker, and
+    ended a second time by its actual owner.
+    """
+    from openjiuwen.agent_teams.observability import (
+        clear_ambient_team_span,
+        set_ambient_team_span,
+    )
+    from opentelemetry import context as otel_context
+    from opentelemetry.trace import set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.span_context import flush_child_spans
+
+    tracer = get_tracer("test")
+    root_span = tracer.start_span(name="agent.code.normal.sess-1")
+    set_ambient_team_span(root_span)
+    child = tracer.start_span(
+        name="tool.bash",
+        context=set_span_in_context(root_span, otel_context.get_current()),
+    )
+
+    try:
+        flush_child_spans()
+        assert root_span.is_recording(), "root span must survive the child flush"
+        assert not child.is_recording(), "leaked child span must be closed"
+    finally:
+        if root_span.is_recording():
+            root_span.end()
+        clear_ambient_team_span()
+
+
+@pytest.mark.asyncio
+async def test_subagent_invoke_nests_under_the_dispatching_tool_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A sub-agent runs inside the tool call that dispatched it, so it nests there.
+
+    Before this, the ``agent.<type>.invoke`` span was opened directly under the
+    dispatching agent, leaving it a sibling of the ``tool.task`` span whose
+    execution actually contains it.
+    """
+    from opentelemetry.trace import set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_current_agent_span,
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+    fw = Runner.callback_framework
+    team_span = _create_team_span("test_team")
+
+    # The dispatching agent's own span, then the task tool call it makes.
+    agent_span = get_tracer("test").start_span(
+        "agent.leader.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    set_current_agent_span(agent_span)
+    await fw.trigger(
+        ToolCallEvents.TOOL_CALL_STARTED,
+        tool_name="task",
+        tool_id="call-1",
+        inputs={"subagent_type": "explore_agent"},
+    )
+
+    rail = ObservabilityRail()
+    ctx = AgentCallbackContext(
+        inputs=type("In", (), {"query": "list files"})(),
+        agent=type("A", (), {
+            "member_name": "explore_agent",
+            "team_name": "test_team",
+            "deep_config": type("DC", (), {"enable_task_loop": False})(),
+            "card": type("C", (), {"name": "explore_agent"})(),
+            "role": None,
+        })(),
+        exception=None,
+    )
+    await rail.before_invoke(ctx)
+    invoke_span = get_current_agent_span()
+    await rail.after_invoke(ctx)
+
+    await fw.trigger(ToolCallEvents.TOOL_CALL_FINISHED, tool_name="task", result="ok")
+    set_current_agent_span(None)
+    agent_span.end()
+    remove_team_span("test_team")
+
+    tool_spans = _spans_by_name(in_memory_exporter, "tool.task")
+    assert tool_spans, "no tool.task span captured"
+    assert invoke_span is not None
+    assert invoke_span.parent is not None
+    assert invoke_span.parent.span_id == tool_spans[0].context.span_id, (
+        "subagent invoke span must nest under the dispatching tool span"
+    )
+
+
+@pytest.mark.asyncio
+async def test_subagent_without_team_name_still_gets_an_agent_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A harness-built sub-agent carries no team, and must still be traced.
+
+    ``team_name`` only labels the span. Gating on it left every sub-agent the
+    harness creates without an agent tier, so its llm/tool spans attached to
+    the dispatching agent's span as if that agent had made the calls.
+    """
+    from opentelemetry.trace import set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_current_agent_span,
+        remove_team_span,
+        set_current_agent_span,
+    )
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+    team_span = _create_team_span("test_team")
+    agent_span = get_tracer("test").start_span(
+        "agent.leader.task_iteration.1",
+        context=set_span_in_context(team_span),
+        kind=SpanKind.INTERNAL,
+    )
+    set_current_agent_span(agent_span)
+
+    rail = ObservabilityRail()
+    ctx = AgentCallbackContext(
+        inputs=type("In", (), {"query": "list files"})(),
+        agent=type("A", (), {
+            "team_name": "",  # harness sub-agents have no team
+            "deep_config": type("DC", (), {"enable_task_loop": False})(),
+            "card": type("C", (), {"name": "explore_agent"})(),
+            "role": None,
+        })(),
+        exception=None,
+    )
+    await rail.before_invoke(ctx)
+    invoke_span = get_current_agent_span()
+    await rail.after_invoke(ctx)
+
+    set_current_agent_span(None)
+    agent_span.end()
+    remove_team_span("test_team")
+
+    assert invoke_span is not None and invoke_span is not agent_span
+    assert invoke_span.name == "agent.explore_agent.invoke"
+    assert invoke_span.parent is not None
+    assert invoke_span.parent.span_id == agent_span.context.span_id
+
+
+@pytest.mark.asyncio
+async def test_iterations_nest_under_the_invoke_span_of_the_same_agent(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """One invoke, N iterations — the rounds belong under the request, not beside it.
+
+    Both hooks fire for an agent whose ``enable_task_loop`` the rail reads as
+    false while the loop still runs. They used to produce sibling spans under
+    the team span, the invoke one empty.
+    """
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+    _create_team_span("test_team")
+
+    agent = type("A", (), {
+        "team_name": "test_team",
+        "deep_config": type("DC", (), {"enable_task_loop": False})(),
+        "card": type("C", (), {"name": "main_agent"})(),
+        "role": None,
+    })()
+
+    def _ctx() -> AgentCallbackContext:
+        # The runtime hands each hook its own callback context.
+        return AgentCallbackContext(
+            inputs=type("In", (), {
+                "query": "q", "result": "r", "iteration": 1,
+                "is_follow_up": False, "loop_event": None,
+            })(),
+            agent=agent,
+            exception=None,
+        )
+
+    rail = ObservabilityRail()
+    invoke_ctx, iter_ctx = _ctx(), _ctx()
+    await rail.before_invoke(invoke_ctx)
+    await rail.before_task_iteration(iter_ctx)
+    await rail.after_task_iteration(iter_ctx)
+    await rail.after_invoke(invoke_ctx)
+    remove_team_span("test_team")
+
+    invoke_spans = _spans_by_name(in_memory_exporter, "agent.main_agent.invoke")
+    iter_spans = _spans_by_name(in_memory_exporter, "agent.main_agent.task_iteration.1")
+    assert invoke_spans and iter_spans
+    assert iter_spans[0].parent is not None
+    assert iter_spans[0].parent.span_id == invoke_spans[0].context.span_id
+    # The invoke span must survive the iteration's stale-span drain.
+    assert invoke_spans[0].end_time >= iter_spans[0].end_time
+
+
+def test_usage_keys_are_disjoint_for_langfuse_but_semconv_for_otlp() -> None:
+    """Token subsets are carved out only for the backend that sums usage keys.
+
+    Langfuse counts every ``gen_ai.usage.*`` key as its own category, so a
+    cached prefix reported beside the full prompt count is charged twice — the
+    trace total on a long agent run came out well above what the provider
+    actually billed. Plain OTLP consumers read ``prompt_tokens`` per semconv
+    (all input tokens), so nothing is subtracted for them.
+    """
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams.observability.callback_handler import (
+        LlmSpanState,
+        OtelCallbackHandler,
+    )
+
+    usage = _FakeUsage(
+        input_tokens=1000,
+        output_tokens=100,
+        total_tokens=1100,
+        cache_tokens=900,
+        reasoning_tokens=40,
+    )
+
+    def _recorded(backend: str) -> dict[str, Any]:
+        written: dict[str, Any] = {}
+        span = SimpleNamespace(
+            attributes={},
+            set_attribute=lambda key, value: written.update({key: value}),
+        )
+        handler = OtelCallbackHandler(
+            ObservabilityConfig(enabled=True, backend=backend),
+            tracer=MagicMock(),
+        )
+        handler._record_usage_attrs(LlmSpanState(span=span, start_ns=0), usage)
+        return written
+
+    langfuse = _recorded("langfuse")
+    assert langfuse["gen_ai.usage.prompt_tokens"] == 100  # 1000 - 900 cached
+    assert langfuse["gen_ai.usage.completion_tokens"] == 60  # 100 - 40 reasoning
+    assert langfuse["gen_ai.usage.cache_tokens"] == 900
+    assert langfuse["gen_ai.usage.reasoning_tokens"] == 40
+    assert (
+        langfuse["gen_ai.usage.prompt_tokens"]
+        + langfuse["gen_ai.usage.completion_tokens"]
+        + langfuse["gen_ai.usage.cache_tokens"]
+        + langfuse["gen_ai.usage.reasoning_tokens"]
+    ) == langfuse["gen_ai.usage.total_tokens"] == 1100
+
+    otlp = _recorded("otlp")
+    assert otlp["gen_ai.usage.prompt_tokens"] == 1000
+    assert otlp["gen_ai.usage.completion_tokens"] == 100
+
+
+def test_usage_subset_larger_than_its_parent_is_left_alone() -> None:
+    """A provider counting reasoning outside the completion keeps its raw numbers.
+
+    Subtracting there would invent a count rather than report one.
+    """
+    from types import SimpleNamespace
+
+    from openjiuwen.agent_teams.observability.callback_handler import (
+        LlmSpanState,
+        OtelCallbackHandler,
+    )
+
+    written: dict[str, Any] = {}
+    span = SimpleNamespace(
+        attributes={},
+        set_attribute=lambda key, value: written.update({key: value}),
+    )
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, backend="langfuse"), tracer=MagicMock()
+    )
+    handler._record_usage_attrs(
+        LlmSpanState(span=span, start_ns=0),
+        _FakeUsage(
+            input_tokens=10, output_tokens=5, total_tokens=15,
+            cache_tokens=0, reasoning_tokens=9,  # > completion
+        ),
+    )
+
+    assert written["gen_ai.usage.completion_tokens"] == 5
+    assert written["gen_ai.usage.reasoning_tokens"] == 9
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_reasoning_span_sits_at_the_call_start(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A non-streaming call has no reasoning timing, and must not fake one.
+
+    Reasoning time is measured from stream chunks. A sub-agent dispatched via
+    ``invoke`` produces none, and the span used to be created at finalize time —
+    zero-length at the *end* of the llm.call, after the answer it preceded.
+    """
+    fw = Runner.callback_framework
+    _create_team_span("test_team")
+
+    messages = [{"role": "user", "content": "Compute 6 * 7."}]
+    await fw.trigger(LLMCallEvents.LLM_INVOKE_INPUT, messages=messages, model="fake-llm-1")
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
+        messages=messages,
+        result=_FakeAssistantMessage(
+            content="42",
+            reasoning_content="Six times seven.",
+            finish_reason="stop",
+            usage=_FakeUsage(reasoning_tokens=5),
+        ),
+    )
+
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
+    assert llm_spans and reasoning_spans
+    call, reasoning = llm_spans[0], reasoning_spans[0]
+
+    assert reasoning.start_time == call.start_time
+    assert reasoning.end_time == call.start_time
+    assert _attr(reasoning, "gen_ai.reasoning.duration_ms") is None
+    assert _attr(reasoning, "gen_ai.reasoning.timing") == "unmeasured: non-streaming call"
+    assert _attr(reasoning, "langfuse.observation.output") == "Six times seven."

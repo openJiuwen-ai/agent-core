@@ -15,8 +15,10 @@ from openjiuwen.core.common.constants.constant import MAX_COLLECTION_SIZE, MAX_E
 RULES = [
     (re.compile(r"&&"), "and"),
     (re.compile(r"\|\|"), "or"),
-    (re.compile(r"true"), "True"),
-    (re.compile(r"false"), "False"),
+    # Match boolean literals only.  Without word boundaries, identifiers such
+    # as ``is_false_alarm`` are corrupted before variable binding takes place.
+    (re.compile(r"\btrue\b"), "True"),
+    (re.compile(r"\bfalse\b"), "False"),
     (re.compile(r"length\("), "len("),
     (re.compile(r"not_in"), "not in"),
     (re.compile(r"is_empty\("), "_safe_is_empty("),

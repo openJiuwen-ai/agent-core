@@ -5,7 +5,7 @@
 
 When ``TeamSpec.model_pool`` is non-empty, an allocator distributes pool
 entries across leader and teammates so concurrent calls spread across
-endpoints instead of saturating a single one. Three strategies ship:
+endpoints instead of saturating a single one. Four strategies ship:
 
 * ``RoundRobinModelAllocator`` — linear rotation through every entry,
   ignoring ``model_name``. Good for pools where every entry is an
@@ -19,6 +19,16 @@ endpoints instead of saturating a single one. Three strategies ship:
   is materialized from a ``ModelRouterConfig``. Lookup-by-name like
   ``ByModelNameAllocator``, but ``allocate()`` with no hint returns the
   first declared name so the leader has a deterministic default.
+* ``IntelliRouterAllocator`` — same lookup as ``RouterAllocator``, over
+  a pool materialized from an ``IntelliRouterConfig`` where each entry
+  carries a whole deployment list and the client-side router owns
+  retry / failover / load balancing. Availability is the router's job
+  here, not the allocator's; the allocator only picks the model name.
+
+The first three spread members *across* endpoints — availability is the
+allocator's concern. ``intelli_router`` inverts that: every member shares
+one deployment list and the client fails over per request. Pick one layer
+to own multi-endpoint reliability; stacking both duplicates the concern.
 
 Identity model: every assignment is referenced as
 ``(model_name, group_index)`` — the entry's position within its
@@ -42,7 +52,10 @@ import hashlib
 from dataclasses import dataclass
 from typing import Optional, Protocol, TYPE_CHECKING, runtime_checkable
 
-from openjiuwen.agent_teams.models.pool import ModelPoolEntry
+from openjiuwen.agent_teams.models.pool import (
+    INTELLI_ROUTER_PROVIDER,
+    ModelPoolEntry,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
@@ -384,6 +397,74 @@ class RouterAllocator:
         # since there is no rotation counter.
 
 
+class IntelliRouterAllocator(RouterAllocator):
+    """Allocator over an IntelliRouter-backed pool.
+
+    Allocation is deliberately identical to ``RouterAllocator``: an
+    IntelliRouter pool is a router pool whose single "endpoint" happens
+    to be client-side, so ``model_name`` still maps to exactly one entry
+    and ``allocate()`` with no hint still returns the first declared
+    name. What differs is only what an entry *means* — under
+    ``RouterAllocator`` it is one remote endpoint, here it is the whole
+    deployment list plus a model name to ask the router for. That is a
+    property of how the pool was built, not of how it is allocated,
+    which is why this subclass adds validation rather than behavior.
+
+    The validation matters because the pool can also be hand-written
+    (``model_pool=[...]`` plus ``model_pool_strategy="intelli_router"``)
+    rather than expanded from ``IntelliRouterConfig``. A hand-written
+    entry that names the wrong provider would silently materialize as a
+    plain client with empty credentials — the deployment list ignored,
+    the failure surfacing only on the first request. Checking at
+    construction turns that into a config error at ``build()`` time.
+    """
+
+    def __init__(self, pool: list[ModelPoolEntry]) -> None:
+        """Initialize from an IntelliRouter-shaped pool.
+
+        Args:
+            pool: Pool entries, typically produced by
+                ``IntelliRouterConfig.to_pool_entries``. Each entry must
+                declare ``api_provider == "intelli_router"`` and carry a
+                non-empty deployment list under
+                ``metadata.client.intelli_router_deployments``.
+
+        Raises:
+            ValueError: when the pool is empty or has duplicate
+                ``model_name`` values (inherited from
+                ``RouterAllocator``), when any entry names a different
+                provider, or when any entry carries no deployments.
+        """
+        super().__init__(pool)
+        self._validate_intelli_router_pool(pool)
+
+    @staticmethod
+    def _validate_intelli_router_pool(pool: list[ModelPoolEntry]) -> None:
+        """Reject entries that cannot reach an IntelliRouter client."""
+        mismatched = sorted(
+            f"{entry.model_name} declares {entry.api_provider}"
+            for entry in pool
+            if entry.api_provider != INTELLI_ROUTER_PROVIDER
+        )
+        if mismatched:
+            raise ValueError(
+                f"model_pool_strategy='intelli_router' requires every entry to declare "
+                f"api_provider='{INTELLI_ROUTER_PROVIDER}'; offending entries: {mismatched}",
+            )
+        empty = sorted(
+            {
+                entry.model_name
+                for entry in pool
+                if not (entry.metadata.get("client") or {}).get("intelli_router_deployments")
+            }
+        )
+        if empty:
+            raise ValueError(
+                "model_pool_strategy='intelli_router' requires every entry to carry a non-empty "
+                f"metadata.client.intelli_router_deployments list; missing for: {empty}",
+            )
+
+
 def resolve_member_model(
     team_spec: "TeamSpec",
     *,
@@ -460,14 +541,18 @@ def build_model_allocator(
         return ByModelNameAllocator(team_spec.model_pool)
     if strategy == "router":
         return RouterAllocator(team_spec.model_pool)
+    if strategy == "intelli_router":
+        return IntelliRouterAllocator(team_spec.model_pool)
     raise ValueError(
-        f"Unknown model_pool_strategy '{strategy}'; expected one of: round_robin, by_model_name, router",
+        f"Unknown model_pool_strategy '{strategy}'; expected one of: "
+        f"round_robin, by_model_name, router, intelli_router",
     )
 
 
 __all__ = [
     "Allocation",
     "ByModelNameAllocator",
+    "IntelliRouterAllocator",
     "ModelAllocator",
     "RoundRobinModelAllocator",
     "RouterAllocator",

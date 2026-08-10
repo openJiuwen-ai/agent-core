@@ -132,6 +132,29 @@ async def test_commit_pending_change_retains_unwritten_tail_on_record_failure(tm
 
 
 @pytest.mark.asyncio
+async def test_commit_pending_change_does_not_apply_unresolved_symlink_target(tmp_path: Path):
+    team_root = tmp_path / "team-skills"
+    outside_root = tmp_path / "outside-skills"
+    _prepare_skill(outside_root, "skill-a")
+    team_root.mkdir()
+    try:
+        (team_root / "skill-a").symlink_to(outside_root / "skill-a", target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("directory symlinks are unavailable")
+    store = EvolutionStore(str(team_root))
+    pending = _make_pending("pending-unresolved")
+    pending_by_id = {pending.change_id: pending}
+
+    result = await commit_pending_change(pending_by_id, pending.change_id, store=store)
+
+    assert result.applied_count == 0
+    assert result.pending_count == 1
+    assert result.errors
+    assert pending_by_id[pending.change_id] is pending
+    assert not (outside_root / "skill-a" / "evolutions.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_commit_pending_change_preserves_subject_kind_on_partial_retry() -> None:
     second_record = _make_record("ev_2")
     records = [_make_record("ev_1"), second_record]

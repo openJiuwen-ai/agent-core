@@ -111,7 +111,7 @@ def test_resolve_team_mode_bridge_only_stays_default():
             BridgeMemberSpec(
                 member_name="codex",
                 display_name="Codex",
-                persona="r",
+                desc="r",
             ),
         ],
     )
@@ -125,7 +125,7 @@ def test_resolve_team_mode_human_only_stays_default():
             TeamMemberSpec(
                 member_name="alice",
                 display_name="Alice",
-                persona="x",
+                desc="x",
                 role_type=TeamRole.HUMAN_AGENT,
             ),
         ],
@@ -140,12 +140,12 @@ def test_resolve_team_mode_mixed_bridge_human_still_default():
             BridgeMemberSpec(
                 member_name="codex",
                 display_name="Codex",
-                persona="r",
+                desc="r",
             ),
             TeamMemberSpec(
                 member_name="alice",
                 display_name="Alice",
-                persona="x",
+                desc="x",
                 role_type=TeamRole.HUMAN_AGENT,
             ),
         ],
@@ -160,7 +160,7 @@ def test_resolve_team_mode_with_teammate_predefined_is_hybrid():
             TeamMemberSpec(
                 member_name="alice",
                 display_name="Alice",
-                persona="x",
+                desc="x",
                 role_type=TeamRole.TEAMMATE,
             ),
         ],
@@ -175,7 +175,7 @@ def test_resolve_team_mode_explicit_override_wins():
             BridgeMemberSpec(
                 member_name="codex",
                 display_name="Codex",
-                persona="r",
+                desc="r",
             ),
         ],
     )
@@ -243,7 +243,7 @@ async def test_spawn_manager_role_inference_for_bridge(db, messager):
     result = await backend.spawn_bridge_agent(
         member_name="codex",
         display_name="Codex",
-        persona="r",
+        prompt="r",
     )
     assert result.ok
     assert backend.is_bridge_agent("codex") is True

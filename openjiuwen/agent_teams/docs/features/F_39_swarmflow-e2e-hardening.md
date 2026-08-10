@@ -5,7 +5,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-06-16 |
-| 范围 | `workflow/engine/{facade,provider,seam,primitives,runtime}.py`（`human()` 补 label/phase + `workflow()` 嵌套深度改 contextvar）、`workflow/backends/{structured_output_tool,team_worker_backend,avatar_session_backend}.py`（force-finish rail）、`harness/team_harness.py`（`add_rail` 委派）、`harness/native_harness.py`（`_ack` 守卫）；新增 `tests/system_tests/agent_swarm/agent_team_swarmflow_e2e.py` / `agent_team_swarmflow_concurrent_e2e.py` / `config_swarmflow.yaml` / `resources/{party_planner,invitation_card,concurrent_invites}.py` + 5 个单测文件改动 |
+| 范围 | `workflow/engine/{facade,provider,seam,primitives,runtime}.py`（`human()` 补 label/phase + `workflow()` 嵌套深度改 contextvar）、`workflow/backends/{structured_output_tool,team_worker_backend,avatar_session_backend}.py`（force-finish rail）、`harness/team_harness.py`（`add_rail` 委派）、`harness/native_harness.py`（`_ack` 守卫）；新增 `tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_e2e.py` / `agent_team_swarmflow_concurrent_e2e.py` / `config_swarmflow.yaml` / `resources/{party_planner,invitation_card,concurrent_invites}.py`（该套件后移入 `agent_swarm/swarmflow/` 独立目录） + 5 个单测文件改动 |
 | 测试基线 | `tests/unit_tests/agent_teams/workflow/` + `harness/` + `test_team_harness_integration.py` 123 passed；真实 qwen flash 两个 E2E：party_planner `E2E PASSED`(phases=6 / human 7×往返 / structured_output 222→17)、concurrent `CONCURRENCY E2E PASSED`(3/3 并发子工作流 / nested-depth 跳过 0 / supervisor crash 0) |
 | Refs | #751 |
 

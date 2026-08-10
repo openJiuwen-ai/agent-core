@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -23,11 +24,10 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation import SysOperation
 
 if TYPE_CHECKING:
-    from openjiuwen.core.single_agent import AgentCard, ReActAgent
+    from openjiuwen.core.single_agent import AgentCard
     from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 
 _SESSION_MEMORY_STATE_KEY = "__session_memory__"
@@ -37,34 +37,47 @@ _CONTEXT_MESSAGE_ID_KEY = "context_message_id"
 DEFAULT_SESSION_MEMORY_TEMPLATE = """# Session Title
 _A short and distinctive 5-10 word descriptive title for the session. Super info dense, no filler_
 
-# Current State
-_What is actively being worked on right now? Pending tasks not yet completed. Immediate next steps._
+# Active Task and Success Criteria
+_What is the active task and what must be true for it to be complete?_
 
-# Task specification
-_What did the user ask to build? Any design decisions or other explanatory context_
+# Current Execution State
+_What is actively being worked on now? Include the latest confirmed state._
 
-# Files and Functions
-_What are the important files? In short, what do they contain and why are they relevant?_
+# Immediate Resume Point and Next Useful Step
+_What should the next agent do first when resuming this session?_
 
-# Workflow
-_What bash commands are usually run and in what order? How to interpret their output if not obvious?_
+# Current Task Facts, Decisions, Evidence, and Fixes
+_Record confirmed facts, decisions, evidence, and corrections for the current task._
 
-# Errors & Corrections
-_Errors encountered and how they were fixed.
-What did the user correct? What approaches failed and should not be tried again?_
+# Current Files, Code Areas, and Artifacts
+_List files and code areas relevant to the current task and their roles._
 
-# Codebase and System Documentation
-_What are the important system components? How do they work/fit together?_
+# Repository and Codebase Understanding
+_Record durable understanding of the repository architecture and important dependencies._
 
-# Learnings
-_What has worked well? What has not? What to avoid? Do not duplicate items from other sections_
+# Historical User Requests and Outcomes
+_Summarize important earlier requests and their confirmed outcomes._
 
-# Key results
-_If the user asked a specific output such as an answer to a question,
-a table, or other document, repeat the exact result here_
+# Learned User Requirements, Preferences, and Acceptance Criteria
+_Record durable user requirements, preferences, and acceptance criteria._
 
-# Worklog
-_Step by step, what was attempted, done? Very terse summary for each step_
+# Historical Work Performed
+_Summarize significant work already performed and the resulting state._
+
+# Durable Historical Information
+_Keep stable information that remains useful across future tasks._
+
+# Cross-Cutting Files, Code Areas, and Artifacts
+_Record artifacts that affect multiple tasks or subsystems._
+
+# Open Work, Blockers, and Verification
+_List unfinished work, blockers, and verification still required._
+
+# Critical Context
+_Keep only high-value details that must not be lost during compression._
+
+# Relevant Files
+_List the files most likely to be needed for the next useful step._
 """
 
 
@@ -202,13 +215,13 @@ the template structure, NOT content to be edited or removed.
 
 
 class SessionMemoryConfig(BaseModel):
-    trigger_tokens: int = Field(default=10000, gt=0)
-    trigger_add_tokens: int = Field(default=5000, gt=0)
-    tool_min_: int = Field(default=3, gt=0)
+    update_trigger_context_ratio: float = Field(default=0.7, gt=0.0, lt=1.0)
     model: ModelRequestConfig | None = None
     model_client: ModelClientConfig | None = None
     update_mode: Literal["agent_edit", "direct_replace"] = Field(default="agent_edit")
     direct_replace_max_retries: int = Field(default=2, ge=0)
+    enable_debug_dump: bool = Field(default=False)
+    debug_dump_dir: str | None = Field(default=None)
 
 
 class SessionMemoryUpdateAgent:
@@ -216,7 +229,7 @@ class SessionMemoryUpdateAgent:
 
     def __init__(self, config: SessionMemoryConfig):
         self._config = config
-        self._agent: ReActAgent | None = None
+        self._agent: Any = None
         self._agent_card: AgentCard | None = None
         self._sys_operation: SysOperation | None = None
         self._direct_model: Model | None = None
@@ -247,6 +260,8 @@ class SessionMemoryUpdateAgent:
         full_context_messages: List[BaseMessage],
         notes_path: Path,
         current_notes: str,
+        system_messages: List[BaseMessage] | None = None,
+        tools: List[Any] | None = None,
     ) -> None:
         if self._config.update_mode == "direct_replace":
             await self._invoke_direct_replace(
@@ -261,19 +276,18 @@ class SessionMemoryUpdateAgent:
             raise RuntimeError("Session memory update agent is not initialized")
         self._prime_notes_file_as_read(notes_path, current_notes)
         query = build_session_memory_prompt(str(notes_path), current_notes)
-        session = self._create_agent_session()
-        inputs = {
-            "query": query,
-            "conversation_id": self._tool_namespace,
-        }
-        await session.pre_run(inputs=inputs)
-        try:
-            await self._prime_inherited_context(session, full_context_messages)
-            response = await self._agent.invoke(inputs, session=session)
-        finally:
-            await session.close_stream()
-            await session.commit()
-        _ = response
+        self._agent.configure_request(tools=tools, allowed_notes_path=notes_path)
+        from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
+            CompressionRequest,
+        )
+
+        request = CompressionRequest(
+            prompt=query,
+            context_messages=list(full_context_messages),
+            system_messages=([] if self._inherited_system_prompt else list(system_messages or [])),
+            tools=list(tools or []),
+        )
+        await self._agent.invoke(request)
 
     async def _invoke_direct_replace(
         self,
@@ -288,9 +302,7 @@ class SessionMemoryUpdateAgent:
         if inherited_system_prompt:
             prompt_messages.append(SystemMessage(content=inherited_system_prompt))
         prompt_messages.extend(full_context_messages)
-        prompt_messages.append(
-            UserMessage(content=build_direct_session_memory_prompt(str(notes_path), current_notes))
-        )
+        prompt_messages.append(UserMessage(content=build_direct_session_memory_prompt(str(notes_path), current_notes)))
         response = await self._invoke_direct_model_with_retry(model=model, prompt_messages=prompt_messages)
         content = self._normalize_direct_response_content(response.content)
         if not content:
@@ -321,44 +333,27 @@ class SessionMemoryUpdateAgent:
     ) -> None:
         if self._agent is not None and self._workspace_root == str(notes_path.parent.parent):
             return
-        from openjiuwen.core.runner import Runner
-        from openjiuwen.core.single_agent import AgentCard, ReActAgent, ReActAgentConfig
-        from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperationCard
+        from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_agent import (
+            SessionMemoryAgent,
+            SessionMemoryAgentConfig,
+        )
 
         workspace_root = notes_path.parent.parent
-
-        sysop_card = SysOperationCard(
-            id=f"{self._tool_namespace}_sysop",
-            mode=OperationMode.LOCAL,
-            work_config=LocalWorkConfig(work_dir=str(workspace_root)),
-        )
-        self._sys_operation = SysOperation(sysop_card)
-
-        agent_card = AgentCard(
-            id=f"{self._tool_namespace}_agent",
-            name="session_memory_update_agent",
-            description="Updates the session memory markdown file using filesystem tools.",
-        )
-        self._agent_card = agent_card
         prompt_template = self._build_prompt_template(self._inherited_system_prompt)
-        agent_config = ReActAgentConfig(
-            model_name=self._config.model.model_name,
-            prompt_template=prompt_template,
-            max_iterations=2,
+        if self._config.model is None or self._config.model_client is None:
+            raise RuntimeError("Session memory agent requires model and model_client config")
+        self._agent = SessionMemoryAgent(
+            Model(self._config.model_client, self._config.model),
+            model_config=self._config.model,
             model_client_config=self._config.model_client,
-            model_config_obj=self._config.model,
+            prompt_template=prompt_template,
+            workspace_root=workspace_root,
+            config=SessionMemoryAgentConfig(
+                max_iterations=3,
+                enable_debug_dump=self._config.enable_debug_dump,
+                debug_dump_dir=self._config.debug_dump_dir,
+            ),
         )
-        agent = ReActAgent(card=agent_card).configure(agent_config)
-
-        for tool in self._build_tools(self._sys_operation):
-            existing_tool = Runner.resource_mgr.get_tool(tool.card.id)
-            if existing_tool is None:
-                result = Runner.resource_mgr.add_tool(tool, tag=agent_card.id)
-                if result.is_err():
-                    raise RuntimeError(f"Failed to register session memory tool: {result.msg()}")
-            agent.ability_manager.add(tool.card)
-
-        self._agent = agent
         self._workspace_root = str(workspace_root)
 
     def _ensure_direct_model(self) -> Model:
@@ -611,9 +606,7 @@ def build_session_memory_prompt(notes_path: str, current_notes: str) -> str:
 
 
 def build_direct_session_memory_prompt(notes_path: str, current_notes: str) -> str:
-    return DIRECT_SESSION_MEMORY_PROMPT.replace("{{notesPath}}", notes_path).replace(
-        "{{currentNotes}}", current_notes
-    )
+    return DIRECT_SESSION_MEMORY_PROMPT.replace("{{notesPath}}", notes_path).replace("{{currentNotes}}", current_notes)
 
 
 def build_system_prompt_text(messages: List[BaseMessage]) -> str:
@@ -623,6 +616,22 @@ def build_system_prompt_text(messages: List[BaseMessage]) -> str:
     if not isinstance(first_message, SystemMessage):
         return ""
     return first_message.content
+
+
+def _load_context_debug_writer():
+    """Lazy import the forked context-debug writer to avoid circular imports.
+
+    ``session_memory_manager`` is imported early by ``processor.base`` and the
+    forked subtree, so a top-level import of ``processor.forked.support.*
+    here would cycle. Resolve it at call time instead.
+    """
+    try:
+        from openjiuwen.core.context_engine.processor.forked.support.context_debug import (
+            write_debug_record,
+        )
+    except Exception:  # pragma: no cover - defensive
+        return None
+    return write_debug_record
 
 
 class SessionMemoryManager:
@@ -711,10 +720,12 @@ class SessionMemoryManager:
     def collect_context_window(ctx: AgentCallbackContext) -> ContextWindow:
         if ctx.context is None:
             return ContextWindow(system_messages=[], context_messages=[], tools=[])
+        input_messages = list(getattr(ctx.inputs, "messages", None) or [])
+        system_messages = [message for message in input_messages if isinstance(message, SystemMessage)]
         return ContextWindow(
-            system_messages=[],
+            system_messages=system_messages,
             context_messages=list(ctx.context.get_messages()),
-            tools=[],
+            tools=list(getattr(ctx.inputs, "tools", None) or []),
         )
 
     def shutdown(self) -> None:
@@ -740,63 +751,74 @@ class SessionMemoryManager:
             )
             return False
 
-        runtime = self._get_runtime_state(session)
         current_tokens = self._count_tokens(context, context_window)
-        if not runtime["initialized"]:
-            if current_tokens >= self.config.trigger_tokens:
-                logger.info(
-                    "[SessionMemory] should_update triggered: tokens=%s threshold=%s",
-                    current_tokens,
-                    self.config.trigger_tokens,
+        context_max = self._resolve_context_max(context)
+        threshold = max(int(context_max * self.config.update_trigger_context_ratio), 1)
+        if current_tokens < threshold:
+            logger.info(
+                "[SessionMemory] should_update skipped: tokens=%s threshold=%s ratio=%.2f context_max=%s",
+                current_tokens,
+                threshold,
+                self.config.update_trigger_context_ratio,
+                context_max,
+            )
+            write_debug_record = _load_context_debug_writer()
+            if write_debug_record is not None:
+                write_debug_record(
+                    context,
+                    processor_type="SessionMemory",
+                    event="threshold_check",
+                    enabled=bool(getattr(self.config, "enable_debug_dump", False)),
+                    dump_dir=getattr(self.config, "debug_dump_dir", None),
+                    phase="should_update",
+                    total_tokens=current_tokens,
+                    context_max=context_max,
+                    threshold=threshold,
+                    hit=False,
+                    reason="below_threshold",
                 )
-                runtime["initialized"] = True
-                self._set_runtime_state(session, runtime)
-                return True
+            return False
+
+        runtime = self._get_runtime_state(session)
+        unsummarized_messages = self._select_unsummarized_messages(
+            messages,
+            runtime.get("notes_upto_message_id"),
+        )
+        if not unsummarized_messages:
             logger.info(
-                "[SessionMemory] should_update skipped: init threshold not reached tokens=%s threshold=%s",
-                current_tokens,
-                self.config.trigger_tokens,
+                "[SessionMemory] should_update skipped: no unsummarized messages session_id=%s",
+                session.get_session_id() if hasattr(session, "get_session_id") else "",
             )
             return False
 
-        total_tool_calls = self._count_tool_calls(messages)
-        baseline_reset = False
-        if current_tokens < runtime["tokens_at_last_update"]:
+        if not self._truncate_messages_to_completed_api_round(unsummarized_messages):
             logger.info(
-                "[SessionMemory] token baseline reset after context shrink current=%s previous=%s",
-                current_tokens,
-                runtime["tokens_at_last_update"],
-            )
-            runtime["tokens_at_last_update"] = 0
-            baseline_reset = True
-        if total_tool_calls < runtime["tool_calls_at_last_update"]:
-            logger.info(
-                "[SessionMemory] tool-call baseline reset after context shrink current=%s previous=%s",
-                total_tool_calls,
-                runtime["tool_calls_at_last_update"],
-            )
-            runtime["tool_calls_at_last_update"] = 0
-            baseline_reset = True
-        if baseline_reset:
-            self._set_runtime_state(session, runtime)
-
-        tokens_since_last = current_tokens - runtime["tokens_at_last_update"]
-        if tokens_since_last < self.config.trigger_add_tokens:
-            logger.info(
-                "[SessionMemory] should_update skipped: delta tokens=%s threshold=%s",
-                tokens_since_last,
-                self.config.trigger_add_tokens,
+                "[SessionMemory] should_update skipped: no new completed API round session_id=%s",
+                session.get_session_id() if hasattr(session, "get_session_id") else "",
             )
             return False
-
-        tool_calls_since_last = total_tool_calls - runtime["tool_calls_at_last_update"]
-        if tool_calls_since_last < self.config.tool_min_:
-            logger.info(
-                "[SessionMemory] should_update skipped: delta tokens=%s threshold=%s",
-                tool_calls_since_last,
-                self.config.tool_min_,
+        logger.info(
+            "[SessionMemory] should_update triggered: tokens=%s threshold=%s ratio=%.2f context_max=%s",
+            current_tokens,
+            threshold,
+            self.config.update_trigger_context_ratio,
+            context_max,
+        )
+        write_debug_record = _load_context_debug_writer()
+        if write_debug_record is not None:
+            write_debug_record(
+                context,
+                processor_type="SessionMemory",
+                event="threshold_check",
+                enabled=bool(getattr(self.config, "enable_debug_dump", False)),
+                dump_dir=getattr(self.config, "debug_dump_dir", None),
+                phase="should_update",
+                total_tokens=current_tokens,
+                context_max=context_max,
+                threshold=threshold,
+                hit=True,
+                reason="reached_threshold",
             )
-            return False
         return True
 
     async def _update_background(
@@ -827,11 +849,16 @@ class SessionMemoryManager:
             len(messages),
         )
         try:
-            await self._update_agent.invoke(
-                full_context_messages=context_window.get_messages(),
-                notes_path=pending_notes_path,
-                current_notes=current_notes,
-            )
+            update_kwargs = {
+                "full_context_messages": list(context_window.context_messages or []),
+                "notes_path": pending_notes_path,
+                "current_notes": current_notes,
+            }
+            if context_window.system_messages:
+                update_kwargs["system_messages"] = list(context_window.system_messages)
+            if context_window.tools:
+                update_kwargs["tools"] = list(context_window.tools)
+            await self._update_agent.invoke(**update_kwargs)
             self._commit_pending_session_memory(pending_notes_path, notes_path)
             if ctx.context is not None:
                 runtime["tokens_at_last_update"] = self._count_tokens(ctx.context, context_window)
@@ -926,14 +953,32 @@ class SessionMemoryManager:
         context: ModelContext,
         context_window: ContextWindow,
     ) -> int:
-        token_counter = context.token_counter()
         all_messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])
+        # 优先用末尾 AssistantMessage.usage_metadata.total_tokens 作为整窗口
+        # 基准（已含当时 system+tools），尾部新增消息用 len//4 补算；无
+        # usage 时 fallback 到 token_counter / char 估算。
+        for idx in range(len(all_messages) - 1, -1, -1):
+            message = all_messages[idx]
+            if ContextUtils.has_valid_usage_metadata(message):
+                tail = all_messages[slice(idx + 1, None)]
+                return message.usage_metadata.total_tokens + sum(
+                    SessionMemoryManager._estimate_message_tokens(msg) for msg in tail
+                )
+        token_counter = context.token_counter()
         if token_counter is not None:
             try:
                 return token_counter.count_messages(all_messages)
             except Exception:
                 logger.debug("Failed to count session memory tokens with token counter", exc_info=True)
         return sum(SessionMemoryManager._estimate_message_tokens(message) for message in all_messages)
+
+    @staticmethod
+    def _resolve_context_max(context: ModelContext) -> int:
+        return ContextUtils.resolve_context_max(
+            model_name=getattr(context, "_model_name", None),
+            fallback_context_window_tokens=getattr(context, "_context_window_tokens", None),
+            model_context_window_tokens=getattr(context, "_model_context_window_tokens", None),
+        )
 
     @staticmethod
     def _estimate_message_tokens(message: BaseMessage) -> int:
@@ -971,7 +1016,7 @@ class SessionMemoryManager:
                 notes_upto_message_id,
                 message_index,
             )
-            return list(messages[message_index + 1:])
+            return list(messages[message_index + 1:])  # fmt: skip
         logger.info(
             "[SessionMemory] select_unsummarized using context id notes_upto=%s index=%s",
             notes_upto_message_id,

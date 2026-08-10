@@ -315,9 +315,9 @@ def test_shutdown_cancels_heartbeat_task() -> None:
         svc._heartbeat_task = asyncio.create_task(_long())
         with patch("playwright_runtime.service.Runner") as mock_runner:
             mock_runner.stop = AsyncMock()
-            with patch.object(svc, "_stop_managed_driver", AsyncMock()):
-                await svc.shutdown()
+            await svc.shutdown()
 
-        assert svc._heartbeat_task.done()
+        assert svc._heartbeat_task is None
+        mock_runner.stop.assert_not_awaited()
 
     _run(_test())

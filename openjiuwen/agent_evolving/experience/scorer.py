@@ -28,8 +28,8 @@ FRESHNESS_HALF_LIFE_DAYS = 90
 STALE_VERSION_PENALTY = 0.7
 
 EVALUATE_LLM_POLICY = LLMInvokePolicy(
-    attempt_timeout_secs=60,
-    total_budget_secs=120,
+    attempt_timeout_secs=120,
+    total_budget_secs=200,
     max_attempts=2,
 )
 SIMPLIFY_LLM_POLICY = LLMInvokePolicy(
@@ -356,12 +356,22 @@ class ExperienceScorer:
         except BaseError as exc:
             logger.error("[ExperienceScorer] evaluate LLM call failed: %s", exc)
             return []
+        except Exception as exc:
+            logger.error(
+                "[ExperienceScorer] evaluate unexpected error: %s",
+                exc,
+                exc_info=True,
+            )
+            return []
 
         results = self._parse_llm_json(raw)
         if results is None:
-            logger.warning("[ExperienceScorer] evaluate: failed to parse LLM response")
+            logger.warning(
+                "[ExperienceScorer] evaluate: failed to parse LLM response "
+                "response_chars=%d",
+                len(raw or ""),
+            )
             return []
-
         return results
 
     async def simplify(

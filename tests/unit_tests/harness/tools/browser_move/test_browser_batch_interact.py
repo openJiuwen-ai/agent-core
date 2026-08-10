@@ -143,23 +143,28 @@ def test_batch_interact_action_calls_code_executor_and_parses_result() -> None:
     assert result["session_id"] == "sess-test"
     assert result["request_id"] == "req-test"
     assert result["steps"][1]["op"] == "autocomplete"
+    assert result["metrics"]["script_size_bytes"] > 0
+    assert result["metrics"]["response_size_bytes"] > 0
+    assert result["metrics"]["executor_elapsed_ms"] >= 0
+    assert result["execution_mode"] == "compact_rpc"
+    assert "url" not in result
+    assert "title" not in result
+    assert result["_runtime_page"] == {
+        "url": "https://example.test/booking",
+        "title": "Booking form",
+    }
     assert "Singapore (SIN)" in observed["js_code"]
     assert "Nationality" in observed["js_code"]
 
 
-def test_batch_interact_action_reports_truncated_steps() -> None:
-    observed: dict[str, Any] = {}
+def test_batch_interact_action_rejects_more_than_25_steps() -> None:
+    called = False
 
     async def fake_code_executor(js_code: str) -> dict[str, Any]:
-        observed["js_code"] = js_code
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps({"ok": True, "steps": [], "elapsed_ms": 1}),
-                }
-            ]
-        }
+        del js_code
+        nonlocal called
+        called = True
+        return {"ok": True}
 
     controller.register_example_actions()
     controller.bind_code_executor(fake_code_executor)
@@ -177,13 +182,9 @@ def test_batch_interact_action_reports_truncated_steps() -> None:
         )
     )
 
-    assert result["ok"] is True
-    assert result["original_step_count"] == 30
-    assert result["executed_step_limit"] == 25
-    assert result["truncated"] is True
-    assert result["dropped_step_count"] == 5
-    assert "#button-24" in observed["js_code"]
-    assert "#button-25" not in observed["js_code"]
+    assert result["ok"] is False
+    assert "at most 25" in result["error"]
+    assert called is False
 
 
 def test_batch_interact_action_rejects_empty_or_non_list_steps_before_running_code() -> None:
@@ -220,12 +221,340 @@ def test_batch_interact_action_fails_cleanly_when_code_executor_missing() -> Non
             "browser_batch_interact",
             session_id="sess-test",
             request_id="req-test",
-            steps=[{"op": "click", "text": "Search"}],
+            steps=[
+                {"op": "fill", "placeholder": "Search", "value": "OpenJiuwen"},
+                {"op": "press", "key": "Enter"},
+            ],
         )
     )
 
     assert result["ok"] is False
     assert result["error"] == "browser_code_executor_not_ready"
+
+
+@pytest.mark.parametrize(
+    ("steps", "message"),
+    [
+        ([{"op": "press"}], "requires key"),
+        (
+            [
+                {"op": "unknown", "selector": "#x"},
+                {"op": "press", "key": "Enter"},
+            ],
+            "unsupported",
+        ),
+        (
+            [
+                {"op": "fill", "value": "query"},
+                {"op": "press", "key": "Enter"},
+            ],
+            "requires a target",
+        ),
+        (
+            [
+                {"op": "autocomplete", "selector": "#from", "value": "SIN"},
+                {"op": "press", "key": "Enter"},
+            ],
+            "requires an option target",
+        ),
+    ],
+)
+def test_batch_interact_validates_schema_before_executor(
+    steps: list[dict[str, Any]],
+    message: str,
+) -> None:
+    called = False
+
+    async def fake_code_executor(js_code: str) -> dict[str, Any]:
+        del js_code
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    controller.register_example_actions()
+    controller.bind_code_executor(fake_code_executor)
+
+    result = _run(
+        controller.run_action(
+            "browser_batch_interact",
+            steps=steps,
+        )
+    )
+
+    assert result["ok"] is False
+    assert message in result["error"]
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    ("steps", "message"),
+    [
+        (
+            [
+                {"op": "click", "selector": "text=销量", "role": "tab"},
+                {"op": "press", "key": "Enter"},
+            ],
+            "exactly one locator strategy",
+        ),
+        (
+            [
+                {"op": "type", "selector": "#toolbar-search", "text": "query"},
+                {"op": "press", "key": "Enter"},
+            ],
+            "use value, not text",
+        ),
+        (
+            [
+                {
+                    "op": "autocomplete",
+                    "target_id": "t_g2_1",
+                    "value": "Shanghai",
+                    "option_target_id": "t_g2_2",
+                    "option_selector": ".autocomplete",
+                },
+                {"op": "press", "key": "Enter"},
+            ],
+            "exactly one option locator strategy",
+        ),
+        (
+            [
+                {"op": "wait_for_text", "text": "Results", "selector": ".guessed-result"},
+                {"op": "press", "key": "Enter"},
+            ],
+            "does not accept a primary locator",
+        ),
+    ],
+)
+def test_batch_interact_rejects_known_bad_case_schema_before_executor(
+    steps: list[dict[str, Any]],
+    message: str,
+) -> None:
+    called = False
+
+    async def fake_code_executor(js_code: str) -> dict[str, Any]:
+        del js_code
+        nonlocal called
+        called = True
+        return {"ok": True}
+
+    controller.register_example_actions()
+    controller.bind_code_executor(fake_code_executor)
+
+    result = _run(controller.run_action("browser_batch_interact", steps=steps))
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert any(message in error for error in result["validation_errors"])
+    assert called is False
+
+
+def test_batch_interact_reports_partial_when_any_executed_step_failed() -> None:
+    async def fake_code_executor(js_code: str) -> dict[str, Any]:
+        del js_code
+        return {
+            "ok": True,
+            "steps": [
+                {"index": 0, "op": "fill", "ok": True},
+                {"index": 1, "op": "wait_for_text", "ok": False, "error": "timeout"},
+            ],
+            "error": None,
+        }
+
+    controller.register_example_actions()
+    controller.bind_code_executor(fake_code_executor)
+
+    result = _run(
+        controller.run_action(
+            "browser_batch_interact",
+            steps=[
+                {"op": "fill", "selector": "#q", "value": "OpenJiuwen"},
+                {"op": "wait_for_text", "text": "Results", "optional": True},
+            ],
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "partial"
+    assert result["error"] == "one or more batch steps failed"
+
+
+def test_batch_interact_unwraps_compact_rpc_and_merges_metrics() -> None:
+    async def fake_code_executor(js_code: str) -> dict[str, Any]:
+        return {
+            "__browser_compact_rpc__": True,
+            "payload": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "ok": True,
+                                "steps": [],
+                                "elapsed_ms": 7,
+                                "internal_steps_elapsed_ms": 5,
+                            }
+                        ),
+                    }
+                ]
+            },
+            "rpc_metrics": {
+                "tool_name": "browser_run_code_unsafe",
+                "tool_resolution_elapsed_ms": 2,
+                "transport_invoke_elapsed_ms": 8,
+                "rpc_total_elapsed_ms": 10,
+                "script_size_bytes": len(js_code),
+                "response_size_bytes": 123,
+            },
+        }
+
+    controller.register_example_actions()
+    controller.bind_code_executor(fake_code_executor)
+
+    result = _run(
+        controller.run_action(
+            "browser_batch_interact",
+            steps=[
+                {"op": "fill", "selector": "#q", "value": "test"},
+                {"op": "press", "key": "Enter"},
+            ],
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["metrics"]["tool_name"] == "browser_run_code_unsafe"
+    assert result["metrics"]["tool_resolution_elapsed_ms"] == 2
+    assert result["metrics"]["transport_invoke_elapsed_ms"] == 8
+    assert result["metrics"]["rpc_total_elapsed_ms"] == 10
+    assert result["metrics"]["internal_steps_elapsed_ms"] == 5
+
+
+def test_batch_interact_returns_compact_condition_observations() -> None:
+    async def fake_code_executor(js_code: str) -> dict[str, Any]:
+        del js_code
+        return {
+            "ok": True,
+            "steps": [
+                {"index": 0, "op": "wait_for_url", "ok": True, "elapsed_ms": 12},
+                {"index": 1, "op": "wait_for_result_count", "ok": True, "elapsed_ms": 9},
+            ],
+            "conditions": [
+                {
+                    "index": 0,
+                    "op": "wait_for_url",
+                    "ok": True,
+                    "elapsed_ms": 12,
+                    "observed": {"url": "https://example.test/results"},
+                },
+                {
+                    "index": 1,
+                    "op": "wait_for_result_count",
+                    "ok": True,
+                    "elapsed_ms": 9,
+                    "observed": {"count": 10},
+                },
+            ],
+            "url": "https://example.test/results",
+            "title": "Results",
+        }
+
+    controller.register_example_actions()
+    controller.bind_code_executor(fake_code_executor)
+    result = _run(
+        controller.run_action(
+            "browser_batch_interact",
+            steps=[
+                {"op": "wait_for_url", "url_contains": "/results"},
+                {"op": "wait_for_result_count", "selector": ".result", "min_count": 1},
+            ],
+        )
+    )
+
+    assert result["conditions"][0]["observed"] == {
+        "url": "https://example.test/results"
+    }
+    assert result["conditions"][1]["observed"] == {"count": 10}
+    assert "url" not in result
+    assert "title" not in result
+
+
+def test_batch_interact_script_uses_fail_fast_targets_and_condition_waits() -> None:
+    js = _build_batch_interact_script(
+        {
+            "steps": [
+                {"op": "wait_for_url", "url_contains": "/results"},
+                {
+                    "op": "wait_for_result_count",
+                    "selector": ".result",
+                    "min_count": 1,
+                },
+            ]
+        }
+    )
+
+    assert "payload.timeout_ms || 2500" in js
+    assert "payload.condition_timeout_ms || 10000" in js
+    assert "conditionOps.has(op) ? defaultConditionTimeout : defaultTimeout" in js
+    assert "target must match exactly one element" in js
+    assert "match_count" in js
+    assert "generation_id" in js
+    assert "op === 'wait_for_url'" in js
+    assert "op === 'wait_for_first_card_title'" in js
+    assert "op === 'wait_for_sort_state'" in js
+    assert "op === 'wait_for_result_count'" in js
+    assert "op === 'wait_for_dom_text_change'" in js
+    assert "op === 'wait_for_stable'" in js
+    assert "visible_text_preview" not in js
+
+
+def test_batch_preflight_rejects_later_ambiguous_target_before_any_click(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed; skipping generated JavaScript execution test")
+
+    js_function = _build_batch_interact_script(
+        {
+            "steps": [
+                {"op": "click", "selector": "#first"},
+                {"op": "click", "selector": ".duplicate"},
+            ],
+            "timeout_ms": 2500,
+            "generation_id": "g4",
+        }
+    )
+    runner = tmp_path / "run_batch_preflight.js"
+    runner.write_text(
+        textwrap.dedent(
+            f"""
+            const fn = ({js_function});
+            const clicks = [];
+            class FakeLocator {{
+              constructor(selector) {{ this.selector = selector; }}
+              first() {{ return this; }}
+              async count() {{ return this.selector === '.duplicate' ? 2 : 1; }}
+              async waitFor() {{}}
+              async isVisible() {{ return true; }}
+              async isEnabled() {{ return true; }}
+              async click() {{ clicks.push(this.selector); }}
+            }}
+            const page = {{
+              locator: (selector) => new FakeLocator(selector),
+              url: () => 'https://example.test/search',
+              title: async () => 'Search',
+            }};
+            fn(page).then((result) => console.log(JSON.stringify({{ result, clicks }})));
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run([node, str(runner)], check=True, text=True, capture_output=True)
+    payload = json.loads(completed.stdout)
+
+    assert payload["result"]["ok"] is False
+    assert payload["result"]["status"] == "failed"
+    assert payload["result"]["steps"][0]["phase"] == "preflight"
+    assert "matched 2" in payload["result"]["error"]
+    assert payload["clicks"] == []
 
 
 def test_batch_interact_script_runs_against_playwright_like_form_stub(tmp_path: Path) -> None:

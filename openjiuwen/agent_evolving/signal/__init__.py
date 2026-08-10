@@ -18,6 +18,17 @@ from openjiuwen.agent_evolving.signal.from_eval import (
     from_evaluated_case,
     from_evaluated_cases,
 )
+from openjiuwen.agent_evolving.signal.review_feedback import (
+    REVIEW_FEEDBACK_SIGNAL,
+    REVIEW_FEEDBACK_SOURCE,
+    ReviewFeedbackAction,
+    ReviewFeedbackAttribution,
+    ReviewFeedbackAttributor,
+    ReviewFeedbackClassification,
+    ReviewFeedbackContext,
+    ReviewFeedbackContextBuilder,
+    attribution_to_evolution_signal,
+)
 from openjiuwen.agent_evolving.signal.team import (
     TeamSignalType,
     TrajectoryIssue,
@@ -38,6 +49,15 @@ __all__ = [
     "make_signal_fingerprint",
     "ConversationSignalDetector",
     "SignalDetector",
+    "REVIEW_FEEDBACK_SIGNAL",
+    "REVIEW_FEEDBACK_SOURCE",
+    "ReviewFeedbackAction",
+    "ReviewFeedbackAttribution",
+    "ReviewFeedbackAttributor",
+    "ReviewFeedbackClassification",
+    "ReviewFeedbackContext",
+    "ReviewFeedbackContextBuilder",
+    "attribution_to_evolution_signal",
     "TeamSignalType",
     "TrajectoryIssue",
     "UserIntent",

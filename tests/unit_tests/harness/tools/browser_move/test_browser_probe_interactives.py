@@ -11,6 +11,9 @@ from unittest.mock import AsyncMock
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    CORE_BROWSER_TOOL_NAMES,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.probes import (
     build_interactive_probe_js,
 )
@@ -60,6 +63,25 @@ def test_build_interactive_probe_js_contains_high_value_selectors() -> None:
     assert "[data-testid]" in js
     assert "max_items" in js
     assert "viewport_only" in js
+    assert "validateSelectorHint" in js
+    assert "matches.length === 1 && matches[0] === el" in js
+    assert "selector_hint_validated" in js
+    assert "actionable" in js
+    assert "clickable" in js
+    assert "match_count" in js
+    assert "visible" in js
+    assert "enabled" in js
+    assert "generation_id" in js
+    assert "matchCount === 1" in js
+    assert "document.elementFromPoint" in js
+
+
+def test_build_interactive_probe_js_embeds_generation_id() -> None:
+    js = build_interactive_probe_js(generation_id="g7")
+
+    assert '"generation_id": "g7"' in js
+    assert "selector_hint: clickable ? selectorHint : ''" in js
+    assert "selector_hint_validated: clickable" in js
 
 
 def test_build_interactive_probe_js_expands_search_and_input_queries() -> None:
@@ -72,7 +94,7 @@ def test_build_interactive_probe_js_expands_search_and_input_queries() -> None:
     assert "input_type" in js
     assert "搜索" in js
     assert "关键词" in js
-    assert "role=\"searchbox\"" in js
+    assert 'role="searchbox"' in js
     assert "[placeholder]" in js
 
 
@@ -153,6 +175,12 @@ def test_runtime_probe_interactives_uses_code_executor_and_parses_json() -> None
                     "role": "button",
                     "text": "Search",
                     "selector_hint": "button:nth-of-type(1)",
+                    "selector_hint_validated": True,
+                    "match_count": 1,
+                    "visible": True,
+                    "enabled": True,
+                    "actionable": True,
+                    "clickable": True,
                 }
             ],
         }
@@ -171,6 +199,9 @@ def test_runtime_probe_interactives_uses_code_executor_and_parses_json() -> None
     assert result["ok"] is True
     assert result["url"] == "https://example.com"
     assert result["elements"][0]["text"] == "Search"
+    assert result["elements"][0]["target_id"].startswith("t_g")
+    assert result["elements"][0]["generation_id"] == result["page_state"]["generation_id"]
+    assert result["page_state"]["interactives"][0]["target_id"] == result["elements"][0]["target_id"]
 
 
 def test_runtime_probe_interactives_handles_missing_code_executor() -> None:
@@ -212,8 +243,11 @@ def test_runtime_unwrap_mcp_text_result() -> None:
 
     assert runtime._unwrap_mcp_text_result(raw) == '{"ok": true, "elements": []}'
 
+
 def test_runtime_call_playwright_run_code_unsafe_uses_runner_mcp_tool(monkeypatch) -> None:
     runtime = _make_runtime()
+    assert runtime.service.allowed_tool_names == CORE_BROWSER_TOOL_NAMES
+    assert "browser_run_code_unsafe" not in runtime.service.allowed_tool_names
 
     class FakeToolResult:
         success = True
@@ -222,7 +256,12 @@ def test_runtime_call_playwright_run_code_unsafe_uses_runner_mcp_tool(monkeypatc
             "content": [
                 {
                     "type": "text",
-                    "text": '{"ok": true, "elements": []}',
+                    "text": (
+                        '{"ok": true, "elements": []}\n'
+                        "### Page state\n"
+                        "- Page URL: https://example.com/\n"
+                        "- Page Snapshot: large snapshot omitted"
+                    ),
                 }
             ]
         }
@@ -248,13 +287,13 @@ def test_runtime_call_playwright_run_code_unsafe_uses_runner_mcp_tool(monkeypatc
         fake_get_mcp_tool,
     )
 
-    result = _run(
-        runtime._call_playwright_run_code_unsafe(
-            "async (page) => ({ok: true})"
-        )
-    )
+    result = _run(runtime._call_playwright_run_code_unsafe("async (page) => ({ok: true})"))
 
-    assert fake_tool.inputs == {
-        "code": "async (page) => ({ok: true})"
-    }
-    assert result["content"][0]["text"] == '{"ok": true, "elements": []}'
+    assert fake_tool.inputs == {"code": "async (page) => ({ok: true})"}
+    assert result["__browser_compact_rpc__"] is True
+    assert result["payload"] == '{"ok":true,"elements":[]}'
+    assert result["rpc_metrics"]["tool_name"] == "browser_run_code_unsafe"
+    assert (
+        result["rpc_metrics"]["transport_response_size_bytes"]
+        > result["rpc_metrics"]["response_size_bytes"]
+    )

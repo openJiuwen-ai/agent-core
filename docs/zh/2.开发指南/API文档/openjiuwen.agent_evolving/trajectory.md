@@ -197,6 +197,11 @@ class MemberTrajectorySnapshot(
 
 返回某个 session 的团队聚合轨迹；当 source 中没有对应 `(team_id, session_id)` 的 snapshot 时返回 `None`。
 
+### get_member_trajectory(team_id, session_id, member_id) -> Trajectory | None
+
+返回指定成员在该 session 发布的最新独立轨迹，不与 leader 或其他成员轨迹合并。没有对应 snapshot
+时返回 `None`。该入口适合需要把 task feedback 严格归因到 assignee 的宿主。
+
 ---
 
 ## class openjiuwen.agent_evolving.trajectory.registry.InMemoryTrajectoryRegistry
@@ -219,6 +224,10 @@ class InMemoryTrajectoryRegistry()
 ### get_trajectory(team_id, session_id, filter_collaborative=True) -> Trajectory | None
 
 聚合同一 session 内每个成员的最新 snapshot。`filter_collaborative=True` 时，teammate 轨迹会先过滤为协作相关步骤再合并。
+
+### get_member_trajectory(team_id, session_id, member_id) -> Trajectory | None
+
+按完整 `(team_id, session_id, member_id)` key 返回单个成员的最新轨迹；未知 key 返回 `None`。
 
 ### clear_session(team_id, session_id) -> None
 

@@ -175,3 +175,5 @@ We welcome all forms of contributions, including but not limited to:
 ## Open Source License
 
 This project is licensed under the Apache-2.0 License.
+
+This product serves solely as a workflow orchestration tool and does not embed any AI model capabilities. When users integrate AI models for specific business scenarios, they shall bear full responsibility for compliance obligations under the EU AI Act and other relevant regulatory frameworks.

@@ -43,6 +43,7 @@ class _FakeCoordination:
         self.finalized = False
         self.enqueued_inputs: list[Any] = []
         self.mailbox_enqueued = False
+        self.task_poll_enqueued = False
 
     async def start(self, session=None) -> None:
         self.started = True
@@ -53,6 +54,9 @@ class _FakeCoordination:
 
     async def enqueue_initial_mailbox_poll(self) -> None:
         self.mailbox_enqueued = True
+
+    async def enqueue_initial_task_poll(self) -> None:
+        self.task_poll_enqueued = True
 
     async def finalize_round(self) -> None:
         self.finalized = True
@@ -117,7 +121,7 @@ def test_spawn_payload_contains_member_identity() -> None:
         member_name="fe-1",
         display_name="Frontend Expert",
         role_type=TeamRole.TEAMMATE,
-        persona="追求交互质量的前端工程师",
+        desc="追求交互质量的前端工程师",
     ))
 
     payload = leader.build_spawn_payload(
@@ -126,7 +130,7 @@ def test_spawn_payload_contains_member_identity() -> None:
     )
 
     assert payload["coordination"]["role"] == "teammate"
-    assert payload["coordination"]["persona"] == "追求交互质量的前端工程师"
+    assert payload["coordination"]["desc"] == "追求交互质量的前端工程师"
     assert payload["coordination"]["transport"]["node_id"] == "fe-1"
     assert payload["query"] == "Review the design system impact."
 
@@ -187,7 +191,7 @@ async def test_spawn_config_contains_serializable_team_agent_payload() -> None:
         member_name="be-1",
         display_name="Backend Expert",
         role_type=TeamRole.TEAMMATE,
-        persona="严谨的后端架构师",
+        desc="严谨的后端架构师",
     ))
 
     spawn_config = leader.build_spawn_config(ctx)
@@ -215,7 +219,7 @@ def test_runtime_context_roundtrips_with_pydantic_serialization() -> None:
     context = TeamRuntimeContext(
         role=TeamRole.LEADER,
         member_name="leader-1",
-        persona="pm",
+        desc="pm",
         team_spec=TeamSpec(team_name="demo", display_name="demo"),
     )
 
@@ -223,7 +227,7 @@ def test_runtime_context_roundtrips_with_pydantic_serialization() -> None:
 
     assert restored.role == TeamRole.LEADER
     assert restored.member_name == "leader-1"
-    assert restored.persona == "pm"
+    assert restored.desc == "pm"
 
 
 @pytest.mark.level0
@@ -258,13 +262,13 @@ async def test_leader_initial_direct_human_agent_route_skips_leader_user_input()
                 member_name="human-counter-1",
                 display_name="Human Counter",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="human counter",
+                desc="human counter",
             ),
             TeamMemberSpec(
                 member_name="ai-counter-1",
                 display_name="AI Counter",
                 role_type=TeamRole.TEAMMATE,
-                persona="ai counter",
+                desc="ai counter",
             ),
         ],
     ).build()
@@ -308,7 +312,7 @@ async def test_leader_initial_human_agent_avatar_route_skips_leader_user_input()
                 member_name="human-counter-1",
                 display_name="Human Counter",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="human counter",
+                desc="human counter",
             ),
         ],
     ).build()
@@ -344,13 +348,13 @@ async def test_leader_initial_direct_human_agent_stream_route_skips_leader_user_
                 member_name="human-counter-1",
                 display_name="Human Counter",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="human counter",
+                desc="human counter",
             ),
             TeamMemberSpec(
                 member_name="ai-counter-1",
                 display_name="AI Counter",
                 role_type=TeamRole.TEAMMATE,
-                persona="ai counter",
+                desc="ai counter",
             ),
         ],
     ).build()
@@ -395,7 +399,7 @@ async def test_leader_initial_human_agent_avatar_stream_route_skips_leader_user_
                 member_name="human-counter-1",
                 display_name="Human Counter",
                 role_type=TeamRole.HUMAN_AGENT,
-                persona="human counter",
+                desc="human counter",
             ),
         ],
     ).build()
@@ -432,7 +436,7 @@ async def test_teammate_initial_dollar_input_stays_regular_user_input() -> None:
             member_name="ai-counter-1",
             display_name="AI Counter",
             role_type=TeamRole.TEAMMATE,
-            persona="ai counter",
+            desc="ai counter",
         )
     )
     spawn_config = leader.build_spawn_config(ctx)
@@ -465,7 +469,7 @@ async def test_inprocess_teammate_initial_dollar_input_stays_regular_user_input(
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name="ai-counter-1",
-        persona="ai counter",
+        desc="ai counter",
         team_spec=team_spec,
     )
     teammate = TeamAgent(AgentCard(id="ai-counter-1", name="ai-counter-1", description="test")).configure(spec, ctx)
@@ -497,7 +501,7 @@ async def test_inprocess_teammate_initial_dollar_stream_stays_regular_user_input
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name="ai-counter-1",
-        persona="ai counter",
+        desc="ai counter",
         team_spec=team_spec,
     )
     teammate = TeamAgent(AgentCard(id="ai-counter-1", name="ai-counter-1", description="test")).configure(spec, ctx)
@@ -538,7 +542,7 @@ async def test_setup_agent_builds_teammate_member_handle() -> None:
             member_name="be-1",
             display_name="Backend Expert",
             role_type=TeamRole.TEAMMATE,
-            persona="严谨的后端架构师",
+            desc="严谨的后端架构师",
         )
     )
     spawn_config = leader.build_spawn_config(ctx)

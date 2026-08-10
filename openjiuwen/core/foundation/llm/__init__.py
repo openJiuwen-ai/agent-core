@@ -27,6 +27,7 @@ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
 # Built-in implementations
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
+from openjiuwen.core.foundation.llm.model_clients.ascend_affinity_model_client import AscendAffinityModelClient
 from openjiuwen.core.foundation.llm.output_parsers.json_output_parser import JsonOutputParser
 from openjiuwen.core.foundation.llm.output_parsers.markdown_output_parser import MarkdownOutputParser
 
@@ -73,6 +74,7 @@ _TOOL_CLASSES = [
 # Built-in ModelClient implementations
 _PREBUILT_MODEL_CLIENTS = [
     "OpenAIModelClient",
+    "AscendAffinityModelClient",
 ]
 
 # Built-in OutputParser implementations

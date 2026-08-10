@@ -30,6 +30,7 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
 )
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
+from opentelemetry.sdk.trace import SpanLimits
 
 from openjiuwen.agent_teams.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.agent_teams.observability.config import ObservabilityConfig
@@ -87,7 +88,11 @@ def init_observability(
 
     resource = Resource.create({"service.name": config.service_name})
     sampler = ParentBased(root=TraceIdRatioBased(config.sample_rate))
-    _provider = TracerProvider(resource=resource, sampler=sampler)
+    _provider = TracerProvider(
+        resource=resource,
+        sampler=sampler,
+        span_limits=SpanLimits(max_attributes=config.max_attributes),
+    )
 
     tracker = ActiveSpanTracker()
     _provider.add_span_processor(tracker)

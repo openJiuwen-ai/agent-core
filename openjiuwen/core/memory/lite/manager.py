@@ -7,10 +7,77 @@ import json
 import sqlite3
 import struct
 import asyncio
+import contextlib
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Set, TYPE_CHECKING
 from dataclasses import dataclass
 from openjiuwen.core.common.logging import memory_logger as logger
+
+
+@contextlib.contextmanager
+def _cross_process_lock(lock_path: str, timeout: float = 30.0):
+    """Cross-process exclusive lock via a lock file (blocks until acquired).
+
+    Serializes the config-change rebuild across concurrently starting memory
+    manager instances, so only one process drops & rebuilds the index tables
+    while the others wait — then the waiters re-check and find the rebuild
+    already done. Without this, concurrent rebuilds race on the same DB and
+    fail with "database is locked", leaving a half-built (empty) vector table.
+
+    Windows: msvcrt.locking (LK_LOCK, blocks with retry). POSIX: fcntl.flock.
+
+    Raises ``TimeoutError`` if the lock is not acquired within ``timeout`` —
+    the caller must NOT run the rebuild without the lock, so we fail loudly
+    rather than silently proceeding and racing with another rebuild.
+    """
+    import time
+
+    ensure_dir(os.path.dirname(lock_path) or ".")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    acquired = False
+    try:
+        deadline = time.monotonic() + timeout
+        if os.name == "nt":
+            import msvcrt
+
+            while time.monotonic() < deadline:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                    acquired = True
+                    break
+                except OSError:
+                    time.sleep(0.1)
+        else:
+            import fcntl
+
+            while time.monotonic() < deadline:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except OSError:
+                    time.sleep(0.1)
+        if not acquired:
+            raise TimeoutError(f"Could not acquire rebuild lock within {timeout}s: {lock_path}")
+        yield
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    # Unlock failures are non-fatal (the fd is closed below and
+                    # byte-range locks release on close); let the outer except
+                    # log them at debug rather than silently swallowing here.
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            except Exception as e:
+                logger.debug(f"Failed to release rebuild lock: {e}")
+        os.close(fd)
 
 if TYPE_CHECKING:
     from openjiuwen.core.sys_operation.sys_operation import SysOperation
@@ -19,7 +86,8 @@ if TYPE_CHECKING:
 from .types import MemoryChunk
 from .internal import (
     ensure_dir, list_memory_files, build_file_entry, chunk_markdown,
-    hash_text, build_fts_query, bm25_rank_to_score, is_memory_path
+    hash_text, build_fts_query, bm25_rank_to_score, is_memory_path,
+    split_query_tokens
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
 from .config import MemorySettings
@@ -32,6 +100,13 @@ EMBEDDING_CACHE_TABLE = "embedding_cache"
 SESSION_DIRTY_DEBOUNCE_MS = 5000
 
 INDEX_CACHE: Dict[str, 'MemoryIndexManager'] = {}
+
+# Module-level lock shared across all initialize() calls in this process so the
+# rebuild (clear tables + reindex) is serialized per-process — distinct from the
+# cross-process file lock, which serializes across processes. A per-call
+# asyncio.Lock() would be a fresh instance each time and serialize nothing.
+# Python 3.10+ defers loop binding to first await, so defining at import is safe.
+_REBUILD_INTRAPROCESS_LOCK = asyncio.Lock()
 
 
 @dataclass
@@ -68,8 +143,11 @@ def _open_database(db_path: str) -> sqlite3.Connection:
     """Open SQLite database."""
     ensure_dir(os.path.dirname(db_path) or ".")
 
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect(db_path, timeout=5.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # busy_timeout lets SQLite wait (up to ms) for a lock instead of failing
+    # immediately with "database is locked" when another process is writing.
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
@@ -193,6 +271,11 @@ class MemoryIndexManager:
         self.sys_operation: Optional["SysOperation"] = None
         self.llm: Optional[Any] = None
 
+        # Set by _ensure_schema when it drops a legacy (non-trigram) chunks_fts;
+        # initialize() uses it to force a full reindex (incremental sync skips
+        # unchanged files and would leave the new trigram table empty).
+        self._fts_migrated: bool = False
+
     @classmethod
     async def get(
             cls,
@@ -241,7 +324,38 @@ class MemoryIndexManager:
         await self._initialize_provider()
         await self._load_vector_extension()
 
-        await self.sync(reason="initial")
+        # Embedding 配置变化时，清空索引表数据后重新索引，而不是在脏库上做增量 reindex。
+        # 原因：旧库的向量表里残留着旧模型/旧维度的向量行，且其 rowid 与重新写入的 chunks
+        # rowid 错位（更新路径只 DELETE chunks 不清向量表），导致搜索时 query 向量与库里
+        # 向量对不上 rowid、返回空。清空各表并重置 rowid 序列，让重新索引在干净的表上
+        # 从 rowid 1 连续递增、维度统一，彻底消除脏状态。源记忆文件(.md)仍在，可完整重建。
+        # 注意：必须在 _load_vector_extension 之后执行，清向量虚拟表需要扩展已加载。
+        #
+        # 多个 manager 实例可能在不同进程里同时初始化（agent_server / gateway 各起一个，
+        # 或重启时新旧进程短暂并存）。若它们同时检测到配置变化并清表重建，会抢 memory.db
+        # 的写锁互相覆盖、写一半失败，留下空的 1024 维表。用跨进程文件锁把"检测→清表→
+        # 全量重建"串行化：持锁者重建，其他进程等锁后重新检测，发现已重建好就直接跳过。
+        #
+        # 同一套锁也串行化 FTS trigram 迁移的 force reindex：迁移 DROP+重建了 chunks_fts
+        # 但 files/chunks 行未动，增量 sync 会因 hash 未变而跳过重建、留下空 FTS 表，
+        # 必须 force=True 全量重写。
+        config_rebuild = await self._needs_rebuild_on_config_change()
+        fts_migration = self._needs_fts_migration_reindex()
+        if config_rebuild or fts_migration:
+            lock_path = self._rebuild_lock_path()
+            async with _REBUILD_INTRAPROCESS_LOCK:  # 本进程内串行（多个 manager 实例同进程时）
+                with _cross_process_lock(lock_path, timeout=120.0):
+                    # 持锁后再检测一次：可能在等锁期间，别的进程已完成重建、meta 已更新。
+                    if await self._needs_rebuild_on_config_change():
+                        self._clear_index_tables()
+                        # 在锁内一次跑完整个重建，释放锁时表已是完整的新索引，避免别的
+                        # 进程看到半成品（chunks 有数据但向量表空）。
+                        await self.sync(reason="initial")
+                    elif self._needs_fts_migration_reindex():
+                        # config 没变，必须 force=True 才会重写未变文件，填满 trigram 表。
+                        await self.sync(reason="fts_migration", force=True)
+        else:
+            await self.sync(reason="initial")
 
         if self.settings.sync.get("watch", True):
             self._setup_file_watcher()
@@ -249,6 +363,130 @@ class MemoryIndexManager:
         self._ensure_interval_sync()
 
         logger.info(f"Memory manager initialized for agent: {self.agent_id}")
+
+    def _rebuild_lock_path(self) -> str:
+        """Path to the cross-process rebuild lock file (next to the DB)."""
+        return self.db_path + ".rebuild.lock"
+
+    async def _needs_rebuild_on_config_change(self) -> bool:
+        """Whether the embedding config changed since the last index (=> must rebuild).
+
+        Mirrors ``_should_full_reindex``'s config-comparison logic but is evaluated
+        at init, so a rebuild can clear the index tables rather than mutate a dirty,
+        mismatched index in place. Returns False when there is no prior index — in
+        that case ``sync`` builds the index normally, nothing to rebuild.
+        """
+        try:
+            cursor = self.db.execute(
+                "SELECT value FROM meta WHERE key = ?", (META_KEY,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+            meta = json.loads(row["value"])
+            if meta.get("provider") != self.provider.id:
+                return True
+            if meta.get("model") != self.provider.model:
+                return True
+            if meta.get("providerKey") != self.provider_key:
+                return True
+            if meta.get("chunkTokens") != self.settings.chunking.get("tokens"):
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to check meta for rebuild: {e}")
+            return False
+
+    def _needs_fts_migration_reindex(self) -> bool:
+        """True if this instance just migrated chunks_fts to trigram and the reindex hasn't run yet.
+
+        ``_fts_migrated`` is set by _ensure_schema when it dropped a legacy table;
+        the meta ``ftsTrigram`` check makes this converge across restarts — once a
+        process force-reindexes and writes ``ftsTrigram``, later processes skip.
+        """
+        if not self._fts_migrated:
+            return False
+        try:
+            cursor = self.db.execute(
+                "SELECT value FROM meta WHERE key = ?", (META_KEY,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return True
+            meta = json.loads(row["value"])
+            return not meta.get("ftsTrigram", False)
+        except Exception as e:
+            logger.warning(f"Failed to check meta for FTS migration reindex: {e}")
+            return True
+
+    def _clear_index_tables(self) -> None:
+        """Clear index tables for rebuild, keeping the DB file.
+
+        Called when embedding config changed. The vector virtual table is DROPPED
+        and the base tables cleared, so the subsequent ``sync`` rebuilds the vector
+        index under the new model/dims from scratch.
+
+        Drop (not DELETE) is essential for the vector table: a stale ``chunks_vec``
+        created under the old model's dims (e.g. float[1024]) would survive a
+        DELETE, and ``_ensure_vector_table``'s ``CREATE ... IF NOT EXISTS`` would
+        then no-op — leaving a 1024-dim table that rejects 2560-dim Qwen vectors
+        with a "Dimension mismatch" error that is swallowed at debug level,
+        silently producing an empty vector table.
+
+        The FTS table, by contrast, is DELETEd (not DROPPed): it has no dimension
+        constraint, so a plain DELETE clears it for re-indexing. And unlike the
+        vector table it is never recreated after init — ``_ensure_schema`` (the
+        only place that creates it) runs once *before* this method; the later
+        ``sync``/``_index_chunk`` path only INSERTs into it. Dropping it here
+        would leave ``fts_available`` True but the table gone, so every FTS
+        insert (debug-swallowed) and keyword search (returns [] silently) fails
+        for the rest of this instance's life. DELETE keeps the structure so
+        ``_index_chunk`` can repopulate it during the rebuild.
+        """
+        if not self.db:
+            return
+        logger.info(
+            f"Embedding config changed, clearing index tables for rebuild: {self.db_path}"
+        )
+        drops = [
+            (f"DROP TABLE IF EXISTS {VECTOR_TABLE}", "vector"),
+        ]
+        for sql, label in drops:
+            try:
+                self.db.execute(sql)
+            except Exception as e:
+                logger.debug(f"Skipping {label} drop: {e}")
+
+        # Clear base tables (DELETE keeps schema; rowids reset below). The FTS
+        # virtual table is cleared here too (DELETE, not DROP) — see docstring.
+        deletions = [
+            ("DELETE FROM chunks", "chunks"),
+            ("DELETE FROM files", "files"),
+            (f"DELETE FROM {FTS_TABLE}", "fts"),
+            (f"DELETE FROM {EMBEDDING_CACHE_TABLE}", "embedding_cache"),
+            ("DELETE FROM meta", "meta"),
+        ]
+        for sql, label in deletions:
+            try:
+                self.db.execute(sql)
+            except Exception as e:
+                logger.debug(f"Skipping {label} clear: {e}")
+
+        # Reset autoincrement so re-indexed chunks get rowids from 1, matching the
+        # freshly written vector rows 1:1 (search joins chunks.rowid <-> vec.rowid).
+        for table in ("chunks", VECTOR_TABLE):
+            try:
+                self.db.execute(
+                    "DELETE FROM sqlite_sequence WHERE name = ?", (table,)
+                )
+            except Exception as e:
+                logger.debug(f"Skipping {table} sqlite_sequence reset: {e}")
+
+        # Forget the old dims so _ensure_vector_table recreates the vec table under
+        # the new model's dims on first write. Combined with the DROP above, the first
+        # chunk write builds a correctly-dimensioned vector table from scratch.
+        self.vector_dims = None
+        self.db.commit()
 
     def _resolve_db_path(self) -> str:
         """Resolve database path.
@@ -342,6 +580,22 @@ class MemoryIndexManager:
 
         if self.fts_enabled:
             try:
+                # Migrate legacy chunks_fts (default unicode61, which doesn't
+                # segment CJK and so never matched Chinese queries) to trigram.
+                # DROP first so the CREATE below rebuilds an empty trigram table;
+                # initialize() then forces a full reindex to repopulate it
+                # (see _needs_fts_migration_reindex).
+                if self._fts_table_is_legacy():
+                    logger.info(
+                        f"Migrating {FTS_TABLE} from unicode61 to trigram tokenizer: "
+                        f"{self.db_path}"
+                    )
+                    try:
+                        self.db.execute(f"DROP TABLE IF EXISTS {FTS_TABLE}")
+                    except sqlite3.Error as e:
+                        logger.debug(f"Skipping legacy {FTS_TABLE} drop: {e}")
+                    self._fts_migrated = True
+
                 self.db.execute(f"""
                     CREATE VIRTUAL TABLE IF NOT EXISTS {FTS_TABLE} USING fts5(
                         id UNINDEXED,
@@ -349,7 +603,8 @@ class MemoryIndexManager:
                         source UNINDEXED,
                         text,
                         content='',
-                        contentless_delete=1
+                        contentless_delete=1,
+                        tokenize='trigram'
                     )
                 """)
                 self.fts_available = True
@@ -360,8 +615,37 @@ class MemoryIndexManager:
 
         self.db.commit()
 
+    def _fts_table_is_legacy(self) -> bool:
+        """True if chunks_fts exists but was created without tokenize=trigram.
+
+        Such a table (the old unicode61 default) must be dropped so _ensure_schema
+        rebuilds it under trigram. A missing table is not legacy.
+        """
+        if not self.db:
+            return False
+        try:
+            cursor = self.db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?",
+                (FTS_TABLE,)
+            )
+            row = cursor.fetchone()
+        except sqlite3.Error as e:
+            logger.debug(f"Failed to introspect {FTS_TABLE} schema: {e}")
+            return False
+        if not row or not row["sql"]:
+            return False
+        return "tokenize=trigram" not in row["sql"].lower()
+
     async def _initialize_provider(self) -> None:
         """Initialize embedding provider."""
+        if self.embedding_config is None or not getattr(self.embedding_config, "api_key", None):
+            self.provider = None
+            self.provider_key = "none:no-embedding"
+            logger.info(
+                "Embedding provider not configured (no embedding_config / api_key); "
+                "memory will use FTS5 keyword search only."
+            )
+            return
         try:
             self.provider = await create_embedding_provider(
                 model=self.settings.model,
@@ -406,8 +690,8 @@ class MemoryIndexManager:
             if self.vector_dims is not None and self.vector_dims != dims:
                 try:
                     self.db.execute(f"DROP TABLE IF EXISTS {VECTOR_TABLE}")
-                except sqlite3.Error:
-                    pass
+                except sqlite3.Error as e:
+                    logger.debug(f"Skipping {VECTOR_TABLE} drop before recreate: {e}")
 
             self.db.execute(f"""
                 CREATE VIRTUAL TABLE IF NOT EXISTS {VECTOR_TABLE} USING vec0(
@@ -600,10 +884,13 @@ class MemoryIndexManager:
 
             meta = json.loads(row["value"])
 
-            if meta.get("provider") != self.provider.id:
+            provider_id = self.provider.id if self.provider else None
+            provider_model = self.provider.model if self.provider else None
+
+            if meta.get("provider") != provider_id:
                 return True
 
-            if meta.get("model") != self.provider.model:
+            if meta.get("model") != provider_model:
                 return True
 
             if meta.get("chunkTokens") != self.settings.chunking.get("tokens"):
@@ -624,35 +911,49 @@ class MemoryIndexManager:
             return True
 
     async def _run_reindex(self) -> None:
-        """Run full reindex."""
+        """Run full reindex.
+
+        Forces re-indexing of every file regardless of hash so that chunks are
+        re-embedded under the current model/dims — this is what "re-index on
+        vector config switch" must mean, otherwise unchanged files keep stale
+        embeddings from the old model and search returns empty results.
+        """
         if "memory" in self.settings.sources:
-            await self._sync_memory_files()
+            await self._sync_memory_files(force=True)
             self.dirty = False
 
         if "sessions" in self.settings.sources:
-            await self._sync_session_files()
+            await self._sync_session_files(force=True)
 
         meta = {
-            "provider": self.provider.id,
-            "model": self.provider.model,
+            "provider": self.provider.id if self.provider else None,
+            "model": self.provider.model if self.provider else None,
             "providerKey": self.provider_key,
             "chunkTokens": self.settings.chunking.get("tokens"),
             "chunkOverlap": self.settings.chunking.get("overlap"),
+            # Marks chunks_fts as migrated to trigram; initialize() skips the
+            # migration force-reindex once this is recorded.
+            "ftsTrigram": self.fts_available,
         }
         if self.vector_available and self.vector_dims:
             meta["vectorDims"] = self.vector_dims
 
         self._write_meta(meta)
 
-    async def _sync_memory_files(self) -> None:
+    async def _sync_memory_files(self, force: bool = False) -> None:
         """Sync memory files.
 
         All session files (YYYY-MM-DD.md) are indexed for search.
         Recent session files (today + yesterday) are also loaded for context.
+
+        When ``force`` is True (e.g. embedding config changed -> full reindex),
+        every file is re-indexed even if its hash is unchanged, so that chunks
+        get re-embedded under the new model/dims. This is the intended meaning
+        of "re-index already-indexed files on vector config switch" — not skip.
         """
         files = list_memory_files(self.workspace, node_name=self.node_name)
 
-        logger.debug(f"Syncing {len(files)} memory files")
+        logger.debug(f"Syncing {len(files)} memory files (force={force})")
 
         active_paths = set()
 
@@ -661,14 +962,15 @@ class MemoryIndexManager:
             entry = await build_file_entry(filepath, base_dir)
             active_paths.add(entry["path"])
 
-            cursor = self.db.execute(
-                "SELECT hash FROM files WHERE path = ? AND source = ?",
-                (entry["path"], "memory")
-            )
-            row = cursor.fetchone()
+            if not force:
+                cursor = self.db.execute(
+                    "SELECT hash FROM files WHERE path = ? AND source = ?",
+                    (entry["path"], "memory")
+                )
+                row = cursor.fetchone()
 
-            if row and row["hash"] == entry["hash"]:
-                continue
+                if row and row["hash"] == entry["hash"]:
+                    continue
 
             await self._index_file(entry, "memory")
 
@@ -684,8 +986,11 @@ class MemoryIndexManager:
             return str(self.workspace.root_path)
         return self.memory_dir
 
-    async def _sync_session_files(self) -> None:
-        """Sync session transcript files."""
+    async def _sync_session_files(self, force: bool = False) -> None:
+        """Sync session transcript files.
+
+        See ``_sync_memory_files`` for the meaning of ``force``.
+        """
         sessions_dir = os.path.join(self.memory_dir, "sessions")
         if not os.path.exists(sessions_dir):
             return
@@ -696,21 +1001,22 @@ class MemoryIndexManager:
                 if f.endswith(".jsonl"):
                     session_files.append(os.path.join(root, f))
 
-        logger.debug(f"Syncing {len(session_files)} session files")
+        logger.debug(f"Syncing {len(session_files)} session files (force={force})")
 
         active_paths = set()
         for session_file in session_files:
             entry = await build_file_entry(session_file, self.memory_dir)
             active_paths.add(entry["path"])
 
-            cursor = self.db.execute(
-                "SELECT hash FROM files WHERE path = ? AND source = ?",
-                (entry["path"], "sessions")
-            )
-            row = cursor.fetchone()
+            if not force:
+                cursor = self.db.execute(
+                    "SELECT hash FROM files WHERE path = ? AND source = ?",
+                    (entry["path"], "sessions")
+                )
+                row = cursor.fetchone()
 
-            if row and row["hash"] == entry["hash"]:
-                continue
+                if row and row["hash"] == entry["hash"]:
+                    continue
 
             await self._index_file(entry, "sessions")
 
@@ -729,12 +1035,31 @@ class MemoryIndexManager:
                 logger.error("no available sys_operation when _index_file")
             chunks = chunk_markdown(content, self.settings.chunking)
 
+            # Before deleting the old chunks, drop their vector rows too —
+            # otherwise re-indexing a file (force reindex / hash change) leaves
+            # orphan vectors in chunks_vec whose rowids no longer match any chunk
+            # (the new chunks get fresh rowids), polluting the index and breaking
+            # the rowid join used by search.
+            old_rowids = []
+            for r in self.db.execute(
+                "SELECT rowid FROM chunks WHERE path = ?", (entry["path"],)
+            ).fetchall():
+                old_rowids.append(r["rowid"])
+            if self.vector_available:
+                for rid in old_rowids:
+                    try:
+                        self.db.execute(
+                            f"DELETE FROM {VECTOR_TABLE} WHERE rowid = ?", (rid,)
+                        )
+                    except sqlite3.Error as e:
+                        logger.debug(f"Skipping orphan vector row delete (rowid={rid}): {e}")
+
             self.db.execute("DELETE FROM chunks WHERE path = ?", (entry["path"],))
             if self.fts_available:
                 try:
                     self.db.execute(f"DELETE FROM {FTS_TABLE} WHERE path = ?", (entry["path"],))
-                except sqlite3.Error:
-                    pass
+                except sqlite3.Error as e:
+                    logger.debug(f"Skipping FTS delete for {entry['path']}: {e}")
 
             for chunk in chunks:
                 await self._index_chunk(entry["path"], source, chunk)
@@ -762,6 +1087,8 @@ class MemoryIndexManager:
 
         embedding = await self._get_embedding(chunk.text)
 
+        model_name = self.provider.model if self.provider else None
+
         cursor = self.db.execute("""
             INSERT OR REPLACE INTO chunks
             (id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)
@@ -769,7 +1096,7 @@ class MemoryIndexManager:
             RETURNING rowid
         """, (
             chunk_id, file_path, source, chunk.start_line, chunk.end_line,
-            chunk_hash, self.provider.model, chunk.text,
+            chunk_hash, model_name, chunk.text,
             vector_to_blob(embedding) if embedding else None,
             int(asyncio.get_event_loop().time()) if self._event_loop else 0
         ))
@@ -805,16 +1132,16 @@ class MemoryIndexManager:
                 for row in cursor.fetchall():
                     try:
                         self.db.execute(f"DELETE FROM {VECTOR_TABLE} WHERE rowid = ?", (row["rowid"],))
-                    except sqlite3.Error:
-                        pass
+                    except sqlite3.Error as e:
+                        logger.debug(f"Skipping vector row delete for {file_path} (rowid={row['rowid']}): {e}")
 
             if self.fts_available:
                 cursor = self.db.execute("SELECT rowid FROM chunks WHERE path = ?", (file_path,))
                 for row in cursor.fetchall():
                     try:
                         self.db.execute(f"DELETE FROM {FTS_TABLE} WHERE rowid = ?", (row["rowid"],))
-                    except sqlite3.Error:
-                        pass
+                    except sqlite3.Error as e:
+                        logger.debug(f"Skipping FTS row delete for {file_path} (rowid={row['rowid']}): {e}")
 
             self.db.execute("DELETE FROM chunks WHERE path = ?", (file_path,))
             self.db.execute("DELETE FROM files WHERE path = ?", (file_path,))
@@ -914,6 +1241,17 @@ class MemoryIndexManager:
                 if r["score"] >= min_score
             ][:max_results]
 
+        # if not embedding, Skip the rerank and use the raw keyword scores directly instead.
+        # Pure-keyword BM25 scores run low (trigram multi-token queries commonly land
+        # 0.1-0.3 after the rank->score transform), so apply a lower floor here than
+        # the hybrid path — otherwise real hits get filtered out and search returns [].
+        if not has_vector:
+            keyword_min_score = self.settings.query.get("keywordMinScore", 0.1)
+            return [
+                r for r in keyword_results
+                if r["score"] >= keyword_min_score
+            ][:max_results]
+
         merged = _merge_hybrid_results(
             vector_results,
             keyword_results,
@@ -933,6 +1271,8 @@ class MemoryIndexManager:
             return await self._search_vector_fallback(query_vec, limit)
 
         if not self.vector_dims:
+            if not self.provider:
+                return []
             sample = await self.provider.embed_query("sample")
             self._ensure_vector_table(len(sample))
         else:
@@ -1048,62 +1388,104 @@ class MemoryIndexManager:
             query: str,
             limit: int
     ) -> List[Dict[str, Any]]:
-        """Search using keyword matching (FTS5)."""
-        if not self.fts_available:
+        """Search via trigram FTS (long tokens) with a LIKE fallback for short tokens.
+
+        Long tokens (>=3 chars) hit the BM25-ranked FTS index; short tokens
+        (<3 chars, e.g. 2-char Chinese) can't match trigram and fall back to
+        ``LIKE '%tok%'`` on ``chunks.text``. Results are merged by chunk id —
+        FTS scores win on conflict, LIKE hits get a fixed score.
+        """
+        long_tokens, short_tokens = split_query_tokens(query)
+        if not long_tokens and not short_tokens:
             return []
 
-        try:
-            fts_query = build_fts_query(query)
-            if not fts_query:
-                return []
+        source_filter, source_params = self._build_source_filter()
 
-            source_filter, source_params = self._build_source_filter()
+        cursor = self.db.execute(f"""
+            SELECT rowid, id, path, source, start_line, end_line, text
+            FROM chunks
+            WHERE {source_filter}
+        """, source_params)
 
-            cursor = self.db.execute(f"""
-                SELECT rowid, id, path, source, start_line, end_line, text
-                FROM chunks
-                WHERE {source_filter}
-            """, source_params)
+        chunk_map = {}
+        for row in cursor.fetchall():
+            chunk_map[row["rowid"]] = {
+                "id": str(row["id"]),
+                "path": str(row["path"]),
+                "source": str(row["source"]),
+                "start_line": int(row["start_line"]),
+                "end_line": int(row["end_line"]),
+                "snippet": str(row["text"][:SNIPPET_MAX_CHARS])
+            }
 
-            chunk_map = {}
-            for row in cursor.fetchall():
-                chunk_map[row["rowid"]] = {
-                    "id": str(row["id"]),
-                    "path": str(row["path"]),
-                    "source": str(row["source"]),
-                    "start_line": int(row["start_line"]),
-                    "end_line": int(row["end_line"]),
-                    "snippet": str(row["text"][:SNIPPET_MAX_CHARS])
-                }
-
-            if not chunk_map:
-                return []
-
-            rows = self.db.execute(f"""
-                SELECT 
-                    rowid,
-                    rank
-                FROM {FTS_TABLE}
-                WHERE {FTS_TABLE} MATCH ?
-                ORDER BY rank
-                LIMIT ?
-            """, (fts_query, limit))
-
-            results = []
-            for row in rows:
-                rowid = row["rowid"]
-                if rowid in chunk_map:
-                    score = bm25_rank_to_score(float(row["rank"]))
-
-                    result = chunk_map[rowid].copy()
-                    result["score"] = float(score)
-                    results.append(result)
-
-            return results
-
-        except Exception as e:
-            logger.debug(f"Keyword search failed: {e}")
+        if not chunk_map:
             return []
+
+        results: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        # FTS path for long tokens. Restrict to rowids that still exist in chunks
+        # (via chunk_map): chunks_fts is contentless and may carry orphan rowids
+        # left by prior reindexes where chunks was cleared but the FTS postings
+        # weren't fully purged. Without this filter, high-scoring orphans fill
+        # the LIMIT before the real hits surface — returning [].
+        fts_query = build_fts_query(query) if long_tokens else ""
+        if self.fts_available and fts_query:
+            try:
+                rowid_placeholders = ",".join("?" * len(chunk_map))
+                rows = self.db.execute(f"""
+                    SELECT
+                        rowid,
+                        rank
+                    FROM {FTS_TABLE}
+                    WHERE {FTS_TABLE} MATCH ? AND rowid IN ({rowid_placeholders})
+                    ORDER BY rank
+                    LIMIT ?
+                """, (fts_query, *list(chunk_map.keys()), limit))
+                for row in rows:
+                    rowid = row["rowid"]
+                    if rowid in chunk_map:
+                        score = bm25_rank_to_score(float(row["rank"]))
+                        result = chunk_map[rowid].copy()
+                        result["score"] = float(score)
+                        if result["id"] not in seen_ids:
+                            seen_ids.add(result["id"])
+                            results.append(result)
+            except Exception as e:
+                logger.debug(f"Keyword FTS search failed: {e}")
+
+        # LIKE fallback for short tokens: trigram can't match <3 chars, so scan
+        # chunks.text. No index, but memory chunk volume is small enough to scan.
+        if short_tokens:
+            like_clauses = " OR ".join("text LIKE ? ESCAPE '\\'" for _ in short_tokens)
+            like_params = [self._escape_like(t) for t in short_tokens]
+            try:
+                like_rows = self.db.execute(f"""
+                    SELECT rowid
+                    FROM chunks
+                    WHERE {source_filter} AND ({like_clauses})
+                    LIMIT ?
+                """, (*source_params, *like_params, limit))
+                # Fixed score clears min_score (0.3) but stays below FTS/BM25 hits.
+                like_score = 0.5
+                for row in like_rows:
+                    rowid = row["rowid"]
+                    if rowid in chunk_map:
+                        result = chunk_map[rowid].copy()
+                        result["score"] = float(like_score)
+                        if result["id"] not in seen_ids:
+                            seen_ids.add(result["id"])
+                            results.append(result)
+            except Exception as e:
+                logger.debug(f"Keyword LIKE fallback failed: {e}")
+
+        return results
+
+    @staticmethod
+    def _escape_like(token: str) -> str:
+        """Escape a token into a LIKE ``%token%`` pattern (literal %, _, \\)."""
+        escaped = token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return f"%{escaped}%"
 
     def _build_source_filter(self) -> tuple:
         """Build SQL filter for enabled sources.
@@ -1122,6 +1504,8 @@ class MemoryIndexManager:
 
     async def _embed_query_with_timeout(self, query: str) -> List[float]:
         """Embed query with timeout."""
+        if not self.provider:
+            return []
         try:
             timeout = 60.0
             return await asyncio.wait_for(

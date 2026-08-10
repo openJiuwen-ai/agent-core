@@ -31,7 +31,7 @@ def test_monitor_event_exposes_lightweight_plan_request_fields() -> None:
     assert "tool_call_id" not in monitor_event.model_dump()
 
 
-def test_monitor_event_does_not_expose_plan_response_feedback() -> None:
+def test_monitor_event_exposes_plan_response_feedback() -> None:
     event = EventMessage.from_event(
         TaskPlanResponseEvent(
             team_name="team",
@@ -53,5 +53,5 @@ def test_monitor_event_does_not_expose_plan_response_feedback() -> None:
     assert monitor_event.plan_id == "plan-1"
     assert monitor_event.approved is False
     dumped = monitor_event.model_dump()
-    assert "feedback" not in dumped
+    assert dumped["feedback"] == "revise implementation details"
     assert "tool_call_id" not in dumped

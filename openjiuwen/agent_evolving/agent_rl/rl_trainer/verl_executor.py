@@ -28,6 +28,7 @@ Class hierarchy::
 ``OfflineVerlTrainingExecutor``.
 """
 
+import importlib
 import inspect
 from abc import abstractmethod
 from copy import deepcopy
@@ -47,6 +48,11 @@ from verl.trainer.ppo.ray_trainer import (
     compute_response_mask,
 )
 from verl.utils.metric import reduce_metrics
+try:
+    from verl.utils.py_functional import rename_dict
+except ImportError:
+    def rename_dict(data: dict, prefix: str) -> dict:
+        return {f"{prefix}{key}": value for key, value in data.items()}
 from verl.utils.tracking import Tracking
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -112,6 +118,22 @@ class BaseVerlTrainingExecutor(RayPPOTrainer):
             )
         self.pad_size = None
         self._diagnostics = TrainingDiagnostics(tokenizer) if config.trainer.get("develop_mode", False) else None
+        self._tensordict_worker_api = self._detect_tensordict_worker_api()
+
+    @staticmethod
+    def _detect_tensordict_worker_api() -> bool:
+        try:
+            importlib.import_module("verl.workers.utils.padding")
+            return hasattr(DataProto, "to_tensordict") and hasattr(DataProto, "from_tensordict")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _padding_helpers():
+        from verl.utils import tensordict_utils as tu
+        from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
+
+        return tu, left_right_2_no_padding, no_padding_2_padding
 
     # -- rollout lifecycle (abstract) ----------------------------------------
 
@@ -195,7 +217,43 @@ class BaseVerlTrainingExecutor(RayPPOTrainer):
             batch, self.actor_rollout_wg.world_size
         )
         self.pad_size = unpad_at
-        prior_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+
+        if self._tensordict_worker_api:
+            tu, left_right_2_no_padding, no_padding_2_padding = self._padding_helpers()
+            batch_td = left_right_2_no_padding(batch.to_tensordict())
+            calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get(
+                "calculate_sum_pi_squared", False
+            )
+            tu.assign_non_tensor(
+                batch_td,
+                calculate_entropy=True,
+                calculate_sum_pi_squared=calculate_sum_pi_squared,
+                compute_loss=False,
+                temperature=self.config.actor_rollout_ref.rollout.temperature,
+            )
+            output = self.actor_rollout_wg.compute_log_prob(batch_td)
+            entropy = no_padding_2_padding(tu.get(output, "entropy"), batch_td)
+            log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
+
+            result = {
+                "old_log_probs": log_probs.float(),
+                "entropys": entropy.float(),
+            }
+            routed_experts = tu.get(output, "routed_experts")
+            if routed_experts is not None:
+                result["routed_experts"] = routed_experts
+            if calculate_sum_pi_squared:
+                sum_pi_squared = tu.get(output, "sum_pi_squared")
+                if sum_pi_squared is not None:
+                    result["sum_pi_squared"] = no_padding_2_padding(
+                        sum_pi_squared, batch_td
+                    ).float()
+            worker_metrics = tu.get(output, "metrics", default={}) or {}
+            if "mfu" in worker_metrics:
+                metrics["perf/mfu/actor_log_prob"] = worker_metrics["mfu"]
+            prior_log_prob = DataProto.from_tensordict(tu.get_tensordict(result))
+        else:
+            prior_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
         entropy_mat = prior_log_prob.batch["entropys"]
         resp_mask = batch.batch["response_mask"]
 
@@ -230,10 +288,27 @@ class BaseVerlTrainingExecutor(RayPPOTrainer):
     def compute_reference_log_prob(self, batch):
         """Computes reference policy log probabilities."""
         if self.use_reference_policy:
-            if getattr(self, "ref_in_actor", False):
-                ref_probs = self.actor_rollout_wg.compute_ref_log_prob(batch)
+            if self._tensordict_worker_api:
+                tu, left_right_2_no_padding, no_padding_2_padding = self._padding_helpers()
+                batch_td = left_right_2_no_padding(batch.to_tensordict())
+                metadata = {"calculate_entropy": False, "compute_loss": False}
+                if getattr(self, "ref_in_actor", False):
+                    metadata["no_lora_adapter"] = True
+                metadata["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+                tu.assign_non_tensor(batch_td, **metadata)
+                if getattr(self, "ref_in_actor", False):
+                    output = self.actor_rollout_wg.compute_log_prob(batch_td)
+                else:
+                    output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
+                log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td)
+                ref_probs = DataProto.from_tensordict(
+                    tu.get_tensordict({"ref_log_prob": log_probs.float()})
+                )
             else:
-                ref_probs = self.ref_policy_wg.compute_ref_log_prob(batch)
+                if getattr(self, "ref_in_actor", False):
+                    ref_probs = self.actor_rollout_wg.compute_ref_log_prob(batch)
+                else:
+                    ref_probs = self.ref_policy_wg.compute_ref_log_prob(batch)
             batch = batch.union(ref_probs)
         return batch
 
@@ -267,6 +342,31 @@ class BaseVerlTrainingExecutor(RayPPOTrainer):
             metrics.update(kl_metrics)
         else:
             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+        response_mask = batch.batch["response_mask"]
+        active_response_tokens = int(response_mask.sum().item())
+        if (
+            str(self.config.algorithm.adv_estimator) == "reinforce_plus_plus"
+            and active_response_tokens <= 1
+        ):
+            token_level_rewards = batch.batch["token_level_rewards"]
+            gamma = self.config.algorithm.gamma
+            with torch.no_grad():
+                returns = torch.zeros_like(token_level_rewards)
+                running_return = 0
+                for t in reversed(range(token_level_rewards.shape[1])):
+                    running_return = token_level_rewards[:, t] + gamma * running_return
+                    returns[:, t] = running_return
+                    running_return = running_return * response_mask[:, t]
+                returns = returns * response_mask
+                batch.batch["advantages"] = returns
+                batch.batch["returns"] = returns
+            metrics["training/advantage_single_token_fallback"] = 1
+            logger.info(
+                "Using unwhitened REINFORCE++ advantage because active response tokens=%d",
+                active_response_tokens,
+            )
+            return batch
 
         batch = compute_advantage(
             batch,
@@ -382,8 +482,36 @@ class BaseVerlTrainingExecutor(RayPPOTrainer):
     def update_actor(self, batch, metrics):
         """Updates the actor policy after critic warmup."""
         if self.config.trainer.critic_warmup <= self.global_steps:
-            actor_result = self.actor_rollout_wg.update_actor(batch)
-            actor_metrics = reduce_metrics(actor_result.meta_info["metrics"])
+            if self._tensordict_worker_api:
+                tu, left_right_2_no_padding, _ = self._padding_helpers()
+                batch_td = left_right_2_no_padding(batch.to_tensordict())
+                actor_cfg = self.config.actor_rollout_ref.actor
+                ppo_mini_batch_size = (
+                    actor_cfg.ppo_mini_batch_size
+                    * self.config.actor_rollout_ref.rollout.n
+                )
+                calculate_entropy = actor_cfg.calculate_entropy or (
+                    actor_cfg.entropy_coeff != 0.0
+                )
+                tu.assign_non_tensor(
+                    batch_td,
+                    calculate_entropy=calculate_entropy,
+                    distillation_use_topk=False,
+                    global_batch_size=ppo_mini_batch_size,
+                    mini_batch_size=ppo_mini_batch_size,
+                    epochs=actor_cfg.ppo_epochs,
+                    seed=actor_cfg.data_loader_seed,
+                    dataloader_kwargs={"shuffle": actor_cfg.shuffle},
+                    compute_loss=True,
+                    temperature=self.config.actor_rollout_ref.rollout.temperature,
+                )
+                actor_output = self.actor_rollout_wg.update_actor(batch_td)
+                actor_metrics = rename_dict(tu.get(actor_output, "metrics"), "actor/")
+                if "actor/mfu" in actor_metrics:
+                    actor_metrics["perf/mfu/actor"] = actor_metrics.pop("actor/mfu")
+            else:
+                actor_result = self.actor_rollout_wg.update_actor(batch)
+                actor_metrics = reduce_metrics(actor_result.meta_info["metrics"])
             metrics.update(actor_metrics)
             if self._diagnostics:
                 self._diagnostics.diag_after_actor_update(metrics)

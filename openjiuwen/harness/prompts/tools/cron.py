@@ -19,8 +19,8 @@ DESCRIPTION: Dict[str, str] = {
         "\n\n【投递频道】delivery.channel / targets：用户未明确指定时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**"
         "\n\n【强制：wake_offset_seconds】这是提前唤醒秒数，不是任务执行时间。"
         "除非用户明确说“提前 X 秒/分钟唤醒/准备/执行”，否则**禁止**传 wake_offset_seconds 字段；"
-        "不要根据任务类型、提醒/查询场景、距离触发时间或历史记录推断为 0、60 或其他值。"
-        "用户未明确指定时必须省略该字段，后端会默认使用 300 秒。"
+        "不要根据任务类型、提醒/查询场景、距离触发时间或历史记录推断为 60 或其他正值。"
+        "用户未明确指定时必须省略该字段，后端会默认使用 0 秒（到点执行，不提前唤醒）。"
         "\n\n【重要：cron 表达式格式】只支持7段式(Quartz格式)：秒 分 时 日 月 周 年。"
         "字段取值范围：秒(0-59)，分(0-59)，时(0-23)，日(1-31)，月(1-12)，周(1-7或?)，年(1970-2099或*)。"
         "日和周字段：不能同时指定具体值，其中一个必须用?表示'不指定'。"
@@ -64,9 +64,10 @@ DESCRIPTION: Dict[str, str] = {
         "system uses current channel. **Never infer from history.**"
         "\n\n[MANDATORY: wake_offset_seconds] This is a compatibility wake-ahead offset, not the task execution time. "
         "Unless the user explicitly says to wake/prepare/run X seconds/minutes early, DO NOT pass wake_offset_seconds. "
-        "Never infer 0, 60, or any other value from task type, reminder/query scenarios, "
+        "Never infer 60 or any other positive value from task type, reminder/query scenarios, "
         "time until trigger, or history. "
-        "When the user does not explicitly specify it, omit the field; the backend defaults to 300 seconds."
+        "When the user does not explicitly specify it, omit the field; the backend defaults to 0 seconds "
+        "(run at the scheduled time, no early wake)."
         "\n\n[CRITICAL: Cron Expression Format] Only supports 7-field Quartz format: "
         "second minute hour day month dow year. "
         "Field ranges: "
@@ -313,15 +314,16 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
     "wake_offset_seconds": {
         "cn": (
             "提前唤醒秒数，不是任务执行时间。除非用户明确说“提前 X 秒/分钟唤醒/准备/执行”，"
-            "否则禁止传该字段；不要根据任务类型、提醒/查询场景、距离触发时间或历史记录推断为 0、60 或其他值。"
-            "用户未明确指定时必须省略，后端默认 300 秒。"
+            "否则禁止传该字段；不要根据任务类型、提醒/查询场景、距离触发时间或历史记录推断为 60 或其他正值。"
+            "用户未明确指定时必须省略，后端默认 0 秒（到点执行，不提前唤醒）。"
         ),
         "en": (
             "Compatibility wake-ahead offset in seconds; not the task execution time. "
             "Unless the user explicitly says to wake/prepare/run X seconds/minutes early, do not pass this field. "
-            "Do not infer 0, 60, or any other value from task type, "
+            "Do not infer 60 or any other positive value from task type, "
             "reminder/query scenarios, time until trigger, or history. "
-            "Omit it when unspecified; the backend defaults to 300 seconds."
+            "Omit it when unspecified; the backend defaults to 0 seconds "
+            "(run at the scheduled time, no early wake)."
         ),
     },
     "description": {
@@ -513,6 +515,7 @@ def get_cron_job_input_params(language: str = "cn") -> Dict[str, Any]:
             "wake_offset_seconds": {
                 "type": "integer",
                 "description": _desc("wake_offset_seconds", language),
+                "default": 0,
             },
             "description": {
                 "type": "string",
@@ -602,8 +605,8 @@ CRON_CREATE_JOB_DESCRIPTION_CN = """
 【targets】用户未明确指定投递渠道时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**
 
 【强制：wake_offset_seconds】除非用户明确说“提前 X 秒/分钟唤醒/准备/执行”，否则**禁止**传 wake_offset_seconds。
-用户未明确指定时必须省略该字段，后端会默认使用 300 秒。不要因为是提醒类任务而传 0，
-也不要因为是查询/准备类任务而传 60 或其他值；禁止从任务类型、距离触发时间或历史记录推断。
+用户未明确指定时必须省略该字段，后端会默认使用 0 秒（到点执行，不提前唤醒）。
+不要因为是查询/准备类任务而传 60 或其他正值；禁止从任务类型、距离触发时间或历史记录推断。
 
 【重要：cron 表达式格式】只支持7段式(Quartz格式)：秒 分 时 日 月 周 年。
 日和周字段：不能同时指定具体值，其中一个必须用?表示'不指定'。
@@ -633,8 +636,9 @@ Create a new cron job using flat fields (name, cron_expr, timezone, targets, des
 [targets] Leave empty unless user explicitly specifies a channel; system uses current channel. **Never infer from history.**
 
 [MANDATORY: wake_offset_seconds] Unless the user explicitly says to wake/prepare/run X seconds/minutes early,
-DO NOT pass wake_offset_seconds. If the user does not specify it, omit the field; the backend defaults to 300 seconds.
-Do not pass 0 for reminder tasks, 60 for query/preparation tasks, or any inferred value from task type, time until trigger, or history.
+DO NOT pass wake_offset_seconds. If the user does not specify it, omit the field; the backend defaults to 0 seconds
+(run at the scheduled time, no early wake).
+Do not pass 60 for query/preparation tasks, or any other inferred positive value from task type, time until trigger, or history.
 
 [CRITICAL: Cron Expression Format] Only supports 7-field Quartz format: second minute hour day month dow year.
 Day and dow fields: cannot both have specific values; one must be '?' (no specific value).
@@ -765,14 +769,15 @@ LEGACY_FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
     "wake_offset_seconds": {
         "cn": (
             "提前唤醒秒数，不是任务执行时间。除非用户明确说“提前 X 秒/分钟唤醒/准备/执行”，"
-            "否则禁止传该字段；用户未明确指定时必须省略，后端默认 300 秒。"
-            "不要根据任务类型、提醒/查询场景、距离触发时间或历史记录推断为 0、60 或其他值。"
+            "否则禁止传该字段；用户未明确指定时必须省略，后端默认 0 秒（到点执行，不提前唤醒）。"
+            "不要根据任务类型、提醒/查询场景、距离触发时间或历史记录推断为 60 或其他正值。"
         ),
         "en": (
             "Wake-ahead offset in seconds; not the task execution time. "
             "Unless the user explicitly says to wake/prepare/run X seconds/minutes early, do not pass this field. "
-            "Omit it when unspecified; the backend defaults to 300 seconds. "
-            "Do not infer 0, 60, or any other value from task type, "
+            "Omit it when unspecified; the backend defaults to 0 seconds "
+            "(run at the scheduled time, no early wake). "
+            "Do not infer 60 or any other positive value from task type, "
             "reminder/query scenarios, time until trigger, or history."
         ),
     },
@@ -837,7 +842,7 @@ def get_cron_create_job_input_params(language: str = "cn") -> Dict[str, Any]:
             "wake_offset_seconds": {
                 "type": "integer",
                 "description": _legacy_desc("wake_offset_seconds", language),
-                "default": 300,
+                "default": 0,
             },
         },
         "required": ["name", "cron_expr", "timezone", "description"],

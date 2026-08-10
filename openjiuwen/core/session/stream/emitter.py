@@ -1,10 +1,11 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
 from typing import Any, Optional
 
 from openjiuwen.core.common.logging import session_logger, LogEventType
+from openjiuwen.core.session.stream.chunk_logging import log_stream_chunk, log_stream_summary
 
 
 class AsyncStreamQueue:
@@ -29,6 +30,10 @@ class AsyncStreamQueue:
 
         self._stream_queue = asyncio.Queue(maxsize=maxsize)
         self._closed = False
+        # Chunk accounting reported once by ``close``; per-chunk tracing is
+        # opt-in, these keep the volume observable without it.
+        self._sent_count = 0
+        self._received_count = 0
 
     @property
     def is_closed(self) -> bool:
@@ -45,10 +50,11 @@ class AsyncStreamQueue:
             try:
                 await asyncio.wait_for(self._stream_queue.put(data),
                                        attempt_timeout)
-                session_logger.debug(
+                self._sent_count += 1
+                log_stream_chunk(
                     "Stream data sent successfully",
-                    event_type=LogEventType.SESSION_STREAM_CHUNK,
-                    metadata={"timeout": attempt_timeout, "attempt": attempt + 1}
+                    timeout=attempt_timeout,
+                    attempt=attempt + 1,
                 )
                 return
             except asyncio.TimeoutError:
@@ -72,10 +78,10 @@ class AsyncStreamQueue:
         stream_item = await asyncio.wait_for(self._stream_queue.get(),
                                              timeout if timeout and timeout > 0 else None)
         self._stream_queue.task_done()
-        session_logger.debug(
+        self._received_count += 1
+        log_stream_chunk(
             "Stream data received successfully",
-            event_type=LogEventType.SESSION_STREAM_CHUNK,
-            metadata={"stream_item_type": type(stream_item).__name__}
+            stream_item_type=type(stream_item).__name__,
         )
         return stream_item
 
@@ -83,6 +89,12 @@ class AsyncStreamQueue:
         if self._closed:
             return
         self._closed = True
+
+        log_stream_summary(
+            "StreamQueue closed",
+            sent_count=self._sent_count,
+            received_count=self._received_count,
+        )
 
         try:
             await asyncio.wait_for(self._stream_queue.join(), timeout if timeout and timeout > 0 else None)

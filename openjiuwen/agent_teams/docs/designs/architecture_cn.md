@@ -143,12 +143,14 @@ openjiuwen/agent_teams/
 │       ├── kernel.py               # CoordinationKernel — 整体 facade
 │       ├── event_bus.py            # EventBus + InnerEventType + poll timer
 │       ├── dispatcher.py           # EventDispatcher + DispatcherHost / AgentRoundController / TeamLifecycleController / PollController
-│       └── handlers/               # 五个场景 handler
-│           ├── agent_lifecycle.py  # USER_INPUT / STANDBY / CLEANED / TOOL_APPROVAL_RESULT
-│           ├── member.py           # 6 个 MEMBER_*
+│       └── handlers/               # 7 个场景 handler（策略逻辑见 handlers/AGENTS.md）
+│           ├── agent_lifecycle.py  # USER_INPUT / STANDBY / CLEANED / TOOL_APPROVAL_RESULT / TASK_PLAN_RESPONSE
+│           ├── member.py           # REFRESH_TEAM_CONTEXT + 6 个 MEMBER_*
 │           ├── message.py          # MESSAGE / BROADCAST / POLL_MAILBOX + MEMBER_SHUTDOWN fan-out
-│           ├── task_board.py       # TASK_CLAIMED + 4 个 TASK_*
-│           └── stale_task.py       # POLL_TASK + 滞留 claim/pending 检测
+│           ├── task_board.py       # INITIAL_POLL_TASK + 14 个 TASK_*（含调度模式子类）
+│           ├── stale_task.py       # POLL_TASK 停滞 sweep（含调度模式子类）
+│           ├── team_completion.py  # POLL_TASK / TASK_LIST_DRAINED / TEAM_COMPLETED
+│           └── workflow.py         # WORKFLOW_PROGRESS（leader-only 叙述）
 │
 ├── rails/                          # 团队 Rail
 │   ├── team_policy_rail.py         # 分段式 PromptSection 注入
@@ -157,11 +159,9 @@ openjiuwen/agent_teams/
 │   └── tool_approval_rail.py       # Teammate 工具审批中断
 │
 ├── prompts/                        # 系统提示词模板 + 装配
-│   ├── loader.py                   # load_template / load_shared_template（@cache）
-│   ├── policy.py                   # role_policy / build_system_prompt（老装配路径）
-│   ├── sections.py                 # TeamSectionName + build_team_*_section（Rail 主力路径）
+│   ├── loader.py                   # load_template（@cache）
+│   ├── sections.py                 # TeamSectionName + build_team_*_section（唯一装配路径）
 │   ├── section_cache.py            # MtimeSectionCache — dynamic section 缓存
-│   ├── system_prompt.md            # 语言无关占位符模板
 │   ├── cn/                         # 中文模板
 │   │   ├── leader_policy.md
 │   │   ├── teammate_policy.md
@@ -197,7 +197,6 @@ openjiuwen/agent_teams/
 │   ├── task_manager.py             # TeamTaskManager
 │   ├── message_manager.py          # TeamMessageManager
 │   ├── models.py                   # SQLModel 静态表 + 动态会话表工厂
-│   ├── memory_database.py          # InMemoryTeamDatabase + MemoryDatabaseConfig
 │   ├── database/                   # 分 DAO 的 SQL 层
 │   │   ├── config.py               # DatabaseConfig / DatabaseType（sqlite/postgres/mysql）
 │   │   ├── engine.py               # 引擎生命周期 + 动态表 CRUD
@@ -274,7 +273,7 @@ class TeamRole(str, Enum):
 
 | 象限 | 文件 | 含义 |
 |------|------|------|
-| **静态数据** | `agent/blueprint.py` (`TeamAgentBlueprint`, frozen) | 构造时确定、生命周期不变（spec / role / member_name / persona） |
+| **静态数据** | `agent/blueprint.py` (`TeamAgentBlueprint`, frozen) | 构造时确定、生命周期不变（spec / role / member_name / desc / prompt） |
 | **运行时可变状态** | `agent/state.py` (`TeamAgentState`) | 只放**跨 operator** 的字段；operator 内部状态留在 operator 自己 |
 | **每实例资源** | `agent/resources.py` (`PrivateAgentResources`) | 这个 TeamAgent 独占（DeepAgent / WorktreeManager / MemoryManager） |
 | **每进程基础设施** | `agent/infra.py` (`TeamInfra`) | **per-process** 共享（messager / db / team_backend）。leader 和 teammate 跨进程时各持一份 |
@@ -540,12 +539,12 @@ flowchart LR
 | Handler | 监听事件 | 关键行为 |
 |---------|---------|---------|
 | `AgentLifecycleHandler` | `USER_INPUT` / `STANDBY` / `CLEANED` / `TOOL_APPROVAL_RESULT` | start round / steer / pause_polls / shutdown_self / resume_interrupt |
-| `MemberHandler` | 6 个 `MEMBER_*` | leader 观察所有成员；teammate 仅处理自身；`MEMBER_STATUS_CHANGED → READY/ERROR` 触发滞留 claim nudge |
+| `MemberHandler` | 6 个 `MEMBER_*` | leader 观察所有成员；teammate 仅处理自身（stale-claim nudge 已收敛为 self-only，不在此触发，见 F_53） |
 | `MessageHandler` | `MESSAGE` / `BROADCAST` / `POLL_MAILBOX` + `MEMBER_SHUTDOWN`（fan-out） | 处理未读消息；leader 额外 ack user-bound 消息 + 通知 human-agent inbound；teammate 在 `MEMBER_SHUTDOWN` 自身时 drain 邮箱 |
 | `TaskBoardHandler` | `TASK_CLAIMED` + 4 个 `TASK_*` | targeted assignment + `_nudge_idle_agent` |
 | `StaleTaskHandler` | `POLL_TASK` | 滞留 claim（默认 120s）+ leader 滞留 PENDING |
 
-`MemberHandler` 与 `StaleTaskHandler` 在 `EventDispatcher.__init__` 共享同一 `stale_claim_throttle` dict，确保同一 stale 窗口内不重复 nudge 同一 task。
+stale-claim nudge 是 self-only（成员在 `POLL_TASK` 上扫自己认领的任务并喂自己的 loop，非 steer），`StaleTaskHandler` 用私有 `_last_stale_nudge` 节流本进程内同一 task 的重复 nudge，不再有跨 handler 共享的 throttle（见 F_53）。
 
 ### 6.3 内部事件类型
 
@@ -586,23 +585,23 @@ CoordinationEvent = Union[InnerEventMessage, EventMessage]
 
 | 优先级 | Section | 内容 | 适用角色 |
 |--------|---------|------|---------|
-| P:11 | `team_role` | member_name + 角色策略 | All |
+| P:10 | `team_identity` | 自身 member_name + 私有工作约定（attachment；仅外部 CLI 内联静态） | All |
+| P:11 | `team_role` | 角色策略 + 执行模式 | All |
 | P:12 | `team_hitt` | HITT 协作规则（当存在 human 成员时） | All |
 | P:13 | `team_workflow` | Leader 工作流（按 team_mode 选择模板） | Leader |
 | P:14 | `team_lifecycle` | 生命周期策略 | Leader |
-| P:15 | `team_persona` | 人设描述 | All |
 | P:16 | `team_extra` | 用户自定义 base_prompt | All |
 | P:65 | `team_info` | 团队元数据 | All |
 | P:66 | `team_members` | 成员关系 | All |
 
-- **静态分段**（role / hitt / workflow / lifecycle / persona / extra）在 `__init__` 一次性构建，每次 `before_model_call` 重新 `add_section`
+- **静态分段**（role / hitt / workflow / lifecycle / extra）在 `__init__` 一次性构建，每次 `before_model_call` 重新 `add_section`
 - **动态分段**（`team_info` / `team_members`）由 `MtimeSectionCache` 包装，先 probe `updated_at`，未变则复用缓存
+- **per-member 分段**（`team_identity`：member_name + 私有工作约定）内容恒定，但成员之间各不相同：留在系统提示词里会让每个成员各占一份前缀 KV cache，故与动态分段同走 attachment 通道
 
 ### 7.2 模板组织
 
 ```
 prompts/
-├── system_prompt.md              # 占位符模板（policy.py 装配路径）
 ├── cn/                           # 中文
 │   ├── leader_policy.md
 │   ├── teammate_policy.md
@@ -611,7 +610,7 @@ prompts/
 └── en/                           # 英文（同结构）
 ```
 
-`policy.py`（老路径，`system_prompt.md` 壳模板）和 `sections.py`（Rail 主力路径，独立 PromptSection）读同一批模板。仅占位符或 section 拆分这类结构性变更需要决定落到哪条路径。
+`sections.py`（唯一装配路径，独立 PromptSection，由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费）读这批模板——各 builder 直接 `load_template`（如 `build_team_role_section` 读 `leader_policy` / `teammate_policy`）。改正文即时生效。
 
 ---
 
@@ -694,9 +693,9 @@ erDiagram
 
 | 后端 | 配置类 | 特征 |
 |------|--------|------|
-| SQLite | `DatabaseConfig(db_type="sqlite")` | WAL 模式，AsyncAdaptedQueuePool，默认 |
+| SQLite（文件） | `DatabaseConfig(db_type="sqlite")` | WAL 模式，AsyncAdaptedQueuePool，默认 |
+| SQLite（内存） | `DatabaseConfig(db_type="sqlite", connection_string=":memory:")` | StaticPool 单连接，单进程，测试友好 |
 | PostgreSQL / MySQL | `DatabaseConfig(db_type="postgresql"/"mysql")` | 共用同一 `DatabaseConfig` |
-| 内存 | `MemoryDatabaseConfig` | asyncio.Lock 序列化，单进程，测试友好 |
 
 ### 8.2 Session checkpoint 状态结构
 
@@ -739,8 +738,8 @@ classDiagram
         +build() TeamAgent
         +resolve_db_config()
     }
-    class LeaderSpec { +member_name +display_name +persona +model_name }
-    class TeamMemberSpec { +member_name +display_name +role_type +persona +prompt_hint +model_name }
+    class LeaderSpec { +member_name +display_name +desc +prompt +model_name }
+    class TeamMemberSpec { +member_name +display_name +role_type +desc +prompt +model_name }
     class TransportSpec { +type +params +build() }
     class StorageSpec { +type +params +build() }
     class DeepAgentSpec { +card +model +system_prompt +tools +mcps +subagents +rails +skills +workspace +sys_operation +approval_required_tools +max_iterations +completion_timeout +language +build() }
@@ -987,7 +986,7 @@ Worktree 工具（`enter_worktree` / `exit_worktree`）已下沉到 `openjiuwen.
 
 ```python
 get_shared_runtime() -> TeamRuntime
-get_shared_db(config) -> TeamDatabase | InMemoryTeamDatabase
+get_shared_db(config) -> TeamDatabase
 cleanup_shared_resources() -> None
 ```
 
@@ -1530,7 +1529,6 @@ create_messager()
 
 # 生成机制
 InProcessSpawnHandle
-MemoryDatabaseConfig
 
 # 可观测性
 TeamMonitor / create_monitor()
