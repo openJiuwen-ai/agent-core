@@ -690,6 +690,18 @@ class CurrentRoundCompressor(ContextProcessor):
             token_counter,
             self.processor_type(),
         )
+        # Tool definitions occupy context-window slots on every request; count
+        # them too so compression triggers before messages+tools exceed the
+        # threshold (otherwise compression can leave the context still over
+        # the model limit — #1506). Guard both the accessor and the result:
+        # some contexts do not expose get_tools(), and lightweight token
+        # counters may only implement count_messages.
+        tools = getattr(context, "get_tools", None)
+        tools = tools() if callable(tools) else []
+        if token_counter is not None and tools:
+            tools_tokens = token_counter.count_tools(tools)
+            if isinstance(tools_tokens, int):
+                tokens += tools_tokens
         if tokens > self._token_threshold:
             logger.info(
                 f"[{self.processor_type()} triggered] context tokens {tokens} "
