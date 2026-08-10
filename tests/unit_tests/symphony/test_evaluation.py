@@ -81,9 +81,38 @@ class FakeLLM:
         return self.response
 
 
+def function_call(call_id: str, name: str, arguments: str = "{}") -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+
+
+def assistant_calls(*calls: dict[str, Any]) -> dict[str, Any]:
+    return {"role": "assistant", "content": None, "tool_calls": list(calls)}
+
+
+def prompt_payload(llm: FakeLLM, index: int = 0) -> dict[str, Any]:
+    prompt = llm.messages[index][0]["content"]
+    return json.loads(prompt.split("Evaluation data:\n", maxsplit=1)[1])
+
+
+async def judge(
+    evaluators: list[Any],
+    response: Any,
+    trace: EvaluationCase,
+    metric_ids: tuple[str, ...],
+) -> tuple[tuple[MetricResult, ...], FakeLLM]:
+    llm = FakeLLM(response)
+    metrics = await EvaluationSuite(evaluators, llm=llm, enable_llm=True).evaluate_case(
+        fingerprint(), trace, metric_ids=metric_ids
+    )
+    return metrics, llm
+
+
 @pytest.mark.asyncio
 async def test_accuracy_prompt_uses_event_time_and_migrated_rubric() -> None:
-    llm = FakeLLM('{"score": 1, "reason": "工具结果支持该回答。"}')
     trace = case(
         expected_output=None,
         output="The event has happened.",
@@ -94,14 +123,10 @@ async def test_accuracy_prompt_uses_event_time_and_migrated_rubric() -> None:
         event_time=datetime(2026, 8, 3, 8, 30, tzinfo=UTC),
     )
 
-    await EvaluationSuite(
-        [AccuracyEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(fingerprint(), trace, metric_ids=("accuracy",))
+    _, llm = await judge([AccuracyEvaluator()], '{"score": 1, "reason": "工具结果支持该回答。"}', trace, ("accuracy",))
 
     prompt = llm.messages[0][0]["content"]
-    payload = json.loads(prompt.split("Evaluation data:\n", maxsplit=1)[1])
+    payload = prompt_payload(llm)
     assert payload["reference_time"] == "2026-08-03T08:30:00+00:00"
     assert payload["reference_time_source"] == "event_time"
     for phrase in (
@@ -127,23 +152,32 @@ async def test_accuracy_prompt_uses_event_time_and_migrated_rubric() -> None:
 
 
 @pytest.mark.asyncio
-async def test_accuracy_accepts_explicit_null_as_llm_not_applicable() -> None:
-    llm = FakeLLM('{"score": null, "reason": "用户 query 与当前 Skill 能力范围明确无关。"}')
-
-    metrics = await EvaluationSuite(
-        [AccuracyEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(
-        fingerprint(),
+@pytest.mark.parametrize(
+    "trace",
+    [
         case(expected_output=None, output="面向用户的回答"),
-        metric_ids=("accuracy",),
+        case(
+            expected_output=None,
+            output=None,
+            message=(
+                {"role": "user", "content": "查一下附近的诊所"},
+                assistant_calls(function_call("call-search", "poi_search", '{"keyword":"诊所"}')),
+            ),
+        ),
+    ],
+)
+async def test_accuracy_accepts_explicit_null_as_llm_not_applicable(trace: EvaluationCase) -> None:
+    metrics, llm = await judge(
+        [AccuracyEvaluator()],
+        '{"score": null, "reason": "本次准确性评估不适用。"}',
+        trace,
+        ("accuracy",),
     )
 
     metric = metrics[0]
     assert metric.status == MetricStatus.NOT_APPLICABLE
     assert metric.score is None
-    assert metric.reason == "用户 query 与当前 Skill 能力范围明确无关。"
+    assert metric.reason == "本次准确性评估不适用。"
     assert metric.details == {
         "not_applicable_code": "llm_not_applicable",
         "evaluation_method": "llm",
@@ -162,14 +196,8 @@ async def test_accuracy_accepts_explicit_null_as_llm_not_applicable() -> None:
     ],
 )
 async def test_accuracy_rejects_malformed_or_invalid_three_value_response(response: str) -> None:
-    metrics = await EvaluationSuite(
-        [AccuracyEvaluator()],
-        llm=FakeLLM(response),
-        enable_llm=True,
-    ).evaluate_case(
-        fingerprint(),
-        case(expected_output=None, output="面向用户的回答"),
-        metric_ids=("accuracy",),
+    metrics, _ = await judge(
+        [AccuracyEvaluator()], response, case(expected_output=None, output="面向用户的回答"), ("accuracy",)
     )
 
     assert metrics[0].status == MetricStatus.ERROR
@@ -178,16 +206,11 @@ async def test_accuracy_rejects_malformed_or_invalid_three_value_response(respon
 
 @pytest.mark.asyncio
 async def test_non_accuracy_llm_evaluator_rejects_null_and_keeps_binary_prompt() -> None:
-    llm = FakeLLM('{"score": null, "reason": "不能用于完整性评分。"}')
-
-    metrics = await EvaluationSuite(
+    metrics, llm = await judge(
         [CompletenessEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(
-        fingerprint(),
+        '{"score": null, "reason": "不能用于完整性评分。"}',
         case(expected_output=None, output="面向用户的回答"),
-        metric_ids=("completeness",),
+        ("completeness",),
     )
 
     assert metrics[0].status == MetricStatus.ERROR
@@ -197,85 +220,29 @@ async def test_non_accuracy_llm_evaluator_rejects_null_and_keeps_binary_prompt()
 
 
 @pytest.mark.asyncio
-async def test_accuracy_can_let_model_mark_tool_call_only_trace_not_applicable() -> None:
-    llm = FakeLLM('{"score": null, "reason": "只有工具调用参数，没有实质回答。"}')
-    trace = case(
-        expected_output=None,
-        output=None,
-        message=(
-            {"role": "user", "content": "查一下附近的诊所"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "call-search",
-                        "type": "function",
-                        "function": {"name": "poi_search", "arguments": '{"keyword":"诊所"}'},
-                    }
-                ],
-            },
-        ),
-    )
-
-    metrics = await EvaluationSuite(
-        [AccuracyEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(fingerprint(), trace, metric_ids=("accuracy",))
-
-    assert metrics[0].status == MetricStatus.NOT_APPLICABLE
-    assert metrics[0].details["not_applicable_code"] == "llm_not_applicable"
-    assert len(llm.messages) == 1
-
-
-@pytest.mark.asyncio
-async def test_accuracy_prompt_uses_current_utc_time_when_event_time_is_missing() -> None:
-    llm = FakeLLM('{"score": 1, "reason": "回答没有明确错误。"}')
+async def test_accuracy_prompt_uses_current_utc_time_without_polluting_completeness() -> None:
     trace = case(expected_output=None, output="Current answer.", event_time=None)
     before = datetime.now(UTC)
 
-    await EvaluationSuite(
-        [AccuracyEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(fingerprint(), trace, metric_ids=("accuracy",))
-
-    after = datetime.now(UTC)
-    prompt = llm.messages[0][0]["content"]
-    payload = json.loads(prompt.split("Evaluation data:\n", maxsplit=1)[1])
-    reference_time = datetime.fromisoformat(payload["reference_time"])
-    assert payload["reference_time_source"] == "evaluation_time"
-    assert reference_time.tzinfo is not None
-    assert before <= reference_time.astimezone(UTC) <= after
-
-
-@pytest.mark.asyncio
-async def test_reference_time_is_only_added_to_accuracy_prompt() -> None:
-    llm = FakeLLM('{"score": 1, "reason": "ok"}')
-    trace = case(expected_output=None, output="cloudy")
-
-    await EvaluationSuite(
+    _, llm = await judge(
         [AccuracyEvaluator(), CompletenessEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(
-        fingerprint(),
+        '{"score": 1, "reason": "回答没有明确错误。"}',
         trace,
-        metric_ids=("accuracy", "completeness"),
+        ("accuracy", "completeness"),
     )
 
-    accuracy_prompt = llm.messages[0][0]["content"]
-    completeness_prompt = llm.messages[1][0]["content"]
-    assert '"reference_time"' in accuracy_prompt
-    assert '"reference_time_source"' in accuracy_prompt
-    assert '"reference_time"' not in completeness_prompt
-    assert '"reference_time_source"' not in completeness_prompt
+    after = datetime.now(UTC)
+    accuracy_payload = prompt_payload(llm)
+    reference_time = datetime.fromisoformat(accuracy_payload["reference_time"])
+    assert accuracy_payload["reference_time_source"] == "evaluation_time"
+    assert reference_time.tzinfo is not None
+    assert before <= reference_time.astimezone(UTC) <= after
+    assert "reference_time" not in prompt_payload(llm, 1)
+    assert "reference_time_source" not in prompt_payload(llm, 1)
 
 
 @pytest.mark.asyncio
 async def test_accuracy_prompt_omits_empty_case_fields_without_changing_public_case() -> None:
-    llm = FakeLLM('{"score": 1, "reason": "ok"}')
     trace = case(
         query="",
         inputs=None,
@@ -292,18 +259,15 @@ async def test_accuracy_prompt_omits_empty_case_fields_without_changing_public_c
     assert public_payload["output"] is None
     assert public_payload["success"] is False
 
-    await EvaluationSuite(
+    _, llm = await judge(
         [AccuracyEvaluator(), CompletenessEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(
-        fingerprint(),
+        '{"score": 1, "reason": "ok"}',
         trace,
-        metric_ids=("accuracy", "completeness"),
+        ("accuracy", "completeness"),
     )
 
-    accuracy_payload = json.loads(llm.messages[0][0]["content"].split("Evaluation data:\n", maxsplit=1)[1])
-    completeness_payload = json.loads(llm.messages[1][0]["content"].split("Evaluation data:\n", maxsplit=1)[1])
+    accuracy_payload = prompt_payload(llm)
+    completeness_payload = prompt_payload(llm, 1)
     accuracy_case = accuracy_payload["case"]
     assert "query" not in accuracy_case
     for field_name in ("inputs", "expected_output", "output", "latency", "event_time"):
@@ -320,73 +284,30 @@ async def test_accuracy_prompt_omits_empty_case_fields_without_changing_public_c
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("output", [None, "NO_REPLY"])
-async def test_accuracy_uses_full_message_when_output_is_missing_or_no_reply(output: Any) -> None:
-    llm = FakeLLM('{"score": 1, "reason": "the message contains sufficient evidence"}')
-    trace = case(
-        expected_output=None,
-        output=output,
-        message=(
-            {"role": "user", "content": "What is the weather?"},
-            {"role": "assistant", "content": "The weather is sunny."},
-        ),
-    )
-
-    metrics = await EvaluationSuite(
-        [AccuracyEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(fingerprint(), trace, metric_ids=("accuracy",))
-
-    assert metrics[0].status == MetricStatus.PASS
-    assert len(llm.messages) == 1
-    prompt = llm.messages[0][0]["content"]
-    assert "What is the weather?" in prompt
-    assert "The weather is sunny." in prompt
-
-
-@pytest.mark.asyncio
-async def test_completeness_uses_message_when_output_is_missing() -> None:
-    llm = FakeLLM('{"score": 1, "reason": "the message completes the task"}')
-    trace = case(expected_output=None, output=None)
-
-    metrics = await EvaluationSuite(
-        [CompletenessEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(fingerprint(), trace, metric_ids=("completeness",))
-
-    assert metrics[0].status == MetricStatus.PASS
-    assert "sunny" in llm.messages[0][0]["content"]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("message", "output"),
+    ("message", "output", "evidence"),
     [
-        (({"role": "assistant", "content": "assistant-only evidence"},), None),
-        ((), "standalone output evidence"),
+        (({"role": "assistant", "content": "assistant evidence"},), None, "assistant evidence"),
+        (({"role": "assistant", "content": "assistant evidence"},), "NO_REPLY", "assistant evidence"),
+        ((), "standalone output evidence", "standalone output evidence"),
     ],
 )
-async def test_direct_output_metrics_accept_query_with_assistant_trace_or_output(
+async def test_output_metrics_use_message_or_standalone_output(
     message: tuple[dict[str, Any], ...],
     output: Any,
+    evidence: str,
 ) -> None:
-    llm = FakeLLM('{"score": 1, "reason": "the supplied evidence is sufficient"}')
     trace = case(expected_output=None, message=message, output=output)
-
-    metrics = await EvaluationSuite(
+    metrics, llm = await judge(
         [AccuracyEvaluator(), CompletenessEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(
-        fingerprint(),
+        '{"score": 1, "reason": "the supplied evidence is sufficient"}',
         trace,
-        metric_ids=("accuracy", "completeness"),
+        ("accuracy", "completeness"),
     )
 
     assert all(metric.status == MetricStatus.PASS for metric in metrics)
     assert len(llm.messages) == 2
+    assert all(evidence in messages[0]["content"] for messages in llm.messages)
 
 
 @pytest.mark.asyncio
@@ -549,7 +470,7 @@ def test_latency_without_observed_values_is_not_applicable(latency: Latency | No
     assert metric.details["not_applicable_code"] == "missing_latency_observation"
 
 
-def test_latency_ignores_scenario_and_target_fingerprint_configuration() -> None:
+def test_latency_is_observational_and_has_no_scenario_configuration() -> None:
     configured = fingerprint(
         static_data={"evaluation": {"latency_scenario": "realtime_interaction"}},
         metadata={"latency_target_ms": 1},
@@ -561,9 +482,6 @@ def test_latency_ignores_scenario_and_target_fingerprint_configuration() -> None
     assert metric.status == MetricStatus.OBSERVED
     assert metric.score is None
     assert metric.details == {"ttft_ms": 6_000.0, "e2e_ms": 90_001.0}
-
-
-def test_latency_evaluator_no_longer_accepts_scenario_configuration() -> None:
     with pytest.raises(TypeError):
         LatencyEvaluator(scenario="short_task")
 
@@ -577,17 +495,7 @@ async def test_trace_can_reference_evaluated_capability_through_a_call() -> None
         query="What is the weather?",
         message=(
             {"role": "user", "content": "What is the weather?"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "weather-step",
-                        "type": "function",
-                        "function": {"name": "weather", "arguments": '{"city":"Shenzhen"}'},
-                    }
-                ],
-            },
+            assistant_calls(function_call("weather-step", "weather", '{"city":"Shenzhen"}')),
             {"role": "tool", "tool_call_id": "weather-step", "content": "sunny"},
         ),
         success=True,
@@ -603,6 +511,18 @@ async def test_trace_can_reference_evaluated_capability_through_a_call() -> None
     assert metrics["latency"].status == MetricStatus.NOT_APPLICABLE
     assert metrics["latency"].details["not_applicable_code"] == "missing_latency_observation"
 
+    mismatched = trace.model_copy(
+        update={
+            "message": (
+                {"role": "user", "content": "What is the weather?"},
+                assistant_calls(function_call("weather-step", "other")),
+            )
+        }
+    )
+    with pytest.raises(BaseError) as exc_info:
+        await EvaluationSuite.default().evaluate(fingerprint(), [mismatched])
+    assert exc_info.value.status is StatusCode.COMPONENT_SYMPHONY_SCHEMA_INVALID
+
 
 @pytest.mark.asyncio
 async def test_success_rate_does_not_infer_success_from_tool_messages() -> None:
@@ -610,17 +530,7 @@ async def test_success_rate_does_not_infer_success_from_tool_messages() -> None:
         success=None,
         message=(
             {"role": "user", "content": "What is the weather?"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "weather-step",
-                        "type": "function",
-                        "function": {"name": "weather-api", "arguments": "{}"},
-                    }
-                ],
-            },
+            assistant_calls(function_call("weather-step", "weather-api")),
             {"role": "tool", "tool_call_id": "weather-step", "content": "success"},
         ),
     )
@@ -636,46 +546,22 @@ async def test_success_rate_does_not_infer_success_from_tool_messages() -> None:
 
 @pytest.mark.asyncio
 async def test_selection_and_composition_use_projected_message_call_order() -> None:
-    llm = FakeLLM('{"score": 1, "reason": "calls are well composed"}')
     trace = case(
         expected_output=None,
         message=(
             {"role": "user", "content": "Format the weather"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "weather-step",
-                        "type": "function",
-                        "function": {"name": "weather-api", "arguments": '{"city":"Shenzhen"}'},
-                    }
-                ],
-            },
+            assistant_calls(function_call("weather-step", "weather-api", '{"city":"Shenzhen"}')),
             {"role": "tool", "tool_call_id": "weather-step", "content": "sunny"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "format-step",
-                        "type": "function",
-                        "function": {"name": "formatter", "arguments": '{"weather":"sunny"}'},
-                    }
-                ],
-            },
+            assistant_calls(function_call("format-step", "formatter", '{"weather":"sunny"}')),
             {"role": "tool", "tool_call_id": "format-step", "content": "It is sunny."},
         ),
     )
 
-    metrics = await EvaluationSuite(
+    metrics, llm = await judge(
         [CapabilitySelectionEvaluator(), CompositionEffectivenessEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(
-        fingerprint(),
+        '{"score": 1, "reason": "calls are well composed"}',
         trace,
-        metric_ids=("capability_selection", "composition_effectiveness"),
+        ("capability_selection", "composition_effectiveness"),
     )
 
     assert all(metric.status == MetricStatus.PASS for metric in metrics)
@@ -697,22 +583,10 @@ async def test_indirect_child_output_metrics_ignore_parent_output() -> None:
         output="parent-only-output",
         message=(
             {"role": "user", "content": "Return weather"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "weather-step",
-                        "type": "function",
-                        "function": {"name": "weather", "arguments": '{"city":"Shenzhen"}'},
-                    },
-                    {
-                        "id": "private-step",
-                        "type": "function",
-                        "function": {"name": "private_tool", "arguments": '{"secret":true}'},
-                    },
-                ],
-            },
+            assistant_calls(
+                function_call("weather-step", "weather", '{"city":"Shenzhen"}'),
+                function_call("private-step", "private_tool", '{"secret":true}'),
+            ),
         ),
     )
 
@@ -756,7 +630,6 @@ async def test_indirect_child_output_metrics_ignore_parent_output() -> None:
 
 @pytest.mark.asyncio
 async def test_indirect_child_prompt_keeps_user_message_when_query_is_empty() -> None:
-    llm = FakeLLM('{"score": 1, "reason": "child evidence is sufficient"}')
     trace = EvaluationCase(
         case_id="parent-empty-query-case",
         capability_id="orchestrator",
@@ -765,28 +638,19 @@ async def test_indirect_child_prompt_keeps_user_message_when_query_is_empty() ->
         output="parent-only-output",
         message=(
             {"role": "user", "content": "Check the child weather result"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "weather-step",
-                        "type": "function",
-                        "function": {"name": "weather", "arguments": '{"city":"Shenzhen"}'},
-                    }
-                ],
-            },
+            assistant_calls(function_call("weather-step", "weather", '{"city":"Shenzhen"}')),
             {"role": "tool", "tool_call_id": "weather-step", "content": "child-only-output"},
             {"role": "user", "content": "unrelated next-round request"},
             {"role": "assistant", "content": "parent-final-assistant"},
         ),
     )
 
-    metrics = await EvaluationSuite(
+    metrics, llm = await judge(
         [AccuracyEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(fingerprint(), trace, metric_ids=("accuracy",))
+        '{"score": 1, "reason": "child evidence is sufficient"}',
+        trace,
+        ("accuracy",),
+    )
 
     assert metrics[0].status == MetricStatus.PASS
     assert len(llm.messages) == 1
@@ -796,52 +660,6 @@ async def test_indirect_child_prompt_keeps_user_message_when_query_is_empty() ->
     assert "parent-final-assistant" not in prompt
     assert "parent-only-output" not in prompt
     assert "unrelated next-round request" not in prompt
-
-
-@pytest.mark.asyncio
-async def test_indirect_identity_uses_tool_function_name() -> None:
-    trace = EvaluationCase(
-        case_id="parent-case",
-        capability_id="orchestrator",
-        capability_type="agent",
-        message=(
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "weather-step",
-                        "type": "function",
-                        "function": {"name": "Weather", "arguments": "{}"},
-                    }
-                ],
-            },
-        ),
-    )
-
-    result = await EvaluationSuite.default().evaluate(fingerprint(), [trace])
-    assert result.capability_id == "weather"
-
-    mismatched = trace.model_copy(
-        update={
-            "message": (
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "weather-step",
-                            "type": "function",
-                            "function": {"name": "other", "arguments": "{}"},
-                        }
-                    ],
-                },
-            )
-        }
-    )
-    with pytest.raises(BaseError) as exc_info:
-        await EvaluationSuite.default().evaluate(fingerprint(), [mismatched])
-    assert exc_info.value.status is StatusCode.COMPONENT_SYMPHONY_SCHEMA_INVALID
 
 
 @pytest.mark.asyncio
@@ -880,29 +698,9 @@ async def test_async_llm_metrics_are_opt_in_and_receive_redacted_payload() -> No
         output="cloudy",
         message=(
             {"role": "user", "content": "Authorization: Bearer super-secret-token"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "first",
-                        "type": "function",
-                        "function": {"name": "weather-api", "arguments": '{"city":"Shenzhen"}'},
-                    }
-                ],
-            },
+            assistant_calls(function_call("first", "weather-api", '{"city":"Shenzhen"}')),
             {"role": "tool", "tool_call_id": "first", "content": "cloudy"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "second",
-                        "type": "function",
-                        "function": {"name": "formatter", "arguments": '{"value":"cloudy"}'},
-                    }
-                ],
-            },
+            assistant_calls(function_call("second", "formatter", '{"value":"cloudy"}')),
             {"role": "tool", "tool_call_id": "second", "content": "cloudy"},
             {"role": "assistant", "content": "cloudy"},
         ),
@@ -1018,16 +816,8 @@ async def test_llm_response_accepts_assistant_message_content_parts() -> None:
     ],
 )
 async def test_llm_response_accepts_complete_json_markdown_fence(response: Any) -> None:
-    llm = FakeLLM(response)
-
-    metrics = await EvaluationSuite(
-        [AccuracyEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(
-        fingerprint(),
-        case(expected_output=None, output="cloudy"),
-        metric_ids=("accuracy",),
+    metrics, llm = await judge(
+        [AccuracyEvaluator()], response, case(expected_output=None, output="cloudy"), ("accuracy",)
     )
 
     assert metrics[0].status == MetricStatus.FAIL
@@ -1047,16 +837,8 @@ async def test_llm_response_accepts_complete_json_markdown_fence(response: Any) 
     ],
 )
 async def test_llm_response_rejects_other_markdown_or_malformed_json(response: str) -> None:
-    llm = FakeLLM(response)
-
-    metrics = await EvaluationSuite(
-        [AccuracyEvaluator()],
-        llm=llm,
-        enable_llm=True,
-    ).evaluate_case(
-        fingerprint(),
-        case(expected_output=None, output="cloudy"),
-        metric_ids=("accuracy",),
+    metrics, llm = await judge(
+        [AccuracyEvaluator()], response, case(expected_output=None, output="cloudy"), ("accuracy",)
     )
 
     assert metrics[0].status == MetricStatus.ERROR

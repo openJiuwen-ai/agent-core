@@ -283,47 +283,38 @@ def test_evaluation_case_serializes_message_output_and_latency_without_legacy_fi
     assert {"actual_output", "calls", "metadata"}.isdisjoint(payload)
 
 
-def test_assistant_content_allows_an_explicit_empty_tool_calls_list() -> None:
-    case = EvaluationCase(
-        capability_id="weather",
-        capability_type="skill",
-        message=({"role": "assistant", "content": "Sunny.", "tool_calls": []},),
-    )
-
-    assert case.message == ({"role": "assistant", "content": "Sunny.", "tool_calls": []},)
-
-
-def test_openai_content_parts_are_accepted_without_imposing_a_multimodal_schema() -> None:
-    case = EvaluationCase(
-        capability_id="weather",
-        capability_type="skill",
-        message=(
-            {"role": "user", "content": [{"type": "input_text", "text": "Weather?"}]},
-            {"role": "assistant", "content": [{"provider_extension": {"value": "Sunny."}}]},
-        ),
-    )
-
-    assert case.message[0]["content"] == [{"type": "input_text", "text": "Weather?"}]
+def _function_call(
+    call_id: str,
+    name: str = "weather",
+    arguments: Any = "{}",
+) -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
 
 
 @pytest.mark.parametrize(
-    ("role", "content"),
+    "message",
     [
-        ("system", 1),
-        ("developer", False),
-        ("user", {"type": "input_text", "text": "Weather?"}),
-        ("assistant", 1.5),
-        ("tool", None),
-        ("user", []),
+        ({"role": "assistant", "content": "Sunny.", "tool_calls": []},),
+        (
+            {"role": "user", "content": [{"type": "input_text", "text": "Weather?"}]},
+            {"role": "assistant", "content": [{"provider_extension": {"value": "Sunny."}}]},
+        ),
     ],
 )
-def test_evaluation_case_rejects_non_openai_content_boundaries(role: str, content: Any) -> None:
-    with pytest.raises(ValidationError, match="content"):
-        EvaluationCase(
-            capability_id="weather",
-            capability_type="skill",
-            message=({"role": role, "content": content},),
-        )
+def test_evaluation_case_accepts_supported_openai_message_content(
+    message: tuple[dict[str, Any], ...],
+) -> None:
+    case = EvaluationCase(
+        capability_id="weather",
+        capability_type="skill",
+        message=message,
+    )
+
+    assert case.message == message
 
 
 @pytest.mark.parametrize("legacy_field", ["actual_output", "calls", "metadata"])
@@ -345,11 +336,8 @@ def test_openai_tool_calls_are_validated_and_projected_with_tool_responses() -> 
             "role": "assistant",
             "content": None,
             "tool_calls": [
-                {
-                    "id": "call-weather",
-                    "type": "function",
-                    "function": {"name": "weather", "arguments": '{"city":"Shenzhen"}'},
-                }
+                _function_call("call-weather", arguments='{"city":"Shenzhen"}'),
+                _function_call("call-pending", name="pending"),
             ],
         },
         {"role": "tool", "tool_call_id": "call-weather", "content": '{"temperature":30}'},
@@ -373,7 +361,7 @@ def test_openai_tool_calls_are_validated_and_projected_with_tool_responses() -> 
 
     calls = project_message_calls(case.message)
 
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert calls[0].tool_call_id == "call-weather"
     assert calls[0].function_name == "weather"
     assert calls[0].arguments == '{"city":"Shenzhen"}'
@@ -381,8 +369,10 @@ def test_openai_tool_calls_are_validated_and_projected_with_tool_responses() -> 
     assert calls[0].assistant_message_index == 1
     assert calls[0].tool_message_index == 2
     assert calls[0].output == '{"temperature":30}'
-    assert matching_message_calls(case.message, fingerprint) == calls
-    assert matching_message_calls(case.message, id_fingerprint) == calls
+    assert calls[1].tool_message_index is None
+    assert calls[1].output is None
+    assert matching_message_calls(case.message, fingerprint) == (calls[0],)
+    assert matching_message_calls(case.message, id_fingerprint) == (calls[0],)
     assert message_has_user_input(case.message) is True
     assert message_has_assistant_or_tool_evidence(case.message) is True
 
@@ -406,51 +396,23 @@ def test_message_evidence_helpers_reject_blank_content() -> None:
     )
 
 
-def test_unanswered_tool_call_projection_has_no_tool_output_or_message_index() -> None:
-    case = EvaluationCase(
-        capability_id="weather",
-        capability_type="skill",
-        message=(
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "call-weather",
-                        "type": "function",
-                        "function": {"name": "weather", "arguments": "{}"},
-                    }
-                ],
-            },
-        ),
-    )
-
-    calls = project_message_calls(case.message)
-
-    assert len(calls) == 1
-    assert calls[0].tool_message_index is None
-    assert calls[0].output is None
-
-
 @pytest.mark.parametrize(
     ("message", "error"),
     [
+        (({"role": "system", "content": 1},), "content"),
+        (({"role": "developer", "content": False},), "content"),
+        (({"role": "user", "content": {"type": "input_text", "text": "Weather?"}},), "content"),
+        (({"role": "assistant", "content": 1.5},), "content"),
+        (({"role": "tool", "content": None},), "content"),
+        (({"role": "user", "content": []},), "content"),
         (({"role": "observer", "content": "x"},), "standard OpenAI role"),
         (
             (
                 {
                     "role": "assistant",
                     "tool_calls": [
-                        {
-                            "id": "duplicate",
-                            "type": "function",
-                            "function": {"name": "first", "arguments": "{}"},
-                        },
-                        {
-                            "id": "duplicate",
-                            "type": "function",
-                            "function": {"name": "second", "arguments": "{}"},
-                        },
+                        _function_call("duplicate", name="first"),
+                        _function_call("duplicate", name="second"),
                     ],
                 },
             ),
@@ -460,51 +422,26 @@ def test_unanswered_tool_call_projection_has_no_tool_output_or_message_index() -
             ({"role": "tool", "tool_call_id": "unknown", "content": "result"},),
             "preceding assistant tool call",
         ),
+        (
+            ({"role": "assistant", "tool_calls": [_function_call("missing-name", name="")]},),
+            "function.name",
+        ),
+        (
+            (
+                {
+                    "role": "assistant",
+                    "tool_calls": [_function_call("wrong-arguments", arguments={})],
+                },
+            ),
+            "function.arguments",
+        ),
     ],
 )
-def test_evaluation_case_rejects_invalid_openai_message_traces(
+def test_evaluation_case_rejects_invalid_openai_messages(
     message: tuple[dict[str, Any], ...],
     error: str,
 ) -> None:
     with pytest.raises(ValidationError, match=error):
-        EvaluationCase(
-            capability_id="weather",
-            capability_type="skill",
-            message=message,
-        )
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        (
-            {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "missing-name",
-                        "type": "function",
-                        "function": {"name": "", "arguments": "{}"},
-                    }
-                ],
-            },
-        ),
-        (
-            {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": "wrong-arguments",
-                        "type": "function",
-                        "function": {"name": "weather", "arguments": {}},
-                    }
-                ],
-            },
-        ),
-    ],
-)
-def test_evaluation_case_rejects_malformed_openai_tool_calls(message: tuple[dict[str, Any], ...]) -> None:
-    with pytest.raises(ValidationError):
         EvaluationCase(
             capability_id="weather",
             capability_type="skill",
