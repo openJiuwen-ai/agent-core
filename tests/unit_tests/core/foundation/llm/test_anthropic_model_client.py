@@ -68,6 +68,46 @@ class TestContentToBlocks:
         blocks = _content_to_blocks(42)
         assert blocks == [{"type": "text", "text": "42"}]
 
+    def test_image_url_data_block_converted_to_anthropic_image(self):
+        # Regression for #1484: OpenAI-style image_url blocks must become
+        # Anthropic "image" + "source" blocks, not be passed through verbatim.
+        blocks = _content_to_blocks([
+            {"type": "text", "text": "see this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+        ])
+        assert blocks[0] == {"type": "text", "text": "see this"}
+        assert blocks[1] == {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="},
+        }
+
+    def test_image_url_media_type_parsed_from_data_url(self):
+        blocks = _content_to_blocks([
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,QUJD"}},
+        ])
+        assert blocks[0]["source"]["media_type"] == "image/jpeg"
+        assert blocks[0]["source"]["data"] == "QUJD"
+
+    def test_image_url_remote_http_url_maps_to_url_source(self):
+        blocks = _content_to_blocks([
+            {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+        ])
+        assert blocks[0] == {
+            "type": "image",
+            "source": {"type": "url", "url": "https://example.com/a.png"},
+        }
+
+    def test_image_url_non_data_url_left_untouched(self):
+        # Malformed/unknown image_url shapes must not be silently dropped.
+        src = [{"type": "image_url", "image_url": {"url": 42}}]
+        blocks = _content_to_blocks(src)
+        assert blocks == src
+
+    def test_already_anthropic_image_block_passes_through(self):
+        src = [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "x"}}]
+        blocks = _content_to_blocks(src)
+        assert blocks == src
+
 
 # ---------------------------------------------------------------------------
 # A. Pure converters: _convert_message_schemas

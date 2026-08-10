@@ -62,6 +62,35 @@ if TYPE_CHECKING:
 # Shape converters: openJiuwen BaseMessage list  <->  Anthropic Messages API payload
 # ---------------------------------------------------------------------------
 
+def _image_url_block_to_anthropic(block: dict) -> dict:
+    """Convert an OpenAI-style ``image_url`` block to an Anthropic ``image`` block.
+
+    The Anthropic Messages API only accepts ``{"type": "image", "source": ...}``
+    blocks; an OpenAI-style ``{"type": "image_url", "image_url": {"url":
+    "data:image/png;base64,..."}}`` sent verbatim is rejected with a 400
+    ``invalid_request_error`` (#1484). Inline data URLs are re-encoded as
+    base64 sources; remote (http/https) URLs map to an Anthropic ``url`` source.
+    """
+    image_url = block.get("image_url")
+    url = image_url.get("url") if isinstance(image_url, dict) else None
+    if not isinstance(url, str) or not url:
+        # Unrecognized shape — leave it untouched so downstream validation
+        # reports the real problem instead of silently dropping the image.
+        return dict(block)
+    if url.startswith("data:"):
+        # data:[<media-type>][;charset=...];base64,<payload>
+        header, _, payload = url.partition(",")
+        if ";base64" not in header or not payload:
+            return dict(block)
+        media_type = header[5:].split(";", 1)[0] or "image/png"
+        return {
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": payload},
+        }
+    # Remote URL — Anthropic accepts url sources for hosted images.
+    return {"type": "image", "source": {"type": "url", "url": url}}
+
+
 def _content_to_blocks(content: Any) -> List[dict]:
     """Normalize OJ ``content`` (str | list[str|dict]) to Anthropic block list."""
     if content is None:
@@ -72,7 +101,10 @@ def _content_to_blocks(content: Any) -> List[dict]:
         blocks2: List[dict] = []
         for item in content:
             if isinstance(item, dict):
-                blocks2.append(dict(item))
+                item = dict(item)
+                if item.get("type") == "image_url":
+                    item = _image_url_block_to_anthropic(item)
+                blocks2.append(item)
             elif isinstance(item, str):
                 if item:
                     blocks2.append({"type": "text", "text": item})
