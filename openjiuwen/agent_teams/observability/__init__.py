@@ -31,13 +31,19 @@ from openjiuwen.agent_teams.observability.setup import (
     is_initialized,
     shutdown_observability,
 )
-from openjiuwen.agent_teams.observability.span_context import flush_child_spans
+from openjiuwen.agent_teams.observability.span_context import (
+    clear_ambient_team_span,
+    flush_child_spans,
+    set_ambient_team_span,
+)
 
 __all__ = [
     "ObservabilityConfig",
     "ObservabilityRail",
     "attach_to_team_agent",
+    "clear_ambient_team_span",
     "finalize_team_trace",
     "init_observability",
+    "set_ambient_team_span",
     "shutdown_observability",
 ]

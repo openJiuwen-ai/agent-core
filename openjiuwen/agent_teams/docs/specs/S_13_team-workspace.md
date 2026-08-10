@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/team_workspace/` |
-| 最近一次修订日期 | 2026-05-09 |
-| 关联 feature | — |
+| 最近一次修订日期 | 2026-07-28 |
+| 关联 feature | `F_69_cwd-workspace-project-root-separation.md` |
 
 ## 范围 / 边界
 
@@ -31,7 +31,7 @@
 
 ## 不变量
 
-1. **Workspace 与 worktree 路径不相交**。Workspace 路径由 `paths.team_home(team_name) / "team-workspace"` 派生（或 config 显式指定 `root_path`）；worktree 路径由 `WorktreeManager.config` 决定。两者不能互相覆盖也不能互为子目录。`mount_into_worktree` 在 worktree 内只放 `.team` 符号链接 + 把 `.agent/` `.team/` 写入 `.gitignore`，不落产物文件。
+1. **Workspace 与 worktree 路径不相交**。Workspace 路径由 `paths.team_home(team_name) / "team-workspace"` 派生（或 config 显式指定 `root_path`）；worktree 路径由 `WorktreeManager.config` 决定。两者不能互相覆盖也不能互为子目录。`.team` 符号链接挂在**成员 workspace** 里（`mount_into_workspace`）——worktree 隔离只移动 cwd、不移动 workspace（[[F_69]]），所以挂载点跟着 workspace 走。`mount_into_worktree` 目前无调用方。
 2. **`paths.py` 是路径布局唯一真相源**。Workspace 的默认根、artifact 子目录、挂载点都从 `team_home(team_name)` 推出；`agent_configurator.create_workspace_manager` 不绕开 `team_home`。Config 的 `root_path` 是用户覆盖入口，不是新增散落硬编码的理由。
 3. **挂载点统一为 `.team/{team_name}/`**。成员 workspace 通过 `mount_into_workspace(workspace_root)` 在 `workspace_root/.team/{team_name}` 上建符号链接。`TeamWorkspaceRail` 与 prompts 中宣告的挂载路径必须严格一致；rail 解析 `.team/` 前缀时既兼容 hub 布局（`.team/{team_name}/...`）也兼容 legacy 布局（`.team/...`），但**新代码只生成 hub 布局**。
 4. **Windows 兜底用 junction，不静默忽略**。`os.symlink` 在 Windows 因权限失败时退到 `mklink /J`；junction 创建失败抛 `OSError`，不允许 catch-all 当成功处理。

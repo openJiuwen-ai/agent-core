@@ -270,7 +270,13 @@ def build_server(
                 tool = client.tools.get(name)
                 if tool is None:
                     return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
-                text = str(await tool.invoke(arguments))
+                text = str(
+                    await tool.invoke(
+                        arguments,
+                        member_name=client.member_name,
+                        display_name=client.member_name,
+                    ),
+                )
             else:
                 text = await _dispatch_operator(client, name, arguments)
         except Exception as exc:  # noqa: BLE001 - never surface as an MCP protocol error

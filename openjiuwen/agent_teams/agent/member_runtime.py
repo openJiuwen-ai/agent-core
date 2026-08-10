@@ -47,8 +47,9 @@ class MemberRuntime(Protocol):
 
         The DeepAgent-backed runtime materialises a fresh harness over a child
         agent session derived from ``team_session`` (so it shares the team
-        session id and persisted DeepAgentState); a CLI runtime ignores
-        ``team_session`` because its subprocess owns its own session.
+        session id and persisted DeepAgentState). SDK-backed external runtimes
+        may likewise derive a member AgentSession for backend-native resume
+        state; subprocess-only CLI runtimes may ignore ``team_session``.
         """
         ...
 

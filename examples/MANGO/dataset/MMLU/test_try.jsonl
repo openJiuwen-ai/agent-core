@@ -1,0 +1,2 @@
+{"task_id": "test_0", "prompt": "Find the degree for the given field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q.\nA. 0\nB. 4\nC. 2\nD. 6", "workflow": [], "gt": "B"}
+{"task_id": "test_1", "prompt": "Let p = (1, 2, 5, 4)(2, 3) in S_5 . Find the index of <p> in S_5.\nA. 8\nB. 2\nC. 24\nD. 120", "workflow": [], "gt": "C"}

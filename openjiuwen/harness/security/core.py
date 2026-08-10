@@ -7,6 +7,12 @@
   2. 评估工具调用权限 (allow / ask / deny)
 
 审批流程由 rail 处理，引擎本身只负责权限判定。
+
+判定管线::
+
+    result_A = evaluate_tiered_policy(...)          # 工具权限（始终）
+    result_B = FileGuardChecker.evaluate(...)       # 路径防护（file_guard.enabled）
+    return strictest(result_A, result_B)
 """
 from __future__ import annotations
 
@@ -14,7 +20,10 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from openjiuwen.harness.security.checker import ExternalDirectoryChecker
+from openjiuwen.harness.security.file_guard import (
+    FileGuardChecker,
+    build_file_guard_checker,
+)
 from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.models import (
     PermissionLevel,
@@ -49,29 +58,31 @@ class PermissionEngine:
         self._model_name = model_name
         self._workspace_root = workspace_root
         self._trusted_dirs = trusted_dirs or []
-        self._external_checker = ExternalDirectoryChecker(
-            self.config, workspace_root=self._workspace_root,
+        self._file_guard: FileGuardChecker | None = build_file_guard_checker(
+            self.config,
+            workspace_root=self._workspace_root,
             trusted_dirs=self._trusted_dirs,
         )
 
     # ---------- 配置 ----------
 
+    def _rebuild_file_guard(self) -> None:
+        self._file_guard = build_file_guard_checker(
+            self.config,
+            workspace_root=self._workspace_root,
+            trusted_dirs=self._trusted_dirs,
+        )
+
     def update_config(self, config: PermissionsSection | dict[str, Any]) -> None:
         """热更新配置."""
         self.config = cast(dict[str, Any], config)
         self._enabled = config.get("enabled", True)
-        self._external_checker = ExternalDirectoryChecker(
-            config, workspace_root=self._workspace_root,
-            trusted_dirs=self._trusted_dirs,
-        )
+        self._rebuild_file_guard()
 
     def update_trusted_dirs(self, trusted_dirs: list[Path]) -> None:
         """更新受信任目录列表."""
         self._trusted_dirs = trusted_dirs
-        self._external_checker = ExternalDirectoryChecker(
-            self.config, workspace_root=self._workspace_root,
-            trusted_dirs=self._trusted_dirs,
-        )
+        self._rebuild_file_guard()
 
     @property
     def trusted_dirs(self) -> list[Path]:
@@ -112,7 +123,11 @@ class PermissionEngine:
         *,
         include_external_directory: bool = True,
     ) -> tuple[PermissionLevel | None, str | None]:
-        """直接评估全局权限，不受 enabled 与宿主「是否校验」短路影响。"""
+        """直接评估全局权限，不受 enabled 与宿主「是否校验」短路影响。
+
+        ``include_external_directory`` 保留旧参数名；实际控制是否合并路径防护
+        （FileGuard / Legacy ExternalDirectory 投影）。
+        """
         if not isinstance(tool_args, dict):
             logger.warning(
                 "[PermissionEngine] direct tool_args is not a dict (type=%s), using {}",
@@ -128,15 +143,16 @@ class PermissionEngine:
         elif not matched_rule_uses_approval_override(matched_rule):
             permission = maybe_escalate_shell_operators(tool_name, tool_args, permission)
 
-        if include_external_directory:
-            ext_result = self._external_checker.check_external_paths(tool_name, tool_args)
-            if ext_result is not None:
+        if include_external_directory and self._file_guard is not None:
+            path_result = self._file_guard.evaluate(tool_name, tool_args)
+            if path_result is not None:
+                path_rule = path_result.matched_rule or "file_guard"
                 if permission is None:
-                    permission = ext_result.permission
-                    matched_rule = ext_result.matched_rule or "external_directory"
+                    permission = path_result.permission
+                    matched_rule = path_rule
                 else:
-                    permission = tiered_policy_strictest(permission, ext_result.permission)
-                    matched_rule = f"{matched_rule}|{ext_result.matched_rule or 'external_directory'}"
+                    permission = tiered_policy_strictest(permission, path_result.permission)
+                    matched_rule = f"{matched_rule}|{path_rule}"
 
         return permission, matched_rule
 
@@ -182,7 +198,7 @@ class PermissionEngine:
             )
             tool_args = {}
 
-        # 1. 工具级 + 参数规则 + 默认（分层策略 evaluate_tiered_policy）
+        # 1. Pipeline A：工具级 + 参数规则 + 默认
         external_paths: list[str] | None = None
         permission, matched_rule = self.evaluate_global_policy_directly(
             tool_name,
@@ -198,25 +214,32 @@ class PermissionEngine:
             permission.value, matched_rule,
         )
 
-        # 2. 外部路径：与当前决策取更严（不放宽）
-        ext_result = self._external_checker.check_external_paths(tool_name, tool_args)
-        if ext_result is not None:
-            logger.info(
-                "[PermissionEngine] permission.external.result tool=%s checked=true permission=%s "
-                "matched_rule=%s external_paths=%s merged_with=%s",
-                tool_name,
-                ext_result.permission.value,
-                ext_result.matched_rule or "external_directory",
-                ext_result.external_paths,
-                permission.value,
-            )
-            permission = tiered_policy_strictest(permission, ext_result.permission)
-            matched_rule = f"{matched_rule}|{ext_result.matched_rule or 'external_directory'}"
-            external_paths = ext_result.external_paths
+        # 2. Pipeline B：file_guard（可独立关闭；含 ExternalDirectory Legacy 投影）
+        if self._file_guard is not None:
+            path_result = self._file_guard.evaluate(tool_name, tool_args)
+            if path_result is not None:
+                path_rule = path_result.matched_rule or "file_guard"
+                logger.info(
+                    "[PermissionEngine] permission.file_guard.result tool=%s checked=true permission=%s "
+                    "matched_rule=%s external_paths=%s merged_with=%s",
+                    tool_name,
+                    path_result.permission.value,
+                    path_rule,
+                    path_result.external_paths,
+                    permission.value,
+                )
+                permission = tiered_policy_strictest(permission, path_result.permission)
+                matched_rule = f"{matched_rule}|{path_rule}"
+                external_paths = path_result.external_paths
+            else:
+                logger.info(
+                    "[PermissionEngine] permission.file_guard.result tool=%s checked=true permission=none "
+                    "matched_rule=none external_paths=[]",
+                    tool_name,
+                )
         else:
             logger.info(
-                "[PermissionEngine] permission.external.result tool=%s checked=true permission=none "
-                "matched_rule=none external_paths=[]",
+                "[PermissionEngine] permission.file_guard.result tool=%s checked=false reason=disabled",
                 tool_name,
             )
 

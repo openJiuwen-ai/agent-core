@@ -28,6 +28,7 @@ OPENAI_ACCOUNT_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 OPENAI_ACCOUNT_OAUTH_TOKEN_URL = f"{OPENAI_ACCOUNT_AUTH_ISSUER}/oauth/token"
 OPENAI_ACCOUNT_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 OPENAI_ACCOUNT_RATE_LIMITED_CODE = "openai_account_auth_rate_limited"
+_OPENAI_ACCOUNT_DEVICE_POLL_NETWORK_ERROR_CODE = "openai_account_device_code_poll_network_error"
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,7 +490,7 @@ def poll_openai_account_device_authorization_once(
                 headers={"Content-Type": "application/json"},
             )
     except httpx.HTTPError as exc:
-        _raise_network_failed("device auth polling", "openai_account_device_code_poll_network_error", exc)
+        _raise_network_failed("device auth polling", _OPENAI_ACCOUNT_DEVICE_POLL_NETWORK_ERROR_CODE, exc)
     if response.status_code in {403, 404}:
         return None
     if response.status_code == 429:
@@ -513,21 +514,32 @@ def poll_openai_account_device_authorization(
 ) -> OpenAIAccountDeviceAuthorization:
     """Poll until the user completes device login and an authorization code is available."""
     start = monotonic()
+    last_network_error: Optional[OpenAIAccountAuthError] = None
     while monotonic() - start < max_wait_seconds:
         sleep(device_code.interval)
-        authorization = poll_openai_account_device_authorization_once(
-            device_code,
-            timeout_seconds=timeout_seconds,
-        )
+        try:
+            authorization = poll_openai_account_device_authorization_once(
+                device_code,
+                timeout_seconds=timeout_seconds,
+            )
+        except OpenAIAccountAuthError as exc:
+            if exc.code != _OPENAI_ACCOUNT_DEVICE_POLL_NETWORK_ERROR_CODE:
+                raise
+            last_network_error = exc
+            continue
+        last_network_error = None
         if authorization is None:
             continue
         return authorization
 
-    raise OpenAIAccountAuthError(
+    timeout_error = OpenAIAccountAuthError(
         "OpenAI account device login timed out.",
         code="openai_account_device_code_timeout",
         relogin_required=True,
     )
+    if last_network_error is not None:
+        raise timeout_error from last_network_error
+    raise timeout_error
 
 
 def exchange_openai_account_device_authorization(

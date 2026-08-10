@@ -1,8 +1,7 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from typing import Awaitable, Callable, List, Dict, Optional, Tuple
-import asyncio
+from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Set, Tuple
 import functools
 
 from pydantic import BaseModel
@@ -39,6 +38,38 @@ class ContextEngine:
     """
 
     _PROCESSOR_MAP: Dict[str, type[ContextProcessor]] = dict()
+
+    # Provider-specific error codes are not consistent enough to identify a
+    # context overflow on their own. Keep the detection message-based and
+    # inspect both wrapped exception fields and the exception cause chain.
+    _CONTEXT_OVERFLOW_PHRASES = (
+        "context length",
+        "context window",
+        "maximum context",
+        "context limit",
+        "prompt is too long",
+        "prompt too long",
+        "input is too long",
+        "input too long",
+    )
+    _CONTEXT_OVERFLOW_FIELDS = (
+        "message",
+        "body",
+        "details",
+        "error",
+        "errors",
+        "response",
+        "code",
+        "type",
+        "param",
+        "status_code",
+        "status",
+        "text",
+        "content",
+        "cause",
+        "__cause__",
+        "__context__",
+    )
 
     def __init__(self,
                  config: ContextEngineConfig = None,
@@ -115,8 +146,10 @@ class ContextEngine:
             token_counter = TiktokenCounter()
 
         if self._config.enable_openrouter_model_context_window_tokens:
-            await asyncio.to_thread(
-                ContextUtils.fetch_openrouter_model_context_window_tokens,
+            # Scheduled, not awaited: this is the first-turn critical path and the
+            # fetch is a ~600KB cross-region download. This context falls back to
+            # the built-in window table; later contexts pick up the fetched values.
+            ContextUtils.prefetch_openrouter_model_context_window_tokens(
                 self._config.openrouter_request_timeout,
             )
 
@@ -163,7 +196,7 @@ class ContextEngine:
             session_id: str = None,
             processor_types: List[str] = None,
             **kwargs,
-    ) -> str:
+    ) -> str | dict[str, Any]:
         """
         Actively run registered compression processors for an existing context.
 
@@ -181,6 +214,9 @@ class ContextEngine:
             - ``"compressed"``: active compression ran and changed context.
             - ``"noop"``: active compression ran but nothing changed, or no
               compression processor is registered.
+
+        A successful compression is saved to the resolved session and committed
+        before this method returns. Contexts without a session remain in-memory only.
         """
         resolved_session_id = session.get_session_id() if session else (session_id or "default_session_id")
         context = self.get_context(context_id=context_id, session_id=resolved_session_id)
@@ -194,11 +230,159 @@ class ContextEngine:
                 StatusCode.CONTEXT_EXECUTION_ERROR,
                 error_msg=f"context '{context_id}' does not support active compression"
             )
-        return await context.compress_context(
+        result = await context.compress_context(
             processor_types=processor_types,
             sys_operation=self._sys_operation,
             **kwargs,
         )
+        result_code = result.get("result") if isinstance(result, dict) else result
+        if result_code == "compressed":
+            get_session_ref = getattr(context, "get_session_ref", None)
+            effective_session = session or (get_session_ref() if callable(get_session_ref) else None)
+            if effective_session is not None:
+                await self.save_contexts(effective_session, context_ids=[context_id])
+                await effective_session.commit()
+        return result
+
+    async def recover_from_model_exception(
+            self,
+            *,
+            context_id: str = "default_context_id",
+            session: Session = None,
+            context: ModelContext = None,
+            exception: Exception = None,
+            streaming: bool = False,
+            stream_chunks_emitted: int = 0,
+            **kwargs,
+    ) -> bool:
+        """Recover from a model context-window rejection by compressing once.
+
+        ReAct agents call this hook after model-call rail retries are
+        exhausted. A retry is requested only when the provider error clearly
+        describes an input/context limit and no partial stream output has
+        already been emitted. ``compress_context`` returns ``"compressed"``
+        only when a registered processor changed the context, so a missing or
+        ineffective processor preserves the original model exception.
+        """
+        del context
+        if streaming and int(stream_chunks_emitted or 0) > 0:
+            context_engine_logger.info(
+                "skip model context recovery after partial stream output"
+            )
+            return False
+
+        if not self.is_context_overflow_error(exception):
+            return False
+
+        compression_kwargs = dict(kwargs)
+        compression_kwargs.setdefault(
+            "compression_trigger", "model_context_overflow"
+        )
+        result = await self.compress_context(
+            context_id=context_id,
+            session=session,
+            **compression_kwargs,
+        )
+        result_code = result.get("result") if isinstance(result, dict) else result
+        if result_code != "compressed":
+            context_engine_logger.info(
+                "model context recovery did not change context, result=%s",
+                result_code,
+            )
+            return False
+
+        context_engine_logger.info("model context recovery compressed context")
+        return True
+
+    @classmethod
+    def is_context_overflow_error(cls, exception: Exception) -> bool:
+        """Return whether an exception describes an input context overflow.
+
+        Model clients commonly wrap the provider response several times. The
+        matcher therefore checks structured error fields, response text, and
+        the Python cause/context chain. It intentionally avoids treating a
+        generic quota, authentication, or network error as recoverable.
+        """
+        if exception is None:
+            return False
+
+        for value in cls._iter_exception_texts(exception):
+            message = value.casefold().replace("_", " ").replace("-", " ")
+            if any(phrase in message for phrase in cls._CONTEXT_OVERFLOW_PHRASES):
+                return True
+            if "token limit" in message and not any(
+                term in message for term in ("output", "completion", "response")
+            ):
+                return True
+            if "too long" in message and any(
+                term in message for term in ("context", "prompt", "input")
+            ):
+                return True
+            if ("exceed" in message or "over limit" in message) and any(
+                term in message for term in ("context", "prompt", "input")
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _iter_exception_texts(
+            cls,
+            value: Any,
+            *,
+            depth: int = 0,
+            seen: Set[int] = None,
+    ) -> Iterator[str]:
+        """Yield text from common provider error wrappers without recursion loops."""
+        if value is None or depth > 6:
+            return
+        if seen is None:
+            seen = set()
+
+        if isinstance(value, str):
+            yield value
+            return
+        if isinstance(value, (bytes, bytearray)):
+            yield bytes(value).decode("utf-8", errors="replace")
+            return
+
+        value_id = id(value)
+        if value_id in seen:
+            return
+        seen.add(value_id)
+
+        if isinstance(value, BaseException):
+            try:
+                value_text = str(value)
+            except Exception:
+                value_text = ""
+            if value_text:
+                yield value_text
+            fields = cls._CONTEXT_OVERFLOW_FIELDS
+        elif isinstance(value, dict):
+            fields = ()
+            for key, nested_value in value.items():
+                yield from cls._iter_exception_texts(
+                    key, depth=depth + 1, seen=seen
+                )
+                yield from cls._iter_exception_texts(
+                    nested_value, depth=depth + 1, seen=seen
+                )
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            fields = ()
+            for nested_value in value:
+                yield from cls._iter_exception_texts(
+                    nested_value, depth=depth + 1, seen=seen
+                )
+        else:
+            fields = cls._CONTEXT_OVERFLOW_FIELDS
+
+        for field in fields:
+            nested_value = getattr(value, field, None)
+            if nested_value is None or nested_value is value or callable(nested_value):
+                continue
+            yield from cls._iter_exception_texts(
+                nested_value, depth=depth + 1, seen=seen
+            )
 
     async def clear_context(
             self,

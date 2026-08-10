@@ -10,7 +10,10 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
+from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
+    BrowserInstanceConfig,
+    BrowserRunGuardrails,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.profiles import BrowserProfile
 from openjiuwen.harness.tools.browser_move.playwright_runtime.service import BrowserService
 
@@ -175,6 +178,57 @@ def test_retryable_runtime_error_retries_once() -> None:
         assert len(observed_tasks) == 2
         assert "Previous failed attempt context:" in observed_tasks[1]
         assert restart_calls["count"] == 1
+
+
+def test_retry_attempts_share_one_task_timeout_budget() -> None:
+    service = _make_service(retry_once=True)
+    observed_timeouts: list[float] = []
+    calls = 0
+
+    async def fake_ensure_started() -> None:
+        return None
+
+    async def fake_run_task_once(**kwargs):
+        nonlocal calls
+        del kwargs
+        calls += 1
+        if calls == 1:
+            return {
+                "ok": False,
+                "final": "### Error\nError: page.goto: Frame has been detached.",
+                "page": {"url": "", "title": ""},
+                "screenshot": None,
+                "error": "tool execution failed",
+            }
+        return {
+            "ok": True,
+            "final": "recovered",
+            "page": {"url": "https://example.com", "title": "Example"},
+            "screenshot": None,
+            "error": None,
+        }
+
+    async def fake_wait_for(awaitable, timeout):
+        observed_timeouts.append(float(timeout))
+        return await awaitable
+
+    with patch.object(service, "ensure_started", fake_ensure_started), patch.object(
+        service, "run_task_once", fake_run_task_once
+    ), patch.object(service, "_restart", AsyncMock()), patch.object(
+        asyncio, "wait_for", fake_wait_for
+    ):
+        result = _run(
+            service.run_task(
+                task="Open example",
+                session_id="session-shared-timeout",
+                request_id="req-shared-timeout",
+            )
+        )
+
+    assert result["ok"] is True
+    assert calls == 2
+    assert len(observed_timeouts) == 2
+    assert observed_timeouts[1] <= observed_timeouts[0] <= 30.0
 
 
 def test_max_iteration_failure_preserves_worker_output_without_progress_summary() -> None:
@@ -525,6 +579,97 @@ def test_build_managed_profile_defaults_user_data_dir_to_runtime_workspace() -> 
     profile = getattr(service, "_build_managed_profile")()
     expected = expected_root / ".browser-profiles" / getattr(service, "_profile_name")
     assert Path(profile.user_data_dir).resolve() == expected
+
+
+def test_build_managed_profile_prefers_instance_browser_binary() -> None:
+    instance = BrowserInstanceConfig(
+        driver_mode="managed",
+        browser_binary="C:/configured/chrome.exe",
+    )
+    with patch.dict(
+        os.environ,
+        {"BROWSER_DRIVER": "managed", "BROWSER_MANAGED_BINARY": "C:/environment/chrome.exe"},
+        clear=False,
+    ):
+        mcp_cfg = McpServerConfig(
+            server_id="test-playwright",
+            server_name="test-playwright",
+            server_path="stdio://playwright",
+            client_type="stdio",
+            params={"cwd": str(Path.cwd())},
+        )
+        service = BrowserService(
+            provider="openai",
+            api_key="test-key",
+            api_base="https://example.invalid/v1",
+            model_name="test-model",
+            mcp_cfg=mcp_cfg,
+            guardrails=BrowserRunGuardrails(),
+            instance=instance,
+        )
+        profile = service._build_managed_profile()
+
+    assert profile.browser_binary == "C:/configured/chrome.exe"
+
+
+def test_existing_profile_browser_binary_is_cleared_for_auto_detection() -> None:
+    async def _test():
+        service = _make_service()
+        setattr(service, "_driver_mode", "managed")
+        profile = BrowserProfile(
+            name="jiuwenclaw",
+            driver_type="managed",
+            cdp_url="http://127.0.0.1:9333",
+            browser_binary="C:/old/chrome.exe",
+            user_data_dir=str(Path.cwd()),
+            debug_port=9333,
+            host="127.0.0.1",
+        )
+        new_driver = MagicMock()
+        new_driver.start.return_value = "http://127.0.0.1:9333"
+        profile_store = getattr(service, "_profile_store")
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            service,
+            "_resolve_existing_cdp_profile",
+            return_value=None,
+        ), patch.object(
+            profile_store,
+            "get_profile",
+            return_value=profile,
+        ), patch.object(
+            profile_store,
+            "upsert_profile",
+            side_effect=lambda browser_profile, select=False: browser_profile,
+        ), patch(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.service.ManagedBrowserDriver",
+            return_value=new_driver,
+        ):
+            await service._ensure_managed_driver_started()
+
+        assert profile.browser_binary == ""
+        new_driver.start.assert_called_once()
+
+    _run(_test())
+
+
+def test_reset_stops_browser_without_eager_restart() -> None:
+    async def _test():
+        service = _make_service()
+        service.started = True
+        managed_driver = MagicMock()
+        service._managed_driver = managed_driver
+        service._heartbeat_task = asyncio.create_task(asyncio.sleep(60))
+
+        with patch.object(service, "_remove_registered_mcp_server", AsyncMock()):
+            await service.reset()
+
+        managed_driver.stop.assert_called_once()
+        assert service.started is False
+        assert service._managed_driver is None
+        assert service._heartbeat_task is None
+
+    _run(_test())
 
 
 def test_run_task_does_not_reset_browser_runtime_after_completion() -> None:

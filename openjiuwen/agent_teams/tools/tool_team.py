@@ -51,8 +51,8 @@ class BuildTeamTool(TeamTool):
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         display_name = inputs.get("display_name")
         leader_display_name = inputs["leader_display_name"]
-        # None when LLM omits the field — backend.build_team inherits the
-        # spec ceiling. True/False explicitly set the runtime instance flag
+        # None when LLM omits a field — backend.build_team inherits the
+        # spec ceiling. Explicit values set the runtime instance flag
         # (subject to the spec ceiling check).
         enable_hitt_arg = inputs.get("enable_hitt")
         await self.team.build_team(
@@ -60,7 +60,9 @@ class BuildTeamTool(TeamTool):
             desc=inputs.get("team_desc"),
             leader_display_name=leader_display_name,
             leader_desc=inputs["leader_desc"],
-            overrides=CapabilityOverrides(enable_hitt=enable_hitt_arg),
+            overrides=CapabilityOverrides(
+                enable_hitt=enable_hitt_arg,
+            ),
         )
         return ToolOutput(
             success=True,

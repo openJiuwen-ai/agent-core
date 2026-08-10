@@ -33,7 +33,7 @@
   1. 全体成员（**含 leader 自己**）状态属于 `MEMBER_SETTLED_STATUSES = {READY, PAUSED,
      STOPPED, SHUTDOWN}`；
   2. 全部任务终态（`TASK_TERMINAL_STATUSES`）且非空；
-  3. 所有 direct / broadcast 消息都已被各自读者读完。
+  3. 所有发给尚未 `SHUTDOWN` 成员的 direct / broadcast 消息都已被各自读者读完。
 
 辅助类型：`schema/status.py` 新增 `MEMBER_SETTLED_STATUSES` frozenset；`schema/team.py`
 新增 `TeamCompletionSnapshot(member_count, task_count)` frozen dataclass，作为

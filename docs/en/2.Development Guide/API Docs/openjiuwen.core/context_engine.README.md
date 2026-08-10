@@ -7,7 +7,10 @@
 | CLASS | DESCRIPTION |
 |------|-------------|
 | [ContextEngineConfig](./context_engine/config.md) | Context engine configuration class. |
+| [CompressionRecallConfig](./context_engine/config.md) | Compressed-source archive and recall configuration. |
 | [Context](./context_engine/base.md) | Abstract context class. |
 | [AgentContext](./context_engine/context_engine.md) | Agent context class. |
 | [WorkflowContext](./context_engine/context_engine.md) | Workflow context class. |
 | [ContextEngine](./context_engine/context_engine.md) | Context engine class. |
+
+See [processor](./context_engine/processors.README.md) for the processor list.

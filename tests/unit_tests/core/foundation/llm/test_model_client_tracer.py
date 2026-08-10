@@ -86,6 +86,7 @@ class TestOpenAIModelClientTracer:
         mock_response.choices[0].message.content = "Test response"
         mock_response.choices[0].message.tool_calls = None
         mock_response.choices[0].message.reasoning_content = None
+        mock_response.choices[0].finish_reason = "stop"
         mock_response.usage = MagicMock()
         mock_response.usage.prompt_tokens = 10
         mock_response.usage.completion_tokens = 20
@@ -271,6 +272,7 @@ class TestSiliconFlowModelClientTracer:
         mock_response.choices[0].message.content = "Test response"
         mock_response.choices[0].message.tool_calls = None
         mock_response.choices[0].message.reasoning_content = None
+        mock_response.choices[0].finish_reason = "stop"
         mock_response.usage = MagicMock()
         mock_response.usage.prompt_tokens = 10
         mock_response.usage.completion_tokens = 20
@@ -407,3 +409,54 @@ async def test_llm_input_includes_extra_request_params(
     assert llm_input_call.kwargs["frequency_penalty"] == -1
     assert llm_input_call.kwargs["presence_penalty"] == 0.5
     assert llm_input_call.kwargs["stop"] == "END"
+
+
+@pytest.mark.asyncio
+async def test_invoke_llm_output_trigger_forwards_reasoning_content(
+    openai_client_config, model_request_config
+):
+    """Non-streaming invoke must forward reasoning_content to the LLM_OUTPUT trigger.
+
+    Regression guard: the streaming path already passes
+    ``reasoning_content=final_message.reasoning_content``; the non-streaming
+    path used to omit it, so ``on_llm_output`` (which reads
+    ``kwargs.get("reasoning_content")``) got an empty string and never
+    created the reasoning sub-span for reasoning models (o1/o3/etc).
+    """
+    client = OpenAIModelClient(model_request_config, openai_client_config)
+
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message = MagicMock()
+    mock_response.choices[0].message.content = "Test response"
+    mock_response.choices[0].message.tool_calls = None
+    mock_response.choices[0].message.reasoning_content = "let me think"
+    mock_response.choices[0].finish_reason = "stop"
+    mock_response.usage = MagicMock()
+    mock_response.usage.prompt_tokens = 10
+    mock_response.usage.completion_tokens = 20
+    mock_response.usage.total_tokens = 30
+    mock_response.usage.prompt_tokens_details = None
+
+    mock_async_client = AsyncMock()
+    mock_async_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+    trigger_mock = AsyncMock()
+    with patch.object(
+        client, "_create_async_openai_client", return_value=mock_async_client
+    ), patch(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.trigger",
+        trigger_mock,
+    ):
+        await client.invoke([UserMessage(content="Hello")])
+
+    llm_output_call = next(
+        call
+        for call in trigger_mock.call_args_list
+        if call.args[0] == LLMCallEvents.LLM_OUTPUT
+    )
+    # reasoning_content must be forwarded, mirroring the streaming path.
+    assert llm_output_call.kwargs["reasoning_content"] == "let me think"
+    # content/usage/tool_calls contracts unchanged.
+    assert llm_output_call.kwargs["response"] == "Test response"
+    assert llm_output_call.kwargs["tool_calls"] is None

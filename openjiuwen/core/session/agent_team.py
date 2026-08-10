@@ -10,6 +10,9 @@ from openjiuwen.core.session.stream import (
     BaseStreamMode,
     OutputSchema,
 )
+from openjiuwen.core.foundation.kv_cache.kv_cache_metadata import (
+    KVCacheIdentity,
+)
 from openjiuwen.core.single_agent import (
     create_agent_session,
     Session as AgentSession,
@@ -42,11 +45,18 @@ class Session:
     def get_session_id(self) -> str:
         return self._session_id
 
-    def get_env(self, key: str, default: Any) -> Any:
+    def get_env(self, key: str, default: Any = None) -> Any:
         return self._inner.config().get_env(key, default)
 
     def get_team_id(self) -> str:
         return self._team_id
+
+    def get_cache_identity(self) -> KVCacheIdentity:
+        """Return the root identity shared by this Team session."""
+        return KVCacheIdentity(
+            cache_id=self._session_id,
+            parent_cache_id=self._session_id,
+        )
 
     def get_envs(self):
         return self._inner.config().get_envs()
@@ -116,7 +126,7 @@ class Session:
                 "source_agent_id": card.id,
                 "source_team_id": self._team_id,
             }
-        return create_agent_session(
+        child = create_agent_session(
             session_id=self._session_id,
             envs=self.get_envs(),
             card=card,
@@ -124,6 +134,8 @@ class Session:
             close_stream_on_post_run=False,
             source_metadata=source_metadata,
         )
+        child.set_team_cache_scope(team_id=self._team_id, agent_id=card.id)
+        return child
 
     def _tag_stream_payload(self, data: dict | OutputSchema):
         if not self._source_metadata_enabled:

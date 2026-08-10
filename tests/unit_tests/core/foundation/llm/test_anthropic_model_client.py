@@ -68,6 +68,46 @@ class TestContentToBlocks:
         blocks = _content_to_blocks(42)
         assert blocks == [{"type": "text", "text": "42"}]
 
+    def test_image_url_data_block_converted_to_anthropic_image(self):
+        # Regression for #1484: OpenAI-style image_url blocks must become
+        # Anthropic "image" + "source" blocks, not be passed through verbatim.
+        blocks = _content_to_blocks([
+            {"type": "text", "text": "see this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+        ])
+        assert blocks[0] == {"type": "text", "text": "see this"}
+        assert blocks[1] == {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="},
+        }
+
+    def test_image_url_media_type_parsed_from_data_url(self):
+        blocks = _content_to_blocks([
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,QUJD"}},
+        ])
+        assert blocks[0]["source"]["media_type"] == "image/jpeg"
+        assert blocks[0]["source"]["data"] == "QUJD"
+
+    def test_image_url_remote_http_url_maps_to_url_source(self):
+        blocks = _content_to_blocks([
+            {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+        ])
+        assert blocks[0] == {
+            "type": "image",
+            "source": {"type": "url", "url": "https://example.com/a.png"},
+        }
+
+    def test_image_url_non_data_url_left_untouched(self):
+        # Malformed/unknown image_url shapes must not be silently dropped.
+        src = [{"type": "image_url", "image_url": {"url": 42}}]
+        blocks = _content_to_blocks(src)
+        assert blocks == src
+
+    def test_already_anthropic_image_block_passes_through(self):
+        src = [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "x"}}]
+        blocks = _content_to_blocks(src)
+        assert blocks == src
+
 
 # ---------------------------------------------------------------------------
 # A. Pure converters: _convert_message_schemas
@@ -442,3 +482,52 @@ class TestClientIdentity:
 
     def test_get_client_name(self):
         assert _make_client()._get_client_name() == "Anthropic client"
+
+
+# ---------------------------------------------------------------------------
+# F. Sampling params: Anthropic forbids temperature + top_p together
+# ---------------------------------------------------------------------------
+
+
+class TestSamplingParams:
+    def _params(self, client: AnthropicModelClient, **overrides) -> dict:
+        kwargs = dict(
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model="claude-opus-4",
+            stop=None,
+            max_tokens=None,
+            stream=False,
+        )
+        kwargs.update(overrides)
+        return client._build_anthropic_params(**kwargs)
+
+    def test_temperature_wins_when_both_set(self):
+        params = self._params(_make_client(), temperature=0.6, top_p=0.8)
+        assert params["temperature"] == 0.6
+        assert "top_p" not in params
+
+    def test_config_defaults_send_temperature_only(self):
+        # ModelRequestConfig defaults both (temperature=0.95, top_p=0.1); the
+        # base builder backfills them, so a plain call must still drop top_p.
+        params = self._params(_make_client())
+        assert "temperature" in params
+        assert "top_p" not in params
+
+    def test_top_p_forwarded_when_temperature_absent(self):
+        # temperature can only be absent if the config itself has no default.
+        client = _make_client()
+        client.model_config.temperature = None
+        params = self._params(client, top_p=0.8)
+        assert params["top_p"] == 0.8
+        assert "temperature" not in params
+
+    def test_default_top_p_dropped_when_temperature_absent(self):
+        # top_p=1.0 is the default (no nucleus truncation); skip it entirely.
+        client = _make_client()
+        client.model_config.temperature = None
+        params = self._params(client, top_p=1.0)
+        assert "top_p" not in params
+        assert "temperature" not in params

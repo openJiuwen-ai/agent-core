@@ -28,7 +28,10 @@ class GatewayConfig:
     dump_token_ids: bool = False
 
     lora_repo_root: str = ""
+    lora_default_policy: str = "disabled"
     redis_url: str = ""
+    trajectory_store_backend: str = "auto"
+    local_trajectory_store_dir: str = ""
 
     upstream_max_retries: int = 2
     upstream_retry_backoff_sec: float = 0.2

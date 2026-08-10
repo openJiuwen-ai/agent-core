@@ -164,7 +164,7 @@ class TestOnlineEvolutionE2E:
         llm.invoke = AsyncMock(
             return_value=SimpleNamespace(content=_build_mock_llm_response_with_script())
         )
-        optimizer = SkillExperienceOptimizer(llm=llm, model="mock-model", language="en")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="mock-model", language="en", two_stage=False)
 
         store = EvolutionStore(str(tmp_path / "skills"))
 
@@ -286,7 +286,7 @@ class TestOnlineEvolutionE2E:
             }])),
         ])
 
-        optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="cn")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="cn", two_stage=False)
         detector = SignalDetector()
         signals = detector.detect([
             {"role": "tool", "name": "bash", "content": "Error: command timeout"},
@@ -327,7 +327,7 @@ class TestOnlineEvolutionE2E:
             "content": "### Initial finding\n- v1 content",
         }])))
 
-        optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="en")
+        optimizer = SkillExperienceOptimizer(llm=llm, model="mock", language="en", two_stage=False)
         signals = SignalDetector().detect([
             {"role": "tool", "name": "bash", "content": "Error: timeout"},
         ])

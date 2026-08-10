@@ -18,7 +18,7 @@ Create a new LLM teammate with domain expertise. Members are long-lived entities
   - Cross-team / cross-member confidential strategy or comparisons
 - Put "private guidance for this member only" and "boundaries only they need to know" into `prompt`. Keep `desc` to the **role identity every teammate must know**, so peers can route tasks and ask for help against it.
 
-You must call build_team before calling spawn_teammate. Call order: build_team → create_task → spawn_teammate → send_message. spawn_teammate only creates the member record (status: UNSTARTED); on the first send_message call the system automatically starts every unstarted member. Call shutdown_member when the member is done. If member_name already exists, creation fails — pick a non-conflicting name.
+You must call build_team before calling spawn_teammate. Call order: build_team → spawn_teammate → create_task → put the members to work. **Members exist before tasks**, so that work lands on named people. This order **holds per batch, not once globally** — spawn a research member to establish background first, then fill in the remaining members and tasks from its findings. spawn_teammate only creates the member record (status: UNSTARTED); when it gets started depends on the team's dispatch mode (see the "Task Dispatch" section of your system prompt). Call shutdown_member when the member is done. If member_name already exists, creation fails — pick a non-conflicting name.
 
 **Both desc and prompt describe long-term properties and must not be bound to specific tasks.** desc captures "who this role is, what it can do, which areas it owns" and is read by every teammate; prompt captures "what working conventions this role always follows" (code style, naming, collaboration habits, etc.) and is read only by the member themselves. Do not put any concrete task goal, task ID, task name, or to-do list into either field — that information is delivered per-task via create_task / send_message. Equally, do not write prompt as generic startup filler such as "start working" or "check the task list".
 
@@ -53,3 +53,38 @@ collaboration constraints; no current-task content:
     For cross-domain dependencies (frontend contract, deployment details),
     align with the corresponding member before implementing. When the
     approach is uncertain, list options and trade-offs before coding.
+
+## Context Inheritance (Fork)
+
+Inherit context from an existing member via `fork` / `fork_source` / `compact`:
+
+| Parameter | Usage |
+|------|------|
+| **fork** | true: inherit the caller's full current context. A string (e.g. `code-ready`): inherit from the named checkpoint snapshot |
+| **fork_source** | Name of the member whose context to fork from. Defaults to leader. Must be an already-spawned in-process teammate |
+| **compact** | Enable context compaction: older messages before the checkpoint are compressed into a summary; messages after are kept verbatim. Only effective with a named checkpoint fork |
+
+### Use Cases
+
+| Scenario | Usage |
+|------|------|
+| Base class read; N homogeneous executors implement derived classes | `fork="base-ready" fork_source="reader"` |
+| Understander has analyzed the project; multiple executors start directly | `fork="code-ready" fork_source="reader"` |
+| Large context; needs compaction to save tokens | `fork="code-ready" fork_source="reader" compact=true` |
+| Unrelated new task | Omit fork |
+
+### Fork Semantics
+
+| fork | compact | Behaviour |
+|------|---------|-----------|
+| `true` | — | Full injection, no compaction |
+| `"ckpt"` | false | Truncate before checkpoint |
+| `"ckpt"` | **true** | Split at ckpt: compress before, keep after |
+
+Other combinations rely on built-in context compaction.
+
+### Mechanism
+
+- Inherited messages are the source member's full conversation history (file reads, search outputs, analysis conclusions)
+- Have the source member call `checkpoint(name="xxx")` before forking, then use `fork="xxx"`
+- `fork=true` inherits the full context at call time; prefer checkpoint mode when later scheduling noise would otherwise be included

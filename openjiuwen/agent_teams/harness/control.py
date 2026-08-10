@@ -48,8 +48,10 @@ class _CmdPause:
     """A pause() invocation reaching the supervisor.
 
     Attributes:
-        ack: Future resolved with None after the supervisor has cancelled
-            the active round, rolled back state, and cached paused_query.
+        ack: Future resolved with None once the harness has settled to PAUSED.
+            For an LLM-phase pause this is synchronous; for a tool-phase pause
+            it is deferred until the current iteration completes cooperatively
+            (the supervisor stashes it on ``ActiveRound.pause_ack``).
     """
 
     ack: asyncio.Future
@@ -85,10 +87,28 @@ class _CmdStop:
     ack: asyncio.Future
 
 
+@dataclass(frozen=True, slots=True)
+class _CmdResume:
+    """A resume() invocation reaching the supervisor.
+
+    Attributes:
+        ack: Future resolved with None after the supervisor has started a
+            continuation round from the paused round's preserved context.
+        query: Cold-resume payload. When the harness was stopped and rebuilt,
+            its context comes back from the session checkpoint and the paused
+            round's originating query is supplied here. ``None`` for a warm
+            resume, which reads the query the pause cached in memory.
+    """
+
+    ack: asyncio.Future
+    query: str | None = None
+
+
 ControlEvent = Union[
     _CmdSend,
     _CmdAbort,
     _CmdPause,
+    _CmdResume,
     _CmdRoundFinished,
     _CmdStop,
 ]

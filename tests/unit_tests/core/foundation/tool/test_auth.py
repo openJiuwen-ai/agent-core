@@ -245,18 +245,33 @@ class TestAuthCallbacks:
     
     @staticmethod
     @pytest.mark.asyncio
-    async def test_ssl_auth_handler_cert_empty():
+    @patch("openjiuwen.core.foundation.tool.auth.auth_callback.SslUtils")
+    @patch("openjiuwen.core.foundation.tool.auth.auth_callback.aiohttp")
+    async def test_ssl_auth_handler_cert_empty(mock_aiohttp, mock_ssl_utils):
+        # An empty ssl_cert is valid: it means "verify SSL using the system
+        # default trust store" (public-CA endpoints work out of the box),
+        # so authentication must succeed and create_strict_ssl_context must
+        # be invoked with None.
+        mock_ssl_context = MagicMock()
+        mock_ssl_utils.get_ssl_config.return_value = (True, None)
+        mock_ssl_utils.create_strict_ssl_context.return_value = mock_ssl_context
+
+        mock_connector = MagicMock()
+        mock_aiohttp.TCPConnector.return_value = mock_connector
+
         auth_config = ToolAuthConfig(
             auth_type=AuthType.SSL,
             config={},
             tool_type="restful_api"
         )
-        
-        # Verify that an exception is raised when SSL cert is empty
-        with pytest.raises(Exception) as excinfo:
-            await SSLAuthStrategy().authenticate(auth_config)
-        
-        assert "must provide ssl cert" in str(excinfo.value)
+
+        result = await SSLAuthStrategy().authenticate(auth_config)
+
+        assert isinstance(result, ToolAuthResult)
+        assert result.success is True
+        assert result.auth_data["connector"] is mock_connector
+        mock_ssl_utils.create_strict_ssl_context.assert_called_once_with(None)
+        mock_aiohttp.TCPConnector.assert_called_once_with(ssl=mock_ssl_context)
     
     @staticmethod
     @pytest.mark.asyncio

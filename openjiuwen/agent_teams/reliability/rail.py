@@ -14,6 +14,7 @@ after the behavior-shaping rails.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.reliability.anomaly import Anomaly
@@ -31,8 +32,16 @@ def _error_text(exc: Exception | None) -> str:
 
 
 def _args_as_dict(tool_args: Any) -> dict[str, Any] | None:
-    """Return tool args only when they are a dict (for stable hashing)."""
-    return tool_args if isinstance(tool_args, dict) else None
+    """Normalize dict or JSON-object tool args for stable hashing."""
+    if isinstance(tool_args, dict):
+        return tool_args
+    if isinstance(tool_args, str):
+        try:
+            parsed = json.loads(tool_args)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 def _measure_response(response: Any) -> tuple[int | None, int | None]:

@@ -15,7 +15,7 @@ from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
+from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 from openjiuwen.core.common.exception.errors import BaseError
 
 
@@ -99,7 +99,7 @@ def _ctx(member: str = "dev-1", cli_agent: str = "claude") -> TeamRuntimeContext
         member_name=member,
         cli_agent=cli_agent,
         team_spec=TeamSpec(team_name="ext_team", display_name="Ext", language="en"),
-        db_config=MemoryDatabaseConfig(),
+        db_config=DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"),
         messager_config=MessagerTransportConfig(
             backend="inprocess",
             team_name="ext_team",
@@ -109,40 +109,23 @@ def _ctx(member: str = "dev-1", cli_agent: str = "claude") -> TeamRuntimeContext
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_build_cli_runtime_ssh_uses_transport_and_keeps_mcp_args(monkeypatch):
-    created: list[_RecordingTransport] = []
-
-    def _factory(_config: SshTransportConfig) -> _RecordingTransport:
-        transport = _RecordingTransport()
-        created.append(transport)
-        return transport
-
-    monkeypatch.setattr(spawn_mod, "SshTransport", _factory)
+async def test_build_cli_runtime_ssh_rejects_non_claude_cli():
     config = SshTransportConfig(host="host", username="u", password="pw")
     token = set_session_id("sess-1")
     try:
-        runtime = await spawn_mod.build_cli_runtime(
-            _ctx(),
-            ssh_transport=config,
-            mcp_server_command=("remote-openjiuwen-team-mcp",),
-            extra_env={"REMOTE_ONLY": "1"},
-        )
+        with pytest.raises(BaseError):
+            await spawn_mod.build_cli_runtime(
+                _ctx(cli_agent="generic"),
+                command_override=("remote-agent",),
+                ssh_transport=config,
+            )
     finally:
         reset_session_id(token)
-
-    assert isinstance(runtime, ExternalCliRuntime)
-    assert len(created) == 1
-    run = created[0].runs[0]
-    assert "--mcp-config" in run["argv"]
-    assert "OPENJIUWEN_TEAM_JOIN" in run["env"]
-    assert run["env"]["REMOTE_ONLY"] == "1"
-    assert "PATH" not in run["env"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_build_cli_runtime_ssh_rejects_oneshot_cli(monkeypatch):
-    monkeypatch.setattr(spawn_mod, "SshTransport", lambda _config: _RecordingTransport())
+async def test_build_cli_runtime_ssh_rejects_oneshot_cli():
     config = SshTransportConfig(host="host", username="u", password="pw")
 
     with pytest.raises(BaseError):

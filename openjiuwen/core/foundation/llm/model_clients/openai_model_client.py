@@ -1,13 +1,14 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import TYPE_CHECKING, List, Optional, AsyncIterator, Union, Any, Mapping
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import httpx
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.common.logging import llm_logger, logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
@@ -36,16 +37,87 @@ if TYPE_CHECKING:
     import openai
 
 
+@dataclass(frozen=True)
+class ModelParamRule:
+    name: str
+    predicate: Callable[[str], bool]
+    extra_body_fields: Mapping[str, object]
+
+
+_DEFAULT_MODEL_PARAM_RULES: tuple[ModelParamRule, ...] = (
+    ModelParamRule(
+        name="minimax_reasoning_split",
+        predicate=lambda m: m.startswith("MiniMax-M"),
+        extra_body_fields={"reasoning_split": True},
+    ),
+)
+
+
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
     __client_name__ = [ProviderType.OpenAI.value]
     _PROTECTED_HEADERS = PROTECTED_HEADERS
+    _MODEL_PARAM_RULES: tuple[ModelParamRule, ...] = _DEFAULT_MODEL_PARAM_RULES
+
+    # Process-wide cache of long-lived ``AsyncOpenAI`` clients, bucketed by
+    # tenant/connection config so different api_key/api_base never share a
+    # client. Each cached client keeps its own httpx keep-alive connection pool
+    # alive, so cache hits reuse established connections (no per-request
+    # build/close). Shared across subclasses (OpenRouter/DashScope/DeepSeek) on
+    # purpose: one cache per process.
+    _client_cache: Dict[Tuple, "openai.AsyncOpenAI"] = {}
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
         self._base_headers = build_base_headers(
             custom_headers=model_client_config.custom_headers,
         )
+
+    def _use_shared_client(self) -> bool:
+        """Whether to reuse the process-wide cached client (default True).
+
+        Emergency kill-switch: set ``use_shared_llm_http_client=False`` to fall
+        back to per-request clients.
+        """
+        return bool(getattr(self.model_client_config, "use_shared_llm_http_client", True))
+
+    @classmethod
+    def connection_key(cls, model_client_config: ModelClientConfig) -> Tuple:
+        """Connection identity used to bucket/reuse cached clients.
+
+        Includes ``api_key``/``api_base`` so different tenants never share a
+        client. ``api_base`` already determines the proxy, so proxy is not part
+        of the key. Exposed as a classmethod so callers (e.g. config hot-reload
+        reconciliation) can compute the same key to select connections to close
+        via :meth:`aclose_connections`.
+        """
+        cfg = model_client_config
+        return (
+            cfg.api_key,
+            cfg.api_base,
+            cfg.verify_ssl,
+            cfg.ssl_cert,
+        )
+
+    def _apply_model_specific_params(self, model: Optional[str], params: dict) -> None:
+        """Apply provider-specific ``extra_body`` fields based on model name.
+
+        Mutates ``params`` in place: for each matching ``ModelParamRule`` the
+        rule's ``extra_body_fields`` are merged into ``params['extra_body']``.
+        Existing caller-provided fields are preserved; later rules override
+        earlier ones on key collision.
+        """
+        if not model:
+            return
+        for rule in self._MODEL_PARAM_RULES:
+            if not rule.predicate(model) or not rule.extra_body_fields:
+                continue
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body.update(rule.extra_body_fields)
+            params["extra_body"] = extra_body
+
+    def _client_cache_key(self) -> Tuple:
+        return self.connection_key(self.model_client_config)
 
     def _get_client_name(self) -> str:
         """Get client name."""
@@ -108,20 +180,60 @@ class OpenAIModelClient(BaseModelClient):
         return params
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
-        """
-        Create an OpenAI Async client with configured SSL/proxy/http client settings.
-        
+        """Acquire an ``AsyncOpenAI`` client for a request.
+
+        Default (shared) path returns a long-lived, cached client whose httpx
+        keep-alive pool reuses established connections. The caller MUST NOT close
+        it on the hot path.
+
+        Emergency fallback path (``use_shared_llm_http_client=False``) builds a
+        fresh per-request client that the caller owns and must close.
+
         Args:
-            timeout: Optional timeout override for this specific request
+            timeout: Optional per-request timeout. Only baked into the client in
+                the fallback path; in the shared path it is applied per request
+                via ``create(..., timeout=...)`` so the cached client is never
+                rebuilt just to change the timeout.
         """
+        if not self._use_shared_client():
+            return self._build_async_openai_client(timeout=timeout)
+
+        # Shared path: build once per tenant/connection identity and reuse.
+        # Building is fully synchronous (no ``await``), so under a single-threaded
+        # asyncio event loop the get/build/set below is atomic and needs no lock.
+        key = self._client_cache_key()
+        client = self._client_cache.get(key)
+        if client is None:
+            client = self._build_async_openai_client()
+            self._client_cache[key] = client
+            llm_logger.info(
+                "Created shared long-lived AsyncOpenAI client.",
+                event_type=LogEventType.LLM_CALL_START,
+                timeout=self.model_client_config.timeout,
+                max_retries=self.model_client_config.max_retries,
+            )
+        return client
+
+    def _build_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
+        """Build a fresh ``AsyncOpenAI`` client with its own httpx connection pool."""
         from openai import AsyncOpenAI
 
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
+        # httpx defaults keepalive_expiry to 5s, which drops idle keep-alive
+        # connections between calls spaced >5s apart, forcing a rebuild. Bump to
+        # 60s to keep connections warm across typical inter-request gaps while
+        # staying at/under common upstream/LB idle timeouts (avoids reusing a
+        # server-closed "dead" connection).
         http_client = httpx.AsyncClient(
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
-            verify=verify
+            verify=verify,
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=60.0,
+            ),
         )
 
         # Use method-level timeout if provided, otherwise use config timeout
@@ -140,6 +252,52 @@ class OpenAIModelClient(BaseModelClient):
             timeout=final_timeout,
             max_retries=self.model_client_config.max_retries
         )
+
+    @classmethod
+    async def aclose(cls) -> None:
+        """Close all cached clients and their underlying connection pools.
+
+        Intended for agent/process teardown only. NEVER call this on the request
+        hot path: it tears down the shared client that other in-flight calls
+        rely on.
+        """
+        clients = list(cls._client_cache.values())
+        cls._client_cache.clear()
+
+        for client in clients:
+            try:
+                await client.close()
+            except Exception as e:  # pragma: no cover - defensive cleanup
+                logger.warning(f"Error closing cached AsyncOpenAI client: {e}")
+
+    @classmethod
+    async def aclose_connections(cls, configs: Iterable[ModelClientConfig]) -> None:
+        """Close and drop cached clients for exactly the given connection identities.
+
+        Only the connections whose identity matches one of ``configs`` are
+        closed; everything else is left untouched. Intended for delta-based
+        eviction on config hot-reload (close just the credentials that were
+        removed/changed), so unrelated cached clients (used by other components
+        sharing this process-wide cache) are never disturbed.
+
+        Closing is immediate even if a call is in flight: a model the user
+        removed should stop consuming tokens at once. An in-flight request on a
+        closed client surfaces as a normal model-call failure (not retried by
+        LLMRetryRail, which only retries repetition/stream-timeout markers).
+        """
+        keys = {cls.connection_key(cfg) for cfg in configs}
+        closed = 0
+        for key in keys:
+            client = cls._client_cache.pop(key, None)
+            if client is None:
+                continue
+            try:
+                await client.close()
+                closed += 1
+            except Exception as e:  # pragma: no cover - defensive cleanup
+                logger.warning(f"Error closing AsyncOpenAI client: {e}")
+        if closed:
+            logger.info(f"Closed {closed} AsyncOpenAI client(s) for removed/updated model config")
 
     async def invoke(
             self,
@@ -201,6 +359,7 @@ class OpenAIModelClient(BaseModelClient):
             extra_body["return_token_ids"] = params.pop("return_token_ids")
             params["extra_body"] = extra_body
 
+        self._apply_model_specific_params(model, params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -220,6 +379,11 @@ class OpenAIModelClient(BaseModelClient):
                 stop=params.get("stop"))
 
             async_client = self._create_async_openai_client(timeout=timeout)
+
+            # Per-request timeout override; cached shared client is never rebuilt
+            # just to change the timeout.
+            if timeout is not None:
+                params["timeout"] = timeout
 
             # Call API
             response = await async_client.chat.completions.create(**params)
@@ -256,6 +420,7 @@ class OpenAIModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 response=assistant_message.content,
+                reasoning_content=assistant_message.reasoning_content,
                 usage=assistant_message.usage_metadata,
                 tool_calls=assistant_message.tool_calls)
 
@@ -286,7 +451,10 @@ class OpenAIModelClient(BaseModelClient):
                 error_msg=f"openAI API async invoke error: {str(e)}"
             ) from e
         finally:
-            if async_client is not None:
+            # Only close clients we own (fallback path). Shared/pooled clients
+            # are long-lived; closing them on the hot path would tear down the
+            # shared transport.
+            if async_client is not None and not self._use_shared_client():
                 await async_client.close()
 
     async def stream(
@@ -355,6 +523,7 @@ class OpenAIModelClient(BaseModelClient):
             extra_body = dict(params.get("extra_body") or {})
             extra_body["return_token_ids"] = params.pop("return_token_ids")
             params["extra_body"] = extra_body
+        self._apply_model_specific_params(model, params)
 
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
@@ -376,6 +545,11 @@ class OpenAIModelClient(BaseModelClient):
                 is_stream=True)
 
             async_client = self._create_async_openai_client(timeout=timeout)
+
+            # Per-request timeout override; cached shared client is never rebuilt
+            # just to change the timeout.
+            if timeout is not None:
+                params["timeout"] = timeout
 
             # Call API with streaming
             response_stream = await async_client.chat.completions.create(**params)
@@ -416,6 +590,7 @@ class OpenAIModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
                 response=final_message.content if final_message else None,
+                reasoning_content=final_message.reasoning_content if final_message else None,
                 usage=final_message.usage_metadata if final_message else None,
                 tool_calls=final_message.tool_calls if final_message else None)
 
@@ -449,7 +624,10 @@ class OpenAIModelClient(BaseModelClient):
                 error_msg=f"openAI API async stream error: {error_detail}"
             ) from e
         finally:
-            if async_client is not None:
+            # Only close clients we own (fallback path). Shared/pooled clients
+            # are long-lived; closing them on the hot path would tear down the
+            # shared transport.
+            if async_client is not None and not self._use_shared_client():
                 await async_client.close()
 
     async def generate_image(
@@ -555,7 +733,18 @@ class OpenAIModelClient(BaseModelClient):
 
     @staticmethod
     def _extract_reasoning_content(msg_or_delta: Any) -> Optional[str]:
-        return getattr(msg_or_delta, 'reasoning_content', None)
+        reasoning_details = getattr(msg_or_delta, "reasoning_details", None)
+        if isinstance(reasoning_details, list) and reasoning_details:
+            first = reasoning_details[0]
+            if isinstance(first, dict):
+                text = first.get("text")
+                if text:
+                    return text
+        for attr in ("reasoning_content", "reasoning"):
+            value = getattr(msg_or_delta, attr, None)
+            if isinstance(value, str) and value:
+                return value
+        return None
 
     async def _parse_response(
             self,
@@ -572,9 +761,11 @@ class OpenAIModelClient(BaseModelClient):
             AssistantMessage: Parsed assistant message
             
         Note:
-            Non-streaming finish_reason can only be "stop" or "tool_calls":
-            - stop: Model generation completed without tool calls
-            - tool_calls: Model generation completed with tool calls
+            Non-streaming finish_reason is normalized as follows:
+            - If the provider returns a value, it is preserved as-is (e.g. "stop",
+              "tool_calls", "length", "content_filter", etc.).
+            - If the provider returns None or an empty string, it defaults to
+              "tool_calls" when tool_calls are present, otherwise "stop".
         """
         choice = response.choices[0]
         message = choice.message
@@ -613,6 +804,7 @@ class OpenAIModelClient(BaseModelClient):
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cache_tokens=self._extract_cache_tokens(response.usage),
+                reasoning_tokens=self._extract_reasoning_tokens(response.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,
@@ -664,12 +856,14 @@ class OpenAIModelClient(BaseModelClient):
         prompt_token_ids = getattr(response, 'prompt_token_ids', None) or None
         completion_token_ids = getattr(choice, 'token_ids', None) or None
         logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
-
+        finish_reason = getattr(choice, 'finish_reason', None) or None
+        if not finish_reason:
+            finish_reason = "tool_calls" if tool_calls else "stop"
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
-            finish_reason="tool_calls" if tool_calls else "stop",
+            finish_reason=finish_reason,
             reasoning_content=reasoning_content,
             parser_content=parser_content,
             prompt_token_ids=prompt_token_ids,
@@ -712,6 +906,7 @@ class OpenAIModelClient(BaseModelClient):
                 output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                 total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
                 cache_tokens=self._extract_cache_tokens(chunk.usage),
+                reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,

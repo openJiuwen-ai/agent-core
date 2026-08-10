@@ -129,6 +129,25 @@ class ToolMgr:
                 results = await self._inner_refresh_mcp_tools(client, server_config, expiry_time)
                 self._mcp_server_name_to_ids.setdefault(server_config.server_name, []).append(server_config.server_id)
                 return results
+            except asyncio.CancelledError:
+                # Task cancellation must propagate — wrapping it into a business
+                # error would break cooperative cancellation of the caller.
+                raise
+            except BaseExceptionGroup as e:
+                # ``BaseExceptionGroup`` (e.g. from ``asyncio.gather``) is a
+                # ``BaseException``, NOT an ``Exception``, so a bare
+                # ``except Exception`` silently swallowed connection failures
+                # wrapped in a group. Surface them as a proper add error.
+                # A single-exception group (the common asyncio.gather case)
+                # carries the real failure in ``exceptions[0]`` — ``str(group)``
+                # only prints "… (1 sub-exception)", hiding the cause.
+                detail = e.exceptions[0] if len(e.exceptions) == 1 else e
+                raise build_error(
+                    StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR,
+                    cause=e,
+                    server_config=server_config,
+                    reason=str(detail),
+                ) from e
             except Exception as e:
                 raise build_error(
                     StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, cause=e, server_config=server_config, reason=str(e)

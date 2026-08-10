@@ -11,6 +11,7 @@
 | **Model** | Large model wrapper class, providing unified invocation interface. |
 | **BaseModelClient** | Large model client abstract base class. |
 | **OpenAIModelClient** | OpenAI-compatible large model client implementation. |
+| **OpenAIAccountModelClient** | OpenAI account OAuth large model client implementation, signing in via OAuth credentials with no `api_key` required. |
 | **DashScopeModelClient** | DashScope (Tongyi Qianwen) large model client implementation, supporting conversational, image generation, speech synthesis, and video generation multimodal features. |
 | **BaseOutputParser** | Output parser abstract base class. |
 | **JsonOutputParser** | JSON format output parser. |

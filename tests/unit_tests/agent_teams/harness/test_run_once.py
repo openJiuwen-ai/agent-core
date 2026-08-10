@@ -83,6 +83,36 @@ async def test_run_once_owns_and_closes_its_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_once_skips_checkpointing_for_a_caller_owned_session() -> None:
+    """A session passed in keeps its own lifecycle: no pre_run, no post_run.
+
+    Single-shot callers (TinyAgent, swarmflow workers) own a throwaway session
+    precisely to skip that checkpointer round trip, so the skip is the contract
+    rather than an incidental optimization.
+    """
+    from unittest.mock import AsyncMock
+
+    from openjiuwen.core.session.agent import Session
+
+    await Runner.start()
+    try:
+        harness = NativeHarness(_spec(enable_task_loop=False))
+        await _inject_fake(harness, answer="x")
+
+        session = Session(card=harness.card)
+        session.pre_run = AsyncMock()
+        session.post_run = AsyncMock()
+
+        result = await harness.run_once("hi", session=session)
+
+        assert result["output"] == "x"
+        session.pre_run.assert_not_awaited()
+        session.post_run.assert_not_awaited()
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_run_once_rejects_when_supervisor_active() -> None:
     """run_once must not run while the streaming supervisor is active."""
     from openjiuwen.agent_teams.harness import HarnessState

@@ -14,10 +14,12 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.fork import ForkContext
     from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 
 
@@ -27,6 +29,7 @@ async def inprocess_spawn(
     *,
     initial_message: Optional[str] = None,
     session_id: Optional[str] = None,
+    fork_from: "ForkContext | None" = None,
 ) -> InProcessSpawnHandle:
     """Spawn a teammate TeamAgent as a coroutine in the current process.
 
@@ -55,11 +58,50 @@ async def inprocess_spawn(
     card = agent_spec.card or AgentCard(
         id=card_id,
         name=ctx.member_name or "unknown",
-        description=f"Teammate: {ctx.persona}" if ctx.persona else "Teammate",
+        description=f"Teammate: {ctx.desc}" if ctx.desc else "Teammate",
     )
 
     teammate = _TeamAgent(card)
     teammate.configure(spec, ctx)
+    kv_cache_hooks.share_registry_with_teammate(team_agent, teammate)
+
+    # Share the leader's checkpoint dict so this teammate's
+    # ``checkpoint()`` tool writes into the leader-visible namespace.
+    team_agent.share_checkpoints_with(teammate)
+    if teammate.team_backend is not None:
+        teammate.team_backend.set_store_checkpoint_fn(
+            lambda name, count: teammate.set_checkpoint(name, count) 
+        )
+
+    # Fork context injection: seed the teammate's context engine with the
+    # fork source's conversation history so it inherits prior understanding.
+    if fork_from and not fork_from.is_empty():
+        native = teammate.resources.harness.get_deep_agent()
+        await native.create_new_context_engine(
+            session_id=session_id,
+            messages=fork_from.to_messages(),
+        )
+        team_logger.debug(
+            "[fork] inprocess_spawn: injected %d messages into %s compact_split=%s",
+            len(fork_from.messages), ctx.member_name, fork_from.compact_split,
+        )
+        team_logger.info(
+            "[fork] %d messages injected into %s",
+            len(fork_from.messages), ctx.member_name,
+        )
+        # Compaction: compress older messages before the split point.
+        if fork_from.compact_split is not None:
+            from openjiuwen.agent_teams.fork_compact import compact_context
+
+            await compact_context(
+                native, split_at=fork_from.compact_split,
+                session_id=session_id,
+            )
+    else:
+        team_logger.debug(
+            "[fork] inprocess_spawn: NO fork injection for %s (fork_from=%s)",
+            ctx.member_name, "present" if fork_from else "None",
+        )
 
     # Empty query means "no first round": the teammate comes up, subscribes,
     # and idles until a real mailbox message arrives. Only a genuine

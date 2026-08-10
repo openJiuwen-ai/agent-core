@@ -5,13 +5,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import yaml
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.runner.runner import Runner
+from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.sections import SectionName
@@ -21,20 +21,35 @@ from openjiuwen.harness.prompts.sections.skills import (
     build_skill_lines,
     build_skills_section,
 )
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
-from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool, ListSkillTool, SkillTool
+from openjiuwen.harness.tools import BashTool, ReadFileTool, ListSkillTool, SkillTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+
+# Lines read when probing a SKILL.md for its YAML front matter. Bodies run to
+# tens of KB while the front matter is a handful of lines; a file whose front
+# matter does not fit within this budget falls back to a full read.
+_FRONT_MATTER_PROBE_LINES = 64
 
 
 class SkillUseRail(DeepAgentRail):
     """Rail that manages skill prompt injection and tool registration."""
 
-    priority = 100
+    # Below the filesystem toolset tier (SysOperationRail / WorktreeRail, 100)
+    # on purpose: ``init`` checks whether read_file / code / bash already have
+    # an owner before contributing its own fallback copies, and that check only
+    # means anything once the rails that own them for real have initialized.
+    # Level with McpRail / SubagentRail, which register their own tools and
+    # neither read nor write anything this rail touches.
+    priority = 95
 
     SKILL_MODE_ALL = "all"
     SKILL_MODE_AUTO_LIST = "auto_list"
     _VALID_SKILL_MODES = {SKILL_MODE_ALL, SKILL_MODE_AUTO_LIST}
+    _SESSION_STATE_KEY = "skill_use"
+    _SESSION_STATE_SCHEMA_VERSION = 1
+    _RUNTIME_ATTACHMENT_SECTION = "skills.runtime_changes"
 
     def __init__(
         self,
@@ -58,7 +73,7 @@ class SkillUseRail(DeepAgentRail):
                 - "auto_list": add list_skill tool and let model decide when to inspect skills
             list_skill_model: Optional model used by list_skill tool.
             enable_cache: Whether to cache loaded skills across invokes.
-            include_tools: Whether to register read_file / code / bash tools.
+            include_tools: Whether to register read_file / bash tools.
             enabled_skills: Optional allow-list of skill names. Supports str or List[str].
             disabled_skills: Optional deny-list of skill names. Supports str or List[str].
             evolution_store: Optional EvolutionStore for progressive disclosure experience text.
@@ -84,6 +99,7 @@ class SkillUseRail(DeepAgentRail):
 
         self.skills: List[Skill] = []
         self.system_prompt_builder = None
+        self.attachment_manager = None
 
         # Cache loaded skills across invokes.
         self._skill_cache: Dict[str, Skill] = {}
@@ -93,9 +109,12 @@ class SkillUseRail(DeepAgentRail):
         # Cache evolution experience texts per skill name.
         self._evolution_texts: Dict[str, str] = {}
 
-        # Track tools added by this rail only.
-        self._owned_tool_names: Set[str] = set()
-        self._owned_tool_ids: Set[str] = set()
+        # Abilities this rail actually registered, mapped from tool name to the
+        # exact card that was stored. The name is the ability-manager key
+        # (``add_ability`` rewrites card ids, so an id is not a stable handle),
+        # while the card identity tells uninit whether this rail is still the
+        # owner or another rail has since taken the name over.
+        self._owned_tool_cards: Dict[str, ToolCard] = {}
 
         # Snapshot of visible skill directories and SKILL.md mtimes.
         self._skills_snapshot_signature: Optional[Tuple[Tuple[str, float], ...]] = None
@@ -244,8 +263,15 @@ class SkillUseRail(DeepAgentRail):
         return filtered
 
     def init(self, agent):
-        """Register tool cards into agent and concrete tools into resource manager."""
+        """Register this rail's tools through the agent ability manager.
+
+        Every tool is registered with ``AbilityManager.add_ability`` (card plus
+        concrete instance) so the ability-manager card id and the
+        resource-manager key stay consistent. Abilities already owned by another
+        rail are left untouched; see the loop comment for why.
+        """
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
         tools = []
 
@@ -256,7 +282,7 @@ class SkillUseRail(DeepAgentRail):
         tools.append(
             SkillTool(
                 operation=self.sys_operation,
-                get_skills=lambda: self.skills,
+                get_skills=lambda session=None: self.get_skills_for_session(session),
                 language=lang,
                 agent_id=agent_id,
                 multimodal_skill_mode=self.multimodal_skill_mode,
@@ -273,7 +299,6 @@ class SkillUseRail(DeepAgentRail):
                         agent_id=agent_id,
                         enable_image_multimodal=enable_read_image_multimodal,
                     ),
-                    CodeTool(self.sys_operation, language=lang, agent_id=agent_id),
                     BashTool(self.sys_operation, language=lang, agent_id=agent_id),
                 ]
             )
@@ -281,72 +306,69 @@ class SkillUseRail(DeepAgentRail):
         if self.skill_mode == self.SKILL_MODE_AUTO_LIST:
             tools.append(
                 ListSkillTool(
-                    get_skills=lambda: self.skills,
+                    get_skills=lambda session=None: self.get_skills_for_session(session),
                     list_skill_model=self.list_skill_model,
                     language=lang,
                     agent_id=agent_id,
                 )
             )
 
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is None:
+            logger.warning(
+                "[SkillUseRail] agent has no ability_manager; skill tools are not registered"
+            )
+            return
+
         for tool in tools:
+            # ``include_tools`` only provides a *fallback* read_file / code /
+            # bash set for hosts that mount no filesystem rail. When another
+            # rail (typically SysOperationRail) already owns the ability, that
+            # owner's instance carries policy this rail cannot reproduce
+            # (read-only mode, bash deny patterns, an explicit multimodal
+            # override), so defer to it instead of rebinding the shared
+            # resource-manager entry behind its back.
+            if ability_manager.get(tool.card.name) is not None:
+                logger.debug(
+                    "[SkillUseRail] ability '%s' is already registered by another "
+                    "owner; skip the fallback registration",
+                    tool.card.name,
+                )
+                continue
             try:
-                existing_tool = Runner.resource_mgr.get_tool(tool.card.id)
-                if existing_tool is not None:
-                    Runner.resource_mgr.remove_tool(tool.card.id)
-                Runner.resource_mgr.add_tool(tool)
-                self._owned_tool_ids.add(tool.card.id)
+                # Register card + instance through the single entry point so the
+                # ability-manager card id and the resource-manager key stay
+                # consistent (stateful tools get an agent-qualified id).
+                result = ability_manager.add_ability(tool.card, tool)
+                if result.added:
+                    self._owned_tool_cards[tool.card.name] = tool.card
             except Exception as exc:
                 logger.warning(
-                    f"[SkillUseRail] failed to add tool resource '{tool.card.id}' "
-                    f"to resource_mgr: {exc}"
+                    f"[SkillUseRail] failed to register tool '{tool.card.name}' "
+                    f"on ability_manager: {exc}"
                 )
 
-        if hasattr(agent, "ability_manager"):
-            for tool in tools:
-                try:
-                    result = agent.ability_manager.add(tool.card)
-                    if result.added:
-                        self._owned_tool_names.add(tool.card.name)
-                except Exception as exc:
-                    logger.warning(
-                        f"[SkillUseRail] failed to add tool card '{tool.card.name}' "
-                        f"to ability_manager: {exc}"
-                    )
-
     def uninit(self, agent):
-        """Remove tool cards from agent ability manager and resource manager."""
-        if hasattr(agent, "ability_manager"):
-            for tool_name in list(self._owned_tool_names):
+        """Remove the abilities this rail still owns from the agent."""
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is not None:
+            for tool_name, tool_card in list(self._owned_tool_cards.items()):
+                if ability_manager.get(tool_name) is not tool_card:
+                    # Another rail re-registered the name after this rail did
+                    # and now owns both the card and the live instance; tearing
+                    # it down here would unregister that rail's tool.
+                    continue
                 try:
-                    agent.ability_manager.remove(tool_name)
+                    # remove_ability mirrors add_ability: it drops the card and,
+                    # for stateful tools, the agent-qualified resource entry.
+                    ability_manager.remove_ability(tool_name)
                 except Exception as exc:
                     logger.warning(
                         f"[SkillUseRail] failed to remove tool '{tool_name}' "
                         f"from ability_manager: {exc}"
                     )
 
-        for tool_id in list(self._owned_tool_ids):
-            if Runner.resource_mgr.get_tool(tool_id) is None:
-                continue
-            try:
-                result = Runner.resource_mgr.remove_tool(tool_id)
-                if hasattr(result, "is_err") and result.is_err():
-                    logger.warning(
-                        "[SkillUseRail] failed to remove tool resource '%s' "
-                        "from resource_mgr: %s",
-                        tool_id,
-                        result,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "[SkillUseRail] failed to remove tool resource '%s' "
-                    "from resource_mgr: %s",
-                    tool_id,
-                    exc,
-                )
-
-        self._owned_tool_names.clear()
-        self._owned_tool_ids.clear()
+        self._owned_tool_cards.clear()
 
     async def refresh_skill_prompt(self, ctx: AgentCallbackContext) -> None:
         """Regenerate the skills system prompt"""
@@ -358,12 +380,18 @@ class SkillUseRail(DeepAgentRail):
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Prepare skills before invoke."""
         await self.refresh_skill_prompt(ctx)
+        self._ensure_session_baseline(ctx)
 
-    async def _fetch_evolution_texts(self) -> None:
+    async def _fetch_evolution_texts(self, skills: Optional[List[Skill]] = None) -> None:
         """Fetch and cache evolution experience texts from EvolutionStore."""
         if self.evolution_store is None:
             return
-        for skill in self.skills:
+        skills = self.skills if skills is None else skills
+        seen_names: Set[str] = set()
+        for skill in skills:
+            if skill.name in seen_names:
+                continue
+            seen_names.add(skill.name)
             try:
                 text = await self.evolution_store.format_desc_experience_text(skill.name)
                 self._evolution_texts[skill.name] = text
@@ -395,11 +423,25 @@ class SkillUseRail(DeepAgentRail):
             return
 
         await self._refresh_skill_prompt_if_changed(ctx)
-        skills_section = self._build_skills_section()
+        # Evolution records can change without changing the Skill.md snapshot.
+        # Refresh them independently so the attachment always contains the
+        # latest experience while the system prompt remains stable.
+        # Some task-loop paths may enter model call without BEFORE_INVOKE.
+        # Establish the durable baseline at the first point where skills are used.
+        self._ensure_session_baseline(ctx)
+        session_state = self._load_session_state(getattr(ctx, "session", None))
+        baseline_skills = (
+            self._get_session_baseline(ctx)
+            if session_state is not None
+            else list(self.skills)
+        )
+        await self._fetch_evolution_texts([*baseline_skills, *self.skills])
+        skills_section = self._build_skills_section(baseline_skills)
         if skills_section is not None:
             self.system_prompt_builder.add_section(skills_section)
         else:
             self.system_prompt_builder.remove_section(SectionName.SKILLS)
+        await self._update_runtime_skill_attachment(ctx, baseline_skills)
 
     async def _refresh_skill_prompt_if_changed(self, ctx: AgentCallbackContext) -> None:
         """Refresh skills when visible skill directories or SKILL.md mtimes changed."""
@@ -431,16 +473,18 @@ class SkillUseRail(DeepAgentRail):
 
         return tuple(entries)
 
-    def _build_skills_section(self):
-        """Build PromptSection from current skills."""
+    def _build_skills_section(self, skills: Optional[List[Skill]] = None):
+        """Build the stable system prompt section from session baseline skills."""
+        skills = self.skills if skills is None else skills
         if self.skill_mode == self.SKILL_MODE_ALL:
             body_lines: List[str] = []
-            for idx, skill in enumerate(self.skills):
+            for idx, skill in enumerate(skills):
                 body_lines.append(
                     build_skill_line(
                         index=idx,
                         skill_name=skill.name,
-                        description=self._get_skill_description(skill),
+                        description=skill.description,
+                        language=self.system_prompt_builder.language,
                         # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                     )
                 )
@@ -456,6 +500,184 @@ class SkillUseRail(DeepAgentRail):
                 mode="auto_list",
             )
 
+    def get_skills_for_session(self, session: Any = None) -> List[Skill]:
+        """Return the current skill view for a tool invocation.
+
+        The persisted baseline is included even if the directory was changed after
+        the session started. Newly discovered skills remain available as runtime
+        additions for the current session.
+        """
+        baseline = self._load_session_baseline(session)
+        if self._load_session_state(session) is None:
+            return list(self.skills)
+
+        merged = list(baseline)
+        known_names = {skill.name for skill in merged}
+        merged.extend(skill for skill in self.skills if skill.name not in known_names)
+        return merged
+
+    def _get_session_baseline(self, ctx: AgentCallbackContext) -> List[Skill]:
+        return self._load_session_baseline(getattr(ctx, "session", None))
+
+    def _ensure_session_baseline(self, ctx: AgentCallbackContext) -> None:
+        session = getattr(ctx, "session", None)
+        if session is None:
+            return
+        if self._load_session_state(session) is not None:
+            return
+        self._save_session_baseline(session, self.skills)
+
+    def _load_session_baseline(self, session: Any) -> List[Skill]:
+        state = self._load_session_state(session)
+        if state is None:
+            return []
+        baseline = state.get("baseline_skills", [])
+        if not isinstance(baseline, list):
+            logger.warning("[SkillUseRail] invalid persisted baseline_skills; ignoring it")
+            return []
+
+        skills: List[Skill] = []
+        for item in baseline:
+            if not isinstance(item, dict) or not item.get("name") or not item.get("directory"):
+                continue
+            skills.append(
+                Skill(
+                    name=str(item["name"]),
+                    description=str(item.get("description") or ""),
+                    directory=Path(str(item["directory"])),
+                )
+            )
+        return skills
+
+    def _load_session_state(self, session: Any) -> Optional[dict]:
+        if session is None or not callable(getattr(session, "get_state", None)):
+            return None
+        state = session.get_state(self._SESSION_STATE_KEY)
+        if not isinstance(state, dict):
+            return None
+        if state.get("schema_version") != self._SESSION_STATE_SCHEMA_VERSION:
+            logger.warning("[SkillUseRail] unsupported persisted state schema; ignoring it")
+            return None
+        return state
+
+    def _save_session_baseline(self, session: Any, skills: List[Skill]) -> None:
+        if not callable(getattr(session, "update_state", None)):
+            return
+        session.update_state(
+            {
+                self._SESSION_STATE_KEY: {
+                    "schema_version": self._SESSION_STATE_SCHEMA_VERSION,
+                    "baseline_skills": [
+                        {
+                            "name": skill.name,
+                            "description": skill.description,
+                            "directory": str(skill.directory),
+                        }
+                        for skill in skills
+                    ],
+                }
+            }
+        )
+
+    async def _update_runtime_skill_attachment(
+        self,
+        ctx: AgentCallbackContext,
+        baseline_skills: List[Skill],
+    ) -> None:
+        manager = self.attachment_manager
+        if manager is None:
+            return
+        baseline_by_name = {skill.name: skill for skill in baseline_skills}
+        current_by_name = {skill.name: skill for skill in self.skills}
+        additions = [skill for skill in self.skills if skill.name not in baseline_by_name]
+        removals = [skill for skill in baseline_skills if skill.name not in current_by_name]
+        writer = manager.bind_context(ctx)
+        if not writer.session_id:
+            return
+        content = self._build_runtime_skill_change_content(
+            additions,
+            removals,
+            baseline_skills,
+        )
+        if not content:
+            await writer.clear_section(self._RUNTIME_ATTACHMENT_SECTION)
+            return
+
+        await writer.add_section(
+            section=self._RUNTIME_ATTACHMENT_SECTION,
+            content=content,
+            kind=PromptAttachmentKind.SKILL,
+            source="skill_use_rail",
+        )
+
+    def _build_runtime_skill_change_content(
+        self,
+        additions: List[Skill],
+        removals: List[Skill],
+        baseline_skills: List[Skill],
+    ) -> str:
+        """Render Skill changes and evolution experience in one attachment."""
+        language = getattr(self.system_prompt_builder, "language", "cn")
+        is_english = str(language).lower().startswith("en")
+        evolution_skills: List[Skill] = []
+        seen_names: Set[str] = set()
+        for skill in [*baseline_skills, *additions]:
+            if skill.name in seen_names:
+                continue
+            if self._evolution_texts.get(skill.name, "").strip():
+                evolution_skills.append(skill)
+                seen_names.add(skill.name)
+
+        if not additions and not removals and not evolution_skills:
+            return ""
+
+        if is_english:
+            lines = [
+                "Skill environment status update. Invoke relevant skills only when needed for the current task.",
+            ]
+            if additions:
+                lines.append("Newly available skills:")
+                lines.extend(
+                    build_skill_line(
+                        index=index,
+                        skill_name=skill.name,
+                        description=skill.description,
+                        language=self.system_prompt_builder.language,
+                    )
+                    for index, skill in enumerate(additions)
+                )
+            if removals:
+                lines.append("Unavailable skills (removed from the environment):")
+                lines.extend(f"- {skill.name}" for skill in removals)
+            if evolution_skills:
+                lines.append("Skill evolution experience reference:")
+                for skill in evolution_skills:
+                    lines.append(f"[Skill: {skill.name}]")
+                    lines.append(self._evolution_texts[skill.name].strip())
+            return "\n".join(lines)
+
+        lines = ["Skill 环境状态更新。请根据当前任务需要，按需调用相关 Skill。"]
+        if additions:
+            lines.append("新增可用 Skill：")
+            lines.extend(
+                build_skill_line(
+                    index=index,
+                    skill_name=skill.name,
+                    description=skill.description,
+                    language=self.system_prompt_builder.language,
+                )
+                for index, skill in enumerate(additions)
+            )
+        if removals:
+            lines.append("已移除、当前不可用的 Skill：")
+            lines.extend(f"- {skill.name}" for skill in removals)
+        if evolution_skills:
+            lines.append("Skill 演进经验参考：")
+            for skill in evolution_skills:
+                lines.append(f"[Skill: {skill.name}]")
+                lines.append(self._evolution_texts[skill.name].strip())
+        return "\n".join(lines)
+
     def _build_all_mode_prompt(self) -> str:
         """Build skill prompt for all mode."""
         body_lines: List[str] = []
@@ -466,6 +688,7 @@ class SkillUseRail(DeepAgentRail):
                     index=idx,
                     skill_name=skill.name,
                     description=self._get_skill_description(skill),
+                    language=self.system_prompt_builder.language,
                     # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
                 )
             )
@@ -501,12 +724,88 @@ class SkillUseRail(DeepAgentRail):
         """Normalize skill names into a set."""
         return set(cls._normalize_name_list(raw))
 
+    async def _read_skill_text(self, path: Path, *, head: Optional[int] = None) -> str:
+        """Read SKILL.md text, optionally only its first *head* lines.
+
+        Args:
+            path: Path to the SKILL.md file.
+            head: When set, read only that many leading lines. Skill metadata is
+                read-only, so the cross-process file lock is waived.
+
+        Returns:
+            The file text that was read.
+
+        Raises:
+            FileNotFoundError: The read failed or returned no content.
+        """
+        result = await self.sys_operation.fs().read_file(
+            str(path),
+            mode="text",
+            encoding="utf-8",
+            head=head,
+            only_read=True,
+        )
+
+        if getattr(result, "code", 0) != 0:
+            raise FileNotFoundError(
+                getattr(result, "message", f"read_file failed: {path}")
+            )
+
+        data = getattr(result, "data", None)
+        content = getattr(data, "content", None) if data is not None else None
+        if content is None:
+            raise FileNotFoundError(f"read_file content is None: {path}")
+
+        return content if isinstance(content, str) else str(content)
+
+    @staticmethod
+    def _split_front_matter(text: str) -> Optional[Tuple[dict, str]]:
+        """Split YAML front matter from the markdown body.
+
+        Args:
+            text: File text starting at the top of the file.
+
+        Returns:
+            The parsed front matter and the remaining body, or None when the
+            text does not open with a complete ``---`` delimited block.
+        """
+        if not text.startswith("---"):
+            return None
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            return None
+        _, yaml_block, body = parts
+        return yaml.safe_load(yaml_block) or {}, body.lstrip()
+
+    async def _load_front_matter(self, path: Path) -> Optional[dict]:
+        """Load only the YAML front matter of a SKILL.md.
+
+        A SKILL.md body can be tens of KB while the front matter is a handful of
+        lines, so a bounded head read is tried first and only a file whose front
+        matter does not fit falls back to reading the whole file.
+
+        Args:
+            path: Path to the SKILL.md file.
+
+        Returns:
+            The parsed front matter mapping, or None when the file has none.
+        """
+        head_text = await self._read_skill_text(path, head=_FRONT_MATTER_PROBE_LINES)
+        parsed = self._split_front_matter(head_text)
+        if parsed is not None:
+            return parsed[0]
+        if not head_text.startswith("---"):
+            return None
+        yaml_data, _ = await self._load_yaml(path)
+        return yaml_data
+
     async def _load_yaml(self, path: Path) -> Tuple[Optional[dict], str]:
         """Load YAML front matter and markdown body from SKILL.md."""
         result = await self.sys_operation.fs().read_file(
             str(path),
             mode="text",
             encoding="utf-8",
+            only_read=True,
         )
 
         if getattr(result, "code", 0) != 0:
@@ -532,10 +831,17 @@ class SkillUseRail(DeepAgentRail):
 
     async def _load_description(self, path: Path) -> str:
         """Load description from YAML front matter."""
-        yaml_data, _ = await self._load_yaml(path)
+        yaml_data = await self._load_front_matter(path)
         if yaml_data is None or "description" not in yaml_data:
             raise KeyError("SKILL.md file does not contain a description field")
-        return str(yaml_data["description"])
+
+        builder = getattr(self, "system_prompt_builder", None)
+        language = str(getattr(builder, "language", "cn") or "cn").strip().lower()
+        localized_key = f"description_{language}"
+        description = yaml_data.get(localized_key) or yaml_data.get("description")
+        if not description:
+            raise KeyError("SKILL.md file does not contain a description field")
+        return str(description).strip()
 
     @staticmethod
     def _skill_md_path(skill: Skill) -> Path:

@@ -7,6 +7,7 @@ from typing import Union, List, Optional, AsyncIterator, Type, Dict
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
 from openjiuwen.core.foundation.llm.model_clients import create_model_client
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -121,18 +122,23 @@ class Model:
         Returns:
             AssistantMessage
         """
-        return await self._client.invoke(
-            messages=messages,
-            stop=stop,
-            model=model,
-            tools=tools,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            output_parser=output_parser,
-            timeout=timeout,
-            **kwargs
-        )
+        # Identify this request for the whole callback chain (input event,
+        # the client's own LLM_OUTPUT trigger, output event, error event) so
+        # observers can attribute what they receive to this call and not to
+        # another one running concurrently. See ``call_scope``.
+        with LlmCallScope():
+            return await self._client.invoke(
+                messages=messages,
+                stop=stop,
+                model=model,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                output_parser=output_parser,
+                timeout=timeout,
+                **kwargs
+            )
 
     async def stream(
             self,
@@ -168,79 +174,85 @@ class Model:
         first_chunk_timeout = self._resolve_stream_timeout("stream_first_chunk_timeout")
         idle_timeout = self._resolve_stream_timeout("stream_idle_timeout")
 
-        stream_iterable = self._client.stream(
-            messages=messages,
-            stop=stop,
-            model=model,
-            tools=tools,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            output_parser=output_parser,
-            timeout=timeout,
-            **kwargs
-        )
-        stream_iterator = stream_iterable.__aiter__()
-        started_at = time.monotonic()
-        last_chunk_at = started_at
-        chunk_count = 0
-        effective_model_name = model or getattr(self.model_config, "model_name", None)
+        # The scope is opened here, in the frame that drives the stream, and
+        # not further down inside the callback handlers: every ``__anext__``
+        # below runs in its own ``asyncio.wait_for`` task, and such a task
+        # copies the context, so an id bound inside a chunk callback would be
+        # gone by the time the next chunk arrives. See ``call_scope``.
+        with LlmCallScope():
+            stream_iterable = self._client.stream(
+                messages=messages,
+                stop=stop,
+                model=model,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                output_parser=output_parser,
+                timeout=timeout,
+                **kwargs
+            )
+            stream_iterator = stream_iterable.__aiter__()
+            started_at = time.monotonic()
+            last_chunk_at = started_at
+            chunk_count = 0
+            effective_model_name = model or getattr(self.model_config, "model_name", None)
 
-        while True:
-            stage = "first_chunk" if chunk_count == 0 else "idle_chunk"
-            next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
+            while True:
+                stage = "first_chunk" if chunk_count == 0 else "idle_chunk"
+                next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
 
-            try:
-                if next_timeout is None:
-                    chunk = await stream_iterator.__anext__()
-                else:
-                    chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError as exc:
-                close = getattr(stream_iterator, "aclose", None) or getattr(stream_iterable, "aclose", None)
-                if callable(close):
-                    await close()
+                try:
+                    if next_timeout is None:
+                        chunk = await stream_iterator.__anext__()
+                    else:
+                        chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError as exc:
+                    close = getattr(stream_iterator, "aclose", None) or getattr(stream_iterable, "aclose", None)
+                    if callable(close):
+                        await close()
 
-                now = time.monotonic()
-                total_elapsed_seconds = now - started_at
-                wait_elapsed_seconds = now - (started_at if chunk_count == 0 else last_chunk_at)
-                timeout_seconds = next_timeout if next_timeout is not None else 0
-                model_provider = getattr(self.model_client_config, "client_provider", None)
-                elapsed_label = "first_chunk_elapsed" if chunk_count == 0 else "idle_elapsed"
-                error_detail = (
-                    f"stream frame timeout: stage={stage}, timeout={timeout_seconds}s, "
-                    f"chunk_count={chunk_count}, {elapsed_label}={wait_elapsed_seconds:.2f}s, "
-                    f"total_elapsed={total_elapsed_seconds:.2f}s, "
-                    f"model={effective_model_name or ''}"
-                )
-                from openjiuwen.core.runner.callback.events import LLMCallEvents
-                await trigger(
-                    LLMCallEvents.LLM_CALL_ERROR,
-                    model_name=effective_model_name,
-                    model_provider=model_provider,
-                    is_stream=True,
-                    error=exc)
-                llm_logger.error(
-                    "LLM stream timeout.",
-                    event_type=LogEventType.LLM_CALL_ERROR,
-                    model_name=effective_model_name,
-                    model_provider=model_provider,
-                    tools=tools,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    is_stream=True,
-                    exception=error_detail
-                )
-                raise build_error(
-                    StatusCode.MODEL_CALL_FAILED,
-                    error_msg=f"LLM stream timeout: {error_detail}"
-                ) from exc
+                    now = time.monotonic()
+                    total_elapsed_seconds = now - started_at
+                    wait_elapsed_seconds = now - (started_at if chunk_count == 0 else last_chunk_at)
+                    timeout_seconds = next_timeout if next_timeout is not None else 0
+                    model_provider = getattr(self.model_client_config, "client_provider", None)
+                    elapsed_label = "first_chunk_elapsed" if chunk_count == 0 else "idle_elapsed"
+                    error_detail = (
+                        f"stream frame timeout: stage={stage}, timeout={timeout_seconds}s, "
+                        f"chunk_count={chunk_count}, {elapsed_label}={wait_elapsed_seconds:.2f}s, "
+                        f"total_elapsed={total_elapsed_seconds:.2f}s, "
+                        f"model={effective_model_name or ''}"
+                    )
+                    from openjiuwen.core.runner.callback.events import LLMCallEvents
+                    await trigger(
+                        LLMCallEvents.LLM_CALL_ERROR,
+                        model_name=effective_model_name,
+                        model_provider=model_provider,
+                        is_stream=True,
+                        error=exc)
+                    llm_logger.error(
+                        "LLM stream timeout.",
+                        event_type=LogEventType.LLM_CALL_ERROR,
+                        model_name=effective_model_name,
+                        model_provider=model_provider,
+                        tools=tools,
+                        temperature=temperature,
+                        top_p=top_p,
+                        max_tokens=max_tokens,
+                        is_stream=True,
+                        exception=error_detail
+                    )
+                    raise build_error(
+                        StatusCode.MODEL_CALL_FAILED,
+                        error_msg=f"LLM stream timeout: {error_detail}"
+                    ) from exc
 
-            chunk_count += 1
-            last_chunk_at = time.monotonic()
-            yield chunk
+                chunk_count += 1
+                last_chunk_at = time.monotonic()
+                yield chunk
 
     async def release(
             self,
@@ -269,6 +281,16 @@ class Model:
         """Whether underlying client supports KV cache release."""
         return callable(getattr(self._client, "release", None))
 
+    def supports_kv_cache_affinity(self) -> bool:
+        """Whether underlying client supports Ascend KV cache affinity actions."""
+        supports_fn = getattr(self._client, "supports_kv_cache_affinity", None)
+        if callable(supports_fn):
+            return bool(supports_fn())
+        return all(
+            callable(getattr(self._client, name, None))
+            for name in ("evict_kvc", "offload_kvc", "prefetch_kvc")
+        )
+
     def build_kv_cache_invoke_kwargs(
             self,
             *,
@@ -290,6 +312,130 @@ class Model:
         if enable_kv_cache_release:
             extra["enable_cache_sharing"] = True
         return extra
+
+    def build_kv_cache_affinity_invoke_kwargs(
+            self,
+            *,
+            session: object = None,
+            session_id: Optional[str] = None,
+            parent_session_id: Optional[str] = None,
+            enable_kv_cache_affinity: bool = False,
+    ) -> dict:
+        """Build AscendAffinity agent_hint kwargs for normal invoke/stream."""
+        build_fn = getattr(self._client, "build_kv_cache_affinity_invoke_kwargs", None)
+        if not callable(build_fn):
+            return {}
+        return build_fn(
+            session=session,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            enable_kv_cache_affinity=enable_kv_cache_affinity,
+        )
+
+    async def evict_kvc(
+            self,
+            *,
+            session_id: str,
+            parent_session_id: Optional[str] = None,
+            target: str = "session",
+            messages: Union[str, List[BaseMessage], List[dict], None] = None,
+            tools: Union[List[ToolInfo], List[dict], None] = None,
+            model: Optional[str] = None,
+            msg_start: Optional[int] = None,
+            msg_end: Optional[int] = None,
+            tools_start: Optional[int] = None,
+            tools_end: Optional[int] = None,
+            include_tools: bool = False,
+            timeout: Optional[float] = None,
+    ) -> bool:
+        """Evict KV cache through the underlying affinity-capable client."""
+        evict_fn = getattr(self._client, "evict_kvc", None)
+        if not callable(evict_fn):
+            return False
+        return bool(await evict_fn(
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            target=target,
+            messages=messages,
+            tools=tools,
+            model=model,
+            msg_start=msg_start,
+            msg_end=msg_end,
+            tools_start=tools_start,
+            tools_end=tools_end,
+            include_tools=include_tools,
+            timeout=timeout,
+        ))
+
+    async def offload_kvc(
+            self,
+            *,
+            session_id: str,
+            parent_session_id: Optional[str] = None,
+            target: str = "session",
+            messages: Union[str, List[BaseMessage], List[dict], None] = None,
+            tools: Union[List[ToolInfo], List[dict], None] = None,
+            model: Optional[str] = None,
+            msg_start: Optional[int] = None,
+            msg_end: Optional[int] = None,
+            tools_start: Optional[int] = None,
+            tools_end: Optional[int] = None,
+            include_tools: bool = False,
+            timeout: Optional[float] = None,
+    ) -> bool:
+        """Offload KV cache through the underlying affinity-capable client."""
+        offload_fn = getattr(self._client, "offload_kvc", None)
+        if not callable(offload_fn):
+            return False
+        return bool(await offload_fn(
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            target=target,
+            messages=messages,
+            tools=tools,
+            model=model,
+            msg_start=msg_start,
+            msg_end=msg_end,
+            tools_start=tools_start,
+            tools_end=tools_end,
+            include_tools=include_tools,
+            timeout=timeout,
+        ))
+
+    async def prefetch_kvc(
+            self,
+            *,
+            session_id: str,
+            parent_session_id: Optional[str] = None,
+            target: str = "session",
+            messages: Union[str, List[BaseMessage], List[dict], None] = None,
+            tools: Union[List[ToolInfo], List[dict], None] = None,
+            model: Optional[str] = None,
+            msg_start: Optional[int] = None,
+            msg_end: Optional[int] = None,
+            tools_start: Optional[int] = None,
+            tools_end: Optional[int] = None,
+            include_tools: bool = False,
+            timeout: Optional[float] = None,
+    ) -> bool:
+        """Prefetch KV cache through the underlying affinity-capable client."""
+        prefetch_fn = getattr(self._client, "prefetch_kvc", None)
+        if not callable(prefetch_fn):
+            return False
+        return bool(await prefetch_fn(
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            target=target,
+            messages=messages,
+            tools=tools,
+            model=model,
+            msg_start=msg_start,
+            msg_end=msg_end,
+            tools_start=tools_start,
+            tools_end=tools_end,
+            include_tools=include_tools,
+            timeout=timeout,
+        ))
 
     async def generate_image(
             self,

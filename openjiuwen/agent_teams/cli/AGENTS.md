@@ -41,7 +41,7 @@ plain → Runner.interact_agent_team(text, team_name=active, session_id=active)
 
 - 路径镜像：`tests/unit_tests/agent_teams/cli/`
 - 单测 mock `Runner.*` 用 `AsyncMock`，断言每个 `_cmd_*` 调用参数（`team_name` / `session_id` / `force`）正确
-- 集成测走 `MemoryDatabaseConfig + InProcessMessager + spawn_mode="inprocess"`，`TeamCli.run(input_iter=...)` 注入预置命令序列；不真启 prompt_toolkit
+- 集成测走 sqlite `:memory:` `DatabaseConfig` + `InProcessMessager` + `spawn_mode="inprocess"`，`TeamCli.run(input_iter=...)` 注入预置命令序列；不真启 prompt_toolkit
 - prompt_toolkit / rich 是软依赖（`pyproject.toml` 的 `cli` extras），不要让它们在非 CLI 模块里成为硬 import
 
 ## 提交约定

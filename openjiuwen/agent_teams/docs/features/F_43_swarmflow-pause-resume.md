@@ -106,7 +106,7 @@ leader.async_tool_runtime._tasks[task_id]  (asyncio.Task)
 - 确定性单测(CI):`test_avatar_session_backend.py::test_abort_all_...`(session `abort_all` 终止
   agent+human harness、cancel 等真人回复的 future)+ `test_background_task_controller.py`(`pause()`
   三步顺序 event→abort_sessions→cancel、`resume()` relaunch、空集 no-op);workflow 全套 90 passed。
-- 真实 LLM e2e(手动)`tests/system_tests/agent_swarm/agent_team_swarmflow_pause_resume_runner_e2e.py`
+- 真实 LLM e2e(手动)`tests/system_tests/agent_swarm/swarmflow/agent_team_swarmflow_pause_resume_runner_e2e.py`
   (仿 `agent_team_swarmflow_e2e.py`,真 leader LLM + `run_agent_team_streaming(background_task_controller=)`):
   party_planner 全原语,**每个 phase 边界都 pause+resume 一次**(构思/征询嘉宾/拟菜单/筹备/审批/
   邀请函,human session 阶段 pause 即 `abort_all` 中断在途真人会话),human 立即应答不留等待。结果

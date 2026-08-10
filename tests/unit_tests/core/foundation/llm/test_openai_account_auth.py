@@ -79,9 +79,10 @@ class _FakeHttpxClient:
 
     def post(self, url, *, headers=None, data=None, json=None):
         self.calls.append({"url": url, "headers": headers, "data": data, "json": json})
-        if self.responses:
-            return self.responses.pop(0)
-        return self.response
+        response = self.responses.pop(0) if self.responses else self.response
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def _patch_refresh_response(monkeypatch, response):
@@ -242,6 +243,69 @@ def test_poll_device_authorization_skips_pending_and_returns_authorization(monke
     }
 
 
+def test_poll_device_authorization_retries_transient_network_error(monkeypatch):
+    request = httpx.Request("POST", OPENAI_ACCOUNT_DEVICE_TOKEN_URL)
+    _patch_httpx_responses(
+        monkeypatch,
+        [
+            httpx.ConnectTimeout("temporary proxy timeout", request=request),
+            httpx.RemoteProtocolError("temporary TLS EOF", request=request),
+            _FakeResponse(200, {"authorization_code": "auth-code", "code_verifier": "verifier"}),
+        ],
+    )
+    sleeps = []
+    device_code = OpenAIAccountDeviceCode(user_code="ABCD-EFGH", device_auth_id="device-auth", interval=3)
+
+    authorization = poll_openai_account_device_authorization(
+        device_code,
+        sleep=sleeps.append,
+        monotonic=lambda: 0.0,
+    )
+
+    assert authorization == OpenAIAccountDeviceAuthorization(
+        authorization_code="auth-code",
+        code_verifier="verifier",
+    )
+    assert sleeps == [3, 3, 3]
+
+
+def test_poll_device_authorization_times_out_after_transient_network_error(monkeypatch):
+    request = httpx.Request("POST", OPENAI_ACCOUNT_DEVICE_TOKEN_URL)
+    network_error = httpx.RemoteProtocolError("server disconnected", request=request)
+    _patch_httpx_responses(monkeypatch, [network_error])
+    ticks = iter([0.0, 1.0, 3.0])
+    device_code = OpenAIAccountDeviceCode(user_code="ABCD-EFGH", device_auth_id="device-auth", interval=3)
+
+    with pytest.raises(OpenAIAccountAuthError) as error:
+        poll_openai_account_device_authorization(
+            device_code,
+            max_wait_seconds=2,
+            sleep=lambda seconds: None,
+            monotonic=lambda: next(ticks),
+        )
+
+    assert error.value.code == "openai_account_device_code_timeout"
+    assert isinstance(error.value.__cause__, OpenAIAccountAuthError)
+    assert error.value.__cause__.code == "openai_account_device_code_poll_network_error"
+    assert error.value.__cause__.__cause__ is network_error
+
+
+def test_poll_device_authorization_does_not_retry_terminal_error(monkeypatch):
+    _patch_refresh_response(monkeypatch, _FakeResponse(500, {}))
+    sleeps = []
+    device_code = OpenAIAccountDeviceCode(user_code="ABCD-EFGH", device_auth_id="device-auth", interval=3)
+
+    with pytest.raises(OpenAIAccountAuthError) as error:
+        poll_openai_account_device_authorization(
+            device_code,
+            sleep=sleeps.append,
+            monotonic=lambda: 0.0,
+        )
+
+    assert error.value.code == "openai_account_device_code_poll_failed"
+    assert sleeps == [3]
+
+
 def test_poll_device_authorization_once_returns_none_while_pending(monkeypatch):
     _patch_refresh_response(monkeypatch, _FakeResponse(404, {}))
     device_code = OpenAIAccountDeviceCode(user_code="ABCD-EFGH", device_auth_id="device-auth", interval=3)
@@ -271,6 +335,7 @@ def test_poll_device_authorization_timeout(monkeypatch):
 
     assert error.value.code == "openai_account_device_code_timeout"
     assert error.value.relogin_required is True
+    assert error.value.__cause__ is None
 
 
 def test_exchange_device_authorization_posts_authorization_form(monkeypatch):

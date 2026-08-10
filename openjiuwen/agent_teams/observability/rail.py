@@ -56,9 +56,9 @@ from openjiuwen.agent_teams.observability.semconv import (
 from openjiuwen.agent_teams.observability.span_context import (
     cascade_close_children,
     get_current_agent_span,
+    get_current_tool_span,
     set_current_agent_span,
     get_team_span,
-    _llm_span_stack,
     _tool_span_map,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -179,6 +179,14 @@ class ObservabilityRail(DeepAgentRail):
     def __init__(self, *, tracer: Tracer | None = None) -> None:
         super().__init__()
         self._injected_tracer = tracer
+        # The invoke span currently open for this agent, when ``before_invoke``
+        # opened one. A rail instance belongs to a single agent and a DeepAgent
+        # runs one invoke at a time, so this needs no per-context storage —
+        # which is the point: the iteration hook fires in a task that may not
+        # inherit the invoke's ContextVars, and it still has to find this span
+        # to nest under. Without it an agent that gets both hooks emits the
+        # invoke and its iterations as siblings, the invoke empty.
+        self._open_invoke_span: Span | None = None
 
     def _tracer(self) -> Tracer:
         if self._injected_tracer is not None:
@@ -203,6 +211,20 @@ class ObservabilityRail(DeepAgentRail):
             member_name = self._resolve_member_name(agent)
             team_name = getattr(agent, "team_name", "")
 
+            team_span = get_team_span()
+            if team_span is None:
+                if team_name:
+                    team_logger.warning("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
+                return
+            if not team_span.is_recording():
+                team_logger.warning(
+                    "RAIL.before_task_iteration: team_span ENDED! name={} trace_id={:032x} "
+                    "span_id={:016x} member={} iteration={}",
+                    team_span.name, team_span.context.trace_id, team_span.context.span_id,
+                    member_name, iteration,
+                )
+                return
+
             # Get session_id from ContextVar (no agent attribute for this)
             session_id = ""
             try:
@@ -211,23 +233,10 @@ class ObservabilityRail(DeepAgentRail):
             except Exception as exc:
                 team_logger.warning("rail: failed to get session_id: {}", exc)
 
-            team_logger.info(
+            team_logger.debug(
                 "RAIL.before_task_iteration: member={} iteration={} ctx_id={}",
                 member_name, iteration, id(ctx),
             )
-
-            team_span = get_team_span()
-            if team_span is None:
-                team_logger.error("RAIL.before_task_iteration: team_span is None! team_name={}", team_name)
-                return
-            if not team_span.is_recording():
-                team_logger.error(
-                    "RAIL.before_task_iteration: team_span ENDED! name={} trace_id={:032x} "
-                    "span_id={:016x} member={} iteration={}",
-                    team_span.name, team_span.context.trace_id, team_span.context.span_id,
-                    member_name, iteration,
-                )
-                return
 
             if AgentSpanScope.current(ctx) is not None:
                 old = AgentSpanScope.current(ctx).span
@@ -250,7 +259,12 @@ class ObservabilityRail(DeepAgentRail):
             self._drain_or_clear_stale(member_name)
 
             member_label = member_name or "unknown"
-            parent_ctx = set_span_in_context(team_span, otel_context.get_current())
+            # One invoke, N iterations: when this agent also got an invoke span,
+            # the iterations belong under it, not beside it.
+            iteration_parent = team_span
+            if self._open_invoke_span is not None and self._open_invoke_span.is_recording():
+                iteration_parent = self._open_invoke_span
+            parent_ctx = set_span_in_context(iteration_parent, otel_context.get_current())
             span = self._tracer().start_span(
                 name=f"agent.{member_label}.task_iteration.{iteration}",
                 context=parent_ctx,
@@ -279,7 +293,7 @@ class ObservabilityRail(DeepAgentRail):
             agent_ctx = set_span_in_context(span, otel_context.get_current())
             otel_context.attach(agent_ctx)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: agent span opened: agent.{}.task_iteration.{} "
                 "span_id={:016x} trace_id={:032x} parent_span_id={:016x}",
                 member_label, iteration,
@@ -306,7 +320,7 @@ class ObservabilityRail(DeepAgentRail):
             if scope is None:
                 return
 
-            team_logger.info(
+            team_logger.debug(
                 "RAIL.after_task_iteration: ctx_id={} name={} span_id={:016x}",
                 id(ctx), scope.span.name, scope.span.context.span_id,
             )
@@ -340,7 +354,7 @@ class ObservabilityRail(DeepAgentRail):
                         redacted = redact_completion(output_str, config) if config else output_str
                         team_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: agent span closed, member={}, has_output={}",
                 member_name, output is not None,
             )
@@ -382,6 +396,13 @@ class ObservabilityRail(DeepAgentRail):
                 return
 
             member_name = self._resolve_member_name(agent) or "unknown"
+            # Empty for every agent outside a team — notably the sub-agents the
+            # harness builds, which carry no team at all. It only labels the
+            # span (``_stamp_agent_attributes`` skips the team attributes when
+            # empty) and must not gate span creation: the parent-span check
+            # below is the real gate, and refusing here is what left a
+            # dispatched sub-agent with no agent tier, its llm/tool spans
+            # attaching to the dispatching agent's span instead.
             team_name = getattr(agent, "team_name", "")
 
             team_span = get_team_span()
@@ -428,7 +449,24 @@ class ObservabilityRail(DeepAgentRail):
                     # so the team span becomes the ambient parent.
                     set_current_agent_span(None)
 
-            parent_ctx = set_span_in_context(parent_span, otel_context.get_current())
+            # A sub-agent is dispatched *from* a tool call and runs to
+            # completion inside it, so the dispatching tool span — not the
+            # agent span the tool itself hangs off — is its span parent. Only
+            # a tool span opened directly under the parent resolved above
+            # qualifies, which keeps this to the actual dispatch and never
+            # re-parents across a trace or an unrelated branch. The agent tier
+            # is unaffected: ``parent_agent_span`` below still records the
+            # agent span to restore, and ``is_outermost`` still follows it.
+            dispatch_tool_span = get_current_tool_span()
+            otel_parent: Span = parent_span
+            if (
+                dispatch_tool_span is not None
+                and dispatch_tool_span.parent is not None
+                and dispatch_tool_span.parent.span_id == parent_span.context.span_id
+            ):
+                otel_parent = dispatch_tool_span
+
+            parent_ctx = set_span_in_context(otel_parent, otel_context.get_current())
             span = self._tracer().start_span(
                 name=f"agent.{member_name}.invoke",
                 context=parent_ctx,
@@ -462,8 +500,11 @@ class ObservabilityRail(DeepAgentRail):
                 is_outermost=is_outermost,
                 config=config,
             ).attach(ctx)
+            # Published for ``before_task_iteration``: an agent that gets both
+            # hooks nests its iterations under this span.
+            self._open_invoke_span = span
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: invoke span opened (single-round fallback): agent.{} "
                 "span_id={:016x} trace_id={:032x} nested={}",
                 member_name, span.context.span_id, span.context.trace_id,
@@ -478,6 +519,8 @@ class ObservabilityRail(DeepAgentRail):
             if scope is None or scope.kind != AgentSpanScope.KIND_INVOKE:
                 # before_invoke skipped (multi-round path) — nothing to close.
                 return
+            if scope.span is self._open_invoke_span:
+                self._open_invoke_span = None
 
             output = None
             inputs = getattr(ctx, "inputs", None)
@@ -486,7 +529,7 @@ class ObservabilityRail(DeepAgentRail):
 
             scope.close(output=output, exception=ctx.exception)
 
-            team_logger.info(
+            team_logger.debug(
                 "otel rail: invoke span closed: name={} span_id={:016x}",
                 scope.span.name, scope.span.context.span_id,
             )
@@ -509,6 +552,11 @@ class ObservabilityRail(DeepAgentRail):
         prev = get_current_agent_span()
         if prev is None or not prev.is_recording():
             return
+        if prev is self._open_invoke_span:
+            # This agent's own live invoke span, which the iteration is about
+            # to nest under — not a leftover, and ending it here would cut the
+            # request's span short at its first round.
+            return
         prev_member = prev.attributes.get(AT_MEMBER_NAME, "")
         if prev_member == member_name:
             team_logger.warning(
@@ -523,7 +571,10 @@ class ObservabilityRail(DeepAgentRail):
                 "(current member: {})",
                 prev_member, member_name,
             )
-            _llm_span_stack.set([])
+            # Clear the tool span ContextVar so the new member starts clean.
+            # LLM spans need no equivalent cleanup: ActiveSpanTracker indexes
+            # them by the id of the request that opened them, so an inherited
+            # context can never make this member resolve another member's span.
             _tool_span_map.set({})
         set_current_agent_span(None)
 
@@ -590,7 +641,6 @@ class ObservabilityRail(DeepAgentRail):
         span.set_attribute(AT_AGENT_ROLE, member_name or "")
         if team_name:
             span.set_attribute(AT_TEAM_ID, team_name)
-            span.set_attribute(AT_TEAM_NAME, team_name)
         if session_id:
             span.set_attribute(AT_SESSION_ID, session_id)
             span.set_attribute(LANGFUSE_SESSION_ID, session_id)

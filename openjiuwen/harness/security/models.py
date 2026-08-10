@@ -82,41 +82,58 @@ class ApprovalOverrideEntry(TypedDict, total=False):
     action: str
 
 
+class FileGuardPathEntry(TypedDict, total=False):
+    """``permissions.file_guard.paths[]`` 单条路径策略。"""
+
+    path: str
+    read: str
+    write: str
+    exec: str
+    match: NotRequired[str]  # ``prefix``（缺省）| ``glob``
+
+
+class FileGuardDefaults(TypedDict, total=False):
+    """未命中 ``paths`` 时的默认动作（建议 ask，避免静默放行）。"""
+
+    read: str
+    write: str
+    exec: str
+
+
+class FileGuardSection(TypedDict, total=False):
+    """路径防护配置（Pipeline B），可独立于工具权限开关。"""
+
+    enabled: bool
+    defaults: NotRequired[FileGuardDefaults]
+    paths: NotRequired[list[FileGuardPathEntry]]
+
+
 class PermissionsSection(TypedDict, total=False):
     """与 agent YAML 中 ``permissions:`` 段落常见字段对齐的结构说明。
 
     常见键包括 ``tools``、``defaults``、``rules``、``approval_overrides``、
-    ``external_directory`` 等；由 :func:`openjiuwen.harness.security.tiered_policy.evaluate_tiered_policy`
-    统一解释。
+    ``file_guard``、``external_directory``（deprecated）等。
+
+    - 工具级策略由 :func:`openjiuwen.harness.security.tiered_policy.evaluate_tiered_policy` 评估。
+    - 路径防护由 :mod:`openjiuwen.harness.security.file_guard` 评估（可独立关闭）。
 
     ``schema``（可选）：建议写 ``tiered_policy`` 等，便于人类阅读或与旧文档对齐；
-    引擎**不**根据该字段切换实现路径。例如（与仓库
-    ``examples/permissions/permission_demo.py`` 中结构相近）::
+    引擎**不**根据该字段切换实现路径。例如::
 
         permissions:
           enabled: true
           schema: tiered_policy
-          permission_mode: normal
           tools:
             read_file: ask
-            write_file: deny
-          defaults:
-            "*": allow
-          rules:
-            # 用户参数级规则：``action`` 直接为 allow / ask / deny；也可用 ``severity`` 由引擎映射
-            # ``match_type: path`` = 对路径型参数取值做匹配；``pattern`` = 在该取值上要满足的正则/通配
-            - id: deny_read_env_files
-              tools: [read_file]
-              match_type: path
-              pattern: "re:\\.env(\\.local)?$"
-              action: deny
-          approval_overrides:
-            # 用户/CLI 持久化覆盖形态与 :class:`ApprovalOverrideEntry` 一致
-            - id: example_allow_git_status
-              tools: [bash, mcp_exec_command, create_terminal]
-              match_type: command
-              pattern: "re:^git\\s+status\\s*$"
-              action: allow
+          file_guard:
+            enabled: true
+            defaults: {read: ask, write: ask, exec: ask}
+            paths:
+              - path: "/data/public"
+                read: allow
+                write: ask
+                exec: deny
+          # deprecated：加载期投影进 file_guard（Legacy）
           external_directory:
             "*": ask
 
@@ -130,11 +147,15 @@ class PermissionsSection(TypedDict, total=False):
     tools: NotRequired[dict[str, Any]]
     rules: NotRequired[list[dict[str, Any]]]
     approval_overrides: NotRequired[list[ApprovalOverrideEntry]]
-    external_directory: NotRequired[dict[str, str]]
+    file_guard: NotRequired[FileGuardSection]
+    external_directory: NotRequired[dict[str, str]]  # deprecated → file_guard
 
 
 __all__ = [
     "ApprovalOverrideEntry",
+    "FileGuardDefaults",
+    "FileGuardPathEntry",
+    "FileGuardSection",
     "PermissionConfirmResponse",
     "PermissionLevel",
     "PermissionResult",

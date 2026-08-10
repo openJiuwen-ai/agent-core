@@ -379,6 +379,33 @@ class TestSubagentRail:
 
     @staticmethod
     @pytest.mark.asyncio
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
+    async def test_before_model_call_appends_task_prompt_extension(mock_create):
+        """Product guidance is appended to the existing task_tool section."""
+        mock_create.return_value = [_make_tool_mock()]
+        system_prompt_builder = Mock(language="en")
+        mock_agent = Mock(
+            deep_config=Mock(subagents=[_minimal_subagent_spec()]),
+            ability_manager=Mock(),
+            system_prompt_builder=system_prompt_builder,
+        )
+        extension = Mock(return_value="## Browser Agent\nDelegate browser work.")
+        rail = SubagentRail(task_prompt_extension=extension)
+        rail.init(mock_agent)
+        ctx = Mock()
+
+        await rail.before_model_call(ctx)
+
+        extension.assert_called_once_with(ctx, "en")
+        section = system_prompt_builder.add_section.call_args.args[0]
+        assert section.name == "task_tool"
+        assert "# Subagent Usage Rules" in section.content["en"]
+        assert "## task_tool" not in section.content["en"]
+        assert "## Browser Agent" in section.content["en"]
+        assert "Delegate browser work." in section.content["en"]
+
+    @staticmethod
+    @pytest.mark.asyncio
     async def test_before_model_call_no_tools():
         """before_model_call returns immediately when tools is None."""
         ctx = Mock()
