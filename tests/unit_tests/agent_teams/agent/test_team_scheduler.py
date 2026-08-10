@@ -371,6 +371,7 @@ async def test_review_fail_dispatches_aggregated_feedback_to_platform_hook(db, b
     )
     await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
     assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "fail", "broken build")).ok
+    assert (await _reviewer_mgr(db, bus, "rev-2").verify_task("r", "pass")).ok
 
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
     await asyncio.sleep(0)

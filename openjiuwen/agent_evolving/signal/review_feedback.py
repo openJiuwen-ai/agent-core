@@ -551,11 +551,12 @@ def _tool_call_proves_skill_read(
         re.IGNORECASE,
     )
     has_skill_path = path_pattern.search(args_text) is not None
-    if "skill" in tool_name and skill_name in _named_skill_values(call_args):
+    base_tool_name = tool_name.rsplit(".", 1)[-1].replace("-", "_")
+    if base_tool_name == "skill_tool" and skill_name in _named_skill_values(call_args):
         return True
     if not has_skill_path:
         return False
-    if any(token in tool_name for token in ("read", "view", "open", "skill")):
+    if any(token in tool_name for token in ("read", "view", "open")):
         return True
     if any(token in tool_name for token in ("bash", "shell", "exec", "command")):
         return (

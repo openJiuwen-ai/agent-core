@@ -278,6 +278,66 @@ async def test_context_builder_does_not_treat_installed_skill_as_read(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_context_builder_accepts_only_skill_tool_as_named_skill_read(tmp_path) -> None:
+    skill_dir = tmp_path / "xlsx"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# XLSX\n", encoding="utf-8")
+    trajectory = trajectory_from_steps(
+        execution_id="trace-skill-tools",
+        steps=[
+            TrajectoryStep(
+                kind="tool",
+                detail=ToolCallDetail(
+                    tool_name="evolve_skill_experiences",
+                    call_args={"skill_name": "xlsx"},
+                    call_result="saved",
+                ),
+            ),
+            TrajectoryStep(
+                kind="tool",
+                detail=ToolCallDetail(
+                    tool_name="tools.skill_tool",
+                    call_args={"skill_name": "xlsx"},
+                    call_result="# XLSX",
+                ),
+            ),
+        ],
+    )
+
+    context = await ReviewFeedbackContextBuilder(store=EvolutionStore(str(tmp_path))).build(
+        trajectory=trajectory,
+    )
+
+    assert context.skill_reads == ("xlsx",)
+
+
+@pytest.mark.asyncio
+async def test_context_builder_rejects_other_skill_named_tools_as_read(tmp_path) -> None:
+    skill_dir = tmp_path / "xlsx"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("# XLSX\n", encoding="utf-8")
+    trajectory = trajectory_from_steps(
+        execution_id="trace-non-reader-skill-tool",
+        steps=[
+            TrajectoryStep(
+                kind="tool",
+                detail=ToolCallDetail(
+                    tool_name="evolve_skill_experiences",
+                    call_args={"skill_name": "xlsx"},
+                    call_result="saved",
+                ),
+            )
+        ],
+    )
+
+    context = await ReviewFeedbackContextBuilder(store=EvolutionStore(str(tmp_path))).build(
+        trajectory=trajectory,
+    )
+
+    assert context.skill_reads == ()
+
+
+@pytest.mark.asyncio
 async def test_context_builder_rejects_write_to_skill_md_as_read_evidence(tmp_path) -> None:
     skill_dir = tmp_path / "xlsx"
     skill_dir.mkdir()
