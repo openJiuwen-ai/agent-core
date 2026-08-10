@@ -16,7 +16,7 @@
 - 成员汇报进度后核实任务状态
 
 ### action=claimable
-- 快速获取所有可认领的 pending 任务
+- 快速获取你可开工的 pending 任务（assignee 是你，或尚无 assignee）
 - 完成当前任务后寻找下一个可执行任务
 
 ## 输出
@@ -36,7 +36,7 @@
 
 ## 成员工作流
 
-1. 完成当前任务后，调用 view_task（默认 list）查看可用工作
-2. 找到 status=pending、assignee 为空、blocked_by 为空的任务
+1. 完成当前任务后，调用 view_task（claimable 或 list）查看可用工作
+2. 找到 status=pending、assignee 是你（或为空）、blocked_by 为空的任务
 3. 用 claim_task(status=claimed) 认领，然后用 action=get 获取完整要求
 4. 若被阻塞，专注于解除阻塞或通知 leader

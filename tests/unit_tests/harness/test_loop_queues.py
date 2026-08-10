@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import pytest
 
+from openjiuwen.harness.task_loop.task_loop_controller import (
+    TaskLoopController,
+)
 from openjiuwen.harness.task_loop.loop_queues import (
     LoopQueues,
 )
@@ -79,3 +82,18 @@ def test_has_follow_up_does_not_consume() -> None:
     assert q.has_follow_up() is True
     assert q.drain_follow_up() == ["fu1"]
     assert q.has_follow_up() is False
+
+
+def test_controller_can_enqueue_follow_up() -> None:
+    """Controller forwards follow-ups to the task-loop queue."""
+    controller = TaskLoopController()
+    queues = LoopQueues()
+    controller._event_handler = type(
+        "Handler",
+        (),
+        {"interaction_queues": queues},
+    )()
+
+    controller.enqueue_follow_up("retry")
+
+    assert controller.drain_follow_up() == ["retry"]

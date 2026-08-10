@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,6 +24,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.core.runner.spawn import SpawnAgentKind
+from openjiuwen.core.session import InteractiveInput
 
 
 def _dummy_agents(**overrides) -> dict[str, DeepAgentSpec]:
@@ -52,6 +54,14 @@ def _build_leader(
         metadata=kwargs.get("metadata") or {},
     )
     return spec.build()
+
+
+def test_initial_leader_route_skips_interactive_input() -> None:
+    agent = SimpleNamespace(role=TeamRole.LEADER, team_backend=object())
+
+    result = TeamAgent._initial_leader_route_payloads(agent, InteractiveInput())
+
+    assert result is None
 
 
 def test_team_agent_leader_policy() -> None:

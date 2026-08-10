@@ -867,9 +867,11 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             await harness.send(initial_message)
 
-    def _initial_leader_route_payloads(self, raw_query: str) -> list["InteractPayload"] | None:
+    def _initial_leader_route_payloads(self, raw_query: Any) -> list["InteractPayload"] | None:
         """Parse leader initial input when it uses explicit team routing."""
-        if not raw_query or self.role != TeamRole.LEADER or self.team_backend is None:
+        if not isinstance(raw_query, str) or not raw_query:
+            return None
+        if self.role != TeamRole.LEADER or self.team_backend is None:
             return None
 
         from openjiuwen.agent_teams.interaction.router import parse_interact_str
