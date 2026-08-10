@@ -1,5 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
 from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple, List, Type, Union
 from pydantic import BaseModel
 
@@ -884,8 +885,12 @@ class ResourceMgr:
         server_configs = [server_config] if isinstance(server_config, McpServerConfig) else server_config
         for config in server_configs:
             try:
-                # atomic process
-                cards = await self._resource_registry.tool().add_tool_server(config, expiry_time=expiry_time)
+                # 用 asyncio.shield() 包裹 add_tool_server，将 MCP 连接运行在独立 task 中。
+                # anyio task group 在 HTTP 请求失败时会通过 call_soon 反复调用 task.cancel()，
+                # shield 确保只 cancel 内部 task，不污染外层调用方。
+                cards = await asyncio.shield(
+                    self._resource_registry.tool().add_tool_server(config, expiry_time=expiry_time)
+                )
                 for card in cards:
                     self._id_to_card[card.id] = card
                     self._tag_mgr.tag_resource(card.id, tag if tag else GLOBAL)
@@ -897,6 +902,16 @@ class ResourceMgr:
                             resource_type="mcp server",
                             tag=tag if tag else GLOBAL,
                             metadata={"tools": tool_names, "server_name": config.server_name})
+            except asyncio.CancelledError as e:
+                # anyio cancel scope 导致的取消，转换为 Error 结果返回给调用方
+                error_msg = f"MCP server connection cancelled: {config.server_name}"
+                logger.warning("add mcp server cancelled",
+                               event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE_SERVER,
+                               resource_id=config.server_id,
+                               resource_type="mcp server",
+                               exception=e,
+                               metadata={"server_name": config.server_name})
+                add_results.append(Error(Exception(error_msg)))
             except Exception as e:
                 add_results.append(Error(e))
                 logger.error("add mcp server failed", event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE_SERVER,
