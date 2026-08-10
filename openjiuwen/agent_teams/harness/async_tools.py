@@ -49,6 +49,22 @@ FailureFormatter = Callable[[str], str | None]
 _SPILL_SUMMARY_CHARS = 1024
 
 
+def _to_jsonable(obj):
+    """递归将 pydantic BaseModel 对象转为 dict，确保 json.dumps 可序列化。
+
+    Swarmflow 脚本的 run() 可能返回嵌套在 dict 或 list 中的 pydantic 模型实例，
+    json.dumps 无法直接序列化它们。此函数遍历结果树，将每个 BaseModel 替换为
+    model_dump(mode="json") 的输出。纯 Python 类型原样返回。
+    """
+    if hasattr(obj, "model_dump") and callable(obj.model_dump):
+        return obj.model_dump(mode="json")
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    return obj
+
+
 def render_result_text(result: Any) -> str:
     """Render an async tool's return value to model-facing text, in full.
 
@@ -67,7 +83,10 @@ def render_result_text(result: Any) -> str:
     if isinstance(result, str):
         return result
     if isinstance(result, (dict, list)):
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        jsonable = _to_jsonable(result)
+        if jsonable is not result:
+            team_logger.info("[async_tools] pydantic BaseModel converted for JSON serialization")
+        return json.dumps(jsonable, ensure_ascii=False, indent=2)
     return str(result)
 
 
