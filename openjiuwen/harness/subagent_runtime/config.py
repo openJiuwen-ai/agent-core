@@ -21,6 +21,7 @@ class SubagentRuntimeConfig:
     activity_throttle_ms: float = 500.0
 
 
-WAIT_TIMEOUT_MS_DEFAULT = 30_000
+# Align with turn_timeout_s (600s): parent wait should cover a full subagent turn.
+WAIT_TIMEOUT_MS_DEFAULT = 600_000
 WAIT_TIMEOUT_MS_MIN = 10_000
 WAIT_TIMEOUT_MS_MAX = 3_600_000

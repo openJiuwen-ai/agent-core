@@ -30,7 +30,7 @@ SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具（subagent_spawn / subag
 ### 调用约束
 
 - subagent_spawn 立即返回 subagent_id，**不含**最终 output。
-- **同一 turn 内 spawn 后必须 subagent_wait** 收集结果；research / coding 类任务传**分钟级** timeout_ms。
+- **同一 turn 内 spawn 后必须 subagent_wait** 收集结果；默认 timeout_ms 600000（10 分钟），简单查询 120000，深度调研/编码 600000+。
 - 一轮结束后实例仍常驻；同一 sticky 类型不要重复 spawn。
 - 追问同一实例用 subagent_send_input，不要为相同意图重复 spawn。
 - wait 超时且方向错误时，用 subagent_send_input(interrupt=true) 纠偏后再 wait。
@@ -59,7 +59,7 @@ SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools (subagent_spawn / su
 ### Usage constraints
 
 - subagent_spawn returns subagent_id immediately and does **not** include the final output.
-- **Call subagent_wait in the same turn after spawn**; use minute-scale timeout_ms for research/coding tasks.
+- **Call subagent_wait in the same turn after spawn**; default timeout_ms 600000 (10 min), 120000 for quick tasks, 600000+ for research/coding.
 - Instances stay alive after one turn completes; do not respawn the same sticky type.
 - Follow up on the same instance with subagent_send_input instead of respawning the same intent.
 - After a timed-out wait with the wrong direction, use subagent_send_input(interrupt=true), then wait again.
