@@ -83,5 +83,5 @@ fork 决策在 `_on_teammate_created` 中执行 — `spawn_teammate` 工具仅�
 
 ## 已知遗留
 
-- **Checkpoint 非持久化**：存于内存，进程重启后丢失。后续可接入 session state）。
+- **Checkpoint 非持久化**：~~存于内存，进程重启后丢失。后续可接入 session state。~~ **已解决**，见 [[F_76_fork-checkpoint-persistence]]——checkpoints 现持久化于 session per-team namespace，冷恢复（`recover_from_session`）自动还原；顺带修复了 leader 自身 `checkpoint()` 工具的路由缺口（此前落 `TeamBackend._checkpoints` 兜底 dict，fork 读不到）。
 - **subprocess spawn fork**：跨进程 fork 的 payload 未接线，当前仅支持 `spawn_mode="inprocess"`。

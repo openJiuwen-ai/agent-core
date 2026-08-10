@@ -125,6 +125,7 @@ state["teams"][team_name] = {
     "model_allocator_state": Optional[dict],
     "lifecycle":             Optional["running" | "paused"],
     "db_state":              Optional["pending_create" | "created" | "cleaned"],
+    "checkpoints":           Optional[dict[str, int]],  # {name: message_count} 命名 fork 快照
 }
 ```
 
@@ -305,6 +306,7 @@ class RecoveryManager:
 ```python
 TEAMS_KEY = "teams"
 TEAM_DB_STATE_KEY = "db_state"
+TEAM_CHECKPOINTS_KEY = "checkpoints"
 TEAM_DB_STATE_PENDING_CREATE = "pending_create"
 TEAM_DB_STATE_CREATED = "created"
 TEAM_DB_STATE_CLEANED = "cleaned"
@@ -313,9 +315,11 @@ def read_teams_bucket(session) -> dict[str, dict[str, Any]]: ...
 def read_team_namespace(session, team_name: str) -> dict[str, Any] | None: ...
 def read_team_names_in_session(session) -> list[str]: ...
 def read_team_db_state(session, team_name: str) -> str | None: ...
+def read_team_checkpoints(session, team_name: str) -> dict[str, int] | None: ...
 def write_team_namespace(session, team_name: str, payload: dict[str, Any]) -> None: ...
 def merge_team_namespace(session, team_name: str, partial: dict[str, Any]) -> None: ...
 def merge_team_db_state(session, team_name: str, state: str) -> None: ...
+def merge_team_checkpoints(session, team_name: str, mapping: dict[str, int]) -> None: ...
 def remove_team_namespace(session, team_name: str) -> bool: ...
 ```
 
@@ -432,8 +436,9 @@ session.state
     │   ├── spec                  TeamAgentSpec.model_dump(mode="json")
     │   ├── context               TeamRuntimeContext.model_dump(mode="json")
     │   ├── model_allocator_state Optional[dict]      ← persist_allocator_state
-    │   └── lifecycle             Optional["running" | "paused"]
-    │                                                  ← coordination 写入
+    │   ├── lifecycle             Optional["running" | "paused"]
+    │   │                                                  ← coordination 写入
+    │   └── checkpoints           Optional[dict[str, int]]  ← 命名 fork 快照
     └── <team_name_B>
         └── ...
 ```
@@ -447,6 +452,7 @@ session.state
 | `model_allocator_state`（初始）| 同上 | 同上 |
 | `model_allocator_state`（增量）| `recovery_manager.persist_allocator_state` → `merge_team_namespace` | round 中模型分配变更后 |
 | `lifecycle` | `coordination/kernel._persist_team_lifecycle` → `merge_team_namespace` | pause / resume 切换时 |
+| `checkpoints` | `TeamAgent._merge_checkpoints_into_session` → `merge_team_namespace` | `checkpoint()` 工具调用时（leader 镜像） |
 
 新增字段时，按"是否在 bind 时一次性给定"决定走 `write_team_namespace`（覆盖）
 还是 `merge_team_namespace`（增量）。**新增字段名进 namespace 之前**，先在

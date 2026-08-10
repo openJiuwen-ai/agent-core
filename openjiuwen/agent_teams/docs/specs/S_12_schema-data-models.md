@@ -224,7 +224,7 @@ STOPPED / RESTARTING / ERROR 不能覆盖。
 ### I-16 Session checkpoint 状态按 team 分桶
 
 session checkpoint 全局状态根上有一个 `teams` namespace：
-`state["teams"][team_name] = {spec, context, model_allocator_state, lifecycle}`。
+`state["teams"][team_name] = {spec, context, model_allocator_state, lifecycle, checkpoints}`。
 同一 session 可承载多个 team 的状态。
 
 读写一律走 `runtime/metadata.py` 的 `read_team_namespace` /
@@ -824,6 +824,7 @@ state["teams"][team_name] = {
     "context": ...,               # TeamRuntimeContext.model_dump()
     "model_allocator_state": ...  # allocator 的 round-robin 游标 / 已分配 model_id 等
     "lifecycle": ...,             # TeamLifecycle 字符串
+    "checkpoints": ...,           # {name: message_count} 命名 fork 快照
 }
 ```
 
