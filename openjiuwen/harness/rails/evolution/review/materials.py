@@ -159,9 +159,10 @@ def _split_llm_messages(span: dict[str, Any]) -> tuple[list[dict[str, Any]], lis
     prompt_count = count_indexed(semconv.GEN_AI_PROMPT)
     completion_count = count_indexed(semconv.GEN_AI_COMPLETION)
     if prompt_count or completion_count:
+        completion_end = prompt_count + completion_count
         return (
             messages[:prompt_count],
-            messages[prompt_count : prompt_count + completion_count],
+            messages[prompt_count:completion_end],
         )
     if messages and messages[-1].get("tool_calls"):
         return messages[:-1], messages[-1:]

@@ -242,8 +242,17 @@ def _member_value(span: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _index_spans(spans: Sequence[Span]) -> dict[tuple[str, str], Span]:
+    by_identity: dict[tuple[str, str], Span] = {}
+    for span in spans:
+        identity = span_identity(span)
+        if identity is not None:
+            by_identity[identity] = span
+    return by_identity
+
+
 def _descendant_keys(spans: Sequence[Span], target_keys: set[tuple[str, str]]) -> set[tuple[str, str]]:
-    by_identity = {identity: span for span in spans if (identity := span_identity(span)) is not None}
+    by_identity = _index_spans(spans)
     children: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
     for identity, span in by_identity.items():
         parent = _parent_identity(span)
@@ -273,14 +282,18 @@ def select_member_spans(
 
     spans = select_team_spans(value, categories=categories, team_id=team_id)
     target = str(member_id)
-    target_keys = {
-        identity for span in spans if _member_value(span) == target if (identity := span_identity(span)) is not None
-    }
+    target_keys: set[tuple[str, str]] = set()
+    for span in spans:
+        if _member_value(span) != target:
+            continue
+        identity = span_identity(span)
+        if identity is not None:
+            target_keys.add(identity)
     selected_keys = set(target_keys)
     if include_descendants:
         selected_keys = _descendant_keys(spans, selected_keys)
     if include_ancestors:
-        by_identity = {identity: span for span in spans if (identity := span_identity(span)) is not None}
+        by_identity = _index_spans(spans)
         for identity in tuple(selected_keys):
             current = by_identity.get(identity)
             while current is not None:
@@ -315,9 +328,13 @@ def select_task_spans(
 
     spans = select_team_spans(value, categories=categories, team_id=team_id)
     target = str(task_id)
-    target_keys = {
-        identity for span in spans if _task_value(span) == target if (identity := span_identity(span)) is not None
-    }
+    target_keys: set[tuple[str, str]] = set()
+    for span in spans:
+        if _task_value(span) != target:
+            continue
+        identity = span_identity(span)
+        if identity is not None:
+            target_keys.add(identity)
     selected_keys = _descendant_keys(spans, target_keys) if include_descendants else target_keys
     return [span for span in spans if span_identity(span) in selected_keys]
 

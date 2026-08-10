@@ -515,7 +515,7 @@ def decode_json_attribute(value: Any) -> Any:
         return deepcopy(value)
     try:
         return json.loads(value)
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except json.JSONDecodeError:
         return value
 
 
