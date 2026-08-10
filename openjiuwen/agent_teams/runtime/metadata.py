@@ -14,6 +14,7 @@ context, allocator state, and lifecycle hint for one team.
         "lifecycle": "running"|"paused",  # optional, written by pause path
         "db_state": "pending_create"|"created"|"cleaned",
         "pending_resume": {"query": ...}, # optional, set by pause / consumed by start
+        "checkpoints": {name: count},     # optional, named fork snapshots
     }
 
 ``pending_resume`` is what makes ``pause -> stop -> start`` equivalent to
@@ -39,6 +40,7 @@ from typing import Any
 TEAMS_KEY = "teams"
 TEAM_PENDING_RESUME_KEY = "pending_resume"
 TEAM_DB_STATE_KEY = "db_state"
+TEAM_CHECKPOINTS_KEY = "checkpoints"
 TEAM_DB_STATE_PENDING_CREATE = "pending_create"
 TEAM_DB_STATE_CREATED = "created"
 TEAM_DB_STATE_CLEANED = "cleaned"
@@ -124,6 +126,29 @@ def clear_pending_resume(session, team_name: str) -> bool:
     return True
 
 
+def read_team_checkpoints(session, team_name: str) -> dict[str, int] | None:
+    """Return the persisted named checkpoints for a team, or ``None`` when absent.
+
+    Defensively keeps only entries whose value is an ``int``: a stale blob
+    with a non-int message count must not break cold recovery.
+    """
+    bucket = read_team_namespace(session, team_name)
+    if bucket is None:
+        return None
+    raw = bucket.get(TEAM_CHECKPOINTS_KEY)
+    if not isinstance(raw, dict):
+        return None
+    return {
+        k: v for k, v in raw.items()
+        if isinstance(k, str) and isinstance(v, int)
+    }
+
+
+def merge_team_checkpoints(session, team_name: str, mapping: dict[str, int]) -> None:
+    """Replace the team bucket's named-checkpoint mapping (whole overwrite)."""
+    merge_team_namespace(session, team_name, {TEAM_CHECKPOINTS_KEY: dict(mapping)})
+
+
 def remove_team_namespace(session, team_name: str) -> bool:
     """Drop the per-team bucket. Returns ``True`` when removed."""
     teams = dict(read_teams_bucket(session))
@@ -141,7 +166,10 @@ __all__ = [
     "TEAM_DB_STATE_PENDING_CREATE",
     "TEAM_DB_STATE_CREATED",
     "TEAM_DB_STATE_CLEANED",
+    "TEAM_CHECKPOINTS_KEY",
     "read_team_db_state",
+    "read_team_checkpoints",
+    "merge_team_checkpoints",
     "read_teams_bucket",
     "read_team_namespace",
     "read_team_names_in_session",

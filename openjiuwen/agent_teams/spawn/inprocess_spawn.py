@@ -67,10 +67,15 @@ async def inprocess_spawn(
 
     # Share the leader's checkpoint dict so this teammate's
     # ``checkpoint()`` tool writes into the leader-visible namespace.
+    # The store callback routes through the *leader's* ``set_checkpoint``:
+    # the dict is shared by reference, so the teammate sees the write
+    # immediately, while the leader is the single writer that mirrors it
+    # into the session per-team namespace (avoiding independent State
+    # objects clobbering each other at ``post_run``).
     team_agent.share_checkpoints_with(teammate)
     if teammate.team_backend is not None:
         teammate.team_backend.set_store_checkpoint_fn(
-            lambda name, count: teammate.set_checkpoint(name, count) 
+            lambda name, count: team_agent.set_checkpoint(name, count)
         )
 
     # Fork context injection: seed the teammate's context engine with the

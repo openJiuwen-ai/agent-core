@@ -561,6 +561,15 @@ class TeamAgent(BaseAgent):
             on_team_cleaned=self._mark_team_cleaned,
             on_team_built=self._mark_team_built,
         )
+        # Route the leader's own ``checkpoint()`` tool into the leader-visible
+        # namespace. ``set_store_checkpoint_fn`` is otherwise only wired for
+        # in-process teammates (see ``inprocess_spawn``); without this the
+        # leader's snapshots land in the backend fallback dict and fork
+        # resolution never sees them.
+        if self.role == TeamRole.LEADER:
+            team_backend = self._configurator.team_backend
+            if team_backend is not None:
+                team_backend.set_store_checkpoint_fn(self.set_checkpoint)
 
     def _setup_agent(
         self,
@@ -1102,65 +1111,73 @@ class TeamAgent(BaseAgent):
                 list(self._spawn_manager.spawned_handles.keys()),
             )
             if fork_info:
-                native = self._resolve_fork_native(fork_info.get("source"))
-                team_logger.debug(
-                    "[fork] resolve_fork_native: source=%s native=%s",
-                    fork_info.get("source"), type(native).__name__ if native else "None",
-                )
-                if native is not None:
-                    fork_value = fork_info["fork"]
-                    compact = fork_info.get("compact", False)
-                    is_named = (
-                        isinstance(fork_value, str)
-                        and fork_value not in ("true", "false")
+                try:
+                    native = self._resolve_fork_native(fork_info.get("source"))
+                    team_logger.debug(
+                        "[fork] resolve_fork_native: source=%s native=%s",
+                        fork_info.get("source"), type(native).__name__ if native else "None",
                     )
-                    ckpt_idx = self._named_checkpoints.get(fork_value) if is_named else None
+                    if native is not None:
+                        fork_value = fork_info["fork"]
+                        compact = fork_info.get("compact", False)
+                        is_named = (
+                            isinstance(fork_value, str)
+                            and fork_value not in ("true", "false")
+                        )
+                        ckpt_idx = self._named_checkpoints.get(fork_value) if is_named else None
 
-                    if compact:
-                        if not is_named:
-                            team_logger.warning(
-                                "[fork] compact=true ignored for member=%s: "
-                                "requires a named checkpoint fork", teammate_id,
-                            )
-                            compact = False
-                        elif ckpt_idx is None:
+                        if compact:
+                            if not is_named:
+                                team_logger.warning(
+                                    "[fork] compact=true ignored for member=%s: "
+                                    "requires a named checkpoint fork", teammate_id,
+                                )
+                                compact = False
+                            elif ckpt_idx is None:
+                                team_logger.warning(
+                                    "[fork] checkpoint '%s' not found for "
+                                    "member=%s; falling back to full context",
+                                    fork_value, teammate_id,
+                                )
+                                compact = False
+
+                        # Default is a live fork (fork="true"/True): full
+                        # injection. Named branches override the capture below.
+                        fork_ctx = ForkContext.from_agent(native)
+                        if compact:
+                            if ckpt_idx is not None and 0 <= ckpt_idx < len(fork_ctx.messages):
+                                fork_ctx.compact_split = ckpt_idx
+                            else:
+                                fork_ctx.compact_split = len(fork_ctx.messages)
+                        elif is_named and ckpt_idx is None:
                             team_logger.warning(
                                 "[fork] checkpoint '%s' not found for "
                                 "member=%s; falling back to full context",
                                 fork_value, teammate_id,
                             )
-                            compact = False
-
-                    # Default is a live fork (fork="true"/True): full
-                    # injection. Named branches override the capture below.
-                    fork_ctx = ForkContext.from_agent(native)
-                    if compact:
-                        if ckpt_idx is not None and 0 <= ckpt_idx < len(fork_ctx.messages):
-                            fork_ctx.compact_split = ckpt_idx
-                        else:
-                            fork_ctx.compact_split = len(fork_ctx.messages)
-                    elif is_named and ckpt_idx is None:
-                        team_logger.warning(
-                            "[fork] checkpoint '%s' not found for "
-                            "member=%s; falling back to full context",
-                            fork_value, teammate_id,
+                        elif is_named:
+                            fork_ctx = ForkContext.from_agent(
+                                native, checkpoint=ckpt_idx,
+                            )
+                        team_logger.debug(
+                            "[fork] ForkContext created: msgs=%d empty=%s",
+                            len(fork_ctx.messages), fork_ctx.is_empty(),
                         )
-                    elif is_named:
-                        fork_ctx = ForkContext.from_agent(
-                            native, checkpoint=ckpt_idx,
+                        team_logger.info(
+                            "[fork] %s into %s (msgs=%d)%s",
+                            "compacted fork" if compact else
+                            "checkpoint fork" if is_named else "live fork",
+                            teammate_id,
+                            len(fork_ctx.messages),
+                            f" split_at={fork_ctx.compact_split}" if fork_ctx.compact_split is not None else "",
                         )
-                    team_logger.debug(
-                        "[fork] ForkContext created: msgs=%d empty=%s",
-                        len(fork_ctx.messages), fork_ctx.is_empty(),
+                except Exception as exc:  # noqa: BLE001 - never let fork capture block the spawn
+                    team_logger.warning(
+                        "[fork] fork capture failed for member=%s: %s; "
+                        "spawning without inherited context",
+                        teammate_id, exc,
                     )
-                    team_logger.info(
-                        "[fork] %s into %s (msgs=%d)%s",
-                        "compacted fork" if compact else
-                        "checkpoint fork" if is_named else "live fork",
-                        teammate_id,
-                        len(fork_ctx.messages),
-                        f" split_at={fork_ctx.compact_split}" if fork_ctx.compact_split is not None else "",
-                    )
+                    fork_ctx = None
 
         ctx = await self._spawn_manager.build_context_from_db(teammate_id)
         if ctx is None:
@@ -1203,8 +1220,37 @@ class TeamAgent(BaseAgent):
         other.set_checkpoints_from(self._named_checkpoints)
 
     def set_checkpoint(self, name: str, count: int) -> None:
-        """Store a named checkpoint in this agent's namespace."""
+        """Store a named checkpoint.
+
+        The leader also mirrors the full mapping into the session's
+        per-team namespace so it survives process restart. Persistence is
+        deferred to the run cycle's ``post_run`` (no explicit flush),
+        matching allocator / lifecycle / pending_resume semantics.
+        """
         self._named_checkpoints[name] = count
+        if self.role == TeamRole.LEADER:
+            self._merge_checkpoints_into_session()
+
+    def _merge_checkpoints_into_session(self) -> None:
+        """Mirror the current checkpoint mapping into the bound team session.
+
+        Sync-only and best-effort: a failure must never break a model call.
+        The durable write happens at run-cycle ``post_run``.
+        """
+        session = self._session_manager.team_session
+        team_name = self._configurator.team_name
+        if session is None or team_name is None:
+            return
+        from openjiuwen.agent_teams.runtime.metadata import merge_team_checkpoints
+
+        try:
+            merge_team_checkpoints(session, team_name, dict(self._named_checkpoints))
+        except Exception as exc:  # noqa: BLE001 - never break a model call over a mirror write
+            team_logger.warning(
+                "[{}] failed to mirror checkpoints into session: {}",
+                self._member_name() or "?",
+                exc,
+            )
 
     def set_checkpoints_from(self, source: dict[str, int]) -> None:
         """Replace this agent's checkpoint namespace with *source*."""
@@ -1362,7 +1408,10 @@ class TeamAgent(BaseAgent):
             ValueError: When the session has no bucket for ``team_name`` or
                 the bucket is missing the leader spec.
         """
-        from openjiuwen.agent_teams.runtime.metadata import read_team_namespace
+        from openjiuwen.agent_teams.runtime.metadata import (
+            read_team_checkpoints,
+            read_team_namespace,
+        )
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
         bucket = read_team_namespace(session, team_name)
@@ -1397,6 +1446,11 @@ class TeamAgent(BaseAgent):
         allocator_state = bucket.get("model_allocator_state")
         if allocator_state:
             agent.restore_allocator_state(allocator_state)
+        # Restore named checkpoints so a cold-recovered leader can still
+        # resolve ``fork="<checkpoint>"`` for teammates spawned later.
+        checkpoints = read_team_checkpoints(session, team_name)
+        if checkpoints:
+            agent.set_checkpoints_from(checkpoints)
         # Inject session_id into the agent_teams contextvar so the immediately
         # following ``recover_team`` flow (and its restart_teammate -> spawn
         # chain) can read it via ``get_session_id``. We deliberately do NOT
