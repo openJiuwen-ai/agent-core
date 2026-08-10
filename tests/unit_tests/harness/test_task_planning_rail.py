@@ -387,6 +387,94 @@ async def test_sync_plan_from_todos_syncs_terminal_states() -> None:
     assert plan.tasks[2].status == TaskStatus.IN_PROGRESS
 
 
+# ================================================================
+# before_invoke plan sync tests
+# ================================================================
+
+
+@pytest.mark.asyncio
+async def test_before_invoke_flushes_completed_todos_into_plan() -> None:
+    """before_invoke syncs stale TaskPlan from completed todo.json before task selection.
+
+    Regression for query hijack: a prior round completed todos in todo.json while
+    the persisted TaskPlan stayed IN_PROGRESS/PENDING. Without this sync the outer
+    loop would call get_next_task() and bind a stale task, overriding the fresh
+    user query.
+    """
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    todos = _make_todos([
+        ("task-a", TodoStatus.COMPLETED),
+        ("task-b", TodoStatus.COMPLETED),
+        ("task-c", TodoStatus.COMPLETED),
+    ])
+    todo_ids = [t.id for t in todos]
+
+    existing_plan = TaskPlan(
+        goal="stale",
+        tasks=[
+            TaskItem(id=todo_ids[0], title="task-a", status=TaskStatus.COMPLETED),
+            TaskItem(id=todo_ids[1], title="task-b", status=TaskStatus.IN_PROGRESS),
+            TaskItem(id=todo_ids[2], title="task-c", status=TaskStatus.PENDING),
+        ],
+    )
+    state = DeepAgentState(iteration=3, task_plan=existing_plan)
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-before-invoke"
+    ctx.agent.load_state.return_value = state
+    ctx.agent.save_state = MagicMock()
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=todos)
+
+    await rail.before_invoke(ctx)
+
+    ctx.agent.save_state.assert_called_once()
+    plan = state.task_plan
+    assert all(t.status == TaskStatus.COMPLETED for t in plan.tasks)
+    # A fully-completed plan yields no next task -> fresh user query is honoured.
+    assert plan.get_next_task() is None
+
+
+@pytest.mark.asyncio
+async def test_before_invoke_never_raises_on_sync_failure() -> None:
+    """before_invoke is best-effort and must not block invoke when sync fails."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    existing_plan = TaskPlan(
+        goal="stale",
+        tasks=[TaskItem(id="t1", title="task-a", status=TaskStatus.IN_PROGRESS)],
+    )
+    state = DeepAgentState(iteration=1, task_plan=existing_plan)
+    ctx = _make_ctx(session=MagicMock())
+    ctx.session.get_session_id.return_value = "sess-fail"
+    ctx.agent.load_state.return_value = state
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(side_effect=Exception("disk error"))
+
+    # Must not raise.
+    await rail.before_invoke(ctx)
+
+
+@pytest.mark.asyncio
+async def test_before_invoke_safe_without_session() -> None:
+    """before_invoke is safe when ctx.session is None."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx(session=None)
+
+    await rail.before_invoke(ctx)
+
+
 @pytest.mark.asyncio
 async def test_bridge_skips_when_plan_exists() -> None:
     """Existing plan -> no overwrite."""
