@@ -125,8 +125,8 @@ class PowerShellTool(Tool):
         )
 
     def _build_history_path(self, session: Any) -> str:
-        from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
-        base_dir = get_workspace() or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        from openjiuwen.core.sys_operation.cwd import get_agent_history_base_dir
+        base_dir = get_agent_history_base_dir()
         return os.path.join(
             base_dir, ".agent_history",
             f"file_ops_{self._agent_id}_{session.get_session_id()}.json",

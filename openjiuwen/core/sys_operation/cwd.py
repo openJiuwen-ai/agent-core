@@ -144,6 +144,21 @@ def set_workspace(path: str) -> None:
     _state().workspace = _resolve(path)
 
 
+def get_agent_history_base_dir() -> str:
+    """Base directory for per-session tool history (``.agent_history/``).
+
+    Prefers the agent workspace; when none is configured, falls back to a
+    user-level directory (``~/.openjiuwen/agent_history``) instead of the
+    project CWD, so history files never pollute the user's project tree
+    (#1490).
+    """
+    workspace = get_workspace()
+    if workspace:
+        return workspace
+    home = os.path.expanduser("~")
+    return os.path.join(home, ".openjiuwen", "agent_history")
+
+
 # ---- Team workspace: shared across team members ---------------------------
 
 def get_team_workspace() -> str | None:
