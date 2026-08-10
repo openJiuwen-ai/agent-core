@@ -768,7 +768,11 @@ class ReActAgent(BaseAgent):
         if not parts:
             return
         body = "\n".join(parts)
-        await context.add_messages(UserMessage(content=f"{prefix}{body}"))
+        await context.add_messages(
+            UserMessage(content=f"{prefix}{body}"),
+            system_messages=ctx.extra.get("_active_system_messages") or [],
+            tools=ctx.extra.get("_active_tools") or [],
+        )
 
     def _extract_user_parts(self, ctx: AgentCallbackContext, user_input: Any) -> List[str]:
         """Normalize a round's query into the input list ON_USER_MESSAGE sees.
@@ -1451,15 +1455,19 @@ class ReActAgent(BaseAgent):
             parallel_tool_calls=self._config.parallel_tool_calls,
         )
 
+        add_kwargs = {
+            "system_messages": ctx.extra.get("_active_system_messages") or [],
+            "tools": ctx.extra.get("_active_tools") or [],
+        }
         for tool_result, tool_message in results:
             if tool_message is not None:
-                await context.add_messages(tool_message)
+                await context.add_messages(tool_message, **add_kwargs)
 
         multimodal_message = self._build_multimodal_tool_results_message(
             tool_result for tool_result, _ in results
         )
         if multimodal_message is not None:
-            await context.add_messages(multimodal_message)
+            await context.add_messages(multimodal_message, **add_kwargs)
 
         return results
 
@@ -1730,7 +1738,11 @@ class ReActAgent(BaseAgent):
 
         # Step 3: all feedbacks collected — write ai_message and concurrently resume all workflows
         resume_ai_message = copy.deepcopy(interruption_state.ai_message)
-        await context.add_messages(resume_ai_message)
+        await context.add_messages(
+            resume_ai_message,
+            system_messages=ctx.extra.get("_active_system_messages") or [],
+            tools=ctx.extra.get("_active_tools") or [],
+        )
 
         all_tool_calls = []
         for entry in interruption_state.interrupted_workflows.values():
@@ -1945,6 +1957,19 @@ class ReActAgent(BaseAgent):
                 tools = await self.ability_manager.list_tool_info()
                 tools_ready_at = time.monotonic()
 
+                ctx.extra["_active_system_messages"] = [
+                    SystemMessage(content=rendered_system_prompt)
+                ]
+                ctx.extra["_active_tools"] = tools
+
+                background_messages = session.get_state("background_messages")
+                if background_messages:
+                    await context.add_messages(
+                        background_messages,
+                        system_messages=ctx.extra.get("_active_system_messages") or [],
+                        tools=ctx.extra.get("_active_tools") or [],
+                    )
+
                 prep_elapsed = tools_ready_at - prep_started_at
                 if prep_elapsed >= SLOW_INVOKE_PREP_SECONDS:
                     logger.info(
@@ -2064,7 +2089,9 @@ class ReActAgent(BaseAgent):
                                 reasoning_content=ai_message.reasoning_content,
                                 usage_metadata=ai_message.usage_metadata,
                                 finish_reason=ai_message.finish_reason,
-                            )
+                            ),
+                            system_messages=ctx.extra.get("_active_system_messages") or [],
+                            tools=ctx.extra.get("_active_tools") or [],
                         )
 
                         if not ai_message.tool_calls:
