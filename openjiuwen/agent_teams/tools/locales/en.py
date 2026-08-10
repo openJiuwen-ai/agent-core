@@ -250,11 +250,11 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
     "create_task.task.content": "Task details including goals and acceptance criteria",
-    # Scheduled create_task requires assignee; autonomous create_task omits it
-    # (members claim from the shared board; leader assigns via update_task).
+    # Autonomous assignee is optional; scheduled create_task requires it.
     "create_task.task.assignee": (
         "Member name that carries this task; the member must already exist and must not be the leader. "
-        "Required in scheduled mode because members never claim there"
+        "Optional in autonomous mode (omitted tasks enter the shared claim pool); required in scheduled mode "
+        "because members never claim there"
     ),
     "create_task.task.depends_on": (
         "Prerequisite task IDs; may reference tasks created in this same call "

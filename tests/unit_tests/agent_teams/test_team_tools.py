@@ -19,6 +19,7 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     TaskStatus,
 )
+from openjiuwen.agent_teams.schema.task import TaskGraphSpec
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
@@ -798,8 +799,8 @@ class TestTaskCreateTool:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
-    async def test_create_lands_unassigned_even_if_assignee_passed(self, agent_team, t, db, sample_agent_card):
-        """Autonomous create_task has no assignee field; extras are ignored."""
+    async def test_create_persists_optional_assignee(self, agent_team, t, db, sample_agent_card):
+        """Autonomous create_task may omit assignee or reserve a non-leader owner."""
         await db.member.create_member(
             member_name="dev-1",
             team_name="test_team",
@@ -808,10 +809,18 @@ class TestTaskCreateTool:
             status=MemberStatus.READY,
         )
         tool = TaskCreateTool(agent_team, t)
-        node_props = tool.card.input_params["properties"]["tasks"]["items"]["properties"]
-        assert "assignee" not in node_props
+        node = tool.card.input_params["properties"]["tasks"]["items"]
+        assert "assignee" in node["properties"]
+        assert "assignee" not in node["required"]
 
-        result = await tool.invoke(
+        unassigned = await tool.invoke(
+            {"tasks": [{"task_id": "open-pool", "title": "Open", "content": "c"}]}
+        )
+        assert unassigned.success is True, unassigned.error
+        assert not unassigned.data.get("assignee")
+        assert (await agent_team.task_manager.get("open-pool")).assignee is None
+
+        reserved = await tool.invoke(
             {
                 "tasks": [
                     {
@@ -823,13 +832,88 @@ class TestTaskCreateTool:
                 ]
             }
         )
-
-        assert result.success is True, result.error
-        assert not result.data.get("assignee")
-        assert result.data["status"] == TaskStatus.PENDING.value
+        assert reserved.success is True, reserved.error
+        assert reserved.data.get("assignee") == "dev-1"
+        assert reserved.data["status"] == TaskStatus.PENDING.value
         stored = await agent_team.task_manager.get("academic-position")
         assert stored.status == TaskStatus.PENDING.value
-        assert stored.assignee is None
+        assert stored.assignee == "dev-1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_rejects_leader_or_unknown_assignee(
+        self, agent_team, t, db, sample_agent_card
+    ):
+        """Optional assignee must still be a real non-leader member when provided."""
+        await db.member.create_member(
+            member_name="leader1",
+            team_name="test_team",
+            display_name="Leader",
+            agent_card=sample_agent_card.model_dump_json(),
+            status=MemberStatus.READY,
+        )
+        # agent_team fixture uses member_name=leader1 as the acting member / leader
+        tool = TaskCreateTool(agent_team, t)
+        as_leader = await tool.invoke(
+            {
+                "tasks": [
+                    {
+                        "title": "Bad",
+                        "content": "c",
+                        "assignee": "leader1",
+                    }
+                ]
+            }
+        )
+        assert as_leader.success is False
+        assert "leader" in (as_leader.error or "").lower()
+
+        unknown = await tool.invoke(
+            {"tasks": [{"title": "Bad", "content": "c", "assignee": "ghost"}]}
+        )
+        assert unknown.success is False
+        assert "ghost" in (unknown.error or "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_persists_assignee_and_claim_starts(
+        self, agent_team, t, db, sample_agent_card
+    ):
+        """Create-time assignee + claim_task must start (not reject as already claimed)."""
+        from openjiuwen.agent_teams.schema.status import MemberMode
+
+        await db.member.create_member(
+            member_name="dev-1",
+            team_name="test_team",
+            display_name="Dev",
+            agent_card=sample_agent_card.model_dump_json(),
+            status=MemberStatus.READY,
+            mode=MemberMode.BUILD_MODE.value,
+        )
+        create = TaskCreateTool(agent_team, t)
+        created = await create.invoke(
+            {
+                "tasks": [
+                    {
+                        "task_id": "owned",
+                        "title": "Owned",
+                        "content": "c",
+                        "assignee": "dev-1",
+                    }
+                ]
+            }
+        )
+        assert created.success is True, created.error
+
+        teammate_tm = agent_team.task_manager
+        # Switch acting member to the assignee for claim
+        teammate_tm.member_name = "dev-1"
+        claim = ClaimTaskTool(teammate_tm, t)
+        result = await claim.invoke({"task_id": "owned", "status": "claimed"})
+        assert result.success is True, result.error
+        stored = await teammate_tm.get("owned")
+        assert stored.status == TaskStatus.IN_PROGRESS.value
+        assert stored.assignee == "dev-1"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1209,18 +1293,36 @@ class TestViewTaskToolV2:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_invoke_claimable(self, agent_team, t, db):
-        """Test claimable action returns only pending tasks"""
+    async def test_invoke_claimable(self, agent_team, t, db, sample_agent_card):
+        """claimable returns pending unassigned or reserved for the viewer."""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
         await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
+        await db.member.create_member(
+            member_name="other-member",
+            team_name="test_team",
+            display_name="Other",
+            agent_card=sample_agent_card.model_dump_json(),
+            status=MemberStatus.READY,
+        )
+        reserved = await agent_team.task_manager.add_graph(
+            [
+                TaskGraphSpec(
+                    title="Reserved",
+                    content="c",
+                    task_id="task4",
+                    assignee="other-member",
+                )
+            ]
+        )
+        assert reserved.ok, reserved.reason
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         result = await tool.invoke({"action": "claimable"})
 
         assert result.success is True
-        assert result.data["count"] == 1
-        assert result.data["tasks"][0]["task_id"] == "task1"
+        ids = {task["task_id"] for task in result.data["tasks"]}
+        assert ids == {"task1"}
 
 
 # ========== Task Execution Tools ==========
