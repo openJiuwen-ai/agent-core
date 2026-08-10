@@ -35,7 +35,8 @@ async def test_disabled_skill_not_scanned_into_cache(skills_root: Path) -> None:
     rail = SkillUseRail(str(skills_root), disabled_skills=["disabled_skill"])
     await rail.reload_skills()
     assert {s.name for s in rail.skills} == {"enabled_skill", "other_skill"}
-    assert "disabled_skill" not in rail._skill_cache
+    # _skill_cache keys are resolved absolute paths, not bare skill names.
+    assert str((skills_root / "disabled_skill").resolve()) not in rail._skill_cache
 
 
 @pytest.mark.asyncio
