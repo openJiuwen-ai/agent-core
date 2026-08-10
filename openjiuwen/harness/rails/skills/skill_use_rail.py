@@ -162,6 +162,11 @@ class SkillUseRail(DeepAgentRail):
                 if not skill_md_path.exists():
                     continue
 
+                # Skip skills that would be filtered out anyway, so disabled /
+                # not-enabled skills are never scanned into the cache (#1499).
+                if not self._is_skill_enabled(item.name):
+                    continue
+
                 key = str(item.resolve())
                 update_at = skill_md_path.stat().st_mtime
 
@@ -242,6 +247,18 @@ class SkillUseRail(DeepAgentRail):
             filtered.append(skill)
 
         return filtered
+
+    def _is_skill_enabled(self, skill_name: str) -> bool:
+        """Whether a skill name would survive the enabled/disabled filters.
+
+        Mirrors ``_filter_skills`` so the incremental loader can skip
+        disabled / not-enabled skills before scanning them into the cache.
+        """
+        if self.enabled_skills and skill_name not in self.enabled_skills:
+            return False
+        if skill_name in self.disabled_skills:
+            return False
+        return True
 
     def init(self, agent):
         """Register tool cards into agent and concrete tools into resource manager."""
