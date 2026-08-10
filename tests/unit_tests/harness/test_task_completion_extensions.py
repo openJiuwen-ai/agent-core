@@ -537,6 +537,96 @@ async def test_goal_interrupt_with_pending_complete_runs_assessment() -> None:
 
 
 @pytest.mark.asyncio
+async def test_goal_interrupt_after_begin_attempt_finalizes_pending_complete() -> None:
+    """Regression: begin_attempt must not drop an unconsumed terminal report.
+
+    In the host loop the agent submits COMPLETE, a permission interrupt ends
+    the round, and the next round's begin_attempt resets the sink before the
+    interrupt path can finalize — leaving the goal ACTIVE and re-driving it
+    forever. begin_attempt must preserve an unconsumed COMPLETE/BLOCKED report
+    so the interrupt after_iteration can still assess and finalize.
+    """
+    from openjiuwen.harness.goal.schema import GoalStatus
+
+    record = GoalRecord.create(session_id="s1", objective="ship it")
+    assessments: list[GoalAssessment] = []
+    assessor_calls = {"n": 0}
+
+    class _Store:
+        def load(self):
+            return record
+
+    class _Manager:
+        def get_store(self, session_id=None):
+            return _Store()
+
+        async def apply_assessment(self, *, goal_id, revision, assessment):
+            assessments.append(assessment)
+            record.status = GoalStatus.COMPLETED
+            record.last_assessment = assessment
+            return record
+
+    rail = TaskCompletionRail()
+    rail.set_goal_manager(_Manager())
+    rail._is_goal_round = True
+    rail._current_goal_id = record.goal_id
+    rail._current_revision = record.revision
+    rail._current_session_id = record.session_id
+
+    # Agent submitted a terminal report during the interrupted attempt.
+    rail._goal_report_sink.submit(
+        GoalAssessment(
+            status=GoalAssessmentStatus.COMPLETE,
+            evidence="tests pass and output verified",
+        )
+    )
+
+    # The next round starts before after_iteration finalizes. begin_attempt
+    # must keep the unconsumed terminal report or the goal loops forever.
+    rail._goal_report_sink.begin_attempt(
+        session_id=record.session_id,
+        goal_id=record.goal_id,
+        revision=record.revision,
+        attempt_index=1,
+    )
+
+    async def _fake_invoke(record_arg, report_arg, ctx):
+        assessor_calls["n"] += 1
+        assert report_arg.status is GoalAssessmentStatus.COMPLETE
+        return '{"status":"complete","evidence":"verified by transcript"}'
+
+    rail._maybe_invoke_transcript_assessor = _fake_invoke  # type: ignore[method-assign]
+
+    class _Evaluator:
+        strategy = None
+
+        def assess(self, *, record, agent_report, transcript_response):
+            return GoalAssessment(
+                status=GoalAssessmentStatus.COMPLETE,
+                evidence="verified",
+            )
+
+    rail._goal_evaluator = _Evaluator()
+
+    inputs = SimpleNamespace(
+        result={"result_type": "interrupt", "component_ids": ["tool_1"]},
+        run_context={
+            "goal_id": record.goal_id,
+            "revision": record.revision,
+            "session_id": record.session_id,
+        },
+    )
+    ctx = AgentCallbackContext(agent=object(), inputs=inputs)
+
+    await rail._do_goal_after_iteration(ctx)
+
+    assert assessor_calls["n"] == 1
+    assert len(assessments) == 1
+    assert assessments[0].status is GoalAssessmentStatus.COMPLETE
+    assert record.status is GoalStatus.COMPLETED
+
+
+@pytest.mark.asyncio
 async def test_goal_interrupt_with_pending_continue_still_skips() -> None:
     """Interrupt + pending CONTINUE report stays on the skip path: CONTINUE
     is not terminal, so no LLM call, no apply_assessment."""

@@ -58,8 +58,19 @@ class GoalReportSink:
         revision: int,
         attempt_index: int,
     ) -> None:
-        """Reset the sink for a new attempt."""
-        self._report = None
+        """Reset the sink for a new attempt.
+
+        Preserve an unconsumed terminal report. In the host loop a permission
+        interrupt can end a round after COMPLETE/BLOCKED was submitted but
+        before the interrupt path finalizes it; the next round's begin_attempt
+        must not drop that report, or the goal stays ACTIVE and the task loop
+        re-drives a finished goal forever. Only clear non-terminal/empty sinks.
+        """
+        if self._report is None or self._report.status not in (
+            GoalAssessmentStatus.COMPLETE,
+            GoalAssessmentStatus.BLOCKED,
+        ):
+            self._report = None
         self._session_id = session_id
         self._goal_id = goal_id
         self._revision = revision
