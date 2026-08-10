@@ -16,6 +16,9 @@ from openjiuwen.agent_teams.context import (
 )
 from openjiuwen.agent_teams.fork import ForkContext
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.runtime.metadata import TEAMS_KEY
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -29,8 +32,10 @@ from openjiuwen.agent_teams.tools.team_tools import SpawnTeammateTool
 from openjiuwen.core.foundation.llm.schema.message import (
     AssistantMessage,
     SystemMessage,
+    ToolMessage,
     UserMessage,
 )
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 # ── fixtures ──────────────────────────────────────────────────────────────
@@ -596,3 +601,307 @@ class TestOnTeammateCreatedFork:
         fork_from = await self._run(agent)
         assert isinstance(fork_from, ForkContext)
         assert len(fork_from.messages) == self._MESSAGE_COUNT
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_capture_failure_degrades_to_no_inheritance(self, monkeypatch):
+        """A fork-capture failure must not abort the member spawn.
+
+        The member is launched without inherited context and the failure is
+        logged, instead of leaving the member UNSTARTED with a stalled
+        message delivery.
+        """
+        agent = self._make_agent(
+            {"fork": "code-ready", "since": None, "source": None, "compact": False},
+            checkpoints={"code-ready": 2},
+        )
+
+        def _boom(*args, **kwargs):
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg="cannot find context 'default_context_id' in session 's'",
+            )
+
+        monkeypatch.setattr(ForkContext, "from_agent", classmethod(_boom))
+
+        fork_from = await self._run(agent)
+        assert fork_from is None
+        agent._spawn_manager.spawn_teammate.assert_awaited()
+
+
+# ── ForkContext persisted-session fallback ──────────────────────────────────
+
+
+class _ContextStateStub:
+    """Minimal session mimicking the child-session state API.
+
+    The real child session stores the engine's saved context under the
+    ``"context"`` key: ``get_state("context")`` returns
+    ``{context_id: {"messages": [...]}}``.
+    """
+
+    def __init__(self, context_state: dict) -> None:
+        self.state: dict = {"context": context_state}
+
+    def get_state(self, key=None):
+        if key is None:
+            return self.state
+        return self.state.get(key)
+
+
+class TestForkContextPersistedFallback:
+    """``ForkContext.from_agent`` recovers when the source context is not
+    materialized in the live engine pool (e.g. after pause/resume rebuilds the
+    native) by reading the source's persisted child-session context state.
+    """
+
+    @staticmethod
+    def _make_agent(states=None, *, loop_session=None):
+        agent = MagicMock()
+        agent.get_current_context = MagicMock(
+            side_effect=build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg="cannot find context 'default_context_id' in session 's'",
+            )
+        )
+        if loop_session is not None:
+            agent.loop_session = loop_session
+        elif states is not None:
+            agent.loop_session = _ContextStateStub(states)
+        else:
+            agent.loop_session = None
+        return agent
+
+    @pytest.mark.level0
+    def test_from_agent_falls_back_to_persisted_messages(self):
+        agent = self._make_agent({
+            "default_context_id": {
+                "messages": [
+                    SystemMessage(content="sys"),
+                    UserMessage(content="count 1"),
+                    AssistantMessage(content="reported 1"),
+                ]
+            }
+        })
+        ctx = ForkContext.from_agent(agent)
+        decoded = ctx.to_messages()
+        # SystemMessage stripped; user/assistant conversation preserved.
+        assert len(decoded) == 2
+        assert decoded[0].content == "count 1"
+        assert decoded[1].content == "reported 1"
+
+    @pytest.mark.level0
+    def test_from_agent_fallback_respects_checkpoint_truncation(self):
+        agent = self._make_agent({
+            "default_context_id": {
+                "messages": [
+                    UserMessage(content="m0"),
+                    AssistantMessage(content="m1"),
+                    UserMessage(content="m2"),
+                ]
+            }
+        })
+        ctx = ForkContext.from_agent(agent, checkpoint=2)
+        decoded = ctx.to_messages()
+        assert [m.content for m in decoded] == ["m0", "m1"]
+
+    @pytest.mark.level1
+    def test_from_agent_reraises_when_no_persisted_state(self):
+        agent = self._make_agent(loop_session=None)
+        with pytest.raises(Exception) as exc_info:
+            ForkContext.from_agent(agent)
+        assert "cannot find context" in str(exc_info.value)
+
+    @pytest.mark.level0
+    def test_from_agent_fallback_decodes_json_dict_messages(self):
+        """Persisted messages stored as json dicts are restored to messages.
+
+        The checkpointer currently round-trips BaseMessage objects, but a
+        future serializer may persist them as dicts; the fallback must not
+        silently degrade to no-inheritance in that case.
+        """
+        raw = [
+            UserMessage(content="count 1").model_dump(mode="json"),
+            AssistantMessage(content="reported 1").model_dump(mode="json"),
+        ]
+        agent = self._make_agent({"default_context_id": {"messages": raw}})
+
+        ctx = ForkContext.from_agent(agent)
+        decoded = ctx.to_messages()
+        assert [m.content for m in decoded] == ["count 1", "reported 1"]
+
+    @pytest.mark.level1
+    def test_from_agent_fallback_reraises_on_malformed_messages(self):
+        """A non-message, non-dict element fails the fallback and re-raises."""
+        agent = self._make_agent(
+            {"default_context_id": {"messages": [UserMessage(content="ok"), "junk"]}}
+        )
+        with pytest.raises(Exception) as exc_info:
+            ForkContext.from_agent(agent)
+        assert "cannot find context" in str(exc_info.value)
+
+    @pytest.mark.level0
+    def test_fallback_path_also_closes_tool_call_boundary(self):
+        """The persisted-session fallback path applies the same boundary fix."""
+        tool_call = ToolCall(id="tc1", type="function", name="checkpoint", arguments="{}")
+        raw = [
+            UserMessage(content="task").model_dump(mode="json"),
+            AssistantMessage(content="1", tool_calls=[tool_call]).model_dump(mode="json"),
+            ToolMessage(tool_call_id="tc1", content="saved").model_dump(mode="json"),
+        ]
+        agent = self._make_agent({"default_context_id": {"messages": raw}})
+
+        ctx = ForkContext.from_agent(agent, checkpoint=2)
+        decoded = ctx.to_messages()
+        assert len(decoded) == 3
+        assert isinstance(decoded[-1], ToolMessage)
+
+
+# ── ForkContext checkpoint boundary closure ─────────────────────────────────
+
+
+class TestForkContextCheckpointBoundary:
+    """Truncation at a checkpoint must carry the closing ToolMessage(s) across
+    the boundary so the injected context has no dangling tool call (which the
+    product rail would mark as ``[工具执行被中断]``).
+    """
+
+    @staticmethod
+    def _checkpoint_call(call_id: str = "tc1", name: str = "checkpoint") -> ToolCall:
+        return ToolCall(id=call_id, type="function", name=name, arguments="{}")
+
+    @pytest.mark.level0
+    def test_boundary_carries_tool_result_across(self):
+        tool_call = self._checkpoint_call()
+        msgs = [
+            UserMessage(content="task"),
+            AssistantMessage(content="1", tool_calls=[tool_call]),
+            ToolMessage(tool_call_id="tc1", content="Checkpoint 'count-1' saved at message 2"),
+        ]
+        ctx = ForkContext.from_agent(_fake_agent(msgs), checkpoint=2)
+        decoded = ctx.to_messages()
+        assert len(decoded) == 3
+        assert decoded[1].tool_calls and decoded[1].tool_calls[0].name == "checkpoint"
+        assert isinstance(decoded[2], ToolMessage)
+        assert decoded[2].tool_call_id == "tc1"
+
+    @pytest.mark.level0
+    def test_boundary_carries_all_tool_results_for_multi_call(self):
+        call_a = self._checkpoint_call(call_id="ta")
+        call_b = self._checkpoint_call(call_id="tb", name="send_message")
+        msgs = [
+            AssistantMessage(content="", tool_calls=[call_a, call_b]),
+            ToolMessage(tool_call_id="ta", content="a result"),
+            ToolMessage(tool_call_id="tb", content="b result"),
+        ]
+        ctx = ForkContext.from_agent(_fake_agent(msgs), checkpoint=1)
+        decoded = ctx.to_messages()
+        assert len(decoded) == 3
+        assert [getattr(m, "tool_call_id", None) for m in decoded[1:]] == ["ta", "tb"]
+
+    @pytest.mark.level1
+    def test_boundary_no_extension_after_plain_response(self):
+        msgs = [
+            UserMessage(content="task"),
+            AssistantMessage(content="ok"),
+        ]
+        ctx = ForkContext.from_agent(_fake_agent(msgs), checkpoint=2)
+        assert len(ctx.to_messages()) == 2
+
+    @pytest.mark.level1
+    def test_boundary_no_extension_when_result_missing(self):
+        tool_call = self._checkpoint_call()
+        msgs = [
+            UserMessage(content="task"),
+            AssistantMessage(content="1", tool_calls=[tool_call]),
+        ]
+        ctx = ForkContext.from_agent(_fake_agent(msgs), checkpoint=2)
+        assert len(ctx.to_messages()) == 2
+
+    @pytest.mark.level1
+    def test_boundary_no_extension_when_next_not_tool_message(self):
+        tool_call = self._checkpoint_call()
+        msgs = [
+            UserMessage(content="task"),
+            AssistantMessage(content="1", tool_calls=[tool_call]),
+            UserMessage(content="next turn"),
+        ]
+        ctx = ForkContext.from_agent(_fake_agent(msgs), checkpoint=2)
+        assert len(ctx.to_messages()) == 2
+
+
+# ── TeamAgent checkpoint persistence ────────────────────────────────────────
+
+
+class _StubSession:
+    """Minimal session mimicking agent_team session's state API."""
+
+    def __init__(self) -> None:
+        self.state: dict = {}
+
+    def update_state(self, data: dict) -> None:
+        self.state.update(data)
+
+    def get_state(self, key=None):
+        if key is None:
+            return self.state
+        return self.state.get(key)
+
+
+class TestTeamAgentCheckpointPersistence:
+    """Assembly-path tests for ``TeamAgent.set_checkpoint`` persistence.
+
+    Verifies the leader mirrors checkpoints into the session per-team
+    namespace (the durable copy read back by cold recovery), that an
+    unbound session degrades gracefully, and that non-leader members only
+    mutate the in-memory mapping.
+    """
+
+    @classmethod
+    def _make_agent(cls, *, role, team_session, team_name="test-team"):
+        from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+
+        agent = object.__new__(TeamAgent)
+        agent._configurator = MagicMock()
+        agent._configurator.role = role
+        agent._configurator.team_name = team_name
+        agent._session_manager = MagicMock()
+        agent._session_manager.team_session = team_session
+        agent._named_checkpoints = {}
+        return agent
+
+    def _bucket_checkpoints(self, session) -> dict:
+        return session.state[TEAMS_KEY]["test-team"]["checkpoints"]
+
+    @pytest.mark.level0
+    def test_leader_set_checkpoint_mirrors_full_mapping_into_session(self):
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        session = _StubSession()
+        agent = self._make_agent(role=TeamRole.LEADER, team_session=session)
+
+        agent.set_checkpoint("code-ready", 5)
+        agent.set_checkpoint("refactor-done", 12)
+
+        assert agent._named_checkpoints == {"code-ready": 5, "refactor-done": 12}
+        assert self._bucket_checkpoints(session) == {"code-ready": 5, "refactor-done": 12}
+
+    @pytest.mark.level1
+    def test_leader_set_checkpoint_unbound_session_degrades_gracefully(self):
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        agent = self._make_agent(role=TeamRole.LEADER, team_session=None)
+        agent.set_checkpoint("code-ready", 5)
+        assert agent._named_checkpoints == {"code-ready": 5}
+
+    @pytest.mark.level1
+    def test_teammate_set_checkpoint_does_not_touch_session(self):
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        session = _StubSession()
+        agent = self._make_agent(role=TeamRole.TEAMMATE, team_session=session)
+
+        agent.set_checkpoint("code-ready", 5)
+
+        assert agent._named_checkpoints == {"code-ready": 5}
+        assert TEAMS_KEY not in session.state

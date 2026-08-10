@@ -9,6 +9,7 @@ from typing import (
 )
 from unittest.mock import (
     AsyncMock,
+    MagicMock,
     call,
     patch,
 )
@@ -1077,6 +1078,124 @@ def test_team_agent_recover_from_session_builds_leader_member_handle():
     handle = agent._state.team_member
     assert handle is not None
     assert handle.member_name == "leader"
+
+
+
+
+@pytest.mark.level0
+def test_team_agent_recover_from_session_restores_checkpoints():
+    from openjiuwen.agent_teams.runtime.metadata import (
+        merge_team_checkpoints,
+        write_team_namespace,
+    )
+
+    session_id = f"recover_ckpt_{uuid.uuid4().hex}"
+    team_name = "persistent_team"
+    session = create_agent_team_session(session_id=session_id, team_id=team_name)
+    write_team_namespace(
+        session,
+        team_name,
+        {
+            "spec": {
+                "team_name": team_name,
+                "agents": {"leader": {}},
+            },
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "desc": "leader",
+                "team_spec": {
+                    "team_name": team_name,
+                    "display_name": team_name,
+                    "leader_member_name": "leader",
+                },
+                "messager_config": {},
+                "db_config": {},
+            },
+        },
+    )
+    merge_team_checkpoints(session, team_name, {"code-ready": 5, "refactor-done": 12})
+
+    agent = TeamAgent.recover_from_session(session, team_name)
+
+    assert agent._named_checkpoints == {"code-ready": 5, "refactor-done": 12}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_checkpoints_survive_reload(isolated_checkpointer):
+    """Checkpoints written + flushed survive a fresh session (simulated restart)."""
+    from openjiuwen.agent_teams.runtime.metadata import (
+        merge_team_checkpoints,
+        write_team_namespace,
+    )
+
+    session_id = f"reload_ckpt_{uuid.uuid4().hex}"
+    team_name = "persistent_team"
+
+    session = create_agent_team_session(session_id=session_id, team_id=team_name)
+    await session.pre_run()
+    write_team_namespace(
+        session,
+        team_name,
+        {
+            "spec": {
+                "team_name": team_name,
+                "agents": {"leader": {}},
+            },
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "desc": "leader",
+                "team_spec": {
+                    "team_name": team_name,
+                    "display_name": team_name,
+                    "leader_member_name": "leader",
+                },
+                "messager_config": {},
+                "db_config": {},
+            },
+        },
+    )
+    merge_team_checkpoints(session, team_name, {"code-ready": 5})
+    await session.flush_checkpoint()
+
+    restored = create_agent_team_session(session_id=session_id, team_id=team_name)
+    await restored.pre_run()
+    agent = TeamAgent.recover_from_session(restored, team_name)
+
+    assert agent._named_checkpoints == {"code-ready": 5}
+    await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.level0
+def test_persist_leader_config_preserves_checkpoints():
+    from openjiuwen.agent_teams.agent.recovery_manager import RecoveryManager
+    from openjiuwen.agent_teams.runtime.metadata import (
+        merge_team_checkpoints,
+        read_team_namespace,
+    )
+
+    session_id = f"preserve_ckpt_{uuid.uuid4().hex}"
+    team_name = "persistent_team"
+    session = create_agent_team_session(session_id=session_id, team_id=team_name)
+
+    configurator = MagicMock()
+    configurator.spec = MagicMock()
+    configurator.spec.model_dump.return_value = {"team_name": team_name}
+    configurator.ctx = MagicMock()
+    configurator.ctx.model_dump.return_value = {}
+    configurator.team_name = team_name
+    configurator.model_allocator = None
+
+    recovery = RecoveryManager(configurator=configurator, spawn_manager=MagicMock())
+
+    merge_team_checkpoints(session, team_name, {"code-ready": 5})
+    recovery.persist_leader_config(session)
+
+    bucket = read_team_namespace(session, team_name)
+    assert bucket["checkpoints"] == {"code-ready": 5}
+    assert bucket["spec"] == {"team_name": team_name}
 
 
 

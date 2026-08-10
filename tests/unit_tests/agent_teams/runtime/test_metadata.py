@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 from openjiuwen.agent_teams.runtime.metadata import (
+    TEAM_CHECKPOINTS_KEY,
     TEAM_DB_STATE_CREATED,
     TEAM_DB_STATE_KEY,
     TEAM_PENDING_RESUME_KEY,
     TEAMS_KEY,
     clear_pending_resume,
     merge_pending_resume,
+    merge_team_checkpoints,
     merge_team_db_state,
     merge_team_namespace,
     read_pending_resume,
+    read_team_checkpoints,
     read_team_db_state,
     read_team_names_in_session,
     read_team_namespace,
@@ -155,3 +158,32 @@ def test_read_pending_resume_ignores_non_dict_payload():
     session = _StubSession()
     write_team_namespace(session, "alpha", {TEAM_PENDING_RESUME_KEY: "nope"})
     assert read_pending_resume(session, "alpha") is None
+
+
+def test_merge_team_checkpoints_creates_bucket_key():
+    session = _StubSession()
+    write_team_namespace(session, "alpha", {"spec": {"team_name": "alpha"}})
+    merge_team_checkpoints(session, "alpha", {"code-ready": 5})
+    bucket = read_team_namespace(session, "alpha")
+    assert bucket["checkpoints"] == {"code-ready": 5}
+    assert bucket["spec"] == {"team_name": "alpha"}
+
+
+def test_merge_team_checkpoints_replaces_whole_mapping():
+    session = _StubSession()
+    merge_team_checkpoints(session, "alpha", {"a": 1})
+    merge_team_checkpoints(session, "alpha", {"b": 2})
+    assert read_team_checkpoints(session, "alpha") == {"b": 2}
+
+
+def test_read_team_checkpoints_returns_none_when_absent():
+    session = _StubSession()
+    assert read_team_checkpoints(session, "alpha") is None
+    write_team_namespace(session, "alpha", {"spec": {}})
+    assert read_team_checkpoints(session, "alpha") is None
+
+
+def test_read_team_checkpoints_filters_non_int_values():
+    session = _StubSession()
+    write_team_namespace(session, "alpha", {TEAM_CHECKPOINTS_KEY: {"ok": 3, "bad": "x", 1: 2}})
+    assert read_team_checkpoints(session, "alpha") == {"ok": 3}
