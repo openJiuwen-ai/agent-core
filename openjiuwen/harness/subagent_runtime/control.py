@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.harness.kv_cache.kv_cache_hooks import is_sticky_subagent_type
+from openjiuwen.harness.subagent_runtime.activity_events import ActivityEmitter
 from openjiuwen.harness.subagent_runtime.config import (
     WAIT_TIMEOUT_MS_DEFAULT,
     WAIT_TIMEOUT_MS_MAX,
@@ -21,6 +23,7 @@ from openjiuwen.harness.subagent_runtime.config import (
 from openjiuwen.harness.subagent_runtime.errors import build_subagent_runtime_error, raise_subagent_not_found
 from openjiuwen.harness.subagent_runtime.ids import build_subagent_id, new_task_id
 from openjiuwen.harness.subagent_runtime.models import (
+    SubagentActivity,
     SubagentTurn,
     SpawnResult,
     SubagentMetadata,
@@ -32,8 +35,13 @@ from openjiuwen.harness.subagent_runtime.models import (
     WaitResult,
     resolve_presentation,
 )
+from openjiuwen.harness.subagent_runtime.output_file import (
+    resolve_parent_workspace_root,
+    write_turn_output,
+)
 from openjiuwen.harness.subagent_runtime.persistence import (
     DEFAULT_SNAPSHOT_PAGE_SIZE,
+    MAX_ACTIVITIES_PER_INSTANCE,
     max_persisted_records,
     merge_subagent_bucket,
     read_subagent_bucket,
@@ -68,6 +76,31 @@ def _cursor_start_index(turns: list[SubagentTurn], cursor: str | None) -> int:
     return len(turns)
 
 
+def _cursor_start_index_merged(
+    items: list[tuple[str, SubagentTurn | SubagentActivity]],
+    cursor: str | None,
+) -> int:
+    if not cursor:
+        return 0
+    parts = cursor.split(":")
+    if len(parts) < 2:
+        return 0
+    subagent_id = parts[0]
+    try:
+        seq = int(parts[1])
+    except ValueError:
+        return 0
+    kind = parts[2] if len(parts) > 2 else None
+    for index, (item_kind, item) in enumerate(items):
+        if item.subagent_id != subagent_id:
+            continue
+        if item.seq > seq:
+            return index
+        if item.seq == seq and kind is not None and item_kind > kind:
+            return index
+    return len(items)
+
+
 class SubagentControl:
     """Parent-session orchestration entry for subagent runtime."""
 
@@ -87,12 +120,19 @@ class SubagentControl:
         self._closed_records: dict[str, SubagentRecord] = {}
         self._turns: dict[str, list[SubagentTurn]] = {}
         self._turn_seq: dict[str, int] = {}
+        self._activities: dict[str, deque[SubagentActivity]] = {}
+        self._activity_seq: dict[str, int] = {}
         self._hydrated = False
+        self._activity_emitter: ActivityEmitter | None = None
+        if self._config.enable_activity_stream and self._parent_session is not None:
+            self._activity_emitter = ActivityEmitter(self._parent_session, config=self._config)
+            self._activity_emitter.start()
         self._manager = SubagentSessionManager(
             parent_agent,
             self._config,
             self._semaphore,
             status_change_handler=self._handle_instance_status_changed,
+            activity_handler=self._handle_activity if self._config.enable_activity_stream else None,
         )
 
     async def spawn(
@@ -222,7 +262,19 @@ class SubagentControl:
             and (instance := self._manager.find(sid)) is not None
             and instance.last_output
         }
-        return WaitResult(statuses=statuses, results=results, timed_out=timed_out)
+        output_files = {
+            sid: turn.output_file
+            for sid in targets
+            if statuses[sid].kind is SubagentStatusKind.COMPLETED
+            and (turn := self._latest_answered_turn(sid)) is not None
+            and turn.output_file
+        }
+        return WaitResult(
+            statuses=statuses,
+            results=results,
+            output_files=output_files,
+            timed_out=timed_out,
+        )
 
     def get_status(self, subagent_id: str) -> SubagentStatus:
         instance = self._manager.find(subagent_id)
@@ -426,6 +478,22 @@ class SubagentControl:
                 items.sort(key=lambda item: item.seq)
                 self._turns[sid] = items
                 self._turn_seq[sid] = max(item.seq for item in items)
+
+        activities = bucket.get("activities") or {}
+        if isinstance(activities, dict):
+            for sid, raw_items in activities.items():
+                if not isinstance(raw_items, list):
+                    continue
+                items = [
+                    SubagentActivity.from_dict(item)
+                    for item in raw_items
+                    if isinstance(item, dict)
+                ]
+                if not items:
+                    continue
+                items.sort(key=lambda item: item.seq)
+                self._activities[sid] = deque(items, maxlen=MAX_ACTIVITIES_PER_INSTANCE)
+                self._activity_seq[sid] = max(item.seq for item in items)
         self._hydrated = True
 
     def flush(self) -> None:
@@ -436,6 +504,7 @@ class SubagentControl:
             bucket = read_subagent_bucket(self._parent_session)
             records: dict[str, Any] = dict(bucket.get("records") or {})
             turns: dict[str, Any] = dict(bucket.get("turns") or {})
+            activities: dict[str, Any] = dict(bucket.get("activities") or {})
 
             for sid, record in self._closed_records.items():
                 records[sid] = record.to_dict()
@@ -452,10 +521,20 @@ class SubagentControl:
                 merged = self._merge_turns(existing, items)
                 turns[sid] = [item.to_dict() for item in merged]
 
-            records, turns = trim_persisted_bucket(
+            for sid, items in self._activities.items():
+                existing = [
+                    SubagentActivity.from_dict(item)
+                    for item in (activities.get(sid) or [])
+                    if isinstance(item, dict)
+                ]
+                merged = self._merge_activities(existing, list(items))
+                activities[sid] = [item.to_dict() for item in merged]
+
+            records, turns, activities = trim_persisted_bucket(
                 records,
                 turns,
                 max_records=max_persisted_records(self._config.max_subagents),
+                activities=activities,
             )
             revision = int(bucket.get("revision") or 0) + 1
             merge_subagent_bucket(
@@ -463,6 +542,7 @@ class SubagentControl:
                 {
                     "records": records,
                     "turns": turns,
+                    "activities": activities,
                     "revision": revision,
                 },
             )
@@ -489,13 +569,24 @@ class SubagentControl:
             subagents.append(self._closed_record_to_payload(record))
 
         all_turns = self._all_turns_flat()
-        start_index = _cursor_start_index(all_turns, cursor)
-        page = all_turns[start_index : start_index + page_size]
+        all_activities = self._all_activities_flat()
+        merged_items = self._merge_snapshot_items(all_turns, all_activities)
+        start_index = _cursor_start_index_merged(merged_items, cursor)
+        page_items = merged_items[start_index : start_index + page_size]
+        page_turns = [item[1] for item in page_items if item[0] == "turn"]
+        page_activities = [item[1] for item in page_items if item[0] == "activity"]
         next_cursor = None
-        if start_index + page_size < len(all_turns) and page:
-            last = page[-1]
-            next_cursor = f"{last.subagent_id}:{last.seq}"
-        return SubagentSnapshot(subagents=subagents, turns=page, cursor=next_cursor)
+        if start_index + page_size < len(merged_items) and page_items:
+            last_kind, last_item = page_items[-1]
+            sid = last_item.subagent_id
+            seq = last_item.seq
+            next_cursor = f"{sid}:{seq}:{last_kind}"
+        return SubagentSnapshot(
+            subagents=subagents,
+            turns=page_turns,
+            activities=page_activities,
+            cursor=next_cursor,
+        )
 
     async def _evict_from_memory(self, subagent_id: str, *, reason: str) -> None:
         metadata = self._registry.find_metadata(subagent_id)
@@ -607,12 +698,62 @@ class SubagentControl:
             merged[turn.seq] = turn
         return [merged[key] for key in sorted(merged)]
 
+    @staticmethod
+    def _merge_activities(
+        existing: list[SubagentActivity],
+        pending: list[SubagentActivity],
+    ) -> list[SubagentActivity]:
+        merged = {activity.seq: activity for activity in existing}
+        for activity in pending:
+            merged[activity.seq] = activity
+        return [merged[key] for key in sorted(merged)]
+
     def _all_turns_flat(self) -> list[SubagentTurn]:
         turns: list[SubagentTurn] = []
         for sid in sorted(self._turns):
             turns.extend(self._turns[sid])
         turns.sort(key=lambda item: (item.subagent_id, item.seq))
         return turns
+
+    def _all_activities_flat(self) -> list[SubagentActivity]:
+        activities: list[SubagentActivity] = []
+        for sid in sorted(self._activities):
+            activities.extend(self._activities[sid])
+        activities.sort(key=lambda item: (item.subagent_id, item.seq))
+        return activities
+
+    @staticmethod
+    def _merge_snapshot_items(
+        turns: list[SubagentTurn],
+        activities: list[SubagentActivity],
+    ) -> list[tuple[str, SubagentTurn | SubagentActivity]]:
+        items: list[tuple[str, SubagentTurn | SubagentActivity, float]] = []
+        for turn in turns:
+            items.append(("turn", turn, turn.created_at_ms))
+        for activity in activities:
+            items.append(("activity", activity, activity.at_ms))
+        items.sort(key=lambda item: (item[1].subagent_id, item[1].seq, item[0], item[2]))
+        return [(kind, payload) for kind, payload, _at_ms in items]
+
+    def _handle_activity(self, activity: SubagentActivity) -> None:
+        if self._activity_emitter is not None:
+            self._activity_emitter.offer(activity)
+        if not activity.is_persistable():
+            return
+        sid = activity.subagent_id
+        bucket = self._activities.setdefault(
+            sid,
+            deque(maxlen=MAX_ACTIVITIES_PER_INSTANCE),
+        )
+        bucket.append(activity)
+        self._activity_seq[sid] = max(self._activity_seq.get(sid, 0), activity.seq)
+
+    def _latest_answered_turn(self, subagent_id: str) -> SubagentTurn | None:
+        turns = self._turns.get(subagent_id) or []
+        for turn in reversed(turns):
+            if turn.answer:
+                return turn
+        return None
 
     def _append_turn(
         self,
@@ -636,6 +777,24 @@ class SubagentControl:
         if status.kind is SubagentStatusKind.COMPLETED and instance is not None:
             answer = instance.last_output
 
+        output_file: str | None = None
+        if answer and task_id:
+            try:
+                workspace_root = resolve_parent_workspace_root(self._parent_agent)
+                output_file = write_turn_output(
+                    workspace_root,
+                    subagent_id,
+                    task_id,
+                    answer,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to write subagent turn output for %s task %s: %s",
+                    subagent_id,
+                    task_id,
+                    exc,
+                )
+
         seq = self._turn_seq.get(subagent_id, 0) + 1
         self._turn_seq[subagent_id] = seq
         turn = SubagentTurn(
@@ -646,6 +805,7 @@ class SubagentControl:
             answer=answer,
             closed_reason=view["closed_reason"],
             created_at_ms=time.time() * 1000,
+            output_file=output_file,
         )
         self._turns.setdefault(subagent_id, []).append(turn)
 

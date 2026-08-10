@@ -31,12 +31,17 @@ SUBAGENT_SPAWN_DESCRIPTION: Dict[str, str] = {
 
 SUBAGENT_WAIT_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "阻塞等待一个或多个 subagent_id 达到终态，返回 statuses、results 与 timed_out。"
+        "阻塞等待一个或多个 subagent_id 达到终态，返回 statuses、results、output_files 与 timed_out。"
+        "output_files[subagent_id] 是该子代理本轮回答的完整文件路径；"
+        "正文较长或后续还要引用细节时，用 read_file 读该文件，勿让子代理重复输出。"
         "研究或编码等长任务请传分钟级 timeout_ms。"
     ),
     "en": (
         "Block until all listed subagent_ids reach a final status; returns statuses, "
-        "results, and timed_out. Prefer minute-scale timeout_ms for research or coding tasks."
+        "results, output_files, and timed_out. "
+        "output_files[subagent_id] is the absolute path to that subagent's full turn answer; "
+        "for long output or later reference, read_file that path instead of asking the subagent "
+        "to repeat it. Prefer minute-scale timeout_ms for research or coding tasks."
     ),
 }
 
@@ -60,12 +65,18 @@ SUBAGENT_SEND_INPUT_DESCRIPTION: Dict[str, str] = {
 
 SUBAGENT_CLOSE_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "关闭空闲子代理实例并释放名额；会话上下文保留在 checkpointer。"
-        "RUNNING 实例会被拒绝，请先 wait 或 send_input(interrupt=true)。"
+        "在子代理不再需要时关闭实例并释放常驻名额；返回关闭前的状态。"
+        "已完成任务的子代理仍会占用名额，不要长期保留不再需要的实例。"
+        "会话上下文保留在 checkpointer，之后可用 subagent_resume 恢复。"
+        "RUNNING 实例会被拒绝，请先 subagent_wait 或 subagent_send_input(interrupt=true)。"
     ),
     "en": (
-        "Close an idle subagent and release its slot; conversation history stays in checkpointer. "
-        "RUNNING instances are rejected—wait or send_input(interrupt=true) first."
+        "Close a subagent when it is no longer needed and release its persistent slot; "
+        "returns the target's previous status before shutdown was requested. "
+        "Completed subagents remain open and count toward the capacity limit until closed—"
+        "don't keep instances around longer than necessary. "
+        "Conversation history stays in checkpointer and can be restored with subagent_resume. "
+        "RUNNING instances are rejected—subagent_wait or subagent_send_input(interrupt=true) first."
     ),
 }
 
@@ -161,7 +172,7 @@ def get_subagent_close_input_params(language: str = "cn") -> Dict[str, Any]:
         "properties": {
             "subagent_id": {
                 "type": "string",
-                "description": "Subagent id to close.",
+                "description": "Subagent id to close (from subagent_spawn).",
             },
         },
         "required": ["subagent_id"],

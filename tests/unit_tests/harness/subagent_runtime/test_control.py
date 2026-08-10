@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -26,6 +28,13 @@ from tests.unit_tests.harness.subagent_runtime.test_session_manager import MockP
 @dataclass
 class ControlParentAgent(MockParentAgent):
     mock_agent: MockAgent = field(default_factory=MockAgent)
+    workspace_root: str | None = None
+
+    @property
+    def deep_config(self):
+        if self.workspace_root is None:
+            return None
+        return SimpleNamespace(workspace=self.workspace_root)
 
     def create_subagent(
         self,
@@ -761,3 +770,83 @@ async def test_resume_no_checkpointer_history_raises_not_found() -> None:
 
             with pytest.raises(AgentError):
                 await control.resume(spawned.subagent_id)
+
+
+@pytest.mark.asyncio
+async def test_wait_returns_output_file_and_writes_answer(tmp_path: Path) -> None:
+    parent = ControlParentAgent(
+        mock_agent=MockAgent(output="analysis done"),
+        workspace_root=str(tmp_path),
+    )
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "analyze this")
+        await _wait_for_turn(parent.mock_agent)
+        waited = await control.wait([spawned.subagent_id], timeout_ms=500)
+
+        output_path = Path(waited.output_files[spawned.subagent_id])
+        assert output_path.is_file()
+        assert output_path.read_text(encoding="utf-8") == "analysis done"
+        assert waited.results[spawned.subagent_id] == "analysis done"
+        assert output_path.name == f"{spawned.task_id}.md"
+
+
+@pytest.mark.asyncio
+async def test_send_input_wait_writes_distinct_output_files(tmp_path: Path) -> None:
+    parent = ControlParentAgent(
+        mock_agent=MockAgent(output="first", delay_s=0.05),
+        workspace_root=str(tmp_path),
+    )
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "first")
+        await _wait_for_turn(parent.mock_agent)
+        first_wait = await control.wait([spawned.subagent_id], timeout_ms=500)
+        first_path = Path(first_wait.output_files[spawned.subagent_id])
+
+        parent.mock_agent.output = "second"
+        instance = control._manager.get(spawned.subagent_id)
+        instance._agent.output = "second"
+        second_task_id = await control.send_input(spawned.subagent_id, "second prompt")
+        await _wait_for_turn(parent.mock_agent)
+        second_wait = await control.wait([spawned.subagent_id], timeout_ms=500)
+        second_path = Path(second_wait.output_files[spawned.subagent_id])
+
+        assert first_path != second_path
+        assert first_path.read_text(encoding="utf-8") == "first"
+        assert second_path.read_text(encoding="utf-8") == "second"
+        assert second_path.name == f"{second_task_id}.md"
+
+
+@pytest.mark.asyncio
+async def test_wait_not_found_has_no_output_file(tmp_path: Path) -> None:
+    parent = ControlParentAgent(
+        mock_agent=MockAgent(output="done", delay_s=0.05),
+        workspace_root=str(tmp_path),
+    )
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+
+        wait_result = await control.wait(["missing-id", spawned.subagent_id], timeout_ms=500)
+
+        assert "missing-id" not in wait_result.output_files
+        assert spawned.subagent_id in wait_result.output_files
+
+
+@pytest.mark.asyncio
+async def test_wait_write_failure_still_returns_results(tmp_path: Path) -> None:
+    parent = ControlParentAgent(
+        mock_agent=MockAgent(output="analysis done"),
+        workspace_root=str(tmp_path),
+    )
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "analyze this")
+
+        with patch(
+            "openjiuwen.harness.subagent_runtime.control.write_turn_output",
+            side_effect=OSError("disk full"),
+        ):
+            await _wait_for_turn(parent.mock_agent)
+            waited = await control.wait([spawned.subagent_id], timeout_ms=500)
+
+        assert waited.results[spawned.subagent_id] == "analysis done"
+        assert spawned.subagent_id not in waited.output_files

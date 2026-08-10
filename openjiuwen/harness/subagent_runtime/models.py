@@ -139,6 +139,7 @@ class WaitResult:
 
     statuses: dict[str, SubagentStatus]
     results: dict[str, str]
+    output_files: dict[str, str]
     timed_out: bool
 
 
@@ -199,9 +200,10 @@ class SubagentTurn:
     answer: str | None
     closed_reason: str | None
     created_at_ms: float
+    output_file: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "subagent_id": self.subagent_id,
             "task_id": self.task_id,
             "seq": self.seq,
@@ -210,6 +212,9 @@ class SubagentTurn:
             "closed_reason": self.closed_reason,
             "created_at_ms": self.created_at_ms,
         }
+        if self.output_file is not None:
+            payload["output_file"] = self.output_file
+        return payload
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> SubagentTurn:
@@ -221,7 +226,65 @@ class SubagentTurn:
             answer=_optional_str(raw.get("answer")),
             closed_reason=_optional_str(raw.get("closed_reason")),
             created_at_ms=float(raw.get("created_at_ms") or 0.0),
+            output_file=_optional_str(raw.get("output_file")),
         )
+
+
+@dataclass(frozen=True)
+class SubagentActivity:
+    """One subagent activity milestone for parent-session activity stream."""
+
+    subagent_id: str
+    task_id: str
+    seq: int
+    kind: str
+    summary: str
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+    ok: bool | None = None
+    at_ms: float = 0.0
+    dropped: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "subagent_id": self.subagent_id,
+            "task_id": self.task_id,
+            "seq": self.seq,
+            "kind": self.kind,
+            "summary": self.summary,
+            "at_ms": self.at_ms,
+        }
+        if self.tool_name is not None:
+            payload["tool_name"] = self.tool_name
+        if self.tool_call_id is not None:
+            payload["tool_call_id"] = self.tool_call_id
+        if self.ok is not None:
+            payload["ok"] = self.ok
+        if self.dropped is not None:
+            payload["dropped"] = self.dropped
+        return payload
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> SubagentActivity:
+        ok_raw = raw.get("ok")
+        ok = ok_raw if isinstance(ok_raw, bool) else None
+        dropped_raw = raw.get("dropped")
+        dropped = int(dropped_raw) if dropped_raw is not None else None
+        return cls(
+            subagent_id=str(raw.get("subagent_id") or ""),
+            task_id=str(raw.get("task_id") or ""),
+            seq=int(raw.get("seq") or 0),
+            kind=str(raw.get("kind") or ""),
+            summary=str(raw.get("summary") or ""),
+            tool_name=_optional_str(raw.get("tool_name")),
+            tool_call_id=_optional_str(raw.get("tool_call_id")),
+            ok=ok,
+            at_ms=float(raw.get("at_ms") or 0.0),
+            dropped=dropped,
+        )
+
+    def is_persistable(self) -> bool:
+        return self.kind in {"tool_call", "tool_result", "error"}
 
 
 @dataclass(frozen=True)
@@ -230,6 +293,7 @@ class SubagentSnapshot:
 
     subagents: list[dict[str, Any]]
     turns: list[SubagentTurn]
+    activities: list[SubagentActivity]
     cursor: str | None
 
 

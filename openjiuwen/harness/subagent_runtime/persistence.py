@@ -9,11 +9,12 @@ from typing import Any
 SUBAGENTS_KEY = "subagents"
 DEFAULT_SNAPSHOT_PAGE_SIZE = 20
 MAX_TURNS_PER_INSTANCE = 50
+MAX_ACTIVITIES_PER_INSTANCE = 50
 
 
 def empty_subagent_bucket() -> dict[str, Any]:
     """Return an empty subagents namespace bucket."""
-    return {"records": {}, "turns": {}, "revision": 0}
+    return {"records": {}, "turns": {}, "activities": {}, "revision": 0}
 
 
 def read_subagent_bucket(session) -> dict[str, Any]:
@@ -23,10 +24,12 @@ def read_subagent_bucket(session) -> dict[str, Any]:
         return empty_subagent_bucket()
     records = bucket.get("records")
     turns = bucket.get("turns")
+    activities = bucket.get("activities")
     revision = bucket.get("revision", 0)
     return {
         "records": dict(records) if isinstance(records, dict) else {},
         "turns": dict(turns) if isinstance(turns, dict) else {},
+        "activities": dict(activities) if isinstance(activities, dict) else {},
         "revision": int(revision) if isinstance(revision, int) else 0,
     }
 
@@ -35,7 +38,7 @@ def merge_subagent_bucket(session, partial: dict[str, Any]) -> None:
     """Merge ``partial`` into the subagents namespace (shallow merge on bucket keys)."""
     bucket = read_subagent_bucket(session)
     for key, value in partial.items():
-        if key in {"records", "turns"} and isinstance(value, dict):
+        if key in {"records", "turns", "activities"} and isinstance(value, dict):
             merged = dict(bucket.get(key) or {})
             merged.update(value)
             bucket[key] = merged
@@ -55,18 +58,30 @@ def trim_persisted_bucket(
     *,
     max_records: int,
     max_turns_per_instance: int = MAX_TURNS_PER_INSTANCE,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Apply FIFO record trimming and per-instance turn limits."""
+    activities: dict[str, Any] | None = None,
+    max_activities_per_instance: int = MAX_ACTIVITIES_PER_INSTANCE,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Apply FIFO record trimming and per-instance turn/activity limits."""
     trimmed_records = dict(records)
     trimmed_turns = {sid: list(items) for sid, items in turns.items() if isinstance(items, list)}
+    trimmed_activities = {
+        sid: list(items)
+        for sid, items in (activities or {}).items()
+        if isinstance(items, list)
+    }
 
     for sid, items in list(trimmed_turns.items()):
         if len(items) <= max_turns_per_instance:
             continue
         trimmed_turns[sid] = items[-max_turns_per_instance:]
 
+    for sid, items in list(trimmed_activities.items()):
+        if len(items) <= max_activities_per_instance:
+            continue
+        trimmed_activities[sid] = items[-max_activities_per_instance:]
+
     if len(trimmed_records) <= max_records:
-        return trimmed_records, trimmed_turns
+        return trimmed_records, trimmed_turns, trimmed_activities
 
     sorted_items = sorted(
         trimmed_records.items(),
@@ -76,7 +91,8 @@ def trim_persisted_bucket(
     for sid, _raw in sorted_items[:excess]:
         trimmed_records.pop(sid, None)
         trimmed_turns.pop(sid, None)
-    return trimmed_records, trimmed_turns
+        trimmed_activities.pop(sid, None)
+    return trimmed_records, trimmed_turns, trimmed_activities
 
 
 def _record_sort_key(raw: Any) -> float:
@@ -96,6 +112,7 @@ def _record_sort_key(raw: Any) -> float:
 
 __all__ = [
     "DEFAULT_SNAPSHOT_PAGE_SIZE",
+    "MAX_ACTIVITIES_PER_INSTANCE",
     "MAX_TURNS_PER_INSTANCE",
     "SUBAGENTS_KEY",
     "empty_subagent_bucket",

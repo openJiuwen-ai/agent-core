@@ -15,6 +15,10 @@ class SubagentRuntimeConfig:
     max_concurrent_running: int = 5
     turn_timeout_s: float = 600.0
     enable_lru_eviction: bool = True
+    enable_activity_stream: bool = True
+    activity_queue_size: int = 256
+    activity_text_max_len: int = 200
+    activity_throttle_ms: float = 500.0
 
 
 WAIT_TIMEOUT_MS_DEFAULT = 30_000

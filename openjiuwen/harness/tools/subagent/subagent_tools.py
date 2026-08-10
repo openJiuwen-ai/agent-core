@@ -139,6 +139,7 @@ class SubagentWaitTool(Tool):
                     sid: status.kind.value for sid, status in result.statuses.items()
                 },
                 "results": dict(result.results),
+                "output_files": dict(result.output_files),
                 "timed_out": result.timed_out,
             },
         )

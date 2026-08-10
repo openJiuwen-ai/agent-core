@@ -34,7 +34,8 @@ SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具（subagent_spawn / subag
 - 一轮结束后实例仍常驻；同一 sticky 类型不要重复 spawn。
 - 追问同一实例用 subagent_send_input，不要为相同意图重复 spawn。
 - wait 超时且方向错误时，用 subagent_send_input(interrupt=true) 纠偏后再 wait。
-- 确认不再需要时用 subagent_close 释放名额；满 10 个会 LRU 淘汰，可用 subagent_resume 拉回。
+- 确认不再需要时用 subagent_close 释放名额；**已完成任务的实例仍会占名额**，不要长期保留无用实例。
+- 满 10 个会 LRU 淘汰，可用 subagent_resume 拉回。
 - close 或淘汰后必须先 subagent_resume，再 subagent_send_input + subagent_wait。
 - subagent_list 可查看存活子代理与容量占用。
 """
@@ -62,7 +63,8 @@ SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools (subagent_spawn / su
 - Instances stay alive after one turn completes; do not respawn the same sticky type.
 - Follow up on the same instance with subagent_send_input instead of respawning the same intent.
 - After a timed-out wait with the wrong direction, use subagent_send_input(interrupt=true), then wait again.
-- Call subagent_close when an instance is no longer needed; LRU may evict when full—use subagent_resume to bring it back.
+- Call subagent_close when an instance is no longer needed; **completed subagents still occupy slots** until closed—do not keep them around longer than necessary.
+- LRU may evict when full (max 10)—use subagent_resume to bring it back.
 - After close or eviction, call subagent_resume before subagent_send_input + subagent_wait.
 - Use subagent_list to inspect live subagents and capacity usage.
 """

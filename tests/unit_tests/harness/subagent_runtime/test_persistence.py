@@ -104,10 +104,25 @@ def test_merge_subagent_bucket_increments_revision() -> None:
 def test_trim_persisted_bucket_pairs_records_and_turns() -> None:
     records = {f"sid-{index}": _record(f"sid-{index}", closed_at_ms=float(index)) for index in range(3)}
     turns = {f"sid-{index}": [{"seq": 1, "task_id": "t"}] for index in range(3)}
-    trimmed_records, trimmed_turns = trim_persisted_bucket(
+    trimmed_records, trimmed_turns, trimmed_activities = trim_persisted_bucket(
         records,
         turns,
         max_records=2,
     )
     assert len(trimmed_records) == 2
     assert set(trimmed_records) == set(trimmed_turns)
+
+
+def test_trim_persisted_bucket_pairs_records_turns_and_activities() -> None:
+    records = {f"sid-{index}": _record(f"sid-{index}", closed_at_ms=float(index)) for index in range(3)}
+    turns = {f"sid-{index}": [{"seq": 1, "task_id": "t"}] for index in range(3)}
+    activities = {f"sid-{index}": [{"seq": 1, "kind": "tool_call"}] for index in range(3)}
+    trimmed_records, trimmed_turns, trimmed_activities = trim_persisted_bucket(
+        records,
+        turns,
+        max_records=2,
+        activities=activities,
+    )
+    assert len(trimmed_records) == 2
+    assert set(trimmed_records) == set(trimmed_turns)
+    assert set(trimmed_records) == set(trimmed_activities)

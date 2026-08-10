@@ -13,13 +13,14 @@ from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.kv_cache.kv_cache_hooks import affinity_enabled
+from openjiuwen.harness.subagent_runtime.activity import ActivityProjector
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.errors import (
     build_subagent_runtime_error,
     raise_subagent_not_found,
 )
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
-from openjiuwen.harness.subagent_runtime.models import SubagentStatus
+from openjiuwen.harness.subagent_runtime.models import SubagentActivity, SubagentStatus
 
 
 async def _close_session_quietly(session: Any) -> None:
@@ -44,12 +45,15 @@ class SubagentSessionManager:
         running_semaphore: asyncio.Semaphore,
         *,
         status_change_handler: Callable[[str, SubagentStatus], Awaitable[None]] | None = None,
+        activity_handler: Callable[[SubagentActivity], None] | None = None,
     ) -> None:
         self._parent_agent = parent_agent
         self._config = config
         self._running_semaphore = running_semaphore
         self._status_change_handler = status_change_handler
+        self._activity_handler = activity_handler
         self._instances: dict[str, SubagentInstance] = {}
+        self._projectors: dict[str, ActivityProjector] = {}
 
     def _build_turn_hooks(
         self,
@@ -119,6 +123,21 @@ class SubagentSessionManager:
             if self._status_change_handler is not None:
                 await self._status_change_handler(subagent_id, status)
 
+        projector = ActivityProjector(subagent_id=subagent_id, config=self._config)
+        self._projectors[subagent_id] = projector
+        instance_holder: dict[str, SubagentInstance] = {}
+
+        async def on_chunk(chunk: Any) -> None:
+            if self._activity_handler is None:
+                return
+            instance = instance_holder.get("instance")
+            if instance is None:
+                return
+            task_id = instance.current_task_id or ""
+            activity = projector.project(chunk, task_id=task_id)
+            if activity is not None:
+                self._activity_handler(activity)
+
         try:
             instance = SubagentInstance(
                 subagent_id=subagent_id,
@@ -134,7 +153,9 @@ class SubagentSessionManager:
                 on_turn_start=on_turn_start,
                 on_turn_finished=on_turn_finished,
                 on_status_changed=on_status_changed,
+                on_chunk=on_chunk if self._activity_handler is not None else None,
             )
+            instance_holder["instance"] = instance
             await instance.start_worker()
         except Exception:
             raise
@@ -160,6 +181,7 @@ class SubagentSessionManager:
         instance = self._instances.pop(subagent_id, None)
         if instance is None:
             return None
+        self._projectors.pop(subagent_id, None)
         await instance.shutdown(reason)
         return instance
 

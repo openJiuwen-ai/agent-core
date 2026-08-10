@@ -189,6 +189,7 @@ async def test_subagent_wait_returns_statuses_and_results() -> None:
             return_value=WaitResult(
                 statuses={"sub1": SubagentStatus.completed("answer")},
                 results={"sub1": "answer"},
+                output_files={"sub1": "/tmp/sub1/output.md"},
                 timed_out=False,
             ),
         ),
@@ -205,6 +206,7 @@ async def test_subagent_wait_returns_statuses_and_results() -> None:
         )
 
     assert result.data["results"] == {"sub1": "answer"}
+    assert result.data["output_files"] == {"sub1": "/tmp/sub1/output.md"}
     assert result.data["statuses"] == {"sub1": SubagentStatusKind.COMPLETED.value}
     assert result.data["timed_out"] is False
     control.emit_status_update.assert_awaited_once_with("sub1", session=session)

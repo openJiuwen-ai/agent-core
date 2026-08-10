@@ -101,6 +101,39 @@ def test_subagent_metadata_fields() -> None:
     assert metadata.current_task_id == "task-1"
 
 
+def test_subagent_activity_round_trip() -> None:
+    from openjiuwen.harness.subagent_runtime.models import SubagentActivity
+
+    activity = SubagentActivity(
+        subagent_id="sid",
+        task_id="task-1",
+        seq=2,
+        kind="tool_result",
+        summary="done",
+        tool_name="grep",
+        tool_call_id="call-1",
+        ok=True,
+        at_ms=10.0,
+    )
+    restored = SubagentActivity.from_dict(activity.to_dict())
+    assert restored == activity
+    assert activity.is_persistable() is True
+
+
+def test_subagent_activity_thinking_not_persistable() -> None:
+    from openjiuwen.harness.subagent_runtime.models import SubagentActivity
+
+    activity = SubagentActivity(
+        subagent_id="sid",
+        task_id="task-1",
+        seq=1,
+        kind="thinking",
+        summary="plan",
+        at_ms=1.0,
+    )
+    assert activity.is_persistable() is False
+
+
 def test_spawn_and_wait_result_shapes() -> None:
     from openjiuwen.harness.subagent_runtime.models import SpawnResult, WaitResult
 
@@ -111,9 +144,11 @@ def test_spawn_and_wait_result_shapes() -> None:
     wait = WaitResult(
         statuses={"sid": SubagentStatus.completed("ok")},
         results={"sid": "ok"},
+        output_files={"sid": "/tmp/sid/output.md"},
         timed_out=False,
     )
     assert wait.results["sid"] == "ok"
+    assert wait.output_files["sid"] == "/tmp/sid/output.md"
     assert wait.timed_out is False
 
 

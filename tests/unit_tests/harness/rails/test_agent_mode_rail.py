@@ -254,6 +254,21 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
             await rail3.after_tool_call(ctx_skip)
             mock_register3.assert_not_called()
 
+    async def test_register_task_tool_skips_when_subagent_runtime_enabled(self) -> None:
+        rail, _, agent = _make_ctx("enter_plan_mode", mode="plan")
+        agent.deep_config = SimpleNamespace(
+            subagents=[SimpleNamespace()],
+            enable_subagent_runtime=True,
+        )
+
+        with patch(
+            "openjiuwen.harness.rails.agent_mode_rail.create_task_tool",
+        ) as mock_create:
+            rail._register_task_tool(agent)
+
+        mock_create.assert_not_called()
+        self.assertFalse(rail._owns_task_tool)
+
     async def test_after_tool_call_restores_mode_when_still_in_plan(self) -> None:
         rail, ctx, agent = _make_ctx(
             "exit_plan_mode",
