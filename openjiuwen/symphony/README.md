@@ -258,8 +258,9 @@ loaded = fingerprints.read()
 ```
 
 `SkillFolderScanner("./skills")` 是显式根目录的扫描便利实现。它只将 `SKILL.md` 作为语义输入，完整资产只
-用于安全 hash；扫描不跟随 symlink，并排除凭据、版本控制和缓存目录。目录、文件、字节数及 manifest 深度
-都有显式上限，不支持安全 anchored no-follow open 的平台会 fail closed。
+用于安全 hash；调用方提供的扫描根目录被视为可信本地目录，所有平台都使用普通路径 I/O。扫描不主动遍历
+symlink、junction 或其他 reparse point，并排除凭据、版本控制和缓存目录。目录、文件、字节数及 manifest
+深度都有显式上限。
 
 额外模型调用默认关闭。打开 `FingerprintSettings.enable_llm_extraction` 或
 `enable_llm_evaluation` 时，调用方必须显式注入实现 `SymphonyLLM.invoke(...)` 的对象；缺少模型时返回
