@@ -12,7 +12,7 @@ import pytest
 import openjiuwen.symphony.shared.fingerprint.parser as parser_module
 import openjiuwen.symphony.shared.fingerprint.scanner as scanner_module
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.symphony.shared.fingerprint import (
     DataTypeVocabulary,
     SkillFolderScanner,
@@ -112,6 +112,48 @@ inputs:
     assert "semantic_content" not in scan_payload["capabilities"][0]
     assert "FRONTMATTER-CREDENTIAL" not in serialized_payloads
     assert "BODY-ONLY-SECRET" not in serialized_payloads
+
+
+def test_parser_normalizes_unquoted_yaml_dates_before_json_serialization(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    unquoted_entrypoint = _write_skill(
+        root / "unquoted-date",
+        """
+released_on: 2026-08-08
+metadata:
+  history:
+    - 2026-08-07
+inputs:
+  cutoff:
+    type: date
+    default: 2026-08-08
+""",
+    )
+    quoted_entrypoint = _write_skill(
+        root / "quoted-date",
+        """
+released_on: "2026-08-08"
+metadata:
+  history:
+    - "2026-08-07"
+inputs:
+  cutoff:
+    type: date
+    default: "2026-08-08"
+""",
+    )
+
+    unquoted = SkillManifestParser().parse(unquoted_entrypoint, root=root)
+    quoted = SkillManifestParser().parse(quoted_entrypoint, root=root)
+    scan = SkillFolderScanner(root).scan()
+
+    assert unquoted.frontmatter["released_on"] == "2026-08-08"
+    assert unquoted.frontmatter["metadata"]["history"] == ["2026-08-07"]
+    assert unquoted.frontmatter["inputs"]["cutoff"]["default"] == "2026-08-08"
+    assert unquoted.frontmatter == quoted.frontmatter
+    json.dumps(unquoted.frontmatter)
+    json.dumps(quoted.frontmatter)
+    json.dumps(scan.to_dict())
 
 
 def test_scanner_is_deterministic_and_hashes_only_safe_recursive_assets(tmp_path: Path) -> None:
@@ -309,6 +351,69 @@ def test_scanner_reports_bad_items_and_continues(tmp_path: Path) -> None:
 
     assert [item.capability_id for item in result] == ["good"]
     assert any(item.code == "invalid_frontmatter" and item.path == "bad/SKILL.md" for item in result.diagnostics)
+
+
+def test_scanner_isolates_unexpected_item_load_errors(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    _write_skill(root / "good", "name: good")
+    _write_skill(root / "broken", "name: broken")
+
+    class FaultyParser(SkillManifestParser):
+        def parse(self, entrypoint: Path, *args: Any, **kwargs: Any):
+            if entrypoint.parent.name == "broken":
+                raise TypeError("synthetic item failure with sensitive details")
+            return super().parse(entrypoint, *args, **kwargs)
+
+    result = SkillFolderScanner(root, parser=FaultyParser()).scan()
+
+    assert [item.capability_id for item in result] == ["good"]
+    diagnostic = next(item for item in result.diagnostics if item.code == "skill_load_failed")
+    assert diagnostic.severity == "error"
+    assert diagnostic.path == "broken/SKILL.md"
+    assert diagnostic.capability_id == "broken"
+    assert diagnostic.details == {"error_type": "TypeError"}
+    serialized = json.dumps(result.to_dict(), ensure_ascii=False)
+    assert "synthetic item failure" not in serialized
+    assert "TypeError" in serialized
+
+
+def test_scanner_isolates_unexpected_asset_hash_errors(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "skills"
+    _write_skill(root / "good", "name: good")
+    _write_skill(root / "broken", "name: broken")
+    original_hash = scanner_module._hash_safe_assets
+
+    def fail_broken(skill_root: Path, *args: Any, **kwargs: Any):
+        if skill_root.name == "broken":
+            raise OSError("synthetic asset failure with sensitive details")
+        return original_hash(skill_root, *args, **kwargs)
+
+    monkeypatch.setattr(scanner_module, "_hash_safe_assets", fail_broken)
+
+    result = SkillFolderScanner(root).scan()
+
+    assert [item.capability_id for item in result] == ["good"]
+    diagnostic = next(item for item in result.diagnostics if item.code == "skill_asset_hash_failed")
+    assert diagnostic.severity == "error"
+    assert diagnostic.path == "broken/SKILL.md"
+    assert diagnostic.capability_id == "broken"
+    assert diagnostic.details == {"error_type": "OSError"}
+    assert "synthetic asset failure" not in json.dumps(result.to_dict(), ensure_ascii=False)
+
+
+def test_scanner_propagates_framework_item_load_errors(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    _write_skill(root / "broken", "name: broken")
+    expected = build_error(StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR, reason="synthetic config failure")
+
+    class FaultyParser(SkillManifestParser):
+        def parse(self, entrypoint: Path, *args: Any, **kwargs: Any):
+            raise expected
+
+    with pytest.raises(BaseError) as caught:
+        SkillFolderScanner(root, parser=FaultyParser()).scan()
+
+    assert caught.value is expected
 
 
 def test_recursive_yaml_is_isolated_as_one_manifest_diagnostic(tmp_path: Path) -> None:

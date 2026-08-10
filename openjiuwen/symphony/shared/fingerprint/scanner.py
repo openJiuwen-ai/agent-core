@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn, overload
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.symphony.models import CapabilityDescriptor, SourceSnapshot
 from openjiuwen.symphony.models._redaction import is_sensitive_name, normalize_sensitive_name
 from openjiuwen.symphony.shared.fingerprint.normalization import (
@@ -249,31 +250,59 @@ class SkillFolderScanner:
 
         for entrypoint in entrypoints:
             relative_entrypoint = entrypoint.relative_to(root).as_posix()
-            parsed = self.parser.parse(
-                entrypoint,
-                root=root,
-                capability_id_hint=entrypoint.parent.name,
-                capability_type=self.capability_type,
-                source=self.source,
-                display_path=relative_entrypoint,
-            )
+            try:
+                parsed = self.parser.parse(
+                    entrypoint,
+                    root=root,
+                    capability_id_hint=entrypoint.parent.name,
+                    capability_type=self.capability_type,
+                    source=self.source,
+                    display_path=relative_entrypoint,
+                )
+            except BaseError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolate one malformed Skill.
+                diagnostics.append(
+                    _item_failure_diagnostic(
+                        code="skill_load_failed",
+                        message="Skill could not be loaded",
+                        path=relative_entrypoint,
+                        capability_id=entrypoint.parent.name,
+                        error=exc,
+                    )
+                )
+                continue
             diagnostics.extend(parsed.diagnostics)
             if parsed.descriptor is None:
                 continue
 
-            hash_result = _hash_safe_assets(
-                entrypoint.parent,
-                scan_root=root,
-                expected_entrypoint_content_hash=parsed.entrypoint_content_hash,
-                max_files=self.max_asset_files,
-                max_file_bytes=self.max_asset_file_bytes,
-                max_total_bytes=self.max_total_asset_bytes,
-                max_scan_directories=self.max_scan_directories,
-                max_directory_entries=self.max_directory_entries,
-                max_scan_files=self.max_scan_asset_files,
-                max_scan_bytes=self.max_scan_asset_bytes,
-                budget=budget,
-            )
+            try:
+                hash_result = _hash_safe_assets(
+                    entrypoint.parent,
+                    scan_root=root,
+                    expected_entrypoint_content_hash=parsed.entrypoint_content_hash,
+                    max_files=self.max_asset_files,
+                    max_file_bytes=self.max_asset_file_bytes,
+                    max_total_bytes=self.max_total_asset_bytes,
+                    max_scan_directories=self.max_scan_directories,
+                    max_directory_entries=self.max_directory_entries,
+                    max_scan_files=self.max_scan_asset_files,
+                    max_scan_bytes=self.max_scan_asset_bytes,
+                    budget=budget,
+                )
+            except BaseError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolate one malformed Skill.
+                diagnostics.append(
+                    _item_failure_diagnostic(
+                        code="skill_asset_hash_failed",
+                        message="Skill assets could not be hashed",
+                        path=relative_entrypoint,
+                        capability_id=parsed.descriptor.capability_id,
+                        error=exc,
+                    )
+                )
+                continue
             diagnostics.extend(
                 _with_manifest_identity(item, parsed.descriptor.capability_id, relative_entrypoint)
                 for item in hash_result.diagnostics
@@ -330,6 +359,26 @@ class _ContentHashResult:
     @property
     def ok(self) -> bool:
         return bool(self.content_hash)
+
+
+def _item_failure_diagnostic(
+    *,
+    code: str,
+    message: str,
+    path: str,
+    capability_id: str,
+    error: Exception,
+) -> ScanDiagnostic:
+    """Build a stable diagnostic for an unexpected single-Skill failure."""
+
+    return ScanDiagnostic(
+        code=code,
+        message=message,
+        severity="error",
+        path=path,
+        capability_id=capability_id,
+        details={"error_type": type(error).__name__},
+    )
 
 
 def build_source_snapshot(result: ScanResult) -> SourceSnapshot:
