@@ -138,6 +138,7 @@ def test_parse_member_status_rejects_unknown_values():
 def _stream_controller(
     queue: asyncio.Queue,
     registry: MemberActivityRegistry | None = None,
+    task_board_probe=None,
 ) -> StreamController:
     blueprint = SimpleNamespace(member_name=LEADER, role=TeamRole.LEADER)
     state = TeamAgentState()
@@ -148,6 +149,7 @@ def _stream_controller(
         resources=SimpleNamespace(harness=None),
         status_updater=lambda status: None,
         execution_updater=lambda status: None,
+        task_board_probe=task_board_probe,
     )
     controller.stream_queue = queue
     return controller
@@ -166,6 +168,15 @@ def _idle_registry() -> MemberActivityRegistry:
     registry.record(LEADER, MemberStatus.BUSY)
     registry.record(LEADER, MemberStatus.READY)
     return registry
+
+
+def _probe(settled: bool):
+    """A task-board probe answering a fixed verdict."""
+
+    async def probe() -> bool:
+        return settled
+
+    return probe
 
 
 def test_emit_team_idle_enqueues_open_stream_marker():
@@ -266,6 +277,113 @@ async def test_marker_is_dropped_when_the_team_moved_again(fast_debounce):
     await asyncio.sleep(fast_debounce * 3)
     assert queue.empty()
     assert controller._idle_marker_task is None
+
+
+# ----------------------------------------------------------------------
+# Task-board condition
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_open_tasks_hold_the_marker_back(fast_debounce):
+    """Quiet members with work still on the board is not an idle team."""
+    queue: asyncio.Queue = asyncio.Queue()
+    controller = _stream_controller(queue, _idle_registry(), _probe(False))
+
+    controller.schedule_team_idle()
+
+    await asyncio.sleep(fast_debounce * 3)
+    assert queue.empty()
+    assert controller._idle_marker_task is None
+
+
+@pytest.mark.asyncio
+async def test_settled_board_lets_the_marker_through(fast_debounce):
+    queue: asyncio.Queue = asyncio.Queue()
+    controller = _stream_controller(queue, _idle_registry(), _probe(True))
+
+    controller.schedule_team_idle()
+
+    marker = await asyncio.wait_for(queue.get(), timeout=1)
+    assert marker.payload["event_type"] == "team.idle"
+
+
+@pytest.mark.asyncio
+async def test_board_is_only_probed_once_the_members_held_still(fast_debounce):
+    """The database round-trip must not happen while somebody is moving."""
+    queue: asyncio.Queue = asyncio.Queue()
+    calls: list[int] = []
+
+    async def probe() -> bool:
+        calls.append(1)
+        return True
+
+    registry = _idle_registry()
+    controller = _stream_controller(queue, registry, probe)
+
+    controller.schedule_team_idle()
+    registry.record("dev-1", MemberStatus.BUSY)
+
+    await asyncio.sleep(fast_debounce * 3)
+    assert calls == []
+    assert queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_missing_probe_falls_back_to_the_member_view(fast_debounce):
+    """Non-leaders hold no probe; the member view stays the whole answer."""
+    queue: asyncio.Queue = asyncio.Queue()
+    controller = _stream_controller(queue, _idle_registry())
+
+    controller.schedule_team_idle()
+
+    marker = await asyncio.wait_for(queue.get(), timeout=1)
+    assert marker.payload["event_type"] == "team.idle"
+
+
+@pytest.mark.asyncio
+async def test_task_board_probe_reads_one_aggregate_count():
+    agent = TeamAgent(AgentCard(name=LEADER))
+    counts = SimpleNamespace(value=(3, 1))
+
+    async def count_tasks_terminality(team_name: str) -> tuple[int, int]:
+        assert team_name == "t"
+        return counts.value
+
+    backend = SimpleNamespace(
+        team_name="t",
+        db=SimpleNamespace(task=SimpleNamespace(count_tasks_terminality=count_tasks_terminality)),
+    )
+    agent._configurator.team_backend = backend
+
+    assert await agent.is_task_board_settled() is False
+    # Every task terminal, and an empty board, both count as settled.
+    counts.value = (3, 0)
+    assert await agent.is_task_board_settled() is True
+    counts.value = (0, 0)
+    assert await agent.is_task_board_settled() is True
+
+
+@pytest.mark.asyncio
+async def test_task_board_probe_without_a_backend_is_settled():
+    agent = TeamAgent(AgentCard(name=LEADER))
+
+    assert await agent.is_task_board_settled() is True
+
+
+@pytest.mark.asyncio
+async def test_task_board_probe_holds_back_on_a_database_error():
+    agent = TeamAgent(AgentCard(name=LEADER))
+
+    async def count_tasks_terminality(team_name: str) -> tuple[int, int]:
+        raise RuntimeError("database is locked")
+
+    agent._configurator.team_backend = SimpleNamespace(
+        team_name="t",
+        db=SimpleNamespace(task=SimpleNamespace(count_tasks_terminality=count_tasks_terminality)),
+    )
+
+    assert await agent.is_task_board_settled() is False
 
 
 def test_is_team_event_marker_distinguishes_agent_output():

@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/worktree/`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-08-05 |
-| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md、F_74_leader-member-activity-and-team-idle.md |
+| 最近一次修订日期 | 2026-08-10 |
+| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md、F_74_leader-member-activity-and-team-idle.md、F_77_team-idle-requires-a-settled-task-board.md |
 
 ## 范围 / 边界
 
@@ -319,6 +319,7 @@ class StreamController:
         execution_updater: Callable[[ExecutionStatus], Any],
         wake_mailbox_callback: Optional[Callable[[], Any]] = None,
         request_completion_poll_callback: Optional[Callable[[], Awaitable[None]]] = None,
+        task_board_probe: Optional[Callable[[], Awaitable[bool]]] = None,   # F_77；leader 接 TeamAgent.is_task_board_settled
     ): ...
 
     # cycle 生命周期（由 CoordinationKernel 调，非 round 级）
@@ -336,7 +337,7 @@ class StreamController:
     def close_stream(self) -> None: ...                                       # put_nowait(None)
     def emit_completion_and_close(self, member_count: int, task_count: int) -> None: ...
     def emit_team_idle(self, members: dict[str, str]) -> None: ...  # team.idle 标记，不关流（F_74）
-    def schedule_team_idle(self) -> None: ...  # 武装去抖 2s 的 team.idle 定时（替换既有 pending）
+    def schedule_team_idle(self) -> None: ...  # 武装去抖 2s 的 team.idle 定时（替换既有 pending）；到点两条件依次复查（F_77）
     def cancel_team_idle(self) -> None: ...    # 丢弃待发定时；幂等，stop / close_stream 都调
 
     # 状态查询（一律直读 harness.state，本层不缓存）
@@ -377,6 +378,13 @@ class StreamController:
   `CancelledError`（task 必须以 cancelled 状态结束），done callback 对非取消结束
   必须 `task.exception()` 取出异常，否则 GC 时的 "Task exception was never
   retrieved" 会盖掉真正的失败。
+- **team.idle 是两条件、且顺序固定**（F_77）：去抖到点后先复查
+  `member_registry.is_idle()`（全员静止），**通过之后**才经 `task_board_probe`
+  问任务板——leader 注入的 `TeamAgent.is_task_board_settled` 走一次聚合 COUNT
+  （`task.count_tasks_terminality`），`non_terminal == 0` 即算静止，**空板同样算**。
+  顺序不可换：板查询是一次 DB 往返，成员还在动时问它既浪费也答非所问。probe 为
+  None（任何非 leader）时该条件恒真——它们本来就不武装 marker。probe 抛错一律按
+  "未静止"处理压住 marker，不允许把一次读失败当成 idle 播出去。
 
 ### session_id contextvar 契约
 

@@ -102,6 +102,7 @@ class TeamAgent(BaseAgent):
             execution_updater=self._update_execution,
             wake_mailbox_callback=self._wake_mailbox_if_interrupt_cleared,
             request_completion_poll_callback=self._request_completion_poll,
+            task_board_probe=self.is_task_board_settled,
         )
         self._coordination = CoordinationKernel(self)
 
@@ -971,6 +972,38 @@ class TeamAgent(BaseAgent):
             self._stream_controller.schedule_team_idle()
         elif signal is IdleSignal.CANCEL:
             self._stream_controller.cancel_team_idle()
+
+    async def is_task_board_settled(self) -> bool:
+        """Return whether the team's task board holds no open task.
+
+        The second half of the team-idle judgement: members having stopped
+        only says nobody is moving *right now*, which a team mid-handoff also
+        satisfies. A board whose every task is terminal (completed or
+        cancelled), or that has no task at all, is what makes the quiet mean
+        "there is nothing left to move".
+
+        One aggregate COUNT, not a full task load — this runs on every idle
+        edge that survives the debounce window. A member with no backend has
+        no board either, so its board is trivially settled; a database error
+        answers False, which merely holds the marker back rather than
+        announcing an idleness this process could not confirm.
+
+        Returns:
+            True when no non-terminal task exists, False otherwise.
+        """
+        backend = self.team_backend
+        if backend is None:
+            return True
+        try:
+            _, non_terminal = await backend.db.task.count_tasks_terminality(backend.team_name)
+        except Exception as e:
+            team_logger.warning(
+                "[{}] failed to probe the task board for team idleness: {}",
+                self._member_name() or "?",
+                e,
+            )
+            return False
+        return non_terminal == 0
 
     async def seed_member_registry(self) -> None:
         """Re-baseline the leader's activity view from the team database.

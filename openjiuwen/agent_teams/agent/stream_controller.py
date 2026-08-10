@@ -106,6 +106,7 @@ class StreamController:
         execution_updater: Callable[[ExecutionStatus], Any],
         wake_mailbox_callback: Optional[Callable[[], Any]] = None,
         request_completion_poll_callback: Optional[Callable[[], Awaitable[None]]] = None,
+        task_board_probe: Optional[Callable[[], Awaitable[bool]]] = None,
     ):
         self._get_blueprint = blueprint_getter
         self._state = state
@@ -117,6 +118,13 @@ class StreamController:
         # The leader wires it to enqueue a POLL_TASK so team completion is
         # re-evaluated immediately; teammates pass None.
         self._request_completion_poll = request_completion_poll_callback
+        # Second condition of the team-idle marker: "is the task board at
+        # rest?". Asked once, only after the roster has held still for the
+        # whole debounce window — a member view alone cannot tell a finished
+        # team from one whose members all happen to be between rounds with
+        # work still on the board. None means "unknown", which is what every
+        # non-leader passes; it never schedules a marker anyway.
+        self._task_board_probe = task_board_probe
 
         self.stream_queue: Optional[asyncio.Queue] = None
         # Observers fan-out chunks to external consumers (e.g. leader's
@@ -418,10 +426,10 @@ class StreamController:
         """Arm the debounced team-idle marker, replacing any pending one.
 
         The team has just gone quiet. Nothing is emitted yet: only if the
-        quiet survives ``_TEAM_IDLE_DEBOUNCE_SECONDS`` does the marker land,
-        which is what keeps a momentary lull between rounds from being
-        reported as an idle team. Any movement in that window cancels it via
-        :meth:`cancel_team_idle`.
+        quiet survives ``_TEAM_IDLE_DEBOUNCE_SECONDS`` *and* the task board is
+        then found at rest does the marker land, which is what keeps a
+        momentary lull between rounds from being reported as an idle team. Any
+        movement in that window cancels it via :meth:`cancel_team_idle`.
         """
         self.cancel_team_idle()
         task = asyncio.create_task(self._emit_team_idle_after_debounce())
@@ -462,7 +470,13 @@ class StreamController:
             )
 
     async def _emit_team_idle_after_debounce(self) -> None:
-        """Wait out the debounce window, then emit if the team is still quiet.
+        """Wait out the debounce window, then emit if the team is still at rest.
+
+        Two conditions, checked strictly in this order: every member has held
+        still for the whole window, and only then is the task board asked
+        whether anything is left open. The order is not cosmetic — the board
+        query is a database round-trip, and asking it while members are still
+        moving would both waste it and answer a question nobody is asking yet.
 
         ``CancelledError`` is deliberately not caught: the cancel path wants
         the task to end *as cancelled*, and swallowing it here would both
@@ -474,6 +488,8 @@ class StreamController:
         registry = self._state.member_registry
         if registry is None or not registry.is_idle():
             return
+        if not await self._is_task_board_settled():
+            return
         snapshot = registry.snapshot()
         team_logger.info(
             "[{}] team went idle: {}",
@@ -481,6 +497,23 @@ class StreamController:
             snapshot,
         )
         self.emit_team_idle(snapshot)
+
+    async def _is_task_board_settled(self) -> bool:
+        """Return whether the task board leaves nothing for the team to do.
+
+        Delegates to the injected probe, which answers True for a board whose
+        every task is terminal *and* for an empty board — a team that was
+        never given tasks is idle the moment its members stop, and demanding a
+        task there would make the marker unreachable. Without a probe (any
+        non-leader) the question is unanswerable, so the member view is taken
+        as the whole answer.
+
+        Returns:
+            True when nothing is left open, False when work remains.
+        """
+        if self._task_board_probe is None:
+            return True
+        return await self._task_board_probe()
 
     def emit_team_idle(self, members: dict[str, str]) -> None:
         """Enqueue a team-idle marker chunk; the stream stays open.
