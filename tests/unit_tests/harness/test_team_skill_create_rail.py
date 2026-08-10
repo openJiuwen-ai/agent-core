@@ -248,6 +248,81 @@ class TestTeamSkillCreateRailPrompts:
 
 
 class TestTeamSkillCreateRailFollowUp:
+    @pytest.mark.asyncio
+    async def test_external_repeated_feedback_routes_to_creation_confirmation(self, tmp_path):
+        rail = _make_rail(tmp_path)
+        _set_builder_tool_calls(rail, ["spawn_member"] * 2)
+        agent, controller = _agent_with_controller(tmp_path)
+        rail.init(agent)
+
+        routed = await rail.propose_from_external_evidence(
+            proposal_key="release-recovery-checklist",
+            reusable_guidance="Create a reusable release recovery checklist.",
+            evidence=(
+                "task=a: recovery policy was missing",
+                "task=b: recovery policy was missing",
+            ),
+            reason="the same missing workflow failed two task reviews",
+        )
+
+        assert routed is True
+        controller.enqueue_follow_up.assert_not_called()
+        events = await rail.drain_pending_approval_events(wait=False)
+        assert len(events) == 1
+        event = events[0]
+        assert event.type == "chat.ask_user_question"
+        assert event.payload["source"] == "skill_creation_approval"
+        assert event.payload["approval_schema"] == "openjiuwen.skill_creation_approval.v1"
+        request_id = event.payload["request_id"]
+        assert request_id.startswith("skill_create_")
+        assert rail.owns_external_proposal(request_id) is True
+        question = event.payload["questions"][0]
+        assert question["header"] == "新建 Skill 审批"
+        assert "拟沉淀的 Skill 内容" in question["question"]
+        assert "Create a reusable release recovery checklist." in question["question"]
+        assert "the same missing workflow failed two task reviews" in question["question"]
+        assert "任务证据" not in question["question"]
+        assert "task=a" not in question["question"]
+        assert "task=b" not in question["question"]
+        assert [option["label"] for option in question["options"]] == ["接收", "拒绝"]
+
+        creation_prompt = rail.resolve_external_proposal(request_id, accepted=True)
+        assert creation_prompt is not None
+        assert "用户已在新建 Skill 审批卡中点击接收" in creation_prompt
+        assert "swarmskill-creator" in creation_prompt
+        assert "task=a" in creation_prompt
+        assert "task=b" in creation_prompt
+        assert rail.owns_external_proposal(request_id) is False
+
+        # The proposal is idempotent and consumes the generic self-check for
+        # the same trajectory window.
+        assert (
+            await rail.propose_from_external_evidence(
+                proposal_key="release-recovery-checklist",
+                reusable_guidance="Create a reusable release recovery checklist.",
+                evidence=("task=a", "task=b"),
+            )
+            is False
+        )
+        await rail._on_after_invoke(_make_invoke_ctx(agent))
+        controller.enqueue_follow_up.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_external_feedback_requires_two_evidence_items(self, tmp_path):
+        rail = _make_rail(tmp_path)
+        agent, controller = _agent_with_controller(tmp_path)
+        rail.init(agent)
+
+        assert (
+            await rail.propose_from_external_evidence(
+                proposal_key="one-off",
+                reusable_guidance="Create a one-off Skill.",
+                evidence=("task=a",),
+            )
+            is False
+        )
+        controller.enqueue_follow_up.assert_not_called()
+
     @pytest.mark.parametrize("tool_name", ["spawn_member", "team.spawn_teammate"])
     @pytest.mark.asyncio
     async def test_schedules_follow_up_when_threshold_met_after_completion(self, tmp_path, tool_name):

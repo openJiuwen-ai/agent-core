@@ -78,6 +78,27 @@ agent = create_deep_agent(
 - 主动演进通过 `request_user_evolution()` 触发；返回的 prompt 会要求主 agent 先调用 `prepare_skill_evolution(user_confirmed=true)`，再用返回的 `evolution_review_ref` 调用 `evolve_review_task(evolution_review_ref=...)`。prepare tool 会把当前 rail 已采集到的执行/对话轨迹作为默认 review materials，`user_intent` 只补充优化方向。
 - 普通 skill 演进会忽略 `kind: team-skill`；team skill 使用 `TeamSkillEvolutionRail` / `TeamSkillRail`。
 
+### 外部已归因信号入口
+
+宿主已经完成归因时，可以调用：
+
+```python
+result = await skill_rail.evolve_from_external_signals(
+    signals=[signal],
+    messages=messages,
+    trajectory=trajectory,
+    user_query="Add reusable validation guidance.",
+    requires_approval=True,
+)
+```
+
+该入口绕过被动 `signal_trigger` 检测，因此即使 `signal_trigger=False` 也可使用；调用方必须负责信号
+归因和证据策略。Rail 仍会强制所有信号恰好指向一个现存普通 Skill，拒绝禁用、缺失或 team skill
+目标，并通过标准 optimizer、并发 semaphore、审批与 `EvolutionStore` 持久化管线处理。
+
+`requires_approval=None` 时沿用 `not auto_save`；显式 `True` 生成审批请求，显式 `False` 允许宿主在
+已有授权范围内自动保存。调用方不应绕过该入口直接写 `evolutions.json`。
+
 ```text
 class SkillEvolutionRail(
     skills_dir: Union[str, list[str]],

@@ -3,6 +3,7 @@
 
 """Unit tests for the F_62 TeamScheduler (leader-side scheduled dispatch)."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -92,7 +93,7 @@ class FakeHost:
         return True
 
 
-def _build_scheduler(db, bus, **spec_overrides):
+def _build_scheduler(db, bus, *, build_context=None, **spec_overrides):
     """Assemble a TeamScheduler over a real task manager and fake host/mail."""
     task_manager = TeamTaskManager(
         team_name=TEAM,
@@ -115,7 +116,12 @@ def _build_scheduler(db, bus, **spec_overrides):
     infra.team_backend = AsyncMock(team_name=TEAM)
     blueprint = SimpleNamespace(spec=spec, team_name=TEAM)
     host = FakeHost()
-    scheduler = TeamScheduler(host, blueprint=blueprint, infra=infra)
+    scheduler = TeamScheduler(
+        host,
+        blueprint=blueprint,
+        infra=infra,
+        build_context=build_context,
+    )
     return scheduler, host, message_manager, task_manager
 
 
@@ -351,6 +357,37 @@ async def test_review_fail_settles_rework_with_feedback(db, bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_review_fail_dispatches_aggregated_feedback_to_platform_hook(db, bus):
+    handler = AsyncMock()
+    build_context = SimpleNamespace(
+        session_id="sched_session",
+        extras={"review_feedback_handler": handler},
+    )
+    scheduler, _host, _mm, tm = _build_scheduler(
+        db,
+        bus,
+        build_context=build_context,
+        default_max_review_rounds=3,
+    )
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
+    assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "fail", "broken build")).ok
+    assert (await _reviewer_mgr(db, bus, "rev-2").verify_task("r", "pass")).ok
+
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    await asyncio.sleep(0)
+    if scheduler._review_feedback_tasks:
+        await asyncio.gather(*scheduler._review_feedback_tasks)
+
+    handler.assert_awaited_once()
+    payload = handler.await_args.args[0]
+    assert payload["task_id"] == "r"
+    assert payload["review_round"] == 1
+    assert payload["session_id"] == "sched_session"
+    assert "broken build" in payload["feedback"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_round_ceiling_escalates_to_leader(db, bus):
     scheduler, host, mm, tm = _build_scheduler(db, bus)
     await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",), max_rounds=1)
@@ -557,3 +594,41 @@ def test_settle_review_tally_inspector_avg_none():
         "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
         "inspector_count": 1, "inspector_voted": 1, "inspector_avg": None,
     }) == VERDICT_FAIL
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_task_list_drained_waits_for_task_feedback_then_finalizes_team_feedback(db, bus):
+    order: list[str] = []
+
+    class _FeedbackHandler:
+        async def __call__(self, _payload):
+            order.append("task")
+
+        async def on_team_completed(self, payload):
+            order.append(f"team:{payload['team_id']}")
+
+    build_context = SimpleNamespace(
+        session_id="sched_session",
+        extras={"review_feedback_handler": _FeedbackHandler()},
+    )
+    scheduler, _host, _mm, _tm = _build_scheduler(
+        db,
+        bus,
+        build_context=build_context,
+    )
+    await scheduler.activate()
+    pending = asyncio.create_task(
+        scheduler._invoke_review_feedback_handler(
+            build_context.extras["review_feedback_handler"],
+            {"task_id": "r", "review_round": 1},
+        )
+    )
+    scheduler._review_feedback_tasks.add(pending)
+    pending.add_done_callback(scheduler._review_feedback_tasks.discard)
+
+    event = EventMessage.from_event(TaskListDrainedEvent(team_name=TEAM, task_count=1))
+    await scheduler.on_event(event)
+    await scheduler.on_event(event)
+
+    assert order == ["task", f"team:{TEAM}"]

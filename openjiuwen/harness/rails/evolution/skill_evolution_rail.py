@@ -965,6 +965,61 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] auto evolution failed: %s", exc)
 
+    async def evolve_from_external_signals(
+        self,
+        *,
+        signals: List[EvolutionSignal],
+        messages: Optional[List[dict]] = None,
+        trajectory: Optional[Trajectory] = None,
+        user_query: str = "",
+        requires_approval: Optional[bool] = None,
+    ) -> OnlineEvolutionResult:
+        """Evolve one regular Skill from already-attributed external signals.
+
+        This entry point deliberately bypasses passive ``signal_trigger``
+        detection. The caller is responsible for attribution and evidence
+        policy; the rail still validates the target, generates records through
+        the standard optimizer, and uses the normal approval/persistence path.
+        """
+
+        normalized_signals = list(signals or [])
+        skill_names = {signal.skill_name for signal in normalized_signals if signal.skill_name}
+        if not normalized_signals or len(skill_names) != 1:
+            return OnlineEvolutionResult(
+                skill_name=next(iter(skill_names), ""),
+                status="skipped_no_input",
+                message="external evolution requires signals attributed to exactly one Skill",
+            )
+
+        skill_name = next(iter(skill_names))
+        if self._disabled_skills and skill_name in self._disabled_skills:
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="skipped_skill_not_found",
+                message=f"external evolution skipped because skill '{skill_name}' is disabled",
+            )
+        if not self._evolution_store.skill_exists(skill_name) or not self._is_regular_skill(skill_name):
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="skipped_skill_not_found",
+                message=f"external evolution skipped because regular skill '{skill_name}' does not exist",
+            )
+
+        approval_required = not self._auto_save if requires_approval is None else bool(requires_approval)
+        # External producers (for example multiple task-review callbacks) can
+        # arrive concurrently.  Use the same per-rail gate as automatic
+        # evolution so optimizer calls and evolution-store writes stay ordered.
+        async with self._evolution_sem:
+            return await self._handle_evolution_from_signals(
+                skill_name=skill_name,
+                signals=normalized_signals,
+                messages=list(messages or []),
+                trajectory=trajectory,
+                ctx=None,
+                user_query=user_query,
+                requires_approval=approval_required,
+            )
+
     async def generate_and_emit_experience(
         self,
         skill_name: str,
