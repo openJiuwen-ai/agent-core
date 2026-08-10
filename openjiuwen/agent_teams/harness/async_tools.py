@@ -83,10 +83,11 @@ def render_result_text(result: Any) -> str:
     if isinstance(result, str):
         return result
     if isinstance(result, (dict, list)):
-        jsonable = _to_jsonable(result)
-        if jsonable is not result:
-            team_logger.info("[async_tools] pydantic BaseModel converted for JSON serialization")
-        return json.dumps(jsonable, ensure_ascii=False, indent=2)
+        try:
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        except TypeError:
+            team_logger.info("[async_tools] pydantic BaseModel detected, converting for JSON serialization")
+            return json.dumps(_to_jsonable(result), ensure_ascii=False, indent=2)
     return str(result)
 
 
