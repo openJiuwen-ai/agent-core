@@ -15,6 +15,7 @@ from openjiuwen.harness.goal.manager import GoalManager
 from openjiuwen.harness.goal.schema import (
     GoalAssessment,
     GoalAssessmentStatus,
+    GoalContract,
     GoalOperationError,
     GoalStatus,
 )
@@ -121,6 +122,27 @@ async def test_set_persists_goal_and_queues_work_only_with_an_output_consumer() 
     assert queued.context["goal_id"] == record.goal_id
     assert attached.notify_calls == 1
     assert attached.emitted[0].type is InteractionEventType.GOAL_UPDATED
+
+
+@pytest.mark.asyncio
+async def test_set_persists_contract() -> None:
+    harness = ManagerHarness()
+    contract = GoalContract(
+        verification="tests pass", boundaries="services/auth"
+    )
+    record = await harness.manager.set(
+        "Migrate auth to JWT", contract=contract
+    )
+
+    assert record.contract is not None
+    assert record.contract.verification == "tests pass"
+    assert record.contract.boundaries == "services/auth"
+
+    # contract survives store round-trip
+    reloaded = harness.manager.get_store().load()
+    assert reloaded is not None
+    assert reloaded.contract is not None
+    assert reloaded.contract.verification == "tests pass"
 
 
 @pytest.mark.asyncio

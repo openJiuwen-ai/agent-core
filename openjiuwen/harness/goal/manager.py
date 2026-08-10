@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Awaitable, Callable, Optional, Protocol
 
+from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.harness.goal.schema import (
     GoalAssessment,
     GoalAssessmentStatus,
+    GoalContract,
     GoalOperationError,
     GoalRecord,
     GoalStatus,
@@ -17,7 +18,7 @@ from openjiuwen.harness.goal.schema import (
 from openjiuwen.harness.task_loop.event_manager import EventManager
 from openjiuwen.harness.schema.interaction import InteractionEvent, RoundWorkItem
 
-logger = logging.getLogger(__name__)
+logger = LazyLogger(lambda: LogManager.get_logger("goal"))
 
 
 CancelRound = Callable[..., Awaitable[None]]
@@ -99,6 +100,7 @@ class GoalManager:
         overwrite_confirmed: bool = False,
         token_budget: Optional[int] = None,
         max_attempts: Optional[int] = None,
+        contract: Optional[GoalContract] = None,
     ) -> GoalRecord:
         normalized = objective.strip()
         if not normalized:
@@ -141,6 +143,7 @@ class GoalManager:
                 objective=normalized,
                 token_budget=token_budget,
                 max_attempts=max_attempts,
+                contract=contract,
             )
             self._store.save(record)
             await self._commit_store_locked()

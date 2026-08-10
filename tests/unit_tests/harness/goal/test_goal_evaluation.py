@@ -35,6 +35,27 @@ def test_parse_assessment_json_accepts_plain_and_fenced_json() -> None:
     assert _parse_assessment_json("not json") is None
 
 
+def test_parse_assessment_json_handles_nested_code_blocks_in_evidence() -> None:
+    """A fenced JSON whose evidence field embeds ```python blocks must still
+    parse: the non-greedy fence regex truncates at the inner ```, so the
+    outermost { ... } fallback must recover the full object."""
+    raw = (
+        '```json\n'
+        '{\n'
+        '  "status": "complete",\n'
+        '  "evidence": "done\\n```python\\nfrom pptx import Presentation\\n'
+        "prs = Presentation()\\nprs.save('x.pptx')\\n```\\nfile ok\",\n"
+        '  "remaining_work": "",\n'
+        '  "next_instruction": ""\n'
+        '}\n```'
+    )
+    parsed = _parse_assessment_json(raw)
+    assert parsed is not None
+    assert parsed.status is GoalAssessmentStatus.COMPLETE
+    assert "```python" in parsed.evidence
+    assert parsed.evidence.endswith("file ok")
+
+
 def test_agent_report_strategy_uses_report_and_falls_back_when_absent() -> None:
     assessor = GoalEvaluator(GoalStopConfig(strategy=GoalStopStrategy.AGENT_REPORT))
 

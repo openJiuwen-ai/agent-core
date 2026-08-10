@@ -25,10 +25,10 @@ goal attempt lifecycle (formerly in the standalone GoalCompletionDriver):
 from __future__ import annotations
 
 import json
-import logging
 import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from openjiuwen.harness.goal.schema import GoalAssessment, GoalRecord
     from openjiuwen.harness.tools.goal import GoalReportSink
 
-logger = logging.getLogger(__name__)
+logger = LazyLogger(lambda: LogManager.get_logger("goal"))
 
 # Cap transcript assessor input size so a long attempt cannot blow the
 # assessor prompt / context window.  Truncation prefers the latest messages.
@@ -444,6 +444,48 @@ class TaskCompletionRail(DeepAgentRail):
         # while the frontend is still answering the interrupt.
         result = getattr(getattr(ctx, "inputs", None), "result", None)
         if isinstance(result, dict) and result.get("result_type") == "interrupt":
+            # If the agent already submitted a terminal goal report during this
+            # attempt, the permission interrupt is a tool-level pause unrelated
+            # to completion. Without finalizing, the next begin_attempt resets
+            # the sink and drops the report, leaving the goal ACTIVE so the task
+            # loop re-drives the completed goal forever. Verify via the
+            # transcript assessor (do NOT blindly trust the agent) and apply
+            # the verified assessment. CONTINUE reports and empty sinks stay on
+            # the original skip path — HITL/permission pauses that did not
+            # declare completion should not burn an LLM call or mutate record.
+            from openjiuwen.harness.goal.schema import GoalAssessmentStatus
+
+            pending_report = (
+                self._goal_report_sink.consume()
+                if self._goal_report_sink is not None
+                else None
+            )
+            if pending_report is not None and pending_report.status in (
+                GoalAssessmentStatus.COMPLETE,
+                GoalAssessmentStatus.BLOCKED,
+            ):
+                logger.info(
+                    "[GoalLifecycle] interrupt with pending %s report; "
+                    "running transcript assessment before finalizing",
+                    pending_report.status.value,
+                )
+                transcript_response = await self._maybe_invoke_transcript_assessor(
+                    record, pending_report, ctx,
+                )
+                if self._goal_evaluator is None:
+                    logger.warning("[GoalLifecycle] Goal evaluator unavailable")
+                    return
+                assessment = self._goal_evaluator.assess(
+                    record=record,
+                    agent_report=pending_report,
+                    transcript_response=transcript_response,
+                )
+                await manager.apply_assessment(
+                    goal_id=str(self._current_goal_id),
+                    revision=int(self._current_revision),
+                    assessment=assessment,
+                )
+                return
             logger.info(
                 "[GoalLifecycle] skip assessment on interrupt "
                 "(HITL/permission pause; attempt not finished)"
@@ -584,6 +626,7 @@ class TaskCompletionRail(DeepAgentRail):
             build_goal_current_instruction(record, language),
             self._extract_attempt_context(ctx),
             language,
+            contract=record.contract,
         )
         try:
             response = await model.invoke(
@@ -615,7 +658,13 @@ class TaskCompletionRail(DeepAgentRail):
             return None
 
         content = getattr(response, "content", None)
-        return content if isinstance(content, str) else str(content or "")
+        content = content if isinstance(content, str) else str(content or "")
+        logger.debug(
+            "[GoalLifecycle] transcript assessor raw response (len=%d): %s",
+            len(content),
+            content[:2000],
+        )
+        return content
 
     @staticmethod
     def _resolve_transcript_model(ctx: AgentCallbackContext) -> Optional[Any]:

@@ -18,7 +18,7 @@ from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.sections import SectionName
 
 if TYPE_CHECKING:
-    from openjiuwen.harness.goal.schema import GoalAssessment, GoalRecord
+    from openjiuwen.harness.goal.schema import GoalAssessment, GoalContract, GoalRecord
 
 # ===================================================================
 # Goal protocol — static system prompt section
@@ -158,6 +158,7 @@ _GOAL_TASK_TEMPLATE: Dict[str, str] = {
     "cn": (
         "<goal_task>\n"
         "<objective>\n{objective}\n</objective>\n\n"
+        "<contract>\n{contract}\n</contract>\n\n"
         "<previous_assessment>\n{previous_assessment}\n</previous_assessment>\n\n"
         "<current_instruction>\n{current_instruction}\n</current_instruction>\n\n"
         "<budget_notice>\n{budget_notice}\n</budget_notice>\n"
@@ -166,6 +167,7 @@ _GOAL_TASK_TEMPLATE: Dict[str, str] = {
     "en": (
         "<goal_task>\n"
         "<objective>\n{objective}\n</objective>\n\n"
+        "<contract>\n{contract}\n</contract>\n\n"
         "<previous_assessment>\n{previous_assessment}\n</previous_assessment>\n\n"
         "<current_instruction>\n{current_instruction}\n</current_instruction>\n\n"
         "<budget_notice>\n{budget_notice}\n</budget_notice>\n"
@@ -207,6 +209,20 @@ def _format_budget_notice(record: GoalRecord, language: str = "cn") -> str:
     return "\n".join(notices)
 
 
+def _format_contract(
+    contract: Optional[GoalContract],
+    language: str = "cn",
+) -> str:
+    """Render the goal contract for the ``<goal_task>`` query.
+
+    None/empty contract → ``"无"``/``"None"`` so the template placeholder
+    stays valid; otherwise the contract's ``render_block(language)``.
+    """
+    if contract is None or contract.is_empty():
+        return "无。" if language == "cn" else "None."
+    return contract.render_block(language)
+
+
 def build_goal_task_query(
     record: GoalRecord,
     language: str = "cn",
@@ -226,9 +242,12 @@ def build_goal_task_query(
 
     budget = _format_budget_notice(record, language)
 
+    contract = _format_contract(record.contract, language)
+
     template = _GOAL_TASK_TEMPLATE.get(language, _GOAL_TASK_TEMPLATE["cn"])
     return template.format(
         objective=record.objective,
+        contract=contract,
         previous_assessment=previous,
         current_instruction=instruction,
         budget_notice=budget,
@@ -264,6 +283,9 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         '  "next_instruction": "status=continue 时填写下一次最具体、可执行的动作，否则可为空字符串"\n'
         "}\n\n"
         "评估规则：\n"
+        "0. 如果提供了 <contract>（完成契约），必须先逐项核对其 "
+        "verification/constraints/boundaries/stop_when；所有契约条件都满足才能输出 "
+        "status=complete，任一不满足则输出 continue 并在 remaining_work 写清缺哪条。\n"
         "1. 先从目标和当前指令中提取必须满足的交付物、验收条件和可验证结果。\n"
         "2. 判断依据必须来自本轮尝试上下文中的可验证证据，而不是主模型的语气或承诺。\n"
         '3. 只有上下文证据表明验收条件已经满足，才能输出 status="complete"。\n'
@@ -293,6 +315,10 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         '  "next_instruction": "Most specific actionable step for status=continue, else empty string"\n'
         "}\n\n"
         "Assessment rules:\n"
+        "0. If a <contract> is provided, first verify each of its "
+        "verification/constraints/boundaries/stop_when fields; only when all "
+        "contract conditions are satisfied may you output status=complete; if "
+        "any is unmet, output continue and state the gap in remaining_work.\n"
         "1. Extract deliverables, acceptance criteria, and verifiable results "
         "from the objective and current instruction.\n"
         "2. Base judgment on verifiable evidence in the attempt context, "
@@ -329,6 +355,7 @@ def build_transcript_assessor_prompt(
     current_instruction: str,
     attempt_context: str,
     language: str = "cn",
+    contract: Optional[GoalContract] = None,
 ) -> str:
     """Build the user prompt for the transcript assessor.
 
@@ -337,18 +364,21 @@ def build_transcript_assessor_prompt(
         current_instruction: The instruction for this attempt.
         attempt_context: The model context produced by this attempt.
         language: ``"cn"`` or ``"en"``.
+        contract: Optional completion contract; when non-empty it is injected
+            as a ``<contract>`` block so the assessor can verify each field
+            (see rule 0 in TRANSCRIPT_ASSESSOR_SYSTEM).
 
     Returns:
         User message for the assessor model.
     """
-    _ = language
-    return "\n\n".join(
-        [
-            f"<objective>\n{objective}\n</objective>",
-            f"<current_instruction>\n{current_instruction}\n</current_instruction>",
-            f"<attempt_context>\n{attempt_context}\n</attempt_context>",
-        ]
-    )
+    parts = [
+        f"<objective>\n{objective}\n</objective>",
+        f"<current_instruction>\n{current_instruction}\n</current_instruction>",
+    ]
+    if contract is not None and not contract.is_empty():
+        parts.append(f"<contract>\n{contract.render_block(language)}\n</contract>")
+    parts.append(f"<attempt_context>\n{attempt_context}\n</attempt_context>")
+    return "\n\n".join(parts)
 
 
 __all__ = [

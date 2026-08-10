@@ -11,6 +11,7 @@ import openjiuwen.harness.goal.schema as goal_schema
 from openjiuwen.harness.goal.schema import (
     GoalAssessment,
     GoalAssessmentStatus,
+    GoalContract,
     GoalOperationError,
     GoalRecord,
     GoalStatus,
@@ -187,3 +188,65 @@ def test_stop_config_defaults() -> None:
     assert config.strategy is GoalStopStrategy.HYBRID
     assert config.transcript_window_attempts == 8
     assert config.verification_interval is None
+
+
+def test_goal_contract_round_trip_and_empty() -> None:
+    contract = GoalContract(
+        outcome="bug fixed",
+        verification="tests pass",
+        constraints="keep API",
+        boundaries="services/auth",
+        stop_when="schema change",
+    )
+    data = contract.to_dict()
+    assert data == {
+        "outcome": "bug fixed",
+        "verification": "tests pass",
+        "constraints": "keep API",
+        "boundaries": "services/auth",
+        "stop_when": "schema change",
+    }
+    restored = GoalContract.from_dict(data)
+    assert restored == contract
+    assert not restored.is_empty()
+    assert GoalContract().is_empty()
+    # non-dict payload degrades to empty, never raises
+    assert GoalContract.from_dict("not a dict").is_empty()  # type: ignore[arg-type]
+
+
+def test_goal_contract_render_block_skips_empty_fields() -> None:
+    contract = GoalContract(verification="tests pass", boundaries="services/auth")
+    block = contract.render_block("cn")
+    assert "验证标准：tests pass" in block
+    assert "范围：services/auth" in block
+    assert "完成结果" not in block  # empty outcome skipped
+    assert contract.render_block("cn")  # non-empty renders something
+
+
+def test_goal_record_round_trips_contract() -> None:
+    contract = GoalContract(verification="tests pass")
+    record = GoalRecord.create(
+        session_id="s1", objective="fix bug", contract=contract
+    )
+    data = record.to_dict()
+    assert data["contract"] == contract.to_dict()
+    restored = GoalRecord.from_dict(data)
+    assert restored.contract is not None
+    assert restored.contract.verification == "tests pass"
+    assert restored.contract.boundaries == ""
+
+
+def test_goal_record_tolerates_missing_contract_field() -> None:
+    """Old persisted records without a contract field must still load."""
+    legacy = GoalRecord.from_dict(
+        {
+            "goal_id": "g1",
+            "session_id": "s1",
+            "objective": "legacy goal",
+            "status": "active",
+            "time_used_seconds": 5,
+            "created_at": _utc_iso(1000),
+            "updated_at": _utc_iso(1005),
+        }
+    )
+    assert legacy.contract is None

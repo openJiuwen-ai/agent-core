@@ -8,9 +8,9 @@ TaskCompletionRail can consume it after the round ends.
 """
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 
+from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.core.foundation.tool import Input, Output, Tool
 from openjiuwen.harness.goal.schema import GoalAssessment, GoalAssessmentStatus
 from openjiuwen.harness.prompts.tools import build_tool_card
@@ -18,7 +18,7 @@ from openjiuwen.harness.prompts.tools import build_tool_card
 if TYPE_CHECKING:
     from openjiuwen.harness.goal.manager import GoalManager
 
-logger = logging.getLogger(__name__)
+logger = LazyLogger(lambda: LogManager.get_logger("goal"))
 
 
 class GoalReportSink:

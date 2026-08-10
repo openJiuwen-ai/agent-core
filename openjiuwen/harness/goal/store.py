@@ -9,15 +9,15 @@ SQLite, or history as an alternative goal state source.
 from __future__ import annotations
 
 import inspect
-import logging
 from typing import TYPE_CHECKING, Optional
 
+from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.harness.goal.schema import GoalRecord
 
 if TYPE_CHECKING:
     from openjiuwen.core.session.agent import Session
 
-logger = logging.getLogger(__name__)
+logger = LazyLogger(lambda: LogManager.get_logger("goal"))
 
 SESSION_GOAL_RECORD_KEY = "harness.goal.record"
 

@@ -9,10 +9,10 @@ HYBRID strategy trusts ``continue`` reports to reduce cost but verifies
 from __future__ import annotations
 
 import json
-import logging
 import re
 from typing import Optional
 
+from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.harness.goal.schema import (
     GoalAssessment,
     GoalAssessmentStatus,
@@ -21,7 +21,7 @@ from openjiuwen.harness.goal.schema import (
     GoalStopStrategy,
 )
 
-logger = logging.getLogger(__name__)
+logger = LazyLogger(lambda: LogManager.get_logger("goal"))
 
 _FALLBACK_CONTINUE = GoalAssessment(
     status=GoalAssessmentStatus.CONTINUE,
@@ -37,7 +37,16 @@ _JSON_BLOCK_PATTERN = re.compile(
 
 
 def _parse_assessment_json(text: str) -> Optional[GoalAssessment]:
-    """Parse JSON from raw assessor output, with fenced-block fallback."""
+    """Parse JSON from raw assessor output.
+
+    Three-layer fallback:
+    1. Bare ``json.loads`` (assessor obeyed the prompt).
+    2. Regex-extracted ``json fence (assessor wrapped in a fence, no nested
+       code blocks).
+    3. Outermost ``{ ... }`` span (assessor wrapped in a fence AND the evidence
+       field embeds ``python`` code blocks whose ```` break the non-greedy
+       regex). Inner braces live inside JSON string values and stay valid.
+    """
     text = text.strip()
     data = None
 
@@ -48,6 +57,15 @@ def _parse_assessment_json(text: str) -> Optional[GoalAssessment]:
         if match:
             try:
                 data = json.loads(match.group(1).strip())
+            except ValueError:
+                data = None
+
+    if not isinstance(data, dict):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                data = json.loads(text[start : end + 1])
             except ValueError:
                 data = None
 
