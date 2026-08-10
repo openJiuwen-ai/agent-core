@@ -50,6 +50,13 @@ def span_category(span: Mapping[str, Any]) -> str | None:
         return "llm"
     if name.startswith("tool.") or name.startswith("execute_tool"):
         return "tool"
+    attrs = span_attributes(span)
+    operation = str(attrs.get(semconv.GEN_AI_OPERATION_NAME) or "").lower()
+    explicit_kind = str(attrs.get(semconv.TRAJECTORY_STEP_KIND) or "").lower()
+    if operation in {"chat", "text_completion", "generate_content"} or explicit_kind == "llm":
+        return "llm"
+    if operation == "execute_tool" or explicit_kind == "tool":
+        return "tool"
     for category, prefixes in (
         ("team", ("team.",)),
         ("agent", ("agent.",)),
@@ -61,13 +68,6 @@ def span_category(span: Mapping[str, Any]) -> str | None:
     ):
         if any(name.startswith(prefix) for prefix in prefixes):
             return category
-    attrs = span_attributes(span)
-    operation = str(attrs.get(semconv.GEN_AI_OPERATION_NAME) or "").lower()
-    explicit_kind = str(attrs.get(semconv.TRAJECTORY_STEP_KIND) or "").lower()
-    if operation in {"chat", "text_completion", "generate_content"} or explicit_kind == "llm":
-        return "llm"
-    if operation == "execute_tool" or explicit_kind == "tool":
-        return "tool"
     if attrs.get(semconv.AT_EVENT_TYPE) is not None:
         return "event"
     if attrs.get(semconv.AT_TASK_ID) is not None:

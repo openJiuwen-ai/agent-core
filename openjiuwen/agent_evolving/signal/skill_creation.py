@@ -7,15 +7,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import (
     iter_spans,
-    read_llm_messages,
+    read_llm_exchange,
     read_tool_call,
-    span_attributes,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
-from openjiuwen.agent_evolving.trajectory import _semconv as semconv
+from openjiuwen.agent_evolving.trajectory.types import TrajectoryLike
 
 SKILL_CREATION_SIGNAL_PROMPT_ELIGIBLE = "prompt_eligible"
 SKILL_CREATION_SIGNAL_SKILL_TOOL_COVER = "skill_tool_cover"
@@ -73,7 +71,7 @@ class SkillCreationSignalDetector:
 
     @staticmethod
     def collect_metrics(
-        trajectory: Trajectory | None,
+        trajectory: TrajectoryLike | None,
         *,
         raw_tool_call_watermark: int = 0,
     ) -> SkillCreationWindowMetrics:
@@ -121,7 +119,7 @@ class SkillCreationSignalDetector:
 
     def detect(
         self,
-        trajectory: Trajectory | None,
+        trajectory: TrajectoryLike | None,
         *,
         raw_tool_call_watermark: int = 0,
         prompted_snapshot: tuple[int, int] | None = None,
@@ -197,7 +195,7 @@ def is_effective_task_tool(tool_name: str) -> bool:
     return not any(keyword in tool for keyword in _EXCLUDED_TOOL_KEYWORDS)
 
 
-def count_tool_calling_iterations(trajectory: Trajectory | None) -> int:
+def count_tool_calling_iterations(trajectory: TrajectoryLike | None) -> int:
     """Count LLM iterations that requested at least one effective task tool."""
     if trajectory is None:
         return 0
@@ -212,7 +210,7 @@ def count_tool_calling_iterations(trajectory: Trajectory | None) -> int:
 
 
 def _count_new_effective_tool_calling_iterations(
-    trajectory: Trajectory,
+    trajectory: TrajectoryLike,
     effective_call_ids_after_watermark: set[str],
     new_tool_spans: list[Any],
 ) -> int:
@@ -251,17 +249,8 @@ def _span_tool_call_id(span: dict[str, Any]) -> str | None:
 def _span_tool_calls(span: dict[str, Any]) -> list[Any]:
     """Read only the completion tool calls from one canonical LLM span."""
 
-    messages = read_llm_messages(span)
-    attrs = span_attributes(span)
-    completion_indexes = {
-        key.split(".")[2]
-        for key in attrs
-        if key.startswith(f"{semconv.GEN_AI_COMPLETION}.") and len(key.split(".")) > 2 and key.split(".")[2].isdigit()
-    }
-    if completion_indexes:
-        completion_count = len(completion_indexes)
-        messages = messages[-completion_count:]
-    for message in reversed(messages):
+    _, completions = read_llm_exchange(span)
+    for message in reversed(completions):
         if isinstance(message, dict) and message.get("tool_calls"):
             return list(message["tool_calls"])
     return []

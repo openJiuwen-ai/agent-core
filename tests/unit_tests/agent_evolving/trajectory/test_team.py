@@ -133,6 +133,17 @@ def test_reasoning_span_is_not_team_trajectory_input() -> None:
     assert span_category({"name": "llm.reasoning"}) is None
 
 
+def test_span_category_prefers_tool_semantics_over_namespaced_tool_name() -> None:
+    span = {
+        "name": "team.custom_tool",
+        "attributes": [
+            {"key": "gen_ai.operation.name", "value": {"stringValue": "execute_tool"}},
+        ],
+    }
+
+    assert span_category(span) == "tool"
+
+
 def test_team_id_routes_children_without_repeated_team_attributes() -> None:
     selected = select_team_spans(_trajectory(), team_id="team-a", categories={"llm", "tool"})
 
