@@ -54,6 +54,11 @@ class ContextEngineConfig(BaseModel):
         into the active context. When disabled, hints remain as-is in the
         conversation, and offloaded content is never automatically restored.
 
+    enable_tiktoken_counter : bool, default False
+        Whether to create a default TiktokenCounter when ``create_context`` is
+        called without an explicit token counter. When disabled, context token
+        budgets use the built-in character-based estimation fallbacks.
+
     context_window_tokens : int, optional
         Total context window supported by the runtime model, including input and
         output tokens. Used for context compression telemetry only.

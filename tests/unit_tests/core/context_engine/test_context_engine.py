@@ -146,6 +146,28 @@ class TestContextEngine:
         assert ctx1 is ctx2
 
     @pytest.mark.asyncio
+    async def test_create_context_does_not_create_default_tiktoken_counter(self, session, caplog):
+        engine = ContextEngine(ContextEngineConfig(enable_tiktoken_counter=False))
+        caplog.set_level(logging.INFO)
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert context.token_counter() is None
+        assert "tiktoken counter disabled; using character-based token estimation" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_create_context_creates_default_tiktoken_counter_when_enabled(self, session):
+        engine = ContextEngine(ContextEngineConfig(enable_tiktoken_counter=True))
+
+        with patch("openjiuwen.core.context_engine.token.tiktoken_counter.TiktokenCounter") as counter_cls:
+            counter = MagicMock()
+            counter_cls.return_value = counter
+            context = await engine.create_context(context_id="ctx", session=session)
+
+        counter_cls.assert_called_once_with()
+        assert context.token_counter() is counter
+
+    @pytest.mark.asyncio
     async def test_create_context_isolated_per_session(self, engine, session, another_session):
         ctx1 = await engine.create_context(context_id="ctx", session=session)
         ctx2 = await engine.create_context(context_id="ctx", session=another_session)

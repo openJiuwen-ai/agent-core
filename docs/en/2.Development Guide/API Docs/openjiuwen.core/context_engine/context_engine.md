@@ -44,7 +44,7 @@ Create or retrieve the `ModelContext` corresponding to the specified session and
 - **session** (Session, optional): Session ID. If provided, reads the session ID from `session.get_session_id()` to isolate different sessions. When `None`, uses `"default_session_id"`. Default value: `None`.
 - **processors** (List[Tuple[str, BaseModel], optional): Processor configuration list, each item is `(processor_type, config)`, such as `[("MessageOffloader", MessageOffloaderConfig(...))]`. Default value: `None`.
 - **history_messages** (List[[BaseMessage](../../openjiuwen.core/foundation/llm/llm.md#class-openjiuwencorefoundationllmschemamessagebasemessage)], optional): Initial message list for the context. Default value: `None`.
-- **token_counter** (TokenCounter, optional): Token counting strategy, used to count message and tool token consumption when constructing windows. When `None`, uses TiktokenCounter. Default value: `None`.
+- **token_counter** (TokenCounter, optional): Token counting strategy, used to count message and tool token consumption when constructing windows. An explicitly provided strategy is always used; when `None`, TiktokenCounter is used only if `ContextEngineConfig.enable_tiktoken_counter=True`, otherwise built-in character-based estimation is used. Default value: `None`.
 
 **Returns**:
 
