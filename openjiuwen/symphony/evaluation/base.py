@@ -424,7 +424,7 @@ def _parse_llm_response(response: Any) -> Mapping[str, Any]:
         response = response.strip()
         fence_prefix = "```json"
         if response[: len(fence_prefix)].casefold() == fence_prefix and response.endswith("```"):
-            response = response[len(fence_prefix) : -3].strip()
+            response = response.removeprefix(response[: len(fence_prefix)]).removesuffix("```").strip()
         response = json.loads(response)
     if not isinstance(response, Mapping):
         raise TypeError("the model response is not a mapping")
