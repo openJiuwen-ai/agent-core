@@ -8,7 +8,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/scheduling/` |
-| 最近一次修订日期 | 2026-08-06 |
+| 最近一次修订日期 | 2026-08-10 |
 | 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback） |
 
 ## 范围 / 边界
@@ -121,7 +121,7 @@ kernel 侧：
 - `_build_wake_callback()`：有调度器时组合 "coordination dispatch → scheduler.on_event"，否则裸 dispatch。
 - `notify_team_built()`：build_team 成功回调（`TeamAgent._mark_team_built`）→ 存在调度器则 `activate()`。
 
-配置消费（全部只在 leader 侧，不跨进程镜像）：`TeamAgentSpec.verify_vote_threshold`（默认 2/3，(0,1]）、`default_max_review_rounds`（默认 3，≥1）、`review_stall_timeout`（默认 1800s，>0）、`enable_task_verification`（提示词驱动，`CapabilityOverrides` 可在 build_team 覆盖）。
+配置消费（全部只在 leader 侧，不跨进程镜像）：`TeamAgentSpec.verify_vote_threshold`（默认 2/3，(0,1]）、`default_max_review_rounds`（默认 3，≥1）、`review_stall_timeout`（默认 1800s，>0）、`enable_task_verification`（提示词驱动，`CapabilityOverrides` 可在 build_team 覆盖；该参数只在 scheduled 下向模型暴露——本节这些配置都只有 scheduled 才有消费者，见 [[F_76]] 与 `S_08` 不变量 21b）。
 
 ## 数据结构
 

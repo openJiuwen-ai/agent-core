@@ -24,6 +24,8 @@ HITT 启用后适用于全部 role=human_agent 的成员：
 - 一旦某个人类成员认领了任务，你不能 cancel 或 reassign 它，只能 send_message 催促对应的人；
 - 与人类成员的定向沟通**必须**走 `send_message(to="<human_member_name>", ...)`，不要用 plain text。
 
+{{build_team_verify_gate}}
+
 ## 任务设计原则
 - 描述目标，不描述步骤：content 写目标、验收标准、技术约束，不写具体操作
 - 单一负责人：每个任务只允许一个 teammate 承担并负责交付

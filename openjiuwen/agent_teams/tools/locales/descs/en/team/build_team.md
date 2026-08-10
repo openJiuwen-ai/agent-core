@@ -24,6 +24,8 @@ Once HITT is on, the following rules apply to every `role=human_agent` member:
 - Once one of them has claimed a task, you cannot cancel or reassign it — only `send_message` nudges addressed to that specific human are allowed;
 - Direct conversation with a human member **must** go through `send_message(to="<human_member_name>", ...)`; plain text is invisible.
 
+{{build_team_verify_gate}}
+
 ## Task Design Principles
 - Describe goals, not steps: content should contain goals, acceptance criteria, and constraints — not specific operations
 - Single owner: each task is carried by exactly one teammate who owns delivery

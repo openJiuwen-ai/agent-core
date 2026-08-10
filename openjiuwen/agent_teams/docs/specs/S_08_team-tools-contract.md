@@ -19,7 +19,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-08-08 |
+| 最近一次修订日期 | 2026-08-10 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md |
 
 ## 范围 / 边界
@@ -242,8 +242,9 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `view_task(action=in_review)` 是 reviewer 拉取待验证任务的入口。
 21. **dispatch_mode 是静态 spec 配置，`build_team` 不选择协调模式**（F_62）。系统提示词与
     工具描述按模式在构建期装配、每套一份、互不混写；`build_team` 的运行时开关只有
-    `enable_hitt` / `enable_task_verification`（后者是提示词驱动的"验证预期"开关，覆盖值
-    随 spec 记录的 `dispatch_mode` 一起写进 `team_info` 行——行是记录，spec 是运行时真相）。
+    `enable_hitt` 与 `enable_task_verification`（后者是提示词驱动的"验证预期"开关，
+    **且本身受 dispatch 门控**，见不变量 21b；覆盖值随 spec 记录的 `dispatch_mode`
+    一起写进 `team_info` 行——行是记录，spec 是运行时真相）。
 
 21a. **`build_team` 的返回值承载 leader 的全部协同准则**（[[F_76]]）。leader 的系统提示词只留
     一段 bootstrap（身份 + build_team/swarmflow 分流 + "先建队"），role / workflow / dispatch /
@@ -255,7 +256,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     任何工具的 schema）。这不违反不变量 21——模式仍由 spec 静态决定，`build_team` 只是**读**它
     来决定披露哪一套。
 
-21b. **verify 闸是 dispatch 门控的能力，`update_task` 双层执法**（[[F_76]]）。`reviewer` /
+21b. **verify 闸是 dispatch 门控的能力，`update_task` 与 `build_team` 双层执法**（[[F_76]]）。`reviewer` /
     `max_review_rounds` 两个属性只在 `dispatch_mode == "scheduled"` 时进 `update_task` 的 schema，
     描述里的 `{{update_task_verify_gate}}` 槽用**同一个信号**门控——参数与讲这个参数的散文一起出现、
     一起消失。第二层在 `invoke`：偷传（MCP 客户端不过 schema）**报错拒掉，不静默剥离**，且在任何写库
@@ -264,6 +265,16 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     assignee 唯一的活跃任务名额。**不拆成两个工具类**：两形态 `invoke` 的 209 行里 177 行逐字相同且
     全是有状态行为，按本 spec 的形态判据应走属性级门控（同 `spawn_teammate` 的 fork），不是独立类。
     与不变量 21 不冲突——模式仍由 spec 静态决定，工具只是读它来决定挂不挂这两个属性。
+
+    **`build_team` 的 `enable_task_verification` 走同一道门**：这个开关唯一能开关的东西就是
+    verify 闸，而闸只在 scheduled 下存在（三个消费点——`create_task` 的 scheduled 形态剥 reviewer、
+    `update_task` 剥 reviewer、`TeamScheduler._reconcile_reviews` 短路——没有一个在 autonomous 下
+    可达）。所以 autonomous 时它既不进 schema，`{{build_team_verify_gate}}` 那节散文也一起消失，
+    `invoke` 对偷传同样报错拒掉。**scheduled 时返回结果必须回带实际生效值**
+    （`data["enable_task_verification"]` + `map_result` 的 `task_verification=`）：spec 天花板会把
+    leader 要的 `True` 收窄成 `False`（`effective = spec and (arg if arg is not None else True)`），
+    而这个开关**不像 `enable_hitt` / `enable_bridge` 那样撞天花板就 `raise_error`，是静默收窄**——
+    回带生效值是 leader 唯一能发现自己没拿到验证闸的通道，否则它会围绕一个不存在的闸去配 reviewer。
 
 22. **`send_message` 的 `content` 有硬上限，超限即拒、且提示如何改走文件通道**（F_64）。
     `tool_message.MAX_CONTENT_CHARS`（当前 2000）以**字符**计——不依赖 tokenizer、不按语言

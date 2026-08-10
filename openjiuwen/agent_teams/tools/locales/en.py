@@ -33,11 +33,12 @@ STRINGS: dict[str, str] = {
         "explicitly out of scope"
     ),
     "build_team.enable_task_verification": (
-        "Whether task verification is expected for this instance; accepts true / false / "
-        "omitted (inherit the TeamAgentSpec setting). When on, teammate task completions "
-        "enter IN_REVIEW for verdict; when off they complete directly. "
-        "Reviewer assignment is unaffected by this switch — you should assign reviewers "
-        "to critical delivery tasks regardless of this flag"
+        "Whether the verify gate runs for this instance; accepts true / false / "
+        "omitted (inherit the TeamAgentSpec setting). When on, a teammate completing a task "
+        "that carries reviewers moves it to IN_REVIEW for a verdict; when off it completes "
+        "directly and any reviewer written into create_task / update_task is ignored. "
+        "The parameter is inert when the user's config is false — the value that actually "
+        "took effect comes back as task_verification in the result"
     ),
     # ===== checkpoint ==========================================================
     # checkpoint._desc lives in descs/en/member/checkpoint.md

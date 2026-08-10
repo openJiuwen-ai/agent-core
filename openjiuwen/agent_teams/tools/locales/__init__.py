@@ -67,6 +67,11 @@ _FRAGMENTS_DIRNAME = "fragments"
 
 _SLOT_PATTERN = re.compile(r"\{\{(\w+)\}\}")
 
+#: A newline followed by two or more blank lines. Templates put a blank line on
+#: each side of a section-level slot, so omitting one collapses into a run that
+#: has to be squeezed back down to a single paragraph break.
+_BLANK_RUN_PATTERN = re.compile(r"\n(?:[ \t]*\n){2,}")
+
 
 @cache
 def _desc_index(lang: str) -> dict[str, Path]:
@@ -152,7 +157,8 @@ def _render_desc(tmpl: PromptTemplate, desc_key: str, lang: str, omit: frozenset
         lang: Language code the fragments are loaded for.
         omit: Slots whose capability is switched off; each collapses to an
             empty string and its fragment file is never read. Slots outside
-            this set must still resolve.
+            this set must still resolve. Spacing is normalised afterwards, so
+            an omitted slot leaves no trace of where it used to sit.
 
     Raises:
         FileNotFoundError: when a declared slot has no fragment file.
@@ -162,8 +168,12 @@ def _render_desc(tmpl: PromptTemplate, desc_key: str, lang: str, omit: frozenset
     if not slots:
         return tmpl.content
     fills = {slot: "" if slot in omit else _load_fragment(slot, lang) for slot in slots}
-    # Strip so an omitted trailing slot leaves no dangling blank lines.
-    rendered = tmpl.format(fills).content.strip()
+    # An omitted slot must leave the surrounding prose reading as if the slot
+    # had never been there: collapse the blank-line run it leaves in the middle
+    # of a template, and strip the one it leaves at either end. Both come from
+    # the same convention -- a section-level slot sits on its own line with a
+    # blank line on each side.
+    rendered = _BLANK_RUN_PATTERN.sub("\n\n", tmpl.format(fills).content).strip()
     # Guard against a fragment carrying its own placeholder, and against the
     # assembler's silent "reinstate the {{literal}}" behaviour ever reaching a
     # model-facing string.

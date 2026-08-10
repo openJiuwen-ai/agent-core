@@ -6,8 +6,8 @@
 |---|---|
 | 日期 | 2026-08-08 |
 | 状态 | **已实现** |
-| 范围 | `prompts/`（新增 `leader_bootstrap.md` + `task_state_autonomous.md` / `task_state_scheduled.md` cn/en、`build_leader_bootstrap_section` / `build_leader_policy_disclosure` / `build_team_task_state_section`、`leader_policy.md` 去槽 + 摘除状态机一节、`leader_swarmflow.md` 收尾句改写）、`rails/team_policy_rail.py`（leader 分支）、`tools/tool_team.py`（`BuildTeamTool` 承载披露）、`tools/tool_factory.py` + `rails/team_tool_rail.py` + `rails/elements.py` + `agent/agent_configurator.py`（`team_mode` 接线）、`tools/locales/descs/*/build_team.md`（返回内容说明）、`core/context_engine/processor/compressor/`（压缩后重注入） |
-| 测试基线 | `python -m pytest tests/unit_tests --override-ini="addopts="` → **14448 passed, 308 skipped, 3 xfailed** |
+| 范围 | `prompts/`（新增 `leader_bootstrap.md` + `task_state_autonomous.md` / `task_state_scheduled.md` cn/en、`build_leader_bootstrap_section` / `build_leader_policy_disclosure` / `build_team_task_state_section`、`leader_policy.md` 去槽 + 摘除状态机一节、`leader_swarmflow.md` 收尾句改写）、`rails/team_policy_rail.py`（leader 分支）、`tools/tool_team.py`（`BuildTeamTool` 承载披露 + `enable_task_verification` 的 dispatch 门控）、`tools/tool_factory.py` + `rails/team_tool_rail.py` + `rails/elements.py` + `agent/agent_configurator.py`（`team_mode` 接线）、`tools/locales/descs/*/build_team.md`（返回内容说明 + `{{build_team_verify_gate}}` 槽）、`tools/locales/descs/*/fragments/build_team_verify_gate.md`（新增）、`tools/locales/{cn,en}.py`（参数文案纠错）、`tools/locales/__init__.py`（节级槽 omit 后的间距归一化）、`core/context_engine/processor/compressor/`（压缩后重注入） |
+| 测试基线 | `python -m pytest tests/unit_tests --override-ini="addopts="` → **14448 passed, 308 skipped, 3 xfailed**；补上 `build_team` 的 dispatch 门控后（2026-08-10，rebase 到 upstream/develop 之上）→ **14595 passed, 308 skipped, 3 xfailed** |
 | Refs | #984 |
 | 关系 | 直接动因是 F_62 / F_73 把调度模式的验证层做厚之后暴露的问题。复用 F_57 的"工具形态在构造期分化"思路，把它从工具 schema 扩展到提示词投递。与 F_70（团队状态走对话历史）同源：都在回答"这段内容该在什么时刻、以什么身份到达成员" |
 
@@ -88,6 +88,71 @@ leader 的系统提示词是一次性拼死的：role policy、workflow、dispat
 
 `test_autonomous_never_mentions_the_verify_gate` 是这条的回归闸：双语断言 `reviewer` /
 `in_review` / `verify_task` / `验证` 四个词在 autonomous 模板里一个都不出现。
+
+### 2a-2. `build_team(enable_task_verification=...)` 走同一道门
+
+同一道门还漏了一个入口：`build_team` 的 `enable_task_verification`。这个开关能开关的东西**只有**
+verify 闸，而闸只在 scheduled 下存在——三个消费点（`create_task` 的 scheduled 形态剥 reviewer、
+`update_task` 剥 reviewer、`TeamScheduler._reconcile_reviews` 整段短路）在 autonomous 下**一个都
+不可达**。所以在 autonomous 下把它摆给模型，是让模型去调一个既开不了也关不了的开关。
+
+门控与 `update_task` 逐字同形：属性只在 `dispatch_mode == "scheduled"` 进 schema，
+`{{build_team_verify_gate}}` 那节散文用同一个信号一起消失，`invoke` 对偷传报错拒掉而非静默剥离。
+
+**scheduled 下必须回带实际生效值**（`data["enable_task_verification"]` + `map_result` 里的
+`task_verification=`）。理由是这个开关的天花板语义与 `enable_hitt` / `enable_bridge` **不同**：后两者
+撞天花板会 `raise_error`，它是静默收窄——
+
+```python
+effective = spec_ceiling and (arg if arg is not None else True)
+```
+
+spec 配 `False` 时，leader 传 `True` 得到的是 `False`，且没有任何报错。回带生效值是 leader 唯一
+能发现"我要的验证闸没拿到"的通道；不回带，它就会围绕一个不存在的闸去给任务配 reviewer，而那些
+reviewer 会在 `create_task` / `update_task` 里被静默剥掉。**这条静默收窄是 F_62 既有的、文档化的
+契约**（描述里明写"用户配置 false → 无论传什么都不生效"），这次不改它，只把生效值补回结果里。
+
+顺带修掉参数文案的一处**反向错误**：`build_team.enable_task_verification` 原文写"reviewer 分配不受
+此开关影响——无论开关值如何，你都应为关键交付任务指派 reviewer"，而代码在开关关闭时**恰恰会剥掉
+reviewer**（`tool_task.py` 两处），同一工具的 `_desc` 段落也写的是"reviewer 会被忽略"。三处互相矛盾，
+以代码为准改文案。
+
+### 2a-3. capability 槽的间距：omit 掉正文中间的 `##` 节
+
+`build_team_verify_gate` 是第一个**位于正文中间的 `##` 级 capability 槽**（`fork_usage` 在文末靠
+`strip()` 兜住，`update_task_verify_gate` 是 bullet 不是节）。模板按既有约定在节级槽两侧各留一个
+空行，于是 omit 时槽塌成空串会留下**两个连续空行**——一个"这里本来有东西"的洞。模型读的是这段
+raw markdown，洞正是让它去问"是不是少了什么能力"的诱因，与 2a 里"不点名不存在的能力"同一条规则。
+
+修在 `_render_desc` 一处：插值后把 3+ 连续换行折回 2 个，与既有的 `strip()`（管首尾槽）是同一个
+意图的两半。全仓 desc / fragment 无一处故意使用连续空行，所以这个归一化没有副作用。顺带把
+`update_task.md` 里槽前缺的那个空行补上——之前不能补正是因为补了会在 omit 时留双空行，现在安全了。
+
+### 2b. cold recovery 的兜底通道：准则经 `<team-context>` 直接注入
+
+披露挂在 `build_team` 上，那么**不调 `build_team` 的 leader** 就什么也拿不到——冷恢复（团队已存在、
+`recover_team()` 路径）正是这种情况：它带着 bootstrap 跑起来，只知道"要建团队"，对自己刚接手的这个
+团队一无所知。
+
+兜底复用 [[F_70]] 已有的 `TeamContextTracker`，不新造通道：在成员的对话里补投一条
+`<team-context kind="collaboration-policy">`，正文是同一份 `build_leader_policy_disclosure(...)`。
+
+三道闸，顺序即语义（`_policy_block`）：
+
+1. **基线标志 `policy_emitted`**——准则是常驻指令不是会变的事实，一个成员 session 只发一次，无探针。
+   基线随 F_70 的既有机制持久化在成员自己的 child `AgentSession`，所以 rail 每轮重建也不会重发。
+2. **`backend.policy_disclosed()`**——这一轮是自己建的团队、准则刚从 tool result 拿到，此时
+   **推进基线但不渲染**，否则下一次调用就会把工具刚说过的话再说一遍。该标志是进程内内存态，
+   语义正是"*本次运行*有没有披露过"，而冷恢复必然在新进程里得到 False。
+3. **团队行必须存在**（`get_team_updated_at() != 0`）——`build_team` 之前没有团队可治理，
+   而且 leader 马上就会拿到。探针在行不存在时读 0，这一条自己就会解除。
+
+非 leader 角色不进这个通道：teammate 的协同约定 spawn 时固定、留在系统提示词里，恢复时白拿。
+
+`kind` 属性是这次给 `<team-context>` 新加的（默认仍无属性）。**它不是分类洁癖**：其余
+`<team-context>` 都是"事实"，这一块是"指令"，两者读法不同，所以 `inbound_tags.md`（cn/en）里明确
+写出这条例外——不写的话 leader 会把一份行为契约当成背景资料读过去。正文前另有一句
+`i18n.team_context.policy_recovered` 说明它为什么出现在这里、以及必须照做。
 
 ### 3. 只有 leader 走这条路
 

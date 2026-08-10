@@ -100,7 +100,7 @@ PostgreSQL / MySQL 后端（`engine.py`），不要用 SQLite。
 
 | 工具 | Leader | Teammate | 说明 |
 |---|---|---|---|
-| `build_team` | ✓ | | 入口工具 —— 描述里承载完整工作流。F_62：`enable_task_verification` 参数可覆盖 spec 默认（提示词驱动的"验证预期"开关）；dispatch_mode 是静态 spec 配置，**不在此选择**，spec 值随行记录进 `team_info`。**F_76：`map_result` 在建队结果之后附上 leader 的完整协同准则**（`prompts.build_leader_policy_disclosure` 按本次调用选定的 `dispatch_mode` / `team_mode` / `lifecycle` / `teammate_mode` 与**实际生效的** `enable_hitt` 裁剪）——leader 的系统提示词里只留一段 bootstrap，其余全部经这条返回值渐进式披露。因此工厂要给它传那几个装配参数（`create_team_tools` 的 `team_mode` 参数就是为它加的） |
+| `build_team` | ✓ | | 入口工具 —— 描述里承载完整工作流。dispatch_mode 是静态 spec 配置，**不在此选择**，spec 值随行记录进 `team_info`。F_62 的 `enable_task_verification`（提示词驱动的"验证预期"开关，可在 spec 天花板内覆盖）**是 dispatch 门控的属性（F_76）**：`dispatch_mode == "scheduled"` 才挂它、才填描述里的 `{{build_team_verify_gate}}` 槽，autonomous 下属性与那节散文一起消失、`invoke` 把偷传的值报错拒掉——它唯一能开关的就是 verify 闸，而闸的三个消费点（scheduled `create_task` 剥 reviewer / `update_task` 剥 reviewer / `TeamScheduler._reconcile_reviews` 短路）在 autonomous 下一个都不可达。scheduled 下返回结果**回带实际生效值**（`data["enable_task_verification"]` + `map_result` 的 `task_verification=`）：spec 天花板对这个开关是**静默收窄**（不像 `enable_hitt` / `enable_bridge` 撞顶就 `raise_error`），回带生效值是 leader 唯一能发现自己没拿到验证闸的通道。**F_76：`map_result` 在建队结果之后附上 leader 的完整协同准则**（`prompts.build_leader_policy_disclosure` 按本次调用选定的 `dispatch_mode` / `team_mode` / `lifecycle` / `teammate_mode` 与**实际生效的** `enable_hitt` 裁剪）——leader 的系统提示词里只留一段 bootstrap，其余全部经这条返回值渐进式披露。因此工厂要给它传那几个装配参数（`create_team_tools` 的 `team_mode` 参数就是为它加的） |
 | `clean_team` | ✓（仅 temporary） | | 要求先关停每个 teammate；`lifecycle="persistent"` 时不接线（那类团队由 operator 经 SDK facade 拆除） |
 | `spawn_teammate` | ✓ | | 拉起一个普通 LLM teammate；可选 `model_config_allocator` 回调；扁平 schema `member_name`/`display_name`/`desc`/`prompt?`/`model_name?`/`isolation?`/`permissions?`。始终接线，但**上下文继承是属性级门控**：`fork_enabled()` 为真才加 `fork`/`fork_source`/`compact` 三个属性，并同时填上描述里的 `{{fork_usage}}` 槽；关时三个属性与那一整节散文一起消失，`invoke` 把偷传进来的 fork 参数在建成员行之前拒掉（MCP 客户端不过 schema）。见 F_75 |
 | `checkpoint` | ✓ | ✓ | 为本成员当前上下文存一个命名快照，供 `spawn_teammate(fork="<name>")` 继承；仅 `fork_enabled()`（`TeamAgentSpec.enable_fork`）时接线，`invoke` 内保留同源兜底。外部成员（`external/client.py` / `sdk_mcp.py`）另行 `exclude_tools` 排除——它们没有 `DeepAgent`，快照无从取起 |
@@ -227,9 +227,12 @@ schema 复用走模块级纯函数，不是复制粘贴：
 - **capability 槽**：描述一个可选能力的槽，构造工具时传
   `t(desc_key, omit={"<slot>"})` 让它收敛为空串（`spawn_teammate` 的
   `fork_usage`，gate 是 `fork_enabled()`；`update_task` 的
-  `update_task_verify_gate`，gate 是 `dispatch_mode == "scheduled"`）。**omit 用的信号必须与塑造 schema
-  的那个信号同源**——参数与讲这个参数的散文一起出现、一起消失。渲染后统一
-  `strip()`，文末的槽被省略时不留空行。这与 `prompts/` 侧 `leader_policy` 的
+  `update_task_verify_gate` 与 `build_team` 的 `build_team_verify_gate`，gate 都是
+  `dispatch_mode == "scheduled"`）。**omit 用的信号必须与塑造 schema
+  的那个信号同源**——参数与讲这个参数的散文一起出现、一起消失。**omit 掉的槽不留痕迹**：渲染后
+  统一 `strip()` 处理首尾槽，并把 3+ 连续换行折回 2 个处理正文中间的槽——模板按约定在节级槽
+  两侧各留一个空行，不折叠就会留下"这里本来有东西"的双空行洞，而模型读的是这段 raw markdown。
+  所以任何 desc / fragment **都不要故意使用连续空行**。这与 `prompts/` 侧 `leader_policy` 的
   `{{collaboration_mechanism}}`（gate `swarmflow_enabled`）是同一个模式：
   **能力关掉时，讲这个能力的文案必须跟着消失**。
 - **槽由 loader 从模板里枚举并强制填满**，缺片段 → 构造期 `FileNotFoundError`（带期望路径）；
@@ -433,7 +436,9 @@ descs/<lang>/
 `test_tool_message.py` 断言，改常量必须同步改片段）、
 `create_task_edge_semantics`、`create_task_granularity`（两个 `create_task` 形态共用）、
 `fork_usage`（**capability 槽**，`spawn_teammate` 专用，gate `fork_enabled()`）、
-`update_task_verify_gate`（**capability 槽**，`update_task` 专用，gate `dispatch_mode == "scheduled"`，F_76）。
+`update_task_verify_gate`（**capability 槽**，`update_task` 专用，gate `dispatch_mode == "scheduled"`，F_76）、
+`build_team_verify_gate`（**capability 槽**，`build_team` 专用，gate 同上，F_76；首个位于正文中间的
+`##` 节级 capability 槽——间距归一化就是为它加的）。
 
 ## Prompt 分层：工具描述 vs 系统提示词
 

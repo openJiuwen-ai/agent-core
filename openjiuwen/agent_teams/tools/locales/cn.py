@@ -26,9 +26,10 @@ STRINGS: dict[str, str] = {
         "用户表达「我要加入团队」时设为 true；明确不需要人类协作时设为 false"
     ),
     "build_team.enable_task_verification": (
-        "本团队实例是否要求任务校验。可选 true / false / 不传（继承 TeamAgentSpec 配置）。"
-        "开启后 teammate 完成任务将进入 IN_REVIEW 等验证者裁决；关闭则直接标记完成。"
-        "reviewer 分配不受此开关影响——无论开关值如何，你都应为关键交付任务指派 reviewer"
+        "本团队实例是否启用验证闸。可选 true / false / 不传（继承 TeamAgentSpec 配置）。"
+        "开启后 teammate 完成配了 reviewer 的任务将进入 IN_REVIEW 等验证者裁决；"
+        "关闭则直接标记完成，且 create_task / update_task 里写的 reviewer 会被忽略。"
+        "用户配置为 false 时本参数不生效，实际生效值见返回结果的 task_verification"
     ),
     # ===== checkpoint ==========================================================
     # checkpoint._desc lives in descs/cn/member/checkpoint.md
