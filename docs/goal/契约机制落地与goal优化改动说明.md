@@ -117,6 +117,19 @@ if not isinstance(data, dict):
 - assessor 1 次评估（29.5s）→ evidence 明确「**一、契约逐项核对结果：1.完成✅ 2.验证✅ 3.约束✅ 4.范围✅ 5.停止条件**」→ COMPLETED，attempt_count=1；
 - 对比无契约跑：assessor 从「凭 agent 自证语气判」升级到「按契约 5 字段逐项核对判」。
 
+### 端到端（web host，契约机制方式2 + interrupt 修复）
+
+在 jiuwenswarm web host 完整流程验证契约闭环，**发现并修复一个 interrupt 场景的 goal 死循环 bug**（`tools/goal.py`）：
+
+**Bug**：goal round 被权限中断（HITL/permission pause）时，agent 已提交 COMPLETE 报告，但**下一轮 `GoalReportSink.begin_attempt` 无条件清空 sink**，把未消费的终态报告丢掉。interrupt 路径拿不到报告 → 走 `skip assessment on interrupt` → goal 永远 ACTIVE → task loop 无限重驱动已完成的 goal。日志特征：`[GoalLifecycle] skip assessment on interrupt` 每秒数十上百条、`[GoalEvaluator]` 0 次调用、agent 反复提交 complete 却永不 finalize。
+
+**修复**：`begin_attempt` 只清空 continue/空报告，**保留未消费的 COMPLETE/BLOCKED 终态报告**，让跨 round 边界的 interrupt with_iteration 仍能 consume 并 finalize。新增回归测试 `test_goal_interrupt_after_begin_attempt_finalizes_pending_complete`。
+
+**验证**：修复后 web host 重跑 388，goal 评估链路首次打通——
+- `[GoalLifecycle] interrupt with pending complete report; running transcript assessment`（不再 skip）
+- `[GoalEvaluator] HYBRID: agent reported complete, verifying via transcript`（评估真正跑起来）
+- 首次评估返回 continue（agent 产出 19 页，超 388 rubric 预期的 ~10 页）→ agent 改进 → 再次提交 complete → 交付 `战略汇报.pptx`（19 页，关键数据与源文件核对通过），目标完成。
+
 ## 五、未改的（确认）
 
 | 不改 | 原因 |
@@ -124,7 +137,7 @@ if not isinstance(data, dict):
 | `GoalEvaluator.assess()` | 契约经 prompt 注入 assessor 模型，由模型语义判断，transcript_response 解析逻辑不变 |
 | `GoalStopConfig` / `GoalStopStrategy` | 契约与停止策略正交 |
 | `SessionGoalStore` | 走 GoalRecord.to_dict/from_dict，contract 自动持久化 |
-| `tools/goal.py`（submit_goal_report/get_current_goal） | 与契约设置无关，agent 已从 `<goal_task>` 看到契约 |
+| `tools/goal.py`（submit_goal_report/get_current_goal 工具本身） | 契约设置不涉及这两个工具，agent 已从 `<goal_task>` 看到契约；但 `GoalReportSink.begin_attempt` 因 interrupt 死循环做了修复（见「四、验证结果」） |
 | `deep_agent.py` | 只调 manager 的 begin_attempt/ensure_active_goal_work_locked，不调 set |
 | `GoalOperationError` | 契约是正常字段，不引入新错误类型 |
 
