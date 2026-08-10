@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 from openjiuwen.symphony.retrieval.build.tree.builder import TreeBuilder
+from openjiuwen.symphony.retrieval.build.tree.prompts import EQUIVALENCE_GROUPING_PROMPT
 from openjiuwen.symphony.retrieval.build.tree.schema import Skill, TreeNode
 
 
@@ -203,6 +205,79 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
         self.assertEqual(group_id, "academic-literature-search")
         self.assertFalse(called["value"])
         self.assertEqual([node.id for node in root.children], ["search-research"])
+
+    def test_default_equivalence_group_keeps_cross_platform_variants(self) -> None:
+        builder = self._builder()
+        github = TreeNode(id="github-issues", name="GitHub Issues", description="在 GitHub 管理议题。")
+        gitlab = TreeNode(id="gitlab-tickets", name="GitLab Tickets", description="在 GitLab 处理工单。")
+        groups = {
+            "issue-management": {
+                "name": "Issue Management",
+                "leaf_ids": [github.id, gitlab.id],
+            }
+        }
+
+        normalized = getattr(builder, "_normalize_equivalence_groups")([github, gitlab], groups)
+
+        self.assertEqual(builder.settings.equiv_min_lexical_similarity, 0.0)
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual({leaf.id for leaf in normalized[0]["leaf_nodes"]}, {github.id, gitlab.id})
+
+        builder.settings.equiv_min_lexical_similarity = 0.12
+        guarded = getattr(builder, "_normalize_equivalence_groups")([github, gitlab], groups)
+        self.assertEqual(len(guarded), 2)
+
+    def test_configured_taxonomy_keeps_fixed_levels_and_builds_terminal_groups(self) -> None:
+        builder = self._builder()
+        builder.config.root_categories = {
+            "office": {
+                "name": "Office",
+                "children": {"issues": {"name": "Issue Management"}},
+            }
+        }
+        builder.operations = replace(
+            builder.operations,
+            discover_equivalence_groups=lambda scope, leaves, verbose=False: {
+                "issue-management": {
+                    "name": "Issue Management",
+                    "leaf_ids": [leaf.id for leaf in leaves],
+                }
+            },
+        )
+        issue_scope = TreeNode(
+            id="issues",
+            name="Issue Management",
+            depth=2,
+            parent_id="office",
+            skills=[
+                _skill("github-issues", name="GitHub Issues"),
+                _skill("gitlab-tickets", name="GitLab Tickets"),
+            ],
+        )
+        office = TreeNode(
+            id="office",
+            name="Office",
+            depth=1,
+            parent_id="root",
+            children=[issue_scope],
+        )
+        root = TreeNode(id="root", name="Root", children=[office])
+
+        getattr(builder, "_normalize_to_equivalence_groups")(root)
+
+        self.assertEqual(root.children, [office])
+        self.assertEqual(office.children, [issue_scope])
+        self.assertEqual(len(issue_scope.children), 1)
+        group = issue_scope.children[0]
+        self.assertEqual(group.id, "issue-management")
+        self.assertEqual(group.depth, 3)
+        self.assertFalse(group.children)
+        self.assertEqual({skill.id for skill in group.skills}, {"github-issues", "gitlab-tickets"})
+
+    def test_equivalence_prompt_uses_relaxed_business_semantics(self) -> None:
+        self.assertIn("Platform, provider, API versus CLI", EQUIVALENCE_GROUPING_PROMPT)
+        self.assertIn("primary or a major directly usable capability", EQUIVALENCE_GROUPING_PROMPT)
+        self.assertIn("Incidental feature overlap", EQUIVALENCE_GROUPING_PROMPT)
 
 
 if __name__ == "__main__":

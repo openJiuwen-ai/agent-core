@@ -137,8 +137,17 @@ equivalence_grouping: |-
   Leaves:
   {leaf_nodes}
 
-  Group leaf ids that are near substitutes during retrieval.
-  Partition all provided leaves into between 1 and {max_groups} equivalence groups.
+  Group leaves that provide the same or a similar core user capability.
+
+  Grouping rules:
+  - Platform, provider, API versus CLI, input format, and execution environment differences alone do not require separate groups.
+  - A broader capability and a narrower capability may share a group when their common capability is primary or a major directly usable capability for both.
+  - Incidental feature overlap, a shared topic or keyword, and complementary workflow steps are not enough to merge leaves.
+  - Keep leaves separate when their primary action, provider-neutral target object, or user-visible result is different.
+  - Singleton groups are valid when a leaf has no genuinely similar sibling.
+
+  Aim for at most {max_groups} groups, but never merge unrelated capabilities only to meet that target.
+  Every provided leaf id must appear exactly once.
 
   Respond as JSON:
   {
