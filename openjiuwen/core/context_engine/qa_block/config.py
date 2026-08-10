@@ -17,7 +17,7 @@ class QABlockConfig(BaseModel):
     l1_llm_min_chars: int = Field(default=1500, gt=0)
     l1_corpus_per_tool_max_chars: int = Field(default=600, gt=0)
     l1_corpus_max_tool_results: int = Field(default=12, gt=0)
-    history_qa_buffer_size: int = Field(default=3, gt=0)
+    history_qa_buffer_size: int = Field(default=6, gt=0)
     async_freeze_persist: bool = True
     freeze_overview_await_s: float = Field(
         default=3.0,
@@ -34,7 +34,15 @@ class QABlockConfig(BaseModel):
         ),
     )
     catalog_max_tokens: int = Field(default=8000, gt=0)
-    catalog_short_max_chars: int = Field(default=150, gt=0)
+    catalog_short_max_chars: int = Field(
+        default=150,
+        gt=0,
+        description=(
+            "Deprecated: LRU eviction in build_catalog_text(max_tokens=...) replaces "
+            "the old truncate-to-short strategy. Kept for backward config compatibility; "
+            "no longer read by any code path."
+        ),
+    )
     hydrate_artifact_aware: bool = True
     selector_enabled: bool = True
     selector_mode: Literal["rule", "llm", "hybrid"] = "llm"
@@ -47,3 +55,25 @@ class QABlockConfig(BaseModel):
     selector_all_small_per_block_tokens: int = Field(default=2500, gt=0)
     selector_all_small_total_tokens: int = Field(default=15000, gt=0)
     selector_all_small_max_blocks: int = Field(default=8, gt=0)
+    default_hydrate_recent_blocks: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Always hydrate the most recent N history QA blocks into context, "
+            "independent of selector. Ensures recent tool results stay visible "
+            "after strip_active_buffer. Set to 0 to disable."
+        ),
+    )
+    max_total_hydrate_blocks: int = Field(
+        default=6,
+        gt=0,
+        description="Maximum total blocks to hydrate (default recent + selector selected).",
+    )
+    hydrate_max_tokens: int = Field(
+        default=30000,
+        gt=0,
+        description=(
+            "Token budget safety net for hydrated history blocks. "
+            "If total approx_tokens exceeds this, oldest blocks are dropped first."
+        ),
+    )

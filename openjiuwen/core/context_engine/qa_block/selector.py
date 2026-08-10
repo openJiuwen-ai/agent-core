@@ -402,6 +402,10 @@ class QABlockSelector:
         catalog_text: str | None = None,
     ) -> tuple[list[str], str, bool]:
         """Returns (qa_ids, reason, llm_succeeded)."""
+        # Intentionally do NOT pass max_tokens here: the selector needs the full
+        # catalog (all L1 entries) to make informed selection decisions.  LRU
+        # eviction is applied only to the rendered [QA_BLOCK_CATALOG] prompt section
+        # via build_catalog_text(max_tokens=...) in the assembly rail.
         catalog = catalog_text if catalog_text is not None else build_catalog_text(registry)
         system_prompt = _SELECTOR_SYSTEM_PROMPT.format(
             max_blocks=self._config.max_preload_blocks,

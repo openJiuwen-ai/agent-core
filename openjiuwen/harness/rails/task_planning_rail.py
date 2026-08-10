@@ -186,6 +186,41 @@ class TaskPlanningRail(DeepAgentRail):
             logger.warning("TaskPlanningRail: failed to remove tool, error: %s", exc)
 
     # -- hook methods --
+    async def before_invoke(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Flush terminal todo states into TaskPlan before the outer loop picks a task.
+
+        A prior round may have completed/cancelled todos in ``todo.json`` while
+        the persisted ``TaskPlan`` stayed stale (e.g. after interrupt/resume,
+        where ``_sync_plan_from_todos`` never fired on a todo tool call). On the
+        next invoke the outer loop would then call ``get_next_task()`` and bind a
+        stale task, whose title overrides the real user query. Reusing the
+        existing sync here guarantees the plan reflects todo terminal states
+        before task selection, so a fully-completed plan yields no next task and
+        the fresh user query is honoured.
+        """
+        session_id = (
+            ctx.session.get_session_id() if ctx.session else "N/A"
+        )
+        logger.info(
+            "TaskPlanningRail: >>> before_invoke plan sync START "
+            "session_id=%s (flushing todo terminal states into TaskPlan "
+            "before outer-loop task selection)",
+            session_id,
+        )
+        try:
+            await self._sync_plan_from_todos(ctx)
+        except Exception as exc:  # never block invoke on a best-effort sync
+            logger.warning(
+                "TaskPlanningRail: before_invoke plan sync failed, error: %s",
+                exc,
+            )
+        logger.info(
+            "TaskPlanningRail: <<< before_invoke plan sync DONE session_id=%s",
+            session_id,
+        )
+
     async def before_model_call(
         self, ctx: AgentCallbackContext
     ) -> None:
