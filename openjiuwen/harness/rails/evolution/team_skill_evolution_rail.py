@@ -218,6 +218,7 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         self._passive_evolution_pending = False
         self._host_completion_pending_session_id: Optional[str] = None
         self._completion_followup_pending_session_id: Optional[str] = None
+        self._team_id = team_id
         self._review_feedback_coordinator = None
         self._review_feedback_global_rail: SkillEvolutionRail | None = None
         self._review_feedback_skill_create_rail = None

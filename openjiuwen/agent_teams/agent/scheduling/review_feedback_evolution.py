@@ -141,8 +141,7 @@ class ReviewFeedbackEvolutionCoordinator:
             return
 
         # Several tasks may fail close together. Serialize attribution and
-        # member mutations so shared model use and Skill writes stay ordered:
-        # every per-assignee Rail writes into the one shared Skill library.
+        # member mutations so shared model use and copy-on-write stay ordered.
         async with self._task_evolution_lock:
             member_rail = self._member_rail_for(assignee, global_rail)
             if member_rail is None:
@@ -450,32 +449,21 @@ class ReviewFeedbackEvolutionCoordinator:
             self._member_rails[assignee] = rail
         return rail
 
-    @staticmethod
-    def _build_default_member_rail(assignee: str, global_rail: Any) -> Any:
-        """Build the standard auto-save Rail used for one assignee's evolution.
-
-        Skills live in exactly one physical library, so the Rail is rooted at
-        the global evolution store rather than at a per-member ``skills/``
-        directory. A member owns no Skill copy of its own; which Skills it may
-        see is a visibility declaration, not a second directory on disk.
-
-        Args:
-            assignee: Member the Rail is built for. The Rail carries no member
-                state today, but the provider contract is per-assignee and the
-                caller caches one Rail per member.
-            global_rail: The team's regular Skill Rail, source of the LLM,
-                model, language and Skill store.
-
-        Returns:
-            An auto-save ``SkillEvolutionRail`` over the single Skill library.
-        """
+    def _build_default_member_rail(self, assignee: str, global_rail: Any) -> Any:
+        """Build the standard auto-save member Rail in its private workspace."""
+        from openjiuwen.agent_teams.workspace_layout import team_member_workspace_path
         from openjiuwen.harness.rails.evolution import (
             EvolutionReviewRuntime,
-            SkillEvolutionRail,
+            MemberSkillEvolutionRail,
         )
 
-        return SkillEvolutionRail(
-            str(global_rail.evolution_store.base_dir),
+        member_skills_dir = team_member_workspace_path(self._team_id, assignee) / "skills"
+        member_skills_dir.mkdir(parents=True, exist_ok=True)
+        global_skills_dir = global_rail.evolution_store.base_dir
+        return MemberSkillEvolutionRail(
+            [str(member_skills_dir), str(global_skills_dir)],
+            member_skills_dir=str(member_skills_dir),
+            global_skills_dir=str(global_skills_dir),
             llm=global_rail.evolver.llm,
             model=global_rail.evolver.model,
             review_runtime=EvolutionReviewRuntime(),

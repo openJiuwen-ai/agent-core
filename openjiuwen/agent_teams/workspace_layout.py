@@ -62,7 +62,26 @@ def ensure_team_member_workspace_link(team_name: str, member_name: str) -> str:
     return str(workspace_path)
 
 
+def ensure_member_skill_copy(
+    *,
+    member_skills_dir: str | Path,
+    global_skills_dir: str | Path,
+    skill_name: str,
+) -> Path:
+    """Compatibility wrapper for the Core member Skill copy helper."""
+    from openjiuwen.harness.rails.evolution.member_skill_workspace import (
+        ensure_member_skill_copy as _ensure_member_skill_copy,
+    )
+
+    return _ensure_member_skill_copy(
+        member_skills_dir=member_skills_dir,
+        global_skills_dir=global_skills_dir,
+        skill_name=skill_name,
+    )
+
+
 __all__ = [
+    "ensure_member_skill_copy",
     "ensure_team_member_workspace_link",
     "team_member_workspace_path",
 ]
