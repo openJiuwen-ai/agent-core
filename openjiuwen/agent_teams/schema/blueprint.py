@@ -309,7 +309,7 @@ class TeamAgentSpec(BaseModel):
     "predefined" to lock the roster and drop the leader's
     ``spawn_member`` tool.
     """
-    dispatch_mode: Literal["autonomous", "scheduled"] = "scheduled"
+    dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
     """How a task reaches the member that executes it. Static configuration.
 
     Orthogonal to ``team_mode`` (which governs whether the roster can
@@ -323,7 +323,7 @@ class TeamAgentSpec(BaseModel):
     in favour of ``member_complete_task``. Prompts and tool shapes are
     assembled per mode at build time; the mode never changes at runtime.
     """
-    enable_task_verification: bool = True
+    enable_task_verification: bool = False
     """Team-level "verification expected" switch for the verify gate.
 
     Purely prompt-driven: when True the leader's task-creation guidance
