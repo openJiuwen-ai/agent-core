@@ -344,7 +344,7 @@ def _content_to_query_text(content: Any) -> str:
     string so callers fall back to ``no-query`` instead of JSON noise.
     """
     if isinstance(content, str) or content is None:
-        return _content_to_text(content)
+        return _strip_channel_envelope(_content_to_text(content))
     parts = content if isinstance(content, list) else [content]
     texts: list[str] = []
     for part in parts:
@@ -359,7 +359,33 @@ def _content_to_query_text(content: Any) -> str:
                     break
     if not texts:
         return ""
-    return _content_to_text("\n".join(texts))
+    return _strip_channel_envelope(_content_to_text("\n".join(texts)))
+
+
+def _strip_channel_envelope(text: str) -> str:
+    """Unwrap a ``lead-in line + JSON envelope`` channel wrapper for query labeling.
+
+    Channels may deliver user text as ``你收到一条消息：\\n{"content": "...", ...}``.
+    Indexed as-is, the envelope metadata (source, timezone, timestamp) dilutes
+    BM25 turn matching and yields useless archive slugs, while the real query
+    lives in the envelope's ``content`` field. Only unwrap when the payload is
+    clearly a JSON object with a non-empty string ``content``; a message whose
+    own first line starts with ``{`` is treated as genuine user text.
+    """
+    stripped = text.strip()
+    head, sep, payload = stripped.partition("\n")
+    payload = payload.strip()
+    if not sep or head.lstrip().startswith("{") or not payload.startswith("{"):
+        return text
+    try:
+        envelope = json.loads(payload)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(envelope, dict):
+        inner = envelope.get("content")
+        if isinstance(inner, str) and inner.strip():
+            return inner
+    return text
 
 
 def _content_to_text(content: Any) -> str:

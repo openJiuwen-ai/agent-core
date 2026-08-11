@@ -135,6 +135,34 @@ def test_archive_structured_content_without_text_yields_no_query_slug(tmp_path):
     assert Path(archive.path).name == f"{archive.memory_id}_no-query"
 
 
+def test_archive_unwraps_channel_envelope_for_query(tmp_path):
+    messages = [
+        UserMessage(
+            content='你收到一条消息：\n{"content": "帮我查一下昨天的报错", "source": "wecom"}'
+        ),
+        AssistantMessage(content="查看日志发现是超时。"),
+    ]
+
+    archive = _archive(tmp_path, messages)
+    archive_path = Path(archive.path)
+
+    turns = [json.loads(line) for line in (archive_path / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert turns[0]["query"] == "帮我查一下昨天的报错"
+    assert archive_path.name == f"{archive.memory_id}_帮我查一下昨天的报错"
+
+
+def test_archive_keeps_json_first_line_as_genuine_user_text(tmp_path):
+    messages = [
+        UserMessage(content='{"content": "这不是信封"}'),
+        AssistantMessage(content="收到。"),
+    ]
+
+    archive = _archive(tmp_path, messages)
+
+    turns = [json.loads(line) for line in (Path(archive.path) / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert turns[0]["query"] == '{"content": "这不是信封"}'
+
+
 def test_current_round_style_archive_uses_preceding_user_as_turn_query(tmp_path):
     messages = [
         AssistantMessage(content="Investigating the failing request."),
