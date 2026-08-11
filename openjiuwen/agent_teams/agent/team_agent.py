@@ -78,7 +78,7 @@ class TeamAgent(BaseAgent):
         super().__init__(card)
         self._configurator = AgentConfigurator(card)
         self._state = TeamAgentState()
-        self._named_checkpoints: dict[str, int] = {}  # name → message_count
+        self._named_checkpoints: dict[str, dict] = {}  # name → {count, description, created_by}
 
         self._spawn_manager = SpawnManager(
             state=self._state,
@@ -571,6 +571,7 @@ class TeamAgent(BaseAgent):
             team_backend = self._configurator.team_backend
             if team_backend is not None:
                 team_backend.set_store_checkpoint_fn(self.set_checkpoint)
+                team_backend.set_checkpoint_list_fn(lambda: self._named_checkpoints)
 
     def _setup_agent(
         self,
@@ -1157,7 +1158,8 @@ class TeamAgent(BaseAgent):
                             isinstance(fork_value, str)
                             and fork_value not in ("true", "false")
                         )
-                        ckpt_idx = self._named_checkpoints.get(fork_value) if is_named else None
+                        ckpt_record = self._named_checkpoints.get(fork_value) if is_named else None
+                        ckpt_idx = ckpt_record["count"] if ckpt_record else None
 
                         if compact:
                             if not is_named:
@@ -1188,6 +1190,7 @@ class TeamAgent(BaseAgent):
                                 "member=%s; falling back to full context",
                                 fork_value, teammate_id,
                             )
+                            await self._notify_fork_name_not_found(teammate_id, fork_value)
                         elif is_named:
                             fork_ctx = ForkContext.from_agent(
                                 native, checkpoint=ckpt_idx,
@@ -1248,19 +1251,58 @@ class TeamAgent(BaseAgent):
         )
         return None
 
+    async def _notify_fork_name_not_found(self, member: str, fork_name: str) -> None:
+        """Surface a wrong fork checkpoint name to the leader.
+
+        The spawn still proceeds with a full-context fallback, but the
+        leader is told which name was requested and which names actually
+        exist, so a naming mismatch is no longer silent.
+        """
+        from openjiuwen.agent_teams.i18n import t
+
+        available = ", ".join(sorted(self._named_checkpoints)) or "（无）"
+        try:
+            await self.message_manager.send_message(
+                content=t(
+                    "checkpoint.fork_not_found",
+                    fork=fork_name,
+                    member=member,
+                    available=available,
+                ),
+                to_member_name=self._member_name(),
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort, never block the spawn
+            team_logger.warning(
+                "[fork] failed to notify leader about missing checkpoint '%s': %s",
+                fork_name, exc,
+            )
+
     def share_checkpoints_with(self, other: "TeamAgent") -> None:
         """Share the leader's checkpoint namespace with another agent."""
         other.set_checkpoints_from(self._named_checkpoints)
 
-    def set_checkpoint(self, name: str, count: int) -> None:
+    def set_checkpoint(
+        self,
+        name: str,
+        count: int,
+        *,
+        description: str = "",
+        created_by: str | None = None,
+    ) -> None:
         """Store a named checkpoint.
 
-        The leader also mirrors the full mapping into the session's
-        per-team namespace so it survives process restart. Persistence is
-        deferred to the run cycle's ``post_run`` (no explicit flush),
-        matching allocator / lifecycle / pending_resume semantics.
+        Each checkpoint records ``{count, description, created_by}`` so the
+        leader can later list names together with their purpose and creator.
+        The leader also mirrors the full mapping into the session's per-team
+        namespace so it survives process restart. Persistence is deferred to
+        the run cycle's ``post_run`` (no explicit flush), matching allocator
+        / lifecycle / pending_resume semantics.
         """
-        self._named_checkpoints[name] = count
+        self._named_checkpoints[name] = {
+            "count": count,
+            "description": description or "",
+            "created_by": created_by or "",
+        }
         if self.role == TeamRole.LEADER:
             self._merge_checkpoints_into_session()
 
@@ -1285,7 +1327,7 @@ class TeamAgent(BaseAgent):
                 exc,
             )
 
-    def set_checkpoints_from(self, source: dict[str, int]) -> None:
+    def set_checkpoints_from(self, source: dict[str, dict]) -> None:
         """Replace this agent's checkpoint namespace with *source*."""
         self._named_checkpoints = source
 

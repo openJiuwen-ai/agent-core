@@ -34,3 +34,7 @@ spawn_teammate(name="dev-2", fork="code-ready", fork_source="understander", ...)
 ```
 
 **快照存的是调用时刻此成员的 `len(messages)`**。之后上下文继续增长不会影响已存快照的语义——fork 从该位置截取，后续消息不在继承范围内。
+
+## 告知 Leader
+
+打完快照后，运行时**会自动通知 leader**——发布框架事件，leader 上下文会收到一条带确切快照名的 announcement-only 公告（明示不需要回复）。你**无需**再单独用 `send_message` 汇报名字；想让 leader 理解快照用途，就把说明写进 `description` 参数（会随公告一起带上）。leader 随时可用 `list_checkpoints` 查看权威清单——不要指望 leader 猜你起的名字。

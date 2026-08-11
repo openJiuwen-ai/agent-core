@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers.base import (
     BaseCoordinationHandler,
     EventCallback,
 )
+from openjiuwen.agent_teams.agent.coordination.handlers.checkpoint import CheckpointHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.member import MemberHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.stale_task import (
@@ -31,6 +32,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers.workflow import Workflow
 __all__ = [
     "AgentLifecycleHandler",
     "BaseCoordinationHandler",
+    "CheckpointHandler",
     "EventCallback",
     "MemberHandler",
     "MessageHandler",

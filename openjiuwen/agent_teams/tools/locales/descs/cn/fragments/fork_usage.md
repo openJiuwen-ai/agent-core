@@ -31,4 +31,5 @@
 
 - 继承的消息为源成员的完整对话历史（包含文件读取结果、搜索输出、分析结论）
 - fork 前先让源成员调 `checkpoint(name="xxx")` 打快照，再用 `fork="xxx"` 指定
+- **fork 前先调 `list_checkpoints` 拿到确切名字**——不要猜 checkpoint 名。填了不存在的名字会静默回退为全量继承
 - `fork=true` 继承调用时刻的全部上下文，包含后续调度噪音时建议改用 checkpoint 模式

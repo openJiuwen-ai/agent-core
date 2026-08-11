@@ -34,3 +34,7 @@ spawn_teammate(name="dev-2", fork="code-ready", fork_source="understander", ...)
 ```
 
 **The checkpoint stores `len(messages)` at call time.** Context growth after the call does not affect the snapshot's semantics — fork captures from that position; messages that arrive later are not inherited.
+
+## Notify the Leader
+
+Saving a checkpoint **automatically notifies the leader** — the runtime publishes a framework event and the leader's context receives an announcement-only note with the exact name (no reply is expected). You do **not** need to send a separate `send_message` to report the name; if you want the leader to understand the snapshot's purpose, describe it in the `description` parameter (it is carried with the announcement). The leader can call `list_checkpoints` at any time to see the authoritative list — never expect the leader to guess the name you chose.

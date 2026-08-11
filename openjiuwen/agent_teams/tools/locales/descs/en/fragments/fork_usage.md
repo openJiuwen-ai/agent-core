@@ -31,4 +31,5 @@ Other combinations rely on built-in context compaction.
 
 - Inherited messages are the source member's full conversation history (file reads, search outputs, analysis conclusions)
 - Have the source member call `checkpoint(name="xxx")` before forking, then use `fork="xxx"`
+- **Before forking, call `list_checkpoints` to get the exact names** — never guess a checkpoint name. Forking with a name that does not exist silently falls back to a full-context inheritance
 - `fork=true` inherits the full context at call time; prefer checkpoint mode when later scheduling noise would otherwise be included
