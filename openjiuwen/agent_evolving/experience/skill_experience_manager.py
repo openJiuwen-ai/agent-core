@@ -96,8 +96,12 @@ class ExperienceManager:
         self._rebuild_service = self._coerce_service(
             service=rebuild_service,
             service_name="rebuild_service",
-            default_factory=lambda: ExperienceRebuildService(store=self._store),
+            default_factory=lambda: ExperienceRebuildService(
+                store=self._store,
+                language=self._language,
+            ),
         )
+        self._last_rebuild_context: Optional[dict[str, Any]] = None
         self.bind_pending_approval_snapshots(self._pending_approval_snapshots)
 
     @property
@@ -591,6 +595,12 @@ class ExperienceManager:
         """Discard staged simplify governance."""
         self._pending_governance.pop(request_id, None)
 
+    def update_rebuild_llm(self, llm: Any, model: str) -> None:
+        """Refresh LLM used by rebuild changelog classification."""
+        update_llm = getattr(self._rebuild_service, "update_llm", None)
+        if callable(update_llm):
+            update_llm(llm, model)
+
     async def request_rebuild(
         self,
         skill_name: str,
@@ -600,6 +610,7 @@ class ExperienceManager:
         min_score: float = 0.5,
         max_context_records: int = 40,
         max_context_chars: int = 20000,
+        record_ids: Optional[list[str]] = None,
     ) -> Optional[str]:
         """Prepare a rebuild prompt for a skill."""
         default_kind = self._subject_kind or "skill"
@@ -612,9 +623,12 @@ class ExperienceManager:
             min_score=min_score,
             max_context_records=max_context_records,
             max_context_chars=max_context_chars,
+            record_ids=record_ids,
         )
         if context is None:
+            self._last_rebuild_context = None
             return None
+        self._last_rebuild_context = context
         from openjiuwen.harness.rails.evolution.commands import build_rebuild_command_prompt
 
         return build_rebuild_command_prompt(
@@ -623,6 +637,19 @@ class ExperienceManager:
             rebuild_context=context,
             language=self._language,
         )
+
+    async def complete_rebuild(
+        self,
+        rebuild_context: Optional[dict[str, Any]] = None,
+    ) -> bool:
+        """Finish a rebuild: bump SemVer, write changelog, clear live evolutions."""
+        context = rebuild_context if rebuild_context is not None else self._last_rebuild_context
+        if not context:
+            return False
+        cleared = await self._rebuild_service.complete_rebuild(context)
+        if cleared and context is self._last_rebuild_context:
+            self._last_rebuild_context = None
+        return cleared
 
     @staticmethod
     def _to_apply_result(skill_name: str, result: PendingCommitResult) -> ExperienceApplyResult:

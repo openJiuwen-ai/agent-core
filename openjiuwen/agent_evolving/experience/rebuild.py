@@ -4,8 +4,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, List, Optional, Sequence
 
+from openjiuwen.agent_evolving.checkpointing.changelog import (
+    classify_records_for_changelog,
+)
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
 from openjiuwen.agent_evolving.experience.archive import EvolutionArchivePair, EvolutionArchiveService
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
@@ -15,9 +18,27 @@ from openjiuwen.core.common.logging import logger
 class ExperienceRebuildService:
     """Prepare deterministic rebuild context without generating the rebuilt skill body."""
 
-    def __init__(self, *, store: Any, archive_service: EvolutionArchiveService | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        store: Any,
+        archive_service: EvolutionArchiveService | None = None,
+        llm: Any = None,
+        model: Optional[str] = None,
+        language: str = "cn",
+        classify_fn: Optional[Callable[[Sequence[EvolutionRecord]], Any]] = None,
+    ) -> None:
         self._store = store
         self._archive_service = archive_service or EvolutionArchiveService(store=store)
+        self._llm = llm
+        self._model = model
+        self._language = language
+        self._classify_fn = classify_fn
+
+    def update_llm(self, llm: Any, model: str) -> None:
+        """Refresh LLM client used for changelog classification."""
+        self._llm = llm
+        self._model = model
 
     async def prepare_rebuild_context(
         self,
@@ -27,8 +48,13 @@ class ExperienceRebuildService:
         min_score: float = 0.5,
         max_context_records: int = 40,
         max_context_chars: int = 20000,
+        record_ids: Optional[Sequence[str]] = None,
     ) -> Optional[dict[str, Any]]:
-        """Archive current state, filter rebuild inputs, and return structured context."""
+        """Archive current state, filter rebuild inputs, and return structured context.
+
+        Does not clear live evolutions; call ``complete_rebuild`` after the rebuild
+        succeeds to bump SemVer, append changelog, and clear.
+        """
         normalized_subject = normalize_subject(subject)
         skill_name = normalized_subject.name
         subject_kind = normalized_subject.kind
@@ -40,38 +66,164 @@ class ExperienceRebuildService:
         archive_pair: Optional[EvolutionArchivePair] = None
         archive_error: Optional[Exception] = None
         try:
-            archive_pair = await self._archive_service.archive_current_pair(skill_name, subject_kind=subject_kind)
+            archive_pair = await self._archive_service.archive_current_pair(
+                skill_name, subject_kind=subject_kind,
+            )
         except Exception as exc:
             archive_error = exc
             logger.warning("[ExperienceRebuildService] archive pair failed for '%s': %s", skill_name, exc)
 
-        filtered_records = _filter_rebuild_records(records_log.entries, min_score=min_score)
+        normalized_ids = _normalize_record_ids(record_ids)
+        filtered_records = _filter_rebuild_records(
+            records_log.entries,
+            min_score=min_score,
+            record_ids=normalized_ids,
+        )
         context = _build_rebuild_context_payload(
             filtered_records,
             max_records=max_context_records,
             max_chars=max_context_chars,
         )
-        context.update(
-            {
-                "subject": normalized_subject.to_payload(),
-                "skill_name": skill_name,
-                "user_intent": user_intent,
-                "min_score": min_score,
-                "archive_path": archive_pair.evolution_archive_name if archive_pair else None,
-                "archive_pair": archive_pair.to_payload() if archive_pair else None,
-                "archive_version": archive_pair.version if archive_pair else None,
-                "archive_error": archive_error,
-            }
-        )
-
-        if archive_pair:
-            await self._store.clear_evolutions(skill_name, subject_kind=subject_kind)
-            self._archive_service.prune(skill_name, subject_kind=subject_kind)
-
+        context_payload: dict[str, Any] = {
+            "subject": normalized_subject.to_payload(),
+            "skill_name": skill_name,
+            "subject_kind": subject_kind,
+            "user_intent": user_intent,
+            "min_score": min_score,
+            "archive_path": archive_pair.evolution_archive_name if archive_pair else None,
+            "archive_pair": archive_pair.to_payload() if archive_pair else None,
+            "archive_version": archive_pair.version if archive_pair else None,
+            "archive_error": archive_error,
+        }
+        if normalized_ids is not None:
+            context_payload["record_ids"] = normalized_ids
+        context.update(context_payload)
         return context
 
+    async def complete_rebuild(self, rebuild_context: dict[str, Any]) -> bool:
+        """Bump SemVer from evolution entries, write changelog, then clear live log.
 
-def _filter_rebuild_records(records: list[EvolutionRecord], *, min_score: float) -> list[EvolutionRecord]:
+        Archive during prepare is a safety step, not a gate for bump/clear.
+        Skip only when archive explicitly failed (``archive_error``).
+
+        Returns True when cleared, False when skipped.
+        """
+        if rebuild_context.get("archive_error") is not None:
+            return False
+        skill_name = str(rebuild_context.get("skill_name") or "").strip()
+        if not skill_name:
+            return False
+        subject_kind = rebuild_context.get("subject_kind")
+        if subject_kind is None:
+            subject = rebuild_context.get("subject")
+            if isinstance(subject, dict):
+                subject_kind = subject.get("kind")
+
+        selected_entries = await self._select_entries_for_rebuild(rebuild_context)
+        new_version = await self._store.bump_version_for_rebuild(
+            skill_name,
+            subject_kind=subject_kind,
+            entries=selected_entries,
+        )
+        if new_version:
+            await self._write_changelog_for_rebuild(
+                skill_name,
+                new_version,
+                entries=selected_entries,
+                subject_kind=subject_kind,
+            )
+        await self._store.clear_evolutions(
+            skill_name,
+            subject_kind=subject_kind,
+            retain_version=new_version,
+        )
+        return True
+
+    async def _select_entries_for_rebuild(
+        self,
+        rebuild_context: dict[str, Any],
+    ) -> list[EvolutionRecord]:
+        """Select entries for version bump and changelog."""
+        skill_name = str(rebuild_context.get("skill_name") or "").strip()
+        subject_kind = rebuild_context.get("subject_kind")
+        record_ids = _normalize_record_ids(rebuild_context.get("record_ids"))
+        evo_log = await self._store.load_full_evolution_log(skill_name, subject_kind=subject_kind)
+        entries = list(getattr(evo_log, "entries", None) or [])
+        if not record_ids:
+            return entries
+        return _filter_rebuild_records(
+            entries,
+            min_score=0.0,
+            record_ids=record_ids,
+        )
+
+    async def _write_changelog_for_rebuild(
+        self,
+        skill_name: str,
+        new_version: str,
+        *,
+        entries: Sequence[EvolutionRecord],
+        subject_kind: Optional[str] = None,
+    ) -> None:
+        """Classify selected evolution entries and append a version section to changelog.md."""
+        append_changelog = getattr(self._store, "append_changelog_for_rebuild", None)
+        if not callable(append_changelog):
+            return
+        try:
+            classified = await classify_records_for_changelog(
+                entries,
+                llm=self._llm,
+                model=self._model,
+                language=self._language,
+                classify_fn=self._classify_fn,
+            )
+            await append_changelog(
+                skill_name,
+                new_version,
+                classified,
+                subject_kind=subject_kind,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[ExperienceRebuildService] changelog update failed for '%s' v%s: %s",
+                skill_name,
+                new_version,
+                exc,
+            )
+
+
+def _normalize_record_ids(record_ids: Optional[Sequence[str]]) -> Optional[List[str]]:
+    """Deduplicate and strip IDs; empty result means no whitelist."""
+    if not record_ids:
+        return None
+    if isinstance(record_ids, bytes):
+        item = record_ids.decode("utf-8", errors="replace").strip()
+        return [item] if item else None
+    if isinstance(record_ids, str):
+        item = record_ids.strip()
+        return [item] if item else None
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in record_ids:
+        item = str(raw or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized or None
+
+
+def _filter_rebuild_records(
+    records: list[EvolutionRecord],
+    *,
+    min_score: float,
+    record_ids: Optional[Sequence[str]] = None,
+) -> list[EvolutionRecord]:
+    """Select rebuild inputs."""
+    if record_ids:
+        allowed = set(record_ids)
+        return [record for record in records if getattr(record, "id", None) in allowed]
+
     filtered: list[EvolutionRecord] = []
     for record in records:
         if getattr(record, "score", 0.0) < min_score:
@@ -125,7 +277,7 @@ def _to_index_item(record: EvolutionRecord) -> dict[str, Any]:
     target = getattr(record.change.target, "value", record.change.target)
     return {
         "record_id": record.id,
-        "summary": record.summary or "",
+        "summary": getattr(record, "summary", "") or "",
         "target": target,
         "section": record.change.section,
         "score": record.score,

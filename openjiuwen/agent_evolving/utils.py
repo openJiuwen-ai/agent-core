@@ -81,17 +81,41 @@ def infer_skill_from_texts(
     return max(hits.items(), key=lambda item: item[1].ranking_key())[0]
 
 
+# Opening/closing fences must be whole lines so body Markdown rules (``---``)
+# are not mistaken for frontmatter delimiters.
+_FRONTMATTER_RE = re.compile(
+    r"\A(?:\ufeff)?---[ \t]*\r?\n"
+    r"(.*?)"
+    r"\r?\n---[ \t]*(?:\r?\n|$)",
+    re.DOTALL,
+)
+
+
+def split_markdown_frontmatter(content: str) -> tuple[Optional[str], str]:
+    """Split Markdown into ``(frontmatter_text, body)``.
+
+    Only ``---`` on its own line is treated as a YAML fence. Returns
+    ``(None, content)`` when no valid frontmatter block is present.
+    """
+    match = _FRONTMATTER_RE.match(content)
+    if not match:
+        return None, content
+    return match.group(1), content[match.end():]
+
+
 def parse_top_level_frontmatter(content: str) -> dict[str, str]:
     """Parse only top-level scalar fields from Markdown frontmatter."""
-    text = content.strip()
-    if not text.startswith("---"):
-        return {}
-    end = text.find("---", 3)
-    if end == -1:
-        return {}
+    frontmatter_text, _ = split_markdown_frontmatter(content)
+    if frontmatter_text is None:
+        # Tolerate leading/trailing whitespace used by some callers/tests.
+        stripped = content.strip()
+        if stripped != content:
+            frontmatter_text, _ = split_markdown_frontmatter(stripped)
+        if frontmatter_text is None:
+            return {}
 
     frontmatter: dict[str, str] = {}
-    for line in text[3:end].strip().split("\n"):
+    for line in frontmatter_text.strip().split("\n"):
         if not line or line[0].isspace() or line.startswith("-"):
             continue
         if ":" not in line:

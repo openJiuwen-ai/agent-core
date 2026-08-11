@@ -3664,3 +3664,91 @@ async def test_run_evolution_regular_signal_uses_online_updater_without_passive_
         )
 
     rail._stage_evolution_from_signals.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_rollback_skill_restores_body_and_clears_live_evolutions(tmp_path):
+    import json
+
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    archive = skill_dir / "archive"
+    archive.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nversion: v1.0.1\n---\n\n# Current\n",
+        encoding="utf-8",
+    )
+    (skill_dir / "evolutions.json").write_text(
+        json.dumps(
+            {
+                "skill_id": "skill-a",
+                "version": "v1.0.1",
+                "entries": [
+                    {
+                        "id": "ev_live",
+                        "source": "execution_failure",
+                        "timestamp": "2026-01-01T00:00:00+00:00",
+                        "context": "ctx",
+                        "change": {
+                            "section": "Troubleshooting",
+                            "action": "append",
+                            "content": "live tip",
+                            "target": "body",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (archive / "SKILL.v1.0.0.md").write_text("# Archived\n", encoding="utf-8")
+    (archive / "evolutions.v1.0.0.json").write_text(
+        json.dumps(
+            {
+                "skill_id": "skill-a",
+                "version": "v1.0.0",
+                "entries": [
+                    {
+                        "id": "ev_archived",
+                        "source": "execution_failure",
+                        "timestamp": "2026-01-01T00:00:00+00:00",
+                        "context": "ctx",
+                        "change": {
+                            "section": "Troubleshooting",
+                            "action": "append",
+                            "content": "archived tip",
+                            "target": "body",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    rail = SkillEvolutionRail(
+        skills_dir=str(root),
+        llm=Mock(),
+        model="dummy-model",
+        auto_scan=False,
+        auto_save=False,
+        review_runtime=_default_review_runtime(),
+    )
+
+    assert await rail.rollback_skill("skill-a", "SKILL.v1.0.0.md") is True
+    assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == "# Archived\n"
+    assert (await rail._evolution_store.load_full_evolution_log("skill-a")).entries == []
+    assert not (archive / "SKILL.v1.0.0.md").exists()
+    assert not (archive / "evolutions.v1.0.0.json").exists()
+
+    current_archives = sorted(archive.glob("SKILL.v*.md"))
+    assert len(current_archives) == 1
+    assert current_archives[0].name == "SKILL.v1.0.1.md"
+    assert "# Current\n" in current_archives[0].read_text(encoding="utf-8")
+    archived_evo = archive / "evolutions.v1.0.1.json"
+    assert archived_evo.is_file()
+    archived_evo_data = json.loads(archived_evo.read_text(encoding="utf-8"))
+    assert archived_evo_data.get("entries") == []
+    assert archived_evo_data.get("skill_id") == "skill-a"

@@ -1751,50 +1751,30 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         )
 
     async def rollback_skill(self, skill_name: str, version: Optional[str] = None) -> bool:
-        """Rollback skill to an archived version (no approval required)."""
+        """Rollback skill to an archived SemVer pair (no approval required).
+
+        Restores the archived ``SKILL.md`` body and always clears live
+        ``evolutions.json`` (empty entries, retained version). The
+        pre-rollback snapshot archives an empty paired ``evolutions.v*.json``
+        (all evolution archives are empty by design).
+        """
+        from openjiuwen.agent_evolving.experience.archive import EvolutionArchiveService
+
         store = self._evolution_store
-        skill_dir = store.resolve_skill_dir(skill_name)
-        if skill_dir is None:
+        if not store.skill_exists(skill_name):
             return False
 
-        archive = skill_dir / "archive"
-        if not archive.is_dir():
-            logger.warning("[SkillEvolutionRail] no archive dir for %s", skill_name)
-            return False
-
-        if version:
-            body_archive = archive / version
-            evo_version = version.replace("SKILL.", "evolutions.").replace(".md", ".json")
-            evo_archive = archive / evo_version
-        else:
-            body_files = sorted(
-                [f for f in archive.iterdir() if f.name.startswith("SKILL.v")],
-                key=lambda p: p.name,
-                reverse=True,
+        archive_service = EvolutionArchiveService(store=store)
+        target = version or "latest"
+        restored = await archive_service.rollback_to_pair(skill_name, target, prune=False)
+        if not restored:
+            logger.warning(
+                "[SkillEvolutionRail] rollback failed for %s -> %s",
+                skill_name,
+                target,
             )
-            if not body_files:
-                logger.warning("[SkillEvolutionRail] no archived body for %s", skill_name)
-                return False
-            body_archive = body_files[0]
-            evo_version = body_archive.name.replace("SKILL.", "evolutions.").replace(".md", ".json")
-            evo_archive = archive / evo_version
-
-        # Archive current state first
-        await store.archive_skill_body(skill_name)
-        await store.archive_evolutions(skill_name)
-
-        old_body = await store.read_file_text(body_archive)
-        await store.write_skill_content(skill_name, old_body)
-
-        if evo_archive.is_file():
-            evo_content = await store.read_file_text(evo_archive)
-            evo_path = skill_dir / "evolutions.json"
-            await store.write_file_text(evo_path, evo_content)
-        else:
-            await store.clear_evolutions(skill_name)
-
-        await store.render_evolution_markdown(skill_name)
-        logger.info("[SkillEvolutionRail] rollback completed for %s -> %s", skill_name, body_archive.name)
+            return False
+        logger.info("[SkillEvolutionRail] rollback completed for %s -> %s", skill_name, target)
         return True
 
     def should_hint_simplify_or_rebuild(self, skill_name: str) -> bool:

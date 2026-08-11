@@ -15,6 +15,7 @@ from openjiuwen.agent_evolving.checkpointing.skill_package import (
     read_skill_id_from_content,
     unpack_skill_package,
 )
+from openjiuwen.agent_evolving.checkpointing.changelog import ClassifiedChangelogEntry
 from openjiuwen.agent_evolving.checkpointing.store_archive import StoreArchiveHelper
 from openjiuwen.agent_evolving.checkpointing.store_projection import StoreProjectionHelper
 from openjiuwen.agent_evolving.checkpointing.store_records import MergeRecordsRequest, StoreRecordsHelper
@@ -678,16 +679,83 @@ class EvolutionStore:
             subject_kind=normalized.kind,
         )
 
-    # ── Governance primitives (archive / clear / rollback) ──
+    # ── Governance primitives (archive / clear / rollback / SemVer) ──
 
-    async def archive_skill_body(self, name: str, *, subject_kind: Optional[str] = None) -> Optional[str]:
-        return await self._archive.archive_skill_body(name, subject_kind=subject_kind)
+    async def resolve_current_version(self, name: str, *, subject_kind: Optional[str] = None) -> str:
+        return await self._archive.resolve_current_version(name, subject_kind=subject_kind)
 
-    async def archive_evolutions(self, name: str, *, subject_kind: Optional[str] = None) -> Optional[str]:
-        return await self._archive.archive_evolutions(name, subject_kind=subject_kind)
+    async def bump_version_for_rebuild(
+        self,
+        name: str,
+        *,
+        subject_kind: Optional[str] = None,
+        entries: Optional[List[EvolutionRecord]] = None,
+    ) -> Optional[str]:
+        return await self._archive.bump_version_for_rebuild(
+            name, subject_kind=subject_kind, entries=entries,
+        )
 
-    async def clear_evolutions(self, name: str, *, subject_kind: Optional[str] = None) -> None:
-        await self._archive.clear_evolutions(name, subject_kind=subject_kind)
+    async def append_changelog_for_rebuild(
+        self,
+        name: str,
+        version: str,
+        classified_entries: List[ClassifiedChangelogEntry],
+        *,
+        subject_kind: Optional[str] = None,
+        release_date: Optional[str] = None,
+    ) -> bool:
+        return await self._archive.append_changelog_for_rebuild(
+            name,
+            version,
+            classified_entries,
+            subject_kind=subject_kind,
+            release_date=release_date,
+        )
+
+    async def archive_current_state(
+        self,
+        name: str,
+        *,
+        subject_kind: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        return await self._archive.archive_current_state(name, subject_kind=subject_kind)
+
+    async def archive_skill_body(
+        self,
+        name: str,
+        *,
+        subject_kind: Optional[str] = None,
+        version: Optional[str] = None,
+    ) -> Optional[str]:
+        return await self._archive.archive_skill_body(name, subject_kind=subject_kind, version=version)
+
+    async def archive_evolutions(
+        self,
+        name: str,
+        *,
+        subject_kind: Optional[str] = None,
+        version: Optional[str] = None,
+    ) -> Optional[str]:
+        return await self._archive.archive_evolutions(name, subject_kind=subject_kind, version=version)
+
+    async def clear_evolutions(
+        self,
+        name: str,
+        *,
+        subject_kind: Optional[str] = None,
+        retain_version: Optional[str] = None,
+    ) -> None:
+        await self._archive.clear_evolutions(
+            name, subject_kind=subject_kind, retain_version=retain_version,
+        )
 
     def list_archives(self, name: str, *, subject_kind: Optional[str] = None) -> List[str]:
         return self._archive.list_archives(name, subject_kind=subject_kind)
+
+    @staticmethod
+    def normalize_body_archive_name(version_or_name: str) -> Optional[str]:
+        return StoreArchiveHelper.normalize_body_archive_name(version_or_name)
+
+    @staticmethod
+    def body_archive_name_for_version(version: str) -> str:
+        return StoreArchiveHelper.body_archive_name_for_version(version)

@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Iterable, Set, Tuple
 
-from openjiuwen.agent_evolving.utils import parse_top_level_frontmatter
+from openjiuwen.agent_evolving.utils import parse_top_level_frontmatter, split_markdown_frontmatter
 
 _EXCLUDE_DIR_NAMES: Set[str] = {"evolution", "archive", "__pycache__", ".git"}
 _EXCLUDE_FILE_NAMES: Set[str] = {"evolutions.json"}
@@ -35,18 +35,18 @@ def ensure_skill_id_in_content(content: str) -> Tuple[str, str]:
 
     skill_id = new_skill_id()
     stripped = content.lstrip("\ufeff")
-    if stripped.startswith("---"):
-        closing = stripped.find("---", 3)
-        if closing != -1:
-            head = stripped[:closing]
-            tail = stripped[closing:]
-            if not head.endswith("\n"):
-                head += "\n"
-            head += f"skill_id: {skill_id}\n"
-            updated = head + tail
-            if updated != content:
-                return updated, skill_id
-            return content, skill_id
+    front_matter, body = split_markdown_frontmatter(stripped)
+    if front_matter is not None:
+        lines = front_matter.strip("\n").split("\n") if front_matter.strip("\n") else []
+        lines.append(f"skill_id: {skill_id}")
+        new_front = "\n".join(lines)
+        if body.startswith("\n") or body.startswith("\r\n") or not body:
+            updated = f"---\n{new_front}\n---{body}"
+        else:
+            updated = f"---\n{new_front}\n---\n{body}"
+        if not updated.endswith("\n"):
+            updated += "\n"
+        return updated, skill_id
 
     updated = f"---\nskill_id: {skill_id}\n---\n\n{content.lstrip()}"
     return updated.rstrip() + "\n", skill_id

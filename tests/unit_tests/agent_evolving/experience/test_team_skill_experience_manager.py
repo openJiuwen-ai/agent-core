@@ -163,7 +163,7 @@ async def test_request_rebuild_uses_shared_helper():
     manager.rebuild_service._archive_service.archive_current_pair.assert_awaited_once_with(
         "team-skill-a", subject_kind="swarm-skill"
     )
-    manager._store.clear_evolutions.assert_awaited_once_with("team-skill-a", subject_kind="swarm-skill")
+    manager._store.clear_evolutions.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -186,4 +186,4 @@ async def test_request_rebuild_prompt_keeps_english_record_labels():
     manager.rebuild_service._archive_service.archive_current_pair.assert_awaited_once_with(
         "team-skill-a", subject_kind="swarm-skill"
     )
-    manager._store.clear_evolutions.assert_awaited_once_with("team-skill-a", subject_kind="swarm-skill")
+    manager._store.clear_evolutions.assert_not_called()

@@ -475,9 +475,10 @@ Fix: Move all triggering info to description
 ### Pattern 8: The Over-Engineered
 
 ```
-Symptom: README.md, changelogs, self-evaluation notes, restatement checklists
+Symptom: README.md, self-evaluation notes, restatement checklists
+         (root changelog.md maintained by skill self-evolution is OK)
 Fix: Delete everything an agent doesn't need to act on the task
-     No documentation about the skill itself
+     No documentation about the skill itself (except evolution-managed changelog.md)
 ```
 
 ### Pattern 9: The Pattern Mismatch

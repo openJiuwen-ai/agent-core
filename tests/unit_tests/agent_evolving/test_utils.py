@@ -5,10 +5,41 @@
 import pytest
 
 from openjiuwen.agent_evolving.dataset import Case, EvaluatedCase
-from openjiuwen.agent_evolving.utils import TuneUtils
+from openjiuwen.agent_evolving.utils import TuneUtils, parse_top_level_frontmatter, split_markdown_frontmatter
 from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolCall, UserMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
+
+
+class TestSplitMarkdownFrontmatter:
+    """Frontmatter fences must ignore body horizontal rules."""
+
+    @staticmethod
+    def test_body_horizontal_rule_preserved():
+        content = (
+            "---\n"
+            "name: demo\n"
+            "version: v1.0.0\n"
+            "---\n"
+            "\n"
+            "# Title\n"
+            "\n"
+            "---\n"
+            "\n"
+            "More\n"
+        )
+        front, body = split_markdown_frontmatter(content)
+        assert front is not None
+        assert "version: v1.0.0" in front
+        assert "---" in body
+        assert "More" in body
+        assert parse_top_level_frontmatter(content)["version"] == "v1.0.0"
+
+    @staticmethod
+    def test_no_frontmatter():
+        front, body = split_markdown_frontmatter("# Just body\n")
+        assert front is None
+        assert body == "# Just body\n"
 
 
 def create_tool_call(func_name: str, arguments: str, call_id: str = "call_id") -> ToolCall:

@@ -310,7 +310,11 @@ skill 数据的演进存储，与 `trajectory_store` 不同。
 
 ### async request_rebuild(skill_name, user_intent=None, min_score=0.5) -> Optional[str]
 
-归档当前 skill 资产，并基于筛选后的演进记录返回 rebuild follow-up prompt。宿主或命令处理器需要把返回的 prompt 注入 agent loop；rail 不会直接写出重建后的 `SKILL.md`。
+归档当前 skill 资产（`SKILL.md` + 空的成对 `evolutions.v*.json` 标记），并基于筛选后的 live 演进记录返回 rebuild follow-up prompt。宿主或命令处理器需要把返回的 prompt 注入 agent loop；rail 不会直接写出重建后的 `SKILL.md`。
+
+### async rollback_skill(skill_name, version=None) -> bool
+
+回滚到归档 SemVer 对（无需审批）。恢复归档中的 `SKILL.md`，并始终清空 live `evolutions.json`。`version` 可为 `latest`、`v1.0.0` 或 `SKILL.v1.0.0.md`；省略时默认 `latest`。
 
 ### async drain_pending_host_events(wait=False, timeout=None) -> list[OutputSchema]
 
