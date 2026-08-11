@@ -198,6 +198,27 @@ class EventBus:
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._loop_task
             self._loop_task = None
+            # Drain whatever the dead loop left behind — above all the
+            # SHUTDOWN sentinel itself (unconsumed when the loop was stuck
+            # and had to be cancelled, or when it exited via the
+            # ``_running`` check before pulling it). A leftover SHUTDOWN is
+            # poison: the NEXT start()'s loop consumes it as its first event
+            # and exits instantly, leaving the bus looking alive while every
+            # event — including user input — piles up undelivered forever.
+            drained = 0
+            while True:
+                try:
+                    self._event_queue.get_nowait()
+                    self._event_queue.task_done()
+                    drained += 1
+                except asyncio.QueueEmpty:
+                    break
+            if drained:
+                team_logger.warning(
+                    "EventBus[{}]: drained {} undelivered event(s) left by the dead loop",
+                    self._role.value,
+                    drained,
+                )
 
     async def pause_polls(self) -> None:
         """Stop periodic poll tasks but keep the main event loop running.
@@ -305,13 +326,26 @@ class EventBus:
                 # CancelledError is a BaseException, not Exception — without
                 # this branch it would kill the loop task silently, leaving
                 # ``_running`` True and every later event stranded in the
-                # queue with no trace. Log, then let cancellation through.
+                # queue with no trace.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    # Genuine cancellation of the loop task (stop()'s timeout
+                    # path): log, then let it through.
+                    team_logger.warning(
+                        "EventBus[{}]: loop cancelled while handling {}",
+                        self._role.value,
+                        getattr(event, "event_type", "unknown"),
+                    )
+                    raise
+                # Spurious cancellation leaking out of the wake callback (an
+                # inner await was cancelled, not this task): the loop is the
+                # only consumer of the queue — log and carry on.
                 team_logger.warning(
-                    "EventBus[{}]: loop cancelled while handling {}",
+                    "EventBus[{}]: wake raised CancelledError but the loop task was not cancelled; "
+                    "surviving and continuing (event={})",
                     self._role.value,
                     getattr(event, "event_type", "unknown"),
                 )
-                raise
             except Exception:
                 event_type = getattr(event, "event_type", "unknown")
                 team_logger.exception(
