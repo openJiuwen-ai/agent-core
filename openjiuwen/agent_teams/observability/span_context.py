@@ -473,10 +473,31 @@ def set_ambient_team_span(span: Span | None) -> None:
     _ambient_team_span = span
 
 
+def set_ambient_root_span(span: Span | None) -> None:
+    """Register a non-team root span as the process-wide fallback.
+
+    Standalone DeepAgent tracing uses an ``agent.<name>`` root span rather than
+    a ``team.<name>`` root. The storage is shared with the historical ambient
+    team fallback because downstream parent resolution only needs "the current
+    trace root", not a team-specific object.
+    """
+    set_ambient_team_span(span)
+
+
+def get_trace_root_span() -> Span | None:
+    """Return the active trace root, whether it belongs to a team or an agent."""
+    return _resolve_team_span()
+
+
 def clear_ambient_team_span() -> None:
     """Drop the process-wide root-span fallback registered for a run."""
     global _ambient_team_span
     _ambient_team_span = None
+
+
+def clear_ambient_root_span() -> None:
+    """Drop the process-wide root-span fallback registered for a run."""
+    clear_ambient_team_span()
 
 
 def _resolve_team_span() -> Span | None:

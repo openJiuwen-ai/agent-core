@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Iterator
 from unittest.mock import MagicMock
 
@@ -60,6 +61,12 @@ from openjiuwen.core.runner.callback.events import (
     LLMCallEvents,
     ToolCallEvents,
 )
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    InvokeInputs,
+    TaskIterationInputs,
+)
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +159,148 @@ def _create_team_span(team_name: str) -> Any:
     return get_or_create_team_span(team_name, get_tracer("openjiuwen.agent_teams.observability"))
 
 
+def _fake_deep_agent(*, name: str = "solo", enable_task_loop: bool = True) -> Any:
+    return SimpleNamespace(
+        card=AgentCard(name=name, description="standalone test agent"),
+        deep_config=SimpleNamespace(enable_task_loop=enable_task_loop),
+        team_name="",
+        role=None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Callback handler: LLM streaming + reasoning + TTFT
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_standalone_deep_agent_task_loop_trace(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Standalone DeepAgent opt-in emits root, iteration, and LLM spans."""
+    rail = ObservabilityRail()
+    agent = _fake_deep_agent(name="solo", enable_task_loop=True)
+    invoke_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=InvokeInputs(query="Say hello"),
+    )
+
+    await rail.before_invoke(invoke_ctx)
+
+    iteration_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=TaskIterationInputs(
+            iteration=1,
+            loop_event="initial",
+            query="Say hello",
+        ),
+    )
+    await rail.before_task_iteration(iteration_ctx)
+
+    fw = Runner.callback_framework
+    messages = [{"role": "user", "content": "Say hello"}]
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+    final = _FakeAssistantMessage(content="hello", usage=_FakeUsage())
+    await fw.trigger(
+        LLMCallEvents.LLM_OUTPUT,
+        messages=messages,
+        response=final.content,
+        usage=final.usage_metadata,
+    )
+
+    iteration_ctx.inputs.result = {"output": "hello"}
+    await rail.after_task_iteration(iteration_ctx)
+    invoke_ctx.inputs.result = {"output": "hello"}
+    await rail.after_invoke(invoke_ctx)
+
+    spans = in_memory_exporter.get_finished_spans()
+    root = _spans_by_name(in_memory_exporter, "agent.solo")[0]
+    iteration = _spans_by_name(in_memory_exporter, "agent.solo.task_iteration.1")[0]
+    llm = _spans_by_name(in_memory_exporter, "llm.call")[0]
+
+    assert root.parent is None
+    assert _attr(root, "langfuse.observation.type") == "agent"
+    assert _attr(root, "langfuse.trace.name") == "agent.solo"
+    assert iteration.parent is not None
+    assert iteration.parent.span_id == root.context.span_id
+    assert llm.parent is not None
+    assert llm.parent.span_id == iteration.context.span_id
+    assert {s.context.trace_id for s in spans} == {root.context.trace_id}
+
+
+@pytest.mark.asyncio
+async def test_standalone_single_round_agent_uses_invoke_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Standalone single-round agents emit root -> invoke -> LLM spans."""
+    rail = ObservabilityRail()
+    agent = _fake_deep_agent(name="solo_once", enable_task_loop=False)
+    invoke_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=InvokeInputs(query="Say hello once"),
+    )
+
+    await rail.before_invoke(invoke_ctx)
+
+    fw = Runner.callback_framework
+    messages = [{"role": "user", "content": "Say hello once"}]
+    await fw.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+    final = _FakeAssistantMessage(content="hello once", usage=_FakeUsage())
+    await fw.trigger(
+        LLMCallEvents.LLM_OUTPUT,
+        messages=messages,
+        response=final.content,
+        usage=final.usage_metadata,
+    )
+
+    invoke_ctx.inputs.result = {"output": "hello once"}
+    await rail.after_invoke(invoke_ctx)
+
+    root = _spans_by_name(in_memory_exporter, "agent.solo_once")[0]
+    invoke = _spans_by_name(in_memory_exporter, "agent.solo_once.invoke")[0]
+    llm = _spans_by_name(in_memory_exporter, "llm.call")[0]
+
+    assert root.parent is None
+    assert invoke.parent is not None
+    assert invoke.parent.span_id == root.context.span_id
+    assert llm.parent is not None
+    assert llm.parent.span_id == invoke.context.span_id
+
+
+@pytest.mark.asyncio
+async def test_standalone_root_spans_do_not_inherit_previous_ended_context(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """Sequential standalone invokes must create independent root traces."""
+    rail = ObservabilityRail()
+    agent = _fake_deep_agent(name="solo_repeat", enable_task_loop=False)
+
+    for index in range(2):
+        invoke_ctx = AgentCallbackContext(
+            agent=agent,
+            inputs=InvokeInputs(query=f"Say hello {index}"),
+        )
+        await rail.before_invoke(invoke_ctx)
+        invoke_ctx.inputs.result = {"output": f"hello {index}"}
+        await rail.after_invoke(invoke_ctx)
+
+    roots = _spans_by_name(in_memory_exporter, "agent.solo_repeat")
+    assert len(roots) == 2
+    assert all(root.parent is None for root in roots)
+    assert len({root.context.trace_id for root in roots}) == 2
+
+    invoke_spans = _spans_by_name(in_memory_exporter, "agent.solo_repeat.invoke")
+    assert len(invoke_spans) == 2
+    root_ids = {root.context.span_id for root in roots}
+    assert all(span.parent is not None and span.parent.span_id in root_ids for span in invoke_spans)
 
 
 @pytest.mark.asyncio
