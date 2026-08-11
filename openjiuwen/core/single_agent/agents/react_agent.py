@@ -1439,7 +1439,21 @@ class ReActAgent(BaseAgent):
         if not tool_calls:
             return []
 
-        for tool_call in tool_calls:
+        # Split out tool calls that the LLMStabilityRail flagged as
+        # truncated / illegal. They must NOT be executed; instead a feedback
+        # ToolMessage is committed so the model can re-emit properly.
+        force_skip_all = bool(ctx.extra.get("llm_stability_force_skip_all"))
+        skip_map = ctx.extra.get("llm_stability_skip") or {}
+        execute_list = [
+            tc for tc in tool_calls
+            if not force_skip_all and getattr(tc, "id", None) not in skip_map
+        ]
+        skip_list = [
+            tc for tc in tool_calls
+            if force_skip_all or getattr(tc, "id", None) in skip_map
+        ]
+
+        for tool_call in execute_list:
             log_args = self._summarize_tool_args_for_log(tool_call.name, tool_call.arguments)
             tool_name = str(tool_call.name or "")
             is_browser_tool = self._is_browser_tool_name(tool_name)
@@ -1448,12 +1462,14 @@ class ReActAgent(BaseAgent):
             else:
                 logger.info("Executing tool: %s with args: %s", tool_name, log_args)
 
-        results = await self.ability_manager.execute(
-            ctx=ctx,
-            tool_call=tool_calls,
-            session=session,
-            parallel_tool_calls=self._config.parallel_tool_calls,
-        )
+        results = []
+        if execute_list:
+            results = await self.ability_manager.execute(
+                ctx=ctx,
+                tool_call=execute_list,
+                session=session,
+                parallel_tool_calls=self._config.parallel_tool_calls,
+            )
 
         add_kwargs = {
             "system_messages": ctx.extra.get("_active_system_messages") or [],
@@ -1463,6 +1479,9 @@ class ReActAgent(BaseAgent):
             if tool_message is not None:
                 await context.add_messages(tool_message, **add_kwargs)
 
+        if skip_list:
+            await self._commit_sanitized_tool_messages(ctx, skip_list, context)
+
         multimodal_message = self._build_multimodal_tool_results_message(
             tool_result for tool_result, _ in results
         )
@@ -1470,6 +1489,31 @@ class ReActAgent(BaseAgent):
             await context.add_messages(multimodal_message, **add_kwargs)
 
         return results
+
+    async def _commit_sanitized_tool_messages(
+            self,
+            ctx: AgentCallbackContext,
+            skip_calls: list,
+            context: ModelContext,
+    ) -> None:
+        """Commit feedback ToolMessages for truncated/illegal tool calls.
+
+        Uses the guidance text while the bounded retry budget lasts, then falls
+        back to the redirect text so the loop always makes forward progress.
+        """
+        retries = int(ctx.extra.get("llm_stability_retries", 0) or 0)
+        max_retries = int(ctx.extra.get("llm_stability_max_retries", 0) or 0)
+        guidance = ctx.extra.get("llm_stability_guidance", "")
+        fallback = ctx.extra.get("llm_stability_fallback", "")
+        for tc in skip_calls:
+            content = guidance if retries <= max_retries else fallback
+            await context.add_messages(
+                ToolMessage(content=content, tool_call_id=getattr(tc, "id", ""))
+            )
+            logger.info(
+                "LLMStability: skipping tool call %s (%s)",
+                getattr(tc, "name", ""), getattr(tc, "id", ""),
+            )
 
     @staticmethod
     def _build_multimodal_tool_result_messages(tool_result: Any) -> List[UserMessage]:
