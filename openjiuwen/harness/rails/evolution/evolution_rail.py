@@ -39,8 +39,8 @@ from openjiuwen.agent_evolving.trajectory import (
     trajectory_session_id,
     trajectory_steps,
 )
+from openjiuwen.agent_evolving.trajectory.legacy_semconv import LEGACY_STEP_META
 from openjiuwen.agent_evolving.trajectory.semconv import (
-    LEGACY_STEP_META,
     OJ_RL_COMPLETION_TOKEN_IDS,
     OJ_RL_LOGPROBS,
     OJ_RL_PROMPT_TOKEN_IDS,

@@ -11,6 +11,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
+from openjiuwen.agent_evolving.trajectory import legacy_semconv
 from openjiuwen.agent_evolving.trajectory.schema import CASE_ID, TRAJECTORY_SOURCE
 from openjiuwen.agent_evolving.trajectory.types import (
     TrajectoryLike,
@@ -27,7 +28,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     span_attributes,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
-from openjiuwen.agent_evolving.trajectory import _semconv as semconv
+from openjiuwen.extensions.observability import semconv
 
 from .llm_response import extract_logprobs, extract_prompt_ids, extract_token_ids
 
@@ -79,7 +80,7 @@ def _span_meta(span: dict[str, Any], attrs: dict[str, Any]) -> dict[str, Any]:
     """Build detached per-span metadata for the rail-v1 sample."""
 
     meta = {str(key): _json_value(value) for key, value in attrs.items()}
-    legacy_meta = decode_json_attribute(attrs.get(semconv.LEGACY_STEP_META))
+    legacy_meta = decode_json_attribute(attrs.get(legacy_semconv.LEGACY_STEP_META))
     if isinstance(legacy_meta, dict):
         meta.update({str(key): _json_value(value) for key, value in legacy_meta.items()})
     for key in ("span_name", "span_id", "parent_span_id", "trace_id"):

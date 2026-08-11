@@ -14,7 +14,7 @@ the ``traceId``/``parentSpanId`` carried on every span, so physical
 ordering or per-trace file separation is irrelevant for ingestion.
 Replaying is just POSTing each line in turn.
 
-Pair this exporter with ``BatchSpanProcessor`` (see ``setup.py``) so
+Pair this exporter with ``BatchSpanProcessor`` (see ``runtime.py``) so
 span-end does not block the business thread: the processor batches
 ended spans and calls :meth:`export` asynchronously (default every 5s
 or 512 spans). ``export()`` appends straight to disk — no in-memory
