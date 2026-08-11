@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.tools.tool_member import (
     ApprovePlanTool,
     ApproveToolCallTool,
     CheckpointTool,
+    ListCheckpointsTool,
     ShutdownMemberTool,
     SpawnBridgeAgentTool,
     SpawnExternalCliTool,
@@ -172,6 +173,7 @@ def create_team_tools(
         # Member management — one tool per role_type (flat schema, no role branching)
         "spawn_teammate": SpawnTeammateTool(agent_team, t, model_config_allocator=model_config_allocator),
         "checkpoint": CheckpointTool(agent_team, t),
+        "list_checkpoints": ListCheckpointsTool(agent_team, t),
         "spawn_human_agent": SpawnHumanAgentTool(agent_team, t),
         "spawn_bridge_agent": SpawnBridgeAgentTool(agent_team, t),
         "spawn_external_cli": SpawnExternalCliTool(agent_team, t),

@@ -75,7 +75,7 @@ async def inprocess_spawn(
     team_agent.share_checkpoints_with(teammate)
     if teammate.team_backend is not None:
         teammate.team_backend.set_store_checkpoint_fn(
-            lambda name, count: team_agent.set_checkpoint(name, count)
+            team_agent.set_checkpoint
         )
 
     # Fork context injection: seed the teammate's context engine with the

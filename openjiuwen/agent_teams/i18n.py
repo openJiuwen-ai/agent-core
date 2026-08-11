@@ -51,6 +51,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "人类成员 {member_name} 仍持有 {count} 个活跃任务 [{task_ids}]，不允许非强制关闭。"
             "请先通过 send_message 与成员协商是否同意强制关闭并取消任务。"
         ),
+        # agent/fork.py — fork name mismatch surfaced to the leader
+        "checkpoint.fork_not_found": (
+            "[fork 警告] checkpoint '{fork}' 不存在，已回退为全量继承（成员 {member}）。"
+            "可用 checkpoint：{available}。请用 list_checkpoints 核对名字后再 fork。"
+        ),
         # reliability/ — anomaly remediation messages
         "reliability.steer_self_correct": (
             "⚙️[可靠性] 检测到 {kind}：{summary}。请停止重复无效操作，改换策略或换用其他工具。"
@@ -303,6 +308,12 @@ STRINGS: dict[str, dict[str, str]] = {
             "Human agent {member_name} still holds {count} active task(s) [{task_ids}] "
             "and cannot be shut down without force. "
             "Use send_message to coordinate with the member on whether to force-shutdown and cancel the tasks."
+        ),
+        # agent/fork.py — fork name mismatch surfaced to the leader
+        "checkpoint.fork_not_found": (
+            "[fork warning] checkpoint '{fork}' not found; fell back to full-context "
+            "inheritance (member {member}). Available checkpoints: {available}. "
+            "Use list_checkpoints to verify names before forking."
         ),
         # reliability/ — anomaly remediation messages
         "reliability.steer_self_correct": (
