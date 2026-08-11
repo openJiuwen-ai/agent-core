@@ -69,7 +69,6 @@ GEN_AI_TOOL_OUTPUT = "gen_ai.tool.output"
 GEN_AI_TOOL_ID = "gen_ai.tool.id"
 GEN_AI_TOOL_CALLS = "gen_ai.tool_calls"
 
-
 # ---------------------------------------------------------------------------
 # agentteam.* — Team-level collaboration attributes (Monitor handler)
 # ---------------------------------------------------------------------------

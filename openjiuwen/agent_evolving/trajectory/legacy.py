@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
-from openjiuwen.agent_evolving.trajectory import _semconv as semconv
+from openjiuwen.extensions.observability import semconv
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import (
     MEMBER_ID,
