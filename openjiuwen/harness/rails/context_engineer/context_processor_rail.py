@@ -350,7 +350,13 @@ class ContextProcessorRail(DeepAgentRail):
         context_engine_config = getattr(config, "context_engine_config", None)
         recall_config = getattr(context_engine_config, "compression_recall_config", None)
         supported_compressor_present = any(
-            processor_name in {"DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor"}
+            processor_name
+            in {
+                "DialogueCompressor",
+                "CurrentRoundCompressor",
+                "RoundLevelCompressor",
+                "SessionMemoryCompressor",
+            }
             for processor_name, _ in all_processors
         )
         recall_requested = isinstance(recall_config, CompressionRecallConfig) and recall_config.enabled

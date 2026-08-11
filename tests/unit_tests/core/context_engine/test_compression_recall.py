@@ -137,9 +137,7 @@ def test_archive_structured_content_without_text_yields_no_query_slug(tmp_path):
 
 def test_archive_unwraps_channel_envelope_for_query(tmp_path):
     messages = [
-        UserMessage(
-            content='你收到一条消息：\n{"content": "帮我查一下昨天的报错", "source": "wecom"}'
-        ),
+        UserMessage(content='你收到一条消息：\n{"content": "帮我查一下昨天的报错", "source": "wecom"}'),
         AssistantMessage(content="查看日志发现是超时。"),
     ]
 
@@ -161,6 +159,21 @@ def test_archive_keeps_json_first_line_as_genuine_user_text(tmp_path):
 
     turns = [json.loads(line) for line in (Path(archive.path) / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
     assert turns[0]["query"] == '{"content": "这不是信封"}'
+
+
+def test_archive_ignores_session_memory_block_when_picking_query(tmp_path):
+    messages = [
+        UserMessage(content="real user question"),
+        AssistantMessage(content="first answer"),
+        UserMessage(content="<memory_block_session>\nnotes\n</memory_block_session>"),
+        AssistantMessage(content="second answer"),
+    ]
+
+    archive = _archive(tmp_path, messages)
+
+    turns = [json.loads(line) for line in (Path(archive.path) / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(turns) == 1
+    assert turns[0]["query"] == "real user question"
 
 
 def test_current_round_style_archive_uses_preceding_user_as_turn_query(tmp_path):

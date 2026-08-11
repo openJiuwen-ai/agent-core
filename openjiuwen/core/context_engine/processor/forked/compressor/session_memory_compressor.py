@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
@@ -19,6 +21,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.util imp
 from openjiuwen.core.context_engine.processor.forked.support.context_debug import (
     write_debug_record,
 )
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 
 SESSION_MEMORY_BLOCK_OPEN = "<memory_block_session>"
@@ -74,6 +77,14 @@ class SessionMemoryCompressor(ContextProcessor):
         if len(new_messages) > len(original_messages):
             return None, context_window
 
+        archive = await self._archive_replaced_messages(
+            context=context,
+            original_messages=original_messages,
+            messages_to_compress=original_messages[: len(original_messages) - len(preserved_messages)],
+        )
+        if archive is not None:
+            memory_message.content = self._with_recall_marker(memory_message.content, archive.memory_id)
+
         context_window.context_messages = new_messages
         context.set_messages(new_messages)
         return (
@@ -84,6 +95,57 @@ class SessionMemoryCompressor(ContextProcessor):
             ),
             context_window,
         )
+
+    async def _archive_replaced_messages(
+        self,
+        *,
+        context: ModelContext,
+        original_messages: list[BaseMessage],
+        messages_to_compress: list[BaseMessage],
+    ) -> Any | None:
+        """Dump the messages replaced by the session memory block for later recall.
+
+        Mirrors ``PrefixCompactProcessor._archive_compressed_messages``: gated on
+        the engine-wide ``CompressionRecallConfig`` and best-effort — an archive
+        failure must never block the compression itself.
+        """
+        get_recall_config = getattr(context, "compression_recall_config", None)
+        recall_config = get_recall_config() if callable(get_recall_config) else None
+        if not isinstance(recall_config, CompressionRecallConfig) or not recall_config.enabled:
+            return None
+        if not messages_to_compress:
+            return None
+        from openjiuwen.core.context_engine.processor.forked.compressor.recall import (
+            archive_compression_messages,
+        )
+
+        try:
+            return await asyncio.to_thread(
+                archive_compression_messages,
+                context=context,
+                processor_type=self.processor_type(),
+                original_messages=original_messages,
+                messages_to_compress=messages_to_compress,
+                preceding_messages=[],
+                chunk_size_tokens=recall_config.chunk_size_tokens,
+                chunk_overlap_tokens=recall_config.chunk_overlap_tokens,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] compression recall archive failed; continuing without a recall marker: %s",
+                self.processor_type(),
+                exc,
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _with_recall_marker(content: str, memory_id: str) -> str:
+        marker = f"[[COMPRESSION_RECALL: id={memory_id}]]"
+        if content.endswith(SESSION_MEMORY_BLOCK_CLOSE):
+            head = content[: -len(SESSION_MEMORY_BLOCK_CLOSE)]
+            return f"{head}{marker}\n{SESSION_MEMORY_BLOCK_CLOSE}"
+        return f"{content}\n{marker}"
 
     def _build_candidate(
         self,
