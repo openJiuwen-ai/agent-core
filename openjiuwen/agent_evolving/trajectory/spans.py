@@ -8,8 +8,8 @@ registry, or subscription.  Functions return detached dictionaries/lists and
 transformations create a new :class:`Trajectory` value through
 ``Trajectory.from_otlp``.
 
-Observability semantic keys are imported from ``agent_teams.observability``;
-the trajectory package must not maintain a second copy of those conventions.
+Current attributes follow the observability conventions; migration-only
+fallbacks remain explicitly owned by the trajectory package.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ from copy import deepcopy
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Iterator, TypeAlias
 
-from openjiuwen.agent_evolving.trajectory import _semconv as semconv
+from openjiuwen.agent_evolving.trajectory import legacy_semconv
+from openjiuwen.extensions.observability import semconv
 
 
 JSONValue: TypeAlias = Any
@@ -569,9 +570,9 @@ def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], li
     prompts = _indexed_messages(attrs, semconv.GEN_AI_PROMPT)
     completions = _indexed_messages(attrs, semconv.GEN_AI_COMPLETION)
     if not prompts:
-        prompts = _message_list(attrs.get(semconv.GEN_AI_INPUT_MESSAGES))
+        prompts = _message_list(attrs.get(legacy_semconv.LEGACY_GEN_AI_INPUT_MESSAGES))
     if not completions:
-        completions = _message_list(attrs.get(semconv.GEN_AI_OUTPUT_MESSAGES))
+        completions = _message_list(attrs.get(legacy_semconv.LEGACY_GEN_AI_OUTPUT_MESSAGES))
     tool_calls = _decode_structured_attribute(attrs.get(semconv.GEN_AI_TOOL_CALLS))
     if tool_calls not in (None, ""):
         if completions:
@@ -597,19 +598,19 @@ def read_tool_call(span: Mapping[str, Any]) -> dict[str, Any]:
     attrs = span_attributes(span)
     result: dict[str, Any] = {}
     name = attrs.get(semconv.GEN_AI_TOOL_NAME)
-    tool_id = attrs.get(semconv.GEN_AI_TOOL_ID) or attrs.get(semconv.GEN_AI_TOOL_CALL_ID)
+    tool_id = attrs.get(semconv.GEN_AI_TOOL_ID) or attrs.get(legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ID)
     if name is not None:
         result["name"] = deepcopy(name)
     if tool_id is not None:
         result["id"] = deepcopy(tool_id)
     if semconv.GEN_AI_TOOL_INPUT in attrs:
         result["input"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_INPUT])
-    elif semconv.GEN_AI_TOOL_CALL_ARGUMENTS in attrs:
-        result["input"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_CALL_ARGUMENTS])
+    elif legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS in attrs:
+        result["input"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS])
     if semconv.GEN_AI_TOOL_OUTPUT in attrs:
         result["output"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_OUTPUT])
-    elif semconv.GEN_AI_TOOL_CALL_RESULT in attrs:
-        result["output"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_CALL_RESULT])
+    elif legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_RESULT in attrs:
+        result["output"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_RESULT])
     error = read_span_error(span)
     if error is not None:
         result["error"] = error
@@ -621,10 +622,13 @@ def read_usage(span: Mapping[str, Any]) -> dict[str, int]:
 
     attrs = span_attributes(span)
     mapping = (
-        ("prompt_tokens", (semconv.GEN_AI_USAGE_PROMPT_TOKENS, semconv.GEN_AI_USAGE_INPUT_TOKENS)),
+        (
+            "prompt_tokens",
+            (semconv.GEN_AI_USAGE_PROMPT_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_INPUT_TOKENS),
+        ),
         (
             "completion_tokens",
-            (semconv.GEN_AI_USAGE_COMPLETION_TOKENS, semconv.GEN_AI_USAGE_OUTPUT_TOKENS),
+            (semconv.GEN_AI_USAGE_COMPLETION_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS),
         ),
         ("total_tokens", (semconv.GEN_AI_USAGE_TOTAL_TOKENS,)),
     )

@@ -21,7 +21,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     span_identity,
     trim_trajectory,
 )
-from openjiuwen.agent_teams.observability import semconv
+from openjiuwen.extensions.observability import semconv
 
 
 def _value(value):

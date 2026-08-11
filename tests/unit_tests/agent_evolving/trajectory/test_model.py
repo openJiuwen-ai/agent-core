@@ -115,8 +115,28 @@ def test_schema_exposes_canonical_and_rl_fields_only() -> None:
         assert hasattr(schema, name)
 
 
+def test_migration_semantic_keys_are_isolated_from_current_conventions() -> None:
+    from openjiuwen.agent_evolving.trajectory import legacy_semconv, semconv
+    from openjiuwen.extensions.observability import semconv as observability_semconv
+
+    migration_keys = (
+        "LEGACY_GEN_AI_INPUT_MESSAGES",
+        "LEGACY_GEN_AI_OUTPUT_MESSAGES",
+        "LEGACY_GEN_AI_TOOL_CALL_ID",
+        "LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS",
+        "LEGACY_GEN_AI_TOOL_CALL_RESULT",
+        "LEGACY_GEN_AI_USAGE_INPUT_TOKENS",
+        "LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS",
+        "LEGACY_TRAJECTORY_STEP_KIND",
+        "LEGACY_STEP_META",
+    )
+    assert all(hasattr(legacy_semconv, name) for name in migration_keys)
+    assert all(not hasattr(semconv, name) for name in migration_keys)
+    assert all(not hasattr(observability_semconv, name) for name in migration_keys)
+
+
 def test_schema_team_identity_values_match_observability_without_runtime_dependency() -> None:
-    from openjiuwen.agent_teams.observability import semconv
+    from openjiuwen.extensions.observability import semconv
 
     assert MEMBER_ID == semconv.AT_MEMBER_ID
     assert SESSION_ID == semconv.AT_SESSION_ID
