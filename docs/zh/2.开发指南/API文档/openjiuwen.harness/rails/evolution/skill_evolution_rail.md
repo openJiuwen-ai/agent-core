@@ -70,11 +70,9 @@ agent = create_deep_agent(
 
 ### 触发机制
 
-- 被动演进在 `DeepAgent.invoke()` 完成后运行。
-- `signal_trigger` 控制被动信号扫描；`auto_scan` 是兼容别名。二者默认关闭。
+- 挂载 `SkillEvolutionRail` 后，被动演进始终启用：在 `DeepAgent.invoke()` 完成后执行被动信号扫描。产品层总开关是是否挂载该 Rail / `evolution.enabled`。
 - `review_trigger` 控制周期性自检 follow_up 注入；`fuzzy_review` 是兼容别名。二者默认关闭。
-- 迁移期如果同时传入新旧参数名，以新参数名的值为准。
-- `auto_scan=False` 会关闭被动信号扫描，也会跳过被动演进的 async snapshot。
+- 迁移期如果同时传入 `review_trigger` 与 `fuzzy_review`，以 `review_trigger` 的值为准。
 - 主动演进通过 `request_user_evolution()` 触发；返回的 prompt 会要求主 agent 先调用 `prepare_skill_evolution(user_confirmed=true)`，再用返回的 `evolution_review_ref` 调用 `evolve_review_task(evolution_review_ref=...)`。prepare tool 会把当前 rail 已采集到的执行/对话轨迹作为默认 review materials，`user_intent` 只补充优化方向。
 - 普通 skill 演进会忽略 `kind: team-skill`；team skill 使用 `TeamSkillEvolutionRail` / `TeamSkillRail`。
 
@@ -85,8 +83,6 @@ class SkillEvolutionRail(
     llm: Model,
     model: str,
     review_runtime: EvolutionReviewRuntime,
-    auto_scan: Optional[bool] = None,
-    signal_trigger: Optional[bool] = None,
     auto_save: bool = False,
     subject_kind: str = "skill",
     language: str = "cn",
@@ -110,8 +106,6 @@ class SkillEvolutionRail(
 * **llm** (Model): 信号、记录生成、评分和治理阶段使用的 LLM 客户端。
 * **model** (str): 模型名称。
 * **review_runtime** (EvolutionReviewRuntime): review 子智能体状态与中断审核绑定的共享运行时，active-review 依赖必须显式传入。
-* **auto_scan** (bool, 可选): `signal_trigger` 的兼容别名；已设置 `signal_trigger` 时忽略该值。
-* **signal_trigger** (bool, 可选): invoke 后是否执行被动信号扫描，默认 `False`。
 * **auto_save** (bool): 是否自动审批并持久化生成的被动记录，默认 `False`。
 * **subject_kind** (str): 本 rail 的演进对象类型（`"skill"` 或 `"swarm-skill"`，会做统一归一化）。
 * **language** (str): prompt 语言，常见值为 `"cn"` 或 `"en"`。
@@ -269,7 +263,7 @@ skill 数据的演进存储，与 `trajectory_store` 不同。
 
 ### evolution_config -> dict
 
-生效的 LLM 策略、超时、`auto_scan`、`auto_save` 和 `eval_interval`。
+生效的 LLM 策略、超时与 `two_stage`。
 
 ---
 

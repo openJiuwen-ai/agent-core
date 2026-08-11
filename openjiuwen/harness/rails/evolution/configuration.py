@@ -289,16 +289,6 @@ def _validate_evolution_rail_config(existing, *, auto_save, language, rail_kwarg
     if getattr(existing, "_language", None) != language:
         mismatches.append(f"language: {getattr(existing, '_language', None)!r} != {language!r}")
 
-    requested_signal_trigger = rail_kwargs.get("signal_trigger")
-    requested_auto_scan = rail_kwargs.get("auto_scan")
-    expected_signal_trigger = bool(
-        requested_signal_trigger if requested_signal_trigger is not None else requested_auto_scan or False
-    )
-    if getattr(existing, "signal_trigger", None) != expected_signal_trigger:
-        mismatches.append(
-            f"signal_trigger: {getattr(existing, 'signal_trigger', None)!r} != {expected_signal_trigger!r}"
-        )
-
     review_old_name = "completion_followup_enabled" if isinstance(existing, TeamSkillEvolutionRail) else "fuzzy_review"
     requested_review_trigger = rail_kwargs.get("review_trigger")
     requested_legacy_review_trigger = rail_kwargs.get(review_old_name)

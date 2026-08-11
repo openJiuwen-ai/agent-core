@@ -170,7 +170,6 @@ react:
   max_iterations: 50
   evolution:
     enabled: {"true" if evolution_enabled else "false"}
-    auto_scan: {"true" if evolution_enabled else "false"}
     auto_save: {"true" if evolution_enabled else "false"}
     skill_base_dir: /root/.jiuwenswarm/agent/workspace/skills
 
