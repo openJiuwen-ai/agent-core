@@ -157,3 +157,19 @@ def test_spec_stall_knobs_validation():
         TeamAgentSpec(**base, stale_claim_idle_timeout=0)
     with pytest.raises(ValueError):
         TeamAgentSpec(**base, stale_pending_idle_timeout=-1)
+
+
+@pytest.mark.level1
+def test_spec_steer_batch_size_validation():
+    """Non-leader members take the steering backlog in bounded batches (F_78)."""
+    base = {"agents": {"leader": DeepAgentSpec()}, "spawn_mode": "inprocess"}
+    spec = TeamAgentSpec(**base)
+    assert spec.steer_batch_size == 2
+
+    assert TeamAgentSpec(**base, steer_batch_size=5).steer_batch_size == 5
+
+    # A drain always takes at least one, so zero would quietly mean one.
+    with pytest.raises(ValueError):
+        TeamAgentSpec(**base, steer_batch_size=0)
+    with pytest.raises(ValueError):
+        TeamAgentSpec(**base, steer_batch_size=-1)

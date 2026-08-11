@@ -24,7 +24,7 @@ from openjiuwen.agent_teams.rails import TeamPolicyRail
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TEAM_CONTEXT_STATE_KEY
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
-from openjiuwen.core.single_agent.rail.base import UserMessageInputs
+from openjiuwen.core.single_agent.rail.base import SteeringDrainInputs, UserMessageInputs
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
 from tests.test_logger import logger
 
@@ -1316,3 +1316,76 @@ class TestTeamPolicyRailSnapshotCollapse:
         assert "<team-context>" in body
         assert body.index("<team-context>") < body.index("fresh board")
         assert "stale board" not in body
+
+
+# ---------------------------------------------------------------------------
+# Steering batch quota (F_78)
+# ---------------------------------------------------------------------------
+
+
+class _StubDrainContext:
+    """AgentCallbackContext stand-in carrying only the drain inputs."""
+
+    def __init__(self, pending: int = 0) -> None:
+        self.inputs = SteeringDrainInputs(pending=pending)
+
+
+async def _quota(rail: TeamPolicyRail, pending: int = 5) -> int | None:
+    """Ask the rail how much of a backlog of ``pending`` this drain may take."""
+    ctx = _StubDrainContext(pending=pending)
+    await rail.before_steering_drain(ctx)
+    return ctx.inputs.limit
+
+
+class TestTeamPolicyRailSteeringQuota:
+    """Non-leader members take the backlog in bounded batches; the leader does not."""
+
+    @staticmethod
+    def _rail(role: TeamRole, steer_batch_size: int = 2) -> TeamPolicyRail:
+        """Build a rail in the given team role."""
+        return TeamPolicyRail(
+            role=role,
+            member_name="dev1",
+            language="cn",
+            steer_batch_size=steer_batch_size,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    @pytest.mark.parametrize(
+        "role",
+        [TeamRole.TEAMMATE, TeamRole.HUMAN_AGENT, TeamRole.BRIDGE_AGENT, TeamRole.WORKER],
+    )
+    async def test_non_leader_roles_cap_the_batch(self, role: TeamRole):
+        """Every role that reads a mailbox gets the same cap — one gate, not four."""
+        assert await _quota(self._rail(role)) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_leader_takes_the_whole_backlog(self):
+        """It reads the sequence of boards, so it must keep seeing all of it."""
+        assert await _quota(self._rail(TeamRole.LEADER)) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_quota_follows_the_configured_batch_size(self):
+        assert await _quota(self._rail(TeamRole.TEAMMATE, steer_batch_size=4)) == 4
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_quota_is_the_same_whatever_is_queued(self):
+        """A fixed cap, not a fraction of the backlog: batches stay a known size."""
+        rail = self._rail(TeamRole.TEAMMATE)
+        assert [await _quota(rail, pending=depth) for depth in (1, 3, 50)] == [2, 2, 2]
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_missing_inputs_are_tolerated(self):
+        """Same defensive read as ``on_user_message``: no inputs, nothing to cap."""
+        rail = self._rail(TeamRole.TEAMMATE)
+        ctx = _StubDrainContext()
+        ctx.inputs = None
+
+        await rail.before_steering_drain(ctx)
+
+        assert ctx.inputs is None
