@@ -99,4 +99,15 @@ __all__ = [
     "MemberTrajectorySnapshot",
     "TrajectorySink",
     "TrajectorySource",
+    "TrajectorySpanProcessor",
 ]
+
+
+def __getattr__(name):
+    """Resolve processor exports lazily to preserve legacy import order."""
+    if name == "TrajectorySpanProcessor":
+        from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+
+        globals()[name] = TrajectorySpanProcessor
+        return TrajectorySpanProcessor
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

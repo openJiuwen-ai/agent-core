@@ -20,7 +20,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     span_attributes,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
-from openjiuwen.agent_evolving.trajectory import _semconv as semconv
+from openjiuwen.extensions.observability import semconv
 
 _REVIEW_TEXT_PREVIEW_CHARS = 240
 _REVIEW_DETAIL_TEXT_CHARS = 1200

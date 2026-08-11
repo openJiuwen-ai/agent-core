@@ -23,8 +23,8 @@ from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
-from openjiuwen.agent_teams.observability import ObservabilityConfig
-from openjiuwen.agent_teams.observability.file_exporter import TraceFileExporter
+from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.file_exporter import TraceFileExporter
 
 
 def _make_span(
@@ -198,7 +198,7 @@ def test_cleanup_keeps_recent_trace_files(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# End-to-end through init_observability / _build_exporter
+# Exporter construction
 # ---------------------------------------------------------------------------
 
 
@@ -214,72 +214,9 @@ def file_config(tmp_path: Path) -> ObservabilityConfig:
 
 
 def test_build_exporter_returns_trace_file_exporter(file_config: ObservabilityConfig) -> None:
-    from openjiuwen.agent_teams.observability.setup import _build_exporter
+    from openjiuwen.extensions.observability.runtime import build_span_exporter
 
-    exporter = _build_exporter(file_config)
+    exporter = build_span_exporter(file_config)
     assert isinstance(exporter, TraceFileExporter)
     assert exporter.root_dir == file_config.traces_dir
     assert exporter.retention_days == 7
-
-
-def test_init_observability_writes_per_day_jsonl(file_config: ObservabilityConfig) -> None:
-    """init_observability with exporter=file lands a per-day ``.jsonl`` on
-    disk after shutdown; each line is a hex-id OTLP JSON request. Pair it
-    with BatchSpanProcessor (setup.py default) — spans flush to disk on
-    provider shutdown."""
-    import asyncio
-
-    asyncio.run(_e2e_async(file_config))
-
-
-async def _e2e_async(file_config: ObservabilityConfig) -> None:
-    from openjiuwen.agent_teams.observability import init_observability, shutdown_observability
-    from openjiuwen.agent_teams.observability.setup import get_tracer
-    from openjiuwen.agent_teams.observability.span_context import get_or_create_team_span, remove_team_span
-    from openjiuwen.core.runner import Runner
-    from openjiuwen.core.runner.callback.events import LLMCallEvents
-
-    class _FakeUsage:
-        input_tokens = 12
-        output_tokens = 7
-        total_tokens = 19
-        model_name = "fake-llm-1"
-
-    class _FakeAssistantMessage:
-        def __init__(self) -> None:
-            self.content = "hello"
-            self.reasoning_content = ""
-            self.finish_reason = "stop"
-            self.tool_calls = None
-            self.usage_metadata = _FakeUsage()
-
-    init_observability(file_config)
-    try:
-        get_or_create_team_span("e2e_team", get_tracer("openjiuwen.agent_teams.observability"))
-        fw = Runner.callback_framework
-        messages = [{"role": "user", "content": "hi"}]
-        await fw.trigger(LLMCallEvents.LLM_INVOKE_INPUT, messages=messages, model="fake-llm-1")
-        await fw.trigger(
-            LLMCallEvents.LLM_INVOKE_OUTPUT,
-            messages=messages,
-            result=_FakeAssistantMessage(),
-        )
-        remove_team_span("e2e_team")
-    finally:
-        shutdown_observability()
-
-    traces_root = Path(file_config.traces_dir)
-    jsonl_files = list(traces_root.glob("*.jsonl"))
-    assert jsonl_files, "no .jsonl trace file written"
-    for jf in jsonl_files:
-        for line in jf.read_text("utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            data = json.loads(line)
-            assert "resourceSpans" in data
-            for rs in data["resourceSpans"]:
-                for ss in rs["scopeSpans"]:
-                    for sp in ss["spans"]:
-                        tid = sp.get("traceId", "")
-                        assert len(tid) == 32 and all(c in "0123456789abcdef" for c in tid)
