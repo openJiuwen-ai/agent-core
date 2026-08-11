@@ -183,7 +183,7 @@ class EvolutionArchiveService:
         pair_or_version: EvolutionArchivePair | str,
         *,
         subject_kind: Optional[str] = None,
-        prune: bool = True,
+        prune: bool = False,
     ) -> bool:
         """Restore archived ``SKILL.md`` and always clear live evolutions.
 

@@ -137,8 +137,6 @@ class ExperienceRebuildService:
             subject_kind=subject_kind,
             retain_version=new_version,
         )
-        if hasattr(self._archive_service, "prune"):
-            self._archive_service.prune(skill_name, subject_kind=subject_kind)
         return True
 
     async def _select_entries_for_rebuild(

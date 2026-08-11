@@ -1766,7 +1766,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
         archive_service = EvolutionArchiveService(store=store)
         target = version or "latest"
-        restored = await archive_service.rollback_to_pair(skill_name, target, prune=True)
+        restored = await archive_service.rollback_to_pair(skill_name, target, prune=False)
         if not restored:
             logger.warning(
                 "[SkillEvolutionRail] rollback failed for %s -> %s",
