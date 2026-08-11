@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple, List, Type, Union
 from pydantic import BaseModel
 
@@ -884,13 +885,15 @@ class ResourceMgr:
         add_results = []
         server_configs = [server_config] if isinstance(server_config, McpServerConfig) else server_config
         for config in server_configs:
+            # 将 MCP 连接放到子 task：mcp/anyio 在 HTTP 失败时会 cancel host task；
+            # 子 task 作为 host，避免把 CancelledError 误传到外层流式任务。
+            # 再用 current_task().cancelling() 区分「子 task 连接失败取消」与「外层真取消」。
+            connect_task = asyncio.create_task(
+                self._resource_registry.tool().add_tool_server(config, expiry_time=expiry_time),
+                name=f"add_mcp_server:{config.server_name}",
+            )
             try:
-                # 用 asyncio.shield() 包裹 add_tool_server，将 MCP 连接运行在独立 task 中。
-                # anyio task group 在 HTTP 请求失败时会通过 call_soon 反复调用 task.cancel()，
-                # shield 确保只 cancel 内部 task，不污染外层调用方。
-                cards = await asyncio.shield(
-                    self._resource_registry.tool().add_tool_server(config, expiry_time=expiry_time)
-                )
+                cards = await connect_task
                 for card in cards:
                     self._id_to_card[card.id] = card
                     self._tag_mgr.tag_resource(card.id, tag if tag else GLOBAL)
@@ -902,16 +905,23 @@ class ResourceMgr:
                             resource_type="mcp server",
                             tag=tag if tag else GLOBAL,
                             metadata={"tools": tool_names, "server_name": config.server_name})
-            except asyncio.CancelledError as e:
-                # anyio cancel scope 导致的取消，转换为 Error 结果返回给调用方
-                error_msg = f"MCP server connection cancelled: {config.server_name}"
-                logger.warning("add mcp server cancelled",
-                               event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE_SERVER,
-                               resource_id=config.server_id,
-                               resource_type="mcp server",
-                               exception=e,
-                               metadata={"server_name": config.server_name})
-                add_results.append(Error(Exception(error_msg)))
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                outer_cancelling = bool(current and current.cancelling())
+                if connect_task.cancelled() and not outer_cancelling:
+                    error_msg = f"MCP server connection cancelled: {config.server_name}"
+                    logger.warning("add mcp server cancelled",
+                                   event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE_SERVER,
+                                   resource_id=config.server_id,
+                                   resource_type="mcp server",
+                                   metadata={"server_name": config.server_name})
+                    add_results.append(Error(Exception(error_msg)))
+                else:
+                    if not connect_task.done():
+                        connect_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await connect_task
+                    raise
             except Exception as e:
                 add_results.append(Error(e))
                 logger.error("add mcp server failed", event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE_SERVER,
