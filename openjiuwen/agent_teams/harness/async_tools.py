@@ -51,7 +51,6 @@ _SPILL_SUMMARY_CHARS = 1024
 
 def _to_jsonable(obj):
     """Recursively convert pydantic BaseModel objects to dict, ensuring json.dumps serializability.
-
         The run() of a Swarmflow script may return pydantic model instances nested in dicts or lists,
         which json.dumps cannot serialize directly. This function traverses the result tree, replacing
         each BaseModel with the output of model_dump(mode="json"). Pure Python types are returned as-is.
