@@ -145,7 +145,8 @@ def _write_turns(
         chunk_paths: list[str] = []
         for chunk_index, chunk_body in enumerate(bodies):
             chunk_id = f"{turn.turn_id}_chunk_{chunk_index:03d}"
-            relative_path = f"chunks/{chunk_id}.md"
+            filename = f"{chunk_id}_{_chunk_slug(chunk_body)}.md"
+            relative_path = f"chunks/{filename}"
             chunk_paths.append(relative_path)
             markdown = (
                 "---\n"
@@ -155,7 +156,7 @@ def _write_turns(
                 "---\n\n"
                 f"{chunk_body.rstrip()}\n"
             )
-            (chunks_dir / f"{chunk_id}.md").write_text(markdown, encoding="utf-8")
+            (chunks_dir / filename).write_text(markdown, encoding="utf-8")
         records.append(
             {
                 "turn_id": turn.turn_id,
@@ -303,9 +304,35 @@ def _new_memory_id(recall_root: Path) -> str:
 
 
 def _query_slug(query: str) -> str:
-    compact = re.sub(r"\s+", "_", query.strip())[:10]
+    return _text_slug(query, max_chars=10, fallback="no-query")
+
+
+# Bare role headers emitted by _render_turn carry no content hint on their own,
+# so _chunk_slug skips them in favor of the first real content line.
+_BARE_SECTION_HEADERS = {"user", "assistant", "assistant reasoning"}
+
+
+def _chunk_slug(body: str) -> str:
+    """Summarize a chunk body for its filename so browsers can gauge the content.
+
+    Uses the first meaningful line (Markdown heading markers stripped): headers
+    with a payload like ``## Tool Call: read_file`` are informative as-is, bare
+    role headers (``## User``) are skipped, and a window-cut fragment is
+    acceptable for a rough hint.
+    """
+    for line in body.splitlines():
+        # Token-window cuts can split a multi-byte character at the boundary,
+        # leaving replacement chars (�) at the start of a line — strip them.
+        text = line.strip().lstrip("#").strip().strip("�").strip()
+        if text and text.lower() not in _BARE_SECTION_HEADERS:
+            return _text_slug(text, max_chars=40, fallback="empty")
+    return "empty"
+
+
+def _text_slug(text: str, *, max_chars: int, fallback: str) -> str:
+    compact = re.sub(r"\s+", "_", text.strip())[:max_chars]
     safe = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", "-", compact).strip("-._")
-    return safe or "no-query"
+    return safe or fallback
 
 
 def _safe_filename_part(value: str) -> str:
