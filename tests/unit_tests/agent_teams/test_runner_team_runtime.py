@@ -1036,6 +1036,47 @@ def test_team_agent_recover_from_session_restores_session_id():
     assert agent.session_id == session_id
 
 
+def test_team_agent_recover_from_session_marks_history_restored():
+    """Cold recovery must tell the backend its history came back (F_76).
+
+    Same session, so the child agent session shares the id and the leader's
+    conversation returns with the original build_team result in it. The flag
+    is what makes build_team refuse a redundant second call; without it set
+    here, that refusal never fires on the path it exists for.
+    """
+    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
+
+    session_id = f"recover_policy_{uuid.uuid4().hex}"
+    session = create_agent_team_session(session_id=session_id, team_id="persistent_team")
+    write_team_namespace(
+        session,
+        "persistent_team",
+        {
+            "spec": {
+                "team_name": "persistent_team",
+                "agents": {"leader": {}},
+            },
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "desc": "leader",
+                "team_spec": {
+                    "team_name": "persistent_team",
+                    "display_name": "persistent_team",
+                    "leader_member_name": "leader",
+                },
+                "messager_config": {},
+                "db_config": {},
+            },
+        },
+    )
+
+    agent = TeamAgent.recover_from_session(session, "persistent_team")
+
+    assert agent.team_backend is not None
+    assert agent.team_backend._history_restored is True
+
+
 def test_team_agent_recover_from_session_builds_leader_member_handle():
     """A cold-recovered leader gets its TeamMember handle via configure().
 

@@ -1,5 +1,7 @@
 Assemble a team and register yourself as Leader. Call as soon as you have a goal — don't hesitate.
 
+**When the team already exists this tool takes it over rather than failing**: nothing is rebuilt, no member is registered twice, the roster and each member's configuration are left as they are, and the effective capability flags come from the team's own configuration (this call's matching arguments do not apply). Inheriting the same team in a new session takes this path — just call it as usual.
+
 ## What It Returns
 Besides the creation result, this tool returns **your full collaboration policy** — core responsibilities, hand-off conventions, decision principles, response cadence, task state transitions, how tasks reach members, team lifecycle wrap-up, and the inbound-tag system. It is tailored to the parameters of this very call, and it is **the basis for everything you do afterwards: read it and follow it**. Do not treat it as a one-off notice to skim past.
 

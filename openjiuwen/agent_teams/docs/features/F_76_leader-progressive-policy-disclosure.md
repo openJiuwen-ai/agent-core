@@ -128,31 +128,61 @@ raw markdown，洞正是让它去问"是不是少了什么能力"的诱因，与
 意图的两半。全仓 desc / fragment 无一处故意使用连续空行，所以这个归一化没有副作用。顺带把
 `update_task.md` 里槽前缺的那个空行补上——之前不能补正是因为补了会在 omit 时留双空行，现在安全了。
 
-### 2b. cold recovery 的兜底通道：准则经 `<team-context>` 直接注入
+### 2b. `build_team` 对已存在的团队幂等：接管而不是失败
 
-披露挂在 `build_team` 上，那么**不调 `build_team` 的 leader** 就什么也拿不到——冷恢复（团队已存在、
-`recover_team()` 路径）正是这种情况：它带着 bootstrap 跑起来，只知道"要建团队"，对自己刚接手的这个
-团队一无所知。
+披露挂在 `build_team` 上，于是**没有那次调用的 leader** 什么也拿不到。到底哪种运行会落进这一格，
+取决于**对话历史在不在**，而这由 dispatch 的 `team_in_session` 一维决定（`runtime/dispatch.py`）：
 
-兜底复用 [[F_70]] 已有的 `TeamContextTracker`，不新造通道：在成员的对话里补投一条
-`<team-context kind="collaboration-policy">`，正文是同一份 `build_leader_policy_disclosure(...)`。
+| 分支 | `team_in_session` | child session id | leader 的对话历史 | 准则从哪来 |
+|---|---|---|---|---|
+| `COLD_RECOVER` | True（同一个 session 继续跑） | 同 id | **恢复了** | 历史里那条 build_team tool result（`team_policy` 重注入保证它不会被压缩掉） |
+| `NEW_TEAM_IN_SESSION` | False（新 session 接手已有团队） | 新 id | **空的** | **无处可来** —— 这一格才是问题所在 |
 
-三道闸，顺序即语义（`_policy_block`）：
+child agent session **共享 team session id**（`harness/team_harness.py` 的 `_make_child_session`），
+所以历史随 session 走：同 session 恢复就还在，换 session 就没了。**真正缺准则的是
+`NEW_TEAM_IN_SESSION`**——它的 leader 从一段空历史起跑，面对的却是一个成员齐备、任务可能过半的团队。
+而此时 `create_team` 撞主键 `IntegrityError → return False`，`build_team` 随即 `raise RuntimeError`，
+leader 只剩 bootstrap：知道"要建团队"，对手上这个团队一无所知。
 
-1. **基线标志 `policy_emitted`**——准则是常驻指令不是会变的事实，一个成员 session 只发一次，无探针。
-   基线随 F_70 的既有机制持久化在成员自己的 child `AgentSession`，所以 rail 每轮重建也不会重发。
-2. **`backend.policy_disclosed()`**——这一轮是自己建的团队、准则刚从 tool result 拿到，此时
-   **推进基线但不渲染**，否则下一次调用就会把工具刚说过的话再说一遍。该标志是进程内内存态，
-   语义正是"*本次运行*有没有披露过"，而冷恢复必然在新进程里得到 False。
-3. **团队行必须存在**（`get_team_updated_at() != 0`）——`build_team` 之前没有团队可治理，
-   而且 leader 马上就会拿到。探针在行不存在时读 0，这一条自己就会解除。
+**cold recovery 不是"不需要"，是明令禁止**。它的历史里已经有准则，而那条 tool result 由
+`team_policy` 重注入保证不会被压缩掉——所以再调一次 `build_team` 永远不会带来任何新信息，只会白烧
+一轮。`BuildTeamTool.invoke` 因此在这种情况下**直接拒绝**，而不是幂等地服务它：
 
-非 leader 角色不进这个通道：teammate 的协同约定 spawn 时固定、留在系统提示词里，恢复时白拿。
+```python
+if await self.team.rejects_rebuild():   # _history_restored and 团队行仍在
+    return ToolOutput(success=False, error="...do not call build_team again...")
+```
 
-`kind` 属性是这次给 `<team-context>` 新加的（默认仍无属性）。**它不是分类洁癖**：其余
-`<team-context>` 都是"事实"，这一块是"指令"，两者读法不同，所以 `inbound_tags.md`（cn/en）里明确
-写出这条例外——不写的话 leader 会把一份行为契约当成背景资料读过去。正文前另有一句
-`i18n.team_context.policy_recovered` 说明它为什么出现在这里、以及必须照做。
+信号在 `TeamAgent.recover_from_session` 里置位（`backend.mark_history_restored()`）——那个方法**就是**
+冷恢复入口，开头强制要求 session 里有该团队的 bucket，语义与 `COLD_RECOVER` 完全重合。
+
+**两个条件缺一不可**。只看"是不是冷恢复"会误伤一种真实情况：恢复出来的 leader 若在本轮中途被
+`CoordinationKernel.start` 判定为"上次清理没做完"（全部 teammate 都是 SHUTDOWN）而执行了
+`clean_team`，团队行就没了——这时它**确实需要**重新建队。所以拒绝条件加上"团队行仍在"，
+`test_recovered_leader_may_rebuild_a_disbanded_team` 守住这一条。
+
+**解法是让这条路走得通，而不是给它修一条旁路**：`build_team` 开头查团队行，已存在则走
+`_reattach_team` 接管并照常返回准则。接管路径写零行、注册零人——名册与成员配置都是既成事实，
+teammate 由 `recover_team` 从那份名册重新拉起，与本次调用无关。
+
+三条约束：
+
+- **本次调用的能力参数不适用**。团队建成时就配好了，成员已经按那套跑，任务也可能已被它塑形
+  （verify 闸上的 reviewer）。所以生效的 verification flag 从行里读回，而不是重算；leader 从返回值
+  得知自己实际拿到什么——与 create 路径上"天花板收窄"的告知方式一致。
+- **`on_team_built` 照常触发**。*这个 session* 的 checkpoint 必须记下团队行存在，否则下一次 run 会在
+  与数据库不符的状态上做 dispatch 决策。
+- **不发 `TeamCreated` 事件**。什么都没被创建；成员收到它只会对一个自己早就在其中的团队做出反应。
+
+返回值的首行区分两者（`Team created:` / `Existing team taken over:`），接管时另附一句"成员已在名册上、
+先看清现状、不要重复创建"。准则正文两条路径逐字相同——**差异只在这一行，不说 leader 就看不见**。
+
+**拒绝的方案：`<team-context kind="collaboration-policy">` 兜底通道。** 曾经实现并提交过：给
+`TeamContextTracker` 加一条 leader 专用 channel，把准则补投进对话，靠三道闸
+（基线一次性标志 / `backend.policy_disclosed()` 进程内内存态 / 团队行探针）避免重复。它能工作，但
+代价是**同一份内容有两条投递路径**，各自有各自的时机、各自的去重逻辑，还要给 `<team-context>` 引入
+一个"这块是指令不是事实"的 `kind` 例外并在 `inbound_tags.md` 里解释它。让 `build_team` 幂等之后，
+这些全部消失：一条路径，无闸，无例外。
 
 ### 3. 只有 leader 走这条路
 
@@ -175,7 +205,11 @@ core 层按工具名 `build_team` 匹配，不 import `agent_teams`——与既�
 
 ## 已知遗留
 
-1. **cold recovery 的 leader 拿不到准则**。团队已存在、leader 经 `recover_team()` 重启时不会再调 `build_team`，历史里若已无那条 tool result（跨 session 重建），准则就缺失。用户已知悉并接受（选项二的代价），未来若要补，最小改法是 recovery 路径主动补投一条披露消息。
+1. **接管路径依赖 leader 真的会去调 `build_team`**。这由 bootstrap 提示词保证（"无论团队是否已经存在
+   都调这一次"），不是由代码强制的——没有任何东西拦住一个 leader 跳过它直接 `create_task`。同 session
+   的 cold recovery 里它本来也不该再调（准则还在历史里，压缩掉则由 `team_policy` 重注入复原），所以
+   这条只在"新 session 接手同一团队"时真正吃紧。要更硬的保障，得在 leader 的第一个非 `build_team`
+   团队工具调用上加一道闸，代价是每个工具都要认识这条规则。
 2. **`create_task` 的 autonomous 形态没有对称的偷传拒绝**。它靠"schema 里就没有 `reviewer` 字段"挡住
    宿主 LLM，但 `TaskCreateTool.invoke` 不像 `UpdateTaskTool` 那样显式拒绝偷传的 reviewer——它是直接
    忽略（构造 `TaskGraphSpec` 时压根不读那个键）。忽略在这里是安全的（不会写进库），所以没有卡死风险，

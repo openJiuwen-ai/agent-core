@@ -256,6 +256,24 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     任何工具的 schema）。这不违反不变量 21——模式仍由 spec 静态决定，`build_team` 只是**读**它
     来决定披露哪一套。
 
+    - **`build_team` 因此必须对已存在的团队幂等**：它是准则的唯一交付点，所以"团队已经在了"不能
+      是失败。`TeamBackend.build_team` 开头查团队行，命中则走 `_reattach_team` 接管——**写零行、
+      注册零人**（名册与成员配置是既成事实，teammate 由 `recover_team` 从那份名册拉起），生效的
+      verification flag **从行里读回而非重算**（团队既有配置优先于本次调用的能力参数），
+      `on_team_built` 照常触发（本 session 的 checkpoint 必须记下团队行存在），
+      **不发 `TeamCreated`**（什么都没被创建）。返回值首行区分 `Team created:` /
+      `Existing team taken over:`，准则正文两条路径逐字相同。
+      **要覆盖的场景是 `NEW_TEAM_IN_SESSION`**（新 session 接手已有团队）：child agent session 共享
+      team session id，所以换 session 等于换掉 leader 的整段对话历史，那条带准则的 tool result
+      不在了，而团队、名册、任务都还在。
+    - **`COLD_RECOVER` 则相反：必须拒绝，不是幂等服务**。它是同一个 session 继续跑，历史恢复，
+      准则还在其中，且那条 tool result 由 `team_policy` 重注入保证**不会被压缩掉**——再调一次
+      永远拿不到新信息，只白烧一轮。`BuildTeamTool.invoke` 在 `backend.rejects_rebuild()` 为真时
+      直接返回失败。判据是 `_history_restored`（由 `TeamAgent.recover_from_session` 置位，该方法
+      即冷恢复入口）**与**团队行仍在，**两个条件缺一不可**：恢复出来的 leader 若在本轮被
+      `CoordinationKernel.start` 的"上次清理没做完"分支执行了 `clean_team`，团队行已消失，
+      那时它确实需要重新建队。
+
 21b. **verify 闸是 dispatch 门控的能力，`update_task` 与 `build_team` 双层执法**（[[F_76]]）。`reviewer` /
     `max_review_rounds` 两个属性只在 `dispatch_mode == "scheduled"` 时进 `update_task` 的 schema，
     描述里的 `{{update_task_verify_gate}}` 槽用**同一个信号**门控——参数与讲这个参数的散文一起出现、

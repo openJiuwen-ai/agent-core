@@ -104,6 +104,22 @@ class BuildTeamTool(TeamTool):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        # A cold recovery continues the same session, so the leader's history
+        # came back carrying the original build_team result -- and the policy
+        # with it, which compaction never drops. Calling this again would buy
+        # nothing and cost a round, so it is refused outright rather than
+        # served idempotently (F_76).
+        if await self.team.rejects_rebuild():
+            return ToolOutput(
+                success=False,
+                error=(
+                    "This team is already yours and this conversation already holds its "
+                    "collaboration policy — do not call build_team again. Read back through "
+                    "your own history for the policy, and use list_members and view_task to "
+                    "see where the work stands."
+                ),
+            )
+
         display_name = inputs.get("display_name")
         leader_display_name = inputs["leader_display_name"]
         # Second-layer enforcement of the verify gate, for arguments coming from
@@ -144,6 +160,7 @@ class BuildTeamTool(TeamTool):
             "leader_member_name": self.team.member_name,
             "leader_display_name": leader_display_name,
             "enable_hitt": self.team.hitt_enabled(),
+            "taken_over": self.team.team_taken_over(),
         }
         # Reported only where the gate exists, and read back off the backend
         # rather than echoed: the spec ceiling may have narrowed what the leader
@@ -153,22 +170,35 @@ class BuildTeamTool(TeamTool):
         return ToolOutput(success=True, data=data)
 
     def map_result(self, output: ToolOutput) -> str:
-        """Render the creation facts, then disclose the collaboration policy.
+        """Render the outcome, then disclose the collaboration policy.
 
         The policy is appended only on success — a failed ``build_team`` leaves
         the leader on the bootstrap path, where re-reading the routing guide is
         what it needs, not a rulebook for a team that does not exist.
+
+        The lead line distinguishes creating a team from taking over one that
+        already existed. A leader that inherited a running team must not go on
+        to spawn the members already on its roster, and the policy that follows
+        is identical either way — so the difference has to be said here or the
+        leader cannot see it at all.
         """
         if not output.success:
             return output.error or "Failed to build team"
         d = output.data or {}
+        lead = "Existing team taken over" if d.get("taken_over") else "Team created"
         facts = (
-            f"Team created: team_name={d.get('team_name')} "
+            f"{lead}: team_name={d.get('team_name')} "
             f"display_name={d.get('display_name')} "
             f"leader_member_name={d.get('leader_member_name')} "
             f"leader_display_name={d.get('leader_display_name')} "
             f"hitt_enabled={d.get('enable_hitt')}"
         )
+        if d.get("taken_over"):
+            facts += (
+                "\nThis team already existed: its members are on the roster and were restarted "
+                "for you. Call list_members and view_task to see where the work stands before "
+                "planning anything — do not re-spawn members that are already there."
+            )
         if self._VERIFY_PARAM in d:
             facts += f" task_verification={d[self._VERIFY_PARAM]}"
         policy = build_leader_policy_disclosure(

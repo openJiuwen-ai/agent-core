@@ -1495,6 +1495,13 @@ class TeamAgent(BaseAgent):
         from openjiuwen.agent_teams.context import set_session_id
 
         set_session_id(session.get_session_id())
+        # This is the cold-recovery path: the same session continues, so the
+        # leader's conversation -- including the build_team result that carries
+        # its collaboration policy -- comes back with it. Mark the backend so
+        # build_team refuses a redundant second call (F_76).
+        backend = agent.team_backend
+        if backend is not None:
+            backend.mark_history_restored()
         return agent
 
 
