@@ -23,7 +23,7 @@ present it writes `pending_create`. `TeamAgent._mark_team_built` and
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/session_manager.py`、`openjiuwen/agent_teams/agent/recovery_manager.py`、`openjiuwen/agent_teams/runtime/metadata.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-05-12 |
+| 最近一次修订日期 | 2026-08-11 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md` |
 
 ## 范围 / 边界
@@ -125,7 +125,7 @@ state["teams"][team_name] = {
     "model_allocator_state": Optional[dict],
     "lifecycle":             Optional["running" | "paused"],
     "db_state":              Optional["pending_create" | "created" | "cleaned"],
-    "checkpoints":           Optional[dict[str, int]],  # {name: message_count} 命名 fork 快照
+    "checkpoints":           Optional[dict[str, dict]],  # {name: {count, description, created_by}} 命名 fork 快照
 }
 ```
 
@@ -315,11 +315,11 @@ def read_teams_bucket(session) -> dict[str, dict[str, Any]]: ...
 def read_team_namespace(session, team_name: str) -> dict[str, Any] | None: ...
 def read_team_names_in_session(session) -> list[str]: ...
 def read_team_db_state(session, team_name: str) -> str | None: ...
-def read_team_checkpoints(session, team_name: str) -> dict[str, int] | None: ...
+def read_team_checkpoints(session, team_name: str) -> dict[str, dict] | None: ...
 def write_team_namespace(session, team_name: str, payload: dict[str, Any]) -> None: ...
 def merge_team_namespace(session, team_name: str, partial: dict[str, Any]) -> None: ...
 def merge_team_db_state(session, team_name: str, state: str) -> None: ...
-def merge_team_checkpoints(session, team_name: str, mapping: dict[str, int]) -> None: ...
+def merge_team_checkpoints(session, team_name: str, mapping: dict[str, dict]) -> None: ...
 def remove_team_namespace(session, team_name: str) -> bool: ...
 ```
 
@@ -438,7 +438,7 @@ session.state
     │   ├── model_allocator_state Optional[dict]      ← persist_allocator_state
     │   ├── lifecycle             Optional["running" | "paused"]
     │   │                                                  ← coordination 写入
-    │   └── checkpoints           Optional[dict[str, int]]  ← 命名 fork 快照
+    │   └── checkpoints           Optional[dict[str, dict]]  ← 命名 fork 快照（{count, description, created_by}）
     └── <team_name_B>
         └── ...
 ```
@@ -452,7 +452,7 @@ session.state
 | `model_allocator_state`（初始）| 同上 | 同上 |
 | `model_allocator_state`（增量）| `recovery_manager.persist_allocator_state` → `merge_team_namespace` | round 中模型分配变更后 |
 | `lifecycle` | `coordination/kernel._persist_team_lifecycle` → `merge_team_namespace` | pause / resume 切换时 |
-| `checkpoints` | `TeamAgent._merge_checkpoints_into_session` → `merge_team_namespace` | `checkpoint()` 工具调用时（leader 镜像） |
+| `checkpoints` | `TeamAgent._merge_checkpoints_into_session` → `merge_team_namespace` | `checkpoint()` 工具调用时（leader 镜像）；记录含 `{count, description, created_by}` |
 
 新增字段时，按"是否在 bind 时一次性给定"决定走 `write_team_namespace`（覆盖）
 还是 `merge_team_namespace`（增量）。**新增字段名进 namespace 之前**，先在
