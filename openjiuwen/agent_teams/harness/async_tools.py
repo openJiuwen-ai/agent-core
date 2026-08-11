@@ -49,6 +49,23 @@ FailureFormatter = Callable[[str], str | None]
 _SPILL_SUMMARY_CHARS = 1024
 
 
+def _to_jsonable(obj):
+    """Recursively convert pydantic BaseModel objects to dict, ensuring json.dumps serializability.
+
+    The run() of a background tool may return pydantic model instances nested in
+    dicts or lists, which json.dumps cannot serialize directly. This function
+    traverses the result tree, replacing each BaseModel with the output of
+    model_dump(mode="json"). Pure Python types are returned as-is.
+    """
+    if hasattr(obj, "model_dump") and callable(obj.model_dump):
+        return obj.model_dump(mode="json")
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(v) for v in obj]
+    return obj
+
+
 def render_result_text(result: Any) -> str:
     """Render an async tool's return value to model-facing text, in full.
 
@@ -67,7 +84,13 @@ def render_result_text(result: Any) -> str:
     if isinstance(result, str):
         return result
     if isinstance(result, (dict, list)):
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        try:
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        except TypeError:
+            team_logger.info(
+                "[async_tools] pydantic BaseModel detected, converting for JSON serialization"
+            )
+            return json.dumps(_to_jsonable(result), ensure_ascii=False, indent=2)
     return str(result)
 
 
