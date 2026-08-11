@@ -24,19 +24,26 @@ class CompressionRecallError(ValueError):
     """Raised when a recall archive cannot be safely read."""
 
 
-def recall_compressed_context(  # pylint: disable=too-many-locals
+def recall_compressed_context(
     *,
     workspace_dir: str,
     session_id: str,
-    memory_id: str,
+    memory_id: str | None = None,
     query: str,
 ) -> dict[str, Any]:
-    """Recall budget-capped chunks from one archive inside the current session."""
+    """Recall budget-capped chunks from compression archives of the current session.
+
+    With ``memory_id`` the search is confined to that one archive (existing
+    behavior). Without it, every archive of the session is searched and the
+    results are merged with per-archive score normalization — raw BM25 scores
+    are corpus-dependent and not comparable across archives.
+    """
     if not workspace_dir:
         raise CompressionRecallError("compression recall requires a workspace directory")
     if not session_id:
         raise CompressionRecallError("compression recall requires a session")
-    if not memory_id or not _MEMORY_ID_RE.fullmatch(memory_id):
+    memory_id = (memory_id or "").strip()
+    if memory_id and not _MEMORY_ID_RE.fullmatch(memory_id):
         raise CompressionRecallError("memory_id is invalid")
     if not query or not query.strip():
         raise CompressionRecallError("query is required")
@@ -49,17 +56,144 @@ def recall_compressed_context(  # pylint: disable=too-many-locals
     if not resolved_session_root.is_dir():
         raise CompressionRecallError("compression recall archive was not found in the current session")
 
+    archives = _list_session_archives(resolved_session_root, session_id)
+    if memory_id:
+        result = _recall_single_archive(
+            resolved_session_root, archives, memory_id=memory_id, session_id=session_id, query=query
+        )
+    else:
+        if not archives:
+            raise CompressionRecallError("compression recall archive was not found in the current session")
+        result = _recall_all_archives(archives, query=query)
+    result["recall_root"] = str(resolved_session_root)
+    result["archives_in_session"] = [
+        {
+            "memory_id": item["memory_id"],
+            "created_at": item["created_at"],
+            "turn_count": item["turn_count"],
+        }
+        for item in archives
+    ]
+    return result
+
+
+def _list_session_archives(session_root: Path, session_id: str) -> list[dict[str, Any]]:
+    """List valid archives of the session, oldest first (names start with a timestamp)."""
+    archives: list[dict[str, Any]] = []
+    for path in sorted(session_root.iterdir()):
+        if not path.is_dir() or path.is_symlink() or path.name.startswith("."):
+            continue
+        manifest_path = path / "manifest.json"
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = _read_json_object(manifest_path)
+        except CompressionRecallError:
+            continue
+        memory_id = str(manifest.get("memory_id") or "")
+        if not memory_id or not path.name.startswith(f"{memory_id}_"):
+            continue
+        if str(manifest.get("session_id") or "") != session_id:
+            continue
+        archives.append(
+            {
+                "memory_id": memory_id,
+                "path": path,
+                "created_at": str(manifest.get("created_at") or ""),
+                "turn_count": int(manifest.get("turn_count") or 0),
+            }
+        )
+    return archives
+
+
+def _recall_single_archive(
+    session_root: Path,
+    archives: list[dict[str, Any]],
+    *,
+    memory_id: str,
+    session_id: str,
+    query: str,
+) -> dict[str, Any]:
+    matches = [item for item in archives if item["memory_id"] == memory_id]
+    if len(matches) != 1:
+        _raise_for_rejected_candidate(session_root, memory_id, session_id=session_id)
+        raise CompressionRecallError("compression recall archive was not found in the current session")
+    archive_path = _resolve_inside(matches[0]["path"], session_root, kind="archive")
+    result = _search_archive(archive_path, memory_id=memory_id, query=query)
+    chunks, truncated, returned_tokens = _apply_budget(result["chunks"])
+    result["chunks"] = chunks
+    result["truncated"] = truncated
+    result["returned_tokens"] = returned_tokens
+    return result
+
+
+def _raise_for_rejected_candidate(session_root: Path, memory_id: str, *, session_id: str) -> None:
+    """Report why an explicitly requested archive was rejected, when it exists.
+
+    ``_list_session_archives`` silently excludes foreign or malformed archives;
+    an explicit ``memory_id`` lookup keeps the specific errors so callers can
+    tell "no such archive" apart from "not your session's archive".
+    """
     candidates = [path for path in session_root.glob(f"{memory_id}_*") if path.is_dir() and not path.is_symlink()]
     if len(candidates) != 1:
-        raise CompressionRecallError("compression recall archive was not found in the current session")
-    archive_path = _resolve_inside(candidates[0], resolved_session_root, kind="archive")
-
-    manifest = _read_json_object(_resolve_inside(archive_path / "manifest.json", archive_path, kind="manifest"))
+        return
+    try:
+        manifest = _read_json_object(candidates[0] / "manifest.json")
+    except CompressionRecallError:
+        return
     if str(manifest.get("session_id") or "") != session_id:
         raise CompressionRecallError("compression recall archive does not belong to the current session")
     if str(manifest.get("memory_id") or "") != memory_id:
         raise CompressionRecallError("compression recall archive id does not match")
 
+
+def _normalized_scored(items: list[dict[str, Any]], *, keep_raw: bool) -> list[dict[str, Any]]:
+    """Normalize scores to the archive's own top item (raw BM25 scores are not
+    comparable across archives, so each archive's top scores 1.0)."""
+    top_score = max((entry["score"] for entry in items), default=0.0)
+    for entry in items:
+        if keep_raw:
+            entry["raw_score"] = entry["score"]
+        if top_score > 0:
+            entry["score"] = entry["score"] / top_score
+    return items
+
+
+def _recall_all_archives(archives: list[dict[str, Any]], *, query: str) -> dict[str, Any]:
+    merged_chunks: list[dict[str, Any]] = []
+    merged_turns: list[dict[str, Any]] = []
+    for item in archives:
+        sub = _search_archive(item["path"], memory_id=item["memory_id"], query=query)
+        merged_chunks.extend(_normalized_scored(sub["chunks"], keep_raw=True))
+        merged_turns.extend(_normalized_scored(sub["matched_turns"], keep_raw=False))
+    # Primary key is the per-archive normalized score; ties (each archive's top
+    # chunk normalizes to 1.0) fall back to the raw score, which still ranks a
+    # strongly matching archive above an incidentally matching one.
+    merged_chunks.sort(key=lambda chunk: (-chunk["score"], -chunk["raw_score"], chunk["chunk_id"]))
+    merged_turns.sort(key=lambda turn: (-turn["score"], turn["memory_id"], turn["turn_id"]))
+
+    chunks, truncated, returned_tokens = _apply_budget(merged_chunks)
+    matched_turn = merged_turns[0] if merged_turns else None
+    archive_path = ""
+    if chunks:
+        archive_path = chunks[0]["archive_path"]
+    elif matched_turn:
+        archive_path = str(
+            next((item["path"] for item in archives if item["memory_id"] == matched_turn["memory_id"]), "")
+        )
+    return {
+        "memory_id": "",
+        "archive_path": archive_path,
+        "matched_turn": matched_turn,
+        "matched_turns": merged_turns,
+        "chunks": chunks,
+        "truncated": truncated,
+        "returned_tokens": returned_tokens,
+    }
+
+
+def _search_archive(archive_path: Path, *, memory_id: str, query: str) -> dict[str, Any]:
+    """Two-stage BM25 search inside one archive; chunks are not budget-capped."""
     turns_path = _resolve_inside(archive_path / "turns.jsonl", archive_path, kind="turn index")
     turns = _read_json_lines(turns_path)
     turn_documents = [f"{turn.get('query', '')}\n{turn.get('answer', '')}" for turn in turns]
@@ -75,8 +209,6 @@ def recall_compressed_context(  # pylint: disable=too-many-locals
             "matched_turn": None,
             "matched_turns": [],
             "chunks": [],
-            "truncated": False,
-            "returned_tokens": 0,
         }
 
     top_turn_score = ranked_turns[0][0]
@@ -85,7 +217,36 @@ def recall_compressed_context(  # pylint: disable=too-many-locals
     ]
 
     candidates = _collect_chunk_candidates(archive_path, matched_turns, query)
+    for candidate in candidates:
+        candidate["memory_id"] = memory_id
+        candidate["archive_path"] = str(archive_path)
     candidates.sort(key=lambda chunk: (-chunk["score"], chunk["chunk_id"]))
+
+    return {
+        "memory_id": memory_id,
+        "archive_path": str(archive_path),
+        "matched_turn": {
+            "memory_id": memory_id,
+            "turn_id": matched_turns[0][1].get("turn_id"),
+            "query": matched_turns[0][1].get("query", ""),
+            "answer": matched_turns[0][1].get("answer", ""),
+            "score": matched_turns[0][0],
+        },
+        "matched_turns": [
+            {
+                "memory_id": memory_id,
+                "turn_id": turn.get("turn_id"),
+                "query": turn.get("query", ""),
+                "answer": turn.get("answer", ""),
+                "score": score,
+            }
+            for score, turn in matched_turns
+        ],
+        "chunks": candidates,
+    }
+
+
+def _apply_budget(candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool, int]:
     budget = _max_content_tokens()
     chunks: list[dict[str, Any]] = []
     returned_tokens = 0
@@ -97,30 +258,7 @@ def recall_compressed_context(  # pylint: disable=too-many-locals
             continue
         returned_tokens += chunk_tokens
         chunks.append(candidate)
-
-    top_turn_score_value, top_turn = matched_turns[0]
-    return {
-        "memory_id": memory_id,
-        "archive_path": str(archive_path),
-        "matched_turn": {
-            "turn_id": top_turn.get("turn_id"),
-            "query": top_turn.get("query", ""),
-            "answer": top_turn.get("answer", ""),
-            "score": top_turn_score_value,
-        },
-        "matched_turns": [
-            {
-                "turn_id": turn.get("turn_id"),
-                "query": turn.get("query", ""),
-                "answer": turn.get("answer", ""),
-                "score": score,
-            }
-            for score, turn in matched_turns
-        ],
-        "chunks": chunks,
-        "truncated": truncated,
-        "returned_tokens": returned_tokens,
-    }
+    return chunks, truncated, returned_tokens
 
 
 def _collect_chunk_candidates(
