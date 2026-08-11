@@ -3,10 +3,12 @@
 """TaskPlanningRail — registers todo tools on DeepAgent."""
 from __future__ import annotations
 
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.core.runner import Runner
@@ -16,6 +18,7 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.harness.prompts.sections.todo import (
     build_progress_reminder_user_prompt,
+    build_todo_advance_reminder_user_prompt,
     build_todo_section,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -26,6 +29,119 @@ from openjiuwen.harness.schema.task import (
 )
 from openjiuwen.harness.tools import TodoTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
+
+_TODO_PROGRESS_REMINDER_KEY = "todo_progress_reminder"  # also tags advance injects (ent name)
+_TODO_SESSION_ID_KEY = "todo_session_id"
+
+
+def _todo_session_label(session_id: str) -> str:
+    """Compact session id for reminder prefixes (align with ent shorten_session_label)."""
+    normalized = (session_id or "").strip()
+    if not normalized:
+        return "unknown"
+    if len(normalized) <= 32:
+        return normalized
+    if "_" in normalized:
+        tail = normalized.rsplit("_", 1)[-1]
+        if tail:
+            return tail
+    return normalized[-32:]
+
+
+def _is_todo_reminder_for_session(message: BaseMessage, session_id: str) -> bool:
+    metadata = getattr(message, "metadata", None) or {}
+    return (
+        metadata.get(_TODO_PROGRESS_REMINDER_KEY) is True
+        and metadata.get(_TODO_SESSION_ID_KEY) == session_id
+    )
+
+
+def _parse_true_false(value: Any, *, default: bool) -> bool:
+    """Parse ``enable_progress_repeat``: only ``true`` / ``false`` (bool or str).
+
+    Allowed: YAML bool, or strings ``\"true\"`` / ``\"false\"`` (case-insensitive).
+    Anything else falls back to ``default``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    logger.warning(
+        "Invalid enable_progress_repeat=%r; allowed: true|false. Using default=%s",
+        value,
+        default,
+    )
+    return default
+
+
+def _parse_positive_int(value: Any, *, default: int) -> int:
+    """Parse ``list_tool_call_interval``: only int / digit string, ``>= 1``.
+
+    Bool is rejected (``True`` is a subclass of ``int`` in Python). Invalid
+    values fall back to ``default``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        logger.warning(
+            "Invalid list_tool_call_interval=%r; allowed: positive int (>=1). "
+            "Using default=%s",
+            value,
+            default,
+        )
+        return default
+    if isinstance(value, int) and value >= 1:
+        return value
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized.isdigit():
+            parsed = int(normalized)
+            if parsed >= 1:
+                return parsed
+    logger.warning(
+        "Invalid list_tool_call_interval=%r; allowed: positive int (>=1). "
+        "Using default=%s",
+        value,
+        default,
+    )
+    return default
+
+
+def resolve_task_planning_rail_kwargs(
+    react_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build ``TaskPlanningRail`` constructor kwargs from ``react.task_planning``.
+
+    Returns an empty dict when the section is absent so callers keep rail defaults.
+    When the section is present, both known fields are returned (with defaults for
+    omitted keys) so env/YAML overrides are applied explicitly.
+
+    Allowed values:
+    - ``enable_progress_repeat``: ``true`` / ``false`` (bool or string)
+    - ``list_tool_call_interval``: positive int ``>= 1`` (int or digit string)
+    """
+    if not isinstance(react_config, dict):
+        return {}
+    raw = react_config.get("task_planning")
+    if not isinstance(raw, dict):
+        return {}
+
+    return {
+        "enable_progress_repeat": _parse_true_false(
+            raw.get("enable_progress_repeat", True),
+            default=True,
+        ),
+        "list_tool_call_interval": _parse_positive_int(
+            raw.get("list_tool_call_interval", 20),
+            default=20,
+        ),
+    }
 
 
 class TaskPlanningRail(DeepAgentRail):
@@ -43,7 +159,7 @@ class TaskPlanningRail(DeepAgentRail):
 
     def __init__(
         self,
-        enable_progress_repeat: bool = False,
+        enable_progress_repeat: bool = True,
         list_tool_call_interval: int = 20,
         model_selection: Optional[Dict[Model, str]] = None,
     ) -> None:
@@ -63,6 +179,10 @@ class TaskPlanningRail(DeepAgentRail):
         self.list_tool_call_interval = list_tool_call_interval
         self._tool_call_counts = {}
         self._todos_cache: Dict[str, List[TodoItem]] = {}
+        # Deferred injection slots (enterprise): store in after_tool_call,
+        # inject+pop in before_model_call (no steering).
+        self._pending_progress_reminder: Dict[str, str] = {}
+        self._pending_advance_reminder: Dict[str, str] = {}
         self.system_prompt_builder = None
         self._model_selection: Dict[Model, str] = model_selection or {}
         self._model_id_to_model: Dict[str, Model] = {}
@@ -146,7 +266,14 @@ class TaskPlanningRail(DeepAgentRail):
     # -- hook methods --
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject task planning system prompt and switch model if needed."""
+        """Inject deferred todo reminders and task planning system prompt.
+
+        Inject runs even when ``system_prompt_builder`` is missing so a progress
+        reminder scheduled with language fallback is not stranded in the pending
+        dict (enterprise returns early before inject; we keep inject first).
+        """
+        await self._inject_pending_todo_reminder(ctx)
+
         if self.system_prompt_builder is None:
             return
 
@@ -180,13 +307,18 @@ class TaskPlanningRail(DeepAgentRail):
             )
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Add progress reminder prompt after tool call.
+        """Schedule advance / progress reminders after tool call.
 
-        Every N tool calls (configurable via tool_call_interval), pushes a
-        steering message prompting the model to review current task progress
-        using todo_list tool.
+        Enterprise-aligned (no steering): write pending dicts in this hook;
+        ``before_model_call`` injects at most one UserMessage (advance preferred),
+        replacing any prior todo reminder for the session via metadata.
 
-        Also refreshes todos cache when todo tools are called.
+        Advance: only after ``todo_*`` when pending-without-in_progress; clears
+        any pending progress. While advance is pending in the dict, progress
+        counting/scheduling is skipped (dict gate).
+
+        Progress (repeat): every N tool calls when enabled; skipped only while
+        advance is still pending inject — not blocked by todo gap status alone.
 
         Args:
             ctx: Agent callback context containing inputs and messages.
@@ -195,7 +327,6 @@ class TaskPlanningRail(DeepAgentRail):
         if tool is None:
             return
 
-        # Refresh todos cache when todo tools are called
         if ctx.session and isinstance(ctx.inputs, ToolCallInputs):
             tool_name = ctx.inputs.tool_name
             if tool_name and tool_name.startswith("todo_"):
@@ -205,13 +336,20 @@ class TaskPlanningRail(DeepAgentRail):
                     self._todos_cache[session_id] = todos
                 except Exception:
                     logger.debug("TaskPlanningRail: after tool call refresh cache failed")
-                # 将 todo.json 的终态即时同步到 TaskPlan，防止外层循环重复处理已完成任务
+                    todos = []
+                await self._maybe_schedule_advance_reminder(ctx, session_id, todos)
                 await self._sync_plan_from_todos(ctx)
 
-        if not self.enable_progress_repeat or not ctx.session or not ctx.context:
+        if not ctx.session:
             return
 
         session_id = ctx.session.get_session_id()
+        if session_id in self._pending_advance_reminder:
+            return
+
+        if not self.enable_progress_repeat or not ctx.context:
+            return
+
         if session_id not in self._tool_call_counts:
             self._tool_call_counts[session_id] = 0
 
@@ -219,23 +357,7 @@ class TaskPlanningRail(DeepAgentRail):
         if self._tool_call_counts[session_id] % self.list_tool_call_interval != 0:
             return
 
-        try:
-            todos = await tool.load_todos(session_id)
-        except Exception:
-            logger.debug("TaskPlanningRail: after tool call load todos failed")
-            return
-
-        if not todos:
-            return
-
-        tasks, in_progress_task = self._format_task_content(todos)
-        prompt = build_progress_reminder_user_prompt(
-            language=self.system_prompt_builder.language,
-            tasks=tasks,
-            in_progress_task=in_progress_task,
-        )
-        # Use steering queue to defer injection until ToolMessages are written.
-        ctx.push_steering(prompt)
+        await self._schedule_progress_reminder(ctx, session_id, tool)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Accumulate token usage per model_id after each LLM call."""
@@ -275,6 +397,9 @@ class TaskPlanningRail(DeepAgentRail):
         # Clean up tool call counts
         if session_id in self._tool_call_counts:
             del self._tool_call_counts[session_id]
+
+        self._pending_progress_reminder.pop(session_id, None)
+        self._pending_advance_reminder.pop(session_id, None)
 
         # Clean up session resources via public interface
         tool = self._find_todo_tool()
@@ -451,7 +576,117 @@ class TaskPlanningRail(DeepAgentRail):
 
         return "\n".join(todos_str), in_progress_str
 
+    @staticmethod
+    def _has_pending_without_in_progress(todos: List[TodoItem]) -> bool:
+        has_pending = any(t.status == TodoStatus.PENDING for t in todos)
+        has_in_progress = any(t.status == TodoStatus.IN_PROGRESS for t in todos)
+        return has_pending and not has_in_progress
+
+    async def _inject_pending_todo_reminder(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Inject deferred advance/progress as UserMessage (enterprise inject+pop).
+
+        Prefers advance over progress. Only pops **trailing** same-session
+        reminders before append so earlier history stays byte-stable for
+        prompt/KV cache; buried reminders are left as-is.
+        """
+        if not ctx.session or not ctx.context:
+            return
+
+        session_id = ctx.session.get_session_id()
+        prompt = self._pending_advance_reminder.pop(session_id, None)
+        if not prompt:
+            prompt = self._pending_progress_reminder.pop(session_id, None)
+        if not prompt:
+            return
+
+        content = f"[TODO · session={_todo_session_label(session_id)}]\n{prompt}"
+        metadata = {
+            _TODO_PROGRESS_REMINDER_KEY: True,
+            _TODO_SESSION_ID_KEY: session_id,
+        }
+        messages = list(ctx.context.get_messages())
+        while messages and _is_todo_reminder_for_session(messages[-1], session_id):
+            messages.pop()
+        messages.append(UserMessage(content=content, metadata=metadata))
+        ctx.context.set_messages(messages)
+        logger.debug(
+            "TaskPlanningRail: injected todo reminder session_id=%s",
+            session_id,
+        )
+
+    async def _schedule_progress_reminder(
+        self,
+        ctx: AgentCallbackContext,
+        session_id: str,
+        tool: TodoTool,
+    ) -> None:
+        """Store progress reminder for before_model_call inject."""
+        try:
+            todos = await tool.load_todos(session_id)
+        except Exception:
+            logger.debug("TaskPlanningRail: after tool call load todos failed")
+            return
+
+        if not todos:
+            return
+
+        tasks, in_progress_task = self._format_task_content(todos)
+        language = (
+            self.system_prompt_builder.language
+            if self.system_prompt_builder
+            else "cn"
+        )
+        prompt = build_progress_reminder_user_prompt(
+            language=language,
+            tasks=tasks,
+            in_progress_task=in_progress_task,
+        )
+        self._pending_progress_reminder[session_id] = prompt
+        logger.debug(
+            "TaskPlanningRail: scheduled progress reminder session_id=%s "
+            "tool_call_count=%d",
+            session_id,
+            self._tool_call_counts.get(session_id, 0),
+        )
+
+    async def _maybe_schedule_advance_reminder(
+        self,
+        ctx: AgentCallbackContext,
+        session_id: str,
+        todos: List[TodoItem],
+    ) -> None:
+        """Store/clear advance reminder; clears pending progress when gap opens.
+
+        Matches enterprise: no schedule (and no clear) when system_prompt_builder
+        is missing — before_model_call also no-ops without it.
+        """
+        if self.system_prompt_builder is None:
+            return
+
+        if not todos:
+            self._pending_advance_reminder.pop(session_id, None)
+            return
+
+        if not self._has_pending_without_in_progress(todos):
+            self._pending_advance_reminder.pop(session_id, None)
+            return
+
+        tasks, _ = self._format_task_content(todos)
+        prompt = build_todo_advance_reminder_user_prompt(
+            language=self.system_prompt_builder.language,
+            tasks=tasks,
+        )
+        self._pending_advance_reminder[session_id] = prompt
+        self._pending_progress_reminder.pop(session_id, None)
+        logger.debug(
+            "TaskPlanningRail: scheduled advance reminder session_id=%s",
+            session_id,
+        )
+
 
 __all__ = [
     "TaskPlanningRail",
+    "resolve_task_planning_rail_kwargs",
 ]
