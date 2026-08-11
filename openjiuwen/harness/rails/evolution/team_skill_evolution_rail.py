@@ -156,8 +156,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         trajectory_source: Optional[TrajectorySource] = None,
         trajectory_sink: Optional[TrajectorySink] = None,
         member_role: Optional[str] = None,
-        auto_scan: Optional[bool] = None,
-        signal_trigger: Optional[bool] = None,
         auto_save: bool = False,
         review_runtime: EvolutionReviewRuntime,
         async_evolution: bool = True,
@@ -180,7 +178,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             raise ValueError("eval_interval must be >= 1")
 
         self._record_llm_policy = record_llm_policy
-        resolved_signal_trigger = bool(signal_trigger if signal_trigger is not None else auto_scan or False)
         resolved_review_trigger = bool(
             review_trigger if review_trigger is not None else completion_followup_enabled or False
         )
@@ -189,7 +186,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             skills_dir,
             llm=llm,
             model=model,
-            signal_trigger=resolved_signal_trigger,
             auto_save=auto_save,
             review_runtime=review_runtime,
             language=language,
@@ -342,24 +338,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         }
 
     @property
-    def auto_scan(self) -> bool:
-        """Backward-compatible alias for signal_trigger."""
-        return self._signal_trigger
-
-    @auto_scan.setter
-    def auto_scan(self, value: bool) -> None:
-        self._signal_trigger = bool(value)
-
-    @property
-    def signal_trigger(self) -> bool:
-        """Whether deterministic team-skill signal triggering is enabled."""
-        return self._signal_trigger
-
-    @signal_trigger.setter
-    def signal_trigger(self, value: bool) -> None:
-        self._signal_trigger = bool(value)
-
-    @property
     def completion_followup_enabled(self) -> bool:
         """Backward-compatible alias for review_trigger."""
         return self._team_review_trigger
@@ -433,7 +411,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Reset invoke-local passive completion state on each invoke boundary."""
         self._passive_evolution_pending = False
-        self._skip_auto_scan_this_invoke = False
+        self._skip_passive_evolution_this_invoke = False
 
     async def _snapshot_for_evolution(
         self,
@@ -441,8 +419,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         ctx: Optional[AgentCallbackContext],
     ) -> Optional[dict]:
         """Phase 1: Capture trajectory plus callback-visible messages for async evolution."""
-        if not getattr(self, "_signal_trigger", True):
-            return None
         if ctx is None:
             return EvolutionSnapshot(
                 trajectory=trajectory,
@@ -537,8 +513,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
         await self._record_presented_experience_detail(ctx, inputs)
 
-        if not self._signal_trigger and not self._team_review_trigger:
-            return
         if self.builder is None:
             return
 
@@ -566,12 +540,14 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         ctx: AgentCallbackContext,
     ) -> bool:
         """Trigger passive evolution only if this invoke has observed team completion."""
-        if self._skip_auto_scan_this_invoke:
-            logger.info("[TeamSkillEvolutionRail] active evolution activity detected, skip passive auto_scan")
+        if self._skip_passive_evolution_this_invoke:
+            logger.info(
+                "[TeamSkillEvolutionRail] active evolution activity detected, skip passive evolution"
+            )
             return False
         if self._team_review_trigger:
             return False
-        return self._signal_trigger and (
+        return (
             self._passive_evolution_pending
             or self._host_completion_pending_session_id == self._current_builder_session_id()
         )
@@ -615,9 +591,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         ctx: Optional[AgentCallbackContext] = None,
     ) -> bool:
         """Mark the current invoke for configured team completion evolution handling."""
-        if not self._signal_trigger and not self._team_review_trigger:
-            logger.info("[TeamSkillEvolutionRail] notify_team_completed ignored because auto_scan is disabled")
-            return False
         if self.builder is None:
             logger.warning(
                 "[TeamSkillEvolutionRail] notify_team_completed: no trajectory available "
@@ -677,9 +650,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         snapshot: Optional[dict] = None,
     ) -> None:
         """Triggered when view_task shows all member tasks completed."""
-        if not getattr(self, "_signal_trigger", True):
-            logger.info("[TeamSkillEvolutionRail] auto_scan disabled, skipping")
-            return
         t0 = time.time()
         try:
             self._emit_progress(

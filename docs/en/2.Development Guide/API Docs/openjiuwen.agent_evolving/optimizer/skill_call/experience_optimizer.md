@@ -53,6 +53,6 @@ Binds optimizable operators and reads per-Skill `EvolutionContext` values from `
 Returns no records when `ctx.signals` is empty. Otherwise it dispatches to the selected profile and produces parsed,
 validated experience records for the downstream online evolution pipeline.
 
-`TeamSkillEvolutionRail` constructs this optimizer with `profile="team"` for its optional
-`signal_trigger` path. Agent-reviewed evolution uses the rail-owned `evolve_review_task` and
+`TeamSkillEvolutionRail` constructs this optimizer with `profile="team"` for the passive team path
+when the rail is mounted. Agent-reviewed evolution uses the rail-owned `evolve_review_task` and
 `evolution_reviewer` proposal flow instead.

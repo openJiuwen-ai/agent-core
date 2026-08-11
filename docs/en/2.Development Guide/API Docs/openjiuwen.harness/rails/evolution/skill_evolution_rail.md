@@ -70,11 +70,9 @@ When manual configuring, only one shared `EvolutionInterruptRail` should be used
 
 ### Trigger Mechanism
 
-- Passive evolution runs after `DeepAgent.invoke()` completes.
-- `signal_trigger` controls passive signal scanning; `auto_scan` is its compatibility alias. Both default to `False`.
+- Mounting `SkillEvolutionRail` always enables passive evolution: passive signal scanning runs after `DeepAgent.invoke()` completes. The product-level master switch is whether the rail is mounted / `evolution.enabled`.
 - `review_trigger` controls periodic self-check follow_up insertion; `fuzzy_review` is its compatibility alias. Both default to `False`.
-- During migration, if both the new and legacy names are provided, the new name takes precedence.
-- `auto_scan=False` disables passive signal scanning and async snapshot creation for passive evolution.
+- During migration, if both `review_trigger` and `fuzzy_review` are provided, `review_trigger` takes precedence.
 - Active evolution is available through `request_user_evolution()`; the returned prompt asks the main agent to call `prepare_skill_evolution(user_confirmed=true)` first, then call `evolve_review_task(evolution_review_ref=...)`. The prepare tool collects the current rail's execution/conversation trajectory as default review materials, and `user_intent` only adds optimization direction.
 - Regular skill evolution ignores `kind: team-skill` skills; team skills use `TeamSkillEvolutionRail` / `TeamSkillRail`.
 
@@ -85,8 +83,6 @@ class SkillEvolutionRail(
     llm: Model,
     model: str,
     review_runtime: EvolutionReviewRuntime,
-    auto_scan: Optional[bool] = None,
-    signal_trigger: Optional[bool] = None,
     auto_save: bool = False,
     subject_kind: str = "skill",
     language: str = "cn",
@@ -110,8 +106,6 @@ class SkillEvolutionRail(
 * **llm** (Model): LLM client instance used by signal, record, scoring, and governance stages.
 * **model** (str): Model name.
 * **review_runtime** (EvolutionReviewRuntime): Shared active-review state for review subagent bindings.
-* **auto_scan** (bool, optional): Compatibility alias for `signal_trigger`; ignored when `signal_trigger` is set.
-* **signal_trigger** (bool, optional): Whether to run passive signal scanning after invoke. Defaults to `False`.
 * **auto_save** (bool): Whether generated passive records are auto-approved and persisted. Defaults to `False`.
 * **subject_kind** (str): Subject kind used by this rail (`"skill"` or `"swarm-skill"` normalized).
 * **language** (str): Prompt language, commonly `"cn"` or `"en"`.
@@ -234,7 +228,7 @@ Regular skill experience optimizer.
 
 ### evolution_config -> dict
 
-Effective LLM policies, timeout, `auto_scan`, `auto_save`, and `eval_interval`.
+Effective LLM policies, timeout, and `two_stage`.
 
 ---
 

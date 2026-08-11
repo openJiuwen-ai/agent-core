@@ -114,11 +114,11 @@ agent = create_deep_agent(
 
 - Monitors `view_task` tool result, detecting "all tasks completed"
 - Supports a passive signal path and an Agent-decided active review path
-- `signal_trigger` controls passive team completion scanning; `auto_scan` is its compatibility alias. Both default to `False`.
+- Mounting `TeamSkillEvolutionRail` / `TeamSkillRail` always enables passive team completion scanning. The product-level master switch is whether the rail is mounted / `evolution.enabled`.
 - `review_trigger` controls team completion self-check follow_up insertion; `completion_followup_enabled` is its compatibility alias. Both default to `False`.
-- During migration, if both the new and legacy names are provided, the new name takes precedence.
+- During migration, if both `review_trigger` and `completion_followup_enabled` are provided, `review_trigger` takes precedence.
 - When `review_trigger=True`, active review takes precedence over passive signal generation after team completion. The main Agent decides whether evolution is needed and calls the rail-owned `evolve_review_task`, which runs `evolution_reviewer`.
-- `auto_scan=False` disables passive completion scanning and `notify_team_completed()` passive triggering. `notify_team_completed()` may still schedule active review when `review_trigger=True`.
+- `notify_team_completed()` triggers passive evolution when the rail is mounted; it may also schedule active review when `review_trigger=True`.
 - The passive path aggregates collaborative trajectory evidence and uses `SkillExperienceOptimizer(profile="team")`. Team completion, team skill attribution, and runtime role attribution are heuristic host-bridge signals, not strong contracts.
 
 ```text
@@ -132,8 +132,6 @@ class TeamSkillRail(
     trajectory_source: Optional[TrajectorySource] = None,
     trajectory_sink: Optional[TrajectorySink] = None,
     member_role: Optional[str] = None,
-    auto_scan: Optional[bool] = None,
-    signal_trigger: Optional[bool] = None,
     auto_save: bool = False,
     review_runtime: EvolutionReviewRuntime,
     async_evolution: bool = True,
@@ -164,8 +162,6 @@ class TeamSkillRail(
 * **trajectory_source** (TrajectorySource, optional): Runtime source for aggregated member trajectory evidence.
 * **trajectory_sink** (TrajectorySink, optional): Runtime sink for publishing this member's latest trajectory snapshot.
 * **member_role** (str, optional): Role written to published snapshots. Defaults to `"leader"` for team skill evolution.
-* **auto_scan** (bool, optional): Compatibility alias for `signal_trigger`; ignored when `signal_trigger` is set.
-* **signal_trigger** (bool, optional): Whether to detect passive team completion and trigger passive evolution, defaults to `False`.
 * **auto_save** (bool): Whether to auto-save generated experience records, defaults to `False` (requires user approval).
 * **review_runtime** (EvolutionReviewRuntime): Shared active-review runtime required for review subagent + active approval tools.
 * **async_evolution** (bool): Whether to execute evolution asynchronously, defaults to `True`.
@@ -326,7 +322,7 @@ Team evolution also uses the normalized subject contract:
 
 ### async notify_team_completed(ctx) -> bool
 
-Mark team completion for the enabled passive signal and/or active-review trigger.
+Mark team completion for passive evolution and the optional active-review trigger.
 
 **Parameters**:
 

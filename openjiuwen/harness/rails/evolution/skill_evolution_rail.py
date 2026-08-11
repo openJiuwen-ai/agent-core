@@ -162,8 +162,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         *,
         llm: Model,
         model: str,
-        auto_scan: Optional[bool] = None,
-        signal_trigger: Optional[bool] = None,
         auto_save: bool = False,
         review_runtime: EvolutionReviewRuntime,
         language: str = "cn",
@@ -191,8 +189,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             skills_dir: Directory or list of directories containing skill definitions
             llm: LLM client for experience generation
             model: Model name for experience generation
-            signal_trigger: Whether to trigger deterministic signal-based evolution.
-            auto_scan: Backward-compatible alias for signal_trigger.
             auto_save: Whether to auto-save generated experiences
             review_runtime: Externally-managed active-review runtime. Required. Shared instances enable
                 cross-rail review state and keep rail-local orchestration stateless.
@@ -236,7 +232,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             evaluate_llm_policy=evaluate_llm_policy,
             simplify_llm_policy=simplify_llm_policy,
         )
-        self._signal_trigger = bool(signal_trigger if signal_trigger is not None else auto_scan or False)
         self._processed_signal_keys: set[tuple[str, ...]] = set()
         self._auto_save = auto_save
         # Optimizer path (for _auto_save=False): memory-staged records until user approval
@@ -255,7 +250,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         self._review_scope_builder = self._make_review_scope_builder()
         self._evolution_tools: list[Any] = []
         self._agent: Any | None = None
-        self._skip_auto_scan_this_invoke = False
+        self._skip_passive_evolution_this_invoke = False
         self._review_trigger = bool(review_trigger if review_trigger is not None else fuzzy_review or False)
         self._fuzzy_review_interval = fuzzy_review_interval
         self._fuzzy_review_non_followup_count = 0
@@ -461,7 +456,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         user_intent: str = "",
     ):
         """Create a review scope with rail-owned bounded review materials."""
-        self._skip_auto_scan_this_invoke = True
+        self._skip_passive_evolution_this_invoke = True
         return self._review_runtime.create_scope(
             source=source,
             subject=subject,
@@ -539,18 +534,18 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         trigger_point,
         ctx: AgentCallbackContext,
     ) -> bool:
-        if not self._signal_trigger:
-            return False
         if self._is_background_run(ctx):
             return False
-        if self._skip_auto_scan_this_invoke:
-            logger.info("[SkillEvolutionRail] active evolution activity detected, skip passive auto_scan")
+        if self._skip_passive_evolution_this_invoke:
+            logger.info(
+                "[SkillEvolutionRail] active evolution activity detected, skip passive evolution"
+            )
             return False
         return True
 
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Reset per-invoke active evolution state."""
-        self._skip_auto_scan_this_invoke = False
+        self._skip_passive_evolution_this_invoke = False
 
     async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Periodically enqueue a fuzzy active-review self-check follow-up."""
@@ -666,24 +661,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             )
             self._approval_runtime = runtime
         return runtime
-
-    @property
-    def auto_scan(self) -> bool:
-        """Backward-compatible alias for signal_trigger."""
-        return self._signal_trigger
-
-    @auto_scan.setter
-    def auto_scan(self, value: bool) -> None:
-        self._signal_trigger = bool(value)
-
-    @property
-    def signal_trigger(self) -> bool:
-        """Whether deterministic signal-based evolution is enabled."""
-        return self._signal_trigger
-
-    @signal_trigger.setter
-    def signal_trigger(self, value: bool) -> None:
-        self._signal_trigger = bool(value)
 
     @property
     def fuzzy_review(self) -> bool:
@@ -829,10 +806,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         In async mode: ctx=None, snapshot contains data captured by _snapshot_for_evolution.
         In sync mode: ctx is active, snapshot=None (backward-compatible).
         """
-        logger.info("[SkillEvolutionRail] run_evolution called, auto_scan=%s", self._signal_trigger)
-        if not self._signal_trigger:
-            logger.info("[SkillEvolutionRail] auto_scan disabled, skipping")
-            return
+        logger.info("[SkillEvolutionRail] run_evolution called")
 
         try:
             # Async path: read from snapshot
@@ -1686,9 +1660,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         ctx: AgentCallbackContext,
     ) -> Optional[dict]:
         """Phase 1: Collect messages while ctx is alive."""
-        if not self._signal_trigger:
-            return None
-
         snapshot = await super()._snapshot_for_evolution(trajectory, ctx)
         if snapshot is None:
             return None

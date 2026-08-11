@@ -52,5 +52,5 @@ class SkillExperienceOptimizer(
 
 当 `ctx.signals` 为空时返回空列表；否则按所选 profile 生成并解析经验记录，交给后续在线演进流程。
 
-`TeamSkillEvolutionRail` 仅在可选的 `signal_trigger` 路径中使用 `profile="team"`。由 Agent 审核的演进
+`TeamSkillEvolutionRail` 在 Rail 挂载后的被动团队路径中使用 `profile="team"`。由 Agent 审核的演进
 改为通过 Rail 自有的 `evolve_review_task` 和 `evolution_reviewer` proposal 链路完成。

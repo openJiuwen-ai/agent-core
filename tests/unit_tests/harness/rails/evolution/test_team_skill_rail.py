@@ -105,7 +105,6 @@ async def test_team_evolution_protocol_section_handles_confirmation_followup(tmp
         skills_dir=str(tmp_path),
         llm=MagicMock(),
         model="mock-model",
-        auto_scan=False,
         async_evolution=False,
     )
     builder = SystemPromptBuilder(language="cn")
@@ -481,7 +480,6 @@ def test_team_skill_evolution_rail_defaults_fixed_member_role_to_leader(tmp_path
         model="mock-model",
         team_id="team-a",
         trajectory_sink=registry,
-        auto_scan=False,
         async_evolution=False,
     )
 
@@ -493,7 +491,6 @@ def test_team_rail_active_review_plumbing_uses_swarm_subject_kind(tmp_path):
         skills_dir=str(tmp_path / "skills"),
         llm=MockLLM(),
         model="mock-model",
-        auto_scan=False,
         async_evolution=False,
     )
     subagent_rail = SubagentRail()
@@ -530,7 +527,6 @@ def test_team_rail_init_registers_review_agent_with_default_max_iterations(tmp_p
         skills_dir=str(tmp_path / "skills"),
         llm=MockLLM(),
         model="mock-model",
-        auto_scan=False,
         async_evolution=False,
     )
     subagent_rail = SubagentRail()
@@ -559,7 +555,6 @@ def test_team_rail_init_registers_review_agent_with_custom_max_iterations(tmp_pa
         skills_dir=str(tmp_path / "skills"),
         llm=MockLLM(),
         model="mock-model",
-        auto_scan=False,
         async_evolution=False,
         review_agent_max_iterations=30,
     )
@@ -601,7 +596,6 @@ async def test_patch_path():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
-            auto_scan=True,
             auto_save=False,
             async_evolution=False,
         )
@@ -641,7 +635,6 @@ async def test_run_evolution_passes_rule_signals_to_consumer():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=True,
             auto_save=False,
             async_evolution=False,
         )
@@ -793,7 +786,6 @@ async def test_async_snapshot_messages_are_preserved_for_team_evolution():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=True,
             auto_save=False,
             async_evolution=True,
         )
@@ -889,74 +881,64 @@ async def test_patch_auto_save():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_auto_scan_and_auto_save_properties():
+def test_auto_save_and_review_trigger_properties():
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         rail = TeamSkillRail(
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=False,
             auto_save=True,
             async_evolution=False,
         )
 
-        assert rail.auto_scan is False
-        assert rail.signal_trigger is False
         assert rail.auto_save is True
         assert rail.completion_followup_enabled is False
         assert rail.review_trigger is False
 
-        rail.auto_scan = True
         rail.auto_save = False
 
-        assert rail.auto_scan is True
-        assert rail.signal_trigger is True
         assert rail.completion_followup_enabled is False
         assert rail.auto_save is False
 
         rail.completion_followup_enabled = True
 
-        assert rail.auto_scan is True
         assert rail.completion_followup_enabled is True
         assert rail.review_trigger is True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_team_signal_and_review_trigger_constructor_aliases():
+def test_team_review_trigger_constructor_aliases():
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         rail = TeamSkillRail(
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            signal_trigger=False,
             review_trigger=True,
             async_evolution=False,
         )
 
-        assert rail.auto_scan is False
         assert rail.completion_followup_enabled is True
+        assert rail.review_trigger is True
 
         rail = TeamSkillRail(
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=False,
-            signal_trigger=False,
             completion_followup_enabled=True,
             review_trigger=True,
             async_evolution=False,
         )
 
-        assert rail.signal_trigger is False
         assert rail.review_trigger is True
+        assert rail.completion_followup_enabled is True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_team_signal_and_review_trigger_defaults_off():
+def test_team_review_trigger_defaults_off():
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         rail = TeamSkillRail(
@@ -966,30 +948,24 @@ def test_team_signal_and_review_trigger_defaults_off():
             async_evolution=False,
         )
 
-        assert rail.signal_trigger is False
-        assert rail.auto_scan is False
         assert rail.review_trigger is False
         assert rail.completion_followup_enabled is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_team_signal_and_review_trigger_constructor_prefers_new_names():
+def test_team_review_trigger_constructor_prefers_new_name():
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         rail = TeamSkillRail(
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=True,
-            signal_trigger=False,
             completion_followup_enabled=True,
             review_trigger=False,
             async_evolution=False,
         )
 
-        assert rail.signal_trigger is False
-        assert rail.auto_scan is False
         assert rail.review_trigger is False
         assert rail.completion_followup_enabled is False
     finally:
@@ -1084,7 +1060,6 @@ async def test_notify_team_completed_without_view_task():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
-            auto_scan=True,
             async_evolution=False,
         )
 
@@ -1112,7 +1087,6 @@ async def test_notify_team_completed_repeated_mark_keeps_same_session():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
-            auto_scan=True,
             async_evolution=False,
         )
 
@@ -1137,7 +1111,6 @@ async def test_notify_team_completed_mark_survives_next_before_invoke():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=True,
             async_evolution=False,
         )
         rail.run_evolution = AsyncMock()
@@ -1172,7 +1145,6 @@ async def test_notify_team_completed_mark_does_not_leak_to_new_session():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=True,
             async_evolution=False,
         )
         rail.run_evolution = AsyncMock()
@@ -1228,37 +1200,6 @@ async def test_notify_team_completed_no_trajectory():
 
 
 @pytest.mark.asyncio
-async def test_auto_scan_false_disables_passive_view_task_trigger():
-    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
-    try:
-        rail = TeamSkillRail(
-            skills_dir=str(tmp),
-            llm=MockLLM(),
-            model="mock-model",
-            auto_scan=False,
-            async_evolution=False,
-        )
-        rail.run_evolution = AsyncMock()
-
-        await rail.before_invoke(_MockCtx(inputs=InvokeInputs(query="round 1", conversation_id="test-session")))
-        await rail.after_tool_call(
-            _MockCtx(
-                inputs=ToolCallInputs(
-                    tool_name="view_task",
-                    tool_args={},
-                    tool_result="task-a completed\ntask-b completed",
-                )
-            )
-        )
-        await rail.after_invoke(_MockCtx(inputs=InvokeInputs(query="round 1", conversation_id="test-session")))
-
-        assert rail._passive_evolution_pending is False
-        assert rail.run_evolution.await_count == 0
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-@pytest.mark.asyncio
 async def test_completion_followup_enabled_view_task_marks_pending_without_passive_scan():
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
@@ -1269,7 +1210,6 @@ async def test_completion_followup_enabled_view_task_marks_pending_without_passi
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=False,
             completion_followup_enabled=True,
             language="en",
             async_evolution=False,
@@ -1331,7 +1271,6 @@ async def test_notify_team_completed_marks_pending_until_task_iteration_when_ena
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=False,
             completion_followup_enabled=True,
             async_evolution=False,
         )
@@ -1389,7 +1328,6 @@ async def test_completion_followup_missing_loop_controller_does_not_enqueue():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=False,
             completion_followup_enabled=True,
             async_evolution=False,
         )
@@ -1435,7 +1373,6 @@ async def test_team_completion_followup_does_not_use_fuzzy_review_without_pendin
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=False,
             completion_followup_enabled=True,
             fuzzy_review=True,
             fuzzy_review_interval=1,
@@ -1474,7 +1411,6 @@ async def test_completion_followup_skips_followup_and_background_iterations():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=False,
             completion_followup_enabled=True,
             async_evolution=False,
         )
@@ -1527,7 +1463,6 @@ async def test_completion_followup_enqueues_once_per_completion_mark():
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=False,
             completion_followup_enabled=True,
             async_evolution=False,
         )
@@ -1592,51 +1527,6 @@ async def test_view_task_completion_without_builder_does_not_mark_passive_evolut
 
 
 @pytest.mark.asyncio
-async def test_auto_scan_false_disables_notify_team_completed():
-    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
-    try:
-        rail = TeamSkillRail(
-            skills_dir=str(tmp),
-            llm=MockLLM(),
-            model="mock-model",
-            auto_scan=False,
-            async_evolution=False,
-        )
-        rail._builder = TrajectoryBuilder(session_id="test-session", source="online")
-
-        result = await rail.notify_team_completed(ctx=None)
-
-        assert result is False
-        assert rail._passive_evolution_pending is False
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-@pytest.mark.asyncio
-async def test_run_evolution_returns_immediately_when_auto_scan_disabled():
-    with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
-        rail = TeamSkillRail.__new__(TeamSkillRail)
-        rail._signal_trigger = False
-        rail._trajectory_source = MagicMock()
-        rail._detect_used_team_skill = Mock(return_value="research-team")
-        rail._emit_progress = MagicMock()
-
-        await rail.run_evolution(
-            trajectory_from_steps(
-                execution_id="exec-1",
-                session_id="sess-1",
-                steps=[],
-                source="online",
-            ),
-            _MockCtx(),
-        )
-
-        rail._trajectory_source.get_trajectory.assert_not_called()
-        rail._detect_used_team_skill.assert_not_called()
-        rail._emit_progress.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_team_record_presented_experiences_delegates_to_tracker():
     with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
         rail = TeamSkillRail.__new__(TeamSkillRail)
@@ -1674,7 +1564,6 @@ async def test_team_record_presented_experiences_delegates_to_tracker():
 async def test_team_snapshot_consumes_experience_tracker_state():
     with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
         rail = TeamSkillRail.__new__(TeamSkillRail)
-        rail._signal_trigger = True
         rail._subject_kind_value = "swarm-skill"
         rail._experience_tracker = Mock()
         record = _make_record("team-skill-a")
@@ -1710,7 +1599,6 @@ async def test_view_task_completion_marks_round_and_triggers_once_after_invoke()
             skills_dir=str(tmp),
             llm=MockLLM(),
             model="mock-model",
-            auto_scan=True,
             auto_save=False,
             async_evolution=False,
         )
@@ -1822,7 +1710,7 @@ async def test_team_after_tool_call_records_read_file_evolution_detail_read(tmp_
 
 
 @pytest.mark.asyncio
-async def test_team_auto_scan_false_still_records_evolution_detail_read(tmp_path):
+async def test_team_still_records_evolution_detail_read(tmp_path):
     skill_dir = tmp_path / "team-skill-a"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
@@ -1833,7 +1721,6 @@ async def test_team_auto_scan_false_still_records_evolution_detail_read(tmp_path
         skills_dir=str(tmp_path),
         llm=MockLLM(),
         model="mock-model",
-        auto_scan=False,
         async_evolution=False,
     )
     rail._experience_tracker.record_presented_records = AsyncMock()
@@ -1866,7 +1753,6 @@ async def test_team_auto_scan_false_still_records_evolution_detail_read(tmp_path
 async def test_team_run_evolution_evaluates_presented_entries_when_no_skill_detected():
     with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
         rail = TeamSkillRail.__new__(TeamSkillRail)
-        rail._signal_trigger = True
         rail._pending_host_events = []
         rail._trajectory_source = None
         rail._detect_used_team_skill = Mock(return_value=None)
@@ -1998,7 +1884,6 @@ async def test_team_handle_evolution_emits_persistence_failed_without_auto_appro
 async def test_team_run_evolution_does_not_report_persistence_failed_as_ready():
     with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
         rail = TeamSkillRail.__new__(TeamSkillRail)
-        rail._signal_trigger = True
         rail._auto_save = True
         rail._pending_host_events = []
         rail._trajectory_source = None
@@ -2068,7 +1953,6 @@ async def test_notify_team_completed_allows_new_invoke_after_async_evolution():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
-            auto_scan=True,
             auto_save=False,
             async_evolution=True,
         )
@@ -2120,7 +2004,6 @@ async def test_async_evolution_failure_is_buffered_and_visible():
             skills_dir=str(tmp),
             llm=FailingLLM(),
             model="mock-model",
-            auto_scan=True,
             auto_save=False,
             async_evolution=True,
         )
@@ -2179,7 +2062,6 @@ async def test_run_evolution_uses_trajectory_source():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
-            auto_scan=True,
             auto_save=False,
             async_evolution=False,
             team_id="team-a",
@@ -2319,7 +2201,6 @@ async def test_run_evolution_filters_non_collaborative_steps():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
-            auto_scan=True,
             auto_save=False,
             async_evolution=False,
             team_id="team-a",
@@ -2395,7 +2276,6 @@ async def test_run_evolution_keeps_full_leader_trajectory():
             skills_dir=str(tmp),
             llm=mock_llm,
             model="mock-model",
-            auto_scan=True,
             auto_save=False,
             async_evolution=False,
             team_id="team-a",
@@ -3144,7 +3024,6 @@ async def test_team_request_user_evolution_wrapper_delegates_to_internal_builder
         skills_dir=str(tmp_path),
         llm=MagicMock(),
         model="mock-model",
-        auto_scan=False,
         async_evolution=False,
     )
     rail._store.skill_exists = Mock(return_value=True)
@@ -3172,7 +3051,6 @@ async def test_team_request_user_evolution_returns_empty_result_when_skill_not_f
         skills_dir=str(tmp_path),
         llm=MagicMock(),
         model="mock-model",
-        auto_scan=False,
         async_evolution=False,
     )
     rail._store.skill_exists = Mock(return_value=False)
@@ -3191,7 +3069,6 @@ async def test_team_request_simplify_returns_team_approval_event(tmp_path):
         skills_dir=str(tmp_path),
         llm=MagicMock(),
         model="mock-model",
-        auto_scan=False,
         async_evolution=False,
     )
     request_id = "team-simplify-req"
@@ -3217,7 +3094,6 @@ async def test_team_request_rebuild_delegates_to_manager_with_params(tmp_path):
         skills_dir=str(tmp_path),
         llm=MagicMock(),
         model="mock-model",
-        auto_scan=False,
         async_evolution=False,
     )
 

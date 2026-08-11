@@ -32,7 +32,7 @@ Unlike regular Skills, Team Skills:
 |--------|----------|
 | `TeamSkillCreateRail` | Auto-detect collaboration patterns, suggest team skill creation |
 | `TeamSkillRail` | Public rail for online evolution. It is the compatibility public alias for `TeamSkillEvolutionRail`. |
-| `SkillExperienceOptimizer` | Shared optimizer used by the optional passive signal path with `profile="team"`. |
+| `SkillExperienceOptimizer` | Shared optimizer used by the passive team path with `profile="team"`. |
 | `evolution_reviewer` | Dedicated subagent used by Agent-decided active review through the rail-owned `evolve_review_task`. |
 | `ExperienceScorer` | Experience scoring and simplify maintenance |
 | `InMemoryTrajectoryRegistry` | Runtime source/sink for publishing member snapshots and aggregating team trajectory evidence |
@@ -106,8 +106,8 @@ team_rail = TeamSkillRail(
     trajectory_source=trajectory_registry,
     trajectory_sink=trajectory_registry,
     review_runtime=review_runtime,
-    signal_trigger=False,      # opt in to passive signal generation if needed
-    review_trigger=True,       # Agent decides after team completion
+    # Mounting this rail enables passive evolution; review_trigger controls completion review
+    review_trigger=True,
     auto_save=False,           # generated records require user approval
     async_evolution=True,      # Execute evolution asynchronously
     evolution_total_timeout_secs=600.0,
@@ -135,17 +135,17 @@ To aggregate multiple members, every rail or agent that should contribute eviden
 
 | Trigger Method | Trigger Condition |
 |----------------|-------------------|
-| Passive signal trigger | `signal_trigger=True` and team completion is observed |
+| Passive signal trigger | Rail is mounted and team completion is observed |
 | Completion review trigger | `review_trigger=True` and team completion is observed |
 | User-requested review | Host calls `request_user_evolution()` and delivers its `followup_prompt` to the main Agent |
 
-Both switches default to `False`. If both are enabled, completion review takes precedence and passive signal generation is skipped for that completion.
+Passive evolution is always available once the rail is mounted. `review_trigger` defaults to `False`. When completion review is enabled, it takes precedence and passive signal generation is skipped for that completion.
 
 ### Evolution Paths
 
 #### 1. Passive Signal Evolution
 
-When `signal_trigger=True`, the rail aggregates team execution evidence and detects:
+After the rail is mounted, when team completion is observed the rail aggregates team execution evidence and detects:
 
 - **Role coordination issues**: Collaboration breaks, data not passed
 - **Constraint violations**: Timeout, output format issues
