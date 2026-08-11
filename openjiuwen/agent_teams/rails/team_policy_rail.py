@@ -88,13 +88,16 @@ class TeamPolicyRail(DeepAgentRail):
     served from the cache -- so constant content paid full price forever. Written
     into the conversation once, the same tokens are encoded once.
 
-    ``on_user_message`` carries one more job that is not about team state at
-    all: for a non-leader member it drops the queued task boards a later one has
-    already superseded. Everything the framework queued for a busy member is
-    handed over as one batch, and the board may be in there several times over
-    -- full surveys, all but the newest already wrong. Each is one whole entry
-    in that batch, so they come out as entries; a step later they are one joined
+    Two more jobs are not about team state at all, and both are about the same
+    thing: what a member coming back from a busy stretch is handed in one turn.
+    ``on_user_message`` drops, for a non-leader member, the queued task boards a
+    later one has already superseded -- the board may be in the batch several
+    times over, full surveys, all but the newest already wrong. Each is one
+    whole entry, so they come out as entries; a step later they are one joined
     history message and can no longer be separated.
+    ``before_steering_drain`` handles what cannot be dropped: mailbox messages
+    each say something of their own, so the batch is capped instead, and the
+    surplus stays queued for the model calls that follow.
 
     When ``team_backend`` is ``None`` (e.g. unit tests that only care about
     static content) the state lane degrades to the identity channel alone.
@@ -121,12 +124,14 @@ class TeamPolicyRail(DeepAgentRail):
         team_backend: "TeamBackend | None" = None,
         expose_human_agents_to_teammates: bool = False,
         swarmflow_enabled: bool = False,
+        steer_batch_size: int = 2,
     ) -> None:
         super().__init__()
         self._language = language
         self._member_name = member_name
         self._role = role
         self._expose_human_agents_to_teammates = expose_human_agents_to_teammates
+        self._steer_batch_size = steer_batch_size
         self.system_prompt_builder = None
 
         # All team sections are static and built once. The HITT contract is
@@ -214,6 +219,28 @@ class TeamPolicyRail(DeepAgentRail):
             return
         parts.insert(0, text)
         await self._tracker.commit(session)
+
+    async def before_steering_drain(self, ctx: AgentCallbackContext) -> None:
+        """Cap how much of the steering backlog one model call takes.
+
+        The other half of the same problem :meth:`_drop_superseded` addresses,
+        one step earlier. Everything the framework queued for a busy member is
+        handed over at once, and what is queued here is mailbox traffic: one
+        entry per message, none of them superseding any other, all of them
+        having to be read. Dropping is therefore not an option — the only thing
+        that can keep the turn from becoming a wall of fused messages is taking
+        fewer of them, and letting the rest ride the model calls after this one.
+
+        **The leader is exempt**, for the reason it is exempt from the
+        superseded-board pruning: it reads what arrives as a sequence, and a
+        sequence it sees in pieces is a sequence it has to reassemble.
+        """
+        if self._role == TeamRole.LEADER:
+            return
+        inputs = getattr(ctx, "inputs", None)
+        if inputs is None:
+            return
+        inputs.limit = self._steer_batch_size
 
     def _drop_superseded(self, parts: list[str]) -> None:
         """Remove, in place, the queued inputs a later one already supersedes.

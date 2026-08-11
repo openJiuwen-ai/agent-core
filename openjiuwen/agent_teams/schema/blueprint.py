@@ -370,6 +370,16 @@ class TeamAgentSpec(BaseModel):
     the leader's process-local idle clock, never DB ``updated_at``.
     Ignored under scheduled dispatch. See F_65.
     """
+    steer_batch_size: int = 2
+    """How many queued steering inputs a non-leader member takes per model call.
+
+    Mailbox messages reach a running member one queue entry each, so a member
+    coming back from a busy stretch used to get the whole pile fused into one
+    turn. This caps the batch; the rest stays queued and arrives at the
+    following model calls, in order. The leader is exempt — it reads the
+    sequence of task-board snapshots to decide whether to re-plan, so it must
+    keep seeing all of it. See F_78.
+    """
     transport: Optional[TransportSpec] = None
     """Pluggable transport layer specification.
 
@@ -652,6 +662,20 @@ class TeamAgentSpec(BaseModel):
         if self.stale_pending_idle_timeout <= 0:
             raise ValueError(
                 f"stale_pending_idle_timeout must be > 0 seconds, got {self.stale_pending_idle_timeout}",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_steer_batch_size(self) -> "TeamAgentSpec":
+        """Reject a steering batch that would consume nothing (F_78).
+
+        A member always takes at least one queued message, so a zero here
+        would not stall anything — it would silently mean "one", which is a
+        worse thing to configure by accident than an outright error.
+        """
+        if self.steer_batch_size <= 0:
+            raise ValueError(
+                f"steer_batch_size must be > 0 messages, got {self.steer_batch_size}",
             )
         return self
 
