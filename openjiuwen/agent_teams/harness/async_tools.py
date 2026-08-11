@@ -50,11 +50,11 @@ _SPILL_SUMMARY_CHARS = 1024
 
 
 def _to_jsonable(obj):
-    """递归将 pydantic BaseModel 对象转为 dict，确保 json.dumps 可序列化。
+    """Recursively convert pydantic BaseModel objects to dict, ensuring json.dumps serializability.
 
-    Swarmflow 脚本的 run() 可能返回嵌套在 dict 或 list 中的 pydantic 模型实例，
-    json.dumps 无法直接序列化它们。此函数遍历结果树，将每个 BaseModel 替换为
-    model_dump(mode="json") 的输出。纯 Python 类型原样返回。
+        The run() of a Swarmflow script may return pydantic model instances nested in dicts or lists,
+        which json.dumps cannot serialize directly. This function traverses the result tree, replacing
+        each BaseModel with the output of model_dump(mode="json"). Pure Python types are returned as-is.
     """
     if hasattr(obj, "model_dump") and callable(obj.model_dump):
         return obj.model_dump(mode="json")
