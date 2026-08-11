@@ -305,6 +305,58 @@ def test_recall_is_strictly_isolated_between_colliding_session_names(tmp_path, m
     assert "beta private answer" not in first_result["chunks"][0]["content"]
 
 
+def test_recall_across_archives_finds_content_in_older_archive(tmp_path):
+    older = _archive(
+        tmp_path,
+        [
+            UserMessage(content="database timeout retry policy"),
+            AssistantMessage(content="use exponential backoff for database retries"),
+        ],
+    )
+    newer = _archive(
+        tmp_path,
+        [
+            UserMessage(content="cache eviction strategy"),
+            AssistantMessage(content="evict least recently used cache entries"),
+        ],
+    )
+
+    result = recall_compressed_context(
+        workspace_dir=str(tmp_path),
+        session_id="session-1",
+        query="database backoff retry",
+    )
+
+    assert result["chunks"]
+    assert result["chunks"][0]["memory_id"] == older.memory_id
+    assert 0 < result["chunks"][0]["score"] <= 1
+    assert all("raw_score" in chunk for chunk in result["chunks"])
+    archive_ids = [item["memory_id"] for item in result["archives_in_session"]]
+    assert archive_ids == sorted(archive_ids)
+    assert set(archive_ids) == {older.memory_id, newer.memory_id}
+    assert result["archives_in_session"][0]["turn_count"] == 1
+    assert Path(result["recall_root"]).name == "compression_recall"
+    assert result["matched_turn"]["memory_id"] == older.memory_id
+
+
+def test_recall_across_archives_miss_still_reports_archives(tmp_path):
+    _archive(
+        tmp_path,
+        [UserMessage(content="database"), AssistantMessage(content="retry with backoff")],
+    )
+
+    result = recall_compressed_context(
+        workspace_dir=str(tmp_path),
+        session_id="session-1",
+        query="completely-unrelated-zebra",
+    )
+
+    assert result["chunks"] == []
+    assert result["matched_turn"] is None
+    assert len(result["archives_in_session"]) == 1
+    assert result["recall_root"]
+
+
 def test_recall_rejects_manifest_from_another_session(tmp_path):
     archive = _archive(
         tmp_path,

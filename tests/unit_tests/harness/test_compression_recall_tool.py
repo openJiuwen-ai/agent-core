@@ -187,6 +187,53 @@ async def test_tool_renders_hint_as_content_on_miss(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_tool_searches_across_archives_when_memory_id_omitted(tmp_path):
+    older = archive_compression_messages(
+        context=_context(tmp_path),
+        processor_type="DialogueCompressor",
+        original_messages=[
+            UserMessage(content="database timeout retry policy"),
+            AssistantMessage(content="use exponential backoff for database retries"),
+        ],
+        messages_to_compress=[
+            UserMessage(content="database timeout retry policy"),
+            AssistantMessage(content="use exponential backoff for database retries"),
+        ],
+        preceding_messages=[],
+    )
+    newer = archive_compression_messages(
+        context=_context(tmp_path),
+        processor_type="DialogueCompressor",
+        original_messages=[
+            UserMessage(content="cache eviction strategy"),
+            AssistantMessage(content="evict least recently used cache entries"),
+        ],
+        messages_to_compress=[
+            UserMessage(content="cache eviction strategy"),
+            AssistantMessage(content="evict least recently used cache entries"),
+        ],
+        preceding_messages=[],
+    )
+    tool = CompressionRecallTool(str(tmp_path), agent_id="agent-1")
+    session = MagicMock()
+    session.get_session_id.return_value = "session-1"
+
+    result = await tool.invoke({"query": "database backoff retry"}, session=session)
+
+    assert result.success is True
+    assert result.data["chunks"]
+    assert result.data["chunks"][0]["memory_id"] == older.memory_id
+    assert {item["memory_id"] for item in result.data["archives_in_session"]} == {
+        older.memory_id,
+        newer.memory_id,
+    }
+    assert result.data["recall_root"] == str(Path(older.path).parent)
+    content = result.data["content"]
+    assert "2" in content  # 本 session 共有 2 个压缩归档
+    assert older.memory_id in content
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("language", "expected_keywords"),
     [
@@ -215,7 +262,9 @@ async def test_tool_returns_retry_hint_with_archive_path_on_miss(tmp_path, langu
     assert result.data["chunks"] == []
     assert result.data["archive_path"] == archive.path
     hint = result.data["hint"]
-    assert archive.path in hint
+    # hint 指向归档根目录（archive.path 的父目录）并列出本 session 的归档
+    assert str(Path(archive.path).parent) in hint
+    assert archive.memory_id in hint
     for keyword in expected_keywords:
         assert keyword in hint
 
