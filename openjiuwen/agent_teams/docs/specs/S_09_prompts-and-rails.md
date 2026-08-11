@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-08-08 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md` |
+| 最近一次修订日期 | 2026-08-11 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md` |
 
 ## 范围 / 边界
 
@@ -15,7 +15,7 @@
 
 - `agent_teams/prompts/` 下系统提示词的全部产出路径：模板加载、占位符装配、`PromptSection` 构造。
 - `agent_teams/prompts/messages.py` 与 `agent_teams/team_context.py`：团队状态（自身身份 / 团队元数据 / 成员名册）的消息正文、名册 diff、投递时机与持久化基线。
-- `agent_teams/rails/` 下四个团队级 Rail（`TeamPolicyRail` / `FirstIterationGate` / `TeamToolApprovalRail` / `TeamPermissionRail`）及 team-specific confirmation payload models（`TeamConfirmPayload` / `TeamPermissionConfirmResponse`）的契约、注入时机、与 DeepAgent rail registry 的交互。
+- `agent_teams/rails/` 下三个团队级 Rail（`TeamPolicyRail` / `TeamToolApprovalRail` / `TeamPermissionRail`）及 team-specific confirmation payload models（`TeamConfirmPayload` / `TeamPermissionConfirmResponse`）的契约、注入时机、与 DeepAgent rail registry 的交互。
 - prompts 子模块的 `cn/` `en/` 双语模板布局，以及与 `agent_teams/i18n.py`（运行时硬编码字符串）的边界。
 
 **不管：**
@@ -95,10 +95,8 @@
 17. **`uninit` 必须把自己写入 builder 的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section（HITT 契约 / bridge 自契约都在其中；leader 则是 `team_bootstrap` / `team_extra` 两个）。团队状态写在成员自己的对话历史里，那是它的历史、不由 rail 清理。rail 卸载后 builder 不得残留团队 section。
 18. **`team_backend is None` 时状态通道退化**：单测可只关心 static 内容；缺 backend 时 `team_info` / 名册两条通道整体跳过，只剩恒定的 identity 通道（它不需要 backend）。
 
-### `FirstIterationGate`
-
-19. **打开仅一次性，可 reset**：`asyncio.Event.set()` 等价开锁；新一轮要先 `reset()` 再 `wait()`。Gate 没有自动复位机制，由 `start_agent` 路径显式调用。
-20. **HUMAN_AGENT 不挂 gate**：`agent_configurator` 仅对非 `HUMAN_AGENT` 角色构造 `FirstIterationGate`。human-agent 没有自主 task loop，挂上等不到 trigger。
+> 不变量 19 / 20 曾描述 `FirstIterationGate`，该 rail 已随单 supervisor 模型删除
+> （`agent_teams/rails/` 下已无此文件）。编号留空不复用，避免打乱后续引用。
 
 ### `TeamToolApprovalRail`
 
@@ -123,6 +121,33 @@
     `_render_block(tag, attrs, body, note="")`，无 note 时拼进空串，**不存在「有没有 note」
     的分支**。`inbound_tags.md`（cn/en）必须与此逐字一致：正文边界写作「除 `<team-note>`
     子元素外」，并明确「看嵌在哪个标签里，不要按前后位置猜」。
+
+### 输入批次配额
+
+29. **一批排队输入喂给一次模型调用的量，由 rail 在消费点现场决定（[[F_78]]）**。两条队列各有
+    一个收窄点，性质不同、手段也不同：
+    - **follow-up 批次靠剔除**：整批经 `ON_USER_MESSAGE` 交给 rail，`TeamPolicyRail._drop_superseded`
+      把被后来者覆盖的任务看板整条丢掉（见不变量 13 / [[F_71]]）。可行的前提是看板是**全量幂等
+      快照**——丢掉旧的不损失信息。
+    - **steering 批次靠限量**：队列里是信箱消息，每条各说各的、一条都不能丢，所以只能少拿。
+      `AgentCallbackEvent.BEFORE_STEERING_DRAIN` 在**每次 drain 之前**触发（队列为空则不触发），
+      带 `SteeringDrainInputs(pending, limit)`；rail 写 `limit`，多个 rail 按 priority 串行、
+      各自看到前一个留下的值。`TeamPolicyRail` 对**非 leader** 成员写 `steer_batch_size`（默认 2）。
+    - **必须在 drain 之前决定**：全取之后再把多余的 `push_steering` 回塞队尾会乱序——rail 链里有
+      真实 await，期间投进来的新消息会排在回塞消息之前。在 drain 之前定量，多余的消息从没离开
+      过队列，FIFO 顺序天然成立。
+    - **队列非空时至少取 1 条**（`drain_steering` 内部 `max(1, limit)`）：消费必须推进，否则
+      `has_pending_steering()` 恒真会让 loop 空转到 `max_iterations` 耗尽。`steer_batch_size`
+      另有 spec 侧 `> 0` 校验。
+    - **不需要额外的续跑机制**：inner loop 本来就在 `has_pending_steering()` 为真时继续迭代，
+      剩下的消息由后续模型调用取走。
+    - **leader 不限量**，与它不参与看板剔除同源：它读的是快照之间的差异来决定重规划还是收尾。
+30. **新增 `AgentCallbackEvent` 成员必须同时做路由决策**：`DeepAgent` 有外层与内层 ReActAgent
+    两个 callback-manager 命名空间，`_register_rail_selective` 按 `_BRIDGE_EVENTS` /
+    `_OUTER_ONLY_EVENTS` / `_DEEP_EVENTS` 分流，**漏了就静默落到外层、rail 永不触发**。内层
+    ReAct loop 触发的事件（`BEFORE_MODEL_CALL` / `ON_USER_MESSAGE` /
+    `BEFORE_STEERING_DRAIN` …）一律进 `_BRIDGE_EVENTS`。
+    `tests/unit_tests/harness/test_deep_agent_rail_event_routing.py` 强制这一条。
 
 ## 接口契约
 
