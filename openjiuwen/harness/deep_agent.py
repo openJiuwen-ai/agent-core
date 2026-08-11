@@ -158,6 +158,9 @@ _BRIDGE_EVENTS = frozenset(
         # Same reason: the inner agent is what admits consumed inputs into the
         # conversation, so it is what fires this.
         AgentCallbackEvent.ON_USER_MESSAGE,
+        # And it is what takes them off the steering queue, one model call
+        # before that.
+        AgentCallbackEvent.BEFORE_STEERING_DRAIN,
     }
 )
 
