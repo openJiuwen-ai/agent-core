@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import List, Any, Union, Optional, Tuple, Dict, Iterable
 
@@ -355,6 +356,50 @@ class AbilityManager:
         suffix = "".join("}" if opener == "{" else "]" for opener in reversed(stack))
         return f"{text}{suffix}"
 
+    _JSON_STRING_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
+    _BARE_VALUE_RE = re.compile(
+        r'(:\s*)'
+        r'([^"\s\{\[\d\\\x00\.\-][^,}\]\x00]*)'
+        r'(?=\s*[,}\]])'
+    )
+
+    @staticmethod
+    def _repair_bare_text_values(text: str) -> Optional[str]:
+        """Attempt to repair bare (unquoted) text values in a JSON-like string.
+
+        Handles cases where the LLM outputs values without double quotes, e.g.
+        ``{"tasks": scan all pages}`` → ``{"tasks": "scan all pages"}``.
+
+        Strategy: mask quoted strings with placeholders so the regex only
+        operates on structural positions, then restore.
+        """
+        stripped = text.strip()
+        if not stripped:
+            return None
+
+        strings: List[str] = []
+
+        def _save(m: "re.Match") -> str:
+            strings.append(m.group(0))
+            return f'\x00{len(strings) - 1}\x00'
+
+        masked = AbilityManager._JSON_STRING_RE.sub(_save, stripped)
+
+        def _quote(m: "re.Match") -> str:
+            prefix = m.group(1)
+            bare = m.group(2).rstrip()
+            if bare in ('true', 'false', 'null'):
+                return m.group(0)
+            escaped = bare.replace('\\', '\\\\').replace('"', '\\"')
+            return f'{prefix}"{escaped}"'
+
+        repaired = AbilityManager._BARE_VALUE_RE.sub(_quote, masked)
+
+        for i, s in enumerate(strings):
+            repaired = repaired.replace(f'\x00{i}\x00', s)
+
+        return repaired if repaired != stripped else None
+
     @classmethod
     def _parse_tool_arguments(cls, arguments: Any) -> Any:
         """Parse tool-call arguments into a dict.
@@ -380,6 +425,13 @@ class AbilityManager:
                 try:
                     logger.warning("Recovered malformed tool arguments by balancing closing brackets")
                     return json.loads(repaired), repaired
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            bare_repaired = cls._repair_bare_text_values(repaired or arguments)
+            if bare_repaired is not None:
+                try:
+                    logger.warning("Recovered malformed tool arguments by quoting bare text values")
+                    return json.loads(bare_repaired), bare_repaired
                 except (json.JSONDecodeError, TypeError):
                     pass
             raise ValueError(
