@@ -43,6 +43,9 @@ STRINGS: dict[str, str] = {
     # checkpoint._desc lives in descs/en/checkpoint.md
     "checkpoint.name": "Semantic snapshot name (e.g. code-ready). Used by later fork calls to reference this snapshot",
     "checkpoint.description": "Optional description of why this checkpoint was taken",
+    "checkpoint.notify_leader": (
+        "[checkpoint] '{name}' created by {member} at message {count}{description}"
+    ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/clean_team.md
     # ===== spawn_teammate ======================================================

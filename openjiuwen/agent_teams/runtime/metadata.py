@@ -126,11 +126,13 @@ def clear_pending_resume(session, team_name: str) -> bool:
     return True
 
 
-def read_team_checkpoints(session, team_name: str) -> dict[str, int] | None:
+def read_team_checkpoints(session, team_name: str) -> dict[str, dict] | None:
     """Return the persisted named checkpoints for a team, or ``None`` when absent.
 
-    Defensively keeps only entries whose value is an ``int``: a stale blob
-    with a non-int message count must not break cold recovery.
+    Each checkpoint is a record ``{"count": int, "description": str,
+    "created_by": str}``. Legacy blobs that still hold a bare ``int`` count
+    are coerced to a record with empty description / creator so cold
+    recovery never breaks on an old format.
     """
     bucket = read_team_namespace(session, team_name)
     if bucket is None:
@@ -138,13 +140,22 @@ def read_team_checkpoints(session, team_name: str) -> dict[str, int] | None:
     raw = bucket.get(TEAM_CHECKPOINTS_KEY)
     if not isinstance(raw, dict):
         return None
-    return {
-        k: v for k, v in raw.items()
-        if isinstance(k, str) and isinstance(v, int)
-    }
+    result: dict[str, dict] = {}
+    for name, value in raw.items():
+        if not isinstance(name, str):
+            continue
+        if isinstance(value, int):
+            result[name] = {"count": value, "description": "", "created_by": ""}
+        elif isinstance(value, dict) and isinstance(value.get("count"), int):
+            result[name] = {
+                "count": value["count"],
+                "description": str(value.get("description") or ""),
+                "created_by": str(value.get("created_by") or ""),
+            }
+    return result
 
 
-def merge_team_checkpoints(session, team_name: str, mapping: dict[str, int]) -> None:
+def merge_team_checkpoints(session, team_name: str, mapping: dict[str, dict]) -> None:
     """Replace the team bucket's named-checkpoint mapping (whole overwrite)."""
     merge_team_namespace(session, team_name, {TEAM_CHECKPOINTS_KEY: dict(mapping)})
 

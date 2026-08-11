@@ -295,9 +295,10 @@ class TeamBackend:
 
         # Fork / checkpoint support
         self._pending_forks: dict[str, dict] = {}    # member_name → {fork, since, source}
-        self._checkpoints: dict[str, int] = {}       # name → message_count
+        self._checkpoints: dict[str, dict] = {}      # name → {count, description, created_by}
         self._snapshot_length: Callable[[], int] | None = None
-        self._store_checkpoint_fn: Callable[[str, int], None] | None = None
+        self._store_checkpoint_fn: Callable[..., None] | None = None
+        self._checkpoint_list_fn: Callable[[], dict] | None = None
 
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
 
@@ -320,8 +321,16 @@ class TeamBackend:
         self._snapshot_length = fn
 
     def set_store_checkpoint_fn(self, fn) -> None:
-        """Register the callback for persisting a named checkpoint."""
+        """Register the callback for persisting a named checkpoint.
+
+        ``fn(name, count, *, description, created_by)`` — the record fields
+        are passed through so the authoritative namespace can store them.
+        """
         self._store_checkpoint_fn = fn
+
+    def set_checkpoint_list_fn(self, fn) -> None:
+        """Register the callback returning the authoritative checkpoint mapping."""
+        self._checkpoint_list_fn = fn
 
     def mark_fork_on_spawn(
         self,
@@ -368,20 +377,44 @@ class TeamBackend:
         )
         return 0
 
-    def store_checkpoint(self, name: str, count: int) -> None:
+    def store_checkpoint(
+        self,
+        name: str,
+        count: int,
+        *,
+        description: str = "",
+        created_by: str | None = None,
+    ) -> None:
         team_logger.debug(
             "[fork] store_checkpoint: member=%s name=%s count=%d "
             "has_store_fn=%s",
             self.member_name, name, count,
             self._store_checkpoint_fn is not None,
         )
+        created_by = created_by or self.member_name
+        record = {
+            "count": count,
+            "description": description or "",
+            "created_by": created_by,
+        }
         if self._store_checkpoint_fn is not None:
-            self._store_checkpoint_fn(name, count)
+            self._store_checkpoint_fn(name, count, description=description, created_by=created_by)
         else:
-            self._checkpoints[name] = count
+            self._checkpoints[name] = record
 
-    def get_checkpoints(self) -> dict[str, int]:
-        return dict(self._checkpoints)
+    def get_checkpoints(self) -> dict[str, dict]:
+        return {name: dict(record) for name, record in self._checkpoints.items()}
+
+    def list_checkpoints(self) -> dict[str, dict]:
+        """Return the authoritative checkpoint mapping for this team.
+
+        Prefers the callback-wired namespace (the leader's in-memory dict,
+        which in-process members write into); falls back to the local dict
+        when no callback is wired.
+        """
+        if self._checkpoint_list_fn is not None:
+            return {name: dict(record) for name, record in self._checkpoint_list_fn().items()}
+        return self.get_checkpoints()
 
     # ------------------------------------------------------------------
 

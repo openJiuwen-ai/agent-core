@@ -34,6 +34,9 @@ STRINGS: dict[str, str] = {
     # checkpoint._desc lives in descs/cn/checkpoint.md
     "checkpoint.name": "快照名（语义化 slug，如 code-ready）。后续 fork 通过此名引用",
     "checkpoint.description": "可选描述，说明为何在此打快照",
+    "checkpoint.notify_leader": (
+        "[checkpoint] 成员 {member} 在消息 {count} 处创建快照 '{name}'{description}"
+    ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/cn/clean_team.md
     # ===== spawn_teammate ======================================================

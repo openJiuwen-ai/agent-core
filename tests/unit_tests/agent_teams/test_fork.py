@@ -196,7 +196,47 @@ class TestCheckpointTool:
         assert result.success is True
         assert result.data["name"] == "code-ready"
         assert result.data["message_count"] == 15
-        assert agent_team.get_checkpoints()["code-ready"] == 15
+        record = agent_team.get_checkpoints()["code-ready"]
+        assert record["count"] == 15
+        assert record["description"] == ""
+        assert record["created_by"] == "leader-1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_notifies_leader_when_member(self, db, messager):
+        t = make_translator("cn")
+        member = TeamBackend(
+            team_name="test-team",
+            member_name="counter-1",
+            is_leader=False,
+            db=db,
+            messager=messager,
+        )
+        member._snapshot_length = lambda: 7
+        member.message_manager = AsyncMock()
+        member.resolve_leader_member_name = AsyncMock(return_value="team-leader")
+        tool = CheckpointTool(member, t)
+
+        result = await tool.invoke({"name": "count-1", "description": "报数1完成"})
+
+        assert result.success is True
+        member.message_manager.send_message.assert_awaited_once()
+        args = member.message_manager.send_message.await_args
+        assert args.kwargs["to_member_name"] == "team-leader"
+        assert "count-1" in args.kwargs["content"]
+        assert "counter-1" in args.kwargs["content"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_does_not_notify_leader_when_leader(self, agent_team):
+        t = make_translator("cn")
+        agent_team._snapshot_length = lambda: 15
+        agent_team.message_manager = AsyncMock()
+        tool = CheckpointTool(agent_team, t)
+
+        await tool.invoke({"name": "code-ready"})
+
+        agent_team.message_manager.send_message.assert_not_awaited()
 
     @pytest.mark.level0
     def test_map_result_success(self, agent_team):
@@ -251,15 +291,33 @@ class TestTeamBackendFork:
     @pytest.mark.level0
     def test_store_checkpoint_with_callback(self, agent_team):
         stored = {}
-        agent_team._store_checkpoint_fn = lambda n, c: stored.update({n: c})
-        agent_team.store_checkpoint("ck", 7)
-        assert stored["ck"] == 7
+        agent_team._store_checkpoint_fn = (
+            lambda n, c, description="", created_by=None: stored.update({n: (c, description, created_by)})
+        )
+        agent_team.store_checkpoint("ck", 7, description="desc", created_by="dev-1")
+        assert stored["ck"] == (7, "desc", "dev-1")
 
     @pytest.mark.level0
     def test_store_checkpoint_fallback(self, agent_team):
         agent_team._store_checkpoint_fn = None
         agent_team.store_checkpoint("fb", 3)
-        assert agent_team.get_checkpoints()["fb"] == 3
+        record = agent_team.get_checkpoints()["fb"]
+        assert record["count"] == 3
+        assert record["description"] == ""
+        assert record["created_by"] == "leader-1"
+
+    @pytest.mark.level0
+    def test_list_checkpoints_prefers_wired_namespace(self, agent_team):
+        agent_team.set_checkpoint_list_fn(lambda: {"a": {"count": 1, "description": "d", "created_by": "dev-1"}})
+        checkpoints = agent_team.list_checkpoints()
+        assert checkpoints["a"]["count"] == 1
+        assert checkpoints["a"]["description"] == "d"
+
+    @pytest.mark.level1
+    def test_list_checkpoints_falls_back_to_local(self, agent_team):
+        agent_team._checkpoint_list_fn = None
+        agent_team._checkpoints = {"b": {"count": 2, "description": "", "created_by": ""}}
+        assert agent_team.list_checkpoints()["b"]["count"] == 2
 
 
 # ── SpawnTeammateTool fork params ──────────────────────────────────────────
@@ -472,6 +530,7 @@ class TestOnTeammateCreatedFork:
         agent._configurator.team_backend.consume_fork_on_spawn = MagicMock(
             return_value=fork_info
         )
+        agent._configurator.message_manager = AsyncMock()
         agent._named_checkpoints = dict(checkpoints or {})
         agent._spawn_manager = MagicMock()
         agent._spawn_manager.spawned_handles = {}
@@ -525,7 +584,7 @@ class TestOnTeammateCreatedFork:
     async def test_named_fork_truncates_to_checkpoint(self):
         agent = self._make_agent(
             {"fork": "code-ready", "since": None, "source": None, "compact": False},
-            checkpoints={"code-ready": 2},
+            checkpoints={"code-ready": {"count": 2}},
         )
         fork_from = await self._run(agent)
         assert isinstance(fork_from, ForkContext)
@@ -548,7 +607,7 @@ class TestOnTeammateCreatedFork:
     async def test_named_fork_with_compact_sets_split(self):
         agent = self._make_agent(
             {"fork": "code-ready", "since": None, "source": None, "compact": True},
-            checkpoints={"code-ready": 2},
+            checkpoints={"code-ready": {"count": 2}},
         )
         fork_from = await self._run(agent)
         assert isinstance(fork_from, ForkContext)
@@ -604,6 +663,32 @@ class TestOnTeammateCreatedFork:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_missing_checkpoint_name_notifies_leader_with_available(self):
+        """A wrong fork name is surfaced to the leader, not silently ignored."""
+        agent = self._make_agent(
+            {"fork": "no-such", "since": None, "source": None, "compact": False},
+            checkpoints={"code-ready": {"count": 2}},
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert len(fork_from.messages) == self._MESSAGE_COUNT  # full-context fallback
+        agent._configurator.message_manager.send_message.assert_awaited_once()
+        content = agent._configurator.message_manager.send_message.await_args.kwargs["content"]
+        assert "no-such" in content
+        assert "code-ready" in content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_resolved_checkpoint_name_does_not_notify(self):
+        agent = self._make_agent(
+            {"fork": "code-ready", "since": None, "source": None, "compact": False},
+            checkpoints={"code-ready": {"count": 2}},
+        )
+        await self._run(agent)
+        agent._configurator.message_manager.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_fork_capture_failure_degrades_to_no_inheritance(self, monkeypatch):
         """A fork-capture failure must not abort the member spawn.
 
@@ -613,7 +698,7 @@ class TestOnTeammateCreatedFork:
         """
         agent = self._make_agent(
             {"fork": "code-ready", "since": None, "source": None, "compact": False},
-            checkpoints={"code-ready": 2},
+            checkpoints={"code-ready": {"count": 2}},
         )
 
         def _boom(*args, **kwargs):
@@ -880,11 +965,17 @@ class TestTeamAgentCheckpointPersistence:
         session = _StubSession()
         agent = self._make_agent(role=TeamRole.LEADER, team_session=session)
 
-        agent.set_checkpoint("code-ready", 5)
+        agent.set_checkpoint("code-ready", 5, description="base done", created_by="dev-1")
         agent.set_checkpoint("refactor-done", 12)
 
-        assert agent._named_checkpoints == {"code-ready": 5, "refactor-done": 12}
-        assert self._bucket_checkpoints(session) == {"code-ready": 5, "refactor-done": 12}
+        assert agent._named_checkpoints == {
+            "code-ready": {"count": 5, "description": "base done", "created_by": "dev-1"},
+            "refactor-done": {"count": 12, "description": "", "created_by": ""},
+        }
+        assert self._bucket_checkpoints(session) == {
+            "code-ready": {"count": 5, "description": "base done", "created_by": "dev-1"},
+            "refactor-done": {"count": 12, "description": "", "created_by": ""},
+        }
 
     @pytest.mark.level1
     def test_leader_set_checkpoint_unbound_session_degrades_gracefully(self):
@@ -892,7 +983,9 @@ class TestTeamAgentCheckpointPersistence:
 
         agent = self._make_agent(role=TeamRole.LEADER, team_session=None)
         agent.set_checkpoint("code-ready", 5)
-        assert agent._named_checkpoints == {"code-ready": 5}
+        assert agent._named_checkpoints == {
+            "code-ready": {"count": 5, "description": "", "created_by": ""}
+        }
 
     @pytest.mark.level1
     def test_teammate_set_checkpoint_does_not_touch_session(self):
@@ -903,5 +996,7 @@ class TestTeamAgentCheckpointPersistence:
 
         agent.set_checkpoint("code-ready", 5)
 
-        assert agent._named_checkpoints == {"code-ready": 5}
+        assert agent._named_checkpoints == {
+            "code-ready": {"count": 5, "description": "", "created_by": ""}
+        }
         assert TEAMS_KEY not in session.state
