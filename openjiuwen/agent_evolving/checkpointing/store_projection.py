@@ -220,7 +220,7 @@ class StoreProjectionHelper:
         return cls._normalize_summary_text(first_line) or record.id
 
     @staticmethod
-    def _normalize_summary_text(text: str, max_chars: int = 96) -> str:
+    def _normalize_summary_text(text: str, max_chars: int = 100) -> str:
         value = text.strip()
         value = re.sub(r"^#{1,6}\s*", "", value)
         value = value.replace("|", " ")
