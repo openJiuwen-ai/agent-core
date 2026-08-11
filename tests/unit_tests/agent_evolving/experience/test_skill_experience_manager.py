@@ -154,6 +154,7 @@ async def test_manager_request_rebuild_delegates_to_rebuild_service(monkeypatch)
         min_score=0.5,
         max_context_records=40,
         max_context_chars=20000,
+        record_ids=None,
     )
 
 
@@ -317,6 +318,7 @@ async def test_request_rebuild_uses_shared_service_with_subject_envelope():
         min_score=0.5,
         max_context_records=40,
         max_context_chars=20000,
+        record_ids=None,
     )
     rebuild_service.prepare_rebuild_context.assert_any_await(
         {"kind": "team-skill", "name": "team-a"},
@@ -324,6 +326,7 @@ async def test_request_rebuild_uses_shared_service_with_subject_envelope():
         min_score=0.5,
         max_context_records=40,
         max_context_chars=20000,
+        record_ids=None,
     )
 
 
@@ -911,11 +914,11 @@ async def test_request_rebuild_uses_shared_helper_and_template():
     manager.rebuild_service._archive_service.archive_current_pair.assert_awaited_once_with(
         "skill-a", subject_kind="skill"
     )
-    manager._store.clear_evolutions.assert_awaited_once_with("skill-a", subject_kind="skill")
+    manager._store.clear_evolutions.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_request_rebuild_inlines_deterministic_context_and_clears_archived_evolutions():
+async def test_request_rebuild_inlines_deterministic_context_without_clearing():
     manager = _make_manager()
     record = _make_record(content="Always validate inputs strictly.")
     record.id = "ev_1"
@@ -935,4 +938,6 @@ async def test_request_rebuild_inlines_deterministic_context_and_clears_archived
 
     assert "Deterministic Rebuild Context" in prompt
     assert "Always validate inputs strictly." in prompt
-    manager._store.clear_evolutions.assert_awaited_once_with("skill-a", subject_kind="skill")
+    manager._store.clear_evolutions.assert_not_called()
+    assert manager._last_rebuild_context is not None
+    assert manager._last_rebuild_context["skill_name"] == "skill-a"

@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionLog
+from openjiuwen.agent_evolving.checkpointing.versioning import parse_semver
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
 from openjiuwen.core.common.logging import logger
 
@@ -20,6 +20,7 @@ _SKILL_ARCHIVE_PREFIX = "SKILL."
 _SKILL_ARCHIVE_SUFFIX = ".md"
 _EVOLUTION_ARCHIVE_PREFIX = "evolutions."
 _EVOLUTION_ARCHIVE_SUFFIX = ".json"
+_DEFAULT_VERSION = "v1.0.0"
 DEFAULT_ARCHIVE_KEEP_LATEST = 10
 
 
@@ -60,7 +61,7 @@ class EvolutionArchiveService:
         *,
         subject_kind: Optional[str] = None,
     ) -> list[EvolutionArchivePair]:
-        """List complete archive pairs for a subject, newest first."""
+        """List complete archive pairs for a subject, newest first (by mtime)."""
         name, kind = self._subject_name_and_kind(subject, subject_kind=subject_kind)
         skill_dir = self._store.resolve_skill_dir(name, subject_kind=kind)
         if skill_dir is None:
@@ -71,20 +72,25 @@ class EvolutionArchiveService:
 
         archive_names = set(self._store.list_archives(name, subject_kind=kind))
         pairs: list[EvolutionArchivePair] = []
-        for filename in sorted(archive_names, reverse=True):
+        for filename in archive_names:
             version = self._version_from_skill_archive_name(filename)
             if version is None:
                 continue
             evolution_name = self._evolution_archive_name(version)
             if evolution_name not in archive_names:
                 continue
+            skill_path = archive_dir / filename
+            evo_path = archive_dir / evolution_name
+            if not skill_path.is_file() or not evo_path.is_file():
+                continue
             pairs.append(
                 EvolutionArchivePair(
                     version=version,
-                    skill_archive=archive_dir / filename,
-                    evolution_archive=archive_dir / evolution_name,
+                    skill_archive=skill_path,
+                    evolution_archive=evo_path,
                 )
             )
+        pairs.sort(key=self._pair_mtime, reverse=True)
         return pairs
 
     async def archive_current_pair(
@@ -92,11 +98,15 @@ class EvolutionArchiveService:
         subject: str | dict[str, Any] | Any,
         *,
         subject_kind: Optional[str] = None,
+        version: Optional[str] = None,
     ) -> Optional[EvolutionArchivePair]:
-        """Archive current ``SKILL.md`` and ``evolutions.json`` as one pair.
+        """Archive current ``SKILL.md`` and ``evolutions.json`` as one SemVer pair.
 
         Missing current ``evolutions.json`` is initialized with an empty log so
         every archive version remains a complete rollback target.
+
+        If the target SemVer pair already exists, skip writing and return the
+        existing pair (idempotent).
         """
         name, kind = self._subject_name_and_kind(subject, subject_kind=subject_kind)
         skill_dir = self._store.resolve_skill_dir(name, subject_kind=kind)
@@ -120,9 +130,24 @@ class EvolutionArchiveService:
 
         archive_dir = skill_dir / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
-        version = self._next_pair_version(archive_dir)
-        skill_archive = archive_dir / self._skill_archive_name(version)
-        evolution_archive = archive_dir / self._evolution_archive_name(version)
+        archive_version = version or await self._resolve_current_version(name, skill_dir, subject_kind=kind)
+        version_key = self._archive_version_key(archive_version)
+        skill_archive = archive_dir / self._skill_archive_name(version_key)
+        evolution_archive = archive_dir / self._evolution_archive_name(version_key)
+
+        if skill_archive.exists() or evolution_archive.exists():
+            logger.warning(
+                "[EvolutionArchiveService] archive skipped for subject=%s version=%s (already exists)",
+                name,
+                version_key,
+            )
+            if skill_archive.is_file() and evolution_archive.is_file():
+                return EvolutionArchivePair(
+                    version=version_key,
+                    skill_archive=skill_archive,
+                    evolution_archive=evolution_archive,
+                )
+            return None
 
         skill_content = await self._store.read_file_text(skill_md)
         evolution_content = await self._store.read_file_text(evolution_log)
@@ -138,10 +163,10 @@ class EvolutionArchiveService:
             "[EvolutionArchiveService] archived current pair: subject=%s kind=%s version=%s",
             name,
             kind or "default",
-            version,
+            version_key,
         )
         return EvolutionArchivePair(
-            version=version,
+            version=version_key,
             skill_archive=skill_archive,
             evolution_archive=evolution_archive,
         )
@@ -214,9 +239,9 @@ class EvolutionArchiveService:
             pruned += 1
         return pruned
 
-    @staticmethod
-    def normalize_version(raw: str) -> Optional[str]:
-        """Normalize a user-facing archive version token."""
+    @classmethod
+    def normalize_version(cls, raw: str) -> Optional[str]:
+        """Normalize a user-facing archive version token to ``vMAJOR.MINOR.PATCH`` or ``latest``."""
         version = str(raw or "").strip()
         if not version:
             return None
@@ -224,9 +249,7 @@ class EvolutionArchiveService:
             return _LATEST_VERSION
         if version.startswith(_SKILL_ARCHIVE_PREFIX) and version.endswith(_SKILL_ARCHIVE_SUFFIX):
             version = version[len(_SKILL_ARCHIVE_PREFIX):-len(_SKILL_ARCHIVE_SUFFIX)]
-        if version.startswith("v"):
-            return version
-        return None
+        return cls._archive_version_key_if_semver(version)
 
     def _resolve_pair(
         self,
@@ -276,18 +299,60 @@ class EvolutionArchiveService:
             subject_kind=subject_kind,
         )
 
+    async def _resolve_current_version(
+        self,
+        name: str,
+        skill_dir: Path,
+        *,
+        subject_kind: Optional[str],
+    ) -> str:
+        resolve = getattr(self._store, "resolve_current_version", None)
+        if callable(resolve):
+            return await resolve(name, subject_kind=subject_kind)
+
+        skill_md = self._store.find_skill_md(skill_dir) or skill_dir / "SKILL.md"
+        if skill_md.is_file():
+            content = await self._store.read_file_text(skill_md)
+            frontmatter_version = self._extract_version_from_skill_md(content)
+            if frontmatter_version:
+                return frontmatter_version
+        evo_log = await self._store.load_full_evolution_log(name, subject_kind=subject_kind)
+        if evo_log.version:
+            return evo_log.version
+        return _DEFAULT_VERSION
+
+    @staticmethod
+    def _extract_version_from_skill_md(content: str) -> Optional[str]:
+        if not content.startswith("---"):
+            return None
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            return None
+        front_matter = parts[1]
+        for line in front_matter.strip().split("\n"):
+            if line.startswith("version:"):
+                value = line.split(":", 1)[1].strip().strip('"').strip("'")
+                return value or None
+        return None
+
+    @staticmethod
+    def _archive_version_key(version: str) -> str:
+        """Normalize a SemVer string to archive key ``vMAJOR.MINOR.PATCH``."""
+        text = (version or "").strip()
+        if text[:1] in ("v", "V"):
+            text = text[1:].strip()
+        return f"v{text}"
+
     @classmethod
-    def _next_pair_version(cls, archive_dir: Path) -> str:
-        base_version = datetime.now(tz=timezone.utc).strftime("v%Y%m%dT%H%M%S")
-        version = base_version
-        suffix = 1
-        while (
-            archive_dir.joinpath(cls._skill_archive_name(version)).exists()
-            or archive_dir.joinpath(cls._evolution_archive_name(version)).exists()
-        ):
-            suffix += 1
-            version = f"{base_version}_{suffix:02d}"
-        return version
+    def _archive_version_key_if_semver(cls, version: str) -> Optional[str]:
+        text = (version or "").strip()
+        if not text:
+            return None
+        bare = text[1:] if text[:1] in ("v", "V") else text
+        major, minor, patch = parse_semver(text)
+        if bare != f"{major}.{minor}.{patch}":
+            return None
+        return cls._archive_version_key(text)
 
     @staticmethod
     def _skill_archive_name(version: str) -> str:
@@ -297,12 +362,19 @@ class EvolutionArchiveService:
     def _evolution_archive_name(version: str) -> str:
         return f"{_EVOLUTION_ARCHIVE_PREFIX}{version}{_EVOLUTION_ARCHIVE_SUFFIX}"
 
-    @staticmethod
-    def _version_from_skill_archive_name(filename: str) -> Optional[str]:
+    @classmethod
+    def _version_from_skill_archive_name(cls, filename: str) -> Optional[str]:
         if not filename.startswith(_SKILL_ARCHIVE_PREFIX) or not filename.endswith(_SKILL_ARCHIVE_SUFFIX):
             return None
         version = filename[len(_SKILL_ARCHIVE_PREFIX):-len(_SKILL_ARCHIVE_SUFFIX)]
-        return version if version.startswith("v") else None
+        return cls._archive_version_key_if_semver(version)
+
+    @staticmethod
+    def _pair_mtime(pair: EvolutionArchivePair) -> float:
+        try:
+            return max(pair.skill_archive.stat().st_mtime, pair.evolution_archive.stat().st_mtime)
+        except OSError:
+            return 0.0
 
     @staticmethod
     def _current_target_paths_are_valid(*, skill_md: Path, evolution_log: Path) -> bool:
