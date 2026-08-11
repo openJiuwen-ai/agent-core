@@ -383,8 +383,8 @@ class CodexSpanBridge:
         from opentelemetry import context as otel_context
         from opentelemetry.trace import SpanKind, set_span_in_context
 
-        from openjiuwen.agent_teams.observability.redaction import redact_prompt
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.redaction import redact_prompt
+        from openjiuwen.extensions.observability.semconv import (
             AT_AGENT_ID,
             AT_AGENT_INPUT,
             AT_AGENT_NAME,
@@ -609,11 +609,11 @@ class CodexSpanBridge:
             set_span_in_context,
         )
 
-        from openjiuwen.agent_teams.observability.redaction import (
+        from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
         )
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.semconv import (
             AT_MEMBER_NAME,
             AT_SESSION_ID,
             AT_TEAM_NAME,
@@ -903,7 +903,7 @@ class CodexSpanBridge:
             set_span_in_context,
         )
 
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.semconv import (
             AT_MEMBER_NAME,
             AT_SESSION_ID,
             AT_TEAM_NAME,
@@ -1060,11 +1060,11 @@ class CodexSpanBridge:
             set_span_in_context,
         )
 
-        from openjiuwen.agent_teams.observability.redaction import (
+        from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
         )
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.semconv import (
             AT_MEMBER_NAME,
             AT_SESSION_ID,
             AT_TEAM_NAME,
@@ -1162,7 +1162,7 @@ class CodexSpanBridge:
         text = _json_text(value)
         if config is None:
             return _truncate(text, 40960)
-        from openjiuwen.agent_teams.observability.redaction import (
+        from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
         )
@@ -1218,11 +1218,11 @@ class CodexSpanBridge:
         from opentelemetry import context as otel_context
         from opentelemetry.trace import Status, StatusCode, set_span_in_context
 
-        from openjiuwen.agent_teams.observability.redaction import (
+        from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
         )
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.semconv import (
             GEN_AI_USAGE_COMPLETION_TOKENS,
             GEN_AI_USAGE_PROMPT_TOKENS,
             GEN_AI_USAGE_TOTAL_TOKENS,
@@ -1279,8 +1279,8 @@ class CodexSpanBridge:
 
         from opentelemetry.trace import Status, StatusCode
 
-        from openjiuwen.agent_teams.observability.redaction import redact_completion
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.redaction import redact_completion
+        from openjiuwen.extensions.observability.semconv import (
             AT_AGENT_OUTPUT,
             LANGFUSE_OBSERVATION_OUTPUT,
         )

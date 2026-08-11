@@ -3,9 +3,8 @@
 
 """OpenTelemetry handlers for AsyncCallbackFramework events.
 
-Agent spans are created per-iteration in ObservabilityRail.
-This handler only creates team spans (on first invoke) and manages
-LLM/tool span lifecycles.
+Agent spans are created per iteration by the host integration. This handler
+manages the generic LLM/tool span lifecycle and root metadata propagation.
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ import json
 import time
 from typing import Any
 
+from opentelemetry import trace
 from opentelemetry import context as otel_context
 from opentelemetry.trace import (
     Span,
@@ -24,13 +24,13 @@ from opentelemetry.trace import (
     set_span_in_context,
 )
 
-from openjiuwen.agent_teams.observability.config import ObservabilityConfig
-from openjiuwen.agent_teams.observability.redaction import (
-    _truncate,
+from openjiuwen.extensions.observability.redaction import (
     redact_completion,
     redact_prompt,
+    truncate,
 )
-from openjiuwen.agent_teams.observability.semconv import (
+from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_MEMBER_NAME,
     AT_SESSION_ID,
@@ -71,27 +71,27 @@ from openjiuwen.agent_teams.observability.semconv import (
     LANGFUSE_OBSERVATION_TYPE,
     LANGFUSE_SESSION_ID,
 )
-from openjiuwen.agent_teams.observability.span_context import (
+from openjiuwen.extensions.observability.span_context import (
     LlmSpanState,
     get_active_span_tracker,
-    get_current_llm_span,
-    get_team_span,
     get_current_agent_span,
+    get_current_llm_span,
+    get_current_session_id,
+    get_root_span,
     pop_current_llm_span,
     pop_tool_span,
     push_tool_span,
+    set_current_session_id,
 )
-from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.call_scope import get_current_llm_call_id
 
 
-_TRACER_NAME = "openjiuwen.agent_teams.observability"
+_TRACER_NAME = "openjiuwen.extensions.observability"
 
 
-def _gen_ai_system_name() -> str:
+def _gen_ai_system_name(config: ObservabilityConfig | None = None) -> str:
     """Return gen_ai.system value from config.service_name, default 'openjiuwen'."""
-    from openjiuwen.agent_teams.observability.setup import get_config
-    config = get_config()
     return config.service_name if config else "openjiuwen"
 
 
@@ -151,8 +151,7 @@ class OtelCallbackHandler:
     def _tracer(self) -> Tracer:
         if self._injected_tracer is not None:
             return self._injected_tracer
-        from openjiuwen.agent_teams.observability.setup import get_tracer
-        return get_tracer(_TRACER_NAME)
+        return trace.get_tracer(_TRACER_NAME)
 
     @staticmethod
     def _get_parent_context_for_llm_tool() -> Any:
@@ -161,14 +160,14 @@ class OtelCallbackHandler:
         Returns None when no valid parent span exists — callers must
         skip span creation in that case rather than attaching to the
         root context, which would produce orphan spans outside the
-        team trace.
+        active trace.
         """
         iteration_span = get_current_agent_span()
         if iteration_span is not None:
             if iteration_span.is_recording():
                 return set_span_in_context(iteration_span, otel_context.get_current())
             else:
-                team_logger.warning(
+                logger.warning(
                     "otel: _get_parent_context - agent span ENDED name={} "
                     "trace_id={:032x} span_id={:016x}",
                     iteration_span.name,
@@ -176,27 +175,27 @@ class OtelCallbackHandler:
                     iteration_span.context.span_id,
                 )
 
-        team_span = get_team_span()
-        if team_span is not None:
-            if team_span.is_recording():
-                team_logger.debug(
-                    "otel: _get_parent_context - fallback to team span name={} "
+        root_span = get_root_span()
+        if root_span is not None:
+            if root_span.is_recording():
+                logger.debug(
+                    "otel: _get_parent_context - fallback to root span name={} "
                     "trace_id={:032x} span_id={:016x}",
-                    team_span.name,
-                    team_span.context.trace_id,
-                    team_span.context.span_id,
+                    root_span.name,
+                    root_span.context.trace_id,
+                    root_span.context.span_id,
                 )
-                return set_span_in_context(team_span, otel_context.get_current())
+                return set_span_in_context(root_span, otel_context.get_current())
             else:
-                team_logger.warning(
-                    "otel: _get_parent_context - team span ENDED name={} "
+                logger.warning(
+                    "otel: _get_parent_context - root span ENDED name={} "
                     "trace_id={:032x} span_id={:016x}",
-                    team_span.name,
-                    team_span.context.trace_id,
-                    team_span.context.span_id,
+                    root_span.name,
+                    root_span.context.trace_id,
+                    root_span.context.span_id,
                 )
 
-        team_logger.debug("otel: no valid parent span for LLM/tool — skipping span creation")
+        logger.debug("otel: no valid parent span for LLM/tool — skipping span creation")
         return None
 
     # ------------------------------------------------------------------
@@ -207,13 +206,13 @@ class OtelCallbackHandler:
         try:
             self._open_llm_span(kwargs)
         except Exception as exc:
-            team_logger.exception("otel: on_llm_invoke_input failed: {}", exc)
+            logger.exception("otel: on_llm_invoke_input failed: {}", exc)
 
     async def on_llm_stream_input(self, *args: Any, **kwargs: Any) -> None:
         try:
             self._open_llm_span(kwargs, is_streaming=True)
         except Exception as exc:
-            team_logger.exception("otel: on_llm_stream_input failed: {}", exc)
+            logger.exception("otel: on_llm_stream_input failed: {}", exc)
 
     async def on_llm_stream_output(self, *args: Any, **kwargs: Any) -> Any:
         try:
@@ -248,7 +247,7 @@ class OtelCallbackHandler:
                 )
             self._maybe_record_response_attrs(state, chunk)
         except Exception as exc:
-            team_logger.warning("otel: on_llm_stream_output failed: {}", exc)
+            logger.warning("otel: on_llm_stream_output failed: {}", exc)
         return kwargs.get("result")
 
     async def on_llm_output(self, *args: Any, **kwargs: Any) -> None:
@@ -257,10 +256,10 @@ class OtelCallbackHandler:
             span = pop_current_llm_span()
             state = getattr(span, "otel_llm_state", None) if span else None
             if state is None:
-                team_logger.debug("otel: on_llm_output — no open LLM span to close")
+                logger.debug("otel: on_llm_output — no open LLM span to close")
                 return
             if not state.span.is_recording():
-                team_logger.debug("otel: on_llm_output — span already ended")
+                logger.debug("otel: on_llm_output — span already ended")
                 return
 
             completion_text = str(kwargs.get("response") or "")
@@ -291,7 +290,7 @@ class OtelCallbackHandler:
             )
         except BaseException as exc:
             if isinstance(exc, Exception):
-                team_logger.warning("otel: on_llm_output failed: {}", exc)
+                logger.warning("otel: on_llm_output failed: {}", exc)
             # State was already popped — if we don't end the span here it
             # becomes an orphan (cascade_close_children can't find it) and
             # is ended later by ActiveSpanTracker.flush_* with no output attrs.
@@ -301,7 +300,7 @@ class OtelCallbackHandler:
                         state.span.set_status(Status(StatusCode.ERROR, f"on_llm_output failed: {exc}"))
                         state.span.end()
                 except Exception as cleanup_exc:
-                    team_logger.warning("otel: on_llm_output cleanup also failed: {}", cleanup_exc)
+                    logger.warning("otel: on_llm_output cleanup also failed: {}", cleanup_exc)
             if not isinstance(exc, Exception):
                 raise
 
@@ -324,14 +323,14 @@ class OtelCallbackHandler:
             self._close_llm_span(state, response)
         except BaseException as exc:
             if isinstance(exc, Exception):
-                team_logger.warning("otel: on_llm_invoke_output failed: {}", exc)
+                logger.warning("otel: on_llm_invoke_output failed: {}", exc)
             if state is not None:
                 try:
                     if state.span.is_recording():
                         state.span.set_status(Status(StatusCode.ERROR, f"on_llm_invoke_output failed: {exc}"))
                         state.span.end()
                 except Exception as cleanup_exc:
-                    team_logger.warning("otel: on_llm_invoke_output cleanup also failed: {}", cleanup_exc)
+                    logger.warning("otel: on_llm_invoke_output cleanup also failed: {}", cleanup_exc)
             if not isinstance(exc, Exception):
                 raise
         return kwargs.get("result")
@@ -358,14 +357,14 @@ class OtelCallbackHandler:
                 state.span.end()
         except BaseException as exc:
             if isinstance(exc, Exception):
-                team_logger.exception("otel: on_llm_call_error failed: {}", exc)
+                logger.exception("otel: on_llm_call_error failed: {}", exc)
             if state is not None:
                 try:
                     if state.span.is_recording():
                         state.span.set_status(Status(StatusCode.ERROR, "llm call error"))
                         state.span.end()
                 except Exception as cleanup_exc:
-                    team_logger.warning("otel: on_llm_call_error cleanup also failed: {}", cleanup_exc)
+                    logger.warning("otel: on_llm_call_error cleanup also failed: {}", cleanup_exc)
             if not isinstance(exc, Exception):
                 raise
 
@@ -397,11 +396,11 @@ class OtelCallbackHandler:
             redacted_input = redact_prompt(raw_input, self._config)
             span.set_attribute(GEN_AI_TOOL_INPUT, redacted_input)
             span.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_input)
-            self._propagate_team_context(span)
+            self._propagate_session_context(span)
             self._stamp_parent_member_name(span)
             push_tool_span(tool_name, span)
         except Exception as exc:
-            team_logger.warning("otel: on_tool_call_started failed: {}", exc)
+            logger.warning("otel: on_tool_call_started failed: {}", exc)
 
     async def on_tool_call_finished(self, *args: Any, **kwargs: Any) -> Any:
         try:
@@ -412,7 +411,7 @@ class OtelCallbackHandler:
                 return result
 
             if not span.is_recording():
-                team_logger.warning(
+                logger.warning(
                     "WRITE_ON_ENDED_SPAN: where=on_tool_call_finished name={} span_id={:016x}",
                     getattr(span, "name", "<no-name>"),
                     getattr(getattr(span, "context", None), "span_id", 0),
@@ -435,7 +434,7 @@ class OtelCallbackHandler:
             span.end()
         except Exception as exc:
             import traceback
-            team_logger.warning("otel: on_tool_call_finished failed: {}\n{}", exc, traceback.format_exc())
+            logger.warning("otel: on_tool_call_finished failed: {}\n{}", exc, traceback.format_exc())
         return kwargs.get("result")
 
     async def on_tool_call_error(self, *args: Any, **kwargs: Any) -> None:
@@ -447,7 +446,7 @@ class OtelCallbackHandler:
                 return
 
             if not span.is_recording():
-                team_logger.warning(
+                logger.warning(
                     "WRITE_ON_ENDED_SPAN: where=on_tool_call_error name={} span_id={:016x}",
                     getattr(span, "name", "<no-name>"),
                     getattr(getattr(span, "context", None), "span_id", 0),
@@ -462,7 +461,7 @@ class OtelCallbackHandler:
                     span.set_status(Status(StatusCode.ERROR, "tool call error"))
                 span.end()
         except Exception as exc:
-            team_logger.exception("otel: on_tool_call_error failed: {}", exc)
+            logger.exception("otel: on_tool_call_error failed: {}", exc)
 
     # ------------------------------------------------------------------
     # Agent
@@ -471,11 +470,11 @@ class OtelCallbackHandler:
     async def on_agent_invoke_input(self, *args: Any, **kwargs: Any) -> None:
         """Handle AGENT_INVOKE_INPUT callback.
 
-        Team span creation is in Runner._maybe_attach_observability
-        (runner owns the full lifecycle: create before invoke, close in finally).
+        Root span creation is owned by the host integration
+        (the host owns the full lifecycle: create before invoke, close in finally).
         This callback only:
           1. Sets ContextVars (session_id)
-          2. Propagates query to team span input
+          2. Propagates query to the root span input
         """
         try:
             inputs = args[0] if args else None
@@ -489,41 +488,42 @@ class OtelCallbackHandler:
             elif isinstance(inputs, dict):
                 query = str(inputs.get("user_input") or inputs.get("query") or "")
 
-            # Set ContextVar for session_id
-            from openjiuwen.agent_teams.context import set_session_id
+            # Set the generic session binding for subsequent callback events.
             if session_id:
-                set_session_id(session_id)
+                set_current_session_id(session_id)
 
-            # Propagate query to team span (created by runner)
+            # Propagate query to the host-provided root span.
             if query:
-                team_span = get_team_span()
-                if team_span is not None and team_span.is_recording():
-                    if not team_span.attributes.get(LANGFUSE_OBSERVATION_INPUT):
-                        team_span.set_attribute(LANGFUSE_OBSERVATION_INPUT,
+                root_span = get_root_span(session_id=session_id) if session_id else get_root_span()
+                if root_span is not None and root_span.is_recording():
+                    if not root_span.attributes.get(LANGFUSE_OBSERVATION_INPUT):
+                        root_span.set_attribute(LANGFUSE_OBSERVATION_INPUT,
                                                 redact_prompt(query, self._config))
 
         except Exception as exc:
-            team_logger.exception("otel: on_agent_invoke_input failed: {}", exc)
+            logger.exception("otel: on_agent_invoke_input failed: {}", exc)
 
     async def on_agent_invoke_output(self, *args: Any, **kwargs: Any) -> Any:
         """Handle AGENT_INVOKE_OUTPUT callback.
 
         DO NOT close agent span here! (managed by Rail)
-        Sets team span output from the FINAL invoke result — this is the
+        Sets root span output from the FINAL invoke result — this is the
         overall agent output, distinct from per-iteration results written by
         ObservabilityRail.after_task_iteration.
         """
         try:
             result = kwargs.get("result")
             if result is not None:
-                team_span = get_team_span()
-                if team_span is not None and team_span.is_recording():
-                    team_span.set_attribute(
+                session = kwargs.get("session")
+                session_id = session.get_session_id() if session else None
+                root_span = get_root_span(session_id=session_id) if session_id else get_root_span()
+                if root_span is not None and root_span.is_recording():
+                    root_span.set_attribute(
                         LANGFUSE_OBSERVATION_OUTPUT,
                         redact_completion(str(result), self._config),
                     )
         except Exception as exc:
-            team_logger.exception("otel: on_agent_invoke_output failed: {}", exc)
+            logger.exception("otel: on_agent_invoke_output failed: {}", exc)
         return kwargs.get("result")
 
     async def on_agent_stream_input(self, *args: Any, **kwargs: Any) -> None:
@@ -559,7 +559,7 @@ class OtelCallbackHandler:
         )
         if call_id:
             span.set_attribute(GEN_AI_REQUEST_ID, call_id)
-        span.set_attribute(GEN_AI_SYSTEM, _gen_ai_system_name())
+        span.set_attribute(GEN_AI_SYSTEM, _gen_ai_system_name(self._config))
         span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         provider_name = self._derive_provider_name(kwargs)
         span.set_attribute(GEN_AI_PROVIDER_NAME, provider_name)
@@ -592,15 +592,15 @@ class OtelCallbackHandler:
         # System messages are ALWAYS emitted regardless of delta — they form
         # the stable instruction baseline that every span needs.
         #
-        # Cross-iteration: the count is stored on the *team* span (not the
+        # Cross-iteration: the count is stored on the root span (not the
         # iteration span) keyed by agent_id, because each iteration opens and
         # closes its own agent span — a count stored there is lost before the
         # next iteration's first LLM call, which would then re-emit the full
-        # prompt. Each teammate (incl. leader) keeps its own chain
+        # prompt. Each agent keeps its own chain
         # (gen_ai.request.prev_message_count.<agent_id>); OTel span
         # set_attribute is internally locked so no manual locking is needed.
         agent_span = get_current_agent_span()
-        team_span = get_team_span()
+        root_span = get_root_span()
         agent_id = ""
         if agent_span is not None:
             raw_id = agent_span.attributes.get(AT_AGENT_ID)
@@ -608,8 +608,8 @@ class OtelCallbackHandler:
                 agent_id = str(raw_id)
 
         prev_count_raw: int = 0
-        if team_span is not None and agent_id:
-            prev_attr = team_span.attributes.get(f"{GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX}{agent_id}")
+        if root_span is not None and agent_id:
+            prev_attr = root_span.attributes.get(f"{GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX}{agent_id}")
             if prev_attr is not None:
                 try:
                     prev_count_raw = int(str(prev_attr))
@@ -618,11 +618,11 @@ class OtelCallbackHandler:
 
         is_first_call = prev_count_raw == 0 or msg_count < prev_count_raw
 
-        # Update the per-member count on the team span for the next LLM call
+        # Update the per-member count on the root span for the next LLM call
         # of this member (across iterations). Also keep the per-span display
         # count on the current iteration span.
-        if team_span is not None and team_span.is_recording() and agent_id:
-            team_span.set_attribute(f"{GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX}{agent_id}", msg_count)
+        if root_span is not None and root_span.is_recording() and agent_id:
+            root_span.set_attribute(f"{GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX}{agent_id}", msg_count)
         if agent_span is not None:
             agent_span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
 
@@ -634,7 +634,7 @@ class OtelCallbackHandler:
         # a fixed non-prompt budget and write only the trailing N messages.
         emit_standard_prompt = self._config.backend != "langfuse"
         attrs_per_msg = 4 if emit_standard_prompt else 2
-        non_prompt_budget = 30  # top system + request params + team context +
+        non_prompt_budget = 30  # top system + request params + root context +
         # member name + output-stage completion/usage/finish_reason (≈22, 30
         # leaves headroom); covers the 1 system message too.
         writable_msg_count = max((self._config.max_attributes - non_prompt_budget) // attrs_per_msg, 0)
@@ -693,7 +693,7 @@ class OtelCallbackHandler:
         ) if delta_msgs else "[]"
         input_max_len = max(self._config.attribute_value_max_length * 10, 81920)
         span.set_attribute(LANGFUSE_OBSERVATION_INPUT,
-                           _truncate(input_json, input_max_len))
+                           truncate(input_json, input_max_len))
 
         tools = kwargs.get("tools")
         if tools:
@@ -705,7 +705,7 @@ class OtelCallbackHandler:
             except (TypeError, ValueError):
                 span.set_attribute(GEN_AI_TOOL_DEFINITIONS, str(tools))
 
-        self._propagate_team_context(span)
+        self._propagate_session_context(span)
         self._stamp_parent_member_name(span)
 
         _llm_st = LlmSpanState(
@@ -720,7 +720,7 @@ class OtelCallbackHandler:
         if tracker is not None:
             tracker.register_llm_span(call_id, span)
 
-        team_logger.debug(
+        logger.debug(
             "otel: _open_llm_span name=llm.call trace_id={:032x} span_id={:016x} "
             "parent_span_id={:016x} streaming={} call_id={}",
             span.context.trace_id, span.context.span_id,
@@ -729,7 +729,7 @@ class OtelCallbackHandler:
 
     def _close_llm_span(self, state: LlmSpanState, response: Any) -> None:
         if not state.span.is_recording():
-            team_logger.warning(
+            logger.warning(
                 "WRITE_ON_ENDED_SPAN: where=_close_llm_span name={} span_id={:016x}",
                 getattr(state.span, "name", "<no-name>"),
                 getattr(getattr(state.span, "context", None), "span_id", 0),
@@ -757,13 +757,13 @@ class OtelCallbackHandler:
             )
         except BaseException as exc:
             if isinstance(exc, Exception):
-                team_logger.warning("otel: _close_llm_span failed: {}", exc)
+                logger.warning("otel: _close_llm_span failed: {}", exc)
             try:
                 if state.span.is_recording():
                     state.span.set_status(Status(StatusCode.ERROR, f"_close_llm_span failed: {exc}"))
                     state.span.end()
             except Exception as cleanup_exc:
-                team_logger.warning("otel: _close_llm_span cleanup also failed: {}", cleanup_exc)
+                logger.warning("otel: _close_llm_span cleanup also failed: {}", cleanup_exc)
             if not isinstance(exc, Exception):
                 raise
 
@@ -891,7 +891,7 @@ class OtelCallbackHandler:
                     )
                     reasoning_span.end(end_time=call_start_wall_ns)
             except Exception as exc:
-                team_logger.warning("otel: _finalize_llm_span_output reasoning span failed: {}", exc)
+                logger.warning("otel: _finalize_llm_span_output reasoning span failed: {}", exc)
 
     def _record_usage_attrs(self, state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
         """Record usage attributes (tokens, model_name) from usage_metadata.
@@ -992,8 +992,7 @@ class OtelCallbackHandler:
             return ""
         return str(getattr(model_config, "model", "") or "")
 
-    @staticmethod
-    def _derive_provider_name(kwargs: dict[str, Any]) -> str:
+    def _derive_provider_name(self, kwargs: dict[str, Any]) -> str:
         mcc = kwargs.get("model_client_config")
         if mcc is not None:
             cp = getattr(mcc, "client_provider", None)
@@ -1004,23 +1003,22 @@ class OtelCallbackHandler:
             cp = getattr(mc, "client_provider", None)
             if cp:
                 return str(cp.value if hasattr(cp, "value") else cp).lower()
-        return _gen_ai_system_name()
+        return _gen_ai_system_name(self._config)
 
     @staticmethod
-    def _propagate_team_context(span: Span) -> None:
+    def _propagate_session_context(span: Span) -> None:
         """Propagate session_id to LLM/tool spans.
 
-        v21: team_name and member_name are no longer propagated via ContextVar.
-        They are read directly from agent.team_name and agent.card.name in Rail.
+        Session identity is propagated to child spans. Other host-specific
+        attributes are supplied directly by the host integration.
         """
         try:
-            from openjiuwen.agent_teams.context import get_session_id as get_ctx_session_id
-            sid = get_ctx_session_id()
+            sid = get_current_session_id()
             if sid:
                 span.set_attribute(LANGFUSE_SESSION_ID, sid)
                 span.set_attribute(AT_SESSION_ID, sid)
         except Exception as exc:
-            team_logger.warning("callback_handler: failed to propagate team context: {}", exc)
+            logger.warning("callback_handler: failed to propagate session context: {}", exc)
 
     @staticmethod
     def _stamp_parent_member_name(span: Span) -> None:
@@ -1038,15 +1036,14 @@ class OtelCallbackHandler:
         try:
             agent_span = get_current_agent_span()
             if agent_span is None:
-                team_logger.debug(
+                logger.debug(
                     "callback_handler: _stamp_parent_member_name — "
                     "no agent span in context; span={} will not carry agentteam.member.name",
                     span.name,
                 )
                 return
             raw = agent_span.attributes.get(AT_MEMBER_NAME)
-            raw = agent_span.attributes.get(AT_MEMBER_NAME)
             if raw is not None:
                 span.set_attribute(AT_MEMBER_NAME, str(raw))
         except Exception as exc:
-            team_logger.warning("callback_handler: failed to stamp member name: {}", exc)
+            logger.warning("callback_handler: failed to stamp member name: {}", exc)

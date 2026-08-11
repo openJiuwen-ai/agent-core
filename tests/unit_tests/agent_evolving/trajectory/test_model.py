@@ -116,7 +116,7 @@ def test_schema_exposes_canonical_and_rl_fields_only() -> None:
 
 
 def test_schema_team_identity_values_match_observability_without_runtime_dependency() -> None:
-    from openjiuwen.agent_teams.observability import semconv
+    from openjiuwen.extensions.observability import semconv
 
     assert MEMBER_ID == semconv.AT_MEMBER_ID
     assert SESSION_ID == semconv.AT_SESSION_ID

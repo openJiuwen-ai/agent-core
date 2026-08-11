@@ -18,7 +18,7 @@ from openjiuwen.agent_evolving.signal.base import EvolutionTarget, make_evolutio
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
-from openjiuwen.agent_teams.observability import semconv
+from openjiuwen.extensions.observability import semconv
 
 
 def _make_signal(signal_type: str = "execution_failure"):

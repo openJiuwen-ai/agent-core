@@ -11,7 +11,7 @@ from openjiuwen.agent_evolving.signal.base import make_signal_fingerprint
 from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
-from openjiuwen.agent_teams.observability import semconv
+from openjiuwen.extensions.observability import semconv
 from openjiuwen.core.foundation.llm import ToolMessage
 
 

@@ -30,11 +30,11 @@ from opentelemetry.trace import (
     set_span_in_context,
 )
 
-from openjiuwen.agent_teams.observability.redaction import (
+from openjiuwen.extensions.observability.redaction import (
     redact_completion,
     redact_prompt,
 )
-from openjiuwen.agent_teams.observability.semconv import (
+from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_AGENT_INPUT,
     AT_AGENT_NAME,
@@ -44,7 +44,6 @@ from openjiuwen.agent_teams.observability.semconv import (
     AT_MEMBER_NAME,
     AT_SESSION_ID,
     AT_TEAM_ID,
-    AT_TEAM_NAME,
     DA_TASK_IS_FOLLOW_UP,
     DA_TASK_ITERATION,
     DA_TASK_LOOP_EVENT,
@@ -53,14 +52,14 @@ from openjiuwen.agent_teams.observability.semconv import (
     LANGFUSE_OBSERVATION_TYPE,
     LANGFUSE_SESSION_ID,
 )
-from openjiuwen.agent_teams.observability.span_context import (
+from openjiuwen.extensions.observability.span_context import (
     cascade_close_children,
+    clear_tool_span_context,
     get_current_agent_span,
     get_current_tool_span,
     set_current_agent_span,
-    get_team_span,
-    _tool_span_map,
 )
+from openjiuwen.agent_teams.observability.span_context import get_team_span
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -575,7 +574,7 @@ class ObservabilityRail(DeepAgentRail):
             # LLM spans need no equivalent cleanup: ActiveSpanTracker indexes
             # them by the id of the request that opened them, so an inherited
             # context can never make this member resolve another member's span.
-            _tool_span_map.set({})
+            clear_tool_span_context()
         set_current_agent_span(None)
 
     @staticmethod
