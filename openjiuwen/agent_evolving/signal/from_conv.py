@@ -29,6 +29,16 @@ def _get_field(obj: object, key: str, default: object = "") -> object:
     return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
 
+def _tool_call_field(tool_call: object, field: str) -> object:
+    """Read direct or OpenAI ``function``-nested tool-call fields."""
+
+    value = _get_field(tool_call, field, "")
+    if value:
+        return value
+    function = _get_field(tool_call, "function", None)
+    return _get_field(function, field, "") if function is not None else ""
+
+
 def _extract_around_match(
     content: str,
     match: re.Match,
@@ -321,8 +331,8 @@ class ConversationSignalDetector:
                     tool_calls = _get_field(msg, "tool_calls", [])
                     if tool_calls:
                         for tc in tool_calls:
-                            tc_id = _get_field(tc, "id", "")
-                            tc_name = _get_field(tc, "name", "")
+                            tc_id = _tool_call_field(tc, "id")
+                            tc_name = _tool_call_field(tc, "name")
                             if tc_id and tc_name:
                                 tool_call_id_to_name[tc_id] = tc_name
 
@@ -371,8 +381,8 @@ class ConversationSignalDetector:
                     skill_read_history.append((msg_idx, detected))
 
                 for tc in tool_calls:
-                    tc_id = str(_get_field(tc, "id"))
-                    tc_name = str(_get_field(tc, "name"))
+                    tc_id = str(_tool_call_field(tc, "id"))
+                    tc_name = str(_tool_call_field(tc, "name"))
                     if tc_id and tc_name:
                         tool_call_id_to_name[tc_id] = tc_name
                     if tc_name.lower() in _CODE_EXEC_TOOLS:
@@ -437,8 +447,8 @@ class ConversationSignalDetector:
     def _detect_skill_from_tool_calls(self, tool_calls: list) -> Optional[str]:
         """Return skill name if any tool call reads a SKILL.md, else None."""
         for tool_call in tool_calls:
-            name = str(_get_field(tool_call, "name")).lower()
-            arguments = str(_get_field(tool_call, "arguments"))
+            name = str(_tool_call_field(tool_call, "name")).lower()
+            arguments = str(_tool_call_field(tool_call, "arguments"))
             skill_name: Optional[str] = None
 
             matched = _SKILL_MD_PATTERN.search(arguments)
@@ -497,7 +507,7 @@ class ConversationSignalDetector:
     @staticmethod
     def _extract_code_from_args(tool_call: object) -> str:
         """Extract inline code or command content from a code-execution tool call."""
-        raw_args = _get_field(tool_call, "arguments")
+        raw_args = _tool_call_field(tool_call, "arguments")
         if isinstance(raw_args, str):
             try:
                 raw_args = json.loads(raw_args)
