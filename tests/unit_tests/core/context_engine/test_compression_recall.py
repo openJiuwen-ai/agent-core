@@ -104,6 +104,37 @@ def test_archive_writes_turn_index_raw_messages_and_readable_chunks(tmp_path):
     assert raw_messages[0]["content"] == "How should database retries work?"
 
 
+def test_archive_extracts_query_text_from_structured_user_content(tmp_path):
+    messages = [
+        UserMessage(content=[{"type": "text", "text": "How should database retries work?"}]),
+        AssistantMessage(content="Use exponential backoff for database timeout errors."),
+        UserMessage(content=[{"type": "text", "text": "如何配置缓存淘汰策略？"}]),
+        AssistantMessage(content="Evict least recently used cache entries."),
+    ]
+
+    archive = _archive(tmp_path, messages)
+    archive_path = Path(archive.path)
+
+    turns = [json.loads(line) for line in (archive_path / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert turns[0]["query"] == "How should database retries work?"
+    assert turns[1]["query"] == "如何配置缓存淘汰策略？"
+    assert archive_path.name == f"{archive.memory_id}_如何配置缓存淘汰策略"
+
+
+def test_archive_structured_content_without_text_yields_no_query_slug(tmp_path):
+    messages = [
+        AssistantMessage(content="Working on it."),
+    ]
+
+    archive = _archive(
+        tmp_path,
+        messages,
+        preceding=[UserMessage(content=[{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}])],
+    )
+
+    assert Path(archive.path).name == f"{archive.memory_id}_no-query"
+
+
 def test_current_round_style_archive_uses_preceding_user_as_turn_query(tmp_path):
     messages = [
         AssistantMessage(content="Investigating the failing request."),

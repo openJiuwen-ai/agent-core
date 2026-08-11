@@ -171,9 +171,9 @@ def _group_turns(messages: list[BaseMessage], *, fallback_query: str) -> list[_T
         if _is_real_user_message(message) and current_messages:
             groups.append((current_query, current_messages))
             current_messages = []
-            current_query = _content_to_text(message.content)
+            current_query = _content_to_query_text(message.content)
         elif _is_real_user_message(message):
-            current_query = _content_to_text(message.content)
+            current_query = _content_to_query_text(message.content)
         current_messages.append(message)
     if current_messages:
         groups.append((current_query, current_messages))
@@ -312,7 +312,7 @@ def _safe_filename_part(value: str) -> str:
 def _latest_real_user_content(messages: list[BaseMessage]) -> str:
     for message in reversed(messages):
         if _is_real_user_message(message):
-            return _content_to_text(message.content)
+            return _content_to_query_text(message.content)
     return ""
 
 
@@ -326,8 +326,36 @@ def _latest_non_empty_query(turns: list[_Turn]) -> str:
 def _is_real_user_message(message: BaseMessage) -> bool:
     if not isinstance(message, UserMessage):
         return False
-    content = _content_to_text(message.content).lstrip()
+    content = _content_to_query_text(message.content).lstrip()
     return not content.startswith(INTERNAL_USER_PREFIXES)
+
+
+def _content_to_query_text(content: Any) -> str:
+    """Extract user-visible text from structured content for query labeling.
+
+    User messages may carry multimodal parts (``[{"type": "text", "text": ...}]``);
+    flattening those with :func:`_content_to_text` yields a JSON blob whose leading
+    characters are ``[{"type":`` — useless as an archive directory name or a BM25
+    recall query. Text-bearing parts are joined; anything else yields an empty
+    string so callers fall back to ``no-query`` instead of JSON noise.
+    """
+    if isinstance(content, str) or content is None:
+        return _content_to_text(content)
+    parts = content if isinstance(content, list) else [content]
+    texts: list[str] = []
+    for part in parts:
+        if isinstance(part, str):
+            texts.append(part)
+            continue
+        if isinstance(part, dict):
+            for key in ("text", "content"):
+                value = part.get(key)
+                if isinstance(value, str) and value.strip():
+                    texts.append(value)
+                    break
+    if not texts:
+        return ""
+    return _content_to_text("\n".join(texts))
 
 
 def _content_to_text(content: Any) -> str:
