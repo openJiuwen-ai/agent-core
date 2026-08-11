@@ -491,3 +491,125 @@ class TestSamplingParams:
         params = self._params(client, top_p=1.0)
         assert "top_p" not in params
         assert "temperature" not in params
+
+
+# ---------------------------------------------------------------------------
+# G. Extended thinking forwarding
+# ---------------------------------------------------------------------------
+
+
+def _client_with(**request_fields) -> AnthropicModelClient:
+    """A client whose request config carries extra fields.
+
+    ``ModelRequestConfig`` sets ``extra="allow"``, so a caller can attach
+    ``thinking`` and the base builder surfaces it via ``model_dump``. Whether it
+    survives the Anthropic-specific rebuild is what these tests pin.
+    """
+    client_config = ModelClientConfig(
+        client_provider="Anthropic",
+        api_key="mock-key",
+        api_base="https://api.anthropic.com",
+        verify_ssl=False,
+    )
+    return AnthropicModelClient(
+        ModelRequestConfig(model_name="claude-sonnet-4-5", **request_fields),
+        client_config,
+    )
+
+
+def _params(client: AnthropicModelClient, **overrides) -> dict:
+    kwargs = {
+        "messages": "hello",
+        "tools": None,
+        "temperature": None,
+        "top_p": None,
+        "model": None,
+        "stop": None,
+        "max_tokens": None,
+        "stream": False,
+    }
+    kwargs.update(overrides)
+    return client._build_anthropic_params(**kwargs)
+
+
+class TestThinkingForward:
+    def test_thinking_is_forwarded_to_the_messages_request(self):
+        """Without this the caller's budget is silently discarded.
+
+        ``_build_anthropic_params`` rebuilds its payload from an explicit set of
+        keys, so anything not named there is dropped no matter how correctly it
+        was configured upstream.
+        """
+        client = _client_with(
+            max_tokens=32000,
+            thinking={"type": "enabled", "budget_tokens": 8000},
+        )
+        params = _params(client)
+        assert params["thinking"] == {"type": "enabled", "budget_tokens": 8000}
+        assert params["max_tokens"] == 32000
+
+    def test_no_thinking_means_no_thinking_key(self):
+        """Models without extended thinking reject the field outright."""
+        params = _params(_client_with(max_tokens=32000))
+        assert "thinking" not in params
+
+    def test_max_tokens_is_raised_to_hold_the_budget(self):
+        """The budget is taken out of max_tokens, and the default is only 8192.
+
+        A budget of 16000 against that default is rejected by the API; a budget
+        of 8000 is accepted and leaves 192 tokens for the answer. Both are
+        avoided by sizing the ceiling here.
+        """
+        client = _client_with(thinking={"type": "enabled", "budget_tokens": 16000})
+        params = _params(client)
+        assert params["max_tokens"] > 16000
+
+    def test_a_sufficient_max_tokens_is_left_alone(self):
+        client = _client_with(
+            max_tokens=64000,
+            thinking={"type": "enabled", "budget_tokens": 16000},
+        )
+        assert _params(client)["max_tokens"] == 64000
+
+    def test_a_malformed_budget_does_not_break_the_request(self):
+        """Never fail a request over a field we are only passing through."""
+        client = _client_with(
+            max_tokens=32000,
+            thinking={"type": "enabled", "budget_tokens": "lots"},
+        )
+        params = _params(client)
+        assert params["thinking"]["budget_tokens"] == "lots"
+        assert params["max_tokens"] == 32000
+
+    def test_a_non_dict_thinking_is_still_forwarded_untouched(self):
+        client = _client_with(max_tokens=32000, thinking="enabled")
+        params = _params(client)
+        assert params["thinking"] == "enabled"
+        assert params["max_tokens"] == 32000
+
+    def test_thinking_drops_incompatible_sampling_knobs(self):
+        """Extended thinking 400s on non-default temperature and any top_p."""
+        client = _client_with(
+            max_tokens=32000,
+            temperature=0.95,
+            top_p=0.9,
+            thinking={"type": "enabled", "budget_tokens": 8000},
+        )
+        params = _params(client, temperature=0.95, top_p=0.9)
+        assert params["thinking"]["budget_tokens"] == 8000
+        assert "temperature" not in params
+        assert "top_p" not in params
+
+    def test_max_tokens_with_only_one_token_of_answer_room_is_raised(self):
+        client = _client_with(
+            max_tokens=8001,
+            thinking={"type": "enabled", "budget_tokens": 8000},
+        )
+        params = _params(client)
+        assert params["max_tokens"] - 8000 >= 4096
+
+    def test_without_thinking_temperature_wins_over_top_p(self):
+        client = _client_with(max_tokens=32000, temperature=0.5, top_p=0.9)
+        params = _params(client, temperature=0.5, top_p=0.9)
+        assert params["temperature"] == 0.5
+        assert "top_p" not in params
