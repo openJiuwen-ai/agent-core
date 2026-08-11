@@ -104,8 +104,46 @@ class _CmdResume:
     query: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _CmdSteer:
+    """A steer() invocation reaching the supervisor.
+
+    Distinct from ``_CmdSend`` with ``immediate=True`` because the two want
+    opposite things from an idle harness. ``send`` starts a round; steering has
+    no meaning without a round already running and must say so instead.
+
+    The phase can only be read safely here. A caller that checks
+    ``active_round`` and then calls ``send`` has an await between the two, and
+    the round it saw may have finished by the time the supervisor acts on the
+    message -- turning a correction for a finished round into a brand new one.
+
+    Attributes:
+        content: Steering text to inject into the running round.
+        ack: Future resolved True when the text was pushed into the active
+            round's steering queue, False when there was no round to steer.
+        steer_id: Correlation id for the request that produced this steer.
+            Carried so ``STEER_APPLIED`` can name which steer a rail dropped;
+            its ``dropped`` list is built from these ids and skips ``None``, so
+            without one a dropped steer is silently reported as applied.
+        expected_round_id: The round the caller believed was running. Present
+            because "a round is running" is not the invariant that matters --
+            *which* round is. ``_CmdRoundFinished`` shares this control queue and
+            ``_on_round_done`` can start the next round synchronously (follow-up
+            drain, abnormal-death replay, task-plan continuation), so a steer
+            dequeued behind one would find a live round that the user never saw
+            and inject the correction into it. ``None`` means the caller does not
+            care which round receives it.
+    """
+
+    content: str
+    ack: asyncio.Future
+    steer_id: str | None = None
+    expected_round_id: int | None = None
+
+
 ControlEvent = Union[
     _CmdSend,
+    _CmdSteer,
     _CmdAbort,
     _CmdPause,
     _CmdResume,

@@ -80,6 +80,7 @@ from openjiuwen.harness.task_loop.loop_coordinator import (
 )
 from openjiuwen.harness.task_loop.loop_queues import (
     LoopQueues,
+    SteeringInput,
 )
 from openjiuwen.harness.task_loop.task_loop_controller import (
     TaskLoopController,
@@ -102,9 +103,11 @@ from openjiuwen.harness.schema.interaction import (
     OutputLease,
     OutputLeaseManager,
     InputDispatchMode,
+    InputDisposition,
     RoundOutcome,
     RoundWorkItem,
     SendInputRequest,
+    SendInputResult,
 )
 from openjiuwen.harness.task_loop.event_manager import EventManager
 
@@ -369,6 +372,7 @@ class DeepAgent(BaseAgent):
             self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
 
         self._react_agent = self._create_react_agent()
+        self._bind_steering_applied_sink()
         self._queue_pending_rails(config)
 
     def _hot_reconfigure(self, config: DeepAgentConfig) -> None:
@@ -525,7 +529,6 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
-        prompt = prompt_builder.build()
         new_react_config = self._react_agent.config.model_copy()
         new_react_config.prompt_template = [
             {"role": "system", "content": _render_identity_prompt(prompt_builder, language)}
@@ -627,8 +630,37 @@ class DeepAgent(BaseAgent):
     ) -> "DeepAgent":
         """Inject an inner agent implementation for runtime wiring/tests."""
         self._react_agent = cast(ReActAgent, react_agent)
+        self._bind_steering_applied_sink()
         self._initialized = initialized
         return self
+
+    def _bind_steering_applied_sink(self) -> None:
+        """Let the inner agent report steering that reached model context.
+
+        This is the bridge between the two loops. The inner ReAct loop is the
+        only place that knows when steering text was admitted, post-rail; this
+        loop is the only one that can put an event on the active output stream.
+        Neither could do it alone, and the inner agent has no upward path of its
+        own.
+
+        The seam carries primitives -- a list of applied entries and a list of
+        dropped ids -- rather than an ``InteractionEvent``. ``core`` should not
+        learn a harness concept just to report something, so the event is built
+        here, at the layer that owns it.
+        """
+        agent = self._react_agent
+        if agent is None:
+            return
+
+        def _sink(applied: List[Dict[str, Any]], dropped: List[str]) -> None:
+            self._emit_interaction_event(
+                InteractionEvent.steer_applied(applied=applied, dropped=dropped)
+            )
+
+        # Real ReActAgent exposes the setter; harness test doubles often do not.
+        binder = getattr(agent, "set_steering_applied_sink", None)
+        if callable(binder):
+            binder(_sink)
 
     @property
     def is_initialized(self) -> bool:
@@ -3068,21 +3100,26 @@ class DeepAgent(BaseAgent):
                         self._notify_work()
                 return stream
 
-    async def send_input(self, request: SendInputRequest) -> None:
+    async def send_input(self, request: SendInputRequest) -> SendInputResult:
         """Dispatch user text or interrupt-resume input.
 
         Hosts that need to read output must call ``attach_output`` first (or
         already hold a stream).  Steer / follow-up requests typically skip
         attach and let the existing consumer receive output.  Dispatch modes
         do not apply to ``InteractiveInput`` recovery requests.
+
+        Returns what actually happened.  A steer that arrives with no active
+        round is reported as rejected rather than being downgraded to
+        follow-up or fresh-turn work, so the host can acknowledge it truthfully
+        instead of starting a turn the user did not ask for.
         """
         if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
             raise RuntimeError("interaction_terminated")
 
         async with self._interaction_send_lock:
-            await self._send_user(request)
+            return await self._send_user(request)
 
-    async def _send_user(self, request: SendInputRequest) -> None:
+    async def _send_user(self, request: SendInputRequest) -> SendInputResult:
         inputs = request.inputs
         if not isinstance(inputs, dict):
             raise ValueError(
@@ -3109,7 +3146,7 @@ class DeepAgent(BaseAgent):
                     )
                 )
                 self._notify_work()
-                return
+                return SendInputResult.queued(InputDisposition.RESUME_QUEUED)
 
             loop = self.loop_controller
             try:
@@ -3124,10 +3161,40 @@ class DeepAgent(BaseAgent):
             if mode is InputDispatchMode.STEER and self._active_interaction_round is not None:
                 if loop is None:
                     raise RuntimeError("active interaction round cannot accept steer without loop_controller")
-                loop.enqueue_steer(str(inputs["query"]))
+                expected = (request.expected_round_id or "").strip()
+                if expected:
+                    active_round_id = self._active_interaction_round.work.request_id
+                    if not active_round_id or expected != active_round_id:
+                        return SendInputResult.rejected("round_mismatch")
+                # Carry the request id into the queue. Without it every
+                # SteeringInput.id is None, and since ``dropped`` is built from
+                # those ids it comes out empty every single time -- a steer
+                # removed by a rail would be reported as applied. The id is what
+                # lets a client match STEER_APPLIED back to the ACK it received.
+                loop.enqueue_steer(
+                    SteeringInput(text=str(inputs["query"]), id=request.request_id)
+                )
                 self._notify_work()
-                return
+                return SendInputResult.queued(InputDisposition.STEER_QUEUED)
 
+            # A client that bound the steer to a specific round id has already
+            # lost that round when we get here. Do not promote it to a Goal
+            # follow-up: that turns an end-of-turn race into silent success.
+            if mode is InputDispatchMode.STEER:
+                expected = (request.expected_round_id or "").strip()
+                if expected:
+                    return SendInputResult.rejected("round_mismatch")
+
+            # A steer with no active round is NOT automatically invalid, and it
+            # must not short-circuit here.  While a Goal is ACTIVE the Web sends
+            # ordinary input as ``input_mode="steer"`` so it lands as a
+            # supplementary constraint on the running Goal rather than
+            # overwriting it, and between attempts there is legitimately no
+            # active round.  Falling through keeps that working, and it is the
+            # only path that runs ``_should_keep_interaction_open_locked()``,
+            # whose intentional side effect queues the Goal's next attempt.
+            # Returning above would drop the message *and* stall the Goal.
+            # (Only unbound steers reach this path: see expected_round_id above.)
             keep_open = self._should_keep_interaction_open_locked()
             if keep_open:
                 self._event_manager.push_user(
@@ -3139,7 +3206,15 @@ class DeepAgent(BaseAgent):
                     )
                 )
                 self._notify_work()
-                return
+                return SendInputResult.queued(InputDisposition.FOLLOW_UP_QUEUED)
+
+            if mode is InputDispatchMode.STEER:
+                # Reached only when there is no active round *and* nothing keeps
+                # the interaction open: genuinely nothing to steer.  This is the
+                # case the contract exists for -- previously it fell into the
+                # fresh-turn path below and started a whole turn the user never
+                # asked for, indistinguishable from success at the wire.
+                return SendInputResult.rejected("no_active_round")
 
             # Fresh user turn.  Output lease ownership stays with the host via
             # ``attach_output``; send_input never steals or creates a stream.
@@ -3147,6 +3222,7 @@ class DeepAgent(BaseAgent):
                 RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
             )
             self._notify_work()
+            return SendInputResult.queued(InputDisposition.TURN_QUEUED)
 
     async def _attach_output_locked(self) -> Optional[InteractionOutputStream]:
         lease = await self._interaction_output.attach()
@@ -3455,9 +3531,37 @@ class DeepAgent(BaseAgent):
                 emitted = await self._emit_round_boundary(session)
                 if not emitted:
                     forwarded.set()
+            # Drop leftovers before clearing the active round marker. The
+            # steering queue is session-scoped; anything still sitting here
+            # would otherwise be drained into the *next* round as if it were
+            # aimed at that turn.
+            self._drop_undrained_steering()
             self._active_interaction_round = None
             if self._interaction_phase is InteractionPhase.RUNNING:
                 self._interaction_phase = InteractionPhase.IDLE
+
+    def _drop_undrained_steering(self) -> None:
+        """Report and clear steers that never reached a model-call boundary.
+
+        Emits ``steer.applied`` with an empty ``applied`` list so hosts can
+        mark ACK'd bubbles as not delivered, matching the rail-drop path.
+        """
+        loop = self.loop_controller
+        if loop is None:
+            return
+        get_queues = getattr(loop, "_get_interaction_queues", None)
+        if get_queues is None:
+            return
+        queues = get_queues()
+        if queues is None:
+            return
+        leftover = queues.drain_steering()
+        if not leftover:
+            return
+        dropped = [item.id for item in leftover if item.id is not None]
+        self._emit_interaction_event(
+            InteractionEvent.steer_applied(applied=[], dropped=dropped)
+        )
 
     def _load_goal_record_locked(self) -> Optional[GoalRecord]:
         if self.goal_manager is None:

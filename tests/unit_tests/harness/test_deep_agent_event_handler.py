@@ -247,10 +247,11 @@ async def test_handle_task_interaction() -> None:
     assert result["status"] == "steer_injected"
     assert "change plan" in result["msg"]
 
-    # Verify message was pushed to steering queue
+    # Verify message was pushed to steering queue. drain_steering yields
+    # SteeringInput now, so the text is read off the envelope.
     msgs = queues.drain_steering()
     assert len(msgs) == 1
-    assert msgs[0] == "change plan"
+    assert msgs[0].text == "change plan"
 
 
 @pytest.mark.asyncio

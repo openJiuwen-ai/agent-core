@@ -61,12 +61,14 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.state import DeepAgentState
+from openjiuwen.harness.task_loop.loop_queues import SteeringInput
 from openjiuwen.agent_teams.harness.control import (
     _CmdAbort,
     _CmdPause,
     _CmdResume,
     _CmdRoundFinished,
     _CmdSend,
+    _CmdSteer,
     _CmdStop,
 )
 from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime
@@ -542,6 +544,52 @@ class NativeHarness(DeepAgent):
         await self._control.put(_CmdSend(msg=msg, ack=ack))
         return await ack
 
+    async def steer(
+        self,
+        content: str,
+        *,
+        steer_id: str | None = None,
+        expected_round_id: int | None = None,
+    ) -> bool:
+        """Inject text into the round that is running, or report there is none.
+
+        The difference from ``send(content, immediate=True)`` is what happens
+        when nothing is running. ``send`` starts a round -- correct for a new
+        message, wrong for a correction aimed at a round that has since
+        finished, which would silently become a turn the user never asked for.
+        This refuses instead.
+
+        Checking ``active_round`` before calling ``send`` cannot achieve the
+        same thing: the check and the supervisor's decision are separated by at
+        least one await, and the round can finish in between. Here the phase is
+        read by the supervisor itself, in the same step that queues the text, so
+        there is no window between deciding and acting.
+
+        Args:
+            content: Steering text.
+            steer_id: Correlation id, surfaced in ``STEER_APPLIED`` so a client
+                can tell which of its steers a rail dropped. Without it the
+                event's ``dropped`` list is always empty.
+            expected_round_id: Refuse unless *this* round is the one running.
+                Omit to accept whichever round is live.
+
+        Returns:
+            True when the text was pushed into the active round's steering
+            queue; False when no round was running, or a different one was, and
+            nothing was queued.
+        """
+        self._require_alive()
+        ack: asyncio.Future = asyncio.get_running_loop().create_future()
+        await self._control.put(
+            _CmdSteer(
+                content=content,
+                ack=ack,
+                steer_id=steer_id,
+                expected_round_id=expected_round_id,
+            )
+        )
+        return await ack
+
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the current round; the harness settles to IDLE.
 
@@ -747,6 +795,8 @@ class NativeHarness(DeepAgent):
         """Route a non-Stop control event to its handler."""
         if isinstance(cmd, _CmdSend):
             await self._on_send(cmd)
+        elif isinstance(cmd, _CmdSteer):
+            await self._on_steer(cmd)
         elif isinstance(cmd, _CmdAbort):
             await self._on_abort(cmd)
         elif isinstance(cmd, _CmdPause):
@@ -843,6 +893,44 @@ class NativeHarness(DeepAgent):
             await self._transition(HarnessState.RUNNING)
             await self._emit_round("started", active.round_id)
         self._ack(cmd.ack, seq)
+
+    async def _on_steer(self, cmd: _CmdSteer) -> None:
+        """Push steering into the active round, or refuse when there is none.
+
+        Only RUNNING with a live round qualifies. Every other phase is a
+        refusal rather than a fallback:
+
+        - **IDLE**: nothing to steer. ``send`` would start a round here.
+        - **PAUSED**: ``send`` resumes the paused round and injects the text,
+          which is a resume the caller did not ask for. Steering does not wake
+          a harness up.
+        - **PAUSING**: the round is on its way out at the next boundary, so text
+          injected now may never be read. Refusing is honest; queueing is not.
+        - **TERMINATED**: ``_require_alive`` in ``steer`` already rejected it.
+
+        A live round is necessary but not sufficient. ``_CmdRoundFinished``
+        shares this queue and ``_on_round_done`` can start the *next* round
+        synchronously, so a steer dequeued behind one would land in a round the
+        caller never saw. When the caller named a round, only that round counts.
+        """
+        phase = self._st.phase
+        active = self._st.active
+        if phase is not HarnessState.RUNNING or active is None:
+            self._ack(cmd.ack, False)
+            return
+        if (
+            cmd.expected_round_id is not None
+            and active.round_id != cmd.expected_round_id
+        ):
+            logger.info(
+                "[NativeHarness] steer refused: round %s ended, %s is running now",
+                cmd.expected_round_id,
+                active.round_id,
+            )
+            self._ack(cmd.ack, False)
+            return
+        self._push_steer(SteeringInput(text=cmd.content, id=cmd.steer_id))
+        self._ack(cmd.ack, True)
 
     async def _on_abort(self, cmd: _CmdAbort) -> None:
         """Abort the current round; the harness settles to IDLE either way.
@@ -1399,8 +1487,13 @@ class NativeHarness(DeepAgent):
     # Task-loop bridge helpers
     # ------------------------------------------------------------------
 
-    def _push_steer(self, content: str) -> None:
-        """Push a steering message into the shared steering queue."""
+    def _push_steer(self, content: "str | SteeringInput") -> None:
+        """Push a steering message into the shared steering queue.
+
+        Accepts a bare string as well, because ``_on_send`` still pushes raw
+        content for ``send(immediate=True)`` -- that path has no request id to
+        carry, and ``push_steer`` coerces either form.
+        """
         handler = self.event_handler
         if handler is not None and handler.interaction_queues is not None:
             handler.interaction_queues.push_steer(content)
@@ -1482,6 +1575,40 @@ class NativeHarness(DeepAgent):
             logger.exception("[NativeHarness] output forwarder crashed")
         finally:
             await self._st.output_queue.put(_END)
+
+    def _emit_interaction_event(self, event: "InteractionEvent") -> None:
+        """Put an interaction event on *this* harness's output stream.
+
+        DeepAgent emits these through ``_interaction_output``, the lease the
+        interaction loop hands to ``attach_output``. A Team never attaches that
+        lease -- its consumer reads ``_st.output_queue`` -- so inherited emits
+        found ``current_token() is None`` and were dropped without a trace. The
+        sink was bound, the event was built, and nothing ever came out.
+
+        That is why ``steer.applied`` never reached a Team client: not a missing
+        binding, a stream nobody was listening to.
+
+        Synchronous by contract, because rails and the inner agent call it from
+        hooks that cannot await -- hence ``put_nowait``. The queue is unbounded,
+        so it cannot raise ``QueueFull``, and going through a tracked
+        ``create_task`` instead would have been a comfortable-looking lie:
+        ``NativeHarness.stop`` overrides ``DeepAgent.stop`` without calling
+        ``super()``, so the parent's cancel loop over ``_interaction_emit_tasks``
+        never runs for a Team and nothing would have cancelled those tasks.
+
+        Also note what this override changes for the events DeepAgent emits
+        through the same seam (``goal.updated``, ``execution.error``): they would
+        land here too. Harmless today because those emit sites live on the
+        interaction loop, which a NativeHarness never runs -- but if that stops
+        being true, this is where they arrive.
+        """
+        queue = self._st.output_queue
+        if queue is None:
+            return
+        try:
+            queue.put_nowait(event.to_output_schema())
+        except Exception:  # noqa: BLE001 - observability must not break a round
+            logger.exception("[NativeHarness] interaction event emit failed")
 
     async def _emit_round_aborted(self, round_id: int, kind: str) -> None:
         """Emit a marker chunk so consumers know prior chunks of this round are void.

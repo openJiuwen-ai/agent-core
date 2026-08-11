@@ -16,7 +16,17 @@ import inspect
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 from pydantic import Field, BaseModel
 
@@ -649,6 +659,18 @@ class ReActAgent(BaseAgent):
         """
         self._llm = llm
 
+    def set_steering_applied_sink(
+        self,
+        sink: Optional[Callable[[List[Dict[str, Any]], List[str]], None]],
+    ) -> None:
+        """Register a callback for steers that reached (or missed) model context.
+
+        Hosts that wrap this agent (for example DeepAgent) bind a sink so they
+        can emit interaction events. Pass ``None`` to clear. Embedders that
+        never set one see no reporting and no behavioural change.
+        """
+        self._steering_applied_sink = sink
+
     def _get_llm(self) -> Model:
         """Get LLM instance (lazy initialization)
 
@@ -737,8 +759,12 @@ class ReActAgent(BaseAgent):
             *,
             source: str,
             prefix: str = "",
-    ) -> None:
+    ) -> List[str]:
         """Join one batch of consumed inputs into the conversation, rails first.
+
+        Returns the parts that were actually admitted, post-rail and in final
+        order -- empty when a rail dropped everything. Callers that only need
+        the side effect can ignore it.
 
         Every input the agent consumes -- a new round's query, the follow-ups
         that queued up while it was busy, a batch of steering messages, a
@@ -767,12 +793,57 @@ class ReActAgent(BaseAgent):
         finally:
             ctx.inputs = previous_inputs
         if not parts:
-            return
+            return []
         body = "\n".join(parts)
         await context.add_messages(UserMessage(content=f"{prefix}{body}"))
+        # Rails mutate ``parts`` in place, so this is the post-rail list in
+        # final order -- what actually reached model context. Returned so a
+        # caller can report it; nothing here depends on the value.
+        return list(parts)
 
-    async def _drain_steering_batch(self, ctx: AgentCallbackContext) -> List[str]:
-        """Take the share of the steering backlog this model call absorbs.
+    def _report_steering_applied(
+            self,
+            drained: List[Any],
+            admitted: List[str],
+    ) -> None:
+        """Tell the host which steers reached model context, and which did not.
+
+        The sink takes plain data rather than a harness event type on purpose.
+        ``core`` should not learn what an interaction event is -- that concept
+        belongs to the loop wrapping this one -- so the seam carries primitives
+        and the wrapper builds the event. Defaulted to ``None``, so an embedder
+        that never sets it sees byte-identical behaviour.
+
+        Correlation is by text, matching each admitted string back to the first
+        unclaimed input that carried it. Rails receive the batch as a list of
+        strings and may reorder or drop entries, so identity is not preserved
+        across admission; matching on content is what survives. Two steers with
+        the same text resolve in queue order, which is the only order anyone
+        could mean.
+        """
+        sink = getattr(self, "_steering_applied_sink", None)
+        if sink is None:
+            return
+        remaining = list(drained)
+        applied: List[Dict[str, Any]] = []
+        for text in admitted:
+            for index, item in enumerate(remaining):
+                if item.text == text:
+                    applied.append({"id": item.id, "text": text})
+                    remaining.pop(index)
+                    break
+            else:
+                # A rail synthesised text that no input carried. Report it, so
+                # the transcript matches the model's view, with no id to claim.
+                applied.append({"id": None, "text": text})
+        dropped = [item.id for item in remaining if item.id is not None]
+        try:
+            sink(applied, dropped)
+        except Exception:  # noqa: BLE001 - observability must not break a turn
+            logger.exception("steering applied sink failed")
+
+    async def _drain_steering_batch(self, ctx: AgentCallbackContext) -> List[Any]:
+        """Take the share of the steering queue this model call absorbs.
 
         Everything queued used to go into one message. That is right when a
         couple of instructions piled up, and wrong when a member comes back to
@@ -790,8 +861,8 @@ class ReActAgent(BaseAgent):
             ctx: Callback context; carries the bound queue and the rails.
 
         Returns:
-            The messages to admit now, oldest first; empty when nothing is
-            queued, which also means no event was fired.
+            ``SteeringInput`` envelopes to admit now, oldest first; empty when
+            nothing is queued, which also means no event was fired.
         """
         queue = ctx.steering_queue
         if queue is None or queue.empty():
@@ -2020,13 +2091,14 @@ class ReActAgent(BaseAgent):
                         # before the next model call.
                         steering = await self._drain_steering_batch(ctx)
                         if steering:
-                            await self._admit_user_message(
+                            admitted = await self._admit_user_message(
                                 ctx,
                                 context,
-                                steering,
+                                [item.text for item in steering],
                                 source="steering",
                                 prefix="[STEERING] ",
                             )
+                            self._report_steering_applied(steering, admitted)
 
                         ai_message = await self._call_model(
                             ctx,

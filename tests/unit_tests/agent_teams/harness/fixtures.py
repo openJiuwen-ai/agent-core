@@ -61,6 +61,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.harness.task_loop.loop_queues import SteeringInput
 
 
 class MockContext:
@@ -211,7 +212,13 @@ class FakeReactAgent:
             steering_q = inputs.get("_steering_queue")
             if steering_q is not None:
                 while not steering_q.empty():
-                    self.seen_steers.append(steering_q.get_nowait())
+                    # The queue carries SteeringInput envelopes now. Record the
+                    # text, so seen_steers stays the list of strings its readers
+                    # expect; the id is covered in
+                    # tests/unit_tests/harness/test_steering_applied.py.
+                    self.seen_steers.append(
+                        SteeringInput.coerce(steering_q.get_nowait()).text
+                    )
             resume_continuation = bool(inputs.get("_resume_continuation"))
 
         context = self.context_engine.get_context(session_id=session.get_session_id())

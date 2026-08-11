@@ -17,7 +17,12 @@ def test_push_and_drain_steering() -> None:
     q.push_steer("msg2")
 
     msgs = q.drain_steering()
-    assert msgs == ["msg1", "msg2"]
+    # drain_steering yields SteeringInput, not bare strings: the queue now
+    # carries an optional request id so a host can correlate an ack.
+    assert [m.text for m in msgs] == ["msg1", "msg2"]
+    # A bare string push leaves the id unset -- rails steer with nothing
+    # to correlate.
+    assert all(m.id is None for m in msgs)
 
     # Second drain returns empty
     assert q.drain_steering() == []
@@ -43,7 +48,7 @@ def test_queues_are_independent() -> None:
     q.push_steer("steer1")
     q.push_follow_up("follow1")
 
-    assert q.drain_steering() == ["steer1"]
+    assert [m.text for m in q.drain_steering()] == ["steer1"]
     assert q.drain_follow_up() == ["follow1"]
 
     # Both empty now
@@ -63,11 +68,11 @@ def test_multiple_drain_cycles() -> None:
     q = LoopQueues()
 
     q.push_steer("a")
-    assert q.drain_steering() == ["a"]
+    assert [m.text for m in q.drain_steering()] == ["a"]
 
     q.push_steer("b")
     q.push_steer("c")
-    assert q.drain_steering() == ["b", "c"]
+    assert [m.text for m in q.drain_steering()] == ["b", "c"]
 
 
 def test_has_follow_up_does_not_consume() -> None:

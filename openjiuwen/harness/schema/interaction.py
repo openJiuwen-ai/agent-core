@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, Dict, Literal, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
 from openjiuwen.core.session.stream import OutputSchema
 
@@ -49,11 +49,59 @@ class SendInputRequest:
     conversation id and trusted directories) travels with the work item.
     The query may also be an ``InteractiveInput`` for interrupt recovery;
     ``mode`` applies only to user text.
+
+    ``expected_round_id`` is an optional precondition for steer: when set it
+    must match ``ActiveInteractionRound.work.request_id`` or the steer is
+    rejected as ``round_mismatch`` instead of landing on a different turn.
     """
 
     request_id: str
     inputs: Dict[str, object]
     mode: Optional[InputDispatchMode] = None
+    expected_round_id: Optional[str] = None
+
+
+class InputDisposition(str, Enum):
+    """What ``send_input`` actually did with the request.
+
+    Named separately from :class:`InputDispatchMode` because the mode is what
+    the caller *asked for* and the disposition is what *happened*.  A steer may
+    legitimately end as ``REJECTED``; before this contract existed it silently
+    became a follow-up or a fresh turn instead, which is the failure this type
+    exists to make impossible.
+    """
+
+    STEER_QUEUED = "steer_queued"
+    FOLLOW_UP_QUEUED = "follow_up_queued"
+    TURN_QUEUED = "turn_queued"
+    RESUME_QUEUED = "resume_queued"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True)
+class SendInputResult:
+    """Outcome of one ``send_input`` call.
+
+    ``accepted`` is the only field a host must read.  ``reason`` is set only
+    when ``accepted`` is false and is a stable machine token
+    (``no_active_round``, ``round_mismatch``) -- not a message for humans.
+    """
+
+    accepted: bool
+    disposition: InputDisposition
+    reason: Optional[str] = None
+
+    @classmethod
+    def queued(cls, disposition: InputDisposition) -> "SendInputResult":
+        return cls(accepted=True, disposition=disposition)
+
+    @classmethod
+    def rejected(cls, reason: str) -> "SendInputResult":
+        return cls(
+            accepted=False,
+            disposition=InputDisposition.REJECTED,
+            reason=reason,
+        )
 
 
 @dataclass(frozen=True)
@@ -145,6 +193,7 @@ class InteractionEventType(str, Enum):
 
     GOAL_UPDATED = "goal.updated"
     EXECUTION_ERROR = "execution.error"
+    STEER_APPLIED = "steer.applied"
 
 
 @dataclass(frozen=True)
@@ -176,6 +225,35 @@ class InteractionEvent:
         if goal is not None:
             payload["goal"] = copy.deepcopy(goal)
         return cls(type=InteractionEventType.EXECUTION_ERROR, payload=payload)
+
+    @classmethod
+    def steer_applied(
+        cls,
+        *,
+        applied: List[Dict[str, object]],
+        dropped: List[str],
+    ) -> InteractionEvent:
+        """Steering text reached model context.
+
+        Distinct from the host's acknowledgement, which only says the text was
+        queued. This is the other half a client needs to tell a slow model from
+        a dropped instruction.
+
+        Emitted once per admitted batch, after admission, because that is when
+        the content is final: several steers drain together and are joined into
+        one message, and rails may drop or reorder them on the way in.
+
+        ``dropped`` carries the ids a rail removed. Without it a client cannot
+        distinguish "still working on it" from "a rail discarded it", and the
+        bubble stays pending forever.
+        """
+        return cls(
+            type=InteractionEventType.STEER_APPLIED,
+            payload={
+                "applied": copy.deepcopy(applied),
+                "dropped": list(dropped),
+            },
+        )
 
 
 @dataclass(frozen=True)

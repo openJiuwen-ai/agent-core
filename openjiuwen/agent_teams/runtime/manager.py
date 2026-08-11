@@ -445,6 +445,94 @@ class TeamRuntimeManager:
         finally:
             await entry.interact_gate.consume_done(ticket)
 
+    async def steer_leader(
+        self,
+        content: str,
+        *,
+        team_name: str,
+        session_id: str,
+        steer_id: str | None = None,
+    ) -> DeliverResult:
+        """Steer the leader's in-flight round, or say why it could not.
+
+        Deliberately not a variant of :meth:`interact`. Interact routes a
+        payload to whichever channel its prefix names — leader, an avatar, a
+        broadcast — and starts a round when the team is idle. Steering does
+        neither: it is text for a round already running, and with no such round
+        there is nothing to steer.
+
+        That distinction is the reason for a separate entry point. Folding
+        steering into interact would silently turn a stale steer into a new
+        leader round, which is exactly the behaviour the single-agent path was
+        changed to stop doing.
+
+        Args:
+            content: Steering text.
+            team_name: Team whose leader to steer.
+            session_id: Session the steer belongs to.
+            steer_id: Correlation id, surfaced in ``STEER_APPLIED`` so a client
+                can tell which of its steers a rail dropped.
+
+        Returns:
+            ``DeliverResult.success(None)`` when the text was handed to the
+            leader — no message id, since steering writes no bus message.
+            ``failure("not_active")`` when no runtime matches,
+            ``failure("no_active_round")`` when the leader is idle or its round
+            ended in flight, ``failure("gate_closed")`` while the runtime is
+            shutting down, and ``failure("unsupported_runtime")`` when the
+            leader's runtime cannot scope an injection to a round (a CLI-backed
+            member, for instance).
+        """
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None:
+            return DeliverResult.failure("not_active")
+
+        # A fast path only, not the guarantee. It saves taking a ticket for a
+        # leader that is plainly idle, but it cannot be the check that matters:
+        # `admit` and the control-queue hop are await points, and the round can
+        # finish inside them. The authority is the harness's own answer below,
+        # which reads the phase in the same step that queues the text.
+        #
+        # Asked through the agent rather than by reaching for `harness.active_round`
+        # directly: `has_in_flight_round` is the surface every runtime flavour
+        # implements, and reading a NativeHarness-only attribute here is what made
+        # this method raise AttributeError for every real team, whose runtime is a
+        # TeamHarness.
+        if not entry.agent.has_in_flight_round():
+            return DeliverResult.failure("no_active_round")
+
+        # Name the round the caller meant. A live round is not enough -- the
+        # supervisor can start the next one synchronously while this steer is in
+        # the control queue, and injecting into a round the user never saw is
+        # worse than refusing.
+        harness = getattr(entry.agent, "harness", None)
+        active = getattr(harness, "active_round", None)
+        expected_round_id = getattr(active, "round_id", None)
+
+        ticket = await entry.interact_gate.admit()
+        if ticket is None:
+            return DeliverResult.failure("gate_closed")
+        try:
+            steered = await entry.agent.steer(
+                content, steer_id=steer_id, expected_round_id=expected_round_id
+            )
+        except NotImplementedError:
+            # Reported apart from "nothing was running" on purpose: the two look
+            # the same to this method and mean opposite things to a user -- one
+            # says "you were too late", the other "this leader can never take a
+            # steer". Collapsing them sends people looking for a race that is not
+            # there.
+            return DeliverResult.failure("unsupported_runtime")
+        finally:
+            await entry.interact_gate.consume_done(ticket)
+        if not steered:
+            # The round ended, or was replaced, while this steer was in flight.
+            # Reported as the same rejection an idle leader gets, because that is
+            # what happened -- and reporting success here would claim a finished
+            # round had taken the correction.
+            return DeliverResult.failure("no_active_round")
+        return DeliverResult.success(None)
+
     @staticmethod
     def _as_swarmflow_human_reply(
         payloads: list[InteractPayload],
