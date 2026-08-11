@@ -179,7 +179,7 @@ class BaseAgent(metaclass=_AgentMeta):
         Args:
             event: agent callback event type
             callback: Callback function (sync or async)
-            priority: Execution priority (lower = runs first)
+            priority: Execution priority (higher = runs first)
 
         Returns:
             self for chaining

@@ -58,11 +58,13 @@ dataclass），本包只在其上加 `DeepAgentRail` 的两个 task-loop 钩子�
 
 ## priority：数值越大越先
 
-`chain.py` / `framework.py` 都是 `sort(key=..., reverse=True)`，**这是唯一权威**。
+权威在 `core/runner/callback/framework.py` 的 `register()`：每次注册后
+`sort(key=lambda x: x.priority, reverse=True)`（`chain.py` 的 `CallbackChain.add` 同）。
+排序是稳定的，所以**同 priority 保持注册顺序**——team 侧「`TeamToolRail` 必须先于
+`TeamPolicyRail` 挂载」那条 mount-order 约束就是靠这个成立的。
 
-> ⚠️ 两处注释把方向写反了，不要信：`core/single_agent/agent_callback_manager.py` 的
-> `register_callback` docstring 写「lower = runs first」，`evolution/context_evolution_rail.py`
-> 的行内注释同理。以 `chain.py` 的 `reverse=True` 为准。
+注意 `register_callback` 的默认 priority 是 **100**，比多数 rail 都高；直接注册的回调会跑在
+它们前面。
 
 同一个数字排两件事：**init 顺序**和**回调链顺序**。所以「我的钩子要在它之后跑」和「我 init
 时它的工具得已经在」由一个数解决。当前梯队：
