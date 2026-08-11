@@ -833,7 +833,7 @@ state["teams"][team_name] = {
     "context": ...,               # TeamRuntimeContext.model_dump()
     "model_allocator_state": ...  # allocator 的 round-robin 游标 / 已分配 model_id 等
     "lifecycle": ...,             # TeamLifecycle 字符串
-    "checkpoints": ...,           # {name: message_count} 命名 fork 快照
+    "checkpoints": ...,           # {name: {count, description, created_by}} 命名 fork 快照
 }
 ```
 
