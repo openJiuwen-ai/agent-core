@@ -12,6 +12,9 @@ from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compres
 from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import (
     archive_compression_messages,
 )
+from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor import (
+    SessionMemoryCompressorConfig,
+)
 from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
 from openjiuwen.core.foundation.llm.model import init_model
 from openjiuwen.core.foundation.tool import ToolCard
@@ -215,6 +218,19 @@ async def test_tool_returns_retry_hint_with_archive_path_on_miss(tmp_path, langu
     assert archive.path in hint
     for keyword in expected_keywords:
         assert keyword in hint
+
+
+@pytest.mark.asyncio
+async def test_rail_registers_recall_tool_for_session_memory_compressor(tmp_path):
+    agent = _make_agent(tmp_path / "session-memory", recall_enabled=True)
+    rail = ContextProcessorRail(
+        preset=False,
+        processors=[("SessionMemoryCompressor", SessionMemoryCompressorConfig(enabled=True))],
+    )
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    assert isinstance(agent.ability_manager.get("recall_compressed_context"), ToolCard)
 
 
 @pytest.mark.asyncio
