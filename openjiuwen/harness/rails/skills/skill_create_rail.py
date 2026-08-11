@@ -145,14 +145,15 @@ class SkillCreateRail(EvolutionRail):
         if not self._auto_trigger:
             logger.debug("[SkillCreateRail] skill creation follow-up skipped: auto trigger disabled")
             return None
-        if self._builder is None:
-            logger.debug("[SkillCreateRail] skill creation follow-up skipped: no trajectory builder")
+        trajectory = self._build_trajectory(ctx)
+        if trajectory is None:
+            logger.debug("[SkillCreateRail] skill creation follow-up skipped: no trajectory")
             return None
 
         session_id = self._current_session_id()
         raw_tool_call_watermark = self._last_followed_tool_call_counts.get(session_id, 0)
         metrics = self._signal_detector.collect_metrics(
-            self._builder,
+            trajectory,
             raw_tool_call_watermark=raw_tool_call_watermark,
         )
         if self._follow_up_blocked_by_context(ctx):
@@ -161,7 +162,7 @@ class SkillCreateRail(EvolutionRail):
             return None
 
         signals = self._signal_detector.detect(
-            self._builder,
+            trajectory,
             raw_tool_call_watermark=raw_tool_call_watermark,
             prompted_snapshot=self._last_prompted_tool_totals.get(session_id),
             metrics=metrics,

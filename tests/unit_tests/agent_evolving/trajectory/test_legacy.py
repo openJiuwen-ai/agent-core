@@ -14,25 +14,19 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TRAJECTORY_ID,
     TRAJECTORY_SOURCE,
 )
+from openjiuwen.agent_evolving.trajectory.spans import (
+    iter_spans,
+    read_llm_messages,
+    read_rl_fields,
+    read_span_error,
+    read_tool_call,
+    read_usage,
+)
 from openjiuwen.agent_evolving.trajectory.types import (
     trajectory_resource_attributes,
     trajectory_session_id,
     trajectory_with_resource_attributes,
 )
-
-
-class _Semconv:
-    GEN_AI_PROMPT = "gen_ai.prompt"
-    GEN_AI_COMPLETION = "gen_ai.completion"
-    GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
-    GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
-    GEN_AI_TOOL_NAME = "gen_ai.tool.name"
-    GEN_AI_TOOL_ID = "gen_ai.tool.id"
-    GEN_AI_TOOL_INPUT = "gen_ai.tool.input"
-    GEN_AI_TOOL_OUTPUT = "gen_ai.tool.output"
-
-
-semconv = _Semconv()
 
 
 def test_upgrade_legacy_steps_returns_canonical_trajectory() -> None:
@@ -237,28 +231,25 @@ def test_upgrade_legacy_steps_preserves_canonical_consumer_fields() -> None:
         }
     )
 
-    spans = trajectory.to_otlp()["resourceSpans"][0]["scopeSpans"][0]["spans"]
-    assert len(spans) == 2
-    llm_span, tool_span = spans
-    llm_attributes = {
-        item["key"]: item["value"] for item in llm_span["attributes"]
+    llm_span, tool_span = list(iter_spans(trajectory))
+    assert read_llm_messages(llm_span) == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    assert read_usage(llm_span) == {"prompt_tokens": 2, "completion_tokens": 1}
+    assert read_rl_fields(llm_span) == {
+        "prompt_token_ids": [1, 2],
+        "completion_token_ids": [3],
+        "logprobs": [-0.1],
     }
-    tool_attributes = {
-        item["key"]: item["value"] for item in tool_span["attributes"]
+    assert read_tool_call(tool_span) == {
+        "name": "search",
+        "id": "call-1",
+        "input": {"query": "hello"},
+        "output": {"answer": "hi"},
+        "error": {"status": "STATUS_CODE_ERROR", "message": "tool failed"},
     }
-    assert llm_attributes[f"{semconv.GEN_AI_PROMPT}.0.role"] == {"stringValue": "user"}
-    assert llm_attributes[f"{semconv.GEN_AI_COMPLETION}.0.content"] == {"stringValue": "hi"}
-    assert llm_attributes[semconv.GEN_AI_USAGE_PROMPT_TOKENS] == {"intValue": "2"}
-    assert llm_attributes[semconv.GEN_AI_USAGE_COMPLETION_TOKENS] == {"intValue": "1"}
-    assert llm_attributes["evolution.rl.prompt_token_ids"] == {"arrayValue": {"values": [{"intValue": "1"}, {"intValue": "2"}]}}
-    assert llm_attributes["evolution.rl.completion_token_ids"] == {"arrayValue": {"values": [{"intValue": "3"}]}}
-    assert llm_attributes["evolution.rl.logprobs"] == {"arrayValue": {"values": [{"doubleValue": -0.1}]}}
-    assert tool_attributes[semconv.GEN_AI_TOOL_NAME] == {"stringValue": "search"}
-    assert tool_attributes[semconv.GEN_AI_TOOL_ID] == {"stringValue": "call-1"}
-    assert tool_attributes[semconv.GEN_AI_TOOL_INPUT] == {
-        "kvlistValue": {"values": [{"key": "query", "value": {"stringValue": "hello"}}]}
+    assert read_span_error(tool_span) == {
+        "status": "STATUS_CODE_ERROR",
+        "message": "tool failed",
     }
-    assert tool_attributes[semconv.GEN_AI_TOOL_OUTPUT] == {
-        "kvlistValue": {"values": [{"key": "answer", "value": {"stringValue": "hi"}}]}
-    }
-    assert tool_span["status"] == {"code": "STATUS_CODE_ERROR", "message": "tool failed"}

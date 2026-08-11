@@ -443,7 +443,7 @@ class TestSkillCreateRailTriggering:
         _append_builder_tool_calling_iterations(builder, 2, tool_name="team.send_message", tool_call_id_prefix="send")
         _append_builder_tool_calling_iterations(builder, 2, tool_name="team.custom_tool", tool_call_id_prefix="custom")
 
-        metrics = _make_signal_detector().collect_metrics(builder)
+        metrics = _make_signal_detector().collect_metrics(builder.build())
 
         assert metrics.total_effective_tool_calling_iterations == 2
         assert metrics.total_effective_tool_calls == 2
@@ -455,7 +455,7 @@ class TestSkillCreateRailTriggering:
         detector = _make_signal_detector()
         builder = _make_builder()
         _append_builder_tool_calling_iterations(builder, 6)
-        prompt_signals = detector.detect(builder)
+        prompt_signals = detector.detect(builder.build())
 
         assert len(prompt_signals) == 1
         prompt_signal = prompt_signals[0]
@@ -463,7 +463,7 @@ class TestSkillCreateRailTriggering:
         assert prompt_signal.reason == "first_prompt_threshold"
 
         _append_builder_tool_call(builder, "team.skill_tool")
-        cover_signals = detector.detect(builder)
+        cover_signals = detector.detect(builder.build())
 
         assert len(cover_signals) == 1
         cover_signal = cover_signals[0]
@@ -474,9 +474,10 @@ class TestSkillCreateRailTriggering:
         detector = _make_signal_detector()
         builder = _make_builder()
         _append_builder_tool_calling_iterations(builder, 6)
-        metrics = detector.collect_metrics(builder)
+        trajectory = builder.build()
+        metrics = detector.collect_metrics(trajectory)
 
-        signals = detector.detect(builder, metrics=metrics)
+        signals = detector.detect(trajectory, metrics=metrics)
 
         assert len(signals) == 1
         assert signals[0].metrics is metrics

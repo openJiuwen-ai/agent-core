@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
+from openjiuwen.agent_evolving.trajectory import _semconv as semconv
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import (
     MEMBER_ID,
@@ -29,106 +30,10 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TRAJECTORY_SCHEMA_VERSION_ATTR,
     TRAJECTORY_SOURCE,
 )
-
-
-class _LegacySemconv:
-    """Minimal semantic-key table used before Phase 2's accessor module."""
-
-    GEN_AI_TOOL_CALLS = "gen_ai.tool_calls"
-    GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
-    GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
-    GEN_AI_PROMPT = "gen_ai.prompt"
-    GEN_AI_COMPLETION = "gen_ai.completion"
-    GEN_AI_TOOL_DEFINITIONS = "gen_ai.tool.definitions"
-    GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
-    GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
-    GEN_AI_TOOL_NAME = "gen_ai.tool.name"
-    GEN_AI_TOOL_ID = "gen_ai.tool.id"
-    GEN_AI_TOOL_INPUT = "gen_ai.tool.input"
-    GEN_AI_TOOL_OUTPUT = "gen_ai.tool.output"
-
-
-semconv = _LegacySemconv()
-
-
-def _decode_otlp_value(value: Any) -> Any:
-    """Decode the small OTLP AnyValue subset used by historical records."""
-
-    if not isinstance(value, Mapping):
-        return deepcopy(value)
-    if "stringValue" in value:
-        return deepcopy(value["stringValue"])
-    if "boolValue" in value:
-        return bool(value["boolValue"])
-    if "intValue" in value:
-        try:
-            return int(value["intValue"])
-        except (TypeError, ValueError):
-            return deepcopy(value["intValue"])
-    if "doubleValue" in value:
-        return deepcopy(value["doubleValue"])
-    if "arrayValue" in value:
-        array = value.get("arrayValue") or {}
-        values = array.get("values") if isinstance(array, Mapping) else []
-        return [_decode_otlp_value(item) for item in values or []]
-    if "kvlistValue" in value:
-        kvlist = value.get("kvlistValue") or {}
-        values = kvlist.get("values") if isinstance(kvlist, Mapping) else []
-        return {
-            str(item["key"]): _decode_otlp_value(item.get("value"))
-            for item in values or []
-            if isinstance(item, Mapping) and item.get("key") is not None
-        }
-    return {str(key): _decode_otlp_value(item) for key, item in value.items()}
-
-
-def attributes_to_map(attributes: Any) -> dict[str, Any]:
-    """Decode historical OTLP attributes into a detached mapping."""
-
-    if isinstance(attributes, Mapping):
-        return {str(key): _decode_otlp_value(value) for key, value in attributes.items()}
-    if not isinstance(attributes, list):
-        return {}
-    return {
-        str(item["key"]): _decode_otlp_value(item.get("value"))
-        for item in attributes
-        if isinstance(item, Mapping) and item.get("key") is not None
-    }
-
-
-def _encode_otlp_value(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {"stringValue": ""}
-    if isinstance(value, bool):
-        return {"boolValue": value}
-    if isinstance(value, int):
-        return {"intValue": str(value)}
-    if isinstance(value, float):
-        return {"doubleValue": value}
-    if isinstance(value, str):
-        return {"stringValue": value}
-    if isinstance(value, list):
-        return {"arrayValue": {"values": [_encode_otlp_value(item) for item in value]}}
-    if isinstance(value, Mapping):
-        return {
-            "kvlistValue": {
-                "values": [
-                    {"key": str(key), "value": _encode_otlp_value(item)}
-                    for key, item in value.items()
-                ]
-            }
-        }
-    return {"stringValue": str(value)}
-
-
-def attributes_from_map(attributes: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Encode a detached mapping as deterministic OTLP attributes."""
-
-    return [
-        {"key": str(key), "value": _encode_otlp_value(value)}
-        for key, value in sorted(attributes.items())
-        if value is not None
-    ]
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    attributes_to_map,
+)
 
 
 _LEGACY_TRAJECTORY_ID = "openjiuwen.trajectory.id"

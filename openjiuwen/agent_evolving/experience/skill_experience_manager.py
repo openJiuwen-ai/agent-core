@@ -42,7 +42,7 @@ from openjiuwen.agent_evolving.protocols import (
 )
 from openjiuwen.agent_evolving.types import ApplyResult, UpdateValue
 from openjiuwen.agent_evolving.update_execution import execute_updates
-from openjiuwen.agent_evolving.trajectory.types import Trajectory
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.core.common.logging import logger
 
 if TYPE_CHECKING:
