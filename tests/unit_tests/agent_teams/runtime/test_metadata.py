@@ -163,17 +163,23 @@ def test_read_pending_resume_ignores_non_dict_payload():
 def test_merge_team_checkpoints_creates_bucket_key():
     session = _StubSession()
     write_team_namespace(session, "alpha", {"spec": {"team_name": "alpha"}})
-    merge_team_checkpoints(session, "alpha", {"code-ready": 5})
+    merge_team_checkpoints(
+        session,
+        "alpha",
+        {"code-ready": {"count": 5, "description": "base done", "created_by": "dev-1"}},
+    )
     bucket = read_team_namespace(session, "alpha")
-    assert bucket["checkpoints"] == {"code-ready": 5}
+    assert bucket["checkpoints"] == {
+        "code-ready": {"count": 5, "description": "base done", "created_by": "dev-1"}
+    }
     assert bucket["spec"] == {"team_name": "alpha"}
 
 
 def test_merge_team_checkpoints_replaces_whole_mapping():
     session = _StubSession()
-    merge_team_checkpoints(session, "alpha", {"a": 1})
-    merge_team_checkpoints(session, "alpha", {"b": 2})
-    assert read_team_checkpoints(session, "alpha") == {"b": 2}
+    merge_team_checkpoints(session, "alpha", {"a": {"count": 1}})
+    merge_team_checkpoints(session, "alpha", {"b": {"count": 2}})
+    assert read_team_checkpoints(session, "alpha") == {"b": {"count": 2, "description": "", "created_by": ""}}
 
 
 def test_read_team_checkpoints_returns_none_when_absent():
@@ -183,7 +189,29 @@ def test_read_team_checkpoints_returns_none_when_absent():
     assert read_team_checkpoints(session, "alpha") is None
 
 
-def test_read_team_checkpoints_filters_non_int_values():
+def test_read_team_checkpoints_coerces_legacy_int_counts():
+    """A legacy ``name -> int`` blob is coerced to a full record."""
     session = _StubSession()
-    write_team_namespace(session, "alpha", {TEAM_CHECKPOINTS_KEY: {"ok": 3, "bad": "x", 1: 2}})
-    assert read_team_checkpoints(session, "alpha") == {"ok": 3}
+    write_team_namespace(session, "alpha", {TEAM_CHECKPOINTS_KEY: {"code-ready": 5}})
+    assert read_team_checkpoints(session, "alpha") == {
+        "code-ready": {"count": 5, "description": "", "created_by": ""}
+    }
+
+
+def test_read_team_checkpoints_filters_invalid_entries():
+    session = _StubSession()
+    write_team_namespace(
+        session,
+        "alpha",
+        {
+            TEAM_CHECKPOINTS_KEY: {
+                "ok": {"count": 3, "description": "d", "created_by": "dev-1"},
+                "bad-str": "x",
+                "bad-count": {"count": "not-int"},
+                1: {"count": 2},
+            }
+        },
+    )
+    assert read_team_checkpoints(session, "alpha") == {
+        "ok": {"count": 3, "description": "d", "created_by": "dev-1"}
+    }

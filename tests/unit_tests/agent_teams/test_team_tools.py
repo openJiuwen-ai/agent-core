@@ -27,6 +27,7 @@ from openjiuwen.agent_teams.tools.database import (
 )
 from openjiuwen.agent_teams.tools import locales as team_locales
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
+from openjiuwen.agent_teams.tools.tool_member import ListCheckpointsTool
 from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
@@ -881,6 +882,80 @@ class TestListMembersTool:
         assert result.success is True
         member = result.data["members"][0]
         assert set(member) == {"member_name", "display_name", "status"}
+
+
+# ========== Checkpoint listing ==========
+
+
+class TestListCheckpointsTool:
+    """Test ListCheckpointsTool"""
+
+    @pytest.mark.level0
+    def test_initialization(self, agent_team, t):
+        """Test tool initialization"""
+        tool = ListCheckpointsTool(agent_team, t)
+        assert tool.card.name == "list_checkpoints"
+        assert tool.card.id == "team.list_checkpoints"
+        assert tool.team == agent_team
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_empty(self, agent_team, t):
+        """Test invoking list checkpoints when empty"""
+        tool = ListCheckpointsTool(agent_team, t)
+        result = await tool.invoke({})
+
+        assert result.success is True
+        assert result.data["count"] == 0
+        assert result.data["checkpoints"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_with_checkpoints(self, agent_team, t):
+        """Records surface name / message_count / description / created_by."""
+        agent_team.set_checkpoint_list_fn(
+            lambda: {
+                "code-ready": {"count": 5, "description": "base done", "created_by": "dev-1"},
+                "refactor-done": {"count": 12, "description": "", "created_by": "dev-2"},
+            }
+        )
+        tool = ListCheckpointsTool(agent_team, t)
+        result = await tool.invoke({})
+
+        assert result.success is True
+        assert result.data["count"] == 2
+        items = result.data["checkpoints"]
+        by_name = {item["name"]: item for item in items}
+        assert by_name["code-ready"] == {
+            "name": "code-ready",
+            "message_count": 5,
+            "description": "base done",
+            "created_by": "dev-1",
+        }
+        assert by_name["refactor-done"]["message_count"] == 12
+
+    @pytest.mark.level1
+    def test_map_result_renders_rows(self, agent_team, t):
+        tool = ListCheckpointsTool(agent_team, t)
+        out = ToolOutput(
+            success=True,
+            data={
+                "checkpoints": [
+                    {"name": "code-ready", "message_count": 5, "description": "base done", "created_by": "dev-1"},
+                    {"name": "refactor-done", "message_count": 12, "description": "", "created_by": "dev-2"},
+                ],
+                "count": 2,
+            },
+        )
+        text = tool.map_result(out)
+        assert "code-ready" in text and "message_count=5" in text and "base done" in text
+        assert "refactor-done" in text and "message_count=12" in text
+
+    @pytest.mark.level1
+    def test_map_result_empty(self, agent_team, t):
+        tool = ListCheckpointsTool(agent_team, t)
+        text = tool.map_result(ToolOutput(success=True, data={"checkpoints": [], "count": 0}))
+        assert text == "No checkpoints"
 
 
 # ========== Task Management Tools (V2) ==========
