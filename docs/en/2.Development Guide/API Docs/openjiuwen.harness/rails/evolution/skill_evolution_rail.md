@@ -275,7 +275,11 @@ Build a host-delivered simplify command prompt. The prompt contains a bounded ex
 
 ### async request_rebuild(skill_name, user_intent=None, min_score=0.5) -> Optional[str]
 
-Archive current skill assets and return a rebuild follow-up prompt using filtered evolution records. The host or command handler must inject the returned prompt into the agent loop; the rail does not directly write the rebuilt `SKILL.md`.
+Archive current skill assets (`SKILL.md` plus an empty paired `evolutions.v*.json` marker) and return a rebuild follow-up prompt using filtered live evolution records. The host or command handler must inject the returned prompt into the agent loop; the rail does not directly write the rebuilt `SKILL.md`.
+
+### async rollback_skill(skill_name, version=None) -> bool
+
+Roll back to an archived SemVer pair (no approval required). Restores the archived `SKILL.md` and always clears live `evolutions.json`. `version` may be `latest`, `v1.0.0`, or `SKILL.v1.0.0.md`; defaults to `latest` when omitted.
 
 ### async drain_pending_host_events(wait=False, timeout=None) -> list[OutputSchema]
 

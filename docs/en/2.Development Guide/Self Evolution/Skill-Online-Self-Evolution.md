@@ -330,7 +330,7 @@ When you need to roll back, use:
 /evolve_rollback <skill_name> [version]
 ```
 
-If you do not specify a version, the system lists the archive versions that can be rolled back to.
+If you do not specify a version, the system defaults to the newest archive (`latest`): restores the archived `SKILL.md` and clears live `evolutions.json`.
 
 ---
 
@@ -434,10 +434,10 @@ Use:
 
 Rebuild creates a follow-up rebuild task. The core process includes:
 
-1. Archive the current `SKILL.md`.
-2. Archive the current `evolutions.json` and select high-scoring experience as rebuild context.
-3. Generate a follow-up task prompt that guides the Agent to use `skill-creator` or `swarmskill-creator` to reorganize the Skill body.
-4. After the rebuild context is ready, clear or reset the currently active experience to avoid duplicated injection from old and new experience.
+1. Archive the current `SKILL.md`, and write an empty paired `evolutions.v*.json` archive marker (live experience entries are not copied).
+2. Select high-scoring experience from the live `evolutions.json` as rebuild context.
+3. Generate a follow-up task prompt that guides the Agent to use `skill-creator` or `swarmskill-creator` and write the rebuilt body to the target `SKILL.md`.
+4. After rebuild completes, clear or reset the currently active experience to avoid duplicated injection from old and new experience.
 
 Rebuild is not a direct overwrite button, and it is not just appending all experience to the end of the document. It is closer to a rewrite task with archive protection: keep the old version first, then restructure high-value experience into the right place.
 
@@ -457,13 +457,13 @@ If the rebuild result is unsatisfactory, use:
 /evolve_rollback <skill_name> latest
 ```
 
-Or first inspect the available rollback versions:
+Or roll back to a specific version:
 
 ```bash
-/evolve_rollback <skill_name>
+/evolve_rollback <skill_name> v1.0.0
 ```
 
-Then roll back to the chosen version.
+Rollback restores the archived `SKILL.md` and always clears the live `evolutions.json` (archived evolutions files are pair markers only and are not restored). When no version is specified, the system defaults to the newest archive (`latest`).
 
 This makes "promoting experience into the main document" a reversible operation.
 

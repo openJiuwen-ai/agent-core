@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,10 +101,12 @@ class EvolutionArchiveService:
         subject_kind: Optional[str] = None,
         version: Optional[str] = None,
     ) -> Optional[EvolutionArchivePair]:
-        """Archive current ``SKILL.md`` and ``evolutions.json`` as one SemVer pair.
+        """Archive current ``SKILL.md`` with an empty paired evolutions archive.
 
+        Evolution archives are always empty by design (never copy live entries).
         Missing current ``evolutions.json`` is initialized with an empty log so
-        every archive version remains a complete rollback target.
+        every archive version remains a complete rollback target pair marker.
+        Live ``evolutions.json`` is left unchanged by this method.
 
         If the target SemVer pair already exists, skip writing and return the
         existing pair (idempotent).
@@ -150,7 +153,9 @@ class EvolutionArchiveService:
             return None
 
         skill_content = await self._store.read_file_text(skill_md)
-        evolution_content = await self._store.read_file_text(evolution_log)
+        empty_log = EvolutionLog.empty(skill_id=name)
+        empty_log.version = version_key
+        evolution_content = json.dumps(empty_log.to_dict(), ensure_ascii=False, indent=2)
         try:
             await self._store.write_file_text(skill_archive, skill_content)
             await self._store.write_file_text(evolution_archive, evolution_content)
@@ -160,7 +165,8 @@ class EvolutionArchiveService:
             raise
 
         logger.info(
-            "[EvolutionArchiveService] archived current pair: subject=%s kind=%s version=%s",
+            "[EvolutionArchiveService] archived current pair: subject=%s kind=%s version=%s "
+            "(evolutions archive empty)",
             name,
             kind or "default",
             version_key,
@@ -179,7 +185,14 @@ class EvolutionArchiveService:
         subject_kind: Optional[str] = None,
         prune: bool = True,
     ) -> bool:
-        """Restore a pair after first archiving the current state."""
+        """Restore archived ``SKILL.md`` and always clear live evolutions.
+
+        Restores the archived skill body after first archiving the current
+        state. Live ``evolutions.json`` is always cleared (empty entries,
+        retained version). Evolution archives are empty by design, so their
+        contents are never restored. ``render_evolution_markdown`` is not
+        called so the restored ``SKILL.md`` is left unmodified.
+        """
         name, kind = self._subject_name_and_kind(subject, subject_kind=subject_kind)
         pair = self._resolve_pair(subject, pair_or_version, subject_kind=kind)
         if pair is None:
@@ -196,8 +209,7 @@ class EvolutionArchiveService:
             return False
 
         skill_content = await self._store.read_file_text(pair.skill_archive)
-        evolution_content = await self._store.read_file_text(pair.evolution_archive)
-        if not skill_content or not evolution_content:
+        if not skill_content:
             return False
 
         current_pair = await self.archive_current_pair(name, subject_kind=kind)
@@ -205,8 +217,7 @@ class EvolutionArchiveService:
             return False
 
         await self._store.write_file_text(skill_md, skill_content)
-        await self._store.write_file_text(evolution_log, evolution_content)
-        await self._store.render_evolution_markdown(name, subject_kind=kind)
+        await self._store.clear_evolutions(name, subject_kind=kind)
 
         self._remove_file(pair.skill_archive)
         self._remove_file(pair.evolution_archive)

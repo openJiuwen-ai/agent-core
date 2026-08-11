@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -359,26 +360,32 @@ version: {_DEFAULT_VERSION}
         subject_kind: Optional[str] = None,
         version: Optional[str] = None,
     ) -> Optional[str]:
+        """Write an empty paired evolutions archive (never copy live entries).
+
+        Live ``evolutions.json`` is left unchanged. Rollback restores only
+        ``SKILL.md`` and clears live evolutions, so archived evo files are
+        kept as empty SemVer pair markers.
+        """
         skill_dir = self._store.resolve_skill_dir(name, subject_kind=subject_kind)
         if skill_dir is None:
-            return None
-        evo_path = skill_dir / _EVOLUTION_FILENAME
-        if not evo_path.is_file():
             return None
         archive = self.archive_dir(skill_dir)
         archive_version = version or await self.resolve_current_version(
             name, subject_kind=subject_kind, skill_dir=skill_dir,
         )
+        version_key = self.archive_version_key(archive_version)
         _, dest = self.archive_paths(archive, archive_version)
         if dest.exists():
             logger.warning(
                 "[EvolutionStore] archive evolutions skipped for version=%s (already exists)",
-                self.archive_version_key(archive_version),
+                version_key,
             )
             return dest.name
-        content = await self._store.read_file_text(evo_path)
+        empty_log = EvolutionLog.empty(skill_id=name)
+        empty_log.version = version_key
+        content = json.dumps(empty_log.to_dict(), ensure_ascii=False, indent=2)
         await self._store.write_file_text(dest, content)
-        logger.info("[EvolutionStore] archived evolutions -> %s", dest.name)
+        logger.info("[EvolutionStore] archived evolutions -> %s (empty)", dest.name)
         return dest.name
 
     async def archive_current_state(
@@ -427,7 +434,9 @@ version: {_DEFAULT_VERSION}
         empty_log = EvolutionLog.empty(skill_id=name)
         empty_log.version = version
         await self._store.save_evolution_log(name, empty_log, skill_dir=skill_dir, subject_kind=subject_kind)
-        await self._store.render_evolution_markdown(name, subject_kind=subject_kind)
+        # Do not call render_evolution_markdown here: empty entries would strip the
+        # evolution-index from SKILL.md via clear_rendered_outputs, which breaks
+        # rollback that just restored an archived body.
         logger.info(
             "[EvolutionStore] cleared evolutions for skill=%s (version=%s)",
             name,

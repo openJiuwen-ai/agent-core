@@ -140,6 +140,8 @@ def build_rebuild_command_prompt(
     creator = "swarmskill-creator" if normalized_subject["kind"] == "swarm-skill" else "skill-creator"
     min_score = rebuild_context.get("min_score") if rebuild_context else None
     min_score_line = f"Min score threshold: {min_score}\n" if min_score is not None else ""
+    skill_name = str(normalized_subject.get("name") or "").strip()
+    target_skill_md = f"{skill_name}/SKILL.md" if skill_name else "the target SKILL.md"
     return (
         f"Please perform skill evolution operation `evolve_rebuild` for subject "
         f"{json.dumps(normalized_subject, ensure_ascii=False)}.\n"
@@ -149,6 +151,16 @@ def build_rebuild_command_prompt(
         f"{format_rebuild_context(rebuild_context)}\n"
         f"Use {creator} for the rebuild and reset evolutions.json to an empty list.\n"
         "Use list_skill_experiences/read_skill_experiences only for overflow records that are not already inlined.\n"
+        f"MUST call write_file or edit_file on the absolute target path for `{target_skill_md}` "
+        "with the complete rebuilt body (overwrite/update that file on disk).\n"
+        "Confirm the disk write succeeded (e.g. re-read or tool success) before finishing.\n"
+        "Hard constraints (violations mean the rebuild is incomplete):\n"
+        f"- You MUST write to `{target_skill_md}` via write_file/edit_file; "
+        "chat drafts, skill_tool, or skill_complete alone do NOT count as writing.\n"
+        "- Do NOT call todo_complete / todo_complete_batch / skill_complete until AFTER "
+        f"`{target_skill_md}` has been successfully written on disk.\n"
+        "- Do NOT mark Write/Confirm (or equivalent) todos as completed before the disk write "
+        "to the target SKILL.md succeeds.\n"
         "Do not submit evolve_skill_experiences or simplify_skill_experiences for this rebuild."
     )
 

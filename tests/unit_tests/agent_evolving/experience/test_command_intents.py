@@ -61,3 +61,7 @@ def test_build_rebuild_command_prompt_returns_prompt():
     )
 
     assert prompt
+    assert "MUST call write_file or edit_file" in prompt
+    assert "`skill-a/SKILL.md`" in prompt
+    assert "Do NOT call todo_complete" in prompt
+    assert "Do NOT mark Write/Confirm" in prompt

@@ -1751,7 +1751,13 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         )
 
     async def rollback_skill(self, skill_name: str, version: Optional[str] = None) -> bool:
-        """Rollback skill to an archived SemVer pair (no approval required)."""
+        """Rollback skill to an archived SemVer pair (no approval required).
+
+        Restores the archived ``SKILL.md`` body and always clears live
+        ``evolutions.json`` (empty entries, retained version). The
+        pre-rollback snapshot archives an empty paired ``evolutions.v*.json``
+        (all evolution archives are empty by design).
+        """
         from openjiuwen.agent_evolving.experience.archive import EvolutionArchiveService
 
         store = self._evolution_store

@@ -330,7 +330,7 @@ Skill 'xlsx' 演进生成了新经验：
 /evolve_rollback <skill_name> [version]
 ```
 
-如果不指定版本，系统会列出可回滚的归档版本。
+如果不指定版本，默认回滚到最新归档（`latest`）：恢复归档 `SKILL.md`，并清空 live `evolutions.json`。
 
 ---
 
@@ -434,10 +434,10 @@ Skill 'xlsx' 演进生成了新经验：
 
 重建会发起一条后续重建任务，核心过程包括：
 
-1. 归档当前 `SKILL.md`。
-2. 归档当前 `evolutions.json`，筛选高分经验作为重建上下文。
-3. 生成后续任务提示，引导 Agent 使用 `skill-creator` 或 `swarmskill-creator` 重新组织 Skill 主体。
-4. 在重建上下文准备完成后，当前活跃经验会被清空或重置，避免新旧经验重复注入。
+1. 归档当前 `SKILL.md`，并写入空的成对 `evolutions.v*.json` 归档标记（不拷贝 live 经验条目）。
+2. 从当前 live `evolutions.json` 筛选高分经验作为重建上下文。
+3. 生成后续任务提示，引导 Agent 使用 `skill-creator` 或 `swarmskill-creator` 将重建结果写入目标 `SKILL.md`。
+4. 重建完成后清空或重置当前活跃经验，避免新旧经验重复注入。
 
 重建不是一个“直接覆盖按钮”，也不是简单把所有经验拼到文档后面。它更像是一次有归档保护的重写任务：先保留旧版本，再把高价值经验重新结构化到合适的位置。
 
@@ -457,13 +457,13 @@ Skill 'xlsx' 演进生成了新经验：
 /evolve_rollback <skill_name> latest
 ```
 
-或者先查看可回滚版本：
+或者指定版本回滚：
 
 ```bash
-/evolve_rollback <skill_name>
+/evolve_rollback <skill_name> v1.0.0
 ```
 
-再选择指定版本回滚。
+回滚会恢复归档中的 `SKILL.md`，并始终清空 live `evolutions.json`（归档侧的 evolutions 文件仅为成对标记，不恢复经验条目）。不指定版本时默认回滚到最新归档（`latest`）。
 
 这让“把经验固化进主文档”不再是一次不可逆操作。
 
