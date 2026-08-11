@@ -13,6 +13,7 @@ from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_ca
 from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
+from openjiuwen.harness.subagent_runtime.status_events import map_status_to_view
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -220,13 +221,13 @@ class SubagentSendInputTool(Tool):
         )
         session = kwargs.get("session")
         await control.emit_status_update(subagent_id, session=session)
-        status = control.get_status(subagent_id)
+        view = map_status_to_view(control.get_status(subagent_id))
         return ToolOutput(
             success=True,
             data={
                 "subagent_id": subagent_id,
                 "task_id": task_id,
-                "status": status.kind.value,
+                "status": view["status"],
             },
         )
 
@@ -297,16 +298,19 @@ class SubagentResumeTool(Tool):
                 reason="'subagent_id' is required",
             )
 
-        status = await control.resume(subagent_id)
+        result = await control.resume(subagent_id)
         session = kwargs.get("session")
         await control.emit_status_update(subagent_id, session=session)
-        return ToolOutput(
-            success=True,
-            data={
-                "subagent_id": subagent_id,
-                "status": status.kind.value,
-            },
-        )
+        view = map_status_to_view(result.status)
+        data: dict[str, Any] = {
+            "subagent_id": subagent_id,
+            "status": view["status"],
+            "turn_outcome": view.get("turn_outcome"),
+            "restored": result.restored,
+        }
+        if result.message:
+            data["message"] = result.message
+        return ToolOutput(success=True, data=data)
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         yield await self.invoke(inputs, **kwargs)

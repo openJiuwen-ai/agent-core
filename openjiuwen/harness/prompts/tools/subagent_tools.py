@@ -84,12 +84,15 @@ SUBAGENT_CLOSE_DESCRIPTION: Dict[str, str] = {
 
 SUBAGENT_RESUME_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "从 checkpointer 恢复已 close 或 LRU 淘汰的 subagent，重新占用名额，不自动投递任务。"
-        "恢复后须再 subagent_send_input 并 subagent_wait。"
+        "从 checkpointer 恢复 status=closed（manual/evicted）的 subagent，重新占用名额，不自动投递任务。"
+        "status=idle 的存活实例无需 resume，直接 subagent_send_input。"
+        "返回 restored=false 表示实例本就在内存中。恢复后须再 subagent_send_input 并 subagent_wait。"
     ),
     "en": (
-        "Restore a closed or LRU-evicted subagent from checkpointer and reclaim a slot; "
-        "does not enqueue work. Follow with subagent_send_input and subagent_wait."
+        "Restore a status=closed (manual/evicted) subagent from checkpointer and reclaim a slot; "
+        "does not enqueue work. Live status=idle instances need subagent_send_input, not resume. "
+        "restored=false means the instance was already in memory. "
+        "Follow with subagent_send_input and subagent_wait after a true restore."
     ),
 }
 

@@ -12,6 +12,7 @@ import pytest
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.subagent_runtime.models import (
+    ResumeResult,
     SpawnResult,
     SubagentStatus,
     SubagentStatusKind,
@@ -339,7 +340,12 @@ async def test_subagent_resume_delegates_to_control() -> None:
         parent,
     )
     control = _control_mock(
-        resume=AsyncMock(return_value=SubagentStatus.pending_init()),
+        resume=AsyncMock(
+            return_value=ResumeResult(
+                status=SubagentStatus.pending_init(),
+                restored=True,
+            ),
+        ),
     )
     session = Session(session_id="parent_sess")
 
@@ -351,4 +357,5 @@ async def test_subagent_resume_delegates_to_control() -> None:
 
     control.resume.assert_awaited_once_with("sub1")
     control.emit_status_update.assert_awaited_once_with("sub1", session=session)
-    assert result.data["status"] == SubagentStatusKind.PENDING_INIT.value
+    assert result.data["status"] == "running"
+    assert result.data["restored"] is True

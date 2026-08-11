@@ -20,6 +20,7 @@ from openjiuwen.harness.subagent_runtime.session_manager import SubagentSessionM
 from openjiuwen.harness.subagent_runtime.models import (
     SubagentActivity,
     SubagentTurn,
+    ResumeResult,
     ShutdownOp,
     SpawnResult,
     SubagentMetadata,
@@ -71,6 +72,7 @@ __all__ = [
     "SubagentOp",
     "SubagentRecord",
     "SubagentRegistry",
+    "ResumeResult",
     "SubagentRuntimeConfig",
     "SubagentSessionManager",
     "SubagentSnapshot",

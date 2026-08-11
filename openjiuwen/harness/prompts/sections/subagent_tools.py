@@ -31,13 +31,14 @@ SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具（subagent_spawn / subag
 
 - subagent_spawn 立即返回 subagent_id，**不含**最终 output。
 - **同一 turn 内 spawn 后必须 subagent_wait** 收集结果；默认 timeout_ms 600000（10 分钟），简单查询 120000，深度调研/编码 600000+。
-- 一轮结束后实例仍常驻；同一 sticky 类型不要重复 spawn。
+- 一轮结束后实例仍常驻（status=idle）；同一 sticky 类型不要重复 spawn。
 - 追问同一实例用 subagent_send_input，不要为相同意图重复 spawn。
+- status=idle 表示实例仍存活、可直接 subagent_send_input，**不要** subagent_resume。
 - wait 超时且方向错误时，用 subagent_send_input(interrupt=true) 纠偏后再 wait。
-- 确认不再需要时用 subagent_close 释放名额；**已完成任务的实例仍会占名额**，不要长期保留无用实例。
+- 确认不再需要时用 subagent_close 释放名额；idle 实例仍会占名额，不要长期保留无用实例。
 - 满 10 个会 LRU 淘汰，可用 subagent_resume 拉回。
-- close 或淘汰后必须先 subagent_resume，再 subagent_send_input + subagent_wait。
-- subagent_list 可查看存活子代理与容量占用。
+- 仅 status=closed（manual/evicted/parent_ended）时必须先 subagent_resume，再 subagent_send_input + subagent_wait。
+- subagent_list 返回 can_send_input / needs_resume，按此决定 send_input 或 resume。
 """
 
 SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools (subagent_spawn / subagent_wait / subagent_list / subagent_send_input / subagent_close / subagent_resume)
@@ -60,13 +61,14 @@ SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools (subagent_spawn / su
 
 - subagent_spawn returns subagent_id immediately and does **not** include the final output.
 - **Call subagent_wait in the same turn after spawn**; default timeout_ms 600000 (10 min), 120000 for quick tasks, 600000+ for research/coding.
-- Instances stay alive after one turn completes; do not respawn the same sticky type.
+- Instances stay alive after one turn completes (status=idle); do not respawn the same sticky type.
 - Follow up on the same instance with subagent_send_input instead of respawning the same intent.
+- status=idle means the instance is live—call subagent_send_input directly, **not** subagent_resume.
 - After a timed-out wait with the wrong direction, use subagent_send_input(interrupt=true), then wait again.
-- Call subagent_close when an instance is no longer needed; **completed subagents still occupy slots** until closed—do not keep them around longer than necessary.
+- Call subagent_close when an instance is no longer needed; idle instances still occupy slots until closed.
 - LRU may evict when full (max 10)—use subagent_resume to bring it back.
-- After close or eviction, call subagent_resume before subagent_send_input + subagent_wait.
-- Use subagent_list to inspect live subagents and capacity usage.
+- Only when status=closed (manual/evicted/parent_ended) call subagent_resume before subagent_send_input + subagent_wait.
+- subagent_list includes can_send_input / needs_resume—follow those flags.
 """
 
 SUBAGENT_SYSTEM_PROMPT: Dict[str, str] = {

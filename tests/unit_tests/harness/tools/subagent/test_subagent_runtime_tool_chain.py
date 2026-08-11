@@ -73,8 +73,9 @@ async def test_spawn_wait_list_tool_chain_uses_real_control() -> None:
             assert len(list_result.data["subagents"]) == 1
             row = list_result.data["subagents"][0]
             assert row["subagent_id"] == subagent_id
-            assert row["status"] == "closed"
-            assert row["closed_reason"] == "completed"
+            assert row["status"] == "idle"
+            assert row["turn_outcome"] == "completed"
+            assert row["can_send_input"] is True
             assert "result" not in row
 
             instance = control._manager.get(subagent_id)
@@ -86,7 +87,7 @@ async def test_spawn_wait_list_tool_chain_uses_real_control() -> None:
             ]
             assert any(item["status"] == "running" for item in status_payloads)
             assert any(
-                item["status"] == "closed" and item["subagent_id"] == subagent_id
+                item["status"] == "idle" and item["subagent_id"] == subagent_id
                 for item in status_payloads
             )
             revisions = [item["revision"] for item in status_payloads if item["subagent_id"] == subagent_id]
@@ -157,7 +158,8 @@ async def test_six_tool_lifecycle_chain_uses_real_control() -> None:
                 {"subagent_id": subagent_id},
                 session=session,
             )
-            assert resume_result.data["status"] == SubagentStatusKind.PENDING_INIT.value
+            assert resume_result.data["status"] == "running"
+            assert resume_result.data["restored"] is True
 
             parent.mock_agent.output = "turn-3"
             instance = get_subagent_control(parent, session)._manager.get(subagent_id)

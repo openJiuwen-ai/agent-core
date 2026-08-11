@@ -25,6 +25,7 @@ from openjiuwen.harness.subagent_runtime.ids import build_subagent_id, new_task_
 from openjiuwen.harness.subagent_runtime.models import (
     SubagentActivity,
     SubagentTurn,
+    ResumeResult,
     SpawnResult,
     SubagentMetadata,
     SubagentRecord,
@@ -53,8 +54,10 @@ from openjiuwen.harness.subagent_runtime.status import StatusReceiver
 from openjiuwen.harness.subagent_runtime.status_events import (
     build_subagent_updated_payload,
     emit_subagent_updated,
-    is_externally_closed,
+    is_instance_closed,
+    is_turn_finished,
     map_status_to_view,
+    resolve_turn_outcome,
 )
 
 _TASK_DESCRIPTION_MAX_LEN = 2000
@@ -373,6 +376,7 @@ class SubagentControl:
             await instance.interrupt()
         task_id = new_task_id()
         await instance.enqueue(UserInputOp(query=query, task_id=task_id))
+        await instance.status.set(SubagentStatus.pending_init())
         self._registry.touch(subagent_id)
         metadata = self._registry.find_metadata(subagent_id)
         if metadata is not None:
@@ -381,11 +385,16 @@ class SubagentControl:
             metadata.updated_at_ms = time.time() * 1000
         return task_id
 
-    async def resume(self, subagent_id: str) -> SubagentStatus:
+    async def resume(self, subagent_id: str) -> ResumeResult:
         """Restore a closed or evicted subagent from checkpointer without enqueueing work."""
         existing = self._manager.find(subagent_id)
         if existing is not None and not existing.is_closed():
-            return existing.agent_status()
+            status = existing.agent_status()
+            return ResumeResult(
+                status=status,
+                restored=False,
+                message="Instance is already live; use subagent_send_input directly.",
+            )
 
         record = self._closed_records.get(subagent_id)
         if record is None:
@@ -412,7 +421,9 @@ class SubagentControl:
             raise
 
         self._closed_records.pop(subagent_id, None)
-        return SubagentStatus.pending_init()
+        restored = self._manager.find(subagent_id)
+        status = restored.agent_status() if restored is not None else SubagentStatus.pending_init()
+        return ResumeResult(status=status, restored=True)
 
     async def close(self, subagent_id: str, reason: str = "manual") -> SubagentStatus:
         instance = self._manager.get(subagent_id)
@@ -772,7 +783,6 @@ class SubagentControl:
         if task_id and any(turn.task_id == task_id for turn in existing):
             return
 
-        view = map_status_to_view(status)
         answer = None
         if status.kind is SubagentStatusKind.COMPLETED and instance is not None:
             answer = instance.last_output
@@ -803,7 +813,7 @@ class SubagentControl:
             seq=seq,
             prompt=metadata.task_description,
             answer=answer,
-            closed_reason=view["closed_reason"],
+            closed_reason=resolve_turn_outcome(status),
             created_at_ms=time.time() * 1000,
             output_file=output_file,
         )
@@ -900,7 +910,10 @@ class SubagentControl:
         status: SubagentStatus,
     ) -> None:
         metadata.updated_at_ms = time.time() * 1000
-        if is_externally_closed(status) and metadata.closed_at_ms is None:
+        view = map_status_to_view(status)
+        if view["status"] == "idle":
+            metadata.closed_at_ms = None
+        elif is_instance_closed(status) and metadata.closed_at_ms is None:
             metadata.closed_at_ms = metadata.updated_at_ms
 
     async def _handle_instance_status_changed(
@@ -908,7 +921,7 @@ class SubagentControl:
         subagent_id: str,
         status: SubagentStatus,
     ) -> None:
-        if not is_externally_closed(status):
+        if not is_turn_finished(status):
             return
         metadata = self._registry.find_metadata(subagent_id)
         instance = self._manager.find(subagent_id)

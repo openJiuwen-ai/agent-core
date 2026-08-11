@@ -25,43 +25,121 @@ _PARENT_ENDED_CLOSE_REASONS = frozenset(
 )
 
 
+def resolve_turn_outcome(status: SubagentStatus) -> str | None:
+    """Map internal status to persisted turn outcome (SubagentTurn.closed_reason)."""
+    kind = status.kind
+    if kind is SubagentStatusKind.COMPLETED:
+        return "completed"
+    if kind is SubagentStatusKind.INTERRUPTED:
+        return "cancelled"
+    if kind is SubagentStatusKind.ERRORED:
+        return "failed"
+    return None
+
+
 def map_status_to_view(status: SubagentStatus) -> dict[str, Any]:
-    """Map internal status to external view fields (status / closed_reason / error)."""
+    """Map internal status to external view fields."""
     kind = status.kind
     if kind in {SubagentStatusKind.PENDING_INIT, SubagentStatusKind.RUNNING}:
-        return {"status": "running", "closed_reason": None, "error": None}
+        return {
+            "status": "running",
+            "turn_outcome": None,
+            "closed_reason": None,
+            "error": None,
+        }
 
     if kind is SubagentStatusKind.COMPLETED:
-        return {"status": "closed", "closed_reason": "completed", "error": None}
+        return {
+            "status": "idle",
+            "turn_outcome": "completed",
+            "closed_reason": None,
+            "error": None,
+        }
 
     if kind is SubagentStatusKind.INTERRUPTED:
-        return {"status": "closed", "closed_reason": "cancelled", "error": None}
+        return {
+            "status": "idle",
+            "turn_outcome": "cancelled",
+            "closed_reason": None,
+            "error": None,
+        }
 
     if kind is SubagentStatusKind.ERRORED:
         code = status.error_code or "ERROR"
         message = status.message or code
         return {
-            "status": "closed",
-            "closed_reason": "failed",
+            "status": "idle",
+            "turn_outcome": "failed",
+            "closed_reason": None,
             "error": {"code": code, "message": message},
         }
 
     if kind is SubagentStatusKind.CLOSED:
         return {
             "status": "closed",
+            "turn_outcome": None,
             "closed_reason": _normalize_close_reason(status.close_reason or "manual"),
             "error": None,
         }
 
     if kind is SubagentStatusKind.NOT_FOUND:
-        return {"status": "closed", "closed_reason": "manual", "error": None}
+        return {
+            "status": "closed",
+            "turn_outcome": None,
+            "closed_reason": "manual",
+            "error": None,
+        }
 
-    return {"status": "running", "closed_reason": None, "error": None}
+    return {
+        "status": "running",
+        "turn_outcome": None,
+        "closed_reason": None,
+        "error": None,
+    }
+
+
+def is_turn_finished(status: SubagentStatus) -> bool:
+    """Return True when a turn reached a terminal state (archive + emit)."""
+    return status.kind in {
+        SubagentStatusKind.COMPLETED,
+        SubagentStatusKind.INTERRUPTED,
+        SubagentStatusKind.ERRORED,
+        SubagentStatusKind.CLOSED,
+    }
+
+
+def is_instance_closed(status: SubagentStatus) -> bool:
+    """Return True when the subagent instance is shut down (not merely idle)."""
+    return status.kind in {
+        SubagentStatusKind.CLOSED,
+        SubagentStatusKind.NOT_FOUND,
+    }
 
 
 def is_externally_closed(status: SubagentStatus) -> bool:
-    """Return True when the external view status is closed."""
-    return map_status_to_view(status)["status"] == "closed"
+    """Return True when the subagent instance is shut down (not merely idle)."""
+    return is_instance_closed(status)
+
+
+def _lifecycle_fields(view: dict[str, Any]) -> dict[str, Any]:
+    external_status = view["status"]
+    if external_status == "closed":
+        return {
+            "lifecycle": "closed",
+            "can_send_input": False,
+            "needs_resume": True,
+        }
+    if external_status == "idle":
+        return {
+            "lifecycle": "live",
+            "can_send_input": True,
+            "needs_resume": False,
+        }
+    return {
+        "lifecycle": "live",
+        "can_send_input": False,
+        "needs_resume": False,
+    }
 
 
 def _normalize_close_reason(reason: str) -> str:
@@ -90,6 +168,7 @@ def build_subagent_updated_payload(
 ) -> dict[str, Any]:
     """Build the external subagent status payload."""
     view = map_status_to_view(status)
+    lifecycle = _lifecycle_fields(view)
     return {
         "subagent_id": subagent_id,
         "sub_session_id": subagent_id,
@@ -99,12 +178,14 @@ def build_subagent_updated_payload(
         "role": role,
         "task_description": task_description,
         "status": view["status"],
-        "closed_at": closed_at_ms,
+        "turn_outcome": view["turn_outcome"],
+        "closed_at": closed_at_ms if view["status"] == "closed" else None,
         "closed_reason": view["closed_reason"],
         "error": view["error"],
         "created_at": created_at_ms,
         "updated_at": updated_at_ms,
         "revision": revision,
+        **lifecycle,
     }
 
 
@@ -131,5 +212,8 @@ __all__ = [
     "build_subagent_updated_payload",
     "emit_subagent_updated",
     "is_externally_closed",
+    "is_instance_closed",
+    "is_turn_finished",
     "map_status_to_view",
+    "resolve_turn_outcome",
 ]

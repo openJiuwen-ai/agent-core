@@ -397,8 +397,10 @@ async def test_capacity_and_describe_live() -> None:
         rows = control.describe_live()
         assert len(rows) == 1
         assert rows[0]["subagent_id"] == spawned.subagent_id
-        assert rows[0]["status"] == "closed"
-        assert rows[0]["closed_reason"] == "completed"
+        assert rows[0]["status"] == "idle"
+        assert rows[0]["turn_outcome"] == "completed"
+        assert rows[0]["can_send_input"] is True
+        assert rows[0]["needs_resume"] is False
         assert rows[0]["revision"] >= 1
         assert rows[0]["task_description"] == "hello"
         assert "result" not in rows[0]
@@ -472,8 +474,9 @@ async def test_describe_one_returns_external_payload() -> None:
         payload = control.describe_one(spawned.subagent_id)
         assert payload is not None
         assert payload["subagent_id"] == spawned.subagent_id
-        assert payload["status"] == "closed"
-        assert payload["closed_reason"] == "completed"
+        assert payload["status"] == "idle"
+        assert payload["turn_outcome"] == "completed"
+        assert payload["can_send_input"] is True
         assert payload["task_description"] == "hello"
         assert payload["parent_session_id"] == "parent"
 
@@ -500,9 +503,11 @@ async def test_worker_terminal_emits_without_wait() -> None:
                 call.args[0].payload["subagent_updated"]
                 for call in session.write_stream.await_args_list
             ]
-            closed_payloads = [item for item in payloads if item.get("status") == "closed"]
-            assert closed_payloads
-            assert closed_payloads[-1]["subagent_id"] == spawned.subagent_id
+            terminal_payloads = [
+                item for item in payloads if item.get("status") in ("idle", "closed")
+            ]
+            assert terminal_payloads
+            assert terminal_payloads[-1]["subagent_id"] == spawned.subagent_id
         finally:
             for sid in list(control._manager.list_ids()):
                 await control._manager.remove(sid, reason="test_cleanup")
@@ -537,10 +542,12 @@ async def test_send_input_on_completed_instance() -> None:
 
         parent.mock_agent.output = "second"
         instance = control._manager.get(spawned.subagent_id)
+        assert instance.agent_status().kind is SubagentStatusKind.COMPLETED
         instance._agent.output = "second"
-        task_id = await control.send_input(spawned.subagent_id, "continue")
 
+        task_id = await control.send_input(spawned.subagent_id, "continue")
         assert task_id
+        assert instance.agent_status().kind is SubagentStatusKind.PENDING_INIT
         await _wait_for_turn(parent.mock_agent)
         waited = await control.wait([spawned.subagent_id], timeout_ms=500)
         assert waited.results[spawned.subagent_id] == "second"
@@ -581,6 +588,20 @@ async def test_send_input_interrupt_redirects_running_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_live_instance_returns_not_restored() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+
+        result = await control.resume(spawned.subagent_id)
+
+        assert result.restored is False
+        assert result.status.kind is SubagentStatusKind.COMPLETED
+        assert "send_input" in (result.message or "")
+
+
+@pytest.mark.asyncio
 async def test_resume_restores_closed_instance() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent())
     async with _patched_control(parent=parent) as control:
@@ -596,9 +617,10 @@ async def test_resume_restores_closed_instance() -> None:
             checkpointer.session_exists = AsyncMock(return_value=True)
             get_checkpointer.return_value = checkpointer
 
-            status = await control.resume(spawned.subagent_id)
+            result = await control.resume(spawned.subagent_id)
 
-        assert status.kind is SubagentStatusKind.PENDING_INIT
+        assert result.restored is True
+        assert result.status.kind is SubagentStatusKind.PENDING_INIT
         assert control._manager.find(spawned.subagent_id) is not None
         assert spawned.subagent_id not in control._closed_records
         assert control._registry.find_metadata(spawned.subagent_id) is not None

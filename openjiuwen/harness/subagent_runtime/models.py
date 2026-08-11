@@ -144,6 +144,15 @@ class WaitResult:
 
 
 @dataclass(frozen=True)
+class ResumeResult:
+    """Control-layer resume response shape."""
+
+    status: SubagentStatus
+    restored: bool
+    message: str | None = None
+
+
+@dataclass(frozen=True)
 class SubagentRecord:
     """Persistable record for one subagent under a parent session."""
 
