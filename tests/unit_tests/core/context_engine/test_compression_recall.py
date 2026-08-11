@@ -195,6 +195,34 @@ def test_current_round_style_archive_uses_preceding_user_as_turn_query(tmp_path)
     assert "database timeout in worker" in chunk
 
 
+def test_archive_chunk_filenames_carry_content_summary(tmp_path):
+    messages = [
+        UserMessage(content="How should database retries work?"),
+        AssistantMessage(content="Use exponential backoff for database timeout errors."),
+    ]
+
+    archive = _archive(tmp_path, messages, chunk_size_tokens=12, chunk_overlap_tokens=2)
+    archive_path = Path(archive.path)
+    turns = [json.loads(line) for line in (archive_path / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    chunk_names = [Path(path).name for path in turns[0]["chunk_paths"]]
+    assert all(name.startswith("turn_000_chunk_") for name in chunk_names)
+    assert chunk_names[0].endswith(".md")
+    # 首个 chunk 跳过 "## User" 裸角色标题，取真实内容行作为摘要
+    assert "How_should_database_retries_work" in chunk_names[0]
+    for name in chunk_names:
+        assert (archive_path / "chunks" / name).is_file()
+
+    # 新文件名下召回链路不受影响
+    result = recall_compressed_context(
+        workspace_dir=str(tmp_path),
+        session_id="session-1",
+        memory_id=archive.memory_id,
+        query="database retries backoff",
+    )
+    assert result["chunks"]
+
+
 def test_recall_selects_one_turn_and_at_most_two_chunks(tmp_path):
     messages = [
         UserMessage(content="database timeout"),
