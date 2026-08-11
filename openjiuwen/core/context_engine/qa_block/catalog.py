@@ -33,6 +33,8 @@ CATALOG_USAGE_FOOTER_EN = (
     "[END_QA_BLOCK_CATALOG_USAGE]"
 )
 
+_CHARS_PER_TOKEN_ESTIMATE = 4
+
 
 def _sorted_history_entries(registry: QABlockRegistry) -> list[QABlockEntry]:
     return sorted(
@@ -58,19 +60,60 @@ def resolve_catalog_l1_text(entry: QABlockEntry) -> str:
     return "(no summary)"
 
 
-def build_catalog_text(registry: QABlockRegistry) -> str:
-    """Build protected [QA_BLOCK_CATALOG] body from registry L1 rows."""
+def build_catalog_text(
+    registry: QABlockRegistry,
+    *,
+    max_tokens: int | None = None,
+) -> str:
+    """Build protected [QA_BLOCK_CATALOG] body from registry L1 rows.
+
+    When *max_tokens* is set, apply LRU eviction: include the most recent
+    history entries first (newest → oldest) until the token budget is
+    exhausted.  Evicted entries remain in the registry and are still
+    selectable by the selector via explicit qa_id references.
+    """
+    entries = _sorted_history_entries(registry)
     lines = [QA_BLOCK_CATALOG_START]
-    for entry in _sorted_history_entries(registry):
-        handle = entry.l0_store.handle if entry.l0_store else entry.qa_id
-        l1 = resolve_catalog_l1_text(entry)
-        lines.append(f"- {entry.qa_id} (handle={handle}): {l1}")
+    evicted = 0
+
+    if max_tokens is not None and entries:
+        max_chars = max_tokens * _CHARS_PER_TOKEN_ESTIMATE
+        reserved = len(QA_BLOCK_CATALOG_START) + len(QA_BLOCK_CATALOG_END) + 4
+        budget = max(0, max_chars - reserved)
+
+        included: list[str] = []
+        total = 0
+        for entry in reversed(entries):
+            handle = entry.l0_store.handle if entry.l0_store else entry.qa_id
+            l1 = resolve_catalog_l1_text(entry)
+            line = f"- {entry.qa_id} (handle={handle}): {l1}"
+            cost = len(line) + 1
+            if total + cost > budget and included:
+                break
+            included.append(line)
+            total += cost
+
+        evicted = len(entries) - len(included)
+        lines.extend(reversed(included))
+        if evicted > 0:
+            lines.append(
+                f"- (... {evicted} earlier QA blocks evicted from catalog; "
+                f"use load_qa_index(qa_id) to explore)"
+            )
+    else:
+        for entry in entries:
+            handle = entry.l0_store.handle if entry.l0_store else entry.qa_id
+            l1 = resolve_catalog_l1_text(entry)
+            lines.append(f"- {entry.qa_id} (handle={handle}): {l1}")
+
     lines.append(QA_BLOCK_CATALOG_END)
     text = "\n".join(lines)
     logger.info(
-        "[QABlockCatalog] built session_id=%s history_blocks=%s chars=%s",
+        "[QABlockCatalog] built session_id=%s history_blocks=%s included=%s evicted=%s chars=%s",
         registry.session_id,
-        len(_sorted_history_entries(registry)),
+        len(entries),
+        len(entries) - evicted,
+        evicted,
         len(text),
     )
     return text
@@ -89,19 +132,21 @@ def build_catalog_section(
     *,
     lang: str = "cn",
     catalog_text: str | None = None,
+    max_tokens: int | None = None,
 ):
     from openjiuwen.core.single_agent.prompts.builder import PromptSection
 
-    body = catalog_text if catalog_text is not None else build_catalog_text(registry)
+    body = (
+        catalog_text
+        if catalog_text is not None
+        else build_catalog_text(registry, max_tokens=max_tokens)
+    )
     catalog_text = append_catalog_usage_footer(body, registry, lang=lang)
     return PromptSection(
         name=CATALOG_SECTION_NAME,
         content={lang: catalog_text},
         priority=CATALOG_SECTION_PRIORITY,
     )
-
-
-_CHARS_PER_TOKEN_ESTIMATE = 4
 
 
 def _estimate_tokens(text: str) -> int:
@@ -114,41 +159,17 @@ def maybe_compact_catalog_l1(
     registry: QABlockRegistry,
     config: QABlockConfig | None = None,
 ) -> QABlockRegistry:
-    """Shorten l1_text tiers when catalog exceeds budget (§2.4)."""
-    cfg = config or QABlockConfig()
-    catalog_text = build_catalog_text(registry)
-    if _estimate_tokens(catalog_text) <= cfg.catalog_max_tokens:
-        return registry
+    """Deprecated no-op: LRU eviction is now handled in build_catalog_text(max_tokens=...).
 
-    updated_blocks = dict(registry.blocks)
-    changed = False
+    The old strategy truncated ALL L1 texts to ``catalog_short_max_chars`` when the
+    catalog exceeded ``catalog_max_tokens``.  This was replaced by LRU eviction
+    (newest-first inclusion) in ``build_catalog_text(max_tokens=...)``, which is
+    called with ``config.catalog_max_tokens`` by the assembly rail.
 
-    for qa_id, entry in registry.blocks.items():
-        if not entry.is_history:
-            continue
-        if entry.l1_catalog_tier != "full":
-            continue
-        l1 = entry.l1_text or ""
-        if len(l1) <= cfg.catalog_short_max_chars:
-            continue
-        new_entry = entry.model_copy(
-            update={
-                "l1_text": l1[: cfg.catalog_short_max_chars].rstrip() + "…",
-                "l1_catalog_tier": "short",
-            }
-        )
-        updated_blocks[qa_id] = new_entry
-        changed = True
+    This function is kept as a no-op for backward compatibility with any external
+    callers.  ``catalog_short_max_chars`` is now a dead config field (kept for
+    backward config file compatibility).
 
-    if not changed:
-        return registry
-
-    compacted = registry.model_copy(update={"blocks": updated_blocks})
-    after_text = build_catalog_text(compacted)
-    logger.info(
-        "[QABlockCatalogCompactor] compacted session_id=%s tokens_before=%s tokens_after=%s",
-        registry.session_id,
-        _estimate_tokens(catalog_text),
-        _estimate_tokens(after_text),
-    )
-    return compacted
+    Returns registry unchanged.
+    """
+    return registry
