@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -125,6 +126,61 @@ def test_recall_tool_result_is_added_to_existing_offloader_protection():
     ContextProcessorRail._protect_compression_recall_tool_results([("MessageSummaryOffloader", offloader_config)])
 
     assert offloader_config.protected_tool_names == ["read_file", "recall_compressed_context"]
+
+
+@pytest.mark.asyncio
+async def test_tool_renders_compact_content_for_model(tmp_path):
+    messages = [
+        UserMessage(content="database timeout"),
+        AssistantMessage(content="retry the database operation with backoff"),
+    ]
+    archive = archive_compression_messages(
+        context=_context(tmp_path),
+        processor_type="DialogueCompressor",
+        original_messages=messages,
+        messages_to_compress=messages,
+        preceding_messages=[],
+    )
+    tool = CompressionRecallTool(str(tmp_path), agent_id="agent-1")
+    session = MagicMock()
+    session.get_session_id.return_value = "session-1"
+
+    result = await tool.invoke(
+        {"memory_id": archive.memory_id, "query": "database retry"},
+        session=session,
+    )
+
+    assert result.success is True
+    content = result.data["content"]
+    assert archive.memory_id in content
+    assert archive.path in content
+    assert str(Path(archive.path).parent) in content
+    assert "retry the database operation with backoff" in content
+    # 结构化结果仍完整保留在 data 中
+    assert result.data["chunks"]
+    assert result.data["matched_turn"]["query"] == "database timeout"
+
+
+@pytest.mark.asyncio
+async def test_tool_renders_hint_as_content_on_miss(tmp_path):
+    archive = archive_compression_messages(
+        context=_context(tmp_path),
+        processor_type="DialogueCompressor",
+        original_messages=[UserMessage(content="database"), AssistantMessage(content="retry with backoff")],
+        messages_to_compress=[UserMessage(content="database"), AssistantMessage(content="retry with backoff")],
+        preceding_messages=[],
+    )
+    tool = CompressionRecallTool(str(tmp_path), agent_id="agent-1")
+    session = MagicMock()
+    session.get_session_id.return_value = "session-1"
+
+    result = await tool.invoke(
+        {"memory_id": archive.memory_id, "query": "completely-unrelated-zebra"},
+        session=session,
+    )
+
+    assert result.success is True
+    assert result.data["content"] == result.data["hint"]
 
 
 @pytest.mark.asyncio

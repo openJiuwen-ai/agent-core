@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 
 from openjiuwen.core.context_engine.processor.forked.compressor.recall import (
@@ -26,6 +27,59 @@ _MISS_HINTS = {
         "chunks/ holds the original pre-compression text."
     ),
 }
+
+
+def _render_recall_content(result: Dict[str, Any], language: str) -> str:
+    """Render the recall result as compact text for the model-facing tool message.
+
+    The full structured dict stays in ``ToolOutput.data`` for programmatic
+    consumers; ``content`` is what the model actually reads, so it carries only
+    the recalled text plus pointers to the archive for anything left out. The
+    recall root holds every compression archive of the session and directory
+    names are designed as ``{timestamp}_{query head}`` so the model can browse
+    other archives by time and topic on its own.
+    """
+    chunks = result.get("chunks") or []
+    if not chunks:
+        return str(result.get("hint") or "")
+    archive_path = str(result.get("archive_path") or "")
+    recall_root = str(Path(archive_path).parent) if archive_path else ""
+    returned_tokens = result.get("returned_tokens", 0)
+    truncated = bool(result.get("truncated"))
+    if language == "cn":
+        header = (
+            f"已从压缩归档 {result.get('memory_id', '')} 召回 {len(chunks)} 个原文片段"
+            f"（约 {returned_tokens} tokens{'，已达上限，归档中还有未返回的片段' if truncated else ''}）。\n"
+            f"当前归档目录：{archive_path}（turns.jsonl 为轮次索引，chunks/ 为本次压缩的原文）\n"
+            f"归档根目录：{recall_root} —— 本会话所有压缩落盘都在此目录下，"
+            f"子目录名格式为 {{时间戳}}_{{query前10字符}}，需要其他压缩内容时可按时间和主题自行浏览查找"
+        )
+        chunk_tpl = "\n\n--- 片段 {i} | {turn_id} | {chunk_id} | 相关度 {score:.2f} ---\n{body}"
+    else:
+        header = (
+            f"Recalled {len(chunks)} source chunk(s) from compression archive "
+            f"{result.get('memory_id', '')} "
+            f"(~{returned_tokens} tokens"
+            f"{', budget reached, more chunks remain in the archive' if truncated else ''}).\n"
+            f"Current archive: {archive_path} (turns.jsonl is the turn index, chunks/ holds this "
+            f"compression's source text)\n"
+            f"Archive root: {recall_root} — all compressed archives of this session live here; "
+            f"subdirectory names are {{timestamp}}_{{first 10 chars of query}}, so you can browse "
+            f"other archives by time and topic yourself"
+        )
+        chunk_tpl = "\n\n--- chunk {i} | {turn_id} | {chunk_id} | score {score:.2f} ---\n{body}"
+    parts = [header]
+    for index, chunk in enumerate(chunks, 1):
+        parts.append(
+            chunk_tpl.format(
+                i=index,
+                turn_id=chunk.get("turn_id", ""),
+                chunk_id=chunk.get("chunk_id", ""),
+                score=float(chunk.get("score") or 0.0),
+                body=str(chunk.get("content") or "").strip(),
+            )
+        )
+    return "".join(parts)
 
 
 class CompressionRecallTool(Tool):
@@ -66,7 +120,11 @@ class CompressionRecallTool(Tool):
         if not result.get("chunks"):
             hint_template = _MISS_HINTS.get(self._language, _MISS_HINTS["cn"])
             result["hint"] = hint_template.format(archive_path=result.get("archive_path") or "")
-        return ToolOutput(success=True, data=result)
+        # data 保留完整结构化结果；模型看到的 ToolMessage 只含渲染后的 content
+        return ToolOutput(
+            success=True,
+            data={**result, "content": _render_recall_content(result, self._language)},
+        )
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
         return
