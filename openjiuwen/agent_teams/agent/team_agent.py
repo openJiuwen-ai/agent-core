@@ -748,6 +748,7 @@ class TeamAgent(BaseAgent):
                 # messages (no-op when the inbox is empty).
                 if raw_query:
                     await self._coordination.enqueue_user_input(inputs)
+                    team_logger.info("[{}] user input enqueued to coordination", self._member_name() or "?")
                 await self._coordination.enqueue_initial_mailbox_poll()
             while True:
                 chunk = await self._stream_controller.stream_queue.get()

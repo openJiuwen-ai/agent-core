@@ -232,11 +232,6 @@ class CoordinationKernel:
             if self._dispatcher is None:
                 raise RuntimeError("CoordinationKernel.start() requires setup() before start()")
             await self._event_bus.start(wake_callback=self._build_wake_callback())
-        # Harness is live now: replay any wakes that arrived while
-        # ``is_agent_ready`` was still false (otherwise they were only
-        # buffered in the dispatcher and never re-driven).
-        if self._dispatcher is not None:
-            await self._dispatcher.flush_deferred()
         if infra.messager:
             team_name = host.team_name
             if team_name and not self._subscribed_topics:
@@ -258,6 +253,14 @@ class CoordinationKernel:
         # members; ``pending_resume`` replays the suspended round for each
         # recovered member (leader and teammates).
         await self.resume_paused_round()
+        # Replay wakes deferred while the agent was not ready. This must run
+        # at the very END of start(): ``flush_deferred`` has no other caller,
+        # so a wake deferred by anything after an earlier flush point (e.g.
+        # REFRESH_TEAM_CONTEXT above, or a USER_INPUT enqueued right after
+        # start returns) would sit in the dispatcher buffer forever.
+        if self._dispatcher is not None:
+            await self._dispatcher.flush_deferred()
+        team_logger.info("[{}] coordination start completed", member_name)
 
     def _build_wake_callback(self):
         """Compose the bus wake callback: coordination first, scheduler second.
@@ -346,6 +349,7 @@ class CoordinationKernel:
         # torn down — treat as a cold pause: resume rebuilds the harness
         # from the session checkpoint (``resume_paused_round`` cold path).
         harness = getattr(host.resources, "harness", None)
+        resume_query = ""
         if harness is not None and getattr(harness, "state", None) is not HarnessState.TERMINATED:
             # Park the round; leave harness PAUSED for later resume. The
             # alive check above is not atomic with the command — a
@@ -361,6 +365,19 @@ class CoordinationKernel:
                     host.member_name or "?",
                     exc,
                 )
+            else:
+                # Capture the continuation query immediately, while the
+                # parked harness still holds it: a parked in-flight round
+                # contributes ``paused_query``; an idle park means the last
+                # user message may still be unprocessed, so carry the host's
+                # last user query instead. When the park fails, the round had
+                # already concluded (round-end ``finalize_round`` won the
+                # race) — nothing to continue and the marker stays empty.
+                resume_query = str(getattr(harness, "paused_query", None) or "")
+                if not resume_query.strip():
+                    resume_query = str(
+                        getattr(getattr(host, "state", None), "pending_user_query", "") or ""
+                    )
         host.persist_allocator_state()
         memory_manager = host.resources.memory_manager
         if memory_manager:
@@ -372,8 +389,11 @@ class CoordinationKernel:
             await host.spawn_manager.shutdown_all_handles()
             self._persist_team_lifecycle("paused")
             # Persist pending_resume so a later request can continue this
-            # round from checkpoint; task rows remain in DB regardless.
-            self._persist_pending_resume()
+            # round from checkpoint; task rows remain in DB regardless. The
+            # marker is always written — empty when the round had concluded
+            # (park lost the round-end race), so the resume side can tell
+            # "nothing to continue" apart from "marker never written".
+            self._persist_pending_resume(resume_query)
         messager = host.infra.messager
         if messager and host.role == TeamRole.LEADER:
             from openjiuwen.agent_teams.context import get_session_id
@@ -511,7 +531,7 @@ class CoordinationKernel:
                 e,
             )
 
-    def _persist_pending_resume(self) -> None:
+    def _persist_pending_resume(self, query: str = "") -> None:
         """Record what a later cold start needs to continue the paused round.
 
         ``pause`` suspends the round at a clean inner-iteration boundary and the
@@ -519,6 +539,20 @@ class CoordinationKernel:
         ``pause -> stop -> start`` equivalent to ``pause -> resume``: the
         cold-started harness continues that round instead of idling until a new
         message arrives.
+
+        The marker is written unconditionally, with ``query`` captured by
+        ``pause`` at park time:
+
+        - park succeeded mid-round → the round's ``paused_query``;
+        - park succeeded on an idle harness → the host's last user query
+          (it may not have been processed yet);
+        - park failed / harness already gone (round-end ``finalize_round``
+          won the race) → empty: the round had concluded, there is nothing
+          to continue, and the next chat.send query drives the round.
+
+        Gating the write on a live PAUSED harness would drop the marker in
+        exactly the cold-pause scenario it exists for, leaving the resumed
+        member silently idle.
 
         The recorded query is not replayed into the continuation's context (that
         is restored from the checkpoint) — it drives the rounds that *follow* it:
@@ -531,21 +565,12 @@ class CoordinationKernel:
         host = self._host
         session = host.session_manager.team_session
         team_name = host.team_name
-        harness = host.resources.harness
-        if session is None or team_name is None or harness is None:
-            return
-        # Nothing was suspended (no in-flight round), so nothing to continue.
-        if harness.state is not HarnessState.PAUSED:
+        if session is None or team_name is None:
             return
         from openjiuwen.agent_teams.runtime.metadata import merge_pending_resume
 
-        paused_query = getattr(harness, "paused_query", None) or ""
-        if not str(paused_query).strip():
-        # IDLE-path pause / InteractiveInput rounds leave paused_query empty;
-        # fall back to the host's last user query so resume is not blank.
-            paused_query = getattr(getattr(host, "state", None), "pending_user_query", "") or ""
         try:
-            merge_pending_resume(session, team_name, {"query": str(paused_query or "")})
+            merge_pending_resume(session, team_name, {"query": str(query or "")})
         except Exception as e:
             team_logger.warning(
                 "[{}] failed to persist pending resume: {}",
@@ -725,6 +750,10 @@ class CoordinationKernel:
         point used by both invoke()/stream() and interact().
         """
         if self._event_bus is None:
+            team_logger.warning(
+                "[{}] user input dropped: coordination event bus is not set up",
+                self._host.member_name or "?",
+            )
             return
         query = inputs.get("query", "") if isinstance(inputs, dict) else inputs
         await self._event_bus.enqueue(
@@ -788,6 +817,10 @@ class CoordinationKernel:
         # replay ``pending_resume`` so recovered members continue from checkpoint.
         pending = self._read_pending_resume()
         if pending is None:
+            team_logger.info(
+                "[{}] no pending_resume marker; idle until the next input",
+                self._host.member_name or "?",
+            )
             return
         # Empty marker: do not start a round with query="". Let the next
         # chat.send query drive the round instead.
