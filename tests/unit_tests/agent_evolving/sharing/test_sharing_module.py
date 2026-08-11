@@ -391,6 +391,29 @@ def test_ensure_skill_id_in_content_adds_frontmatter_field():
     assert f"skill_id: {skill_id}" in updated
 
 
+def test_ensure_skill_id_preserves_body_horizontal_rule():
+    from openjiuwen.agent_evolving.utils import split_markdown_frontmatter
+
+    content = (
+        "---\n"
+        "name: demo\n"
+        "description: d\n"
+        "---\n"
+        "\n"
+        "# Body\n"
+        "\n"
+        "---\n"
+        "\n"
+        "After\n"
+    )
+    updated, skill_id = ensure_skill_id_in_content(content)
+    front, body = split_markdown_frontmatter(updated)
+    assert front is not None
+    assert f"skill_id: {skill_id}" in front
+    assert "\n---\n" in body
+    assert "After" in body
+
+
 def test_keyword_extractor_parse_from_patch():
     patch = EvolutionPatch(
         section="Troubleshooting",

@@ -330,17 +330,17 @@ def _coerce_classified_entries(
     result: Any,
     records: Sequence[EvolutionRecord],
 ) -> List[ClassifiedChangelogEntry]:
+    """Coerce classify_fn output; keep valid entries and fill gaps with fallback."""
     if result is None:
         return fallback_classified_entries(records)
-    if isinstance(result, list) and result and isinstance(result[0], ClassifiedChangelogEntry):
-        return list(result)
 
     by_id = {record.id: record for record in records}
-    coerced: List[ClassifiedChangelogEntry] = []
+    coerced_by_id: dict[str, ClassifiedChangelogEntry] = {}
     if isinstance(result, list):
         for item in result:
             if isinstance(item, ClassifiedChangelogEntry):
-                coerced.append(item)
+                if item.id in by_id:
+                    coerced_by_id[item.id] = item
                 continue
             if not isinstance(item, dict):
                 continue
@@ -348,16 +348,25 @@ def _coerce_classified_entries(
             if not record_id or record_id not in by_id:
                 continue
             summary = str(item.get("summary") or "").strip() or fallback_summary(by_id[record_id])
-            coerced.append(
+            coerced_by_id[record_id] = ClassifiedChangelogEntry(
+                id=record_id,
+                category=normalize_category(item.get("category")),
+                summary=summary,
+            )
+
+    entries: List[ClassifiedChangelogEntry] = []
+    for record in records:
+        if record.id in coerced_by_id:
+            entries.append(coerced_by_id[record.id])
+        else:
+            entries.append(
                 ClassifiedChangelogEntry(
-                    id=record_id,
-                    category=normalize_category(item.get("category")),
-                    summary=summary,
+                    id=record.id,
+                    category=_DEFAULT_CATEGORY,
+                    summary=fallback_summary(record),
                 )
             )
-    if len(coerced) == len(records):
-        return coerced
-    return fallback_classified_entries(records)
+    return entries
 
 
 def utc_today_iso() -> str:

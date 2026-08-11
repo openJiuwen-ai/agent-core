@@ -23,6 +23,7 @@ from openjiuwen.agent_evolving.checkpointing.versioning import (
     bump_semver,
     parse_semver,
 )
+from openjiuwen.agent_evolving.utils import split_markdown_frontmatter
 from openjiuwen.core.common.logging import logger
 
 _EVOLUTION_FILENAME = "evolutions.json"
@@ -111,12 +112,9 @@ class StoreArchiveHelper:
 
     @staticmethod
     def extract_version_from_skill_md(content: str) -> Optional[str]:
-        if not content.startswith("---"):
+        front_matter, _ = split_markdown_frontmatter(content)
+        if front_matter is None:
             return None
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return None
-        front_matter = parts[1]
         for line in front_matter.strip().split("\n"):
             if line.startswith("version:"):
                 value = line.split(":", 1)[1].strip().strip('"').strip("'")
@@ -154,24 +152,25 @@ class StoreArchiveHelper:
             return
 
         content = await self._store.read_file_text(skill_md_path)
-        if content.startswith("---"):
-            parts = content.split("---", 2)
-            if len(parts) >= 3:
-                front_matter = parts[1]
-                body = parts[2]
-                lines = front_matter.strip("\n").split("\n") if front_matter.strip("\n") else []
-                updated = False
-                for idx, line in enumerate(lines):
-                    if line.startswith("version:"):
-                        lines[idx] = f"version: {version}"
-                        updated = True
-                        break
-                if not updated:
-                    lines.append(f"version: {version}")
-                new_front = "\n".join(lines)
+        front_matter, body = split_markdown_frontmatter(content)
+        if front_matter is not None:
+            lines = front_matter.strip("\n").split("\n") if front_matter.strip("\n") else []
+            updated = False
+            for idx, line in enumerate(lines):
+                if line.startswith("version:"):
+                    lines[idx] = f"version: {version}"
+                    updated = True
+                    break
+            if not updated:
+                lines.append(f"version: {version}")
+            new_front = "\n".join(lines)
+            # Keep body as returned by the splitter (already excludes closing fence).
+            if body.startswith("\n") or body.startswith("\r\n") or not body:
                 new_content = f"---\n{new_front}\n---{body}"
-                await self._store.write_file_text(skill_md_path, new_content)
-                return
+            else:
+                new_content = f"---\n{new_front}\n---\n{body}"
+            await self._store.write_file_text(skill_md_path, new_content)
+            return
 
         new_content = f"---\nversion: {version}\n---\n{content}"
         await self._store.write_file_text(skill_md_path, new_content)
@@ -443,12 +442,40 @@ version: {_DEFAULT_VERSION}
             version,
         )
 
+    @classmethod
+    def _archive_filename_version_key(cls, filename: str) -> Optional[Tuple[int, int, int]]:
+        """Extract a comparable SemVer triple from ``SKILL.vX.Y.Z.md`` / ``evolutions.vX.Y.Z.json``."""
+        name = Path(filename).name
+        version_key: Optional[str] = None
+        if cls.is_body_archive_filename(name):
+            version_key = name.removeprefix("SKILL.").removesuffix(".md")
+        elif name.startswith("evolutions.v") and name.endswith(".json"):
+            version_key = name.removeprefix("evolutions.").removesuffix(".json")
+        if not version_key:
+            return None
+        bare = version_key[1:] if version_key[:1] in ("v", "V") else version_key
+        major, minor, patch = parse_semver(version_key)
+        if bare != f"{major}.{minor}.{patch}":
+            return None
+        return major, minor, patch
+
+    @classmethod
+    def _archive_file_sort_key(cls, path: Path) -> Tuple[int, Tuple[int, int, int], str]:
+        """Newest SemVer first; non-semver files last; tie-break by name for stability."""
+        version = cls._archive_filename_version_key(path.name)
+        if version is None:
+            return (1, (0, 0, 0), path.name)
+        major, minor, patch = version
+        return (0, (-major, -minor, -patch), path.name)
+
     def list_archives(self, name: str, *, subject_kind: Optional[str] = None) -> List[str]:
+        """List archive filenames for a skill, newest SemVer first."""
         skill_dir = self._store.resolve_skill_dir(name, subject_kind=subject_kind)
         if skill_dir is None:
             return []
         archive = skill_dir / "archive"
         if not archive.is_dir():
             return []
-        files = sorted(archive.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
-        return [f.name for f in files if f.is_file()]
+        files = [f for f in archive.iterdir() if f.is_file()]
+        files.sort(key=self._archive_file_sort_key)
+        return [f.name for f in files]

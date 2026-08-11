@@ -9,6 +9,7 @@ import asyncio
 import io
 import json
 import tarfile
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -1056,7 +1057,9 @@ class TestEvolutionStoreArchiveAndCreate:
         assert archived.get("skill_id") == "skill-a"
         # Live log is not cleared by archive itself.
         assert len((await store.load_full_evolution_log("skill-a")).entries) == 1
-        assert store.list_archives("skill-a") == sorted(store.list_archives("skill-a"), reverse=True)
+        listed = store.list_archives("skill-a")
+        assert body_archive in listed
+        assert evo_archive in listed
 
         skill_md_before_clear = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
         await store.clear_evolutions("skill-a")
@@ -1065,6 +1068,35 @@ class TestEvolutionStoreArchiveAndCreate:
         # clear_evolutions must not rewrite SKILL.md via projection.
         assert (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8") == skill_md_before_clear
 
+    @staticmethod
+    def test_list_archives_sorts_by_semver_not_mtime(tmp_path: Path):
+        root = tmp_path / "skills"
+        skill_dir = root / "skill-a"
+        archive = skill_dir / "archive"
+        archive.mkdir(parents=True)
+        # Write newer version first, then older — mtime would prefer v1.0.0.
+        (archive / "SKILL.v1.2.0.md").write_text("# 1.2.0\n", encoding="utf-8")
+        (archive / "evolutions.v1.2.0.json").write_text("{}", encoding="utf-8")
+        time.sleep(0.02)
+        (archive / "SKILL.v1.0.0.md").write_text("# 1.0.0\n", encoding="utf-8")
+        (archive / "evolutions.v1.0.0.json").write_text("{}", encoding="utf-8")
+        (archive / "SKILL.v1.10.0.md").write_text("# 1.10.0\n", encoding="utf-8")
+        (archive / "evolutions.v1.10.0.json").write_text("{}", encoding="utf-8")
+        (archive / "notes.txt").write_text("noise", encoding="utf-8")
+        store = EvolutionStore(str(root))
+
+        listed = store.list_archives("skill-a")
+
+        semver_files = [name for name in listed if name != "notes.txt"]
+        assert semver_files == [
+            "SKILL.v1.10.0.md",
+            "evolutions.v1.10.0.json",
+            "SKILL.v1.2.0.md",
+            "evolutions.v1.2.0.json",
+            "SKILL.v1.0.0.md",
+            "evolutions.v1.0.0.json",
+        ]
+        assert listed[-1] == "notes.txt"
     @staticmethod
     @pytest.mark.asyncio
     async def test_delete_or_clear_last_record_removes_stale_projection_outputs(tmp_path: Path):

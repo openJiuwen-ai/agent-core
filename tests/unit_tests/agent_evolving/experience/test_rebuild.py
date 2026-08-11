@@ -11,8 +11,10 @@ import pytest
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.changelog import ClassifiedChangelogEntry
+from openjiuwen.agent_evolving.checkpointing.store_archive import StoreArchiveHelper
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionPatch, EvolutionRecord, EvolutionTarget
 from openjiuwen.agent_evolving.experience.rebuild import ExperienceRebuildService
+from openjiuwen.agent_evolving.utils import split_markdown_frontmatter
 
 
 def _make_record(
@@ -216,3 +218,38 @@ async def test_complete_rebuild_bumps_minor_when_any_instruction(tmp_path: Path)
     assert cleared is True
     content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     assert "version: v1.1.0" in content
+
+
+@pytest.mark.asyncio
+async def test_set_skill_md_version_keeps_body_horizontal_rule(tmp_path: Path):
+    """Body Markdown ``---`` must not break frontmatter version writes."""
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: skill-a\n"
+        "version: v1.0.0\n"
+        "---\n"
+        "\n"
+        "# Skill\n"
+        "\n"
+        "Before rule\n"
+        "\n"
+        "---\n"
+        "\n"
+        "After rule\n",
+        encoding="utf-8",
+    )
+    store = EvolutionStore(str(root))
+    await store._archive.set_skill_md_version(skill_dir, "v1.0.1")
+
+    content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    front, body = split_markdown_frontmatter(content)
+    assert front is not None
+    assert "version: v1.0.1" in front
+    assert content.count("version:") == 1
+    assert "Before rule" in body
+    assert "After rule" in body
+    assert "\n---\n" in body
+    assert StoreArchiveHelper.extract_version_from_skill_md(content) == "v1.0.1"

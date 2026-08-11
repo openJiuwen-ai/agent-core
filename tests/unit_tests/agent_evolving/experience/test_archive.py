@@ -122,6 +122,24 @@ async def test_archive_current_pair_is_idempotent_for_same_version(tmp_path: Pat
     assert first.skill_archive == second.skill_archive
 
 
+def test_list_pairs_sorts_by_semver_not_mtime(tmp_path: Path):
+    root = tmp_path / "skills"
+    skill_dir = _prepare_skill(root, "skill-a")
+    # Higher SemVer written first so mtime would prefer the older version.
+    _write_pair(skill_dir, "v1.10.0")
+    time.sleep(0.02)
+    _write_pair(skill_dir, "v1.2.0")
+    time.sleep(0.02)
+    _write_pair(skill_dir, "v1.0.0")
+    service = EvolutionArchiveService(store=EvolutionStore(str(root)))
+
+    assert [pair.version for pair in service.list_pairs("skill-a")] == [
+        "v1.10.0",
+        "v1.2.0",
+        "v1.0.0",
+    ]
+
+
 def test_list_pairs_ignores_non_semver_and_normalizes_versions(tmp_path: Path):
     root = tmp_path / "skills"
     skill_dir = _prepare_skill(root, "skill-a")

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord, EvolutionTarget
+from openjiuwen.agent_evolving.utils import split_markdown_frontmatter
 from openjiuwen.core.common.logging import logger
 
 _EVOLUTION_INDEX_PATTERN = re.compile(
@@ -331,12 +332,9 @@ class StoreProjectionHelper:
 
     @staticmethod
     def extract_description_from_skill_md(content: str) -> str:
-        if not content.startswith("---"):
+        front_matter, _ = split_markdown_frontmatter(content)
+        if front_matter is None:
             return ""
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return ""
-        front_matter = parts[1]
         for line in front_matter.strip().split("\n"):
             if line.startswith("description:"):
                 return line.split(":", 1)[1].strip().strip('"').strip("'")

@@ -13,6 +13,7 @@ from typing import Any, Optional
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionLog
 from openjiuwen.agent_evolving.checkpointing.versioning import parse_semver
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
+from openjiuwen.agent_evolving.utils import split_markdown_frontmatter
 from openjiuwen.core.common.logging import logger
 
 _EVOLUTION_FILENAME = "evolutions.json"
@@ -62,7 +63,7 @@ class EvolutionArchiveService:
         *,
         subject_kind: Optional[str] = None,
     ) -> list[EvolutionArchivePair]:
-        """List complete archive pairs for a subject, newest first (by mtime)."""
+        """List complete archive pairs for a subject, newest SemVer first."""
         name, kind = self._subject_name_and_kind(subject, subject_kind=subject_kind)
         skill_dir = self._store.resolve_skill_dir(name, subject_kind=kind)
         if skill_dir is None:
@@ -91,7 +92,7 @@ class EvolutionArchiveService:
                     evolution_archive=evo_path,
                 )
             )
-        pairs.sort(key=self._pair_mtime, reverse=True)
+        pairs.sort(key=lambda pair: parse_semver(pair.version), reverse=True)
         return pairs
 
     async def archive_current_pair(
@@ -334,12 +335,9 @@ class EvolutionArchiveService:
 
     @staticmethod
     def _extract_version_from_skill_md(content: str) -> Optional[str]:
-        if not content.startswith("---"):
+        front_matter, _ = split_markdown_frontmatter(content)
+        if front_matter is None:
             return None
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return None
-        front_matter = parts[1]
         for line in front_matter.strip().split("\n"):
             if line.startswith("version:"):
                 value = line.split(":", 1)[1].strip().strip('"').strip("'")
@@ -379,13 +377,6 @@ class EvolutionArchiveService:
             return None
         version = filename[len(_SKILL_ARCHIVE_PREFIX):-len(_SKILL_ARCHIVE_SUFFIX)]
         return cls._archive_version_key_if_semver(version)
-
-    @staticmethod
-    def _pair_mtime(pair: EvolutionArchivePair) -> float:
-        try:
-            return max(pair.skill_archive.stat().st_mtime, pair.evolution_archive.stat().st_mtime)
-        except OSError:
-            return 0.0
 
     @staticmethod
     def _current_target_paths_are_valid(*, skill_md: Path, evolution_log: Path) -> bool:

@@ -217,3 +217,36 @@ async def test_classify_fn_override():
     entries = await classify_records_for_changelog([record], classify_fn=_classify)
     assert entries[0].category == "Security"
     assert entries[0].summary == "新增注入防护"
+
+
+@pytest.mark.asyncio
+async def test_coerce_keeps_partial_classifications():
+    """Partial classify_fn / dict results must retain valid entries and fill gaps."""
+    record_a = _record("ev_aaaa1111", "add rule")
+    record_b = _record("ev_bbbb2222", "other content")
+    record_c = _record("ev_cccc3333", "third item")
+
+    def _classify(_records):
+        return [
+            {"id": "ev_aaaa1111", "category": "Fixed", "summary": "修复规则"},
+            # missing ev_bbbb2222 (ID absent)
+            {"id": "ev_unknown", "category": "Added", "summary": "orphan"},  # ID mismatch
+            ClassifiedChangelogEntry(
+                id="ev_cccc3333",
+                category="Added",
+                summary="新增第三项",
+            ),
+        ]
+
+    entries = await classify_records_for_changelog(
+        [record_a, record_b, record_c],
+        classify_fn=_classify,
+    )
+    by_id = {entry.id: entry for entry in entries}
+    assert len(entries) == 3
+    assert by_id["ev_aaaa1111"].category == "Fixed"
+    assert by_id["ev_aaaa1111"].summary == "修复规则"
+    assert by_id["ev_bbbb2222"].category == "Changed"
+    assert "other content" in by_id["ev_bbbb2222"].summary
+    assert by_id["ev_cccc3333"].category == "Added"
+    assert by_id["ev_cccc3333"].summary == "新增第三项"
