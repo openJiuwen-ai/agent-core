@@ -413,12 +413,19 @@ class TestConversationSignalDetector:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_detect_user_intent_requires_normalized_messages() -> None:
-        trajectory = _build_trajectory_from_messages([])
-        detector = ConversationSignalDetector()
+    async def test_detect_user_intent_accepts_trajectory() -> None:
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/my_skill/SKILL.md"}]},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+        ]
+        trajectory = _build_trajectory_from_messages(messages)
+        detector = ConversationSignalDetector(existing_skills={"my_skill"})
 
-        with pytest.raises(TypeError, match="normalized messages"):
-            await detector.detect_user_intent(trajectory)  # type: ignore[arg-type]
+        signals = await detector.detect_user_intent(trajectory)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].excerpt == "不对，你应该先检查文件是否存在"
 
     @staticmethod
     @pytest.mark.asyncio

@@ -216,6 +216,7 @@ def _active_request_detector(
 ) -> Mock:
     detector = Mock()
     detector.bind_llm.return_value = detector
+    detector.collect_skills_from_messages.return_value = []
     if trajectory_error is None:
         detector.detect_trajectory_signals.return_value = trajectory_signals or []
     else:
@@ -1454,6 +1455,7 @@ async def test_run_evolution_uses_online_updater_path_after_init(tmp_path):
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = [_make_signal("skill-a")]
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
     rail._handle_evolution_from_signals = AsyncMock(return_value=_no_records_result())
     ability_manager = SimpleNamespace(add=Mock(return_value=SimpleNamespace(added=True)))
     agent = SimpleNamespace(
@@ -1557,6 +1559,7 @@ async def test_run_evolution_emits_cancelled_when_attributed_signals_generate_no
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = [signal]
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
 
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._online_updater.bind = Mock()
@@ -2137,6 +2140,7 @@ async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_p
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = []
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
     trajectory = trajectory_from_steps(
         execution_id="exec-message-object",
         steps=[
@@ -2166,7 +2170,8 @@ async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_p
         trajectory,
         signal_types={"execution_failure", "script_artifact"},
     )
-    detector.detect_user_intent.assert_not_awaited()
+    detector.detect_user_intent.assert_awaited_once()
+    assert detector.detect_user_intent.await_args.args[0] == snapshot["messages"]
 
 
 @pytest.mark.asyncio
@@ -2181,19 +2186,27 @@ async def test_run_evolution_does_not_use_llm_for_passive_user_messages(tmp_path
         },
         {"role": "user", "content": "不对，你应该先检查文件是否存在"},
     ]
+    feedback = _make_signal("skill-a", excerpt="不对，你应该先检查文件是否存在")
+    detector = Mock()
+    detector.bind_llm.return_value = detector
+    detector.detect_trajectory_signals.return_value = []
+    detector.detect_user_intent = AsyncMock(return_value=[feedback])
+    detector.collect_skills_from_messages.return_value = ["skill-a"]
+
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
-    rail._infer_primary_skill = Mock(return_value="skill-a")
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
 
-    rail._evolver._llm.invoke = AsyncMock(
-        return_value={"content": '{"is_feedback": true, "excerpt": "不对，你应该先检查文件是否存在"}'}
-    )
-    await rail.run_evolution(
-        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
-    )
+    with patch(
+        "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
+        return_value=detector,
+    ):
+        await rail.run_evolution(
+            _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+        )
 
-    rail._stage_evolution_from_signals.assert_not_awaited()
-    rail._evolver._llm.invoke.assert_not_awaited()
+    detector.detect_user_intent.assert_awaited_once()
+    rail._stage_evolution_from_signals.assert_awaited_once()
+    assert rail._stage_evolution_from_signals.await_args.kwargs["skill_name"] == "skill-a"
 
 
 @pytest.mark.asyncio
@@ -2350,6 +2363,7 @@ async def test_run_evolution_cancels_when_all_signals_are_unattributed(tmp_path)
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = [_make_signal(None)]
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
 
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._stage_evolution_from_signals = AsyncMock()
@@ -2474,6 +2488,7 @@ async def test_run_evolution_continues_when_only_some_signals_are_attributed(tmp
         _make_signal("skill-b", excerpt="Error: b"),
     ]
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
 
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a", "skill-b"])
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
@@ -2870,6 +2885,7 @@ async def test_run_evolution_evaluates_presented_entries_from_snapshot(tmp_path)
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals = Mock(return_value=[])
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
     with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector", return_value=detector):
         await rail.run_evolution(
             None,
@@ -3613,6 +3629,7 @@ async def test_run_evolution_regular_signal_uses_online_updater_without_passive_
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = [_make_signal("skill-a")]
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
 
     with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector", return_value=detector):
         await rail.run_evolution(
@@ -3689,7 +3706,6 @@ async def test_rollback_skill_restores_body_and_clears_live_evolutions(tmp_path)
         skills_dir=str(root),
         llm=Mock(),
         model="dummy-model",
-        auto_scan=False,
         auto_save=False,
         review_runtime=_default_review_runtime(),
     )

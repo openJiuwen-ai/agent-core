@@ -10,7 +10,7 @@ import posixpath
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
@@ -42,6 +42,9 @@ from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     SignalDetector,
     make_signal_fingerprint,
+)
+from openjiuwen.agent_evolving.skill_self_evolution import (
+    resolve_skill_evolution_action,
 )
 from openjiuwen.agent_evolving.tools import create_main_evolution_tools
 from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
@@ -276,6 +279,9 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             language=language,
             evolution_store=self._evolution_store,
         )
+        # In-memory snapshot: session_id → skills used in this chat (cross-turn;
+        # Session objects are recreated per request so setattr on session is lost).
+        self._used_skills_by_session: Dict[str, Set[str]] = {}
 
     @property
     def subject_kind(self) -> str:
@@ -744,6 +750,14 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         inputs = ctx.inputs
         if not isinstance(inputs, ToolCallInputs):
             return
+        tracked = self._resolve_tracked_skill_name(
+            str(inputs.tool_name or ""),
+            inputs.tool_args,
+            inputs.tool_msg,
+        )
+        if tracked:
+            session = ctx.session if hasattr(ctx, "session") else None
+            self._remember_session_used_skill(session, tracked)
         await self._track_presented_from_tool_call(ctx, inputs)
 
     async def _track_presented_from_tool_call(
@@ -810,15 +824,31 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
         try:
             # Async path: read from snapshot
+            session = None
+            session_skills: Set[str] = set()
+            snapshot_session_id = ""
             if snapshot is not None:
                 trajectory = snapshot.get("trajectory", trajectory)
                 messages = snapshot["messages"]
                 presented_entries = snapshot.get("presented_entries", [])
+                session_skills = {
+                    str(name).strip()
+                    for name in (snapshot.get("session_used_skills") or [])
+                    if str(name).strip()
+                }
+                snapshot_session_id = str(snapshot.get("session_id") or "").strip()
+                if snapshot_session_id:
+                    session_skills |= {
+                        str(name).strip()
+                        for name in (self._used_skills_by_session.get(snapshot_session_id) or set())
+                        if str(name).strip()
+                    }
             # Sync path: read from ctx (backward-compatible)
             elif ctx is not None:
                 messages = self._collect_messages_from_trajectory(trajectory)
                 session = ctx.session if hasattr(ctx, "session") else None
                 presented_entries = self._experience_tracker.consume_eval_state(session)
+                session_skills = self._get_session_used_skills(session)
             else:
                 logger.warning("[SkillEvolutionRail] run_evolution abort: no snapshot and no ctx")
                 return
@@ -859,10 +889,46 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 model=self._evolver.model,
                 language=self._language,
             )
+            traj_skills = detector.collect_skills_from_messages(messages)
+            for name in traj_skills:
+                self._remember_session_used_skill(session, name)
+                if snapshot_session_id:
+                    used = self._used_skills_by_session.get(snapshot_session_id)
+                    if not isinstance(used, set):
+                        used = set()
+                        self._used_skills_by_session[snapshot_session_id] = used
+                    used.add(name)
+                session_skills.add(name)
+            session_skills |= self._get_session_used_skills(session)
+            logger.info(
+                "[SkillEvolutionRail] session used skills=%s (traj=%s)",
+                sorted(session_skills),
+                traj_skills,
+            )
+
             detected = detector.detect_trajectory_signals(
                 trajectory,
                 signal_types={"execution_failure", "script_artifact"},
             )
+            try:
+                feedback_signals = await detector.detect_user_intent(
+                    messages,
+                    extra_skills=sorted(session_skills),
+                )
+            except Exception as _fb_exc:
+                logger.warning(
+                    "[SkillEvolutionRail] user feedback signal detection failed: %s",
+                    _fb_exc,
+                )
+                feedback_signals = []
+            if feedback_signals:
+                logger.info(
+                    "[SkillEvolutionRail] detected %d user feedback signal(s), skills=%s",
+                    len(feedback_signals),
+                    sorted({s.skill_name for s in feedback_signals if getattr(s, "skill_name", None)}),
+                )
+                detected = [*detected, *feedback_signals]
+
             signals: List[EvolutionSignal] = []
             for signal in detected:
                 fp = make_signal_fingerprint(signal)
@@ -920,8 +986,26 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 )
 
             # Evolve existing skills (when signals are attributed to known skills)
+            skills_dirs = self._resolve_skills_dirs_for_self_evolution()
             deferred_cancelled: List[tuple[str, str]] = []
             for skill_name, skill_signals in skill_groups.items():
+                action = resolve_skill_evolution_action(
+                    skill_name,
+                    default_auto_save=self._auto_save,
+                    skills_dirs=skills_dirs,
+                )
+                if action == "off":
+                    logger.info(
+                        "[SkillEvolutionRail] selfEvolution=off after attribution, skipping skill=%s",
+                        skill_name,
+                    )
+                    deferred_cancelled.append(
+                        (
+                            skill_name,
+                            f"selfEvolution=off for '{skill_name}'; skipping online evolution",
+                        )
+                    )
+                    continue
                 generated = await self._evolve_skill_with_sharing(
                     skill_name=skill_name,
                     skill_signals=skill_signals,
@@ -929,7 +1013,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     trajectory=trajectory,
                     ctx=ctx,
                     shared_records=downloaded_per_skill.get(skill_name, []),
-                    requires_approval=not self._auto_save,
+                    requires_approval=action != "auto",
                 )
                 if not generated:
                     deferred_cancelled.append(
@@ -1672,15 +1756,100 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         session = ctx.session if hasattr(ctx, "session") else None
         presented_entries = self._experience_tracker.consume_eval_state(session)
 
+        # Refresh session-used skills while ctx/session is still alive.
+        detector = SignalDetector()
+        for name in detector.collect_skills_from_messages(messages):
+            self._remember_session_used_skill(session, name)
+        session_key = self._resolve_used_skills_session_key(session) or str(session_id or "").strip()
+        session_used_skills = sorted(self._get_session_used_skills(session))
+        if session_key and not session_used_skills:
+            session_used_skills = sorted(
+                str(name).strip()
+                for name in (self._used_skills_by_session.get(session_key) or set())
+                if str(name).strip()
+            )
+
         snapshot.update(
             {
-                "session_id": session_id,
+                "session_id": session_key or session_id,
                 "presented_entries": presented_entries,
                 "skill_name": "skill-evolution",
                 "incremental_messages": self._resolve_incremental_messages(messages, ctx, None),
+                "session_used_skills": session_used_skills,
             }
         )
         return snapshot
+
+    def _resolve_skills_dirs_for_self_evolution(self) -> Optional[List[Any]]:
+        """Return EvolutionStore base dirs for capabilities.json lookup, if available."""
+        raw = getattr(self._evolution_store, "base_dirs", None)
+        if raw is None:
+            return None
+        try:
+            return list(raw)
+        except TypeError:
+            return None
+
+    @staticmethod
+    def _resolve_used_skills_session_key(session: Any) -> Optional[str]:
+        """Resolve stable key for in-memory used-skills snapshot (no disk)."""
+        if session is None:
+            return None
+        getter = getattr(session, "get_session_id", None)
+        if callable(getter):
+            try:
+                sid = str(getter() or "").strip()
+            except Exception:
+                sid = ""
+            if sid:
+                return sid
+        # Tests / callers without get_session_id: same object only.
+        return f"__obj__:{id(session)}"
+
+    def _get_session_used_skills(self, session: Any) -> Set[str]:
+        """Return skill names used earlier for this session_id (cross-turn)."""
+        key = self._resolve_used_skills_session_key(session)
+        if not key:
+            return set()
+        raw = self._used_skills_by_session.get(key)
+        if not isinstance(raw, set):
+            return set()
+        return {str(name).strip() for name in raw if str(name).strip()}
+
+    def _remember_session_used_skill(self, session: Any, skill_name: str) -> None:
+        """Record a skill as used for this session_id (in-memory, no disk)."""
+        name = (skill_name or "").strip()
+        key = self._resolve_used_skills_session_key(session)
+        if not key or not name:
+            return
+        used = self._used_skills_by_session.get(key)
+        if not isinstance(used, set):
+            used = set()
+            self._used_skills_by_session[key] = used
+        if name not in used:
+            used.add(name)
+            logger.info(
+                "[SkillEvolutionRail] remember session used skill=%s session_id=%s total=%d",
+                name,
+                key,
+                len(used),
+            )
+
+    @classmethod
+    def _resolve_tracked_skill_name(
+        cls,
+        tool_name: str,
+        tool_args: Any,
+        tool_msg: Any = None,
+    ) -> Optional[str]:
+        """Resolve skill name from skill_tool / skill_complete for session tracking."""
+        name = (tool_name or "").lower()
+        args = cls._parse_tool_args_dict(tool_args)
+        if name in ("skill_tool", "skill_complete") or name.endswith(".skill_tool"):
+            skill = str(args.get("skill_name") or "").strip()
+            if skill:
+                return skill
+        return None
 
     # ── Governance commands (shared by 1D and team skills) ──
 
