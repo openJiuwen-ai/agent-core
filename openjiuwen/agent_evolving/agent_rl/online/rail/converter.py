@@ -11,14 +11,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-from openjiuwen.agent_evolving.trajectory import legacy_semconv
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import CASE_ID, TRAJECTORY_SOURCE
-from openjiuwen.agent_evolving.trajectory.types import (
-    TrajectoryLike,
-    trajectory_execution_id,
-    trajectory_resource_attributes,
-    trajectory_session_id,
-)
 from openjiuwen.agent_evolving.trajectory.spans import (
     decode_json_attribute,
     iter_spans,
@@ -80,9 +74,6 @@ def _span_meta(span: dict[str, Any], attrs: dict[str, Any]) -> dict[str, Any]:
     """Build detached per-span metadata for the rail-v1 sample."""
 
     meta = {str(key): _json_value(value) for key, value in attrs.items()}
-    legacy_meta = decode_json_attribute(attrs.get(legacy_semconv.LEGACY_STEP_META))
-    if isinstance(legacy_meta, dict):
-        meta.update({str(key): _json_value(value) for key, value in legacy_meta.items()})
     for key in ("span_name", "span_id", "parent_span_id", "trace_id"):
         source_key = {
             "span_name": "name",
@@ -95,7 +86,7 @@ def _span_meta(span: dict[str, Any], attrs: dict[str, Any]) -> dict[str, Any]:
     return meta
 
 
-def _trajectory_cost(trajectory: TrajectoryLike) -> Optional[dict[str, int]]:
+def _trajectory_cost(trajectory: Trajectory) -> Optional[dict[str, int]]:
     input_tokens = 0
     output_tokens = 0
     for span in iter_spans(trajectory):
@@ -182,13 +173,13 @@ class OnlineTrajectoryConverter:
 
     def convert(
         self,
-        trajectory: TrajectoryLike,
+        trajectory: Trajectory,
         *,
         tenant_id: Optional[str] = None,
         session_done: Optional[bool] = None,
     ) -> RailV1Batch:
-        trajectory_id = trajectory_execution_id(trajectory)
-        session_id = str(trajectory_session_id(trajectory) or "")
+        trajectory_id = trajectory.trajectory_id
+        session_id = str(trajectory.session_id or "")
         samples: list[PerTurnSample] = []
         model_id = self.model_id or ""
 
@@ -236,7 +227,7 @@ class OnlineTrajectoryConverter:
             )
             samples.append(sample)
 
-        trajectory_attrs = trajectory_resource_attributes(trajectory)
+        trajectory_attrs = trajectory.resource_attributes
         status = str((trajectory_attrs or {}).get("status") or "ok")
         meta = TrajectoryMeta(
             trajectory_id=trajectory_id,
@@ -267,7 +258,7 @@ class OnlineTrajectoryConverter:
         )
 
     @staticmethod
-    def extract_prev_feedback(trajectory: TrajectoryLike) -> Optional[dict[str, Any]]:
+    def extract_prev_feedback(trajectory: Trajectory) -> Optional[dict[str, Any]]:
         """Use the first user message in the new batch as previous-turn feedback."""
         for span in iter_spans(trajectory):
             if span_category(span) != "llm":

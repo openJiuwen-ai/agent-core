@@ -9,6 +9,8 @@ import logging
 import os
 from typing import TYPE_CHECKING, Optional
 
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+
 if TYPE_CHECKING:
     from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
 
@@ -20,7 +22,10 @@ def is_rl_online_rail_enabled_from_env() -> bool:
     return os.getenv("USE_RL_ONLINE_RAIL", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
+def build_rl_online_rail_from_env(
+    *,
+    trajectory_span_processor: TrajectorySpanProcessor,
+) -> Optional["RLOnlineRail"]:
     """Instantiate :class:`RLOnlineRail` + :class:`TrajectoryUploader` from env, or return None.
 
     Environment variables:
@@ -37,6 +42,8 @@ def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
     """
     if not is_rl_online_rail_enabled_from_env():
         return None
+    if not isinstance(trajectory_span_processor, TrajectorySpanProcessor):
+        raise TypeError("trajectory_span_processor must be a TrajectorySpanProcessor")
     try:
         from .online_rail import RLOnlineRail
         from .uploader import TrajectoryUploader
@@ -62,6 +69,7 @@ def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
         uploader=uploader,
         lora_default_policy=lora_default_policy,
         gateway_api_key=api_key,
+        trajectory_span_processor=trajectory_span_processor,
     )
     logger.info(
         "build_rl_online_rail_from_env: RLOnlineRail ready (rail-v1), gateway=%s, lora_policy=%s",

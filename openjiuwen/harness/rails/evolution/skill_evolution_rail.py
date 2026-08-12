@@ -74,7 +74,7 @@ from openjiuwen.harness.rails.evolution.contracts import (
 from openjiuwen.harness.rails.evolution.evolution_rail import (
     EvolutionRail,
     EvolutionTriggerPoint,
-    _PreparedEvolutionInput,
+    PreparedEvolutionInput,
 )
 from openjiuwen.harness.rails.evolution.review.materials import build_review_scoped_materials
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
@@ -141,7 +141,7 @@ class EvolutionReviewScopeBuilder:
 
 
 @dataclass(frozen=True)
-class _SkillPreparedEvolutionInput(_PreparedEvolutionInput):
+class _SkillPreparedEvolutionInput(PreparedEvolutionInput):
     """Detached Skill evolution input with rail-local evaluation state."""
 
     presented_entries: tuple[tuple[str, Any, str], ...] = ()

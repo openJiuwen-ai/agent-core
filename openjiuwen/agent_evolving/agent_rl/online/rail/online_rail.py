@@ -11,15 +11,18 @@ from typing import Any, Optional
 
 import httpx
 
-from openjiuwen.agent_evolving.trajectory import (
-    Trajectory,
-    set_trajectory_resource_attributes,
-    trajectory_execution_id,
-    trajectory_meta,
-    trajectory_steps,
+from openjiuwen.agent_evolving.agent_rl.rl_rail import RLRail
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.agent_evolving.trajectory.schema import (
+    RL_COMPLETION_TOKEN_IDS,
+    RL_LOGPROBS,
+    RL_PROMPT_TOKEN_IDS,
 )
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, span_attributes, span_sort_key
+from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.harness.rails import EvolutionRail
+from openjiuwen.harness.rails.evolution import PreparedEvolutionInput
 
 from .converter import OnlineTrajectoryConverter
 from .llm_response import extract_logprobs, extract_prompt_ids, extract_token_ids
@@ -29,8 +32,7 @@ logger = logging.getLogger(__name__)
 runtime_logger = logging.getLogger("jiuwenswarm.agents.harness.common.rails.rl_online_rail_loader")
 
 
-
-class RLOnlineRail(EvolutionRail):
+class RLOnlineRail(RLRail):
     """Rail-based online RL collector and uploader."""
 
     priority = 100
@@ -50,12 +52,16 @@ class RLOnlineRail(EvolutionRail):
         lora_runtime_base_url: str = "",
         lora_runtime_timeout: float = 30.0,
         session_done_on_invoke_end: bool = True,
+        trajectory_span_processor: TrajectorySpanProcessor,
         **kwargs: Any,
     ) -> None:
-        kwargs.setdefault("max_trajectory_steps", None)
-        super().__init__(**kwargs)
+        super().__init__(
+            session_id=session_id,
+            source="rl_online",
+            trajectory_span_processor=trajectory_span_processor,
+            **kwargs,
+        )
         del lora_repo, lora_runtime_base_url
-        self._session_id = session_id
         self._tenant_id = tenant_id
         self._gateway_endpoint = gateway_endpoint.rstrip("/")
         self._gateway_api_key = gateway_api_key
@@ -65,11 +71,13 @@ class RLOnlineRail(EvolutionRail):
         self._lora_gateway_client = lora_gateway_client
         self._lora_runtime_timeout = lora_runtime_timeout
         self._session_done_on_invoke_end = session_done_on_invoke_end
-        self._llm_step_count = 0
         self._started_at = 0.0
+        self._status = "ok"
+        self._exception: str | None = None
 
     def _resolve_user_id(self, ctx: AgentCallbackContext) -> str:
-        return str(self._tenant_id or ctx.extra.get("user_id") or "").strip()
+        extra = getattr(ctx, "extra", None) or {}
+        return str(self._tenant_id or extra.get("user_id") or "").strip()
 
     def _enable_token_capture(self, ctx: AgentCallbackContext) -> None:
         config = self._react_config(ctx)
@@ -211,103 +219,126 @@ class RLOnlineRail(EvolutionRail):
         finally:
             self._restore_model(ctx)
 
+    def _scope_metadata(self, capture: Any) -> dict[str, Any]:
+        """Include online status metadata in each detached rail projection."""
+
+        metadata = super()._scope_metadata(capture)
+        if self._tenant_id is not None:
+            metadata["tenant_id"] = self._tenant_id
+        metadata["status"] = self._status
+        if self._started_at:
+            metadata["started_at"] = self._started_at
+        if self._exception is not None:
+            metadata["exception"] = self._exception
+        return metadata
+
+    def get_trajectory(
+        self,
+        *,
+        session_id: str,
+        member_id: str | None = None,
+        team_id: str | None = None,
+    ) -> Trajectory | None:
+        """Return the detached clean projection with current online metadata."""
+
+        trajectory = super().get_trajectory(session_id=session_id, member_id=member_id, team_id=team_id)
+        if trajectory is None:
+            return None
+        return trajectory.with_resource_attributes(self._scope_metadata_for_projection())
+
+    def _scope_metadata_for_projection(self) -> dict[str, Any]:
+        attributes: dict[str, Any] = {"status": self._status}
+        if self._tenant_id is not None:
+            attributes["tenant_id"] = self._tenant_id
+        if self._started_at:
+            attributes["started_at"] = self._started_at
+        if self._exception is not None:
+            attributes["exception"] = self._exception
+        return attributes
+
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
-        self._llm_step_count = 0
         self._started_at = time.time()
+        self._status = "ok"
+        self._exception = None
         self._enable_token_capture(ctx)
         if self._tenant_id is None:
             user_id = self._resolve_user_id(ctx)
             self._tenant_id = user_id or None
-        if self._builder is not None:
-            self._builder.session_id = self._session_id or self._builder.session_id
-            self._builder.source = "rl_online"
-            self._builder.meta.update({
-                "tenant_id": self._tenant_id,
-                "status": "ok",
-                "started_at": self._started_at,
-            })
 
-    async def _on_after_model_call(self, ctx: AgentCallbackContext) -> None:
-        self._llm_step_count += 1
-        if self._builder is None or not self._builder.steps:
-            logger.info("[RLOnlineRail] after_model_call skipped: builder_empty=%s", self._builder is None)
-            return
-        last_step = self._builder.steps[-1]
-        if last_step.kind != "llm":
-            logger.info("[RLOnlineRail] after_model_call skipped: last_step_kind=%s", last_step.kind)
-            return
-        # The base ``EvolutionRail`` already lifts top-level
-        # prompt/completion token ids and logprobs from the response into
-        # the step. Fall back to deeper extraction (e.g. nested
-        # ``response.metadata.choices[0]``) only when those are empty.
-        response = getattr(ctx.inputs, "response", None)
-        if last_step.prompt_token_ids is None:
-            prompt_ids = extract_prompt_ids(response)
-            if prompt_ids is not None:
-                last_step.prompt_token_ids = prompt_ids
-        if last_step.completion_token_ids is None:
-            token_ids = extract_token_ids(response)
-            if token_ids is not None:
-                last_step.completion_token_ids = token_ids
-        if last_step.logprobs is None:
-            logprobs = extract_logprobs(response)
-            if logprobs is not None:
-                last_step.logprobs = logprobs
-        last_step.meta.update({
-            "turn_id": self._llm_step_count - 1,
-            "source": "rl_online",
-            "tenant_id": self._tenant_id,
-        })
-        if ctx.extra.get("rl_online_lora_model"):
-            last_step.meta.update({
-                "rl_online_lora_model": ctx.extra.get("rl_online_lora_model"),
-                "rl_online_lora_version": ctx.extra.get("rl_online_lora_version"),
-                "rl_online_lora_path": ctx.extra.get("rl_online_lora_path"),
-            })
-        logger.info(
-            "[RLOnlineRail] captured llm step=%d prompt_ids=%s response_tokens=%s logprobs=%s response_type=%s",
-            self._llm_step_count,
-            len(last_step.prompt_token_ids or []),
-            len(last_step.completion_token_ids or []),
-            len(last_step.logprobs or []),
-            type(response).__name__,
-        )
+    def _enrich_latest_llm(self, trajectory: Trajectory, response: Any) -> Trajectory:
+        """Attach provider-nested token fields without mutating the response."""
+
+        enriched = super()._enrich_latest_llm(trajectory, response)
+        prompt_ids = extract_prompt_ids(response)
+        completion_ids = extract_token_ids(response)
+        logprobs = extract_logprobs(response)
+        if prompt_ids is None and completion_ids is None and logprobs is None:
+            return enriched
+
+        payload = enriched.to_otlp()
+        target: dict[str, Any] | None = None
+        for resource_span in payload.get("resourceSpans") or []:
+            for scope_span in resource_span.get("scopeSpans") or []:
+                for span in scope_span.get("spans") or []:
+                    if not isinstance(span, dict) or span_category(span) != "llm":
+                        continue
+                    if target is None or span_sort_key(span) >= span_sort_key(target):
+                        target = span
+        if target is None:
+            return enriched
+
+        attrs = span_attributes(target)
+        if prompt_ids is not None:
+            attrs[RL_PROMPT_TOKEN_IDS] = prompt_ids
+        if completion_ids is not None:
+            attrs[RL_COMPLETION_TOKEN_IDS] = completion_ids
+        if logprobs is not None:
+            attrs[RL_LOGPROBS] = logprobs
+        target["attributes"] = attributes_from_map(attrs)
+        return Trajectory.from_otlp(payload)
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
         self._restore_model(ctx)
-        if self._builder is not None:
-            self._builder.meta["status"] = "invoke_error"
-            self._builder.meta["exception"] = repr(ctx.exception)
+        self._status = "invoke_error"
+        self._exception = repr(ctx.exception)
 
-    async def _on_after_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Keep uploaded online RL trajectories scoped to one invoke."""
-        self._reset_trajectory_builder()
+    async def _on_after_invoke(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
+        """End the current RL sample without retaining it into the next invoke."""
+
+        del ctx, trajectory
+        self._reset_current_scope()
 
     async def run_evolution(
         self,
-        trajectory: Trajectory,
-        ctx: Optional[AgentCallbackContext] = None,
-        *,
-        snapshot: Optional[dict[str, Any]] = None,
+        prepared: PreparedEvolutionInput,
     ) -> None:
-        metadata = trajectory_meta(trajectory)
-        attributes = {"ended_at": time.time()}
-        attributes["tenant_id"] = metadata.get("tenant_id", self._tenant_id)
-        attributes["status"] = metadata.get("status", "ok")
-        trajectory = set_trajectory_resource_attributes(trajectory, attributes)
+        """Convert one frozen prepared input and enqueue it for the gateway."""
+
+        trajectory = prepared.trajectory
+        metadata = trajectory.resource_attributes
+        trajectory = trajectory.with_resource_attributes(
+            {
+                "ended_at": time.time(),
+                "tenant_id": metadata.get("tenant_id", self._tenant_id),
+                "status": metadata.get("status", self._status),
+            }
+        )
         batch = self._converter.convert(
             trajectory,
             tenant_id=self._tenant_id,
             session_done=self._session_done_on_invoke_end,
         )
         logger.info(
-            "[RLOnlineRail] run_evolution trajectory=%s steps=%d samples=%d tenant=%s",
-            trajectory_execution_id(trajectory),
-            len(trajectory_steps(trajectory)),
+            "[RLOnlineRail] run_evolution trajectory=%s samples=%d tenant=%s",
+            trajectory.trajectory_id,
             len(batch.samples),
             self._tenant_id,
         )
         if not batch.samples:
-            logger.debug("[RLOnlineRail] no LLM samples to upload trajectory=%s", trajectory_execution_id(trajectory))
+            logger.debug("[RLOnlineRail] no LLM samples to upload trajectory=%s", trajectory.trajectory_id)
             return
         await self._uploader.enqueue(batch)

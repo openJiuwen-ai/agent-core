@@ -214,7 +214,7 @@ class _TeamTrajectoryCaptureMixin:
 
 
 @dataclass(frozen=True)
-class _PreparedEvolutionInput:
+class PreparedEvolutionInput:
     """Detached input shared by synchronous and background evolution paths."""
 
     trajectory: Trajectory
@@ -238,11 +238,11 @@ class EvolutionRail(DeepAgentRail):
     Inheriting this class provides automatic trajectory collection.
     Subclasses should override one or more extension points:
       - _on_before_invoke(ctx): Initialization at invoke start
-      - _on_after_model_call(ctx): Step-level updates after LLM calls
-      - _on_after_tool_call(ctx): Tool-level updates after tool calls
-      - _on_after_invoke(ctx): Custom logic after invoke, before builder cleared
-      - _on_after_task_iteration(ctx): Custom logic after each task-loop iteration
-      - run_evolution(trajectory, ctx): Called when evolution_trigger fires
+      - _on_after_model_call(ctx, trajectory): Updates after LLM calls
+      - _on_after_tool_call(ctx, trajectory): Updates after tool calls
+      - _on_after_invoke(ctx, trajectory): Custom logic after final draining
+      - _on_after_task_iteration(ctx, trajectory): Updates after each task-loop iteration
+      - run_evolution(prepared): Called when evolution_trigger fires
 
     The evolution trigger point is configurable via ``evolution_trigger``.
     """
@@ -938,7 +938,7 @@ class EvolutionRail(DeepAgentRail):
         self,
         trajectory: Trajectory,
         ctx: AgentCallbackContext,
-    ) -> Optional[_PreparedEvolutionInput]:
+    ) -> Optional[PreparedEvolutionInput]:
         """Phase 1: Synchronously capture detached input while ctx is alive.
 
         Subclasses override to capture additional immutable state (e.g.
@@ -947,7 +947,7 @@ class EvolutionRail(DeepAgentRail):
         """
         del ctx
         messages = self._collect_messages_from_trajectory(trajectory)
-        return _PreparedEvolutionInput(
+        return PreparedEvolutionInput(
             trajectory=trajectory,
             messages=tuple(deepcopy(messages)),
         )
@@ -1028,14 +1028,14 @@ class EvolutionRail(DeepAgentRail):
         content = getattr(result, "content", "")
         return content if isinstance(content, str) else str(content)
 
-    async def _safe_run_evolution(self, prepared: _PreparedEvolutionInput) -> None:
+    async def _safe_run_evolution(self, prepared: PreparedEvolutionInput) -> None:
         """Phase 2: Safely execute evolution in background.
 
         Catches exceptions to prevent polluting the main lifecycle flow.
         Acquires semaphore to limit concurrent evolution LLM calls.
         """
-        if not isinstance(prepared, _PreparedEvolutionInput):
-            raise TypeError("prepared must be an _PreparedEvolutionInput")
+        if not isinstance(prepared, PreparedEvolutionInput):
+            raise TypeError("prepared must be a PreparedEvolutionInput")
         outcome: dict[str, str] | None = None
         try:
             total_timeout = self._get_evolution_total_timeout_secs()
@@ -1069,7 +1069,7 @@ class EvolutionRail(DeepAgentRail):
         """Optional total timeout for one background evolution task."""
         return None
 
-    async def run_evolution(self, prepared: _PreparedEvolutionInput) -> None:
+    async def run_evolution(self, prepared: PreparedEvolutionInput) -> None:
         """Called with one detached input when evolution is triggered."""
         del prepared
 

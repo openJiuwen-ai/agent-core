@@ -5,7 +5,49 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.agent_evolving.trajectory import LLMCallDetail, TrajectoryStep, trajectory_from_steps
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.extensions.observability import semconv
+
+
+def _canonical_llm_trajectory(
+    execution_id: str,
+    span_attrs: dict[str, object],
+    *,
+    resource_attrs: dict[str, object] | None = None,
+) -> Trajectory:
+    resource = {
+        "openjiuwen.trajectory_id": execution_id,
+        semconv.AT_SESSION_ID: "session-1",
+        "openjiuwen.trajectory.source": "online",
+    }
+    resource.update(resource_attrs or {})
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map(resource)},
+                    "scopeSpans": [
+                        {
+                            "spans": [
+                                {
+                                    "traceId": "trace-test",
+                                    "spanId": "llm-1",
+                                    "name": "llm.call",
+                                    "attributes": attributes_from_map(
+                                        {
+                                            semconv.GEN_AI_REQUEST_MODEL: "m1",
+                                            **span_attrs,
+                                        }
+                                    ),
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+    )
 
 
 class _FakeRedisPipeline:
@@ -274,28 +316,18 @@ async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tm
 def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_response():
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
-    trajectory = trajectory_from_steps(
-        execution_id="traj-1",
-        session_id="session-1",
-        steps=[
-            TrajectoryStep(
-                kind="llm",
-                detail=LLMCallDetail(
-                    model="m1",
-                    messages=[{"role": "user", "content": "hello"}],
-                    response={
-                        "role": "assistant",
-                        "content": "pong",
-                        "prompt_token_ids": [1, 2, 3],
-                        "choices": [{
-                            "token_ids": [4, 5],
-                            "logprobs": [-0.1, -0.2],
-                        }],
-                    },
-                ),
-            ),
-        ],
-        source="online",
+    trajectory = _canonical_llm_trajectory(
+        "traj-1",
+        {
+            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
+            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            "provider_response_json": {
+                "prompt_token_ids": [1, 2, 3],
+                "choices": [{"token_ids": [4, 5], "logprobs": [-0.1, -0.2]}],
+            },
+        },
     )
 
     batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory)
@@ -308,38 +340,23 @@ def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_re
 @pytest.mark.asyncio
 async def test_online_trajectory_converter_preserves_trace_plain_meta():
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
-    from openjiuwen.agent_evolving.trajectory import (
-        TrajectoryTraceAgentHandler,
-        TrajectoryTraceStateManager,
-    )
-    from openjiuwen.core.session.tracer.span import TraceAgentSpan
 
-    state_manager = TrajectoryTraceStateManager()
-    handler = TrajectoryTraceAgentHandler(state_manager)
-    trace_id = "trace-meta-converter"
-    state_manager.bind_trace(
-        trace_id,
-        session_id="session-1",
-        source="rl_online",
-        meta={
+    trajectory = _canonical_llm_trajectory(
+        "trace-meta-converter",
+        {
+            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
+            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+        },
+        resource_attrs={
+            "openjiuwen.trajectory.source": "rl_online",
             "tenant_id": "tenant-1",
             "status": "ok",
             "started_at": 123.4,
             "custom": {"label": "keep"},
         },
     )
-    span = TraceAgentSpan(trace_id=trace_id, invoke_id="llm-1")
-    await handler.on_llm_start(
-        span,
-        inputs={"inputs": [{"role": "user", "content": "hello"}]},
-        instance_info={"class_name": "m1"},
-    )
-    await handler.on_llm_end(
-        span,
-        outputs={"outputs": {"role": "assistant", "content": "pong"}},
-    )
-
-    trajectory = state_manager.build_trajectory(trace_id, session_id="session-1", source="rl_online", finalize=True)
     batch = OnlineTrajectoryConverter(tenant_id="tenant-1").convert(trajectory)
 
     assert batch.trajectory_meta.status == "ok"
@@ -352,23 +369,17 @@ def test_online_trajectory_converter_normalizes_streaming_logprobs_for_gateway()
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.rail_ingest import RailBatchIngestor
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
-    trajectory = trajectory_from_steps(
-        execution_id="traj-stream",
-        session_id="session-1",
-        steps=[
-            TrajectoryStep(
-                kind="llm",
-                detail=LLMCallDetail(
-                    model="m1",
-                    messages=[{"role": "user", "content": "hello"}],
-                    response={"role": "assistant", "content": "pong"},
-                ),
-                prompt_token_ids=[1, 2, 3],
-                completion_token_ids=[4, 5],
-                logprobs={"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-            ),
-        ],
-        source="online",
+    trajectory = _canonical_llm_trajectory(
+        "traj-stream",
+        {
+            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
+            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            "evolution.rl.prompt_token_ids": [1, 2, 3],
+            "evolution.rl.completion_token_ids": [4, 5],
+            "evolution.rl.logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+        },
     )
 
     batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory).to_dict()
@@ -379,46 +390,26 @@ def test_online_trajectory_converter_normalizes_streaming_logprobs_for_gateway()
     assert normalized["trajectory"]["response_logprobs"] == [-0.1, -0.2]
 
 
-def test_online_trajectory_converter_tolerates_message_model_dump_failure():
+def test_online_trajectory_converter_reads_detached_messages():
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
-    class _BrokenMessage:
-        role = "assistant"
-        content = "previous turn"
-
-        def model_dump(self):
-            raise TypeError("MockValSer")
-
-    # OTLP construction JSON-safes message objects; converter must still
-    # accept the resulting string fallback without raising.
-    trajectory = trajectory_from_steps(
-        execution_id="traj-broken-message",
-        session_id="session-1",
-        steps=[
-            TrajectoryStep(
-                kind="llm",
-                detail=LLMCallDetail(
-                    model="m1",
-                    messages=[
-                        {"role": "user", "content": "hello"},
-                        _BrokenMessage(),
-                    ],
-                    response={
-                        "role": "assistant",
-                        "content": "pong",
-                    },
-                ),
-            ),
-        ],
-        source="online",
+    trajectory = _canonical_llm_trajectory(
+        "traj-detached-message",
+        {
+            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
+            f"{semconv.GEN_AI_PROMPT}.1.role": "assistant",
+            f"{semconv.GEN_AI_PROMPT}.1.content": "previous turn",
+            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+        },
     )
 
     batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory)
 
     assert len(batch.samples) == 1
     assert batch.samples[0].messages[0] == {"role": "user", "content": "hello"}
-    assert batch.samples[0].messages[1]["role"] == "unknown"
-    assert "BrokenMessage" in batch.samples[0].messages[1]["content"]
+    assert batch.samples[0].messages[1] == {"role": "assistant", "content": "previous turn"}
 
 
 @pytest.mark.asyncio

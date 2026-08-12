@@ -12,7 +12,7 @@ from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcess
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.agent_evolving.trajectory.store import InMemoryTrajectoryStore
-from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, _PreparedEvolutionInput
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, PreparedEvolutionInput
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
 
 
@@ -33,12 +33,12 @@ def _trajectory() -> Trajectory:
     )
 
 
-def _prepared() -> _PreparedEvolutionInput:
-    return _PreparedEvolutionInput(trajectory=_trajectory(), messages=())
+def _prepared() -> PreparedEvolutionInput:
+    return PreparedEvolutionInput(trajectory=_trajectory(), messages=())
 
 
 class _FailingRail(EvolutionRail):
-    async def run_evolution(self, prepared: _PreparedEvolutionInput) -> None:
+    async def run_evolution(self, prepared: PreparedEvolutionInput) -> None:
         del prepared
         raise RuntimeError("evolution failed")
 
@@ -47,7 +47,7 @@ class _TimeoutRail(EvolutionRail):
     def _get_evolution_total_timeout_secs(self) -> float:
         return 0.001
 
-    async def run_evolution(self, prepared: _PreparedEvolutionInput) -> None:
+    async def run_evolution(self, prepared: PreparedEvolutionInput) -> None:
         del prepared
         await asyncio.sleep(1)
 

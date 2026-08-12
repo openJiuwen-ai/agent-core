@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Dict
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from os import PathLike
 
 from openjiuwen.core.common.logging import logger
@@ -42,6 +42,9 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
 
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+
 
 def _collect_disabled_skills_from_state(skills_dirs: list[str]) -> list[str]:
     """Read skills_state.json from each skills_dir and collect disabled skill names."""
@@ -67,7 +70,10 @@ def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
     return card.name == "free_search" and not is_free_search_enabled()
 
 
-def _append_env_online_training_rail(rails: list[AgentRail]) -> list[AgentRail]:
+def _append_env_online_training_rail(
+    rails: list[AgentRail],
+    trajectory_span_processor: TrajectorySpanProcessor | None,
+) -> list[AgentRail]:
     """Append env-configured online training rail without exposing it to hosts.
 
     JiuwenSwarm and other harness hosts only need to set environment variables.
@@ -84,7 +90,10 @@ def _append_env_online_training_rail(rails: list[AgentRail]) -> list[AgentRail]:
 
     if any(isinstance(rail, RLOnlineRail) for rail in rails):
         return rails
-    rail = build_rl_online_rail_from_env()
+    if trajectory_span_processor is None:
+        logger.warning("Online training rail is enabled but no trajectory span processor is available")
+        return rails
+    rail = build_rl_online_rail_from_env(trajectory_span_processor=trajectory_span_processor)
     if rail is None:
         return rails
     return [*rails, rail]
@@ -226,6 +235,7 @@ def resolve_deep_agent_parts(
     enable_security_rail: bool = True,
     enable_llm_retry_rail: bool = True,
     enable_sys_operation: bool = True,
+    trajectory_span_processor: TrajectorySpanProcessor | None = None,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -409,7 +419,7 @@ def resolve_deep_agent_parts(
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):
             all_rails.append(make_rail())
-    all_rails = _append_env_online_training_rail(all_rails)
+    all_rails = _append_env_online_training_rail(all_rails, trajectory_span_processor)
 
     return DeepAgentParts(
         config=config,

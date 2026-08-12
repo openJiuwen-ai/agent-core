@@ -34,6 +34,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentRail,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts.sections import SectionName
@@ -1092,6 +1093,7 @@ def test_resolve_deep_agent_parts_adds_rl_online_rail_from_env(monkeypatch) -> N
     parts = resolve_deep_agent_parts(
         model=_create_dummy_model(),
         enable_sys_operation=False,
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
 
     rail_types = [type(rail).__name__ for rail in parts.rails if rail is not None]

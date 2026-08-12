@@ -610,6 +610,7 @@ class DeepAgentSpec(BaseModel):
             completion_timeout=self.completion_timeout,
             context_engine_config=self.context_engine_config,
             kv_cache_affinity_config=self.kv_cache_affinity_config,
+            trajectory_span_processor=getattr(build_ctx, "trajectory_span_processor", None),
             **self._progressive_tool_kwargs(),
         )
 
