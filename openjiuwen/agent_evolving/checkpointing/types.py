@@ -194,7 +194,7 @@ class EvolutionLog:
     """Persisted container of evolution entries for one skill."""
 
     skill_id: str
-    version: str = "v1.0.0"
+    version: str = "1.0.0"
     updated_at: str = field(default_factory=lambda: datetime.now(tz=timezone.utc).isoformat())
     entries: List[EvolutionRecord] = field(default_factory=list)
 
@@ -214,7 +214,7 @@ class EvolutionLog:
     def from_dict(cls, data: dict) -> "EvolutionLog":
         return cls(
             skill_id=data.get("skill_id", ""),
-            version=data.get("version", "v1.0.0"),
+            version=data.get("version", "1.0.0"),
             updated_at=data.get("updated_at", ""),
             entries=[EvolutionRecord.from_dict(item) for item in data.get("entries", [])],
         )

@@ -185,12 +185,14 @@ async def test_complete_rebuild_bumps_patch_and_clears(tmp_path: Path):
 
     assert cleared is True
     content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-    assert "version: v1.0.1" in content
+    assert "version: 1.0.1" in content
     log = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
     assert log["entries"] == []
-    assert log["version"] == "v1.0.1"
+    assert log["version"] == "1.0.1"
     changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
-    assert "## [v1.0.1]" in changelog or "## [1.0.1]" in changelog or "v1.0.1" in changelog
+    assert "## [1.0.1]" in changelog
+    # Archive filenames still use the v-prefixed key.
+    assert StoreArchiveHelper.archive_version_key("1.0.1") == "v1.0.1"
 
 
 @pytest.mark.asyncio
@@ -217,7 +219,7 @@ async def test_complete_rebuild_bumps_minor_when_any_instruction(tmp_path: Path)
 
     assert cleared is True
     content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
-    assert "version: v1.1.0" in content
+    assert "version: 1.1.0" in content
 
 
 @pytest.mark.asyncio
@@ -253,3 +255,94 @@ async def test_set_skill_md_version_keeps_body_horizontal_rule(tmp_path: Path):
     assert "After rule" in body
     assert "\n---\n" in body
     assert StoreArchiveHelper.extract_version_from_skill_md(content) == "v1.0.1"
+
+
+def test_extract_version_prefers_frontmatter_over_body():
+    content = (
+        "---\n"
+        "name: skill-a\n"
+        "version: v2.0.0\n"
+        "---\n"
+        "\n"
+        "# Skill\n"
+        "\n"
+        "version: v9.9.9\n"
+    )
+    assert StoreArchiveHelper.extract_version_from_skill_md(content) == "v2.0.0"
+
+
+def test_extract_version_from_body_when_frontmatter_missing_version():
+    content = (
+        "---\n"
+        "name: skill-a\n"
+        "---\n"
+        "\n"
+        "# Skill\n"
+        "\n"
+        "version: v1.2.3\n"
+    )
+    assert StoreArchiveHelper.extract_version_from_skill_md(content) == "v1.2.3"
+
+
+def test_extract_version_from_full_doc_without_frontmatter():
+    content = "# Skill\n\nversion: \"v3.1.0\"\n"
+    assert StoreArchiveHelper.extract_version_from_skill_md(content) == "v3.1.0"
+
+
+def test_extract_version_returns_none_when_absent():
+    content = "---\nname: skill-a\n---\n\n# Skill\n"
+    assert StoreArchiveHelper.extract_version_from_skill_md(content) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_current_version_reads_body_without_writing_frontmatter(tmp_path: Path):
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    skill_dir.mkdir(parents=True)
+    original = (
+        "---\n"
+        "name: skill-a\n"
+        "---\n"
+        "\n"
+        "# Skill\n"
+        "\n"
+        "version: v1.2.3\n"
+    )
+    (skill_dir / "SKILL.md").write_text(original, encoding="utf-8")
+    store = EvolutionStore(str(root))
+
+    version = await store.resolve_current_version("skill-a")
+
+    assert version == "v1.2.3"
+    content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    front, _ = split_markdown_frontmatter(content)
+    assert front is not None
+    assert "version:" not in front
+    assert content == original
+
+
+@pytest.mark.asyncio
+async def test_resolve_current_version_writes_default_when_missing(tmp_path: Path):
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: skill-a\n"
+        "---\n"
+        "\n"
+        "# Skill\n",
+        encoding="utf-8",
+    )
+    store = EvolutionStore(str(root))
+
+    version = await store.resolve_current_version("skill-a")
+
+    assert version == "1.0.0"
+    content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    front, body = split_markdown_frontmatter(content)
+    assert front is not None
+    assert "version: 1.0.0" in front
+    assert "version: v1.0.0" not in front
+    assert "# Skill" in body
+    assert StoreArchiveHelper.archive_version_key(version) == "v1.0.0"

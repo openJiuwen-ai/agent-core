@@ -357,15 +357,15 @@ class TestEvolutionStoreLogCRUD:
         store = EvolutionStore(str(root))
         original_write_file_text = store.write_file_text
 
-        async def fail_skill_md_projection(path: Path, content: str) -> None:
-            if path.name == "SKILL.md":
+        async def fail_section_projection(path: Path, content: str) -> None:
+            if path.parent.name == "evolution" and path.suffix == ".md":
                 raise build_error(
                     StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR,
                     error_msg="projection failed",
                 )
             await original_write_file_text(path, content)
 
-        store.write_file_text = fail_skill_md_projection
+        store.write_file_text = fail_section_projection
 
         with pytest.raises(BaseError) as exc_info:
             await store.append_record("skill-a", make_record("ev_1"))
@@ -588,8 +588,10 @@ class TestEvolutionStoreAppendScriptRecord:
         assert len(py_files) == 1
 
         skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
-        assert "evolution-index-start" in skill_md
-        assert "Scripts" in skill_md
+        assert "evolution-index-start" not in skill_md
+        assert "# Skill A" in skill_md
+        assert (script_file / "_index.md").exists()
+        assert "Script Index" in (script_file / "_index.md").read_text(encoding="utf-8")
 
 
 class TestEvolutionStoreConcurrentSafety:
@@ -690,7 +692,7 @@ class TestEvolutionStoreRenderMarkdown:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_render_updates_skill_md_index_block(tmp_path: Path):
+    async def test_render_does_not_inject_skill_md_index_block(tmp_path: Path):
         root = tmp_path / "skills"
         prepare_skill(root, "skill-a", "# Skill A\n\nSome content\n")
         store = EvolutionStore(str(root))
@@ -701,23 +703,20 @@ class TestEvolutionStoreRenderMarkdown:
         )
 
         skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
-        assert "<!-- evolution-index-start -->" in skill_md
-        assert "<!-- evolution-index-end -->" in skill_md
-        assert "Evolution Experiences" in skill_md
-        assert "**1**" in skill_md
-        assert "Use this section as an index of lessons learned from previous executions." in skill_md
-        assert "For narrative guidance, read the relevant `evolution/*.md#...` detail section." in skill_md
-        assert "### Experience Index" in skill_md
-        assert "| Summary | Type | Score | Detail |" in skill_md
-        assert "body fix" in skill_md
-        assert "[evolution/troubleshooting.md#ev_1](evolution/troubleshooting.md#ev_1)" in skill_md
-        assert "### Highlighted Evolution Records" not in skill_md
-        assert "### Top Experiences" not in skill_md
-        assert "### Narrative Guidance" not in skill_md
+        assert "<!-- evolution-index-start -->" not in skill_md
+        assert "<!-- evolution-index-end -->" not in skill_md
+        assert "Evolution Experiences" not in skill_md
+        assert "### Experience Index" not in skill_md
+        assert "# Skill A" in skill_md
+        assert "Some content" in skill_md
+
+        troubleshooting = (root / "skill-a" / "evolution" / "troubleshooting.md").read_text(encoding="utf-8")
+        assert '<a id="ev_1"></a>' in troubleshooting
+        assert "body fix" in troubleshooting
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_render_updates_skill_md_index_with_script_assets(tmp_path: Path):
+    async def test_render_script_assets_without_skill_md_index(tmp_path: Path):
         root = tmp_path / "skills"
         prepare_skill(root, "skill-a", "# Skill A\n\nSome content\n")
         store = EvolutionStore(str(root))
@@ -735,17 +734,20 @@ class TestEvolutionStoreRenderMarkdown:
         await store.append_record("skill-a", record)
 
         skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
-        assert "Scripts are implementation aids, not mandatory steps." in skill_md
-        assert "### Script Assets" in skill_md
-        assert "### Experience Index" not in skill_md
-        assert "### Narrative Guidance" not in skill_md
-        assert "evolution/scripts/_index.md" in skill_md
-        assert "[evolution/scripts/validate_csv.py](evolution/scripts/validate_csv.py)" in skill_md
-        assert "CSV validation helper" in skill_md
+        assert "evolution-index-start" not in skill_md
+        assert "### Script Assets" not in skill_md
+        assert "CSV validation helper" not in skill_md
+
+        index_path = root / "skill-a" / "evolution" / "scripts" / "_index.md"
+        assert index_path.exists()
+        index_content = index_path.read_text(encoding="utf-8")
+        assert "validate_csv.py" in index_content
+        assert "CSV validation helper" in index_content
+        assert (root / "skill-a" / "evolution" / "scripts" / "validate_csv.py").exists()
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_full_experience_index_includes_low_score_records_and_anchors(tmp_path: Path):
+    async def test_full_experience_details_include_low_score_records_and_anchors(tmp_path: Path):
         root = tmp_path / "skills"
         prepare_skill(root, "skill-a", "# Skill A\n\nSome content\n")
         store = EvolutionStore(str(root))
@@ -772,10 +774,9 @@ class TestEvolutionStoreRenderMarkdown:
         troubleshooting = (root / "skill-a" / "evolution" / "troubleshooting.md").read_text(encoding="utf-8")
         instructions = (root / "skill-a" / "evolution" / "instructions.md").read_text(encoding="utf-8")
 
-        assert "Use explicit retry budget before rerunning flaky tools." in skill_md
-        assert "| 0.20 | [evolution/troubleshooting.md#ev_low](evolution/troubleshooting.md#ev_low) |" in skill_md
-        assert "Match this skill when users mention audits" in skill_md
-        assert "[evolution/instructions.md#ev_high](evolution/instructions.md#ev_high)" in skill_md
+        assert "evolution-index-start" not in skill_md
+        assert "Use explicit retry budget before rerunning flaky tools." not in skill_md
+        assert "Match this skill when users mention audits" not in skill_md
         assert '<a id="ev_low"></a>' in troubleshooting
         assert "### [ev_low] Use explicit retry budget before rerunning flaky tools." in troubleshooting
         assert "### Legacy title" in troubleshooting
@@ -785,7 +786,7 @@ class TestEvolutionStoreRenderMarkdown:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_render_replaces_existing_index_block(tmp_path: Path):
+    async def test_render_strips_existing_index_block(tmp_path: Path):
         root = tmp_path / "skills"
         initial_content = (
             "# Skill A\n\nContent\n\n<!-- evolution-index-start -->\nold index\n<!-- evolution-index-end -->\n"
@@ -800,8 +801,11 @@ class TestEvolutionStoreRenderMarkdown:
 
         skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
         assert "old index" not in skill_md
-        assert "Evolution Experiences" in skill_md
-        assert skill_md.count("evolution-index-start") == 1
+        assert "evolution-index-start" not in skill_md
+        assert "Evolution Experiences" not in skill_md
+        assert "# Skill A" in skill_md
+        assert "Content" in skill_md
+        assert (root / "skill-a" / "evolution" / "troubleshooting.md").exists()
 
 
 class TestEvolutionStoreRecordMaintenance:
@@ -925,7 +929,11 @@ class TestPackSkillForSharing:
     @pytest.mark.asyncio
     async def test_pack_skill_for_sharing_omits_evolution_index_block(tmp_path: Path):
         root = tmp_path / "skills"
-        prepare_skill(root, "skill-a", "# Skill A\n\nContent\n")
+        prepare_skill(
+            root,
+            "skill-a",
+            "# Skill A\n\nContent\n\n<!-- evolution-index-start -->\nstale\n<!-- evolution-index-end -->\n",
+        )
         store = EvolutionStore(str(root))
 
         await store.append_record(
@@ -934,7 +942,8 @@ class TestPackSkillForSharing:
         )
 
         local_skill_md = (root / "skill-a" / "SKILL.md").read_text(encoding="utf-8")
-        assert "evolution-index-start" in local_skill_md
+        # Live render strips any leftover index; package must stay pristine too.
+        assert "evolution-index-start" not in local_skill_md
 
         package = await store.pack_skill_for_sharing("skill-a")
         packed_skill_md = TestPackSkillForSharing._read_tar_skill_md(package)
@@ -1111,7 +1120,7 @@ class TestEvolutionStoreArchiveAndCreate:
         skill_md_path = root / "skill-a" / "SKILL.md"
         section_path = root / "skill-a" / "evolution" / "troubleshooting.md"
         assert section_path.exists()
-        assert "evolution-index-start" in skill_md_path.read_text(encoding="utf-8")
+        assert "evolution-index-start" not in skill_md_path.read_text(encoding="utf-8")
 
         await store.delete_records("skill-a", [record.id])
 
@@ -1120,14 +1129,14 @@ class TestEvolutionStoreArchiveAndCreate:
 
         await store.append_record("skill-a", make_record("ev_2", content="body fix 2"))
         assert section_path.exists()
-        skill_md_with_index = skill_md_path.read_text(encoding="utf-8")
-        assert "evolution-index-start" in skill_md_with_index
+        skill_md_after_append = skill_md_path.read_text(encoding="utf-8")
+        assert "evolution-index-start" not in skill_md_after_append
 
         await store.clear_evolutions("skill-a")
 
-        # clear_evolutions empties the log but does not strip SKILL.md projection.
+        # clear_evolutions empties the log but does not clear evolution/*.md projection.
         assert (await store.load_full_evolution_log("skill-a")).entries == []
-        assert skill_md_path.read_text(encoding="utf-8") == skill_md_with_index
+        assert skill_md_path.read_text(encoding="utf-8") == skill_md_after_append
         assert section_path.exists()
 
     @staticmethod

@@ -217,12 +217,11 @@ class TestOnlineEvolutionE2E:
         assert ts_md.exists()
         assert "Permission Denied" in ts_md.read_text(encoding="utf-8")
 
-        # Verify SKILL.md index block
+        # Verify SKILL.md is not injected with an Experience Index block
         skill_md = (tmp_path / "skills" / skill_name / "SKILL.md").read_text(encoding="utf-8")
-        assert "<!-- evolution-index-start -->" in skill_md
-        assert "<!-- evolution-index-end -->" in skill_md
-        assert "Evolution Experiences" in skill_md
-        assert "**2**" in skill_md
+        assert "<!-- evolution-index-start -->" not in skill_md
+        assert "<!-- evolution-index-end -->" not in skill_md
+        assert "Evolution Experiences" not in skill_md
 
     @staticmethod
     @pytest.mark.asyncio

@@ -95,17 +95,19 @@ class TestParseAndBumpSemver:
 
     @staticmethod
     def test_format_semver():
-        assert format_semver(2, 1, 0) == "v2.1.0"
+        assert format_semver(2, 1, 0) == "2.1.0"
 
     @staticmethod
     def test_bump_patch_preserves_major_and_minor():
-        assert bump_semver("2.3.4", VersionBump.PATCH) == "v2.3.5"
+        assert bump_semver("2.3.4", VersionBump.PATCH) == "2.3.5"
 
     @staticmethod
     def test_bump_minor_preserves_major_and_resets_patch():
-        assert bump_semver("2.3.4", VersionBump.MINOR) == "v2.4.0"
+        assert bump_semver("2.3.4", VersionBump.MINOR) == "2.4.0"
 
     @staticmethod
     def test_bump_invalid_falls_back_to_default():
-        assert bump_semver("bad", VersionBump.PATCH) == "v1.0.1"
-        assert bump_semver("", VersionBump.MINOR) == "v1.1.0"
+        assert bump_semver("bad", VersionBump.PATCH) == "1.0.1"
+        assert bump_semver("", VersionBump.MINOR) == "1.1.0"
+        assert bump_semver("v1.0.0", VersionBump.PATCH) == "1.0.1"
+
