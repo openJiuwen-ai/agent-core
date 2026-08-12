@@ -5,6 +5,7 @@ import pytest
 
 from openjiuwen.agent_evolving.agent_rl.offline.runtime.runtime_executor import RuntimeExecutor
 from openjiuwen.agent_evolving.agent_rl.schemas import RLTask
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 
 
 @pytest.fixture
@@ -14,7 +15,7 @@ def sample_task():
 
 @pytest.mark.asyncio
 async def test_execute_async_neither_agent_factory_returns_empty_rollout(sample_task):
-    executor = RuntimeExecutor()
+    executor = RuntimeExecutor(trajectory_span_processor=TrajectorySpanProcessor())
     result = await executor.execute_async(sample_task)
     assert result.rollout_info == []
     assert result.reward_list == []
@@ -28,7 +29,10 @@ async def test_execute_async_agent_factory_exception_returns_empty_rollout(sampl
     def agent_factory(_: RLTask):
         raise ValueError("fail")
 
-    executor = RuntimeExecutor(agent_factory=agent_factory)
+    executor = RuntimeExecutor(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        agent_factory=agent_factory,
+    )
     result = await executor.execute_async(sample_task)
     assert result is not None
     assert result.rollout_info == []

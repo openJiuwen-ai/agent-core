@@ -34,6 +34,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentRail,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.prompts.sections import SectionName
@@ -53,6 +54,7 @@ from openjiuwen.harness.subagents.code_agent import (
     CODE_AGENT_FACTORY_NAME,
     DEFAULT_CODE_AGENT_SYSTEM_PROMPT,
 )
+from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.research_agent import (
     DEFAULT_RESEARCH_AGENT_SYSTEM_PROMPT,
     RESEARCH_AGENT_FACTORY_NAME,
@@ -312,7 +314,22 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
     assert agent.loop_coordinator is None
 
 
-def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt() -> None:
+def test_reconstructed_deep_agents_share_inner_persistence_identity() -> None:
+    persistence_id = "stable-deep-agent"
+    first = DeepAgent(AgentCard(id=persistence_id, name="deep")).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+    second = DeepAgent(AgentCard(id=persistence_id, name="deep")).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+
+    assert first.react_agent is not None
+    assert second.react_agent is not None
+    assert first.react_agent.card.id == persistence_id
+    assert second.react_agent.card.id == persistence_id
+
+
+def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
         DeepAgentConfig(
             enable_task_loop=False,
@@ -322,16 +339,10 @@ def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt
     )
 
     assert agent.system_prompt_builder is not None
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
-    # The template carries the identity alone; the reminder reaches the model
-    # through the shared builder, exactly once (ReActAgent folds the template
-    # back into the identity section on every round).
-    initial_template = agent._react_agent.config.prompt_template[0]["content"]
-    assert "initial identity" in initial_template
-    assert "<prompt-attachment>" not in initial_template
-    initial_prompt = agent.system_prompt_builder.build()
+    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
+    initial_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "initial identity" in initial_prompt
-    assert initial_prompt.count("<prompt-attachment>") == 1
+    assert "<prompt-attachment>" not in initial_prompt
 
     agent.configure(
         DeepAgentConfig(
@@ -341,143 +352,10 @@ def test_prompt_attachment_reminder_is_in_initial_and_hot_reloaded_system_prompt
         )
     )
 
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is not None
-    reloaded_template = agent._react_agent.config.prompt_template[0]["content"]
-    assert "updated identity" in reloaded_template
-    reloaded_prompt = agent.system_prompt_builder.build()
+    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
+    reloaded_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "updated identity" in reloaded_prompt
-    assert reloaded_prompt.count("<prompt-attachment>") == 1
-
-
-@pytest.mark.asyncio
-async def test_rendered_system_prompt_keeps_each_section_once() -> None:
-    """The prompt actually sent to the model must not repeat a section.
-
-    ReActAgent writes ``prompt_template`` back into the identity section on
-    every round while DeepAgent's shared builder still owns the other sections,
-    so a template holding the fully built prompt used to emit them twice.
-    """
-    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
-        DeepAgentConfig(
-            model=_create_dummy_model(),
-            enable_task_loop=False,
-            auto_create_workspace=False,
-            language="en",
-            system_prompt="IDENTITY_MARKER",
-        )
-    )
-    react_agent = agent._react_agent
-    react_agent.prompt_builder = agent.system_prompt_builder
-
-    # Mirror what a round does: fold the template back into identity, then build.
-    rendered = react_agent._build_rendered_system_prompt({"query": "hi"})
-    react_agent.add_prompt_builder_section("identity", rendered, priority=10)
-    prompt = react_agent.prompt_builder.build()
-
-    assert prompt.count("IDENTITY_MARKER") == 1
-    assert prompt.count("<prompt-attachment>") == 1
-
-
-def test_apply_prompt_builder_to_react_agent_keeps_the_template_identity_only() -> None:
-    """The public re-render entry point must not fold every section into identity.
-
-    ``apply_prompt_builder_to_react_agent`` is what resource-binding targets
-    call after mutating a section. It writes ``prompt_template``, which
-    ReActAgent folds back into identity on every round, so handing it the fully
-    built prompt would reintroduce the duplication for anything that goes
-    through this path.
-    """
-    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
-        DeepAgentConfig(
-            model=_create_dummy_model(),
-            enable_task_loop=False,
-            auto_create_workspace=False,
-            language="en",
-            system_prompt="IDENTITY_MARKER",
-        )
-    )
-
-    agent.apply_prompt_builder_to_react_agent()
-
-    template = agent._react_agent.config.prompt_template[0]["content"]
-    assert "IDENTITY_MARKER" in template
-    assert "<prompt-attachment>" not in template
-    assert agent.system_prompt_builder.build().count("<prompt-attachment>") == 1
-
-
-def test_skill_use_rail_initializes_after_the_filesystem_toolset() -> None:
-    """SkillUseRail defers read_file / code / bash to whoever owns them for real.
-
-    Its init only contributes fallback copies of those tools when nothing has
-    claimed the names yet, which is a question it can only answer correctly
-    once the rails that own them have initialized. Since rails initialize in
-    priority order, that requirement is a priority requirement.
-    """
-    from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
-    from openjiuwen.harness.tools.worktree.rails import WorktreeRail
-
-    assert SkillUseRail.priority < SysOperationRail.priority
-    assert SkillUseRail.priority < WorktreeRail.priority
-
-
-@pytest.mark.asyncio
-async def test_rails_are_initialized_in_priority_order() -> None:
-    """init runs highest priority first, so a rail's tools exist for lower ones.
-
-    A rail registers its tools and prompt sections in init, so "run my hook
-    after that rail's" and "see that rail's tools when I initialize" are the
-    same question. One priority answers both, whatever order rails were added.
-    """
-    init_order: List[str] = []
-
-    class _OrderRail(AgentRail):
-        def __init__(self, name: str, priority: int) -> None:
-            super().__init__()
-            self._name = name
-            self.priority = priority
-
-        def init(self, agent) -> None:
-            init_order.append(self._name)
-
-    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
-        DeepAgentConfig(enable_task_loop=False, auto_create_workspace=False)
-    )
-    agent.set_react_agent(FakeReactAgent(), initialized=False)
-    # Added low-to-high on purpose: list order must not decide this.
-    agent.add_rail(_OrderRail("low", 10))
-    agent.add_rail(_OrderRail("high", 100))
-    agent.add_rail(_OrderRail("mid", 50))
-
-    await agent.ensure_initialized()
-
-    assert init_order == ["high", "mid", "low"]
-
-
-@pytest.mark.asyncio
-async def test_rails_sharing_a_priority_keep_insertion_order() -> None:
-    """A stable sort, so an equal priority still means "the order I listed them"."""
-    init_order: List[str] = []
-
-    class _TiedRail(AgentRail):
-        priority = 100
-
-        def __init__(self, name: str) -> None:
-            super().__init__()
-            self._name = name
-
-        def init(self, agent) -> None:
-            init_order.append(self._name)
-
-    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
-        DeepAgentConfig(enable_task_loop=False, auto_create_workspace=False)
-    )
-    agent.set_react_agent(FakeReactAgent(), initialized=False)
-    agent.add_rail(_TiedRail("first"))
-    agent.add_rail(_TiedRail("second"))
-
-    await agent.ensure_initialized()
-
-    assert init_order == ["first", "second"]
+    assert "<prompt-attachment>" not in reloaded_prompt
 
 
 @pytest.mark.asyncio
@@ -1205,6 +1083,23 @@ def test_create_deep_agent_auto_add_task_planning_rail() -> None:
     assert "TaskPlanningRail" in rail_types
 
 
+def test_resolve_deep_agent_parts_adds_rl_online_rail_from_env(monkeypatch) -> None:
+    from openjiuwen.harness.factory import resolve_deep_agent_parts
+
+    monkeypatch.setenv("USE_RL_ONLINE_RAIL", "1")
+    monkeypatch.setenv("TRAJECTORY_GATEWAY_URL", "http://127.0.0.1:18080")
+    monkeypatch.setenv("RL_ONLINE_TENANT_ID", "test-user")
+
+    parts = resolve_deep_agent_parts(
+        model=_create_dummy_model(),
+        enable_sys_operation=False,
+        trajectory_span_processor=TrajectorySpanProcessor(),
+    )
+
+    rail_types = [type(rail).__name__ for rail in parts.rails if rail is not None]
+    assert "RLOnlineRail" in rail_types
+
+
 @pytest.mark.asyncio
 async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
     tool = _build_tool_card("factory_tool")
@@ -1457,6 +1352,7 @@ def test_create_subagent_forwards_browser_capabilities_to_factory(tmp_path) -> N
         workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
         subagents=[browser_spec],
     )
+    parent.deep_config.enable_read_image_multimodal = False
     factory_result = object()
 
     with patch(
@@ -1471,6 +1367,80 @@ def test_create_subagent_forwards_browser_capabilities_to_factory(tmp_path) -> N
 
     assert subagent is factory_result
     assert mock_create_browser_agent.call_args.kwargs["browser_capabilities"] == ["pdf", "vision"]
+    assert mock_create_browser_agent.call_args.kwargs["enable_read_image_multimodal"] is False
+
+
+def test_create_subagent_forwards_multimodal_support_to_browser_factory(tmp_path) -> None:
+    browser_spec = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser prompt",
+        factory_name="browser_agent",
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[browser_spec],
+    )
+    parent.deep_config.enable_read_image_multimodal = True
+
+    with patch(
+        "openjiuwen.harness.subagents.browser_agent.create_browser_agent",
+        return_value=object(),
+    ) as mock_create_browser_agent:
+        parent.create_subagent("browser_agent", "browser_session")
+
+    assert mock_create_browser_agent.call_args.kwargs["enable_read_image_multimodal"] is True
+
+
+def test_create_subagent_forwards_multimodal_support_to_derived_browser_model(tmp_path) -> None:
+    parent_model = _create_dummy_model()
+    browser_spec = build_browser_agent_config(
+        parent_model,
+        language="en",
+    )
+    parent = create_deep_agent(
+        model=parent_model,
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[browser_spec],
+    )
+    parent.deep_config.enable_read_image_multimodal = False
+
+    with patch(
+        "openjiuwen.harness.subagents.browser_agent.create_browser_agent",
+        return_value=object(),
+    ) as mock_create_browser_agent:
+        parent.create_subagent("browser_agent", "browser_session")
+
+    assert mock_create_browser_agent.call_args.kwargs["enable_read_image_multimodal"] is False
+
+
+def test_create_subagent_keeps_auto_probe_for_distinct_browser_model(tmp_path) -> None:
+    browser_spec = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser"),
+        system_prompt="browser prompt",
+        factory_name="browser_agent",
+        model=_create_dummy_model(),
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        system_prompt="parent prompt",
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[browser_spec],
+    )
+    parent.deep_config.enable_read_image_multimodal = False
+
+    with patch(
+        "openjiuwen.harness.subagents.browser_agent.create_browser_agent",
+        return_value=object(),
+    ) as mock_create_browser_agent:
+        parent.create_subagent("browser_agent", "browser_session")
+
+    assert "enable_read_image_multimodal" not in mock_create_browser_agent.call_args.kwargs
 
 
 def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:

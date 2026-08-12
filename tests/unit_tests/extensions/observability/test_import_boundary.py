@@ -15,14 +15,13 @@ def test_semconv_import_does_not_load_agent_teams() -> None:
 import sys
 from openjiuwen.extensions.observability import semconv
 from openjiuwen.extensions.observability.config import ObservabilityConfig
-from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
+from openjiuwen.extensions.observability.setup import init_observability, shutdown_observability
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 assert semconv.GEN_AI_OPERATION_NAME == "gen_ai.operation.name"
-runtime = ObservabilityRuntime()
-runtime.initialize(ObservabilityConfig(enabled=True, sample_rate=1.0), span_exporter_override=InMemorySpanExporter())
+init_observability(ObservabilityConfig(enabled=True, sample_rate=1.0), span_exporter_override=InMemorySpanExporter())
 assert not [name for name in sys.modules if name.startswith("openjiuwen.agent_teams")]
-runtime.shutdown()
+shutdown_observability()
 """
 
     result = subprocess.run(

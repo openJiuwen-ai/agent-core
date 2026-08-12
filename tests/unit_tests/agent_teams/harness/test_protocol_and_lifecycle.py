@@ -6,14 +6,17 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags, TraceState
 
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.core.runner import Runner
 from openjiuwen.agent_teams.harness import (
     HarnessProtocol,
     HarnessState,
     NativeHarness,
 )
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryStore
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -89,7 +92,7 @@ async def test_stop_leaves_no_lingering_harness_tasks() -> None:
     await Runner.start()
     try:
         harness = NativeHarness(make_spec())
-        fake = await start_harness(harness, sleep_seconds=0.02)
+        await start_harness(harness, sleep_seconds=0.02)
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
@@ -246,34 +249,51 @@ async def test_after_task_iteration_fires_when_round_fails() -> None:
         await Runner.stop()
 
 
+def _synthetic_llm_span(span_id: int) -> ReadableSpan:
+    context = SpanContext(
+        trace_id=1,
+        span_id=span_id,
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_state=TraceState(),
+    )
+    return ReadableSpan(
+        name="llm.call",
+        context=context,
+        resource=Resource.create({"openjiuwen.session_id": "harness-session"}),
+        kind=SpanKind.INTERNAL,
+        attributes={},
+        status=Status(StatusCode.OK),
+        start_time=span_id,
+        end_time=span_id + 1,
+    )
+
+
 @pytest.mark.asyncio
 async def test_evolution_rail_triggers_per_round_in_multi_round_mode() -> None:
-    """An AFTER_INVOKE-triggered EvolutionRail fires once per outer round.
-
-    Regression guard for the original bug: in start+send multi-round mode the
-    invoke lifecycle never fired, so SkillEvolutionRail / TeamSkillEvolutionRail
-    (default trigger AFTER_INVOKE) never built a trajectory nor ran evolution.
-    This mounts a minimal EvolutionRail and proves the whole chain now fires:
-    ``before_invoke`` creates the trajectory builder and ``after_invoke``
-    triggers ``run_evolution`` — per round.
-    """
+    """An AFTER_INVOKE rail fires once per outer round with canonical spans."""
     await Runner.start()
     try:
         harness = NativeHarness(make_spec())
         await start_harness(harness)
 
+        processor = TrajectorySpanProcessor()
         evolved: list = []
 
         class _CountingEvolutionRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
-                evolved.append(trajectory)
+            def __init__(self) -> None:
+                super().__init__(async_evolution=False, trajectory_span_processor=processor)
+                self._span_id = 1
 
-        # Default trigger is AFTER_INVOKE; sync evolution so the count is
-        # settled by the time after_invoke returns.
-        rail = _CountingEvolutionRail(
-            trajectory_store=InMemoryTrajectoryStore(),
-            async_evolution=False,
-        )
+            async def _on_before_invoke(self, ctx) -> None:
+                await super()._on_before_invoke(ctx)
+                processor.on_end(_synthetic_llm_span(self._span_id))
+                self._span_id += 1
+
+            async def run_evolution(self, prepared) -> None:
+                evolved.append(prepared)
+
+        rail = _CountingEvolutionRail()
         await harness.agent_callback_manager.register_rail(rail, harness)
 
         collected: list = []
@@ -287,7 +307,6 @@ async def test_evolution_rail_triggers_per_round_in_multi_round_mode() -> None:
             await harness.stop()
             await consumer
 
-        # Evolution ran once per outer round — the bug would leave this empty.
         assert len(evolved) == 2
     finally:
         await Runner.stop()

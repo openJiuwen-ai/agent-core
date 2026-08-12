@@ -31,11 +31,18 @@ from openjiuwen.harness.manifest import (
     resolve_factory,
 )
 from openjiuwen.harness.manifest.introspect import class_rail_adapter
+from openjiuwen.harness.manifest.harness_elements import (
+    SKILL_CREATE,
+    SkillCreateInput,
+    _build_skill_create_rail,
+)
+from openjiuwen.harness.schema.build_context import BuildContext
 from openjiuwen.harness.schema.deep_agent_spec import (
     _RAIL_PROVIDER_REGISTRY,
     _SUBAGENT_PROVIDER_REGISTRY,
     _TOOL_PROVIDER_REGISTRY,
 )
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 
 
 @dataclass
@@ -235,3 +242,33 @@ def test_register_from_catalog_routes_by_kind(isolated_catalog) -> None:
     assert isinstance(rail, _FakeRailWithLang)
     assert rail.language == "fr"
     assert rail.channel == "x"
+
+
+def test_skill_create_manifest_injects_shared_processor_from_context() -> None:
+    """SkillCreateRail receives the exact process-level processor instance."""
+    processor = TrajectorySpanProcessor()
+    context = BuildContext(language="en")
+    context.trajectory_span_processor = processor
+
+    resolved = SkillCreateInput.resolve({"skills_dir": "/tmp/skills"}, context)
+    assert resolved.trajectory_span_processor is processor
+
+    rail = _build_skill_create_rail({"skills_dir": "/tmp/skills"}, context)
+    assert rail.trajectory_span_processor is processor
+    assert get_catalog()[SKILL_CREATE].input_schema["properties"]["trajectory_span_processor"]["source"] == "context"
+
+
+def test_skill_create_manifest_does_not_fallback_without_processor() -> None:
+    """A missing context processor fails construction instead of creating one."""
+    with pytest.raises(TypeError, match="trajectory_span_processor"):
+        _build_skill_create_rail({"skills_dir": "/tmp/skills"}, BuildContext())
+
+
+@pytest.mark.parametrize("name", ["tool_call_threshold", "tool_diversity_threshold"])
+def test_skill_create_manifest_rejects_removed_threshold_params(name: str) -> None:
+    """Removed threshold knobs must fail instead of being silently ignored."""
+    context = BuildContext(language="en")
+    context.trajectory_span_processor = TrajectorySpanProcessor()
+
+    with pytest.raises(TypeError, match=name):
+        _build_skill_create_rail({name: 1}, context)
