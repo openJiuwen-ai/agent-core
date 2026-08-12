@@ -16,12 +16,20 @@ from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitor
 from openjiuwen.agent_teams.observability.span_context import finalize_trace, reset_all
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.extensions.observability.config import ObservabilityConfig
-from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
+from openjiuwen.extensions.observability.setup import (
+    force_flush_provider,
+    get_config as get_shared_config,
+    get_observability_runtime,
+    get_tracer,
+    init_observability as init_shared_observability,
+    is_initialized as is_shared_observability_initialized,
+    shutdown_observability as shutdown_shared_observability,
+)
 
 _MONITOR_TRACER_NAME = "openjiuwen.agent_teams.observability.monitor"
 
 
-_runtime = ObservabilityRuntime()
+_runtime = get_observability_runtime()
 _monitor_handler: OtelTeamMonitorHandler | None = None
 _lifecycle_lock = threading.RLock()
 _initializing = False
@@ -38,27 +46,25 @@ def init_observability(
 
     with _lifecycle_lock:
         if not config.enabled:
-            _runtime.initialize(config)
+            init_shared_observability(config)
             return
         if _initializing:
             raise RuntimeError("observability initialization is already in progress")
-        if _runtime.is_initialized():
-            _runtime.add_span_processors(additional_span_processors)
-            return
 
         _initializing = True
         try:
-            _runtime.initialize(
+            init_shared_observability(
                 config,
                 span_exporter_override=span_exporter_override,
                 additional_span_processors=additional_span_processors,
             )
-            _monitor_handler = OtelTeamMonitorHandler(
-                config,
-                tracer=_runtime.get_tracer(_MONITOR_TRACER_NAME),
-            )
+            if _monitor_handler is None:
+                _monitor_handler = OtelTeamMonitorHandler(
+                    config,
+                    tracer=get_tracer(_MONITOR_TRACER_NAME),
+                )
         except Exception:
-            _runtime.shutdown()
+            shutdown_shared_observability()
             _monitor_handler = None
             reset_all()
             raise
@@ -80,11 +86,6 @@ def finalize_team_trace(team_name: str) -> None:
         force_flush_provider()
 
 
-def force_flush_provider(timeout_millis: int = 5000) -> None:
-    """Force flush the shared observability runtime."""
-    _runtime.force_flush(timeout_millis)
-
-
 def shutdown_observability() -> None:
     """Close Team monitor spans and shut down the shared runtime."""
     global _monitor_handler
@@ -96,25 +97,22 @@ def shutdown_observability() -> None:
                     _monitor_handler.close_all_spans()
                 except Exception as exc:
                     team_logger.warning("otel: monitor span cleanup failed - {}", exc)
-            _runtime.shutdown()
+            shutdown_shared_observability()
         finally:
             _monitor_handler = None
             reset_all()
 
 
-def get_tracer(name: str) -> Any:
-    """Return a tracer bound to the active observability runtime."""
-    return _runtime.get_tracer(name)
-
-
 def get_config() -> ObservabilityConfig | None:
-    """Return the active observability configuration."""
-    return _runtime.get_config()
+    """Return the active shared observability configuration."""
+
+    return get_shared_config()
 
 
 def is_initialized() -> bool:
-    """Return whether Team observability is initialized."""
-    return _runtime.is_initialized()
+    """Return whether the shared observability runtime is initialized."""
+
+    return is_shared_observability_initialized()
 
 
 def attach_to_team_agent(team_agent: Any) -> None:
