@@ -291,11 +291,24 @@ class CoordinationKernel:
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
         if self._scheduler is not None:
             self._scheduler.deactivate()
-        # Pause, do not tear down: the round stops at a clean inner-iteration
-        # boundary and stays resumable in place. This used to hard-cancel via
-        # ``drain_agent_task`` → ``abort(immediate=True)``, which threw away
-        # everything the member had done in the round it interrupted mid-way.
-        await self.pause_agent_round()
+        # Park the round only while the harness is alive. ``finalize_round``
+        # may already have stopped it; that is a cold pause, and the next run
+        # rebuilds native from the session checkpoint.
+        harness = getattr(host.resources, "harness", None)
+        if harness is not None and getattr(harness, "state", None) is not HarnessState.TERMINATED:
+            # The alive check is not atomic with the pause command. If a
+            # concurrent finalizer stops native here, finish cold-pause
+            # cleanup instead of aborting the persistent-team finalizer.
+            try:
+                await self.pause_agent_round()
+            except Exception as exc:
+                if getattr(harness, "state", None) is not HarnessState.TERMINATED:
+                    raise
+                team_logger.warning(
+                    "[{}] park round failed; continuing with cold pause: {}",
+                    host.member_name or "?",
+                    exc,
+                )
         host.persist_allocator_state()
         # Extract team memories while the session is still bound and the DB
         # is accessible. Moved from finalize_round so extraction runs once

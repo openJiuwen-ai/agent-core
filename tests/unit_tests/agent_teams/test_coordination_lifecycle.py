@@ -202,6 +202,65 @@ async def test_pause_stops_at_boundary_and_never_hard_cancels():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_pause_treats_terminated_harness_as_cold_pause():
+    """Round finalization may stop native before persistent cleanup runs."""
+    host = _make_kernel_host()
+    host.resources.harness.state = HarnessState.TERMINATED
+    host.stream_controller.pause_agent.side_effect = RuntimeError("NativeHarness already stopped")
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.pause()
+
+    host.stream_controller.pause_agent.assert_not_awaited()
+    host.persist_allocator_state.assert_called_once()
+    host.session_manager.release_session.assert_called_once()
+    assert kernel._lifecycle_state == "paused"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_degrades_concurrent_harness_stop_to_cold_pause():
+    """A harness can terminate after the alive check but before park runs."""
+    host = _make_kernel_host()
+    host.resources.harness.state = HarnessState.RUNNING
+
+    async def stop_during_pause():
+        host.resources.harness.state = HarnessState.TERMINATED
+        raise RuntimeError("NativeHarness already stopped")
+
+    host.stream_controller.pause_agent.side_effect = stop_during_pause
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.pause()
+
+    host.stream_controller.pause_agent.assert_awaited_once()
+    host.persist_allocator_state.assert_called_once()
+    host.session_manager.release_session.assert_called_once()
+    assert kernel._lifecycle_state == "paused"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_propagates_failure_while_harness_is_alive():
+    """Only a confirmed concurrent termination may become a cold pause."""
+    host = _make_kernel_host()
+    host.resources.harness.state = HarnessState.RUNNING
+    host.stream_controller.pause_agent.side_effect = RuntimeError("control queue failed")
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    with pytest.raises(RuntimeError, match="control queue failed"):
+        await kernel.pause()
+
+    host.persist_allocator_state.assert_not_called()
+    host.session_manager.release_session.assert_not_called()
+    assert kernel._lifecycle_state == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_stop_hard_cancels_the_round():
     """kernel.stop tears the round down: it is discarded outright."""
     host = _make_kernel_host()
