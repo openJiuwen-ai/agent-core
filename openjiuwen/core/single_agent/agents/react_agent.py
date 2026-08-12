@@ -41,7 +41,9 @@ from openjiuwen.core.context_engine import (
 )
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
+    ImagePart,
     Model,
+    TextPart,
     ToolMessage,
     UserMessage,
     SystemMessage
@@ -1153,6 +1155,9 @@ class ReActAgent(BaseAgent):
             return False
 
         for message in messages:
+            if any(isinstance(part, ImagePart) for part in getattr(message, "parts", ())):
+                return True
+
             content = getattr(message, "content", None)
             if isinstance(message, dict):
                 content = message.get("content")
@@ -1476,29 +1481,14 @@ class ReActAgent(BaseAgent):
 
     @staticmethod
     def _build_multimodal_tool_results_message(tool_results: Any) -> Optional[UserMessage]:
-        content: List[dict[str, Any]] = []
+        content: List[Union[TextPart, ImagePart]] = []
         loaded_paths: List[str] = []
 
         for tool_result in tool_results:
-            for item in ReActAgent._iter_multimodal_image_items(tool_result):
-                source = str(item.get("source") or "tool")
-                source_path = str(item.get("source_path") or "unknown image")
-                data_url = item["data_url"]
+            for source, source_path, image in ReActAgent._iter_multimodal_image_items(tool_result):
                 loaded_paths.append(source_path)
-                content.append(
-                    {
-                        "type": "text",
-                        "text": f"Image loaded from {source}: {source_path}",
-                    }
-                )
-                content.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": data_url,
-                        },
-                    }
-                )
+                content.append(TextPart(text=f"Image loaded from {source}: {source_path}"))
+                content.append(image)
 
         if not content:
             return None
@@ -1508,12 +1498,13 @@ class ReActAgent(BaseAgent):
                 "Images loaded by tool results:",
                 *[f"{index}. {path}" for index, path in enumerate(loaded_paths, start=1)],
             ]
-            content.insert(0, {"type": "text", "text": "\n".join(summary_lines)})
+            content.insert(0, TextPart(text="\n".join(summary_lines)))
 
         return UserMessage(content=content)
 
     @staticmethod
-    def _iter_multimodal_image_items(tool_result: Any) -> List[dict[str, Any]]:
+    def _iter_multimodal_image_items(tool_result: Any) -> List[tuple[str, str, ImagePart]]:
+        """Pull ``(source, source_path, ImagePart)`` out of a tool result's multimodal payload."""
         data = getattr(tool_result, "data", None)
         if not isinstance(data, dict):
             return []
@@ -1522,7 +1513,7 @@ class ReActAgent(BaseAgent):
         if not isinstance(multimodal_items, list):
             return []
 
-        image_items: List[dict[str, Any]] = []
+        images: List[tuple[str, str, ImagePart]] = []
         for item in multimodal_items:
             if not isinstance(item, dict) or item.get("type") != "image":
                 continue
@@ -1531,9 +1522,21 @@ class ReActAgent(BaseAgent):
             if not isinstance(data_url, str) or not data_url.startswith("data:image/"):
                 continue
 
-            image_items.append(item)
+            extra = {
+                key: item[key]
+                for key in ("width", "height")
+                if isinstance(item.get(key), int)
+            }
+            image = ImagePart.from_data_url_unchecked(data_url, **extra)
+            images.append(
+                (
+                    str(item.get("source") or "tool"),
+                    str(item.get("source_path") or "unknown image"),
+                    image,
+                )
+            )
 
-        return image_items
+        return images
 
     def _is_interrupted(self, tool_result: Any) -> bool:
         """Detect whether a tool result signals workflow interruption."""

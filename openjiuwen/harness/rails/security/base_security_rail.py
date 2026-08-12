@@ -9,7 +9,8 @@ from enum import Enum
 from typing import Any, Iterable, Optional, Set
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import ToolMessage
+from openjiuwen.core.foundation.llm import TextPart, ToolMessage
+from openjiuwen.core.foundation.llm.schema.content_part import normalize_content_part
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.session import InteractiveInput
@@ -616,11 +617,12 @@ class BaseSecurityRail(AgentRail):
                 return content
             if isinstance(content, list):
                 parts = []
-                for part in content:
-                    if isinstance(part, str):
-                        parts.append(part)
-                    elif isinstance(part, dict) and "text" in part:
-                        parts.append(str(part["text"]))
+                for item in content:
+                    part = normalize_content_part(item)
+                    if isinstance(part, TextPart):
+                        parts.append(part.text)
+                    elif isinstance(item, dict) and "text" in item:
+                        parts.append(str(item["text"]))
                 return " ".join(parts)
             return str(content)
         if isinstance(msg, dict) and "content" in msg:

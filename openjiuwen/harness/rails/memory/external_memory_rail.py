@@ -8,6 +8,8 @@ import time
 from typing import Dict, Optional
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import TextPart
+from openjiuwen.core.foundation.llm.schema.content_part import normalize_content_part
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
@@ -372,9 +374,9 @@ class ExternalMemoryRail(DeepAgentRail):
                             return content.strip()
                         if isinstance(content, list):
                             texts = [
-                                p.get("text", "") 
-                                for p in content 
-                                if isinstance(p, dict) and p.get("type") == "text" and p.get("text", "").strip()
+                                part.text
+                                for part in (normalize_content_part(p) for p in content)
+                                if isinstance(part, TextPart) and part.text.strip()
                             ]
                             if texts:
                                 return " ".join(texts).strip()

@@ -1,6 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Tests for the vcs message codec (BaseMessage <-> json dict, by role)."""
+import json
+
+from openjiuwen.core.foundation.llm.schema.content_part import ImagePart, TextPart
 from openjiuwen.core.foundation.llm.schema.message import (
     AssistantMessage,
     SystemMessage,
@@ -67,3 +70,28 @@ def test_context_state_roundtrip():
     assert isinstance(decoded["messages"][0], UserMessage)
     assert decoded["messages"][1].content == "yo"
     assert decoded["offload_messages"]["h1"][0].content == "big"
+
+
+def test_content_part_content_survives_json_dumps():
+    """``vcs/backend.py`` calls ``json.dumps`` with no ``default=``.
+
+    ``AssistantMessage`` used to override ``model_dump`` by hand, ignoring
+    ``mode="json"``, so a ``ContentPart`` in ``content`` would have reached
+    ``json.dumps`` as a pydantic model and raised ``TypeError``.
+    """
+    message = AssistantMessage(content=[TextPart(text="answer")])
+
+    encoded = encode_message(message)
+
+    assert json.loads(json.dumps(encoded))["content"] == [{"type": "text", "text": "answer"}]
+
+
+def test_content_part_content_roundtrips():
+    message = UserMessage(
+        content=[TextPart(text="look"), ImagePart(mime_type="image/png", data="Zm9v")],
+    )
+
+    decoded = decode_message(encode_message(message))
+
+    assert isinstance(decoded, UserMessage)
+    assert decoded.parts == message.parts

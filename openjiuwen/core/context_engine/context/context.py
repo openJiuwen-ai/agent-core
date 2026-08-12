@@ -21,7 +21,8 @@ from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.foundation.kv_cache import first_changed_index
-from openjiuwen.core.foundation.llm import BaseMessage
+from openjiuwen.core.foundation.llm import BaseMessage, TextPart
+from openjiuwen.core.foundation.llm.schema.content_part import normalize_content_part
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
@@ -617,11 +618,13 @@ class SessionModelContext(ModelContext):
             return len(content) // 4
         elif isinstance(content, list):
             total = 0
-            for part in content:
-                if isinstance(part, str):
-                    total += len(part) // 4
-                elif isinstance(part, dict) and "text" in part:
-                    total += len(part["text"]) // 4
+            for item in content:
+                part = normalize_content_part(item)
+                if isinstance(part, TextPart):
+                    total += len(part.text) // 4
+                elif isinstance(item, dict) and "text" in item:
+                    # Untyped ``{"text": ...}`` dialects normalization skips.
+                    total += len(item["text"]) // 4
             return total
         return 0
 

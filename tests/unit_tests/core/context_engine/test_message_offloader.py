@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import base64
 from unittest.mock import MagicMock
 from typing import List
 
@@ -9,6 +10,7 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
+    MessageOffloader,
     MessageOffloaderConfig,
     OMIT_STRING,
 )
@@ -687,3 +689,122 @@ class TestMessageOffloader:
         tool_msg = result[2]
         assert not isinstance(tool_msg, OffloadMixin)
         assert tool_msg.content == long_content
+
+
+def _openai_image_block() -> dict:
+    """The shape a multimodal tool result carries today."""
+    data_url = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\xa5" * 4096).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": data_url}}
+
+
+class TestListContentIsNeverOffloaded:
+    """The §5 decision-3 rule, made explicit by ``_is_offloadable_content``.
+
+    Before this stage the exclusion was an accident of an unnamed
+    ``isinstance(content, str)`` check, which the ``.text`` migration would
+    have removed — silently making image-bearing messages offloadable.
+    """
+
+    @pytest.mark.asyncio
+    async def test_offload_list_content_does_not_raise(self):
+        """Defect C: ``content[:n] + OMIT_STRING`` used to raise ``TypeError``.
+
+        The guard means production never reaches here with list content, so
+        this covers the direct call only — a latent crash removed, not a
+        behavior change.
+        """
+        engine = ContextEngine(ContextEngineConfig(default_window_message_num=100))
+        ctx = await engine.create_context("list_content_ctx", None, history_messages=[])
+        offloader = MessageOffloader(
+            MessageOffloaderConfig(trim_size=100, large_message_threshold=1000)
+        )
+        message = ToolMessage(
+            tool_call_id="tc-1",
+            content=["a long tool result " * 200, _openai_image_block()],
+        )
+
+        offloaded = await offloader._offload_message(message, ctx)
+
+        assert isinstance(offloaded, OffloadMixin)
+        preview = offloaded.content.split("[[OFFLOAD:")[0]
+        assert preview == ("a long tool result " * 200)[:100] + OMIT_STRING
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(["x" * 200, _openai_image_block()], id="with-image"),
+            pytest.param(["x" * 200, "y" * 200], id="text-only-list"),
+        ],
+    )
+    async def test_list_content_is_never_offloaded(self, content):
+        """Text-only lists are excluded too — the rule is not image-specific."""
+        config = MessageOffloaderConfig(
+            messages_threshold=1,
+            large_message_threshold=30,
+            trim_size=10,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+        )
+        ctx = await create_context_with_offloader(config)
+
+        await ctx.add_messages(
+            [UserMessage(content="u"), ToolMessage(content=content, tool_call_id="tc-1")]
+        )
+
+        tool_msg = ctx.get_messages()[1]
+        assert not isinstance(tool_msg, OffloadMixin)
+        assert tool_msg.content == content
+
+    @pytest.mark.asyncio
+    async def test_list_content_not_offloaded_even_when_role_is_eligible(self):
+        """Not merely a side effect of ``"user"`` being absent from the default roles."""
+        config = MessageOffloaderConfig(
+            messages_threshold=1,
+            large_message_threshold=30,
+            trim_size=10,
+            offload_message_type=["user"],
+            messages_to_keep=None,
+            keep_last_round=False,
+        )
+        ctx = await create_context_with_offloader(config)
+
+        await ctx.add_messages(
+            [
+                UserMessage(content=["describe this", _openai_image_block()]),
+                UserMessage(content="x" * 200),
+            ]
+        )
+
+        messages = ctx.get_messages()
+        assert not isinstance(messages[0], OffloadMixin), "image message must be kept"
+        assert isinstance(messages[1], OffloadMixin), "the role really is eligible"
+
+    @pytest.mark.asyncio
+    async def test_str_content_offload_behavior_unchanged(self):
+        """Regression guard for the ``.content`` -> ``.text`` substitution.
+
+        ``.text`` returns ``str`` content unchanged, so the trim must stay
+        byte-identical — this is the half of the change that touches every
+        existing caller.
+        """
+        config = MessageOffloaderConfig(
+            messages_threshold=1,
+            large_message_threshold=30,
+            trim_size=10,
+            offload_message_type=["tool"],
+            messages_to_keep=None,
+            keep_last_round=False,
+        )
+        ctx = await create_context_with_offloader(config)
+        long_content = "".join(str(i % 10) for i in range(200))
+
+        await ctx.add_messages(
+            [UserMessage(content="u"), ToolMessage(content=long_content, tool_call_id="tc-1")]
+        )
+
+        offload_msg = ctx.get_messages()[1]
+        assert isinstance(offload_msg, OffloadMixin)
+        assert offload_msg.content.split("[[OFFLOAD:")[0] == long_content[:10] + OMIT_STRING
+        assert_offload_saved(ctx, offload_msg, long_content)

@@ -6,9 +6,12 @@ from __future__ import annotations
 import json
 from typing import Any, List, Optional
 
+from openjiuwen.core.foundation.llm import TextPart
+from openjiuwen.core.foundation.llm.schema.content_part import normalize_content_part
+
 
 def _content_to_text(content: Any) -> str:
-    """Extract text from message content; omit image_url blocks."""
+    """Extract text from message content; omit image blocks."""
     if content is None:
         return ""
     if isinstance(content, str):
@@ -18,17 +21,11 @@ def _content_to_text(content: Any) -> str:
 
     parts: List[str] = []
     for block in content:
-        if isinstance(block, str):
-            parts.append(block)
+        part = normalize_content_part(block)
+        if not isinstance(part, TextPart):
             continue
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "image_url":
-            continue
-        if block.get("type") == "text":
-            text = block.get("text")
-            if isinstance(text, str) and text.strip():
-                parts.append(text)
+        if part.text.strip() or isinstance(block, str):
+            parts.append(part.text)
     return "\n".join(parts)
 
 

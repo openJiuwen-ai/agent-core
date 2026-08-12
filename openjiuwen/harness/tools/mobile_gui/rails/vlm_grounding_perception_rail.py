@@ -12,7 +12,8 @@ from PIL import Image
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-from openjiuwen.core.foundation.llm import UserMessage
+from openjiuwen.core.foundation.llm import TextPart, UserMessage
+from openjiuwen.core.foundation.llm.schema.content_part import normalize_content_part
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
@@ -316,10 +317,9 @@ class VlmGroundingPerceptionRail(AgentRail):
         if isinstance(content, list):
             parts: list[str] = []
             for block in content:
-                if isinstance(block, str):
-                    parts.append(block)
-                elif isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(str(block.get("text") or ""))
+                part = normalize_content_part(block)
+                if isinstance(part, TextPart):
+                    parts.append(part.text)
             return "\n".join(parts)
         return str(content or "")
 

@@ -10,7 +10,8 @@ from typing import List, Optional, Tuple
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text, sanitize_value_for_text
 from openjiuwen.core.context_engine.token.base import TokenCounter
-from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ImagePart, TextPart
+from openjiuwen.core.foundation.llm.schema.content_part import DEFAULT_IMAGE_TOKENS, normalize_content_part
 from openjiuwen.core.foundation.tool import ToolInfo
 
 # Providers charge tokens per image by its dimensions, not its payload size.
@@ -18,7 +19,10 @@ from openjiuwen.core.foundation.tool import ToolInfo
 # of magnitude and triggers premature context compression. When an image's
 # dimensions cannot be read, this flat fallback applies: the OpenAI high-detail
 # cost of a typical full-height phone screenshot (85 + 8 tiles x 170).
-DEFAULT_IMAGE_PLACEHOLDER_TOKENS = 1445
+#
+# Aliased from ``content_part`` rather than redeclared: ``ImagePart`` uses the
+# same number as its own no-dimensions fallback, and two copies would drift.
+DEFAULT_IMAGE_PLACEHOLDER_TOKENS = DEFAULT_IMAGE_TOKENS
 
 # The estimate is provider-agnostic by design (model-name sniffing is brittle
 # under router aliases): it takes the larger of the two dominant billing
@@ -209,6 +213,27 @@ def _image_block_tokens(part: dict) -> int:
     return _estimate_image_tokens(*dimensions)
 
 
+def _image_part_to_block(part: ImagePart) -> dict:
+    """Render an ``ImagePart`` into the dict shape the estimators above read.
+
+    Keeps one pricing path for typed and raw content alike: stamped
+    ``width``/``height`` short-circuit the sniffing, while a part carrying only
+    bytes still has its dimensions read out of the payload header. Deliberately
+    not ``ImagePart.estimated_tokens``, which prices for a single named
+    provider — this counter budgets a context window and wants the
+    provider-agnostic upper bound ``_estimate_image_tokens`` returns.
+    """
+    block: dict = {"type": "image", "detail": part.detail}
+    if part.width is not None and part.height is not None:
+        block["width"] = part.width
+        block["height"] = part.height
+    if part.data is not None:
+        block["source"] = {"type": "base64", "data": part.data}
+    elif part.url is not None:
+        block["image_url"] = {"url": part.url}
+    return block
+
+
 class TiktokenCounter(TokenCounter):
     """
     A fast and exact token counter powered by tiktoken.
@@ -279,8 +304,12 @@ class TiktokenCounter(TokenCounter):
                     total += self.count(json.dumps(dict_msg["tool_calls"], ensure_ascii=False), model=model, **kwargs)
         return total + 3
 
-    def _count_content_blocks(self, blocks: list, *, model: str = "", **kwargs) -> tuple:
+    def _count_content_blocks(self, blocks: list, *, model: str = "", **kwargs) -> Tuple[str, int]:
         """Split multimodal block-list content into countable text and non-text tokens.
+
+        Items are normalized to typed parts first, so a payload costs the same
+        whether its producer wrote an ``ImagePart`` or one of the raw dialects
+        that maps onto one.
 
         Image blocks are priced by their dimensions (tile formula), never by
         their payload: counting a base64 ``data:`` URL as text would report
@@ -288,22 +317,33 @@ class TiktokenCounter(TokenCounter):
         Images whose dimensions cannot be read cost the flat fallback, and the
         ``TIKTOKEN_IMAGE_PLACEHOLDER_TOKENS`` env var overrides both. Unknown
         block types are counted from their compact JSON form.
+
+        Returns:
+            The text to place in the message envelope, and the token count
+            contributed by everything that is not text.
         """
         text_parts: List[str] = []
         block_tokens = 0
-        for part in blocks:
-            if isinstance(part, dict):
-                ptype = part.get("type")
-                if ptype in ("image_url", "image") or "image_url" in part or "image" in part:
-                    block_tokens += _image_block_tokens(part)
-                elif ptype == "text" or "text" in part:
-                    text_parts.append(str(part.get("text") or ""))
+        for item in blocks:
+            part = normalize_content_part(item)
+            if isinstance(part, TextPart):
+                text_parts.append(part.text)
+            elif isinstance(part, ImagePart):
+                block_tokens += _image_block_tokens(_image_part_to_block(part))
+            elif isinstance(item, dict):
+                ptype = item.get("type")
+                if ptype in ("image_url", "image") or "image_url" in item or "image" in item:
+                    block_tokens += _image_block_tokens(item)
+                elif ptype == "text" or "text" in item:
+                    text_parts.append(str(item.get("text") or ""))
                 else:
-                    sanitized = sanitize_value_for_text(part)
+                    sanitized = sanitize_value_for_text(item)
                     compact = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
                     block_tokens += self.count(compact, model=model, **kwargs)
             elif isinstance(part, str):
                 text_parts.append(part)
+            else:
+                text_parts.append(str(part))
         return "\n".join(text_parts), block_tokens
 
     def count_tools(self, tools: List[ToolInfo], *, model: str = "", **kwargs) -> int:

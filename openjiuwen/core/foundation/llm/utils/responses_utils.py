@@ -13,6 +13,7 @@ import httpx
 from pydantic import BaseModel
 
 from openjiuwen.core.common.utils.header_utils import sanitize_headers
+from openjiuwen.core.foundation.llm.schema.content_part import TextPart
 from openjiuwen.core.foundation.llm.schema.message import (
     AssistantMessage,
     BaseMessage,
@@ -334,6 +335,8 @@ def _content_as_text(content: Any) -> str:
 def _content_part_text(part: Any) -> str:
     if isinstance(part, str):
         return part
+    if isinstance(part, TextPart):
+        return part.text
     if not isinstance(part, dict):
         return ""
 

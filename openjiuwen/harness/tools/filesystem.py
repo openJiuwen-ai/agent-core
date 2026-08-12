@@ -773,18 +773,23 @@ class ReadFileTool(Tool):
         return max(1, int(encoded_length * 0.125))
 
     @staticmethod
-    def _compress_image(img: Any, size: Tuple[int, int], quality: int) -> Optional[bytes]:
+    def _compress_image(img: Any, size: Tuple[int, int], quality: int) -> Optional[Tuple[bytes, Tuple[int, int]]]:
         """Render an isolated, downsized JPEG copy of an already-decoded PIL image.
 
         `img.convert("RGB")` returns a new image object, so `img` itself is
         never mutated and stays reusable by other compression tiers.
+
+        Returns the encoded bytes together with the pixel dimensions actually
+        produced. `thumbnail` preserves aspect ratio, so the result is rarely
+        exactly `size`, and the caller needs the real numbers to estimate
+        image tokens without decoding the payload a second time.
         """
         try:
             out = io.BytesIO()
             tier = img.convert("RGB")
             tier.thumbnail(size)
             tier.save(out, format="JPEG", quality=quality)
-            return out.getvalue()
+            return out.getvalue(), tier.size
         except (OSError, ValueError) as exc:
             logger.debug("Failed to compress image bytes: %s", exc)
             return None
@@ -804,6 +809,7 @@ class ReadFileTool(Tool):
         image_type = ext.lstrip(".") or "png"
         dimensions: str | None = None
         resized = raw
+        transmitted: Optional[Tuple[int, int]] = None
 
         try:
             from PIL import Image
@@ -817,6 +823,7 @@ class ReadFileTool(Tool):
                     detected_format = (img.format or "PNG").lower()
                     image_type = detected_format  # prefer format detected from buffer
                     dimensions = f"{img.width}x{img.height}"
+                    transmitted = (img.width, img.height)
 
                     # Tier 1: standard resize, same format as the source (thumbnail to 1536×1536).
                     tier1 = img.copy()
@@ -826,19 +833,20 @@ class ReadFileTool(Tool):
                     candidate = out.getvalue()
                     if candidate and len(candidate) < len(raw):
                         resized = candidate
+                        transmitted = tier1.size
 
                     # Tier 2/3: only pay for further compression if tier 1 still busts the budget.
                     # Token budget check uses a byte-length estimate, not a real base64 encode.
                     if self._estimate_base64_tokens(len(resized)) > self.MAX_TOKENS:
                         compressed = self._compress_image(img, size=(800, 800), quality=40)
-                        if compressed and self._estimate_base64_tokens(len(compressed)) <= self.MAX_TOKENS:
-                            resized = compressed
+                        if compressed and self._estimate_base64_tokens(len(compressed[0])) <= self.MAX_TOKENS:
+                            resized, transmitted = compressed
                             image_type = "jpeg"
                         else:
                             # Final fallback: 400×400 JPEG q=20 (mirrors TS Sharp fallback).
                             fallback = self._compress_image(img, size=(400, 400), quality=20)
                             if fallback:
-                                resized = fallback
+                                resized, transmitted = fallback
                                 image_type = "jpeg"
             except (OSError, ValueError) as exc:
                 logger.debug("Failed to parse image metadata (%s): %s", file_path, exc)
@@ -868,17 +876,18 @@ class ReadFileTool(Tool):
         encoded = base64.b64encode(resized).decode("ascii")
         data_url = f"data:{mime_type};base64,{encoded}"
         parts.append("Image bytes are attached as multimodal input and omitted from this tool result.")
+        payload = {
+            "type": "image",
+            "source": "read_file",
+            "source_path": file_path,
+            "mime_type": mime_type,
+            "data_url": data_url,
+        }
+        if transmitted is not None:
+            payload["width"], payload["height"] = transmitted
         return {
             "content": "\n".join(parts),
-            "multimodal": [
-                {
-                    "type": "image",
-                    "source": "read_file",
-                    "source_path": file_path,
-                    "mime_type": mime_type,
-                    "data_url": data_url,
-                }
-            ],
+            "multimodal": [payload],
         }
 
     # ------------------------------------------------------------------

@@ -9,6 +9,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openjiuwen.core.foundation.llm import ImagePart, TextPart, UserMessage
+from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
+    AnthropicModelClient,
+    _convert_message_schemas,
+)
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.harness import image_modality_probe
 from openjiuwen.harness.image_modality_probe import (
     get_cached_image_support,
@@ -192,3 +198,57 @@ async def test_scheduled_probe_skips_cached_endpoint() -> None:
 
     assert not image_modality_probe._probe_tasks
     invoke.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: the probe is built from Parts, not an OpenAI-shaped dict
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_probe_message_uses_parts():
+    invoke = AsyncMock(return_value=_FakeResponse("blue"))
+    llm = _make_llm(invoke=invoke)
+
+    await probe_image_support(llm)
+
+    message = invoke.await_args.args[0][0]
+    assert isinstance(message, UserMessage)
+    assert isinstance(message.content[0], ImagePart)
+    assert isinstance(message.content[1], TextPart)
+
+
+@pytest.mark.asyncio
+async def test_probe_renders_for_anthropic():
+    """Before Stage 3 the probe only meant anything against OpenAI endpoints."""
+    invoke = AsyncMock(return_value=_FakeResponse("blue"))
+    llm = _make_llm(invoke=invoke)
+
+    await probe_image_support(llm)
+
+    message = invoke.await_args.args[0][0]
+    payload = AnthropicModelClient._convert_messages_to_dict([message])
+    _, anthropic_messages = _convert_message_schemas(payload)
+
+    blocks = anthropic_messages[0]["content"]
+    assert blocks[0]["type"] == "image"
+    assert blocks[0]["source"]["type"] == "base64"
+    assert blocks[0]["source"]["media_type"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_probe_still_renders_the_openai_shape():
+    invoke = AsyncMock(return_value=_FakeResponse("blue"))
+    llm = _make_llm(invoke=invoke)
+
+    await probe_image_support(llm)
+
+    message = invoke.await_args.args[0][0]
+    content = BaseModelClient._convert_messages_to_dict([message])[0]["content"]
+
+    assert content[0]["type"] == "image_url"
+    assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert content[1] == {
+        "type": "text",
+        "text": "What color is this image? Reply with one word.",
+    }

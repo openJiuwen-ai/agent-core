@@ -722,8 +722,8 @@ class RoundLevelCompressor(ContextProcessor):
                 cause=exc,
             ) from exc
         replacements = await self._build_json_replacements(context, targets, response.parser_content)
-        if not replacements and isinstance(response.content, str) and response.content.strip():
-            fallback = await self._build_raw_fallback_replacement(context, targets, response.content.strip())
+        if not replacements and response.text.strip():
+            fallback = await self._build_raw_fallback_replacement(context, targets, response.text.strip())
             if fallback:
                 replacements = [fallback]
 

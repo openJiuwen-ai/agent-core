@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import ImagePart
+from openjiuwen.core.foundation.llm.schema.content_part import normalize_content_part
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
@@ -20,13 +22,15 @@ ARCHIVED_SCREEN_PLACEHOLDER = (
 )
 
 
+def _is_image_block(block) -> bool:
+    """True for an image in any shape ``content`` may hold it."""
+    return isinstance(normalize_content_part(block), ImagePart)
+
+
 def _has_image_url(msg) -> bool:
     if not isinstance(msg.content, list):
         return False
-    return any(
-        isinstance(b, dict) and b.get("type") == "image_url"
-        for b in msg.content
-    )
+    return any(_is_image_block(b) for b in msg.content)
 
 
 def _replace_archived_screenshot_images(msg) -> None:
@@ -35,7 +39,7 @@ def _replace_archived_screenshot_images(msg) -> None:
         return
     next_content: list = []
     for block in msg.content:
-        if isinstance(block, dict) and block.get("type") == "image_url":
+        if _is_image_block(block):
             next_content.append({"type": "text", "text": ARCHIVED_SCREEN_PLACEHOLDER})
         else:
             next_content.append(block)
