@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from openjiuwen.core.context_engine.qa_block.store import QABlockStore
 
 _CHARS_PER_TOKEN_ESTIMATE = 4
+_MAX_QA_MESSAGE_CACHE = 50
 
 
 def _estimate_message_tokens(messages: list[BaseMessage], token_counter: Any | None) -> int:
@@ -73,6 +74,12 @@ class QABlockLayer:
         self._config = config or QABlockConfig()
         self._artifact_store = artifact_store
         self._message_cache: dict[str, list[BaseMessage]] = {}
+
+    def _enforce_cache_limit(self) -> None:
+        """Evict oldest cached QA messages when the cache exceeds the limit."""
+        while len(self._message_cache) > _MAX_QA_MESSAGE_CACHE:
+            oldest = next(iter(self._message_cache))
+            self._message_cache.pop(oldest, None)
 
     @property
     def registry(self) -> QABlockRegistry:
@@ -151,6 +158,7 @@ class QABlockLayer:
                     raw_reasons[qa_id] = reason
 
             self._message_cache[qa_id] = messages
+            self._enforce_cache_limit()
             hydrate_messages.extend(messages)
 
         if not hydrate_messages:
@@ -279,6 +287,7 @@ class QABlockLayer:
         messages = await load_qa_l0(qa_id, self._history, self._store)
         if messages:
             self._message_cache[qa_id] = messages
+            self._enforce_cache_limit()
         return messages
 
     async def qa_ref_for_index(

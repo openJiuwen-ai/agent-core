@@ -87,6 +87,49 @@ class FreezeCommitResult:
     native_messages: list[BaseMessage]
 
 
+_MAX_QA_REGISTRY_BLOCKS = 200
+
+
+async def _evict_old_registry_blocks(
+    registry: QABlockRegistry,
+    store: QABlockStore | None = None,
+) -> int:
+    """Evict oldest history blocks when registry exceeds the limit.
+
+    Only ``is_history`` blocks are candidates; the current (in-flight) block
+    is never removed.  When ``store`` is provided, the corresponding L0 disk
+    files are also deleted so that ``reconcile_orphan_l0_blocks`` cannot
+    re-add them on the next model call.  Returns the number of evicted blocks.
+    """
+    history_items = [
+        (qa_id, entry.qa_index)
+        for qa_id, entry in registry.blocks.items()
+        if entry.is_history
+    ]
+    history_items.sort(key=lambda item: item[1])
+    excess = len(history_items) - _MAX_QA_REGISTRY_BLOCKS
+    if excess <= 0:
+        return 0
+    for old_id, _ in history_items[:excess]:
+        del registry.blocks[old_id]
+        if store is not None:
+            try:
+                await store.delete_l0(old_id)
+            except Exception as exc:
+                logger.warning(
+                    "[QABlockFreezer] failed to delete L0 for evicted qa_id=%s error=%s",
+                    old_id,
+                    exc,
+                )
+    logger.info(
+        "[QABlockFreezer] evicted %s old QA blocks (limit=%s) session_id=%s",
+        excess,
+        _MAX_QA_REGISTRY_BLOCKS,
+        registry.session_id,
+    )
+    return excess
+
+
 class QABlockFreezer:
     def __init__(
         self,
@@ -157,6 +200,7 @@ class QABlockFreezer:
         registry: QABlockRegistry | None = None,
         status: Literal["completed", "interrupted"] = "completed",
         preloaded_qa_ids: list[str] | None = None,
+        store: QABlockStore | None = None,
     ) -> FreezeCommitResult | None:
         registry = registry or load_registry(session)
         native_messages = extract_qa_native_messages(context.get_messages(), registry)
@@ -229,6 +273,7 @@ class QABlockFreezer:
         history_buffer.push(qa_id, [message.model_copy(deep=True) for message in native_messages])
         registry.blocks[qa_id] = entry
         registry.current_qa_id = None
+        await _evict_old_registry_blocks(registry, store)
         save_registry(session, registry)
         strip_active_buffer(context, registry)
 
@@ -351,6 +396,7 @@ class QABlockFreezer:
             history_buffer,
             status=status,
             preloaded_qa_ids=preloaded_qa_ids,
+            store=store,
         )
         if commit is None:
             return None

@@ -79,6 +79,9 @@ class ContextMessageBuffer:
         self._history_messages_size = self._history_messages_size - self._max_buffer_size
 
 
+_MAX_IN_MEMORY_OFFLOAD_ENTRIES = 100
+
+
 class OffloadMessageBuffer:
     def __init__(
             self,
@@ -106,6 +109,9 @@ class OffloadMessageBuffer:
     ):
         if offload_type == "in_memory":
             self._in_memory_offload_messages[offload_handle] = messages
+            while len(self._in_memory_offload_messages) > _MAX_IN_MEMORY_OFFLOAD_ENTRIES:
+                oldest = next(iter(self._in_memory_offload_messages))
+                self._in_memory_offload_messages.pop(oldest, None)
 
     async def reload(
             self,

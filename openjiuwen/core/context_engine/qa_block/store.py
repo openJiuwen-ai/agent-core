@@ -145,3 +145,33 @@ class QABlockStore:
             len(messages),
         )
         return messages
+
+    async def delete_l0(self, qa_id: str) -> bool:
+        """Delete L0 block file from disk. Returns True if file was deleted."""
+        target = self._absolute_path(qa_id)
+        deleted = False
+        if target.is_file():
+            try:
+                target.unlink()
+                deleted = True
+            except OSError as exc:
+                logger.warning(
+                    "[QABlockStore] delete_l0 failed session_id=%s qa_id=%s path=%s error=%s",
+                    self._session_id,
+                    qa_id,
+                    self.l0_relative_path(qa_id),
+                    exc,
+                )
+        if deleted and target.parent.is_dir():
+            try:
+                target.parent.rmdir()
+            except OSError:
+                pass
+        if deleted:
+            logger.info(
+                "[QABlockStore] delete_l0 session_id=%s qa_id=%s path=%s",
+                self._session_id,
+                qa_id,
+                self.l0_relative_path(qa_id),
+            )
+        return deleted

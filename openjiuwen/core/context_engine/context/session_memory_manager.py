@@ -321,6 +321,18 @@ class SessionMemoryUpdateAgent:
             response = await self._agent.invoke(inputs, session=session)
         finally:
             await session.post_run()
+            try:
+                from openjiuwen.core.session.checkpointer import CheckpointerFactory
+                await CheckpointerFactory.get_checkpointer().release(
+                    session.get_session_id()
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[SessionMemory] checkpointer release failed session_id=%s error=%s",
+                    session.get_session_id(),
+                    exc,
+                    exc_info=True,
+                )
         _ = response
 
     async def _invoke_direct_replace(
