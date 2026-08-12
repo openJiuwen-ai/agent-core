@@ -48,6 +48,9 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime_tools import (
     build_browser_runtime_tools,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.vision_rail import (
+    BrowserVisionRail,
+)
 
 try:
     from openjiuwen.harness.prompts import resolve_language
@@ -118,6 +121,12 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "When several fields are needed from the same page, extract them together in one "
     "browser_batch_interact call with named extract_text/extract_value steps, or consume one "
     "browser_probe_cards result that already contains all fields. "
+    "Use browser_vision when the answer exists only as pixels: charts, graphs, canvas elements, "
+    "images without alt text, tables whose values are drawn rather than written, CAPTCHAs, or "
+    "when you need to verify layout. When a probe result reports visual_content.has_visual_only "
+    "or a card marked visual_only, call browser_vision instead of inferring the value from "
+    "surrounding text — never guess at a chart you have not looked at. Do not call browser_vision "
+    "for text or structured data the compact probes can already extract. "
     "Use browser_snapshot only when compact probes are insufficient, when accessibility structure "
     "is needed, or when exact element references are required by a Playwright MCP action. "
     "When an older browser result is replaced by a <persisted-output> marker and its preview is "
@@ -178,6 +187,11 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "动态页面应使用 wait_for_url、wait_for_first_card_title、wait_for_sort_state、"
     "wait_for_result_count、wait_for_dom_text_change 或 wait_for_stable，并设置总 timeout。"
     "“等待完全加载”或“适当停顿”表示等待条件稳定，不表示固定 sleep 3 秒。"
+    "当答案只以像素形式存在时使用 browser_vision：图表、曲线图、canvas 元素、没有 alt 文本的图片、"
+    "以图形而非文字呈现数值的表格、验证码，或需要核实页面布局时。"
+    "当探测结果中出现 visual_content.has_visual_only，或某张卡片被标记为 visual_only 时，"
+    "应调用 browser_vision，而不是根据周围文字推测数值——绝不要对没有看过的图表进行猜测。"
+    "对于紧凑探测已经可以提取的文本或结构化数据，不要调用 browser_vision。"
     "仅在紧凑探测不足、需要无障碍结构，或 Playwright MCP 操作需要精确元素引用时使用 browser_snapshot。"
     "旧浏览器结果被替换为 <persisted-output> 且预览不足时，使用标记中的 handle 调用 "
     "browser_recall_offload。页面导航后，恢复结果里的 ref/selector 已过期，只能作为证据，禁止用于交互。"
@@ -437,6 +451,7 @@ def create_browser_agent(
     injected_rails: List[AgentRail] = [
         BrowserRuntimeRail(browser_backend),
         BrowserWorkingContextRail(working_context_config),
+        BrowserVisionRail(model=model),
     ]
     injected_tools.append(BrowserOffloadRecallTool(workspace, language=resolved_language))
 

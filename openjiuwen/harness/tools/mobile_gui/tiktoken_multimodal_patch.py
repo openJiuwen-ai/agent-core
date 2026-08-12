@@ -24,5 +24,6 @@ def apply_tiktoken_counter_multimodal_patch() -> None:
 
 
 __all__ = [
+    "DEFAULT_IMAGE_PLACEHOLDER_TOKENS",
     "apply_tiktoken_counter_multimodal_patch",
 ]
