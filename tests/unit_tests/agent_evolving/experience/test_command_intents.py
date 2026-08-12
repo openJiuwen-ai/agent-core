@@ -65,3 +65,5 @@ def test_build_rebuild_command_prompt_returns_prompt():
     assert "`skill-a/SKILL.md`" in prompt
     assert "Do NOT call todo_complete" in prompt
     assert "Do NOT mark Write/Confirm" in prompt
+    assert "reset evolutions.json" not in prompt
+    assert "Do NOT edit, rewrite, or clear evolutions.json" in prompt

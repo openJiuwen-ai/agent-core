@@ -27,7 +27,11 @@ from openjiuwen.agent_evolving.utils import split_markdown_frontmatter
 from openjiuwen.core.common.logging import logger
 
 _EVOLUTION_FILENAME = "evolutions.json"
-_DEFAULT_VERSION = "v1.0.0"
+# Logical / SKILL.md version (no ``v`` prefix). Archive filenames still use
+# ``archive_version_key`` → ``vMAJOR.MINOR.PATCH``.
+_DEFAULT_VERSION = "1.0.0"
+# Key-value ``version:`` lines only (case-insensitive); not arbitrary semver tokens.
+_VERSION_FIELD_RE = re.compile(r"(?im)^\s*version\s*:\s*(.+?)\s*$")
 
 
 class StoreArchiveHelper:
@@ -111,15 +115,32 @@ class StoreArchiveHelper:
         return body_path.exists() or evo_path.exists()
 
     @staticmethod
-    def extract_version_from_skill_md(content: str) -> Optional[str]:
-        front_matter, _ = split_markdown_frontmatter(content)
-        if front_matter is None:
+    def _parse_version_field_value(raw: str) -> Optional[str]:
+        """Normalize a raw ``version:`` field value; empty becomes None."""
+        value = (raw or "").strip().strip('"').strip("'").strip()
+        return value or None
+
+    @classmethod
+    def _find_version_field_in_text(cls, text: str) -> Optional[str]:
+        """Return the first non-empty ``version:`` field value in ``text``."""
+        if not text:
             return None
-        for line in front_matter.strip().split("\n"):
-            if line.startswith("version:"):
-                value = line.split(":", 1)[1].strip().strip('"').strip("'")
-                return value or None
+        for match in _VERSION_FIELD_RE.finditer(text):
+            parsed = cls._parse_version_field_value(match.group(1))
+            if parsed:
+                return parsed
         return None
+
+    @classmethod
+    def extract_version_from_skill_md(cls, content: str) -> Optional[str]:
+        """Parse skill version: frontmatter ``version`` first, then body/full doc."""
+        front_matter, body = split_markdown_frontmatter(content)
+        if front_matter is not None:
+            fm_version = cls._find_version_field_in_text(front_matter)
+            if fm_version:
+                return fm_version
+            return cls._find_version_field_in_text(body)
+        return cls._find_version_field_in_text(content)
 
     async def resolve_current_version(
         self,
@@ -128,16 +149,27 @@ class StoreArchiveHelper:
         subject_kind: Optional[str] = None,
         skill_dir: Optional[Path] = None,
         evo_log: Optional[EvolutionLog] = None,
+        write_default: bool = True,
     ) -> str:
-        """Resolve current skill version: frontmatter -> evolutions.json -> v1.0.0."""
+        """Resolve version: SKILL.md (FM then body) -> optional default write -> evo log -> 1.0.0.
+
+        Default written to SKILL.md is bare ``1.0.0`` (no ``v``). Archive paths
+        still normalize via ``archive_version_key`` to ``v1.0.0``.
+
+        When ``write_default`` is False (e.g. clear/rollback), missing SKILL.md
+        version falls through to ``evolutions.json`` without mutating the file.
+        """
         resolved_dir = skill_dir or self._store.resolve_skill_dir(name, subject_kind=subject_kind)
         if resolved_dir is not None:
             skill_md_path = self._store.find_skill_md(resolved_dir)
             if skill_md_path is not None:
                 content = await self._store.read_file_text(skill_md_path)
-                frontmatter_version = self.extract_version_from_skill_md(content)
-                if frontmatter_version:
-                    return frontmatter_version
+                parsed = self.extract_version_from_skill_md(content)
+                if parsed:
+                    return parsed
+                if write_default:
+                    await self.set_skill_md_version(resolved_dir, _DEFAULT_VERSION)
+                    return _DEFAULT_VERSION
         log = evo_log
         if log is None:
             log = await self._store.load_full_evolution_log(name, subject_kind=subject_kind)
@@ -425,17 +457,24 @@ version: {_DEFAULT_VERSION}
             version = retain_version
         elif skill_dir is not None:
             evo_log = await self._store.load_full_evolution_log(name, subject_kind=subject_kind)
+            # Do not write a default version into SKILL.md here: clear runs after
+            # rollback restores archived bodies that may omit frontmatter version.
             version = await self.resolve_current_version(
-                name, subject_kind=subject_kind, skill_dir=skill_dir, evo_log=evo_log,
+                name,
+                subject_kind=subject_kind,
+                skill_dir=skill_dir,
+                evo_log=evo_log,
+                write_default=False,
             )
         else:
             version = _DEFAULT_VERSION
         empty_log = EvolutionLog.empty(skill_id=name)
         empty_log.version = version
         await self._store.save_evolution_log(name, empty_log, skill_dir=skill_dir, subject_kind=subject_kind)
-        # Do not call render_evolution_markdown here: empty entries would strip the
-        # evolution-index from SKILL.md via clear_rendered_outputs, which breaks
-        # rollback that just restored an archived body.
+        # Do not call render_evolution_markdown here: empty entries would clear
+        # evolution/*.md (and strip any leftover SKILL.md index) via
+        # clear_rendered_outputs, which can race with rollback that just restored
+        # an archived body.
         logger.info(
             "[EvolutionStore] cleared evolutions for skill=%s (version=%s)",
             name,

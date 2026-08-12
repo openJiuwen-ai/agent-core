@@ -149,7 +149,7 @@ def build_rebuild_command_prompt(
         f"{min_score_line}"
         "Old version has been archived. Create the rebuilt skill body from the deterministic context below.\n"
         f"{format_rebuild_context(rebuild_context)}\n"
-        f"Use {creator} for the rebuild and reset evolutions.json to an empty list.\n"
+        f"Use {creator} for the rebuild.\n"
         "Use list_skill_experiences/read_skill_experiences only for overflow records that are not already inlined.\n"
         f"MUST call write_file or edit_file on the absolute target path for `{target_skill_md}` "
         "with the complete rebuilt body (overwrite/update that file on disk).\n"
@@ -161,6 +161,8 @@ def build_rebuild_command_prompt(
         f"`{target_skill_md}` has been successfully written on disk.\n"
         "- Do NOT mark Write/Confirm (or equivalent) todos as completed before the disk write "
         "to the target SKILL.md succeeds.\n"
+        "- Do NOT edit, rewrite, or clear evolutions.json; the host clears it after "
+        "complete_rebuild (version bump + changelog).\n"
         "Do not submit evolve_skill_experiences or simplify_skill_experiences for this rebuild."
     )
 
