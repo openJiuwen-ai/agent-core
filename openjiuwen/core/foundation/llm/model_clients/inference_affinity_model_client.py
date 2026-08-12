@@ -283,6 +283,7 @@ class InferenceAffinityModelClient(BaseModelClient):
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
+        final_message = None
         try:
             await trigger(
                 LLMCallEvents.LLM_INPUT,
@@ -301,24 +302,27 @@ class InferenceAffinityModelClient(BaseModelClient):
             if output_parser:
                 # Use streaming parser
                 async for parsed_result in self._astream_with_parser(params, output_parser, timeout=timeout):
-                    await trigger(
-                        LLMCallEvents.LLM_OUTPUT,
-                        model_name=params.get("model"),
-                        model_provider=self.model_client_config.client_provider,
-                        result=parsed_result,
-                        is_stream=True)
+                    final_message = parsed_result if final_message is None else final_message + parsed_result
                     yield parsed_result
             else:
                 # Direct return without parser
                 async for chunk in self._stream_response(params, timeout=timeout):
                     if chunk:
-                        await trigger(
-                            LLMCallEvents.LLM_OUTPUT,
-                            model_name=params.get("model"),
-                            model_provider=self.model_client_config.client_provider,
-                            result=chunk,
-                            is_stream=True)
+                        final_message = chunk if final_message is None else final_message + chunk
                         yield chunk
+
+            if tracer_record_data:
+                await tracer_record_data(llm_response=final_message)
+
+            await trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+                response=final_message.content if final_message else None,
+                reasoning_content=final_message.reasoning_content if final_message else None,
+                usage=final_message.usage_metadata if final_message else None,
+                tool_calls=final_message.tool_calls if final_message else None)
 
         except Exception as e:
             await trigger(
