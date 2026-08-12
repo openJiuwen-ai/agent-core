@@ -296,6 +296,7 @@ class CheckpointTool(TeamTool):
             )
         )
         self.team = team
+        self.t = t
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -318,12 +319,22 @@ class CheckpointTool(TeamTool):
         name = inputs["name"]
         count = self.team.snapshot_context_length()
         description = inputs.get("description") or ""
-        self.team.store_checkpoint(
+        conflict = self.team.store_checkpoint(
             name,
             count,
             description=description,
             created_by=self.team.member_name,
         )
+        if conflict is not None:
+            return ToolOutput(
+                success=False,
+                error=self.t(
+                    "checkpoint", "duplicate",
+                    name=name,
+                    created_by=conflict.get("created_by") or "?",
+                    description=conflict.get("description") or "",
+                ),
+            )
         # Notify the leader as a framework event (not a member message): the
         # name reaches the leader's context as an announcement-only note, so
         # the leader is never prompted to reply. The leader's own checkpoints

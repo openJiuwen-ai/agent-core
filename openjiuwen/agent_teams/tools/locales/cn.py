@@ -35,6 +35,13 @@ STRINGS: dict[str, str] = {
     # checkpoint._desc lives in descs/cn/member/checkpoint.md
     "checkpoint.name": "快照名（语义化 slug，如 code-ready）。后续 fork 通过此名引用",
     "checkpoint.description": "可选描述，说明为何在此打快照",
+    "checkpoint.duplicate": (
+        "⚠️ 快照保存失败：快照名 '{name}' 已被 {created_by} 占用（{description}）。"
+        "你本次的快照**没有建立**，后续 fork 拿不到你的上下文。"
+        "请用一个新的名字（例如 '{name}-v2'，或在名字末尾加序号/业务后缀）"
+        "**立即再次调用 checkpoint** 完成保存——不要用纯文本说明代替实际调用。"
+        "仅当你原本就是要继承那个已存在的快照、而不是保存自己的新快照时，才不需要重新调用。"
+    ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/cn/team/clean_team.md
     # ===== spawn_teammate ======================================================

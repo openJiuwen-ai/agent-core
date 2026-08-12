@@ -22,6 +22,10 @@ After the understander finishes reading the base class:
 checkpoint(name="base-ready", description="Base class analysis complete, ready to fork")
 ```
 
+## Name uniqueness
+
+Checkpoint names are **unique team-wide**: once any member has saved a name, no other member can reuse it. A duplicate call is **rejected** and the error tells you who created the existing snapshot and why — so you can either pick a different name, or fork the existing snapshot if it already captures the context you need.
+
 ## Fork coordination
 
 ```python

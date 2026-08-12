@@ -1161,6 +1161,24 @@ class TeamAgent(BaseAgent):
                         ckpt_record = self._named_checkpoints.get(fork_value) if is_named else None
                         ckpt_idx = ckpt_record["count"] if ckpt_record else None
 
+                        if ckpt_record is not None:
+                            source_name = fork_info.get("source") or self._member_name()
+                            creator = ckpt_record.get("created_by") or ""
+                            if creator and creator != source_name:
+                                team_logger.warning(
+                                    "[fork] checkpoint '%s' created by '%s' but "
+                                    "fork_source='%s'; the index belongs to another "
+                                    "member and may not fit this source's context",
+                                    fork_value, creator, source_name,
+                                )
+                                await self._notify_fork_name_not_found(
+                                    teammate_id, fork_value,
+                                    detail=(
+                                        f"（创建者 '{creator}' 与 fork_source "
+                                        f"'{source_name}' 不匹配）"
+                                    ),
+                                )
+
                         if compact:
                             if not is_named:
                                 team_logger.warning(
@@ -1251,12 +1269,19 @@ class TeamAgent(BaseAgent):
         )
         return None
 
-    async def _notify_fork_name_not_found(self, member: str, fork_name: str) -> None:
+    async def _notify_fork_name_not_found(
+        self,
+        member: str,
+        fork_name: str,
+        *,
+        detail: str = "",
+    ) -> None:
         """Surface a wrong fork checkpoint name to the leader.
 
         The spawn still proceeds with a full-context fallback, but the
         leader is told which name was requested and which names actually
-        exist, so a naming mismatch is no longer silent.
+        exist, so a naming mismatch (missing name, or a name whose creator
+        does not match ``fork_source``) is no longer silent.
         """
         from openjiuwen.agent_teams.i18n import t
 
@@ -1268,6 +1293,7 @@ class TeamAgent(BaseAgent):
                     fork=fork_name,
                     member=member,
                     available=available,
+                    detail=detail,
                 ),
                 to_member_name=self._member_name(),
             )
@@ -1288,16 +1314,23 @@ class TeamAgent(BaseAgent):
         *,
         description: str = "",
         created_by: str | None = None,
-    ) -> None:
+    ) -> dict | None:
         """Store a named checkpoint.
 
-        Each checkpoint records ``{count, description, created_by}`` so the
-        leader can later list names together with their purpose and creator.
-        The leader also mirrors the full mapping into the session's per-team
-        namespace so it survives process restart. Persistence is deferred to
-        the run cycle's ``post_run`` (no explicit flush), matching allocator
-        / lifecycle / pending_resume semantics.
+        Checkpoint names are **team-globally unique**: a name that already
+        exists — regardless of who created it — is rejected and the existing
+        record is returned (``None`` on success). The leader also mirrors the
+        full mapping into the session's per-team namespace so it survives
+        process restart. Persistence is deferred to the run cycle's
+        ``post_run`` (no explicit flush), matching allocator / lifecycle /
+        pending_resume semantics.
+
+        Returns:
+            ``None`` when stored; the existing record on a name conflict.
         """
+        existing = self._named_checkpoints.get(name)
+        if existing is not None:
+            return existing
         self._named_checkpoints[name] = {
             "count": count,
             "description": description or "",
@@ -1305,6 +1338,7 @@ class TeamAgent(BaseAgent):
         }
         if self.role == TeamRole.LEADER:
             self._merge_checkpoints_into_session()
+        return None
 
     def _merge_checkpoints_into_session(self) -> None:
         """Mirror the current checkpoint mapping into the bound team session.

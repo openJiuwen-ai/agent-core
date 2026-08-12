@@ -53,8 +53,9 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/fork.py — fork name mismatch surfaced to the leader
         "checkpoint.fork_not_found": (
-            "[fork 警告] checkpoint '{fork}' 不存在，已回退为全量继承（成员 {member}）。"
-            "可用 checkpoint：{available}。请用 list_checkpoints 核对名字后再 fork。"
+            "[fork 警告] checkpoint '{fork}' 未能按 fork_source 解析{detail}，"
+            "已回退为全量继承（成员 {member}）。可用 checkpoint：{available}。"
+            "请用 list_checkpoints 核对名字后再 fork。"
         ),
         # agent/coordination/handlers/checkpoint.py — leader announcement body/note
         "checkpoint.created_body": (
@@ -318,8 +319,9 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/fork.py — fork name mismatch surfaced to the leader
         "checkpoint.fork_not_found": (
-            "[fork warning] checkpoint '{fork}' not found; fell back to full-context "
-            "inheritance (member {member}). Available checkpoints: {available}. "
+            "[fork warning] checkpoint '{fork}' could not be resolved against "
+            "fork_source{detail}; fell back to full-context inheritance "
+            "(member {member}). Available checkpoints: {available}. "
             "Use list_checkpoints to verify names before forking."
         ),
         # agent/coordination/handlers/checkpoint.py — leader announcement body/note

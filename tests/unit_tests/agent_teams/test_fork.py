@@ -237,6 +237,25 @@ class TestCheckpointTool:
 
         agent_team.publish_checkpoint_created.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_duplicate_returns_error_with_creator_and_no_event(self, agent_team):
+        t = make_translator("cn")
+        agent_team._snapshot_length = lambda: 15
+        agent_team._checkpoints["code-ready"] = {
+            "count": 5, "description": "base done", "created_by": "counter-1",
+        }
+        agent_team.publish_checkpoint_created = AsyncMock()
+        tool = CheckpointTool(agent_team, t)
+
+        result = await tool.invoke({"name": "code-ready"})
+
+        assert result.success is False
+        assert "code-ready" in result.error
+        assert "counter-1" in result.error
+        assert "base done" in result.error
+        agent_team.publish_checkpoint_created.assert_not_awaited()
+
     @pytest.mark.level0
     def test_map_result_success(self, agent_team):
         t = make_translator("cn")
@@ -304,6 +323,22 @@ class TestTeamBackendFork:
         assert record["count"] == 3
         assert record["description"] == ""
         assert record["created_by"] == "leader-1"
+
+    @pytest.mark.level0
+    def test_store_checkpoint_returns_conflict_record_on_duplicate(self, agent_team):
+        agent_team._store_checkpoint_fn = None
+        agent_team._checkpoints["code-ready"] = {
+            "count": 5, "description": "base done", "created_by": "counter-1",
+        }
+        conflict = agent_team.store_checkpoint("code-ready", 99, created_by="leader-1")
+        assert conflict == {"count": 5, "description": "base done", "created_by": "counter-1"}
+        assert agent_team.get_checkpoints()["code-ready"]["count"] == 5  # unchanged
+
+    @pytest.mark.level1
+    def test_store_checkpoint_returns_none_on_success(self, agent_team):
+        agent_team._store_checkpoint_fn = None
+        assert agent_team.store_checkpoint("fresh", 3) is None
+        assert agent_team.get_checkpoints()["fresh"]["count"] == 3
 
     @pytest.mark.level0
     def test_list_checkpoints_prefers_wired_namespace(self, agent_team):
@@ -688,6 +723,20 @@ class TestOnTeammateCreatedFork:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_fork_source_mismatch_notifies_leader(self):
+        """A checkpoint owned by a member other than fork_source is surfaced."""
+        agent = self._make_agent(
+            {"fork": "code-ready", "since": None, "source": None, "compact": False},
+            checkpoints={"code-ready": {"count": 2, "description": "", "created_by": "counter-1"}},
+        )
+        await self._run(agent)
+        agent._configurator.message_manager.send_message.assert_awaited_once()
+        content = agent._configurator.message_manager.send_message.await_args.kwargs["content"]
+        assert "code-ready" in content
+        assert "counter-1" in content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_fork_capture_failure_degrades_to_no_inheritance(self, monkeypatch):
         """A fork-capture failure must not abort the member spawn.
 
@@ -999,6 +1048,31 @@ class TestTeamAgentCheckpointPersistence:
             "code-ready": {"count": 5, "description": "", "created_by": ""}
         }
         assert TEAMS_KEY not in session.state
+
+    @pytest.mark.level0
+    def test_same_member_duplicate_name_rejected_not_overwritten(self):
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        agent = self._make_agent(role=TeamRole.LEADER, team_session=None)
+        assert agent.set_checkpoint("code-ready", 5, created_by="dev-1") is None
+
+        conflict = agent.set_checkpoint("code-ready", 99, created_by="dev-1")
+
+        assert conflict == {"count": 5, "description": "", "created_by": "dev-1"}
+        assert agent._named_checkpoints["code-ready"]["count"] == 5  # unchanged
+
+    @pytest.mark.level1
+    def test_cross_member_duplicate_name_rejected_globally(self):
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        agent = self._make_agent(role=TeamRole.LEADER, team_session=None)
+        assert agent.set_checkpoint("code-ready", 5, created_by="dev-1") is None
+
+        conflict = agent.set_checkpoint("code-ready", 99, created_by="dev-2")
+
+        assert conflict is not None
+        assert conflict["created_by"] == "dev-1"
+        assert agent._named_checkpoints["code-ready"]["count"] == 5  # unchanged
 
 
 # ── enable_fork capability gate ────────────────────────────────────────────

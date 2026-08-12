@@ -316,7 +316,7 @@ class TeamBackend:
         self._pending_forks: dict[str, dict] = {}    # member_name → {fork, since, source}
         self._checkpoints: dict[str, dict] = {}      # name → {count, description, created_by}
         self._snapshot_length: Callable[[], int] | None = None
-        self._store_checkpoint_fn: Callable[..., None] | None = None
+        self._store_checkpoint_fn: Callable[..., dict | None] | None = None
         self._checkpoint_list_fn: Callable[[], dict] | None = None
 
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
@@ -414,7 +414,14 @@ class TeamBackend:
         *,
         description: str = "",
         created_by: str | None = None,
-    ) -> None:
+    ) -> dict | None:
+        """Store a named checkpoint, or return the conflicting record.
+
+        Checkpoint names are team-globally unique. Returns ``None`` on
+        success; on a name conflict the existing record (with its
+        ``created_by`` / ``description``) is returned so the caller can build
+        an actionable error message.
+        """
         team_logger.debug(
             "[fork] store_checkpoint: member=%s name=%s count=%d "
             "has_store_fn=%s",
@@ -422,15 +429,17 @@ class TeamBackend:
             self._store_checkpoint_fn is not None,
         )
         created_by = created_by or self.member_name
-        record = {
+        if self._store_checkpoint_fn is not None:
+            return self._store_checkpoint_fn(name, count, description=description, created_by=created_by)
+        existing = self._checkpoints.get(name)
+        if existing is not None:
+            return existing
+        self._checkpoints[name] = {
             "count": count,
             "description": description or "",
             "created_by": created_by,
         }
-        if self._store_checkpoint_fn is not None:
-            self._store_checkpoint_fn(name, count, description=description, created_by=created_by)
-        else:
-            self._checkpoints[name] = record
+        return None
 
     def get_checkpoints(self) -> dict[str, dict]:
         return {name: dict(record) for name, record in self._checkpoints.items()}

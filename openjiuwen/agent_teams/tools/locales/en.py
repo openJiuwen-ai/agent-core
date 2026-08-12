@@ -44,6 +44,15 @@ STRINGS: dict[str, str] = {
     # checkpoint._desc lives in descs/en/member/checkpoint.md
     "checkpoint.name": "Semantic snapshot name (e.g. code-ready). Used by later fork calls to reference this snapshot",
     "checkpoint.description": "Optional description of why this checkpoint was taken",
+    "checkpoint.duplicate": (
+        "⚠️ Snapshot save FAILED: the name '{name}' is already taken by "
+        "{created_by} ({description}). Your snapshot was NOT created, so a "
+        "later fork will not inherit your context. Call checkpoint AGAIN with "
+        "a different name (e.g. '{name}-v2', or append a number / business "
+        "suffix) to actually save it — do not substitute a plain-text "
+        "explanation for the call. Only skip re-calling if your goal was to "
+        "inherit that existing snapshot rather than save your own."
+    ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/team/clean_team.md
     # ===== spawn_teammate ======================================================
