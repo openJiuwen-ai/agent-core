@@ -367,6 +367,50 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
 
 
 @pytest.mark.asyncio
+async def test_streaming_llm_call_closes_through_team_span_accessor_across_context(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A root-span fallback must support streaming callbacks in another context."""
+    from openjiuwen.extensions.observability import span_context
+
+    team_span = _create_team_span("test_team")
+    fw = Runner.callback_framework
+    messages = [{"role": "user", "content": "hello"}]
+
+    await fw.trigger(
+        LLMCallEvents.LLM_STREAM_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+
+    # JiuwenClaw opens the root span in the request task, while its long-lived
+    # DeepAgent executes the round in another task that cannot see this
+    # ContextVar. The product adapter supplies the same root through the public
+    # accessor, so every callback phase must resolve through that accessor.
+    span_context.clear_root_span(expected_span=team_span)
+    span_context.set_ambient_root_span(team_span)
+
+    await fw.trigger(
+        LLMCallEvents.LLM_STREAM_OUTPUT,
+        messages=messages,
+        result=_FakeChunk(content="hello", finish_reason="stop"),
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_OUTPUT,
+        messages=messages,
+        response="hello",
+        usage=_FakeUsage(),
+    )
+
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(llm_spans) == 1
+    assert _attr(llm_spans[0], "langfuse.gen_ai.completion.0.content") == "hello"
+
+    team_span.end()
+    span_context.clear_ambient_root_span()
+
+
+@pytest.mark.asyncio
 async def test_backend_langfuse_only_writes_langfuse_attrs(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:

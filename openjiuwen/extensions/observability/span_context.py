@@ -280,7 +280,13 @@ class ActiveSpanTracker(SpanProcessor):
         # spans here would steal them from the operation that owns the trace.
         return True
 
-    def flush_spans_for_trace(self, trace_id: int, exclude_root_span: bool = True) -> int:
+    def flush_spans_for_trace(
+        self,
+        trace_id: int,
+        exclude_root_span: bool = True,
+        *,
+        exclude_span_id: int | None = None,
+    ) -> int:
         """Close all active spans for a specific trace.
 
         Spans that carry ``otel_llm_state`` are leaked LLM spans whose normal
@@ -303,6 +309,13 @@ class ActiveSpanTracker(SpanProcessor):
         for span in spans_to_close:
             try:
                 if not span.is_recording():
+                    continue
+
+                span_context = getattr(span, "context", None)
+                if (
+                    exclude_span_id is not None
+                    and getattr(span_context, "span_id", None) == exclude_span_id
+                ):
                     continue
 
                 if exclude_root_span and _is_root_span(span, root_span):
@@ -773,7 +786,15 @@ def flush_child_spans(*, trace_id: int | None = None) -> None:
                 effective_trace_id = root_span.context.trace_id
 
         if effective_trace_id is not None:
-            closed = tracker.flush_spans_for_trace(effective_trace_id, exclude_root_span=True)
+            root_span = _resolve_root_span()
+            root_span_id = None
+            if root_span is not None and hasattr(root_span, "context") and root_span.context:
+                root_span_id = root_span.context.span_id
+            closed = tracker.flush_spans_for_trace(
+                effective_trace_id,
+                exclude_root_span=True,
+                exclude_span_id=root_span_id,
+            )
             if closed > 0:
                 logger.info(
                     "flush_child_spans: closed {} spans for trace {:032x}",

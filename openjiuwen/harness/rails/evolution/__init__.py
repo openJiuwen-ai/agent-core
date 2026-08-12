@@ -25,11 +25,14 @@ from openjiuwen.harness.rails.evolution.context_evolution_rail import (
 from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionHostEventMeta,
     EvolutionRequestResult,
-    EvolutionSnapshot,
     SimplifyRequestResult,
 )
 from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EvolutionInterruptRail
-from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
+from openjiuwen.harness.rails.evolution.evolution_rail import (
+    EvolutionRail,
+    EvolutionTriggerPoint,
+    PreparedEvolutionInput,
+)
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.review.subagent import (
     EVOLUTION_REVIEW_AGENT_NAME,
@@ -59,8 +62,8 @@ __all__ = [
     "EvolutionRail",
     "EvolutionRequestResult",
     "EvolutionReviewRuntime",
-    "EvolutionSnapshot",
     "EvolutionTriggerPoint",
+    "PreparedEvolutionInput",
     "SimplifyRequestResult",
     "SkillCreateRail",
     "SkillEvolutionRail",
