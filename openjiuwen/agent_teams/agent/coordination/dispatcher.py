@@ -301,10 +301,19 @@ class EventDispatcher:
                 getattr(dropped, "event_type", type(dropped).__name__),
             )
         self._deferred_wakes.append(event)
-        team_logger.debug(
-            "agent not ready, deferring coordination wake: type={}",
-            getattr(event, "event_type", type(event).__name__),
-        )
+        event_type = getattr(event, "event_type", type(event).__name__)
+        if event_type == InnerEventType.USER_INPUT:
+            # A deferred user input is "the agent never replied" if no flush
+            # follows — never leave it at debug level.
+            team_logger.warning(
+                "agent not ready, deferring USER_INPUT wake (deferred={})",
+                len(self._deferred_wakes),
+            )
+        else:
+            team_logger.debug(
+                "agent not ready, deferring coordination wake: type={}",
+                event_type,
+            )
 
     async def flush_deferred(self) -> None:
         """Replay wakes buffered while the harness was not ready."""

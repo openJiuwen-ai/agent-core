@@ -237,3 +237,91 @@ async def test_team_harness_start_stops_leftover_paused_native() -> None:
     fresh_native.start.assert_awaited_once_with(session=child)
     assert harness._native is fresh_native
     assert harness._native_session_id == "team-sess"
+
+
+def _make_pause_kernel(harness: object, pending_user_query: str) -> CoordinationKernel:
+    """Leader kernel wired for pause(), with a real _persist_pending_resume."""
+    host = SimpleNamespace(
+        member_name="office",
+        role=TeamRole.LEADER,
+        team_name="team-demo",
+        state=SimpleNamespace(pending_user_query=pending_user_query),
+        spawn_manager=SimpleNamespace(
+            cancel_recovery_tasks=AsyncMock(),
+            shutdown_all_handles=AsyncMock(),
+        ),
+        persist_allocator_state=MagicMock(),
+        resources=SimpleNamespace(memory_manager=None, harness=harness),
+        infra=SimpleNamespace(messager=None, team_backend=None),
+        session_manager=SimpleNamespace(
+            release_session=MagicMock(),
+            team_session=SimpleNamespace(),
+        ),
+    )
+    kernel = CoordinationKernel.__new__(CoordinationKernel)
+    kernel._host = host
+    kernel._lifecycle_state = "running"
+    kernel._scheduler = None
+    kernel._event_bus = None
+    kernel._persist_team_lifecycle = MagicMock()
+    kernel.unsubscribe_transport = AsyncMock()
+    kernel.close_stream = MagicMock()
+    kernel.pause_agent_round = AsyncMock()
+    kernel._await_harness_paused = AsyncMock()
+    kernel._mark_live_teammates = AsyncMock()
+    return kernel
+
+
+@pytest.mark.asyncio
+async def test_pause_writes_empty_pending_resume_when_harness_terminated() -> None:
+    """Park lost the round-end race: the marker is still written, empty."""
+    harness = SimpleNamespace(state=HarnessState.TERMINATED, active_round=None)
+    kernel = _make_pause_kernel(harness, pending_user_query="已完成的问题")
+
+    with patch(
+        "openjiuwen.agent_teams.runtime.metadata.merge_pending_resume",
+    ) as merge:
+        await kernel.pause()
+
+    kernel.pause_agent_round.assert_not_awaited()
+    merge.assert_called_once()
+    assert merge.call_args.args[2] == {"query": ""}
+    assert kernel._lifecycle_state == "paused"
+
+
+@pytest.mark.asyncio
+async def test_pause_persists_paused_query_when_park_succeeds() -> None:
+    """In-flight round parked: the marker carries the round's query."""
+    harness = SimpleNamespace(
+        state=HarnessState.RUNNING,
+        paused_query="继续写报告",
+        active_round=None,
+    )
+    kernel = _make_pause_kernel(harness, pending_user_query="别的消息")
+
+    with patch(
+        "openjiuwen.agent_teams.runtime.metadata.merge_pending_resume",
+    ) as merge:
+        await kernel.pause()
+
+    merge.assert_called_once()
+    assert merge.call_args.args[2] == {"query": "继续写报告"}
+
+
+@pytest.mark.asyncio
+async def test_pause_falls_back_to_pending_user_query_on_idle_park() -> None:
+    """Idle park: the last user message may be unprocessed — carry it."""
+    harness = SimpleNamespace(
+        state=HarnessState.IDLE,
+        paused_query=None,
+        active_round=None,
+    )
+    kernel = _make_pause_kernel(harness, pending_user_query="还没处理的消息")
+
+    with patch(
+        "openjiuwen.agent_teams.runtime.metadata.merge_pending_resume",
+    ) as merge:
+        await kernel.pause()
+
+    merge.assert_called_once()
+    assert merge.call_args.args[2] == {"query": "还没处理的消息"}
