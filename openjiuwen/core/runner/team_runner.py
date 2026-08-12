@@ -958,17 +958,21 @@ class _TeamRunnerClassMixin:
         """
         if base:
             # pylint: disable=protected-access — designated internal facade hook, see module docstring.
-            async for chunk in _global_runner()._run_base_team_streaming(
+            inner_stream = _global_runner()._run_base_team_streaming(
                 base_team=agent_team,
                 inputs=inputs,
                 session=session,
                 context=context,
                 stream_modes=stream_modes,
                 envs=envs,
-            ):
-                yield chunk
+            )
+            try:
+                async for chunk in inner_stream:
+                    yield chunk
+            finally:
+                await inner_stream.aclose()
             return
-        async for chunk in _global_runner().run_agent_team_streaming(
+        inner_stream = _global_runner().run_agent_team_streaming(
             agent_team=agent_team,
             inputs=inputs,
             member=member,
@@ -978,8 +982,12 @@ class _TeamRunnerClassMixin:
             envs=envs,
             stream_logger=stream_logger,
             background_task_controller=background_task_controller,
-        ):
-            yield chunk
+        )
+        try:
+            async for chunk in inner_stream:
+                yield chunk
+        finally:
+            await inner_stream.aclose()
 
     @classmethod
     async def interact_agent_team(

@@ -55,6 +55,48 @@ async def _activate_pool_entry(manager, team_name: str, session_id: str, agent) 
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", [False, True])
+async def test_runner_streaming_facade_closes_inner_stream(monkeypatch, base: bool) -> None:
+    class TrackedStream:
+        def __init__(self) -> None:
+            self.closed = False
+            self._yielded = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return "chunk"
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    inner = TrackedStream()
+    fake_runner = SimpleNamespace(
+        run_agent_team_streaming=lambda **_kwargs: inner,
+        _run_base_team_streaming=lambda **_kwargs: inner,
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.team_runner._global_runner",
+        lambda: fake_runner,
+    )
+
+    stream = Runner.run_agent_team_streaming(
+        agent_team="team",
+        inputs={"query": "hello"},
+        base=base,
+    )
+    assert await stream.__anext__() == "chunk"
+
+    await stream.aclose()
+
+    assert inner.closed is True
+
+
 @pytest.fixture
 def isolated_checkpointer():
     original = CheckpointerFactory.get_checkpointer()
