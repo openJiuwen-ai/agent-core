@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import contextlib
 import sys
 import types
 import unittest
@@ -10,13 +11,74 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthResult
 from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
 from openjiuwen.core.foundation.tool.mcp.base import extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import (
     StreamableHttpClient,
 )
-
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
+from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
+
+
+def _streamable_client_patches(*, mock_tools, call_tool_mock):
+    """Patch MCP streamable client methods used by ResourceMgr.add_mcp_server.
+
+    Full-suite runs may import browser_move, which overrides ToolMgr.StreamableHttpClient
+    and can leave a subclass whose connect() talks to real mcp with a different signature
+    (``timeout`` TypeError). Force registry + class methods onto foundation client.
+    """
+    from openjiuwen.core.common.clients.client_registry import get_client_registry
+
+    registry = get_client_registry()
+
+    def _foundation_factory(**kwargs):
+        return StreamableHttpClient(**kwargs)
+
+    patches = [
+        patch.object(StreamableHttpClient, "connect", AsyncMock(return_value=True)),
+        patch.object(StreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
+        patch.object(StreamableHttpClient, "list_tools", AsyncMock(return_value=mock_tools)),
+        patch.object(StreamableHttpClient, "call_tool", call_tool_mock),
+        patch.object(ToolMgr, "StreamableHttpClient", StreamableHttpClient, create=True),
+        patch.dict(
+            registry._factories,
+            {
+                "mcp_streamable-http": _foundation_factory,
+                "mcp_streamable_http": _foundation_factory,
+            },
+            clear=False,
+        ),
+        patch.dict(
+            registry._client_classes,
+            {
+                "mcp_streamable-http": StreamableHttpClient,
+                "mcp_streamable_http": StreamableHttpClient,
+            },
+            clear=False,
+        ),
+    ]
+    try:
+        from openjiuwen.harness.tools.browser_move.clients.streamable_http_client import (
+            BrowserMoveStreamableHttpClient,
+        )
+    except Exception:
+        BrowserMoveStreamableHttpClient = None
+    if BrowserMoveStreamableHttpClient is not None:
+        patches.extend(
+            [
+                patch.object(BrowserMoveStreamableHttpClient, "connect", AsyncMock(return_value=True)),
+                patch.object(BrowserMoveStreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
+                patch.object(
+                    BrowserMoveStreamableHttpClient,
+                    "list_tools",
+                    AsyncMock(return_value=mock_tools),
+                ),
+                patch.object(BrowserMoveStreamableHttpClient, "call_tool", call_tool_mock),
+            ]
+        )
+    return patches
 
 
 class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
@@ -79,17 +141,39 @@ class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
         fake_mcp.ClientSession = FakeClientSession
         fake_mcp_client = types.ModuleType("mcp.client")
         fake_streamable_http = types.ModuleType("mcp.client.streamable_http")
+        fake_streamable_http.streamablehttp_client = fake_streamablehttp_client
         fake_streamable_http.streamable_http_client = fake_streamablehttp_client
         fake_mcp_client.streamable_http = fake_streamable_http
 
-        with patch.dict(
-            sys.modules,
-            {
-                "mcp": fake_mcp,
-                "mcp.client": fake_mcp_client,
-                "mcp.client.streamable_http": fake_streamable_http,
-            },
-            clear=False,
+        expected_auth = AuthHeaderAndQueryProvider(
+            auth_headers={"Authorization": "Bearer token"},
+            auth_query_params={"ak": "demo-ak"},
+        )
+        # Ensure TOOL_AUTH yields a provider even if callback handlers are not
+        # registered in full-suite order (test-only isolation, no prod change).
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "mcp": fake_mcp,
+                    "mcp.client": fake_mcp_client,
+                    "mcp.client.streamable_http": fake_streamable_http,
+                },
+                clear=False,
+            ),
+            patch.object(
+                Runner.callback_framework,
+                "trigger",
+                AsyncMock(
+                    return_value=[
+                        ToolAuthResult(
+                            success=True,
+                            auth_data={"auth_provider": expected_auth},
+                            message="ok",
+                        )
+                    ]
+                ),
+            ),
         ):
             client = StreamableHttpClient(
                 "http://127.0.0.1:8930/mcp",
@@ -129,6 +213,7 @@ class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
         fake_mcp.ClientSession = object
         fake_mcp_client = types.ModuleType("mcp.client")
         fake_streamable_http = types.ModuleType("mcp.client.streamable_http")
+        fake_streamable_http.streamablehttp_client = fake_streamablehttp_client
         fake_streamable_http.streamable_http_client = fake_streamablehttp_client
         fake_mcp_client.streamable_http = fake_streamable_http
 
@@ -193,13 +278,11 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
         ]
         mock_tool_result = "navigation completed"
         test_inputs = {"url": "https://example.com"}
+        mock_call_tool = AsyncMock(return_value=mock_tool_result)
 
-        with (
-            patch.object(StreamableHttpClient, "connect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "list_tools", AsyncMock(return_value=mock_tools)),
-            patch.object(StreamableHttpClient, "call_tool", AsyncMock(return_value=mock_tool_result)) as mock_call_tool,
-        ):
+        with contextlib.ExitStack() as stack:
+            for p in _streamable_client_patches(mock_tools=mock_tools, call_tool_mock=mock_call_tool):
+                stack.enter_context(p)
             mcp_server_config = McpServerConfig(
                 server_name="streamable-server",
                 server_path="http://127.0.0.1:8930/mcp",
@@ -247,12 +330,10 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
             )
         ]
 
-        with (
-            patch.object(StreamableHttpClient, "connect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "list_tools", AsyncMock(return_value=mock_tools)),
-            patch.object(StreamableHttpClient, "call_tool", AsyncMock(return_value="typed")) as mock_call_tool,
-        ):
+        mock_call_tool = AsyncMock(return_value="typed")
+        with contextlib.ExitStack() as stack:
+            for p in _streamable_client_patches(mock_tools=mock_tools, call_tool_mock=mock_call_tool):
+                stack.enter_context(p)
             mcp_server_config = McpServerConfig(
                 server_name="streamable-server",
                 server_path="http://127.0.0.1:8930/mcp",
@@ -288,12 +369,10 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
             )
         ]
 
-        with (
-            patch.object(StreamableHttpClient, "connect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "list_tools", AsyncMock(return_value=mock_tools)),
-            patch.object(StreamableHttpClient, "call_tool", AsyncMock(return_value="snapshotted")) as mock_call_tool,
-        ):
+        mock_call_tool = AsyncMock(return_value="snapshotted")
+        with contextlib.ExitStack() as stack:
+            for p in _streamable_client_patches(mock_tools=mock_tools, call_tool_mock=mock_call_tool):
+                stack.enter_context(p)
             mcp_server_config = McpServerConfig(
                 server_name="streamable-server",
                 server_path="http://127.0.0.1:8930/mcp",
