@@ -278,12 +278,13 @@ def create_team_tools(
     if not agent_team.external_cli_kinds():
         allowed = allowed - {"spawn_external_cli"}
     # Context inheritance (F_75). One flag gates the whole capability:
-    # ``checkpoint`` disappears here, and ``SpawnTeammateTool`` reads the same
-    # ``fork_enabled()`` above to drop its fork properties and the matching
-    # section of its description. A checkpoint nobody can fork from is dead
-    # weight in every member's tool list.
+    # ``checkpoint`` / ``list_checkpoints`` disappear here, and
+    # ``SpawnTeammateTool`` reads the same ``fork_enabled()`` above to drop
+    # its fork properties and the matching section of its description. A
+    # checkpoint nobody can fork from is dead weight in every member's tool
+    # list.
     if not agent_team.fork_enabled():
-        allowed = allowed - {"checkpoint"}
+        allowed = allowed - {"checkpoint", "list_checkpoints"}
     # Swarmflow is wired only when the host supplied a worker-model resolver
     # (leader + enable_swarmflow). Same idempotent-subtraction gate as the
     # spawn tools.

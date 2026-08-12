@@ -1050,6 +1050,7 @@ async def test_fork_disabled_hides_every_fork_surface(fork_disabled_team, lang, 
 
     tools = create_team_tools(role=role, agent_team=fork_disabled_team, lang=lang)
     assert "checkpoint" not in {tool.card.name for tool in tools}
+    assert "list_checkpoints" not in {tool.card.name for tool in tools}
     if role != "leader":
         return
     assert _spawn_schema_props(tools) & _FORK_PROPS == set()
@@ -1070,6 +1071,7 @@ async def test_fork_enabled_exposes_every_fork_surface(agent_team, lang, role):
     assert "checkpoint" in {tool.card.name for tool in tools}
     if role != "leader":
         return
+    assert "list_checkpoints" in {tool.card.name for tool in tools}
     assert _FORK_PROPS <= _spawn_schema_props(tools)
     desc = _spawn_desc(tools)
     assert "fork_source" in desc
