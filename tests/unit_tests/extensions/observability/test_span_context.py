@@ -7,12 +7,16 @@ from contextvars import Context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import SpanKind, set_span_in_context
 
 from openjiuwen.extensions.observability.span_context import (
+    ActiveSpanTracker,
     clear_root_span,
     clear_current_session_id,
+    flush_child_spans,
     get_root_span,
     reset_state,
+    set_active_span_tracker,
     set_current_session_id,
     set_root_span,
 )
@@ -74,5 +78,32 @@ def test_clear_root_span_expected_identity_does_not_remove_replacement() -> None
             old.end()
         if new.is_recording():
             new.end()
+        reset_state()
+        provider.shutdown()
+
+
+def test_flush_child_spans_preserves_registered_agent_root() -> None:
+    """The safety flush must not end a single-agent root span as a child."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    tracker = ActiveSpanTracker()
+    provider.add_span_processor(tracker)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test.agent-root-flush")
+    root = tracer.start_span("agent.agent.session", kind=SpanKind.SERVER)
+    set_root_span(root, session_id="single-agent")
+    child = tracer.start_span("tool.call", context=set_span_in_context(root))
+    set_active_span_tracker(tracker)
+    try:
+        flush_child_spans()
+
+        assert root.is_recording()
+        assert not child.is_recording()
+        assert not any(span.name == "agent.agent.session" for span in exporter.get_finished_spans())
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="single-agent", expected_span=root)
+        set_active_span_tracker(None)
         reset_state()
         provider.shutdown()

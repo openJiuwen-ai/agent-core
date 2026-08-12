@@ -27,9 +27,14 @@ TrajectoryUploader = importlib.import_module(
     "openjiuwen.agent_evolving.agent_rl.online.rail.uploader"
 ).TrajectoryUploader
 trajectory_module = importlib.import_module("openjiuwen.agent_evolving.trajectory")
-LLMCallDetail = trajectory_module.LLMCallDetail
-TrajectoryStep = trajectory_module.TrajectoryStep
-trajectory_from_steps = trajectory_module.trajectory_from_steps
+Trajectory = importlib.import_module("openjiuwen.agent_evolving.trajectory.model").Trajectory
+TrajectorySpanProcessor = trajectory_module.TrajectorySpanProcessor
+trajectory_spans = importlib.import_module("openjiuwen.agent_evolving.trajectory.spans")
+trajectory_schema = importlib.import_module("openjiuwen.agent_evolving.trajectory.schema")
+observability_semconv = importlib.import_module("openjiuwen.extensions.observability.semconv")
+PreparedEvolutionInput = importlib.import_module(
+    "openjiuwen.harness.rails.evolution.evolution_rail"
+).PreparedEvolutionInput
 
 
 class _FakeRedisPipeline:
@@ -250,27 +255,51 @@ async def test_online_gateway_proxy_and_rail_upload_e2e(tmp_path: Path):
                 gateway_endpoint="http://gateway.local",
                 tenant_id="st-user",
                 uploader=uploader,
+                trajectory_span_processor=TrajectorySpanProcessor(),
             )
-            trajectory = trajectory_from_steps(
-                execution_id="traj-st",
-                session_id="session-st",
-                steps=[
-                    TrajectoryStep(
-                        kind="llm",
-                        detail=LLMCallDetail(
-                            model="st-model",
-                            messages=[{"role": "user", "content": "ping"}],
-                            response={"role": "assistant", "content": "pong", "finish_reason": "stop"},
-                        ),
-                        prompt_token_ids=[101, 102],
-                        completion_token_ids=[201, 202],
-                        logprobs=[-0.1, -0.2],
-                    )
-                ],
-                source="rl_online",
+            trajectory = Trajectory.from_otlp(
+                {
+                    "resourceSpans": [
+                        {
+                            "resource": {
+                                "attributes": trajectory_spans.attributes_from_map(
+                                    {
+                                        trajectory_schema.TRAJECTORY_ID: "traj-st",
+                                        trajectory_schema.SESSION_ID: "session-st",
+                                        trajectory_schema.TRAJECTORY_SOURCE: "rl_online",
+                                    }
+                                )
+                            },
+                            "scopeSpans": [
+                                {
+                                    "scope": {"name": "system-test"},
+                                    "spans": [
+                                        {
+                                            "traceId": "1" * 32,
+                                            "spanId": "2" * 16,
+                                            "name": "llm.call",
+                                            "attributes": trajectory_spans.attributes_from_map(
+                                                {
+                                                    observability_semconv.GEN_AI_REQUEST_MODEL: "st-model",
+                                                    f"{observability_semconv.GEN_AI_PROMPT}.0.role": "user",
+                                                    f"{observability_semconv.GEN_AI_PROMPT}.0.content": "ping",
+                                                    f"{observability_semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+                                                    f"{observability_semconv.GEN_AI_COMPLETION}.0.content": "pong",
+                                                    trajectory_schema.RL_PROMPT_TOKEN_IDS: [101, 102],
+                                                    trajectory_schema.RL_COMPLETION_TOKEN_IDS: [201, 202],
+                                                    trajectory_schema.RL_LOGPROBS: [-0.1, -0.2],
+                                                }
+                                            ),
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
             )
 
-            await rail.run_evolution(trajectory)
+            await rail.run_evolution(PreparedEvolutionInput(trajectory=trajectory, messages=()))
             await uploader.shutdown()
 
             stats_response = await gateway_client.get(
