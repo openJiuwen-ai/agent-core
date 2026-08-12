@@ -551,6 +551,11 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
     attempts = rt.retries + 1
     last_err: Exception | None = None
     label = opts.get("label") or "agent"
+    # Accumulate tokens burned across every retry attempt: each failed call
+    # attaches its budget_rail tally to the raised BackendError (backend) or
+    # turn delta (session), so a budget-exhausted/failed agent's real
+    # consumption reaches the AGENT_FAILED event instead of being dropped.
+    burned_tokens = 0
     for attempt in range(1, attempts + 1):
         try:
             if timeout is not None:
@@ -560,6 +565,10 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
                 res = await make_call()
         except Exception as e:  # backend / timeout error -> retry, then skip
             last_err = e
+            # This attempt burned real tokens before failing (budget-exhausted,
+            # backend error, etc.). Accumulate so the final failed result can
+            # attribute the agent's full cost, not just the last attempt's.
+            burned_tokens += getattr(e, "tokens", 0) or 0
             rt.log_sink(
                 f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}"
             )
@@ -592,7 +601,10 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
         )
     detail = str(last_err) if last_err else "unknown error"
     rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")
-    return _BackendCallResult(result=None, succeeded=False, error_detail=detail)
+    return _BackendCallResult(
+        result=None, succeeded=False, error_detail=detail,
+        tokens=burned_tokens if burned_tokens > 0 else None,
+    )
 
 
 def _rehydrate(rec: dict, model) -> Any:
