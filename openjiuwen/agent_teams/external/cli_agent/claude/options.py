@@ -38,6 +38,7 @@ def build_claude_options(
     cwd: str | None,
     add_dirs: tuple[str, ...],
     env: dict[str, str],
+    cli_path: str | None,
     system_prompt: str | None,
     team_session_id: str | None,
     member_name: str,
@@ -53,6 +54,7 @@ def build_claude_options(
     resume = claude_session_id if resume_external_backend else None
     return sdk.ClaudeAgentOptions(
         add_dirs=list(add_dirs),
+        cli_path=cli_path,
         cwd=cwd,
         env=env,
         mcp_servers=None,

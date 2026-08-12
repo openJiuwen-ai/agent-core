@@ -416,8 +416,40 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
     assert options.env["EXTRA"] == "1"
     assert "OPENJIUWEN_TEAM_JOIN" in options.env
     assert options.mcp_servers is None
+    assert options.cli_path is None
     assert options.session_id == build_claude_session_id(team_session_id="sess-1", member_name="claude-1")
     assert options.resume is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_passes_claude_cli_path(fake_claude_sdk):
+    token = set_session_id("sess-1")
+    try:
+        runtime = await spawn_mod.build_cli_runtime(
+            _ctx(),
+            mcp_server_command=("openjiuwen-team-mcp",),
+            cli_path="/opt/claude",
+        )
+    finally:
+        reset_session_id(token)
+
+    assert runtime._options.cli_path == "/opt/claude"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_claude_rejects_full_command_override(fake_claude_sdk):
+    token = set_session_id("sess-1")
+    try:
+        with pytest.raises(BaseError, match="configure cli_path instead"):
+            await spawn_mod.build_cli_runtime(
+                _ctx(),
+                command_override=("claude", "--print"),
+                mcp_server_command=("openjiuwen-team-mcp",),
+            )
+    finally:
+        reset_session_id(token)
 
 
 @pytest.mark.asyncio

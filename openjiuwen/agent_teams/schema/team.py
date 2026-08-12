@@ -252,11 +252,20 @@ class ExternalCliAgentSpec(BaseModel):
     and Codex uses :attr:`codex_bin` when a custom executable is required.
     """
 
-    codex_bin: str | None = None
+    cli_path: str | None = Field(default=None, min_length=1)
+    """Optional executable path for SDK-backed CLI agents.
+
+    For Claude this is passed to ``ClaudeAgentOptions.cli_path``. For Codex it
+    maps to ``CodexConfig.codex_bin``. Adapter-backed CLIs should continue to
+    use :attr:`command` when overriding the full launch argv.
+    """
+
+    codex_bin: str | None = Field(default=None, min_length=1)
     """Optional Codex executable path passed to ``CodexConfig.codex_bin``.
 
-    This field is valid only for ``cli_agent="codex"``. The Codex SDK remains
-    responsible for constructing its ``app-server`` arguments.
+    This legacy field is valid only for ``cli_agent="codex"``. Prefer
+    :attr:`cli_path` for new configuration. The Codex SDK remains responsible
+    for constructing its ``app-server`` arguments.
     """
 
     cwd: Optional[str] = None
@@ -323,8 +332,10 @@ class ExternalCliAgentSpec(BaseModel):
         """Keep SDK binary selection separate from adapter argv overrides."""
         if self.cli_agent == "codex" and self.command is not None:
             raise ValueError(
-                "Codex SDK config does not support command; use codex_bin to select a custom executable",
+                "Codex SDK config does not support command; use cli_path to select a custom executable",
             )
+        if self.cli_agent not in {"claude", "codex"} and self.cli_path is not None:
+            raise ValueError("cli_path is only valid when cli_agent is 'claude' or 'codex'")
         if self.cli_agent != "codex" and self.codex_bin is not None:
             raise ValueError("codex_bin is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.mcp_default_tools_approval_mode is not None:
