@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
@@ -76,7 +76,6 @@ from openjiuwen.harness.rails.evolution.evolution_rail import (
     EvolutionTriggerPoint,
     PreparedEvolutionInput,
 )
-from openjiuwen.harness.rails.evolution.review.materials import build_review_scoped_materials
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.review.subagent import (
     EVOLUTION_REVIEW_AGENT_NAME,
@@ -124,20 +123,6 @@ def _normalize_skill_relative_file_path(relative_file_path: str) -> str:
     if "." not in base and base.casefold() == "skill":
         return f"{prefix}/SKILL.md" if prefix else "SKILL.md"
     return raw
-
-
-class EvolutionReviewScopeBuilder:
-    """Build bounded review materials for active evolution review scopes."""
-
-    def __init__(
-        self,
-        *,
-        materials_builder: Callable[[Trajectory | None], dict[str, Any]],
-    ) -> None:
-        self._materials_builder = materials_builder
-
-    def build_scoped_materials(self, trajectory: Trajectory) -> dict[str, Any]:
-        return self._materials_builder(trajectory)
 
 
 @dataclass(frozen=True)
@@ -268,7 +253,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         self._pending_governance: Dict[str, Dict[str, Any]] = {}
         self._language = language
         self._review_runtime = review_runtime
-        self._review_scope_builder = self._make_review_scope_builder()
         self._evolution_tools: list[Any] = []
         self._agent: Any | None = None
         self._skip_signal_trigger_this_invoke = False
@@ -367,12 +351,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             subject_kind=self.subject_kind,
         )
 
-    def _make_review_scope_builder(self) -> EvolutionReviewScopeBuilder:
-        """Build the active review material builder for this rail subject."""
-        return EvolutionReviewScopeBuilder(
-            materials_builder=build_review_scoped_materials,
-        )
-
     def _online_request_id_prefix(self) -> str | None:
         """Return an optional request id prefix for staged online evolution."""
         return None
@@ -441,7 +419,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         if deep_config is None:
             return
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        subagents = remove_evolution_review_agent_config(list(getattr(deep_config, "subagents", None) or []))
+        subagents = list(getattr(deep_config, "subagents", None) or [])
         deep_config.subagents = ensure_evolution_review_agent_config(
             subagents,
             build_evolution_review_agent_config(
@@ -479,14 +457,22 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         source: str,
         subject: dict[str, Any],
         session_id: str,
+        member_id: str | None = None,
+        team_id: str | None = None,
         user_intent: str = "",
     ):
-        """Create review materials from the current clean trajectory window."""
-        capture = self._current_capture()
+        """Create a review scope with the current clean trajectory window."""
+        capture = self._resolve_capture(
+            session_id=session_id,
+            member_id=member_id,
+            team_id=team_id,
+        )
         if capture is None:
+            with self._subscription_lock:
+                has_active_capture = bool(self._active_captures)
+            if has_active_capture:
+                raise RuntimeError("review session does not match the active trajectory scope")
             raise RuntimeError("evolution review must be prepared during an active invoke")
-        if session_id and session_id != capture.session_id:
-            raise RuntimeError("review session does not match the active trajectory scope")
 
         trajectory = self.get_trajectory(
             session_id=capture.session_id,
@@ -501,7 +487,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             subject=subject,
             session_id=capture.session_id,
             user_intent=user_intent,
-            scoped_materials=self._review_scope_builder.build_scoped_materials(trajectory),
+            trajectory=trajectory,
         )
         self._skip_signal_trigger_this_invoke = True
         return scope

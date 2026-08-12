@@ -66,10 +66,8 @@ from openjiuwen.harness.rails.evolution.evolution_rail import (
     EvolutionTriggerPoint,
     _TeamTrajectoryCaptureMixin,
 )
-from openjiuwen.harness.rails.evolution.review.materials import build_swarm_review_scoped_materials
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
-    EvolutionReviewScopeBuilder,
     _SkillPreparedEvolutionInput,
     SkillEvolutionRail,
 )
@@ -242,12 +240,6 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
             generate_records_llm_policy=generate_records_llm_policy,
             two_stage=two_stage,
             profile="team",
-        )
-
-    def _make_review_scope_builder(self) -> EvolutionReviewScopeBuilder:
-        """Build the active review material builder for team/swarm subjects."""
-        return EvolutionReviewScopeBuilder(
-            materials_builder=build_swarm_review_scoped_materials,
         )
 
     def _online_request_id_prefix(self) -> str | None:

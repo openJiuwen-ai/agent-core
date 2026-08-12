@@ -11,12 +11,17 @@ from openjiuwen.agent_evolving.prompts.tools import (
     ListSkillExperiencesMetadataProvider,
     SimplifySkillExperiencesMetadataProvider,
 )
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.extensions.observability import semconv
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.agent_evolving.tools import (
     EvolutionReviewListSkillExperiencesTool,
-    EvolutionReviewListTrajectoryStepsTool,
+    EvolutionReviewListTrajectorySpansTool,
     EvolutionReviewReadSkillExperiencesTool,
-    EvolutionReviewReadTrajectoryStepsTool,
+    EvolutionReviewReadTrajectorySpansTool,
     SubmitEvolutionReviewResultTool,
     create_evolution_review_tools,
 )
@@ -77,6 +82,58 @@ def _record(record_id="ev_1", content="Prefer structured parser fields."):
         ),
         score=0.8,
         timestamp="2026-01-01T00:00:00Z",
+    )
+
+
+def _span(name, span_id, *, start=1, parent=None, attributes=None, status=None):
+    span = {
+        "traceId": "trace-1",
+        "spanId": span_id,
+        "name": name,
+        "startTimeUnixNano": str(start),
+        "endTimeUnixNano": str(start + 1),
+        "attributes": dict(attributes or {}),
+    }
+    if parent is not None:
+        span["parentSpanId"] = parent
+    if status is not None:
+        span["status"] = status
+    return span
+
+
+def _trajectory(*spans):
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map({TRAJECTORY_ID: "review-tool-test"}),
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "test"},
+                            "spans": list(spans),
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+
+def _tool_trajectory(*, output="failed parse", status=None):
+    return _trajectory(
+        _span(
+            "tool.bash",
+            "tool-1",
+            attributes={
+                semconv.GEN_AI_TOOL_NAME: "bash",
+                semconv.GEN_AI_TOOL_ID: "call-1",
+                semconv.GEN_AI_TOOL_INPUT: {"cmd": "pytest"},
+                semconv.GEN_AI_TOOL_OUTPUT: output,
+            },
+            status=status,
+        )
     )
 
 
@@ -156,15 +213,15 @@ def test_review_tool_agent_id_scopes_tool_ids_without_changing_names():
     assert {tool.card.name for tool in tools} == {
         "list_skill_experiences",
         "read_skill_experiences",
-        "list_trajectory_steps",
-        "read_trajectory_steps",
+        "list_trajectory_spans",
+        "read_trajectory_spans",
         "submit_evolution_review",
     }
     assert {tool.card.id for tool in tools} == {
         "EvolutionReviewListSkillExperiencesTool_parent_agent_1",
         "EvolutionReviewReadSkillExperiencesTool_parent_agent_1",
-        "EvolutionReviewListTrajectoryStepsTool_parent_agent_1",
-        "EvolutionReviewReadTrajectoryStepsTool_parent_agent_1",
+        "EvolutionReviewListTrajectorySpansTool_parent_agent_1",
+        "EvolutionReviewReadTrajectorySpansTool_parent_agent_1",
         "SubmitEvolutionReviewResultTool_parent_agent_1",
     }
 
@@ -175,8 +232,8 @@ def test_review_tools_declare_required_input_schemas():
     tools = [
         EvolutionReviewListSkillExperiencesTool(runtime=runtime, query_service=query_service),
         EvolutionReviewReadSkillExperiencesTool(runtime=runtime, query_service=query_service),
-        EvolutionReviewListTrajectoryStepsTool(runtime=runtime),
-        EvolutionReviewReadTrajectoryStepsTool(runtime=runtime),
+        EvolutionReviewListTrajectorySpansTool(runtime=runtime),
+        EvolutionReviewReadTrajectorySpansTool(runtime=runtime),
         SubmitEvolutionReviewResultTool(runtime=runtime),
     ]
 
@@ -184,15 +241,26 @@ def test_review_tools_declare_required_input_schemas():
 
     assert schemas["list_skill_experiences"]["required"] == ["evolution_review_ref"]
     assert schemas["read_skill_experiences"]["required"] == ["evolution_review_ref", "record_ids"]
-    assert schemas["list_trajectory_steps"]["required"] == ["evolution_review_ref"]
-    list_props = schemas["list_trajectory_steps"]["properties"]
+    assert schemas["list_trajectory_spans"]["required"] == ["evolution_review_ref"]
+    list_props = schemas["list_trajectory_spans"]["properties"]
     assert list_props["cursor"]["type"] == "string"
     assert list_props["limit"]["type"] == "integer"
-    assert list_props["kind"]["enum"] == ["llm", "tool"]
+    assert set(list_props["kind"]["enum"]) == {
+        "llm",
+        "tool",
+        "team",
+        "agent",
+        "task",
+        "message",
+        "member",
+        "plan",
+        "event",
+    }
+    assert list_props["name_contains"]["type"] == "string"
     assert list_props["tool_name"]["type"] == "string"
     assert list_props["has_error"]["type"] == "boolean"
-    assert schemas["read_trajectory_steps"]["required"] == ["evolution_review_ref", "refs"]
-    assert schemas["read_trajectory_steps"]["properties"]["refs"]["description"]
+    assert schemas["read_trajectory_spans"]["required"] == ["evolution_review_ref", "refs"]
+    assert schemas["read_trajectory_spans"]["properties"]["refs"]["description"]
     submit_required = schemas["submit_evolution_review"]["required"]
     assert submit_required == [
         "evolution_review_ref",
@@ -233,8 +301,8 @@ def test_review_tools_declare_english_parameter_constraints():
     tools = create_evolution_review_tools(runtime=runtime, query_service=query_service, language="en")
     schemas = {tool.card.name: tool.card.input_params for tool in tools}
 
-    refs_description = schemas["read_trajectory_steps"]["properties"]["refs"]["description"]
-    assert refs_description == "Task-record refs available to the current review."
+    refs_description = schemas["read_trajectory_spans"]["properties"]["refs"]["description"]
+    assert refs_description == "Span refs returned by list_trajectory_spans for the current review."
     experience_properties = schemas["submit_evolution_review"]["properties"]["proposals"]["items"]["properties"][
         "experience"
     ]["properties"]
@@ -266,81 +334,50 @@ async def test_review_tools_declare_general_subject_schema_and_normalize_team_sk
 
 
 @pytest.mark.asyncio
-async def test_read_trajectory_steps_returns_details_and_records_trace():
+async def test_read_trajectory_spans_returns_bounded_tool_detail_and_records_trace():
     runtime = EvolutionReviewRuntime()
     launch = runtime.create_scope(
         source="explicit_command",
         subject={"kind": "skill", "name": "skill-a"},
         session_id="session-1",
-        scoped_materials={
-            "trajectory_steps": [
-                {
-                    "ref": "step-1",
-                    "index": 0,
-                    "kind": "tool",
-                    "tool_name": "bash",
-                    "summary": "tool=bash result_preview=failed parse",
-                    "has_error": True,
-                }
-            ],
-            "trajectory_step_details": {
-                "step-1": {
-                    "ref": "step-1",
-                    "index": 0,
-                    "kind": "tool",
-                    "detail": {
-                        "tool_name": "bash",
-                        "call_args": {"cmd": "pytest"},
-                        "call_result": "failed parse",
-                        "tool_call_id": "call-1",
-                    },
-                }
-            },
-        },
+        trajectory=_tool_trajectory(status={"code": "ERROR", "message": "failed parse"}),
     )
-    tool = EvolutionReviewReadTrajectoryStepsTool(runtime=runtime)
+    tool = EvolutionReviewReadTrajectorySpansTool(runtime=runtime)
+    span_ref = "span:trace-1:tool-1"
 
     result = await tool.invoke(
-        {"evolution_review_ref": launch.evolution_review_ref, "refs": ["step-1"]},
+        {"evolution_review_ref": launch.evolution_review_ref, "refs": [span_ref]},
         conversation_id="session-1",
     )
 
     assert result.success is True
-    assert result.data["items"] == [
-        {
-            "ref": "step-1",
-            "index": 0,
-            "kind": "tool",
-            "detail": {
-                "tool_name": "bash",
-                "call_args": {"cmd": "pytest"},
-                "call_result": "failed parse",
-                "tool_call_id": "call-1",
-            },
-        }
-    ]
+    item = result.data["items"][0]
+    assert item["ref"] == span_ref
+    assert item["kind"] == "tool"
+    assert item["tool"] == {
+        "name": "bash",
+        "id": "call-1",
+        "input": {"value": {"cmd": "pytest"}, "truncated": False},
+        "output": {"value": "failed parse", "truncated": False},
+    }
+    assert item["error"]["value"]["message"] == "failed parse"
     scope = runtime.resolve_scope(launch.evolution_review_ref, session_id="session-1")
-    assert scope.read_trace == {"step-1"}
+    assert scope.read_trace == {span_ref}
 
 
 @pytest.mark.asyncio
-async def test_read_trajectory_steps_rejects_unknown_detail_refs():
+async def test_read_trajectory_spans_rejects_unknown_refs():
     runtime = EvolutionReviewRuntime()
     launch = runtime.create_scope(
         source="explicit_command",
         subject={"kind": "skill", "name": "skill-a"},
         session_id="session-1",
-        scoped_materials={
-            "trajectory_steps": [
-                {"ref": "step-1", "index": 0, "kind": "tool", "summary": "tool=bash", "has_error": False}
-            ],
-            "trajectory_step_details": {},
-        },
+        trajectory=_tool_trajectory(),
     )
-    tool = EvolutionReviewReadTrajectoryStepsTool(runtime=runtime)
+    tool = EvolutionReviewReadTrajectorySpansTool(runtime=runtime)
 
     result = await tool.invoke(
-        {"evolution_review_ref": launch.evolution_review_ref, "refs": ["step-1"]},
+        {"evolution_review_ref": launch.evolution_review_ref, "refs": ["span:trace-1:missing"]},
         conversation_id="session-1",
     )
 
@@ -349,35 +386,25 @@ async def test_read_trajectory_steps_rejects_unknown_detail_refs():
 
 
 @pytest.mark.asyncio
-async def test_list_trajectory_steps_returns_paginated_index_without_recording_trace():
+async def test_list_trajectory_spans_returns_paginated_factual_index_without_recording_trace():
     runtime = EvolutionReviewRuntime()
     launch = runtime.create_scope(
         source="explicit_command",
         subject={"kind": "skill", "name": "skill-a"},
         session_id="session-1",
-        scoped_materials={
-            "trajectory_steps": [
-                {"ref": "step-1", "index": 0, "kind": "llm", "summary": "llm model=m messages=1", "has_error": False},
-                {
-                    "ref": "step-2",
-                    "index": 1,
-                    "kind": "tool",
-                    "tool_name": "bash",
-                    "summary": "tool=bash result_preview=ok",
-                    "has_error": False,
-                },
-                {
-                    "ref": "step-3",
-                    "index": 2,
-                    "kind": "tool",
-                    "tool_name": "python",
-                    "summary": "tool=python result_preview=Error",
-                    "has_error": True,
-                },
-            ]
-        },
+        trajectory=_trajectory(
+            _span("llm.call", "llm-1", start=1, attributes={semconv.GEN_AI_REQUEST_MODEL: "m"}),
+            _span("tool.bash", "tool-1", start=2, attributes={semconv.GEN_AI_TOOL_NAME: "bash"}),
+            _span(
+                "tool.python",
+                "tool-2",
+                start=3,
+                attributes={semconv.GEN_AI_TOOL_NAME: "python"},
+                status={"code": "ERROR"},
+            ),
+        ),
     )
-    tool = EvolutionReviewListTrajectoryStepsTool(runtime=runtime)
+    tool = EvolutionReviewListTrajectorySpansTool(runtime=runtime)
 
     result = await tool.invoke(
         {"evolution_review_ref": launch.evolution_review_ref, "limit": 2},
@@ -385,78 +412,159 @@ async def test_list_trajectory_steps_returns_paginated_index_without_recording_t
     )
 
     assert result.success is True
-    assert result.data == {
-        "items": [
-            {"ref": "step-1", "index": 0, "kind": "llm", "summary": "llm model=m messages=1", "has_error": False},
-            {
-                "ref": "step-2",
-                "index": 1,
-                "kind": "tool",
-                "tool_name": "bash",
-                "summary": "tool=bash result_preview=ok",
-                "has_error": False,
-            },
-        ],
-        "next_cursor": "2",
-        "total": 3,
-    }
+    assert [item["ref"] for item in result.data["items"]] == [
+        "span:trace-1:llm-1",
+        "span:trace-1:tool-1",
+    ]
+    assert result.data["items"][0]["model"] == "m"
+    assert result.data["items"][1]["tool_name"] == "bash"
+    assert "summary" not in result.data["items"][0]
+    assert result.data["next_cursor"] == "2"
+    assert result.data["total"] == 3
     scope = runtime.resolve_scope(launch.evolution_review_ref, session_id="session-1")
     assert scope.read_trace == set()
 
 
 @pytest.mark.asyncio
-async def test_list_trajectory_steps_filters_index_items():
+async def test_list_trajectory_spans_filters_kind_name_tool_and_error():
     runtime = EvolutionReviewRuntime()
     launch = runtime.create_scope(
         source="explicit_command",
         subject={"kind": "skill", "name": "skill-a"},
         session_id="session-1",
-        scoped_materials={
-            "trajectory_steps": [
-                {"ref": "step-1", "index": 0, "kind": "llm", "summary": "llm model=m messages=1", "has_error": False},
-                {
-                    "ref": "step-2",
-                    "index": 1,
-                    "kind": "tool",
-                    "tool_name": "bash",
-                    "summary": "tool=bash result_preview=ok",
-                    "has_error": False,
-                },
-                {
-                    "ref": "step-3",
-                    "index": 2,
-                    "kind": "tool",
-                    "tool_name": "python",
-                    "summary": "tool=python result_preview=Error",
-                    "has_error": True,
-                },
-            ]
-        },
+        trajectory=_trajectory(
+            _span("llm.call", "llm-1"),
+            _span("tool.bash", "tool-1", start=2, attributes={semconv.GEN_AI_TOOL_NAME: "bash"}),
+            _span(
+                "tool.python",
+                "tool-2",
+                start=3,
+                attributes={semconv.GEN_AI_TOOL_NAME: "python"},
+                status={"code": "ERROR"},
+            ),
+        ),
     )
-    tool = EvolutionReviewListTrajectoryStepsTool(runtime=runtime)
+    tool = EvolutionReviewListTrajectorySpansTool(runtime=runtime)
 
     result = await tool.invoke(
         {
             "evolution_review_ref": launch.evolution_review_ref,
             "kind": "tool",
+            "name_contains": "PYTHON",
+            "tool_name": "python",
             "has_error": True,
         },
         conversation_id="session-1",
     )
 
     assert result.success is True
-    assert result.data["items"] == [
-        {
-            "ref": "step-3",
-            "index": 2,
-            "kind": "tool",
-            "tool_name": "python",
-            "summary": "tool=python result_preview=Error",
-            "has_error": True,
-        }
-    ]
+    assert result.data["items"][0]["ref"] == "span:trace-1:tool-2"
+    assert result.data["items"][0]["tool_name"] == "python"
+    assert result.data["items"][0]["has_error"] is True
     assert result.data["next_cursor"] is None
     assert result.data["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_read_trajectory_spans_projects_llm_and_context_allowlists():
+    runtime = EvolutionReviewRuntime()
+    launch = runtime.create_scope(
+        source="explicit_command",
+        subject={"kind": "swarm-skill", "name": "team-a"},
+        session_id="session-1",
+        trajectory=_trajectory(
+            _span(
+                "llm.call",
+                "llm-1",
+                attributes={
+                    semconv.GEN_AI_REQUEST_MODEL: "model-a",
+                    f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+                    f"{semconv.GEN_AI_PROMPT}.0.content": [
+                        {"type": "text", "text": "review this"},
+                        {"type": "image_url", "image_url": "data:image/png;base64,secret"},
+                    ],
+                    f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+                    f"{semconv.GEN_AI_COMPLETION}.0.content": "done",
+                    semconv.GEN_AI_USAGE_TOTAL_TOKENS: 42,
+                    semconv.GEN_AI_REQUEST_TEMPERATURE: 0.8,
+                    semconv.LANGFUSE_OBSERVATION_INPUT: "duplicate prompt",
+                },
+            ),
+            _span(
+                "agent.worker.task_iteration.1",
+                "agent-1",
+                start=2,
+                attributes={
+                    semconv.AT_AGENT_ID: "worker-a",
+                    semconv.AT_AGENT_ROLE: "researcher",
+                    semconv.AT_AGENT_INPUT: "x" * 1300,
+                    "unrelated.business.field": "private",
+                },
+            ),
+        ),
+    )
+    tool = EvolutionReviewReadTrajectorySpansTool(runtime=runtime)
+
+    result = await tool.invoke(
+        {
+            "evolution_review_ref": launch.evolution_review_ref,
+            "refs": ["span:trace-1:llm-1", "span:trace-1:agent-1"],
+        },
+        conversation_id="session-1",
+    )
+
+    assert result.success is True
+    llm_item, agent_item = result.data["items"]
+    assert llm_item["llm"]["model"] == "model-a"
+    prompt_value = llm_item["llm"]["input_messages"]["items"][0]["content"]["value"]
+    assert prompt_value[1] == {"type": "image_url", "omitted": "image_content"}
+    assert "usage" not in llm_item["llm"]
+    assert "temperature" not in llm_item["llm"]
+    assert "langfuse" not in str(llm_item).lower()
+    assert agent_item["context"][semconv.AT_AGENT_ID] == "worker-a"
+    assert agent_item["context"][semconv.AT_AGENT_ROLE] == "researcher"
+    bounded_input = agent_item["context"][semconv.AT_AGENT_INPUT]
+    assert bounded_input == {"value": "x" * 1200, "truncated": True, "original_chars": 1300}
+    assert "unrelated.business.field" not in agent_item["context"]
+
+
+@pytest.mark.asyncio
+async def test_trajectory_span_tools_omit_unaddressable_spans_and_limit_reads():
+    runtime = EvolutionReviewRuntime()
+    trajectory = _tool_trajectory()
+    payload = trajectory.to_otlp()
+    payload["resourceSpans"][0]["scopeSpans"][0]["spans"].append(
+        {
+            "traceId": "trace-1",
+            "name": "event.unaddressable",
+            "startTimeUnixNano": "3",
+            "endTimeUnixNano": "4",
+        }
+    )
+    launch = runtime.create_scope(
+        source="explicit_command",
+        subject={"kind": "skill", "name": "skill-a"},
+        session_id="session-1",
+        trajectory=Trajectory.from_otlp(payload),
+    )
+    tools = {
+        tool.card.name: tool
+        for tool in create_evolution_review_tools(runtime=runtime, query_service=DummyQueryService())
+    }
+
+    listed = await tools["list_trajectory_spans"].invoke(
+        {"evolution_review_ref": launch.evolution_review_ref},
+        conversation_id="session-1",
+    )
+    too_many = await tools["read_trajectory_spans"].invoke(
+        {"evolution_review_ref": launch.evolution_review_ref, "refs": [f"span:t:s{i}" for i in range(9)]},
+        conversation_id="session-1",
+    )
+
+    assert listed.success is True
+    assert [item["ref"] for item in listed.data["items"]] == ["span:trace-1:tool-1"]
+    assert too_many.success is False
+    assert "read at most 8 trajectory refs" in too_many.error
 
 
 @pytest.mark.asyncio
@@ -601,23 +709,12 @@ async def test_submit_evolution_review_records_runtime_completion():
         source="explicit_command",
         subject={"kind": "skill", "name": "skill-a"},
         session_id="session-1",
-        scoped_materials={
-            "trajectory_steps": [
-                {"ref": "step-1", "index": 0, "kind": "tool", "summary": "tool=bash result_preview=failed parse"}
-            ],
-            "trajectory_step_details": {
-                "step-1": {
-                    "ref": "step-1",
-                    "index": 0,
-                    "kind": "tool",
-                    "detail": {"tool_name": "bash", "call_result": "failed parse"},
-                }
-            },
-        },
+        trajectory=_tool_trajectory(),
     )
-    read_tool = EvolutionReviewReadTrajectoryStepsTool(runtime=runtime)
+    span_ref = "span:trace-1:tool-1"
+    read_tool = EvolutionReviewReadTrajectorySpansTool(runtime=runtime)
     await read_tool.invoke(
-        {"evolution_review_ref": launch.evolution_review_ref, "refs": ["step-1"]},
+        {"evolution_review_ref": launch.evolution_review_ref, "refs": [span_ref]},
         conversation_id="session-1",
     )
     submit_tool = SubmitEvolutionReviewResultTool(runtime=runtime)
@@ -627,7 +724,7 @@ async def test_submit_evolution_review_records_runtime_completion():
             "evolution_review_ref": launch.evolution_review_ref,
             "subject": {"kind": "skill", "name": "skill-a"},
             "outcome": "recommend_evolve",
-            "evidence_refs": ["step-1"],
+            "evidence_refs": [span_ref],
             "proposals": [
                 {
                     "proposal_id": "prop_1",
@@ -672,34 +769,24 @@ async def test_review_tools_accept_evolution_reviewer_subsession_for_parent_scop
         source="explicit_command",
         subject={"kind": "skill", "name": "skill-a"},
         session_id="session-1",
-        scoped_materials={
-            "trajectory_steps": [
-                {"ref": "step-1", "index": 0, "kind": "tool", "summary": "tool=bash result_preview=failed parse"}
-            ],
-            "trajectory_step_details": {
-                "step-1": {
-                    "ref": "step-1",
-                    "index": 0,
-                    "kind": "tool",
-                    "detail": {"tool_name": "bash", "call_result": "failed parse"},
-                }
-            },
-        },
+        trajectory=_tool_trajectory(),
     )
+    span_ref = "span:trace-1:tool-1"
     reviewer_session_id = "session-1_sub_evolution_reviewer_1234abcd"
-    read_tool = EvolutionReviewReadTrajectoryStepsTool(runtime=runtime)
+    reviewer_session = create_agent_session(session_id=reviewer_session_id)
+    read_tool = EvolutionReviewReadTrajectorySpansTool(runtime=runtime)
     submit_tool = SubmitEvolutionReviewResultTool(runtime=runtime)
 
     read_result = await read_tool.invoke(
-        {"evolution_review_ref": launch.evolution_review_ref, "refs": ["step-1"]},
-        conversation_id=reviewer_session_id,
+        {"evolution_review_ref": launch.evolution_review_ref, "refs": [span_ref]},
+        session=reviewer_session,
     )
     submit_result = await submit_tool.invoke(
         {
             "evolution_review_ref": launch.evolution_review_ref,
             "subject": {"kind": "skill", "name": "skill-a"},
             "outcome": "recommend_evolve",
-            "evidence_refs": ["step-1"],
+            "evidence_refs": [span_ref],
             "proposals": [
                 {
                     "proposal_id": "prop_1",
@@ -710,7 +797,7 @@ async def test_review_tools_accept_evolution_reviewer_subsession_for_parent_scop
                 }
             ],
         },
-        conversation_id=reviewer_session_id,
+        session=reviewer_session,
     )
     resolved = runtime.resolve_selected_proposals(
         launch.evolution_review_ref,
@@ -722,7 +809,27 @@ async def test_review_tools_accept_evolution_reviewer_subsession_for_parent_scop
     assert read_result.success is True
     assert submit_result.success is True
     assert resolved.selected_proposal_ids == ("prop_1",)
-    assert runtime.resolve_scope(launch.evolution_review_ref, session_id="session-1").read_trace == {"step-1"}
+    assert runtime.resolve_scope(launch.evolution_review_ref, session_id="session-1").read_trace == {span_ref}
+
+
+@pytest.mark.asyncio
+async def test_review_tools_reject_unrelated_session():
+    runtime = EvolutionReviewRuntime()
+    launch = runtime.create_scope(
+        source="explicit_command",
+        subject={"kind": "skill", "name": "skill-a"},
+        session_id="session-1",
+        trajectory=_tool_trajectory(),
+    )
+    tool = EvolutionReviewReadTrajectorySpansTool(runtime=runtime)
+
+    result = await tool.invoke(
+        {"evolution_review_ref": launch.evolution_review_ref, "refs": ["span:trace-1:tool-1"]},
+        session=create_agent_session(session_id="session-2"),
+    )
+
+    assert result.success is False
+    assert runtime.resolve_scope(launch.evolution_review_ref, session_id="session-1").read_trace == set()
 
 
 @pytest.mark.asyncio
@@ -732,23 +839,12 @@ async def test_submit_evolution_review_rejects_more_than_max_proposals():
         source="explicit_command",
         subject={"kind": "skill", "name": "skill-a"},
         session_id="session-1",
-        scoped_materials={
-            "trajectory_steps": [
-                {"ref": "step-1", "index": 0, "kind": "tool", "summary": "tool=bash result_preview=failed parse"}
-            ],
-            "trajectory_step_details": {
-                "step-1": {
-                    "ref": "step-1",
-                    "index": 0,
-                    "kind": "tool",
-                    "detail": {"tool_name": "bash", "call_result": "failed parse"},
-                }
-            },
-        },
+        trajectory=_tool_trajectory(),
     )
-    read_tool = EvolutionReviewReadTrajectoryStepsTool(runtime=runtime)
+    span_ref = "span:trace-1:tool-1"
+    read_tool = EvolutionReviewReadTrajectorySpansTool(runtime=runtime)
     await read_tool.invoke(
-        {"evolution_review_ref": launch.evolution_review_ref, "refs": ["step-1"]},
+        {"evolution_review_ref": launch.evolution_review_ref, "refs": [span_ref]},
         conversation_id="session-1",
     )
     submit_tool = SubmitEvolutionReviewResultTool(runtime=runtime)
@@ -758,7 +854,7 @@ async def test_submit_evolution_review_rejects_more_than_max_proposals():
             "evolution_review_ref": launch.evolution_review_ref,
             "subject": {"kind": "skill", "name": "skill-a"},
             "outcome": "recommend_evolve",
-            "evidence_refs": ["step-1"],
+            "evidence_refs": [span_ref],
             "proposals": [
                 {
                     "proposal_id": f"prop_{index}",
@@ -766,7 +862,7 @@ async def test_submit_evolution_review_rejects_more_than_max_proposals():
                         "summary": f"Use parser fields {index}",
                         "content": f"Prefer parser fields for case {index}.",
                     },
-                    "evidence_refs": ["step-1"],
+                    "evidence_refs": [span_ref],
                 }
                 for index in range(1, 5)
             ],
