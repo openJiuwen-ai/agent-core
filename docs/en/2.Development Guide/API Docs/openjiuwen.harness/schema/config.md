@@ -66,6 +66,7 @@ Full configuration dataclass for a [`DeepAgent`](../deep_agent.md#class-openjiuw
 
 - **model** (str | BaseChatModel): LLM model name or instance.
 - **card** ([AgentCard](../../openjiuwen.core/single_agent/single_agent.md#class-openjiuwencoresingle_agentagentcard), optional): Agent identity card. Default: `None`.
+- **tool_owner_id** (str, optional): Runtime owner namespace for stateful Tool resources. Use it to isolate executable Tool instances without changing the stable Agent card/checkpoint identity. Defaults to the effective `card.id` and cannot change during one configured Agent lifecycle.
 - **system_prompt** (str, optional): System prompt override. Default: `None`.
 - **enable_task_loop** (bool): Enable the autonomous task loop. Default: `False`.
 - **enable_async_subagent** (bool): Allow sub-agents to run asynchronously. Differentiate sync/async modes: register `TaskTool` for synchronous mode, register `session` tools for asynchronous mode. Default: `False`.

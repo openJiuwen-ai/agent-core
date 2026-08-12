@@ -293,6 +293,41 @@ class DeepAgent(BaseAgent):
         self._initialized = False
         return self
 
+    def _apply_tool_owner_id(
+        self,
+        config: DeepAgentConfig,
+        previous_config: Optional[DeepAgentConfig] = None,
+    ) -> None:
+        """Bind stateful Tool ownership independently from the persistent card id.
+
+        Hot reconfiguration is partial throughout DeepAgent: when the incoming
+        config omits ``tool_owner_id``, retain the prior explicit namespace.
+        Initial configuration and agents that never opt in continue to use
+        ``card.id`` exactly as before.
+        """
+        owner_id = config.tool_owner_id
+        if owner_id is None and previous_config is not None:
+            owner_id = previous_config.tool_owner_id
+        if owner_id is not None:
+            if not isinstance(owner_id, str):
+                raise TypeError("DeepAgentConfig.tool_owner_id must be a string or None")
+            owner_id = owner_id.strip() or None
+        effective_card_id = config.card.id if config.card is not None else self.card.id
+        effective_owner_id = owner_id or effective_card_id
+        previous_effective_owner_id = None
+        if previous_config is not None:
+            previous_effective_owner_id = previous_config.tool_owner_id or self.card.id
+        if (
+            previous_effective_owner_id is not None
+            and effective_owner_id != previous_effective_owner_id
+        ):
+            raise ValueError(
+                "DeepAgentConfig.tool_owner_id cannot change during a DeepAgent lifecycle; "
+                "create a new agent to use a different Tool owner namespace"
+            )
+        config.tool_owner_id = owner_id
+        self.ability_manager.set_owner_id(effective_owner_id)
+
     @staticmethod
     def _filter_disabled_tools(config: DeepAgentConfig) -> None:
         if config.tools is None:
@@ -342,31 +377,12 @@ class DeepAgent(BaseAgent):
                 result.msg(),
             )
 
-    @staticmethod
-    def _resolve_tool_owner_id(config: DeepAgentConfig) -> str:
-        """Return the owner id qualifying this agent's stateful tool registrations.
-
-        Tool ownership and persistence identity are separate concerns: the
-        checkpointer keys state by ``card.id``, so that id has to stay stable,
-        while the process-global resource manager needs one owner per live agent
-        or concurrent agents sharing a card silently overwrite each other's tool
-        instances. ``tool_owner_id`` lets a host separate the two; omitting it
-        keeps the historical behaviour of reusing ``card.id``.
-
-        Args:
-            config: The configuration being applied.
-
-        Returns:
-            The explicit ``tool_owner_id`` when set, otherwise the card id.
-        """
-        return config.tool_owner_id or config.card.id
-
     def _initial_configure(self, config: DeepAgentConfig) -> None:
         """First-time setup: persist config, create the inner ReActAgent, and queue rails."""
-        self._deep_config = config
+        self._apply_tool_owner_id(config)
         if config.card is not None:
             self.card = config.card
-            self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
+        self._deep_config = config
 
         self._react_agent = self._create_react_agent()
         self._queue_pending_rails(config)
@@ -374,10 +390,10 @@ class DeepAgent(BaseAgent):
     def _hot_reconfigure(self, config: DeepAgentConfig) -> None:
         """Hot-reconfigure an already-running agent without restarting it."""
         previous_config = self._deep_config
-        self._deep_config = config
+        self._apply_tool_owner_id(config, previous_config)
         if config.card is not None:
             self.card = config.card
-            self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
+        self._deep_config = config
 
         self._hot_reload_rails(config)
 

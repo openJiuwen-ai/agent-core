@@ -89,6 +89,22 @@ ReliabilityRail 的探测器滑窗 / 自愈限流 / leader sink 收敛进 `relia
    protocol 方法 + `AgentCustomizer` 别名、`TeamHarness` 的 run/apply/缓存、`ExternalCliRuntime`
    no-op、`recover_from_session` 的 reinject。平台改用 provider（swarm 已落地）。
 
+### Provider 返回契约
+
+- Provider 必须同步返回；返回 coroutine/awaitable 直接 `TypeError`，Provider 自身异常原样上抛。
+- Rail Provider 只可返回 `AgentRail`、`list[AgentRail]`、`None` 或空列表。
+- Tool Provider 只可返回 live `Tool`、已注册的 `ToolCard`、对应列表、`None` 或空列表。
+- 列表中的 `None` 表示条件能力未启用，装配时过滤；其他错误类型立即失败。
+- live `Tool` 不要求预注册，由 `AbilityManager` 在应用阶段注册；stateful Tool 届时按当前
+  Agent owner 自动改写资源 ID。
+- 纯 `ToolCard` 是已存在 Tool 的引用，不是“只提供元数据”：当前节点必须能按 card.id
+  从 `Runner.resource_mgr` 找到真实 Tool，且真实 card 与声明 card 全字段一致；装配结果使用真实
+  canonical card，避免模型所见元数据与实际执行对象错配。
+- `stateless=True` 的纯卡可作为共享引用；stateful 纯卡必须按当前 Agent owner 预先注册为
+  `<tool_name>_<owner_id>`。无 owner、owner 不匹配或伪造 card 均拒绝。
+- `DeepAgentSpec.tools` / `SubAgentSpec.tools` 中的直接 `ToolCard` 服从同一规则；SubAgent
+  构建 Provider 时使用子 Agent 自己的 card.id，不继承父 Agent owner。
+
 **关键安全性核对**：去掉 TeamToolRail eager init 安全——TeamPolicyRail static section 在
 `__init__` 用构造参数生成、不读 `ability_manager`；LLM 看 tools 走 `ability_manager.list()`
 （before_model_call），晚于 `ensure_initialized` 的自动 init。唯一受影响的是测试 `_tool_names`

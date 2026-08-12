@@ -608,6 +608,16 @@ class AbilityManager:
         """
         from openjiuwen.core.runner import Runner
 
+        # Reject a duplicate name inside this manager before touching the
+        # process-wide resource manager.  Otherwise the stateful refresh below
+        # can replace the executable instance even though ``self.add(card)``
+        # keeps the existing ToolCard, leaving metadata and execution out of
+        # sync.  A freshly rebuilt manager with the same owner id still has an
+        # empty local registry and therefore retains the intended refresh
+        # semantics for rebinding stateful resources across agent rebuilds.
+        if card.name in self._tools:
+            return self.add(card)
+
         if card.stateless:
             Runner.resource_mgr.add_tool(resource, skip_if_exists=True)
             return self.add(card)

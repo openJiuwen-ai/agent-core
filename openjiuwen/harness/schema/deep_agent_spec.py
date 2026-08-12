@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -21,6 +22,7 @@ from openjiuwen.core.foundation.llm import (
 )
 from openjiuwen.core.foundation.tool import (
     McpServerConfig,
+    Tool,
     ToolCard,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -109,6 +111,107 @@ def _as_built_list(built: Any) -> list:
     if isinstance(built, list):
         return [item for item in built if item is not None]
     return [built]
+
+
+def _map_provider_result(built: Any, validator: Callable[[Any], Any]) -> Any:
+    """Validate a provider result and normalize omitted list entries away."""
+    if built is None:
+        return None
+    if isinstance(built, list):
+        return [validator(item) for item in built if item is not None]
+    return validator(built)
+
+
+def _validate_rail_provider_result(built: Any, *, provider_name: str) -> Any:
+    """Require rail providers to return AgentRail values (or an empty result)."""
+    from openjiuwen.core.single_agent.rail.base import AgentRail
+
+    def _validate(item: Any) -> AgentRail:
+        if inspect.isawaitable(item):
+            if inspect.iscoroutine(item):
+                item.close()
+            raise TypeError(f"Rail provider '{provider_name}' must return synchronously, not an awaitable")
+        if not isinstance(item, AgentRail):
+            raise TypeError(
+                f"Rail provider '{provider_name}' returned {type(item).__name__}; "
+                "expected AgentRail, list[AgentRail], or None"
+            )
+        return item
+
+    return _map_provider_result(built, _validate)
+
+
+def _canonicalize_tool_card_reference(
+    card: ToolCard,
+    *,
+    context: "BuildContext | None",
+    source: str,
+) -> ToolCard:
+    """Resolve a ToolCard reference to its registered, owner-safe canonical card."""
+    from openjiuwen.core.runner import Runner
+    from openjiuwen.core.single_agent.ability_manager import AbilityManager
+
+    registered_tool = Runner.resource_mgr.get_tool(card.id) if card.id else None
+    if registered_tool is None:
+        raise TypeError(f"ToolCard '{card.name}' from {source} has no registered Tool instance under id '{card.id}'")
+
+    registered_card = getattr(registered_tool, "card", None)
+    if not isinstance(registered_card, ToolCard):
+        raise TypeError(f"Registered Tool '{card.id}' referenced by {source} does not expose a valid ToolCard")
+    if registered_card.model_dump(mode="python") != card.model_dump(mode="python"):
+        raise TypeError(f"ToolCard '{card.name}' from {source} does not match the registered Tool")
+    if registered_card.stateless:
+        return registered_card
+
+    owner_value = getattr(context, "member_card_id", None)
+    if owner_value is not None and not isinstance(owner_value, str):
+        raise TypeError("BuildContext.member_card_id must be a string or None")
+    owner_id = (owner_value or "").strip()
+    if not owner_id:
+        raise TypeError(f"Stateful ToolCard '{registered_card.name}' from {source} requires an agent owner id")
+    expected_id = AbilityManager.qualify_tool_id(registered_card, owner_id)
+    if registered_card.id != expected_id:
+        raise TypeError(
+            f"Stateful ToolCard '{registered_card.name}' from {source} must be registered as "
+            f"'{expected_id}' for agent '{owner_id}'"
+        )
+    return registered_card
+
+
+def _validate_live_tool(tool: Tool, *, source: str) -> Tool:
+    """Validate a concrete Tool injected at runtime without requiring pre-registration."""
+    if not isinstance(getattr(tool, "card", None), ToolCard):
+        raise TypeError(f"{source} supplied a Tool with an invalid card")
+    return tool
+
+
+def _validate_tool_provider_result(
+    built: Any,
+    *,
+    provider_name: str,
+    context: "BuildContext | None",
+) -> Any:
+    """Require Tool/ToolCard provider values and canonicalize card references."""
+
+    def _validate(item: Any) -> Tool | ToolCard:
+        if inspect.isawaitable(item):
+            if inspect.iscoroutine(item):
+                item.close()
+            raise TypeError(f"Tool provider '{provider_name}' must return synchronously, not an awaitable")
+        if isinstance(item, Tool):
+            return _validate_live_tool(item, source=f"Tool provider '{provider_name}'")
+        if isinstance(item, ToolCard):
+            return _canonicalize_tool_card_reference(
+                item,
+                context=context,
+                source=f"tool provider '{provider_name}'",
+            )
+        raise TypeError(
+            f"Tool provider '{provider_name}' returned {type(item).__name__}; "
+            "expected Tool, ToolCard, list[Tool | ToolCard], or None"
+        )
+
+    return _map_provider_result(built, _validate)
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +373,9 @@ class RailSpec(BaseModel):
                 synthesized so providers still observe them.
 
         Returns:
-            A rail, a list of rails, or ``None``; callers flatten the result.
+            An ``AgentRail``, a list of rails, or ``None``. Invalid provider
+            values fail immediately; ``None`` and empty lists remain valid for
+            conditionally disabled capabilities.
         """
         from openjiuwen.harness.manifest import ensure_builtin_elements_registered
 
@@ -283,7 +388,8 @@ class RailSpec(BaseModel):
             )
         if context is None:
             context = BuildContext(language=language, workspace=workspace)
-        return factory(dict(self.params), context)
+        built = factory(dict(self.params), context)
+        return _validate_rail_provider_result(built, provider_name=self.type)
 
 
 class BuiltinToolSpec(BaseModel):
@@ -316,6 +422,11 @@ class BuiltinToolSpec(BaseModel):
                 bare id), so providers need not consume it.
             context: Runtime carrier forwarded to the tool provider. When None,
                 a minimal context carrying ``language`` is synthesized.
+
+        Returns:
+            A ``Tool``, canonical registered ``ToolCard``, a list of either, or
+            ``None``. Stateful card-only references must already be registered
+            under the current context's agent-qualified id.
         """
         from openjiuwen.harness.manifest import ensure_builtin_elements_registered
 
@@ -328,7 +439,12 @@ class BuiltinToolSpec(BaseModel):
             )
         if context is None:
             context = BuildContext(language=language)
-        return factory(dict(self.params), context)
+        built = factory(dict(self.params), context)
+        return _validate_tool_provider_result(
+            built,
+            provider_name=self.type,
+            context=context,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -368,36 +484,83 @@ class SubAgentSpec(BaseModel):
             parent_model: Fallback model when self.model is None.
             language: Resolved language for rail construction.
             context: Runtime carrier; if ``factory_name`` matches a registered
-                sub-agent provider it builds the config directly.
+                sub-agent provider it builds the config directly. A derived
+                view always exposes this sub-agent's card id as the owner id.
         """
         from openjiuwen.harness.manifest import ensure_builtin_elements_registered
 
         ensure_builtin_elements_registered()
-        if self.factory_name and self.factory_name in _SUBAGENT_PROVIDER_REGISTRY:
-            return _SUBAGENT_PROVIDER_REGISTRY[self.factory_name](dict(self.factory_kwargs), context)
-        resolved_model = self.model.build() if self.model else None
         resolved_workspace = self.workspace.build() if self.workspace else None
+        child_agent_id = self.agent_card.id
+        if context is None:
+            child_context = BuildContext(
+                language=language,
+                workspace=resolved_workspace,
+                member_card_id=child_agent_id,
+            )
+        else:
+            child_context = context.derive(
+                language=language,
+                workspace=resolved_workspace if resolved_workspace is not None else context.workspace,
+                member_card_id=child_agent_id,
+            )
+            child_context.extras = dict(child_context.extras)
+        child_context.extras["_parent_model"] = parent_model
+
+        if self.factory_name and self.factory_name in _SUBAGENT_PROVIDER_REGISTRY:
+            return _SUBAGENT_PROVIDER_REGISTRY[self.factory_name](dict(self.factory_kwargs), child_context)
+        resolved_model = self.model.build() if self.model else None
         resolved_rails = None
         if self.rails:
             resolved_rails = []
             for rail_spec in self.rails:
                 resolved_rails.extend(
                     _as_built_list(
-                        rail_spec.build(language=language, workspace=resolved_workspace, context=context),
+                        rail_spec.build(
+                            language=language,
+                            workspace=resolved_workspace,
+                            context=child_context,
+                        ),
                     ),
                 )
 
         resolved_sys_op = self.sys_operation.resolve() if self.sys_operation else None
 
-        # Resolve tools: BuiltinToolSpec → Tool instance, ToolCard passes through.
-        sa_prefix = self.agent_card.id or self.agent_card.name
+        # Resolve tools with the child's identity; pure cards are canonical references.
+        sa_prefix = child_agent_id or self.agent_card.name
         resolved_tools: list = []
         for item in self.tools:
             if isinstance(item, BuiltinToolSpec):
                 tid = f"{sa_prefix}.{item.type}"
-                resolved_tools.extend(_as_built_list(item.build(language=language, tool_id=tid, context=context)))
+                resolved_tools.extend(
+                    _as_built_list(
+                        item.build(
+                            language=language,
+                            tool_id=tid,
+                            context=child_context,
+                        )
+                    )
+                )
+            elif isinstance(item, Tool):
+                resolved_tools.append(
+                    _validate_live_tool(
+                        item,
+                        source=f"SubAgentSpec.tools for agent '{child_agent_id}'",
+                    )
+                )
+            elif isinstance(item, ToolCard):
+                resolved_tools.append(
+                    _canonicalize_tool_card_reference(
+                        item,
+                        context=child_context,
+                        source=f"SubAgentSpec.tools for agent '{child_agent_id}'",
+                    )
+                )
             else:
-                resolved_tools.append(item)
+                raise TypeError(
+                    "SubAgentSpec.tools must contain Tool, ToolCard, or BuiltinToolSpec values, "
+                    f"got {type(item).__name__}"
+                )
 
         return SubAgentConfig(
             agent_card=self.agent_card,
@@ -493,7 +656,7 @@ class DeepAgentSpec(BaseModel):
         tool_id_prefix: str | None = None,
         context: "BuildContext | None" = None,
     ) -> list | None:
-        """Resolve tools list: BuiltinToolSpec → Tool instance, ToolCard passes through."""
+        """Resolve tools and canonicalize direct ToolCard references."""
         if not self.tools:
             return None
         resolved: list = []
@@ -501,8 +664,21 @@ class DeepAgentSpec(BaseModel):
             if isinstance(item, BuiltinToolSpec):
                 tid = f"{tool_id_prefix}.{item.type}" if tool_id_prefix else None
                 resolved.extend(_as_built_list(item.build(language=language, tool_id=tid, context=context)))
+            elif isinstance(item, Tool):
+                resolved.append(_validate_live_tool(item, source="DeepAgentSpec.tools"))
+            elif isinstance(item, ToolCard):
+                resolved.append(
+                    _canonicalize_tool_card_reference(
+                        item,
+                        context=context,
+                        source="DeepAgentSpec.tools",
+                    )
+                )
             else:
-                resolved.append(item)
+                raise TypeError(
+                    "DeepAgentSpec.tools must contain Tool, ToolCard, or BuiltinToolSpec values, "
+                    f"got {type(item).__name__}"
+                )
         return resolved or None
 
     def resolve_parts(self, context: "BuildContext | None" = None) -> Any:

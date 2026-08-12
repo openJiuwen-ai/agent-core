@@ -175,7 +175,8 @@ class DeepAgentConfig:
             ``card.id``. Set it when several agents legitimately share one card
             identity (e.g. one adapter per session) so their tool instances do
             not overwrite each other under the same id — the checkpointer key
-            keeps using ``card.id`` and is unaffected.
+            keeps using ``card.id`` and is unaffected. The owner id remains
+            immutable for the lifetime of a configured DeepAgent.
         system_prompt: System prompt injected into the
             ReAct agent's prompt template.
         context_engine_config: Reserved for P1 context

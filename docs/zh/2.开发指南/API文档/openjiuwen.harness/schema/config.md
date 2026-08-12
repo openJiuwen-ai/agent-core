@@ -93,6 +93,7 @@ def from_env(cls) -> AudioModelConfig
 class DeepAgentConfig:
     model: Optional[Model] = None
     card: Optional[AgentCard] = None
+    tool_owner_id: Optional[str] = None
     system_prompt: Optional[str] = None
     context_engine_config: Optional[Any] = None
     enable_task_loop: bool = False
@@ -127,6 +128,7 @@ DeepAgent 运行时配置。
 |---|---|---|---|
 | `model` | `Optional[Model]` | `None` | 预构建的 LLM Model 实例 |
 | `card` | `Optional[AgentCard]` | `None` | 智能体身份卡 |
+| `tool_owner_id` | `Optional[str]` | `None` | 有状态 Tool 的运行时所有者命名空间；用于隔离工具实例而不改变稳定的 Agent 卡片/检查点身份，未设置时使用 `card.id`，同一 Agent 生命周期内不可更改 |
 | `system_prompt` | `Optional[str]` | `None` | 注入内部 ReActAgent 提示模板的系统提示词 |
 | `context_engine_config` | `Optional[Any]` | `None` | 上下文工程配置，设置后应用为内部 ReActAgent 的 `ContextEngineConfig` |
 | `enable_task_loop` | `bool` | `False` | 是否启用外层任务循环 |
