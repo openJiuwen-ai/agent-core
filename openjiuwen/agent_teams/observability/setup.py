@@ -18,6 +18,7 @@ bypass the OTLP exporter and feed an InMemorySpanExporter directly.
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Optional
 
 from opentelemetry import trace
@@ -56,16 +57,66 @@ _CALLBACK_TRACER_NAME = "openjiuwen.agent_teams.observability"
 _MONITOR_TRACER_NAME = "openjiuwen.agent_teams.observability.monitor"
 
 _provider: Optional[TracerProvider] = None
+_owns_provider: bool = True
 _callback_handler: Optional[OtelCallbackHandler] = None
 _monitor_handler: Optional[OtelTeamMonitorHandler] = None
 _config: Optional[ObservabilityConfig] = None
 _registered: list[tuple[str, Callable[..., Any]]] = []
 
 
+class _ExternalProviderSpanTracker(ActiveSpanTracker):
+    """Track only AgentCore spans on an externally managed provider."""
+
+    _INSTRUMENTATION_SCOPE_PREFIX = "openjiuwen.agent_teams.observability"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._accepting = True
+        self._accepting_lock = threading.Lock()
+
+    def stop_accepting(self) -> bool:
+        """Stop tracking and return whether this call changed the state."""
+        with self._accepting_lock:
+            if not self._accepting:
+                return False
+            self._accepting = False
+            return True
+
+    def on_start(self, span: Any, parent_context: Any = None) -> None:
+        if not self._is_agentcore_span(span):
+            return
+        with self._accepting_lock:
+            if self._accepting:
+                super().on_start(span, parent_context)
+
+    def on_end(self, span: Any) -> None:
+        if not self._is_agentcore_span(span):
+            return
+        with self._accepting_lock:
+            if self._accepting:
+                super().on_end(span)
+
+    def shutdown(self) -> None:
+        """Flush tracked spans once if the external provider closes first."""
+        if self.stop_accepting():
+            self.flush_all_spans(exclude_team_span=False)
+
+    @classmethod
+    def _is_agentcore_span(cls, span: Any) -> bool:
+        scope = getattr(span, "instrumentation_scope", None)
+        name = getattr(scope, "name", "")
+        return isinstance(name, str) and (
+            name == cls._INSTRUMENTATION_SCOPE_PREFIX
+            or name.startswith(f"{cls._INSTRUMENTATION_SCOPE_PREFIX}.")
+        )
+
+
 def init_observability(
     config: ObservabilityConfig,
     *,
     span_exporter_override: SpanExporter | None = None,
+    tracer_provider_override: TracerProvider | None = None,
+    owns_provider: bool = True,
 ) -> None:
     """Initialize the TracerProvider and register Callback handlers.
 
@@ -74,8 +125,12 @@ def init_observability(
         span_exporter_override: When set, bypass ``config.exporter`` and
             use this exporter directly. Tests pass an InMemorySpanExporter
             here to capture spans without an external collector.
+        tracer_provider_override: When set, use this existing provider rather
+            than constructing one or registering it as the global provider.
+        owns_provider: Whether AgentCore should shut down an injected provider.
+            Internal providers are always owned by AgentCore.
     """
-    global _provider, _callback_handler, _monitor_handler, _config
+    global _provider, _owns_provider, _callback_handler, _monitor_handler, _config
 
     if not config.enabled:
         team_logger.info("observability disabled by config")
@@ -84,36 +139,49 @@ def init_observability(
         team_logger.warning("observability already initialized; skipping re-init")
         return
 
+    if tracer_provider_override is not None and span_exporter_override is not None:
+        raise ValueError("tracer_provider_override and span_exporter_override are mutually exclusive")
+    if tracer_provider_override is not None and not isinstance(tracer_provider_override, TracerProvider):
+        raise TypeError("tracer_provider_override must be a TracerProvider")
+    if tracer_provider_override is None and not owns_provider:
+        raise ValueError("owns_provider=False requires tracer_provider_override")
+
     _config = config
 
-    resource = Resource.create({"service.name": config.service_name})
-    sampler = ParentBased(root=TraceIdRatioBased(config.sample_rate))
-    _provider = TracerProvider(
-        resource=resource,
-        sampler=sampler,
-        span_limits=SpanLimits(max_attributes=config.max_attributes),
-    )
+    if tracer_provider_override is not None:
+        _provider = tracer_provider_override
+        _owns_provider = owns_provider
+    else:
+        resource = Resource.create({"service.name": config.service_name})
+        sampler = ParentBased(root=TraceIdRatioBased(config.sample_rate))
+        _provider = TracerProvider(
+            resource=resource,
+            sampler=sampler,
+            span_limits=SpanLimits(max_attributes=config.max_attributes),
+        )
+        _owns_provider = True
 
-    tracker = ActiveSpanTracker()
+    tracker = _ExternalProviderSpanTracker() if tracer_provider_override is not None else ActiveSpanTracker()
     _provider.add_span_processor(tracker)
     set_active_span_tracker(tracker)
 
-    exporter = span_exporter_override or _build_exporter(config)
-    # console writes synchronously per-span, so keep it on the Simple
-    # processor for immediate output. The file exporter appends straight
-    # to disk with no buffering of its own — put it on BatchSpanProcessor
-    # so span-end does not block the business thread (it batches ended
-    # spans and calls export() asynchronously, default every 5s / 512
-    # spans). Anything else (otlp_*) also batches.
-    if span_exporter_override is not None or isinstance(exporter, ConsoleSpanExporter):
-        _provider.add_span_processor(SimpleSpanProcessor(exporter))
-    else:
-        _provider.add_span_processor(BatchSpanProcessor(exporter))
+    if tracer_provider_override is None:
+        exporter = span_exporter_override or _build_exporter(config)
+        # console writes synchronously per-span, so keep it on the Simple
+        # processor for immediate output. The file exporter appends straight
+        # to disk with no buffering of its own — put it on BatchSpanProcessor
+        # so span-end does not block the business thread (it batches ended
+        # spans and calls export() asynchronously, default every 5s / 512
+        # spans). Anything else (otlp_*) also batches.
+        if span_exporter_override is not None or isinstance(exporter, ConsoleSpanExporter):
+            _provider.add_span_processor(SimpleSpanProcessor(exporter))
+        else:
+            _provider.add_span_processor(BatchSpanProcessor(exporter))
 
-    try:
-        trace.set_tracer_provider(_provider)
-    except Exception as exc:
-        team_logger.warning("otel: set_tracer_provider failed - {}", exc)
+        try:
+            trace.set_tracer_provider(_provider)
+        except Exception as exc:
+            team_logger.warning("otel: set_tracer_provider failed - {}", exc)
 
     _callback_handler = OtelCallbackHandler(
         config,
@@ -152,9 +220,17 @@ def force_flush_provider(timeout_millis: int = 5000) -> None:
             team_logger.warning("otel: force_flush failed - {}", exc)
 
 
+def abort_current_llm_span(error: BaseException) -> bool:
+    """Ask the active observability owner to close its current LLM span."""
+    handler = _callback_handler
+    if handler is None:
+        return False
+    return handler.abort_current_llm_span(error)
+
+
 def shutdown_observability() -> None:
     """Unregister callbacks, flush, and reset module state."""
-    global _provider, _callback_handler, _monitor_handler, _config
+    global _provider, _owns_provider, _callback_handler, _monitor_handler, _config
 
     framework = _runner_callback_framework()
     if framework is not None:
@@ -170,7 +246,11 @@ def shutdown_observability() -> None:
 
     tracker = get_active_span_tracker()
     if tracker is not None:
-        tracker.flush_all_spans(exclude_team_span=False)
+        if isinstance(tracker, _ExternalProviderSpanTracker):
+            if tracker.stop_accepting():
+                tracker.flush_all_spans(exclude_team_span=False)
+        else:
+            tracker.flush_all_spans(exclude_team_span=False)
         set_active_span_tracker(None)
 
     if _provider is not None:
@@ -178,11 +258,13 @@ def shutdown_observability() -> None:
             _provider.force_flush(timeout_millis=5000)
         except Exception as exc:
             team_logger.warning("otel: provider force_flush failed - {}", exc)
-        try:
-            _provider.shutdown()
-        except Exception as exc:
-            team_logger.warning("otel: provider shutdown failed - {}", exc)
+        if _owns_provider:
+            try:
+                _provider.shutdown()
+            except Exception as exc:
+                team_logger.warning("otel: provider shutdown failed - {}", exc)
         _provider = None
+        _owns_provider = True
 
     _callback_handler = None
     _monitor_handler = None

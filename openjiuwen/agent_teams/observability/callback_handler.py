@@ -249,10 +249,17 @@ class OtelCallbackHandler:
     async def on_llm_output(self, *args: Any, **kwargs: Any) -> None:
         state = None
         try:
+            span_peek = get_current_llm_span()
+            state_peek = getattr(span_peek, "otel_llm_state", None) if span_peek else None
+            if state_peek is None:
+                team_logger.debug("otel: on_llm_output — no open LLM span to close")
+                return
+            if not state_peek.is_streaming:
+                return
+
             span = pop_current_llm_span()
             state = getattr(span, "otel_llm_state", None) if span else None
             if state is None:
-                team_logger.debug("otel: on_llm_output — no open LLM span to close")
                 return
             if not state.span.is_recording():
                 team_logger.debug("otel: on_llm_output — span already ended")
@@ -332,37 +339,60 @@ class OtelCallbackHandler:
         return kwargs.get("result")
 
     async def on_llm_call_error(self, *args: Any, **kwargs: Any) -> None:
+        del args
+        error = kwargs.get("error") or kwargs.get("exception")
+        self.abort_current_llm_span(
+            error if isinstance(error, BaseException) else None,
+        )
+
+    @staticmethod
+    def abort_current_llm_span(error: BaseException | None) -> bool:
+        """Close the current LLM span through its owning callback handler."""
         state = None
         try:
             span = pop_current_llm_span()
             state = getattr(span, "otel_llm_state", None) if span else None
 
             if state is None:
-                return
+                return False
 
             if not state.span.is_recording():
-                return
+                return False
 
-            exc = kwargs.get("error") or kwargs.get("exception")
-            if state.span.is_recording():
-                if isinstance(exc, BaseException):
-                    state.span.record_exception(exc)
-                    state.span.set_status(Status(StatusCode.ERROR, str(exc)))
-                else:
-                    state.span.set_status(Status(StatusCode.ERROR, "llm call error"))
-                state.span.end()
+            if error is not None:
+                state.span.record_exception(error)
+                state.span.set_status(Status(StatusCode.ERROR, str(error)))
+            else:
+                state.span.set_status(Status(StatusCode.ERROR, "llm call error"))
+            state.span.end()
+            return True
         except BaseException as exc:
             if isinstance(exc, Exception):
-                team_logger.exception("otel: on_llm_call_error failed: {}", exc)
+                team_logger.exception("otel: abort_current_llm_span failed: {}", exc)
             if state is not None:
                 try:
                     if state.span.is_recording():
                         state.span.set_status(Status(StatusCode.ERROR, "llm call error"))
-                        state.span.end()
                 except Exception as cleanup_exc:
-                    team_logger.warning("otel: on_llm_call_error cleanup also failed: {}", cleanup_exc)
+                    team_logger.warning(
+                        "otel: abort_current_llm_span status cleanup failed: {}",
+                        cleanup_exc,
+                    )
+                try:
+                    if state.span.is_recording():
+                        state.span.end()
+                    handled = not state.span.is_recording()
+                except Exception as cleanup_exc:
+                    team_logger.warning(
+                        "otel: abort_current_llm_span end cleanup failed: {}",
+                        cleanup_exc,
+                    )
+                    handled = False
+            else:
+                handled = False
             if not isinstance(exc, Exception):
                 raise
+            return handled
 
     # ------------------------------------------------------------------
     # Tool
