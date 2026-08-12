@@ -250,12 +250,23 @@ async def test_pause_propagates_failure_while_harness_is_alive():
     host.stream_controller.pause_agent.side_effect = RuntimeError("control queue failed")
     kernel = CoordinationKernel(host)
     kernel._lifecycle_state = "running"
+    kernel._dispatcher = SimpleNamespace(
+        deactivate=AsyncMock(),
+        activate_and_flush=AsyncMock(),
+    )
+    kernel._scheduler = SimpleNamespace(
+        is_active=True,
+        deactivate=MagicMock(),
+        activate=AsyncMock(side_effect=RuntimeError("scheduler recovery failed")),
+    )
 
     with pytest.raises(RuntimeError, match="control queue failed"):
         await kernel.pause()
 
     host.persist_allocator_state.assert_not_called()
     host.session_manager.release_session.assert_not_called()
+    kernel._dispatcher.activate_and_flush.assert_awaited_once()
+    kernel._scheduler.activate.assert_awaited_once()
     assert kernel._lifecycle_state == "running"
 
 
@@ -288,6 +299,52 @@ async def test_pause_persists_pending_resume_for_a_later_cold_start():
     await kernel.pause()
 
     assert read_pending_resume(session, "test-team") == {"query": "the original task"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_race_persists_active_round_query_over_stale_host_query():
+    """The live round, not the host's first input, owns cold-resume identity."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.state = SimpleNamespace(pending_user_query="task A")
+    host.resources.harness.state = HarnessState.RUNNING
+    host.resources.harness.active_round = SimpleNamespace(original_query="task B")
+
+    async def terminate_during_pause():
+        host.resources.harness.state = HarnessState.TERMINATED
+        host.resources.harness.active_round = None
+        raise RuntimeError("NativeHarness already stopped")
+
+    host.stream_controller.pause_agent.side_effect = terminate_during_pause
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.pause()
+
+    assert read_pending_resume(session, "test-team") == {"query": "task B"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_completed_round_marker_is_cleared_without_replay():
+    """A completed round records no resumable query and is not replayed."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.state = SimpleNamespace(pending_user_query="the completed task")
+    host.resources.harness.state = HarnessState.TERMINATED
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.pause()
+
+    assert read_pending_resume(session, "test-team") == {"query": ""}
+    host.resources.harness.state = HarnessState.IDLE
+    await kernel.resume_paused_round()
+    host.stream_controller.resume_agent.assert_not_awaited()
+    assert read_pending_resume(session, "test-team") is None
 
 
 @pytest.mark.asyncio
@@ -376,7 +433,11 @@ def _arm_kernel_for_start(host: SimpleNamespace) -> CoordinationKernel:
 
     kernel = CoordinationKernel(host)
     kernel._event_bus = SimpleNamespace(is_running=True, start=AsyncMock(), enqueue=AsyncMock())
-    kernel._dispatcher = SimpleNamespace(team_completion=SimpleNamespace(rearm=MagicMock()))
+    kernel._dispatcher = SimpleNamespace(
+        team_completion=SimpleNamespace(rearm=MagicMock()),
+        activate_and_flush=AsyncMock(),
+        deactivate=AsyncMock(),
+    )
     return kernel
 
 
@@ -406,6 +467,7 @@ async def test_start_resumes_a_round_left_paused():
     assert isinstance(event, InnerEventMessage)
     assert event.event_type == InnerEventType.REFRESH_TEAM_CONTEXT
     host.stream_controller.resume_agent.assert_awaited_once_with()
+    kernel._dispatcher.activate_and_flush.assert_awaited_once()
 
 
 @pytest.mark.asyncio
