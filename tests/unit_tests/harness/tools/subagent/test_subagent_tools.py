@@ -11,6 +11,8 @@ import pytest
 
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
 from openjiuwen.harness.subagent_runtime.models import (
     ResumeResult,
     SpawnResult,
@@ -25,6 +27,7 @@ from openjiuwen.harness.tools.subagent.subagent_tools import (
     SubagentSendInputTool,
     SubagentSpawnTool,
     SubagentWaitTool,
+    build_subagent_tools,
 )
 
 
@@ -44,6 +47,14 @@ def _wait_tool(parent: SimpleNamespace | None = None) -> SubagentWaitTool:
         ToolCard(id="subagent_wait", name="subagent_wait", description="wait"),
         parent or _parent(),
     )
+
+
+def test_build_subagent_tools_wait_declares_call_timeout() -> None:
+    tools = build_subagent_tools(_parent(), language="cn")
+    wait_tool = next(tool for tool in tools if tool.card.name == "subagent_wait")
+    expected_timeout_s = WAIT_TIMEOUT_MS_DEFAULT / 1000.0
+    assert wait_tool.card.properties["resilience"]["timeout_s"] == expected_timeout_s
+    assert AbilityManager._resolve_call_timeout(wait_tool.card) == expected_timeout_s
 
 
 def _control_mock(**kwargs) -> SimpleNamespace:

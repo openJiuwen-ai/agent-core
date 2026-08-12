@@ -19,6 +19,14 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
 
+def _attach_call_timeout(card: ToolCard, timeout_s: float) -> ToolCard:
+    card.properties = {
+        **(card.properties if isinstance(card.properties, dict) else {}),
+        "resilience": {"timeout_s": timeout_s},
+    }
+    return card
+
+
 def _parse_browser_capabilities(
     inputs: dict[str, Any],
     subagent_type: str,
@@ -338,6 +346,7 @@ def build_subagent_tools(
         language=language,
         agent_id=agent_id,
     )
+    _attach_call_timeout(wait_card, WAIT_TIMEOUT_MS_DEFAULT / 1000.0)
     list_card = build_tool_card(
         name="subagent_list",
         tool_id="subagent_list",
