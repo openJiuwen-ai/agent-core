@@ -157,6 +157,56 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             browser_capabilities=["pdf", "vision"],
         )
 
+    async def test_task_tool_passes_resolved_model_to_create_subagent(self) -> None:
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+                self.deep_config = SimpleNamespace(model=None)
+
+            async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
+                return {"output": "done"}
+
+        override = _create_dummy_model()
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[
+                    SubAgentConfig(
+                        agent_card=AgentCard(name="code", description="code subagent"),
+                        system_prompt="sub",
+                    )
+                ],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        parent_agent.resolve_subagent_model = (  # type: ignore[attr-defined]
+            lambda *, model_name="", model_tier="": (override, None)
+        )
+
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+        session = Session(session_id="parent_session")
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()) as mock_create:
+            result = await tool.invoke(
+                {
+                    "subagent_type": "code",
+                    "task_description": "run task",
+                    "model_tier": "lite",
+                    "model_name": "",
+                },
+                session=session,
+            )
+
+        self.assertTrue(result.success)
+        mock_create.assert_called_once()
+        self.assertIs(mock_create.call_args.kwargs.get("model"), override)
+
 
 class TestTaskToolSync(unittest.TestCase):
     def test_create_task_tool(self) -> None:
@@ -231,6 +281,35 @@ class TestTaskToolSync(unittest.TestCase):
         self.assertEqual(sub.deep_config.tools, explicit_spec.tools)
         self.assertEqual(sub.deep_config.mcps, explicit_spec.mcps)
         self.assertEqual(sub.deep_config.skills, explicit_spec.skills)
+
+    def test_create_subagent_model_override_wins_over_spec(self) -> None:
+        parent_model = _create_dummy_model()
+        override = Model(
+            model_client_config=ModelClientConfig(
+                client_provider="OpenAI",
+                api_key="override-key",
+                api_base="http://override-base",
+                verify_ssl=False,
+            ),
+            model_config=ModelRequestConfig(model="override-model"),
+        )
+        parent_agent = create_deep_agent(
+            model=parent_model,
+            card=AgentCard(name="parent", description="test"),
+            system_prompt="parent prompt",
+            tools=[],
+            mcps=[],
+            skills=[],
+            subagents=[],
+            add_general_purpose_agent=True,
+        )
+
+        sub = parent_agent.create_subagent(
+            "general-purpose",
+            "sub_session_id",
+            model=override,
+        )
+        self.assertIs(sub.deep_config.model, override)
 
 
 if __name__ == "__main__":

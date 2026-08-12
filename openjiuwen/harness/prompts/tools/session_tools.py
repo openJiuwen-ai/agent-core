@@ -55,6 +55,9 @@ capability categories selected from the available Playwright capabilities above.
 core-only browser task. Do not provide browser_capabilities for other subagent types.
 Do not specify agents you do not have access to!!!
 
+Optional model selection: pass model_tier (lite/pro) or model_name (exact name/alias);
+omit both to use the parent agent's current default model.
+
 ## When to use:
 - Tasks that are complex, multi-step, and can be executed independently
 - Scenarios requiring parallel processing, focused reasoning, or large context/token usage
@@ -110,6 +113,8 @@ SESSIONS_SPAWN_DESCRIPTION_CN = """创建异步后台子代理任务，立即返
 重要：使用 sessions_spawn 时，必须指定 subagent_type、task_description 参数来选择代理类型和描述任务。
 当 subagent_type 为 "browser_agent" 时，还必须指定 browser_capabilities，并从上方可用的 Playwright 能力中选择额外能力类别。
 仅使用核心浏览器能力时传入空列表；其他子代理类型不要提供 browser_capabilities。请勿指定你无权访问的其他代理！！！
+
+可选模型选择：可传 model_tier（lite/pro）或 model_name（精确名/别名）；省略则用父 Agent 当前默认模型。
 
 ## 使用场景:
 - 任务复杂、多步骤、可独立执行
@@ -175,6 +180,19 @@ SESSIONS_SPAWN_PARAMS: Dict[str, Dict[str, str]] = {
         "cn": "浏览器子代理所需的额外能力类别列表；仅使用核心能力时传入空列表",
         "en": "Additional capability categories required by browser_agent; use an empty list for core-only tasks",
     },
+    "model_name": {
+        "cn": "可选：为本次子代理指定精确模型名（或别名 / name#index）。"
+              "与 model_tier 同时给出时优先使用 model_name。",
+        "en": "Optional exact model name (or alias / name#index) for this "
+              "subagent. When both are set, model_name takes priority over "
+              "model_tier.",
+    },
+    "model_tier": {
+        "cn": "可选：模型等级 lite 或 pro（来自主机 models.defaults[].tier）。"
+              "未配置或非法时回退父 Agent 默认模型。",
+        "en": "Optional model tier lite or pro from host models.defaults[].tier. "
+              "Unconfigured or invalid values fall back to the parent default.",
+    },
 }
 
 
@@ -196,6 +214,14 @@ def get_sessions_spawn_input_params(language: str = "cn") -> Dict[str, Any]:
                 "type": "array",
                 "items": {"type": "string"},
                 "description": p["browser_capabilities"].get(language, p["browser_capabilities"]["cn"]),
+            },
+            "model_name": {
+                "type": "string",
+                "description": p["model_name"].get(language, p["model_name"]["cn"]),
+            },
+            "model_tier": {
+                "type": "string",
+                "description": p["model_tier"].get(language, p["model_tier"]["cn"]),
             },
         },
         "required": ["subagent_type", "task_description"],
