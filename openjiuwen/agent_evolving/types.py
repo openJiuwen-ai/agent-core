@@ -5,9 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Mapping
-
-from openjiuwen.agent_evolving.trajectory.types import UpdateKey, Updates
+from typing import Any, Dict, Literal, Mapping, TypeAlias
 
 from openjiuwen.agent_evolving.protocols import (
     APPEND_MODE,
@@ -20,6 +18,8 @@ from openjiuwen.agent_evolving.protocols import (
 
 UpdateMode = Literal["replace", "append", "merge"]
 UpdateEffect = Literal["state", "pending_change"]
+UpdateKey: TypeAlias = tuple[str, str]
+Updates: TypeAlias = Dict[UpdateKey, Any]
 
 
 @dataclass(frozen=True)

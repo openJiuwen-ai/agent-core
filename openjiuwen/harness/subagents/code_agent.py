@@ -84,8 +84,29 @@ def _inject_builtin_plan_agents(
     *,
     resolved_language: str,
     model: Model,
+    workspace: Optional[str | Workspace] = None,
+    sys_operation: Optional[SysOperation] = None,
 ) -> list[SubAgentConfig | DeepAgent]:
-    """Inject explore and plan builtin sub-agents if missing."""
+    """Inject explore and plan builtin sub-agents if missing.
+
+    The injected specs carry this agent's ``workspace`` and ``sys_operation``:
+    ``DeepAgent.create_subagent`` only adopts a spec's sys_operation when its
+    workspace is set too, and a spec without one makes ``create_deep_agent``
+    mint a fresh LOCAL sys_operation for the sub-agent -- which ignores this
+    agent's sandbox and applies ``restrict_to_sandbox`` against the sub-agent's
+    own narrower workspace instead.
+
+    Args:
+        subagents: Sub-agent specs configured by the caller.
+        resolved_language: Normalized language code for the injected specs.
+        model: Model the injected sub-agents inherit.
+        workspace: This agent's workspace, forwarded to the injected specs.
+        sys_operation: This agent's sys_operation, forwarded to the injected
+            specs so they share its filesystem boundary.
+
+    Returns:
+        The caller's specs plus any missing built-in explore / plan sub-agent.
+    """
     effective = list(subagents)
     if not _has_agent(effective, "explore_agent"):
         effective.append(
@@ -93,6 +114,8 @@ def _inject_builtin_plan_agents(
                 model=model,
                 language=resolved_language,
                 max_iterations=25,
+                workspace=workspace,
+                sys_operation=sys_operation,
             )
         )
     if not _has_agent(effective, "plan_agent"):
@@ -101,6 +124,8 @@ def _inject_builtin_plan_agents(
                 model=model,
                 language=resolved_language,
                 max_iterations=25,
+                workspace=workspace,
+                sys_operation=sys_operation,
             )
         )
     return effective
@@ -233,6 +258,8 @@ def create_code_agent(
         list(subagents or []),
         resolved_language=resolved_language,
         model=model,
+        workspace=workspace,
+        sys_operation=sys_operation,
     )
 
     final_rails = _merge_rails_with_required(

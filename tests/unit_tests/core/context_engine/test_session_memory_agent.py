@@ -1,9 +1,17 @@
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig, SessionMemoryManager
+from openjiuwen.core.context_engine.processor.forked.compressor.recall.retriever import (
+    recall_compressed_context,
+)
 from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_agent import (
     SessionMemoryAbilityManager,
     SessionMemoryAgent,
@@ -17,6 +25,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.compress
     CompressionRequest,
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.support.forked_agent import ForkedAgent
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     ModelClientConfig,
@@ -208,6 +217,85 @@ async def test_session_memory_compressor_renders_committed_notes(tmp_path):
     assert len(updated.context_messages) == 2
     assert updated.context_messages[0].content.startswith("<memory_block_session>")
     assert updated.context_messages[1].content == "new"
+
+
+def _recall_test_context(tmp_path, notes_path, *, recall_enabled: bool):
+    session = SimpleNamespace(
+        get_state=lambda key: (
+            {
+                "memory_path": str(notes_path),
+                "notes_upto_message_id": "m2",
+            }
+            if key == "__session_memory__"
+            else None
+        ),
+    )
+    return SimpleNamespace(
+        get_session_ref=lambda: session,
+        set_messages=lambda messages: None,
+        _context_window_tokens=1,
+        workspace_dir=lambda: str(tmp_path),
+        session_id=lambda: "session-1",
+        context_id=lambda: "context-1",
+        compression_recall_config=lambda: CompressionRecallConfig(enabled=recall_enabled),
+    )
+
+
+def _recall_test_window():
+    return ContextWindow(
+        context_messages=[
+            UserMessage(content="how should database retries work", metadata={"context_message_id": "m1"}),
+            AssistantMessage(content="use exponential backoff", metadata={"context_message_id": "m2"}),
+            UserMessage(content="latest question", metadata={"context_message_id": "m3"}),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_memory_compressor_archives_replaced_messages_for_recall(tmp_path):
+    notes_path = tmp_path / "session_context.md"
+    notes_path.write_text("# Current State\nworking on database retries", encoding="utf-8")
+    context = _recall_test_context(tmp_path, notes_path, recall_enabled=True)
+    processor = SessionMemoryCompressor(
+        SessionMemoryCompressorConfig(enabled=True, session_memory_path=str(notes_path))
+    )
+
+    event, updated = await processor.on_get_context_window(context, _recall_test_window())
+
+    assert event is not None
+    memory_message = updated.context_messages[0]
+    marker = re.search(r"\[\[COMPRESSION_RECALL: id=([^\]]+)\]\]", memory_message.content)
+    assert marker is not None
+    memory_id = marker.group(1)
+
+    archives = list(Path(tmp_path).glob(f"context/*/compression_recall/{memory_id}_*"))
+    assert len(archives) == 1
+    turns = [json.loads(line) for line in (archives[0] / "turns.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert turns[0]["query"] == "how should database retries work"
+
+    result = recall_compressed_context(
+        workspace_dir=str(tmp_path),
+        session_id="session-1",
+        memory_id=memory_id,
+        query="database retries backoff",
+    )
+    assert result["chunks"]
+
+
+@pytest.mark.asyncio
+async def test_session_memory_compressor_skips_archive_when_recall_disabled(tmp_path):
+    notes_path = tmp_path / "session_context.md"
+    notes_path.write_text("# Current State\nworking on database retries", encoding="utf-8")
+    context = _recall_test_context(tmp_path, notes_path, recall_enabled=False)
+    processor = SessionMemoryCompressor(
+        SessionMemoryCompressorConfig(enabled=True, session_memory_path=str(notes_path))
+    )
+
+    event, updated = await processor.on_get_context_window(context, _recall_test_window())
+
+    assert event is not None
+    assert "COMPRESSION_RECALL" not in updated.context_messages[0].content
+    assert list(Path(tmp_path).glob("context/*/compression_recall/*")) == []
 
 
 @pytest.mark.asyncio

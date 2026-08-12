@@ -282,6 +282,35 @@ class UserMessageInputs:
 
 
 @dataclass
+class SteeringDrainInputs:
+    """Input data for the BEFORE_STEERING_DRAIN event.
+
+    Fired before each model call that has steering waiting, and *only* then —
+    an empty queue skips the event entirely. It asks the rails one question:
+    how much of the backlog does this model call absorb? Whatever a rail does
+    not let through stays queued in order, and the loop keeps running while the
+    queue is non-empty, so the rest arrives at the following model calls.
+
+    This is deliberately the moment *before* the queue is touched. Capping the
+    batch afterwards would mean draining everything and pushing the surplus
+    back, and the surplus would then sit behind whatever arrived meanwhile.
+
+    Attributes:
+        pending: How many messages are queued right now. Read-only context for
+            the decision — a rail that only caps large bursts reads it.
+        limit: The most this drain may take. ``None`` (the default) takes
+            everything, which is what a run with no opinion on the matter does.
+            Rails run in priority order and each sees what the previous one
+            left, so the value standing at the end is the one that applies.
+            A non-empty queue always yields at least one message regardless:
+            consumption has to make progress or the loop would spin on a
+            backlog it refuses to touch.
+    """
+    pending: int = 0
+    limit: int | None = None
+
+
+@dataclass
 class RetryRequest:
     """Retry directive produced by on_exception rails."""
 
@@ -302,6 +331,7 @@ EventInputs = Union[
     ToolCallInputs,
     TaskIterationInputs,
     UserMessageInputs,
+    SteeringDrainInputs,
     Dict[str, Any],
 ]
 
@@ -326,6 +356,9 @@ class AgentCallbackEvent(str, Enum):
             follow-up, a steering message, or a resumed workflow interrupt)
             is written into the conversation. Rails may rewrite its content;
             see :class:`UserMessageInputs`.
+        BEFORE_STEERING_DRAIN: Before pending steering messages are taken off
+            the queue, and only when some are pending. Rails cap how many this
+            model call absorbs; see :class:`SteeringDrainInputs`.
 
     Model Interaction Callbacks:
         BEFORE_MODEL_CALL: Before LLM is called
@@ -343,6 +376,7 @@ class AgentCallbackEvent(str, Enum):
     AFTER_TASK_ITERATION = "after_task_iteration"
     AFTER_REACT_ITERATION = "after_react_iteration"
     ON_USER_MESSAGE = "on_user_message"
+    BEFORE_STEERING_DRAIN = "before_steering_drain"
     BEFORE_MODEL_CALL = "before_model_call"
     AFTER_MODEL_CALL = "after_model_call"
     ON_MODEL_EXCEPTION = "on_model_exception"
@@ -509,8 +543,20 @@ class AgentCallbackContext:
         if self._steering_queue is not None:
             self._steering_queue.put_nowait(msg)
 
-    def drain_steering(self) -> List[str]:
-        """Drain all pending steering messages.
+    def drain_steering(
+        self, limit: int | None = None,
+    ) -> List[str]:
+        """Drain pending steering messages, oldest first.
+
+        What is not taken stays queued in order, so the next drain resumes
+        where this one stopped. A non-empty queue always yields at least one
+        message: consumption has to make progress, or ``has_pending_steering``
+        would keep the loop going over a backlog nothing ever consumes.
+
+        Args:
+            limit: The most this call may take. ``None`` (the default) takes
+                everything, which is the behaviour of a loop with no rail
+                policy on the matter.
 
         Returns:
             List of steering message strings,
@@ -518,8 +564,11 @@ class AgentCallbackContext:
         """
         if self._steering_queue is None:
             return []
+        take = None if limit is None else max(1, limit)
         msgs: List[str] = []
         while not self._steering_queue.empty():
+            if take is not None and len(msgs) >= take:
+                break
             try:
                 msgs.append(
                     self._steering_queue.get_nowait()
@@ -613,6 +662,7 @@ EVENT_METHOD_MAP: Dict[AgentCallbackEvent, str] = {
     AgentCallbackEvent.AFTER_TASK_ITERATION: "after_task_iteration",
     AgentCallbackEvent.AFTER_REACT_ITERATION: "after_react_iteration",
     AgentCallbackEvent.ON_USER_MESSAGE: "on_user_message",
+    AgentCallbackEvent.BEFORE_STEERING_DRAIN: "before_steering_drain",
 }
 
 
@@ -677,6 +727,16 @@ class AgentRail(ABC):
 
         ``ctx.inputs`` is a :class:`UserMessageInputs`; rails may rewrite
         ``ctx.inputs.message.content`` in place.
+        """
+        pass
+
+    async def before_steering_drain(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Called before pending steering messages leave the queue.
+
+        ``ctx.inputs`` is a :class:`SteeringDrainInputs`; rails cap the batch
+        by writing ``ctx.inputs.limit``.
         """
         pass
 

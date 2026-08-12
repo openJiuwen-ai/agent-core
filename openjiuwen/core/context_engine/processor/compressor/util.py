@@ -18,8 +18,10 @@ from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMe
 STATE_REINJECTION_MARKER = "[STATE_REINJECTION]"
 TEAM_STATE_LABEL = "TEAM_STATE"
 TEAM_MESSAGES_LABEL = "TEAM_MESSAGES"
+TEAM_POLICY_LABEL = "TEAM_POLICY"
 TEAM_TOOL_CALL_NAMES = {"send_message", "view_task", "claim_task", "member_complete_task"}
 TEAM_MESSAGE_TOOL_CALL_NAMES = {"send_message"}
+TEAM_POLICY_TOOL_CALL_NAME = "build_team"
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,74 @@ def build_team_collaboration_reinjected_messages(messages: List[BaseMessage]) ->
             )
         )
     ]
+
+
+def build_team_policy_reinjected_messages(
+    processor: Any,
+    *,
+    context: Any,
+    messages: List[BaseMessage],
+    messages_to_keep: List[BaseMessage],
+) -> List[UserMessage]:
+    """Re-inject the team leader's collaboration policy verbatim after a compact.
+
+    A team leader receives its collaboration policy — role, workflow, dispatch
+    conventions, lifecycle, HITT contract, inbound-tag notice — as the result of
+    its ``build_team`` call rather than in the system prompt, so that it reads
+    only the variant its own team runs. That makes the policy an ordinary
+    history message, and an ordinary history message is exactly what full
+    compaction summarizes away. Summarized, a behavioural contract stops being
+    a contract: "the leader was told how to hand off work" is not something the
+    leader can follow.
+
+    So it is restored verbatim rather than summarized, and **not truncated** —
+    returning messages instead of a string is what keeps it clear of
+    ``state_snapshot_max_chars``, on the same grounds the skill-round builder
+    does it: a half policy is a policy with the second half silently deleted.
+
+    Nothing is re-injected when the policy is already surviving in
+    ``messages_to_keep``, or when this conversation never built a team (every
+    non-leader agent, which is most of them).
+
+    Args:
+        processor: The owning ``FullCompactProcessor`` (unused; the policy is
+            reproduced whole, so none of its truncation helpers apply).
+        context: The model context (unused; the policy is read off the
+            transcript, not off session state).
+        messages: The full message list being compacted.
+        messages_to_keep: The recent messages preserved verbatim.
+
+    Returns:
+        A single-element list carrying the policy, or ``[]``.
+    """
+    _ = processor, context
+    keep_signatures = {message_signature(message) for message in messages_to_keep}
+    for message in reversed(messages):
+        if not isinstance(message, AssistantMessage):
+            continue
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            if (getattr(tool_call, "name", "") or "") != TEAM_POLICY_TOOL_CALL_NAME:
+                continue
+            result_text = find_tool_result_text(messages, getattr(tool_call, "id", None)).strip()
+            if not result_text:
+                continue
+            if _policy_already_kept(result_text, keep_signatures):
+                return []
+            return [
+                UserMessage(
+                    content=(
+                        f"{STATE_REINJECTION_MARKER}\n[{TEAM_POLICY_LABEL}]\n"
+                        f"Team collaboration policy recovered from compressed dialogue "
+                        f"(still in force, follow it verbatim):\n{result_text}"
+                    )
+                )
+            ]
+    return []
+
+
+def _policy_already_kept(result_text: str, keep_signatures: set[str]) -> bool:
+    """Whether the preserved recent messages already carry the policy text."""
+    return any(result_text in signature for signature in keep_signatures)
 
 
 def _is_state_reinjection_message(message: BaseMessage) -> bool:

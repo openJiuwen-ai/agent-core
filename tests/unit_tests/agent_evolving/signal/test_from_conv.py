@@ -9,65 +9,78 @@ import pytest
 
 from openjiuwen.agent_evolving.signal.base import make_signal_fingerprint
 from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
-from openjiuwen.agent_evolving.trajectory.types import (
-    LLMCallDetail,
-    ToolCallDetail,
-    Trajectory,
-    TrajectoryStep,
-    trajectory_from_steps,
-)
-from openjiuwen.core.foundation.llm import SystemMessage, ToolMessage
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.extensions.observability import semconv
+from openjiuwen.core.foundation.llm import ToolMessage
 
 
 def _build_trajectory_from_messages(messages: List[dict]) -> Trajectory:
-    """Convert message list to Trajectory for testing.
+    """Convert test messages into canonical LLM/tool spans."""
+    spans: list[dict] = []
+    pending_prompt: list[dict] = []
+    span_index = 0
 
-    Creates Trajectory with LLM steps containing messages and tool steps
-    containing tool results.
-    """
-    steps: List[TrajectoryStep] = []
-    tool_call_id_to_result: dict = {}
-
-    # First pass: collect tool call IDs and results
-    for msg in messages:
-        role = msg.get("role", "")
-        if role == "tool":
-            tool_call_id = msg.get("tool_call_id", "")
-            if tool_call_id:
-                tool_call_id_to_result[tool_call_id] = msg
-
-    # Build steps
-    llm_messages: List[dict] = []
-    for msg in messages:
-        role = msg.get("role", "")
-        if role in ("user", "assistant", "system"):
-            llm_messages.append(msg)
-            if role == "assistant":
-                tool_calls = msg.get("tool_calls", [])
-                for tc in tool_calls:
-                    tc_id = tc.get("id", "")
-                    if tc_id and tc_id in tool_call_id_to_result:
-                        result_msg = tool_call_id_to_result[tc_id]
-                        tool_step = TrajectoryStep(
-                            kind="tool",
-                            detail=ToolCallDetail(
-                                tool_name=tc.get("name", ""),
-                                call_result=result_msg.get("content", ""),
-                                tool_call_id=tc_id,
-                            ),
-                        )
-                        steps.append(tool_step)
-
-    if llm_messages:
-        steps.insert(
-            0,
-            TrajectoryStep(
-                kind="llm",
-                detail=LLMCallDetail(model="test-model", messages=llm_messages),
-            ),
+    def add_llm(prompt: list[dict], completion: dict | None) -> None:
+        nonlocal span_index
+        values: dict[str, object] = {}
+        for index, message in enumerate(prompt):
+            values[f"{semconv.GEN_AI_PROMPT}.{index}.role"] = message.get("role", "")
+            values[f"{semconv.GEN_AI_PROMPT}.{index}.content"] = message.get("content", "")
+        if completion is not None:
+            values[f"{semconv.GEN_AI_COMPLETION}.0.role"] = completion.get("role", "assistant")
+            values[f"{semconv.GEN_AI_COMPLETION}.0.content"] = completion.get("content", "")
+            if completion.get("tool_calls"):
+                values[semconv.GEN_AI_TOOL_CALLS] = completion["tool_calls"]
+        values[semconv.GEN_AI_REQUEST_MODEL] = "test-model"
+        spans.append(
+            {
+                "traceId": "trace-test",
+                "spanId": f"llm-{span_index}",
+                "name": "llm.call",
+                "attributes": attributes_from_map(values),
+            }
         )
+        span_index += 1
 
-    return trajectory_from_steps(execution_id="test-exec", steps=steps)
+    for message in messages:
+        role = str(message.get("role", ""))
+        if role == "tool":
+            tool_id = str(message.get("tool_call_id") or "")
+            tool_attrs = {
+                semconv.GEN_AI_TOOL_NAME: message.get("name", ""),
+                semconv.GEN_AI_TOOL_INPUT: message.get("input", {}),
+                semconv.GEN_AI_TOOL_OUTPUT: message.get("content", ""),
+            }
+            if tool_id:
+                tool_attrs[semconv.GEN_AI_TOOL_ID] = tool_id
+            spans.append(
+                {
+                    "traceId": "trace-test",
+                    "spanId": f"tool-{span_index}",
+                    "name": f"tool.{message.get('name') or 'unknown'}",
+                    "attributes": attributes_from_map(tool_attrs),
+                }
+            )
+            span_index += 1
+        elif role == "assistant" and message.get("tool_calls"):
+            add_llm(pending_prompt, message)
+            pending_prompt = []
+        else:
+            pending_prompt.append(message)
+    if pending_prompt:
+        add_llm(pending_prompt, None)
+
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({"openjiuwen.trajectory_id": "test-exec"})},
+                    "scopeSpans": [{"spans": spans}],
+                }
+            ]
+        }
+    )
 
 
 def _build_team_member_trajectory(
@@ -78,23 +91,44 @@ def _build_team_member_trajectory(
     meta: dict = None,
 ) -> Trajectory:
     """Build a Trajectory with team member context for collaboration signal testing."""
-    steps = [
-        TrajectoryStep(
-            kind="tool",
-            detail=ToolCallDetail(
-                tool_name=tool_name,
-                call_args=tool_args,
-                call_result=tool_result,
-            ),
-            meta=meta or {},
-        ),
-    ]
-    return trajectory_from_steps(
-        execution_id=f"exec-{member_id}",
-        session_id="session-team",
-        steps=steps,
-        source="online",
-        meta={"member_id": member_id, "team_id": "team-1"},
+    tool_attrs = {
+        semconv.GEN_AI_TOOL_NAME: tool_name,
+        semconv.GEN_AI_TOOL_INPUT: tool_args,
+        semconv.GEN_AI_TOOL_OUTPUT: tool_result,
+        semconv.AT_TEAM_ID: "team-1",
+        semconv.AT_MEMBER_ID: member_id,
+    }
+    if meta:
+        tool_attrs.update(meta)
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map(
+                            {
+                                "openjiuwen.trajectory_id": f"exec-{member_id}",
+                                semconv.AT_SESSION_ID: "session-team",
+                                semconv.AT_TEAM_ID: "team-1",
+                                semconv.AT_MEMBER_ID: member_id,
+                            }
+                        )
+                    },
+                    "scopeSpans": [
+                        {
+                            "spans": [
+                                {
+                                    "traceId": "trace-team",
+                                    "spanId": "tool-1",
+                                    "name": f"tool.{tool_name}",
+                                    "attributes": attributes_from_map(tool_attrs),
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
     )
 
 
@@ -104,24 +138,47 @@ class TestConversationSignalDetector:
     def test_empty_trajectory_returns_empty_signals(self) -> None:
         """Empty trajectory should return empty signal list."""
         detector = ConversationSignalDetector()
-        trajectory = trajectory_from_steps(execution_id="test", steps=[])
+        trajectory = Trajectory.from_otlp(
+            {
+                "resourceSpans": [
+                    {
+                        "resource": {"attributes": attributes_from_map({"openjiuwen.trajectory_id": "test"})},
+                        "scopeSpans": [{"spans": []}],
+                    }
+                ]
+            }
+        )
         signals = detector.detect(trajectory)
         assert signals == []
 
     def test_trajectory_with_message_objects_does_not_require_dict_get(self) -> None:
         """Object-style messages in trajectory should not crash signal detection."""
         detector = ConversationSignalDetector()
-        trajectory = trajectory_from_steps(
-            execution_id="message-object",
-            steps=[
-                TrajectoryStep(
-                    kind="llm",
-                    detail=LLMCallDetail(
-                        model="test-model",
-                        messages=[SystemMessage(content="system prompt")],
-                    ),
-                )
-            ],
+        trajectory = Trajectory.from_otlp(
+            {
+                "resourceSpans": [
+                    {
+                        "resource": {"attributes": attributes_from_map({"openjiuwen.trajectory_id": "message-object"})},
+                        "scopeSpans": [
+                            {
+                                "spans": [
+                                    {
+                                        "traceId": "trace-message",
+                                        "spanId": "llm-1",
+                                        "name": "llm.call",
+                                        "attributes": attributes_from_map(
+                                            {
+                                                f"{semconv.GEN_AI_PROMPT}.0.role": "system",
+                                                f"{semconv.GEN_AI_PROMPT}.0.content": "system prompt",
+                                            }
+                                        ),
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            }
         )
 
         signals = detector.detect_trajectory_signals(trajectory)

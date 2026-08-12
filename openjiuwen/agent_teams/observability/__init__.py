@@ -21,23 +21,28 @@ Quickstart::
     attach_to_team_agent(team_agent)
 """
 
-from openjiuwen.agent_teams.observability.config import ObservabilityConfig
 from openjiuwen.agent_teams.observability.rail import ObservabilityRail
 from openjiuwen.agent_teams.observability.setup import (
     attach_to_team_agent,
     finalize_team_trace,
-    get_tracer,
     init_observability,
     is_initialized,
     shutdown_observability,
 )
-from openjiuwen.agent_teams.observability.span_context import flush_child_spans
+from openjiuwen.agent_teams.observability.span_context import (
+    clear_ambient_team_span,
+    set_ambient_team_span,
+)
+from openjiuwen.extensions.observability.config import ObservabilityConfig
 
 __all__ = [
     "ObservabilityConfig",
     "ObservabilityRail",
     "attach_to_team_agent",
+    "clear_ambient_team_span",
     "finalize_team_trace",
     "init_observability",
+    "is_initialized",
+    "set_ambient_team_span",
     "shutdown_observability",
 ]

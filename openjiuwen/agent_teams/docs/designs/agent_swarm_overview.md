@@ -383,7 +383,8 @@ Agent Swarm 全面支持中英文双语：
 
 - **运行时字符串**：通过 i18n 模块的 `t(key)` 函数动态切换
 - **Prompt 长文本**：按语言分目录存放（`prompts/cn/`、`prompts/en/`）
-- **工具描述**：按语言分目录存放（`tools/locales/descs/cn/`、`tools/locales/descs/en/`）
+- **工具描述**：按语言分目录、语言内再按领域分目录存放（`tools/locales/descs/<lang>/<domain>/`，
+  领域清单见 `tools/AGENTS.md`）
 
 ---
 

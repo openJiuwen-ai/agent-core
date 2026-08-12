@@ -124,7 +124,13 @@ async def test_send_to_none_drives_avatar(team_backend):
 
     assert result.ok
     assert result.message_id is None
-    avatar.interact.assert_awaited_once_with("read design.md and summarise it")
+    avatar.interact.assert_awaited_once()
+    delivered = avatar.interact.await_args.args[0]
+    # Tagged as the controller speaking, body verbatim inside: a bare body
+    # reads as the harness's ordinary user turn, and the avatar answers it
+    # by messaging ``user`` — a different person on the leader's side.
+    assert 'from="controller"' in delivered
+    assert "read design.md and summarise it" in delivered
     avatar.deliver_input.assert_not_called()
 
 
@@ -143,7 +149,8 @@ async def test_send_inbox_does_not_parse_at_in_body(team_backend):
 
     assert result.ok
     assert result.message_id is None
-    avatar.interact.assert_awaited_once_with(f"@{TEAMMATE} ping me when done")
+    avatar.interact.assert_awaited_once()
+    assert f"@{TEAMMATE} ping me when done" in avatar.interact.await_args.args[0]
 
 
 @pytest.mark.asyncio

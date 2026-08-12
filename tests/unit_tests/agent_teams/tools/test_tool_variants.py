@@ -74,6 +74,7 @@ def _backend(db, member_name: str, is_leader: bool, dispatch_mode: str = "autono
         db=db,
         messager=AsyncMock(spec=Messager),
         dispatch_mode=dispatch_mode,
+        enable_task_verification=True,
     )
 
 
@@ -701,3 +702,366 @@ async def test_view_task_in_review_lists_reviewers_tasks(db):
     result = await view.invoke({"action": "in_review"})
     assert result.success
     assert [task["task_id"] for task in result.data["tasks"]] == ["v1"]
+
+
+# ---------------------------------------------------------------------------
+# Structured reviewer (F_73): object input + auto-numbering
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_structured_reviewer(db):
+    """Scheduled create_task with structured reviewer objects persists type
+    and auto-generates reviewer_id."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke({
+        "tasks": [{
+            "task_id": "sr1",
+            "title": "t",
+            "content": "c",
+            "assignee": DEV_1,
+            "reviewer": [
+                {"type": "verifier", "instruction": "check correctness"},
+                {"type": "inspector", "instruction": ""},
+                {"type": "challenger", "instruction": ""},
+            ],
+        }]
+    })
+    assert result.success, result.error
+    task = await backend.task_manager.get("sr1")
+    details = task.reviewer_details()
+    assert len(details) == 3
+
+    assert details[0]["type"] == "verifier"
+    assert details[0]["reviewer_id"] == "verifier_1"
+    assert details[0]["instruction"] == "check correctness"
+
+    assert details[1]["type"] == "inspector"
+    assert details[1]["reviewer_id"] == "inspector_1"
+
+    assert details[2]["type"] == "challenger"
+    assert details[2]["reviewer_id"] == "challenger_1"
+
+    # reviewers() returns flat name list for verify_task identity guard
+    assert task.reviewers() == ["verifier_1", "inspector_1", "challenger_1"]
+
+
+@pytest.mark.level0
+def test_reviewer_id_auto_numbering():
+    """_clean_reviewers assigns per-type sequential counters."""
+    from openjiuwen.agent_teams.tools.tool_task import _clean_reviewers
+
+    spec = {"reviewer": [
+        {"type": "verifier"},
+        {"type": "inspector"},
+        {"type": "verifier"},
+        {"type": "challenger"},
+        {"type": "inspector"},
+    ]}
+    result = _clean_reviewers(spec)
+    assert [d["reviewer_id"] for d in result] == [
+        "verifier_1",
+        "inspector_1",
+        "verifier_2",
+        "challenger_1",
+        "inspector_2",
+    ]
+
+
+@pytest.mark.level0
+def test_reviewer_id_preserves_existing():
+    """_clean_reviewers keeps a caller-supplied reviewer_id untouched."""
+    from openjiuwen.agent_teams.tools.tool_task import _clean_reviewers
+
+    spec = {"reviewer": [
+        {"type": "verifier", "reviewer_id": "custom-name"},
+    ]}
+    result = _clean_reviewers(spec)
+    assert result[0]["reviewer_id"] == "custom-name"
+
+
+@pytest.mark.level0
+def test_reviewer_id_old_format_compat():
+    """_clean_reviewers upgrades old string-list entries."""
+    from openjiuwen.agent_teams.tools.tool_task import _clean_reviewers
+
+    spec = {"reviewer": ["alice", {"type": "inspector"}]}
+    result = _clean_reviewers(spec)
+    assert result[0]["type"] == "verifier"
+    assert result[0]["reviewer_id"] == "alice"
+    assert result[1]["type"] == "inspector"
+    assert result[1]["reviewer_id"] == "inspector_1"
+
+
+# ---------------------------------------------------------------------------
+# update_task's verify gate is a dispatch-gated capability (F_76)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_hides_verify_gate_under_autonomous(db):
+    """Autonomous dispatch has no verify gate, so the schema must not offer one.
+
+    The reviewer machinery is driven by the scheduling runtime, which only a
+    scheduled-dispatch leader has. Offering ``reviewer`` here would let the
+    leader push a task into ``in_review`` with nobody to rule on it — stalled
+    forever, holding its assignee's only active-task slot.
+    """
+    tools = create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True))
+    properties = _by_name(tools, "update_task").card.input_params["properties"]
+
+    assert "reviewer" not in properties
+    assert "max_review_rounds" not in properties
+    # Everything else the tool does is unaffected.
+    for name in ("task_id", "status", "title", "content", "assignee", "add_blocked_by"):
+        assert name in properties
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_offers_verify_gate_under_scheduled(db):
+    """Scheduled dispatch keeps the full verify-gate surface."""
+    tools = create_team_tools(
+        role="leader",
+        agent_team=_backend(db, LEADER_NAME, True, dispatch_mode="scheduled"),
+        dispatch_mode="scheduled",
+    )
+    properties = _by_name(tools, "update_task").card.input_params["properties"]
+
+    assert "reviewer" in properties
+    assert "max_review_rounds" in properties
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_update_task_description_gates_with_the_schema(db):
+    """Prose and parameters appear and disappear together."""
+    autonomous = _by_name(
+        create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True)),
+        "update_task",
+    ).card.description
+    scheduled = _by_name(
+        create_team_tools(
+            role="leader",
+            agent_team=_backend(db, LEADER_NAME, True, dispatch_mode="scheduled"),
+            dispatch_mode="scheduled",
+        ),
+        "update_task",
+    ).card.description
+
+    assert "reviewer" not in autonomous
+    assert "{{" not in autonomous  # the slot collapsed, it did not leak
+    assert "reviewer" in scheduled
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_update_task_rejects_smuggled_reviewer_under_autonomous(db):
+    """An MCP client bypasses the schema, so invoke enforces the gate too.
+
+    Rejected loudly rather than stripped: a silently dropped reviewer reads as
+    "verification is on" to the leader, which then waits for a verdict that is
+    never coming.
+    """
+    backend = _backend(db, LEADER_NAME, True)
+    tools = create_team_tools(role="leader", agent_team=backend)
+    create = _by_name(tools, "create_task")
+    update = _by_name(tools, "update_task")
+
+    created = await create.invoke({"tasks": [{"title": "t", "content": "c"}]})
+    task_id = created.data["task_id"]
+
+    result = await update.invoke({
+        "task_id": task_id,
+        "reviewer": [{"type": "verifier", "instruction": "check it"}],
+    })
+    assert result.success is False
+    assert "verify gate does not exist" in result.error
+
+    # The rejection happens before any mutation: the task keeps no reviewers.
+    task = await backend.task_manager.get(task_id)
+    assert task.reviewers() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_update_task_sets_reviewers_under_scheduled(db):
+    """The gate still works where it is real."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create = _by_name(tools, "create_task")
+    update = _by_name(tools, "update_task")
+
+    created = await create.invoke({
+        "tasks": [{"title": "t", "content": "c", "assignee": DEV_1}],
+    })
+    task_id = created.data["task_id"]
+
+    result = await update.invoke({
+        "task_id": task_id,
+        "reviewer": [{"type": "verifier", "instruction": "check it"}],
+    })
+    assert result.success is True
+
+    task = await backend.task_manager.get(task_id)
+    assert task.reviewers() == ["verifier_1"]
+
+
+# ---------------------------------------------------------------------------
+# build_team's verify gate is a dispatch-gated capability too
+# ---------------------------------------------------------------------------
+
+_BUILD_ARGS = {
+    "display_name": "Fresh Team",
+    "team_desc": "ship it",
+    "leader_display_name": "Boss",
+    "leader_desc": "runs the team",
+}
+
+
+def _fresh_backend(db, dispatch_mode: str, *, verification_ceiling: bool = True) -> TeamBackend:
+    """Backend for a team name the fixture has not created yet.
+
+    ``build_team`` creates the team row itself, so it needs a name that is not
+    already taken by the fixture's roster.
+    """
+    return TeamBackend(
+        team_name="unbuilt_team",
+        member_name=LEADER_NAME,
+        is_leader=True,
+        db=db,
+        messager=AsyncMock(spec=Messager),
+        dispatch_mode=dispatch_mode,
+        enable_task_verification=verification_ceiling,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_team_hides_verify_gate_under_autonomous(db):
+    """Autonomous dispatch has no gate to switch, so the flag must not appear.
+
+    Only a scheduled-dispatch leader owns a ``TeamScheduler``, and that
+    scheduler is the only thing that summons reviewers. Offering the flag here
+    would let the leader plan its whole task graph around verification that no
+    runtime is going to perform.
+    """
+    tools = create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True))
+    build = _by_name(tools, "build_team")
+    properties = build.card.input_params["properties"]
+
+    assert "enable_task_verification" not in properties
+    # Everything else the tool takes is unaffected.
+    for name in ("display_name", "team_desc", "leader_display_name", "leader_desc", "enable_hitt"):
+        assert name in properties
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_team_offers_verify_gate_under_scheduled(db):
+    """Scheduled dispatch exposes the flag — there the gate is real."""
+    tools = create_team_tools(
+        role="leader",
+        agent_team=_backend(db, LEADER_NAME, True, dispatch_mode="scheduled"),
+        dispatch_mode="scheduled",
+    )
+    properties = _by_name(tools, "build_team").card.input_params["properties"]
+
+    assert properties["enable_task_verification"]["type"] == "boolean"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_build_team_description_gates_with_the_schema(db):
+    """Prose and parameter appear and disappear together."""
+    autonomous = _by_name(
+        create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True)),
+        "build_team",
+    ).card.description
+    scheduled = _by_name(
+        create_team_tools(
+            role="leader",
+            agent_team=_backend(db, LEADER_NAME, True, dispatch_mode="scheduled"),
+            dispatch_mode="scheduled",
+        ),
+        "build_team",
+    ).card.description
+
+    assert "enable_task_verification" not in autonomous
+    assert "{{" not in autonomous  # the slot collapsed, it did not leak
+    assert "enable_task_verification" in scheduled
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_build_team_rejects_smuggled_verification_under_autonomous(db):
+    """An MCP client bypasses the schema, so invoke enforces the gate too.
+
+    Rejected loudly rather than stripped: a silently dropped flag would leave
+    the leader believing verification is on, and it would keep assigning
+    reviewers to tasks that then stall in ``in_review``.
+    """
+    backend = _fresh_backend(db, "autonomous")
+    tools = create_team_tools(role="leader", agent_team=backend)
+    build = _by_name(tools, "build_team")
+
+    result = await build.invoke({**_BUILD_ARGS, "enable_task_verification": True})
+
+    assert result.success is False
+    assert "verify gate does not exist" in result.error
+    # The rejection happens before any mutation: no team row was created.
+    assert await db.team.get_team("unbuilt_team") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_build_team_reports_the_effective_verification_flag(db):
+    """Scheduled dispatch honours the flag and reports what took effect."""
+    backend = _fresh_backend(db, "scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    build = _by_name(tools, "build_team")
+
+    result = await build.invoke({**_BUILD_ARGS, "enable_task_verification": False})
+
+    assert result.success is True
+    assert result.data["enable_task_verification"] is False
+    assert backend.task_verification_enabled() is False
+    assert "task_verification=False" in build.map_result(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_build_team_reports_the_ceiling_narrowing_the_leader_choice(db):
+    """A spec ceiling of False wins, and the leader is told so.
+
+    The flag can only narrow within the user's config, so a leader asking for
+    verification against a False ceiling gets None of it. Reporting the
+    effective value back is what stops it from planning around a gate the spec
+    already ruled out.
+    """
+    backend = _fresh_backend(db, "scheduled", verification_ceiling=False)
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    build = _by_name(tools, "build_team")
+
+    result = await build.invoke({**_BUILD_ARGS, "enable_task_verification": True})
+
+    assert result.success is True
+    assert result.data["enable_task_verification"] is False
+    assert "task_verification=False" in build.map_result(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_build_team_omitted_verification_inherits_the_ceiling(db):
+    """Omitting the flag inherits the spec value rather than defaulting to off."""
+    backend = _fresh_backend(db, "scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+
+    result = await _by_name(tools, "build_team").invoke(dict(_BUILD_ARGS))
+
+    assert result.data["enable_task_verification"] is True

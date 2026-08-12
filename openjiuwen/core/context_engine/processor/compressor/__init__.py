@@ -18,10 +18,6 @@ from openjiuwen.core.context_engine.processor.compressor.round_level_compressor 
     RoundLevelCompressor,
     RoundLevelCompressorConfig,
 )
-from openjiuwen.core.context_engine.processor.compressor.reasoning_tool_loop_compact_processor import (
-    ReasoningToolLoopCompactProcessor,
-    ReasoningToolLoopCompactProcessorConfig,
-)
 
 __all__ = [
     "CurrentRoundCompressor",
@@ -32,8 +28,6 @@ __all__ = [
     "FullCompactProcessorConfig",
     "MicroCompactProcessor",
     "MicroCompactProcessorConfig",
-    "ReasoningToolLoopCompactProcessor",
-    "ReasoningToolLoopCompactProcessorConfig",
     "RoundLevelCompressor",
     "RoundLevelCompressorConfig",
 ]

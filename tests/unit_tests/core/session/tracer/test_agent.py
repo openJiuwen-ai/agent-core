@@ -13,6 +13,11 @@ from tests.unit_tests.core.session.tracer.mock_node_with_tracer import StreamNod
 from tests.unit_tests.core.session.tracer.test_workflow_tracer import record_tracer_info
 from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode
 
+# Simulated in-flight work between the on_*_start and on_*_end trace
+# triggers. Only the recorded tracer chunks are asserted, never the wall
+# time, so this just has to be a real suspension point.
+_MOCK_WORK_DELAY = 0.01
+
 
 class MockLLM:
     def __init__(self, tracer):
@@ -22,7 +27,7 @@ class MockLLM:
         try:
             await self.tracer.trigger("tracer_agent", "on_llm_start", span=span, inputs={"llm": "mock llm"},
                                       instance_info={"class_name": "Openai"})
-            await asyncio.sleep(2)
+            await asyncio.sleep(_MOCK_WORK_DELAY)
         except Exception as e:
             await self.tracer.trigger("tracer_agent", "on_llm_error", span=span, error=e,
                                       )
@@ -40,7 +45,7 @@ class MockPlugin:
         try:
             await self.tracer.trigger("tracer_agent", "on_plugin_start", span=span, inputs={"llm": "mock tool"},
                                       instance_info={"class_name": "RestFulAPI"})
-            await asyncio.sleep(2)
+            await asyncio.sleep(_MOCK_WORK_DELAY)
         except Exception as e:
             await self.tracer.trigger("tracer_agent", "on_plugin_error", span=span, error=e,
                                       )

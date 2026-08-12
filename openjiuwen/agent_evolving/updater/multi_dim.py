@@ -10,7 +10,7 @@ from openjiuwen.agent_evolving.signal.from_eval import from_evaluated_case
 
 if TYPE_CHECKING:
     from openjiuwen.agent_evolving.signal.base import EvolutionSignal
-    from openjiuwen.agent_evolving.trajectory.types import Trajectory
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory
     from openjiuwen.core.operator.base import Operator
 
 

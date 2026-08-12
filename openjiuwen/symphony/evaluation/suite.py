@@ -37,6 +37,7 @@ from openjiuwen.symphony.models import (
     QualityResult,
     SuggestionPriority,
 )
+from openjiuwen.symphony.models._message_trace import message_references_fingerprint
 
 _EVALUATION_CACHE_PROTOCOL = "symphony-evaluation-suite-v3"
 _BUILTIN_EVALUATOR_MODULE = "openjiuwen.symphony.evaluation"
@@ -477,11 +478,7 @@ class EvaluationSuite:
             fingerprint.capability_id,
             fingerprint.capability_type,
         )
-        call_match = any(
-            (call.capability_id, call.capability_type) == (fingerprint.capability_id, fingerprint.capability_type)
-            for call in case.calls
-        )
-        if not direct_match and not call_match:
+        if not direct_match and not message_references_fingerprint(case.message, fingerprint):
             raise_error(
                 StatusCode.COMPONENT_SYMPHONY_SCHEMA_INVALID,
                 reason="evaluation case identity does not match fingerprint",
@@ -582,8 +579,6 @@ class EvaluationSuite:
         }
         if len(results) == 1:
             details: dict[str, Any] = dict(template.details)
-            if metric_id == "latency":
-                details.pop("samples_ms", None)
             details.update(counts)
             return template.model_copy(update={"details": details})
         details = counts
@@ -606,27 +601,18 @@ class EvaluationSuite:
         if not_applicable_codes:
             details["not_applicable_codes"] = not_applicable_codes
         if metric_id == "latency":
-            samples: list[float] = []
-            for result in results:
-                raw_samples = result.details.get("samples_ms", [])
-                if isinstance(raw_samples, list):
-                    samples.extend(
-                        float(value)
-                        for value in raw_samples
-                        if isinstance(value, (int, float)) and not isinstance(value, bool)
-                    )
-            details.update(latency_statistics(samples))
-            details.pop("samples_ms", None)
-            details["observation_bases"] = sorted(
-                {
-                    str(result.details["observation_basis"])
-                    for result in results
-                    if result.details.get("observation_basis")
-                }
-            )
-            details["target_bases"] = sorted(
-                {str(result.details["target_basis"]) for result in results if result.details.get("target_basis")}
-            )
+            for latency_type in ("ttft", "e2e"):
+                samples = []
+                for result in results:
+                    latency_value = result.details.get(f"{latency_type}_ms")
+                    if not isinstance(latency_value, (int, float)):
+                        continue
+                    if isinstance(latency_value, bool):
+                        continue
+                    samples.append(float(latency_value))
+                if samples:
+                    details[latency_type] = latency_statistics(samples)
+                    details[latency_type].pop("samples_ms", None)
         evidence = self._deduplicate(item for result in results for item in result.evidence)
         failures = self._deduplicate(item for result in results for item in result.failures)
         suggestions = self._deduplicate(item for result in results for item in result.suggestions)

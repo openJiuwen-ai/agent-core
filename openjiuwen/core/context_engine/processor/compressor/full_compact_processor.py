@@ -22,9 +22,11 @@ from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.compressor.util import (
     FullCompactStateReinjector,
+    TEAM_POLICY_LABEL,
     build_plan_mode_reinjected_content,
     build_task_status_reinjected_content,
     build_skill_reinjected_content,
+    build_team_policy_reinjected_messages,
 )
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -273,6 +275,14 @@ class FullCompactProcessor(ContextProcessor):
             name="plan_mode",
             label="PLAN_MODE",
             builder=build_plan_mode_reinjected_content,
+        )
+        # A team leader's collaboration policy arrives as the ``build_team``
+        # tool result, so compaction would otherwise summarize a behavioural
+        # contract into a description of one. This builder restores it verbatim.
+        self._state_reinjector.register_builder(
+            name="team_policy",
+            label=TEAM_POLICY_LABEL,
+            builder=build_team_policy_reinjected_messages,
         )
         self._model: Model | None = None
         if config.model is not None and config.model_client is not None:

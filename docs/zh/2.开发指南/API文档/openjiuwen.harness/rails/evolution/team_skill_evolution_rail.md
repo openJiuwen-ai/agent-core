@@ -14,6 +14,27 @@
 - 当调用次数达到阈值（默认 2 次）且未使用已有 Team/Swarm Skill 时，通过 `TaskLoopController` 注入简短 follow_up 唤起下一轮
 - 完整自检规则通过系统提示词注入；如果 Agent 判断存在可复用团队协作价值，必须通过普通回复文本确认。用户确认后，调用 `swarmskill-creator` 或兼容的团队技能创建 Skill。如果 creator 不可用，Agent 应通过普通回复文本提醒用户。
 
+### 外部重复证据入口
+
+可信宿主已经识别到重复、可复用且没有现存 Skill 可归因的模式时，可以提交创建审批：
+
+```python
+staged = await create_rail.propose_from_external_evidence(
+    proposal_key="release-recovery-checklist",
+    reusable_guidance="Create a reusable release recovery checklist.",
+    evidence=["task-a: ...", "task-b: ..."],
+    reason="The same missing workflow caused two review failures.",
+)
+```
+
+该方法要求 `auto_trigger=True`、非空 key/指导和至少两条去重证据；同一 key 在当前 Rail 生命周期内
+只生成一次审批 host event。它不会直接创建或修改 Skill。宿主用 `owns_external_proposal(request_id)`
+识别请求，用户作答后调用 `resolve_external_proposal(request_id, accepted=...)`；接受时返回受约束的创建
+prompt，拒绝或未知请求返回 `None`。
+
+Rail 只校验重复证据数量，不判断证据是否属于同一语义模式。调用方必须在提交前完成同类分组，不能
+用无关任务凑足两条证据。
+
 ```text
 class TeamSkillCreateRail(
     skills_dir: str,

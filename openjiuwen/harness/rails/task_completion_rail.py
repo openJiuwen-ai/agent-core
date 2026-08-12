@@ -15,7 +15,8 @@ Only takes effect when ``enable_task_loop=True``.
 
 When a ``goal_manager`` is supplied, the rail additionally drives the
 goal attempt lifecycle (formerly in the standalone GoalCompletionDriver):
-- Injecting the goal protocol prompt section (before_model_call)
+- Injecting the goal protocol via PromptAttachment on goal rounds
+  (before_model_call; cleared on non-goal rounds)
 - Replacing the query with <goal_task> XML (before_task_iteration)
 - Consuming submit_goal_report and running assessment (after_task_iteration)
 - Accumulating token usage (after_model_call)
@@ -34,6 +35,10 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ToolCallInputs,
 )
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
+)
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.task_completion import (
     build_completion_signal_section,
 )
@@ -133,7 +138,7 @@ class TaskCompletionRail(DeepAgentRail):
         self._current_revision: Optional[int] = None
         self._current_session_id: Optional[str] = None
         self._current_attempt_messages: List[Any] = []
-
+        self.attachment_manager = None
 
     def set_goal_manager(
         self, goal_manager: GoalManager,
@@ -194,6 +199,9 @@ class TaskCompletionRail(DeepAgentRail):
           when it has lost the ``<goal_task>`` context (e.g. after the user
           interjects a normal question).
         """
+        self.attachment_manager = getattr(
+            agent, "prompt_attachment_manager", None
+        )
         if self._goal_manager is None:
             return
 
@@ -233,6 +241,7 @@ class TaskCompletionRail(DeepAgentRail):
         """Remove the goal tools."""
         if not hasattr(agent, "ability_manager"):
             self._goal_tools = []
+            self.attachment_manager = None
             return
         for tool in self._goal_tools:
             name = getattr(tool.card, "name", None)
@@ -247,6 +256,7 @@ class TaskCompletionRail(DeepAgentRail):
                     exc_info=True,
                 )
         self._goal_tools = []
+        self.attachment_manager = None
 
     # -- lifecycle hooks --
 
@@ -256,7 +266,8 @@ class TaskCompletionRail(DeepAgentRail):
         """Inject prompt sections.
 
         - Always: completion-signal section (when promise is configured).
-        - Goal support: static goal protocol section.
+        - Goal support: goal protocol as a PromptAttachment on goal rounds
+          only; cleared on non-goal rounds to avoid wasting context.
         """
         builder = getattr(
             ctx.agent, "system_prompt_builder", None
@@ -270,14 +281,62 @@ class TaskCompletionRail(DeepAgentRail):
             )
             builder.add_section(section)
 
-        if self._goal_manager is not None and builder is not None:
-            from openjiuwen.harness.prompts.sections.goal import (
-                build_goal_protocol_section,
-            )
+        await self._sync_goal_protocol_prompt(ctx, builder)
 
-            language = getattr(builder, "language", self._goal_language)
+    async def _sync_goal_protocol_prompt(
+        self,
+        ctx: AgentCallbackContext,
+        builder: Any,
+    ) -> None:
+        """Upsert or clear goal protocol based on run_kind."""
+        from openjiuwen.harness.prompts.sections.goal import (
+            build_goal_protocol_section,
+        )
+
+        run_kind = self._get_run_kind(ctx)
+        want_goal = (
+            run_kind == "goal" and self._goal_manager is not None
+        )
+        language = getattr(
+            builder, "language", self._goal_language
+        ) if builder is not None else self._goal_language
+
+        manager = self.attachment_manager
+        if manager is None:
+            if want_goal:
+                logger.warning(
+                    "TaskCompletionRail: prompt attachment manager "
+                    "is unavailable; skip goal protocol attachment"
+                )
+            return
+
+        writer = manager.bind_context(ctx)
+        if want_goal:
             section = build_goal_protocol_section(language)
-            builder.add_section(section)
+            try:
+                await writer.add_from_prompt_section(
+                    prompt_section=section,
+                    kind=PromptAttachmentKind.RUNTIME,
+                    source="agent_core.task_completion_rail",
+                    language=language,
+                    content_kind="text/markdown",
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "TaskCompletionRail: skip goal protocol "
+                    "prompt attachment: %s",
+                    exc,
+                )
+            return
+
+        try:
+            await writer.clear_section(SectionName.GOAL_PROTOCOL)
+        except ValueError as exc:
+            logger.warning(
+                "TaskCompletionRail: skip clearing goal "
+                "protocol prompt attachment: %s",
+                exc,
+            )
 
     async def before_task_iteration(
         self, ctx: AgentCallbackContext,

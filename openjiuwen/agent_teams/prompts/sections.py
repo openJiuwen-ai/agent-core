@@ -34,6 +34,10 @@ Section layout (aligned with ``prompt_design.md``):
   P:14  team_lifecycle   — team lifecycle policy (LEADER only)
   P:15  team_dispatch    — how tasks reach members: autonomous claim vs
                           scheduled assignment (LEADER + TEAMMATE)
+  P:16  team_task_state  — the task state machine, one template per dispatch
+                          mode (LEADER only). Autonomous documents no verify
+                          gate — that mode has neither the ``reviewer``
+                          parameter nor the runtime to drive one.
   P:17  team_extra       — user-supplied base prompt (when set)
 
 Team *state* (team metadata, peer roster) is not a section at all: it is
@@ -59,11 +63,13 @@ class TeamSectionName:
     """Centralized section names owned by ``TeamPolicyRail``."""
 
     IDENTITY = "team_identity"
+    BOOTSTRAP = "team_bootstrap"
     ROLE = "team_role"
     HITT = "team_hitt"
     BRIDGE = "team_bridge"
     WORKFLOW = "team_workflow"
     DISPATCH = "team_dispatch"
+    TASK_STATE = "team_task_state"
     LIFECYCLE = "team_lifecycle"
     EXTRA = "team_extra"
     INBOUND_TAGS = "team_inbound_tags"
@@ -78,6 +84,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "role_heading": "# 团队角色",
         "workflow_heading": "# 工作流程",
         "dispatch_heading": "# 任务下发与获取",
+        "task_state_heading": "# 任务状态流转",
         "lifecycle_heading": "# 团队生命周期",
         "leader_mode_plan": (
             "团队成员执行模式: plan_mode（成员选择或接到任务后需直接通过 submit_plan 提交计划，"
@@ -95,6 +102,7 @@ _LABELS: dict[str, dict[str, str]] = {
         "role_heading": "# Team Role",
         "workflow_heading": "# Workflow",
         "dispatch_heading": "# Task Dispatch",
+        "task_state_heading": "# Task State Transitions",
         "lifecycle_heading": "# Team Lifecycle",
         "leader_mode_plan": (
             "Teammate execution mode: plan_mode (teammates must submit a plan "
@@ -180,6 +188,44 @@ def build_team_identity_section(
     )
 
 
+def build_leader_bootstrap_section(
+    *,
+    swarmflow_enabled: bool,
+    language: str = "cn",
+) -> PromptSection:
+    """Build the leader's only system-prompt team section (F_76).
+
+    The leader's system prompt carries no collaboration policy at all — just
+    who it is, which mechanism to route to, and the instruction to call
+    ``build_team``. Everything else is disclosed in that tool's result, so a
+    leader never reads the conventions of a dispatch mode its team does not
+    run (see :func:`build_leader_policy_disclosure`).
+
+    The ``collaboration_mechanism`` slot carries the build_team-versus-swarmflow
+    decision guide, kept in its own ``leader_swarmflow`` template and filled
+    only when the leader actually holds the ``swarmflow`` tool — the same signal
+    the tool factory gates that tool on. Without the tool the slot collapses to
+    empty and the bootstrap is a bare "form the team first" instruction, so the
+    leader never deliberates over a mechanism it has no way to run.
+
+    Args:
+        swarmflow_enabled: Whether the leader holds the ``swarmflow`` tool.
+        language: Prompt language ('cn' or 'en').
+
+    Returns:
+        PromptSection carrying the leader bootstrap body.
+    """
+    mechanism = ""
+    if swarmflow_enabled:
+        mechanism = "\n" + load_template("leader_swarmflow", language).content.strip() + "\n"
+    body = load_template("leader_bootstrap", language).format({"collaboration_mechanism": mechanism}).content.strip()
+    return PromptSection(
+        name=TeamSectionName.BOOTSTRAP,
+        content={language: f"{body}\n"},
+        priority=11,
+    )
+
+
 def build_team_role_section(
     *,
     role: TeamRole,
@@ -193,8 +239,17 @@ def build_team_role_section(
     the only per-member value and lives in the ``team_identity`` section, so
     this section stays byte-identical across every member sharing a role.
 
+    HUMAN_AGENT takes its own policy instead of the teammate one: an avatar's
+    counterparts and output channels differ from a teammate's on the point that
+    matters most. Its controller reads the avatar's plain text output directly,
+    while the teammate policy makes ``send_message(to="user")`` the mandatory
+    reply channel — handing that contract to an avatar makes it answer its
+    controller by messaging ``user``, a different real person. BRIDGE_AGENT
+    keeps the teammate policy: it is a full teammate whose content happens to
+    come from a remote executor.
+
     Args:
-        role: LEADER or TEAMMATE.
+        role: The role whose policy to load.
         teammate_mode: Execution mode applied to teammates in this team
             (``"plan_mode"`` or ``"build_mode"``). For LEADER, rendered
             as a description of how teammates execute; for TEAMMATE,
@@ -211,18 +266,26 @@ def build_team_role_section(
     labels = _labels_for(language)
     if role == TeamRole.LEADER:
         policy_name = "leader_policy"
+    elif role == TeamRole.HUMAN_AGENT:
+        policy_name = "human_agent_policy"
     elif workspace_prompt_variant == "external":
         policy_name = "teammate_policy_external"
     else:
         policy_name = "teammate_policy"
     role_text = load_template(policy_name, language).content.strip()
 
-    is_plan_mode = teammate_mode == "plan_mode"
-    if role == TeamRole.LEADER:
-        mode_label_key = "leader_mode_plan" if is_plan_mode else "leader_mode_build"
+    # The execution mode describes how a member plans and completes work it
+    # took on itself. An avatar never does — it acts only on its controller's
+    # instruction — so the mode line says nothing to it.
+    if role == TeamRole.HUMAN_AGENT:
+        mode_line = ""
     else:
-        mode_label_key = "teammate_mode_plan" if is_plan_mode else "teammate_mode_build"
-    mode_line = f"{labels[mode_label_key]}\n\n"
+        is_plan_mode = teammate_mode == "plan_mode"
+        if role == TeamRole.LEADER:
+            mode_label_key = "leader_mode_plan" if is_plan_mode else "leader_mode_build"
+        else:
+            mode_label_key = "teammate_mode_plan" if is_plan_mode else "teammate_mode_build"
+        mode_line = f"{labels[mode_label_key]}\n\n"
     body = f"{labels['role_heading']}\n\n{mode_line}{role_text}\n"
     return PromptSection(
         name=TeamSectionName.ROLE,
@@ -313,6 +376,51 @@ def build_team_dispatch_section(
         name=TeamSectionName.DISPATCH,
         content={language: body},
         priority=15,
+    )
+
+
+def build_team_task_state_section(
+    *,
+    role: TeamRole,
+    dispatch_mode: str = "autonomous",
+    language: str = "cn",
+) -> Optional[PromptSection]:
+    """Build the task state-machine section (LEADER only).
+
+    The state machine is not mode-neutral, so it gets one template per dispatch
+    mode rather than one template with mode caveats inside it. Two edges differ
+    outright — who drives ``pending -> in_progress``, and whether a verify gate
+    exists at all — and a single text describing both had to hedge every line,
+    which is how the autonomous leader ended up being told to call
+    ``create_task(reviewer=[...])``: a parameter that mode's ``create_task``
+    does not have.
+
+    Autonomous therefore documents no verify gate. That is not an omission:
+    ``TaskCreateTool`` exposes no ``reviewer``, and the gate cannot be reached
+    by hand either — the reviewer machinery is driven by the scheduling runtime,
+    which only a scheduled-dispatch leader has, so a task pushed into
+    ``in_review`` there would stall with nobody to rule on it.
+
+    Args:
+        role: Team role; only LEADER owns the board-level state machine.
+        dispatch_mode: ``"autonomous"`` or ``"scheduled"``; unknown values fall
+            back to ``"autonomous"``, matching ``build_team_dispatch_section``.
+        language: Prompt language.
+
+    Returns:
+        PromptSection wrapping the matching ``task_state_<mode>.md`` under an
+        H1 heading; ``None`` for non-leader roles.
+    """
+    if role != TeamRole.LEADER:
+        return None
+    mode = dispatch_mode if dispatch_mode in _DISPATCH_MODES else "autonomous"
+    labels = _labels_for(language)
+    state_text = load_template(f"task_state_{mode}", language).content.strip()
+    body = f"{labels['task_state_heading']}\n\n{state_text}\n"
+    return PromptSection(
+        name=TeamSectionName.TASK_STATE,
+        content={language: body},
+        priority=16,
     )
 
 
@@ -621,6 +729,11 @@ def build_team_static_sections(
             dispatch_mode=dispatch_mode,
             language=language,
         ),
+        build_team_task_state_section(
+            role=role,
+            dispatch_mode=dispatch_mode,
+            language=language,
+        ),
         build_team_lifecycle_section(
             role=role,
             lifecycle=lifecycle,
@@ -638,6 +751,65 @@ def build_team_static_sections(
     # included.
     sections.append(build_team_inbound_tags_section(language=language))
     return sections
+
+
+def build_leader_policy_disclosure(
+    *,
+    lifecycle: str = "temporary",
+    teammate_mode: str = "build_mode",
+    team_mode: str = "default",
+    dispatch_mode: str = "autonomous",
+    language: str = "cn",
+    hitt_enabled: bool = False,
+) -> str:
+    """Render the leader's collaboration policy for the ``build_team`` result.
+
+    This is the disclosure half of the leader's progressive-disclosure split
+    (F_76): the same sections that used to sit in the leader's system prompt,
+    assembled the same way (priority-ordered, ``\\n\\n``-joined), but delivered
+    as the ``build_team`` tool result instead. Which variant of each section
+    the leader reads is decided by the arguments of the very call that created
+    the team, so the conventions of a dispatch mode the team does not run never
+    reach it.
+
+    Excluded on purpose:
+
+    * ``team_identity`` — per-member, delivered through the conversation by
+      ``TeamContextTracker``.
+    * ``team_extra`` — the user-supplied base prompt is the caller's own
+      instruction to this leader, not team policy, and has to be in force
+      *before* the team exists. It stays in the system prompt.
+    * ``team_bootstrap`` — already in the system prompt; repeating the routing
+      guide after the route has been taken is noise.
+
+    Args:
+        lifecycle: Team lifecycle ("temporary" / "persistent").
+        teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
+        team_mode: Team mode ("default" / "predefined" / "hybrid").
+        dispatch_mode: How tasks reach members ("autonomous" / "scheduled").
+        language: Prompt language ("cn" / "en").
+        hitt_enabled: The team's effective HITT flag, as resolved by this
+            ``build_team`` call — not the spec ceiling.
+
+    Returns:
+        The rendered policy text, or ``""`` when no section produced content.
+    """
+    sections = build_team_static_sections(
+        role=TeamRole.LEADER,
+        member_name=None,
+        lifecycle=lifecycle,
+        teammate_mode=teammate_mode,
+        team_mode=team_mode,
+        dispatch_mode=dispatch_mode,
+        base_prompt=None,
+        language=language,
+        hitt_enabled=hitt_enabled,
+        include_member_specific=False,
+    )
+    builder = SystemPromptBuilder(language=language)
+    for section in sections:
+        builder.add_section(section)
+    return builder.build()
 
 
 def build_team_member_system_prompt(
@@ -700,6 +872,8 @@ def build_team_member_system_prompt(
 
 __all__ = [
     "TeamSectionName",
+    "build_leader_bootstrap_section",
+    "build_leader_policy_disclosure",
     "build_team_bridge_section",
     "build_team_dispatch_section",
     "build_team_extra_section",
@@ -710,5 +884,6 @@ __all__ = [
     "build_team_member_system_prompt",
     "build_team_role_section",
     "build_team_static_sections",
+    "build_team_task_state_section",
     "build_team_workflow_section",
 ]

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn, overload
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.symphony.models import CapabilityDescriptor, SourceSnapshot
 from openjiuwen.symphony.models._redaction import is_sensitive_name, normalize_sensitive_name
 from openjiuwen.symphony.shared.fingerprint.normalization import (
@@ -25,9 +26,7 @@ from openjiuwen.symphony.shared.fingerprint.parser import (
     SkillManifestParser,
 )
 from openjiuwen.symphony.shared.fingerprint.safe_filesystem import (
-    open_directory_no_follow,
     open_regular_file_no_follow,
-    supports_anchored_open,
 )
 
 _HASH_PROTOCOL = b"openjiuwen-symphony-safe-assets-v1\0"
@@ -122,6 +121,7 @@ class _ScanBudget:
 class _SafeDirectoryEntry:
     name: str
     mode: int | None
+    is_link: bool = False
 
 
 @dataclass(frozen=True)
@@ -217,8 +217,6 @@ class SkillFolderScanner:
         """Scan safely; one malformed Skill does not abort the remaining inventory."""
 
         root = _validated_root(self.root)
-        if not supports_anchored_open():
-            _raise_inventory_error("this platform cannot securely scan an anchored no-follow directory tree")
         if self.max_depth is not None and not _is_integer(self.max_depth, minimum=0):
             _raise_config_error("max_depth must be a non-negative integer or None")
         limits = (
@@ -249,31 +247,59 @@ class SkillFolderScanner:
 
         for entrypoint in entrypoints:
             relative_entrypoint = entrypoint.relative_to(root).as_posix()
-            parsed = self.parser.parse(
-                entrypoint,
-                root=root,
-                capability_id_hint=entrypoint.parent.name,
-                capability_type=self.capability_type,
-                source=self.source,
-                display_path=relative_entrypoint,
-            )
+            try:
+                parsed = self.parser.parse(
+                    entrypoint,
+                    root=root,
+                    capability_id_hint=entrypoint.parent.name,
+                    capability_type=self.capability_type,
+                    source=self.source,
+                    display_path=relative_entrypoint,
+                )
+            except BaseError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolate one malformed Skill.
+                diagnostics.append(
+                    _item_failure_diagnostic(
+                        code="skill_load_failed",
+                        message="Skill could not be loaded",
+                        path=relative_entrypoint,
+                        capability_id=entrypoint.parent.name,
+                        error=exc,
+                    )
+                )
+                continue
             diagnostics.extend(parsed.diagnostics)
             if parsed.descriptor is None:
                 continue
 
-            hash_result = _hash_safe_assets(
-                entrypoint.parent,
-                scan_root=root,
-                expected_entrypoint_content_hash=parsed.entrypoint_content_hash,
-                max_files=self.max_asset_files,
-                max_file_bytes=self.max_asset_file_bytes,
-                max_total_bytes=self.max_total_asset_bytes,
-                max_scan_directories=self.max_scan_directories,
-                max_directory_entries=self.max_directory_entries,
-                max_scan_files=self.max_scan_asset_files,
-                max_scan_bytes=self.max_scan_asset_bytes,
-                budget=budget,
-            )
+            try:
+                hash_result = _hash_safe_assets(
+                    entrypoint.parent,
+                    scan_root=root,
+                    expected_entrypoint_content_hash=parsed.entrypoint_content_hash,
+                    max_files=self.max_asset_files,
+                    max_file_bytes=self.max_asset_file_bytes,
+                    max_total_bytes=self.max_total_asset_bytes,
+                    max_scan_directories=self.max_scan_directories,
+                    max_directory_entries=self.max_directory_entries,
+                    max_scan_files=self.max_scan_asset_files,
+                    max_scan_bytes=self.max_scan_asset_bytes,
+                    budget=budget,
+                )
+            except BaseError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolate one malformed Skill.
+                diagnostics.append(
+                    _item_failure_diagnostic(
+                        code="skill_asset_hash_failed",
+                        message="Skill assets could not be hashed",
+                        path=relative_entrypoint,
+                        capability_id=parsed.descriptor.capability_id,
+                        error=exc,
+                    )
+                )
+                continue
             diagnostics.extend(
                 _with_manifest_identity(item, parsed.descriptor.capability_id, relative_entrypoint)
                 for item in hash_result.diagnostics
@@ -332,6 +358,26 @@ class _ContentHashResult:
         return bool(self.content_hash)
 
 
+def _item_failure_diagnostic(
+    *,
+    code: str,
+    message: str,
+    path: str,
+    capability_id: str,
+    error: Exception,
+) -> ScanDiagnostic:
+    """Build a stable diagnostic for an unexpected single-Skill failure."""
+
+    return ScanDiagnostic(
+        code=code,
+        message=message,
+        severity="error",
+        path=path,
+        capability_id=capability_id,
+        details={"error_type": type(error).__name__},
+    )
+
+
 def build_source_snapshot(result: ScanResult) -> SourceSnapshot:
     """Build a deterministic source snapshot without caching directory state."""
 
@@ -362,7 +408,7 @@ def _validated_root(root: Path) -> Path:
         root_stat = absolute.lstat()
     except OSError as exc:
         _raise_inventory_error("scan root does not exist or cannot be inspected", cause=exc)
-    if stat.S_ISLNK(root_stat.st_mode):
+    if _is_link_stat(root_stat):
         _raise_inventory_error("symlinked scan roots are not allowed")
     if not stat.S_ISDIR(root_stat.st_mode):
         _raise_inventory_error("scan root must be a directory")
@@ -372,34 +418,39 @@ def _validated_root(root: Path) -> Path:
 def _read_directory_entries(
     directory: Path,
     *,
-    root: Path,
     max_directories: int,
     max_entries: int,
     budget: _ScanBudget,
 ) -> list[_SafeDirectoryEntry]:
-    """List a bounded directory through an fd anchored to the configured root."""
+    """List a bounded trusted local directory through its path."""
 
     if budget.directories >= max_directories:
         _raise_inventory_error("Skill scan exceeds the configured directory limit")
     budget.directories += 1
-    directory_fd = open_directory_no_follow(directory, root=root)
-    if directory_fd is None:
-        raise OSError("directory could not be opened beneath the configured root")
-    try:
-        entries: list[_SafeDirectoryEntry] = []
-        with os.scandir(directory_fd) as iterator:
-            for entry in iterator:
-                if len(entries) >= max_entries:
-                    _raise_inventory_error("a scanned directory exceeds the configured entry limit")
-                try:
-                    mode = entry.stat(follow_symlinks=False).st_mode
-                except OSError:
-                    mode = None
-                entries.append(_SafeDirectoryEntry(name=entry.name, mode=mode))
-    finally:
-        os.close(directory_fd)
+    entries: list[_SafeDirectoryEntry] = []
+    with os.scandir(directory) as iterator:
+        for entry in iterator:
+            if len(entries) >= max_entries:
+                _raise_inventory_error("a scanned directory exceeds the configured entry limit")
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+                mode = entry_stat.st_mode
+                is_link = _is_link_stat(entry_stat)
+            except OSError:
+                mode = None
+                is_link = False
+            entries.append(_SafeDirectoryEntry(name=entry.name, mode=mode, is_link=is_link))
     entries.sort(key=lambda item: (item.name.casefold(), item.name))
     return entries
+
+
+def _is_link_stat(path_stat: object) -> bool:
+    """Return whether a stat result represents a symlink or Windows reparse point."""
+
+    mode = getattr(path_stat, "st_mode", 0)
+    file_attributes = getattr(path_stat, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(mode) or bool(file_attributes & reparse_flag)
 
 
 def _discover_entrypoints(
@@ -420,7 +471,6 @@ def _discover_entrypoints(
         try:
             children = _read_directory_entries(
                 directory,
-                root=root,
                 max_directories=max_directories,
                 max_entries=max_directory_entries,
                 budget=budget,
@@ -450,11 +500,11 @@ def _discover_entrypoints(
                     )
                 )
                 continue
-            if stat.S_ISLNK(child_mode):
+            if entry.is_link:
                 diagnostics.append(
                     ScanDiagnostic(
                         code="symlink_skipped",
-                        message="symlink was not traversed during Skill discovery",
+                        message="symlink or reparse point was not traversed during Skill discovery",
                         severity="warning",
                         path=_relative_display(child, root),
                     )
@@ -631,7 +681,6 @@ def _collect_safe_asset_paths(
         try:
             children = _read_directory_entries(
                 directory,
-                root=scan_root,
                 max_directories=max_scan_directories,
                 max_entries=max_directory_entries,
                 budget=budget,
@@ -660,7 +709,7 @@ def _collect_safe_asset_paths(
                     )
                 )
                 continue
-            if stat.S_ISLNK(child_mode):
+            if entry.is_link:
                 continue
             if stat.S_ISDIR(child_mode):
                 if not _exclude_directory(child.name):

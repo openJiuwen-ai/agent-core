@@ -162,6 +162,26 @@ def set_team_workspace(path: str) -> None:
     _state().team_workspace = _resolve(path)
 
 
+# ---- Agent history root: cross-project, per-host artifact root ------------
+
+def get_agent_history_root() -> str:
+    """Root directory for cross-session agent artifacts (e.g. ``.agent_history/``).
+
+    Unlike ``get_workspace()``/``get_cwd()``, this is anchored to the
+    jiuwenswarm host's system working directory rather than the current
+    project, so history is not scattered across every project checkout.
+    Honors ``JIUWENSWARM_DATA_DIR`` / ``JIUWENSWARM_HOME`` -- the same
+    env vars the jiuwenswarm host sets for multi-instance isolation
+    (see jiuwenswarm.common.utils.get_user_workspace_dir) -- so agent-core
+    stays decoupled from that package while still landing in the same root.
+    """
+    data_dir = os.getenv("JIUWENSWARM_DATA_DIR")
+    if data_dir:
+        return str(Path(data_dir).expanduser().resolve())
+    home = os.getenv("JIUWENSWARM_HOME") or str(Path.home())
+    return str((Path(home) / ".jiuwenswarm").expanduser().resolve())
+
+
 # ---- Bulk initialization ---------------------------------------------------
 
 def init_cwd(

@@ -15,7 +15,9 @@ from openjiuwen.agent_evolving.signal import (
     make_team_trajectory_signal,
     make_team_user_intent_signal,
 )
-from openjiuwen.agent_evolving.trajectory.types import ToolCallDetail, TrajectoryStep, trajectory_from_steps
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.extensions.observability import semconv
 
 
 def test_team_signal_type_values_are_stable() -> None:
@@ -76,18 +78,32 @@ def test_team_user_intent_signal_helper() -> None:
 
 
 def test_build_team_trajectory_summary_includes_tool_calls() -> None:
-    trajectory = trajectory_from_steps(
-        execution_id="exec-1",
-        steps=[
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="send_message",
-                    call_args={"to": "reviewer"},
-                    call_result="sent",
-                ),
-            )
-        ],
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({"openjiuwen.trajectory_id": "exec-1"})},
+                    "scopeSpans": [
+                        {
+                            "spans": [
+                                {
+                                    "traceId": "trace-team",
+                                    "spanId": "tool-1",
+                                    "name": "tool.send_message",
+                                    "attributes": attributes_from_map(
+                                        {
+                                            semconv.GEN_AI_TOOL_NAME: "send_message",
+                                            semconv.GEN_AI_TOOL_INPUT: {"to": "reviewer"},
+                                            semconv.GEN_AI_TOOL_OUTPUT: "sent",
+                                        }
+                                    ),
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
     )
 
     summary = build_team_trajectory_summary(trajectory)

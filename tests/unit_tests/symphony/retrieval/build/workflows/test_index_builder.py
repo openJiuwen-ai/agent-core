@@ -275,6 +275,72 @@ class IndexBuilderWorkflowTests(unittest.TestCase):
             self.assertEqual(catalog[0].metadata["source_description"], "Weather forecast skill")
             self.assertEqual(tree["nodes"][1]["worker_id"], "weather")
 
+    def test_incremental_jsonl_matches_existing_catalog_by_worker_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            def write_jsonl(path: Path, worker_ids: list[str]) -> None:
+                lines = []
+                for worker_id in worker_ids:
+                    lines.append(
+                        json.dumps(
+                            {
+                                "contentExtendParam": {
+                                    "skillId": worker_id,
+                                    "skillName": worker_id.title(),
+                                    "skillDesc": f"{worker_id} description",
+                                    "skillPath": f"/installed/{worker_id}/SKILL.md",
+                                }
+                            }
+                        )
+                    )
+                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            base_jsonl = root / "base.jsonl"
+            add_jsonl = root / "add.jsonl"
+            delete_jsonl = root / "delete.jsonl"
+            write_jsonl(base_jsonl, ["alpha", "beta"])
+            write_jsonl(add_jsonl, ["gamma"])
+            write_jsonl(delete_jsonl, ["beta"])
+            base_dir = root / "base-index"
+            add_dir = root / "add-index"
+            delete_dir = root / "delete-index"
+            config = BuildConfig(
+                method=BuildMethod.TREE,
+                llm_openai_client=cast(Any, object()),
+                llm_model="fake-tree-model",
+                incremental_max_change_ratio=1.0,
+                incremental_min_add_confidence=0.0,
+                incremental_min_add_confidence_margin=0.0,
+            )
+
+            with patch.object(workflows_module, "build_tree", side_effect=_fake_build_tree) as build_tree_mock:
+                IndexBuilder.build(output_dir=base_dir, item_jsonl_path=str(base_jsonl), config=config)
+                IndexBuilder.add(
+                    base_index_dir=base_dir,
+                    output_dir=add_dir,
+                    item_jsonl_path=str(add_jsonl),
+                    config=config,
+                )
+                IndexBuilder.delete(
+                    base_index_dir=add_dir,
+                    output_dir=delete_dir,
+                    item_jsonl_path=str(delete_jsonl),
+                    config=config,
+                )
+
+            add_catalog = load_catalog_records(add_dir / "catalog.jsonl")
+            delete_catalog = load_catalog_records(delete_dir / "catalog.jsonl")
+            self.assertEqual(build_tree_mock.call_count, 1)
+            self.assertEqual([record.worker_id for record in add_catalog], ["alpha", "beta", "gamma"])
+            self.assertEqual([record.worker_id for record in delete_catalog], ["alpha", "gamma"])
+            self.assertEqual(load_manifest(add_dir)["item_paths"], [
+                "jsonl://skill/alpha",
+                "jsonl://skill/beta",
+                "jsonl://skill/gamma",
+            ])
+            self.assertEqual(add_catalog[0].skill_path, "/installed/alpha/SKILL.md")
+
     def test_rejects_invalid_paths_and_duplicate_materialized_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

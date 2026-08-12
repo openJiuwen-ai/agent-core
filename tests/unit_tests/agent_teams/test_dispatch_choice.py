@@ -97,18 +97,18 @@ async def test_build_team_records_spec_mode_on_team_row(db):
 async def test_task_verification_override_persists(db):
     backend = _backend(db, enable_task_verification=False)
     await _build(backend, CapabilityOverrides(enable_task_verification=True))
-    assert backend.task_verification_enabled() is True
+    assert backend.task_verification_enabled() is False  # spec=False ceiling; leader override ignored
     team = await db.team.get_team(TEAM)
-    assert bool(team.enable_task_verification) is True
+    assert bool(team.enable_task_verification) is False  # spec=False ceiling
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_build_team_tool_has_no_dispatch_choice(db):
-    tool = BuildTeamTool(_backend(db), make_translator("cn"))
+    tool = BuildTeamTool(_backend(db, enable_task_verification=True), make_translator("cn"))
     properties = tool.card.input_params["properties"]
     assert "dispatch_mode" not in properties
-    assert "enable_task_verification" in properties
+    assert "enable_task_verification" not in properties
 
     result = await tool.invoke(
         {
@@ -116,11 +116,10 @@ async def test_build_team_tool_has_no_dispatch_choice(db):
             "team_desc": "d",
             "leader_display_name": "Leader",
             "leader_desc": "ld",
-            "enable_task_verification": True,
         }
     )
     assert result.success
-    assert result.data["enable_task_verification"] is True
+    assert "enable_task_verification" not in result.data
     assert "dispatch_mode" not in result.data
 
 
@@ -133,14 +132,9 @@ async def test_build_team_tool_has_no_dispatch_choice(db):
 def test_spec_review_knobs_validation():
     base = {"agents": {"leader": DeepAgentSpec()}, "spawn_mode": "inprocess"}
     spec = TeamAgentSpec(**base)
-    assert spec.verify_vote_threshold == pytest.approx(2 / 3)
     assert spec.default_max_review_rounds == 3
     assert spec.review_stall_timeout == 1800
 
-    with pytest.raises(ValueError):
-        TeamAgentSpec(**base, verify_vote_threshold=0)
-    with pytest.raises(ValueError):
-        TeamAgentSpec(**base, verify_vote_threshold=1.5)
     with pytest.raises(ValueError):
         TeamAgentSpec(**base, default_max_review_rounds=0)
     with pytest.raises(ValueError):
@@ -163,3 +157,19 @@ def test_spec_stall_knobs_validation():
         TeamAgentSpec(**base, stale_claim_idle_timeout=0)
     with pytest.raises(ValueError):
         TeamAgentSpec(**base, stale_pending_idle_timeout=-1)
+
+
+@pytest.mark.level1
+def test_spec_steer_batch_size_validation():
+    """Non-leader members take the steering backlog in bounded batches (F_78)."""
+    base = {"agents": {"leader": DeepAgentSpec()}, "spawn_mode": "inprocess"}
+    spec = TeamAgentSpec(**base)
+    assert spec.steer_batch_size == 2
+
+    assert TeamAgentSpec(**base, steer_batch_size=5).steer_batch_size == 5
+
+    # A drain always takes at least one, so zero would quietly mean one.
+    with pytest.raises(ValueError):
+        TeamAgentSpec(**base, steer_batch_size=0)
+    with pytest.raises(ValueError):
+        TeamAgentSpec(**base, steer_batch_size=-1)

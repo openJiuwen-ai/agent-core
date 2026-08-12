@@ -145,7 +145,8 @@ def _write_turns(
         chunk_paths: list[str] = []
         for chunk_index, chunk_body in enumerate(bodies):
             chunk_id = f"{turn.turn_id}_chunk_{chunk_index:03d}"
-            relative_path = f"chunks/{chunk_id}.md"
+            filename = f"{chunk_id}_{_chunk_slug(chunk_body)}.md"
+            relative_path = f"chunks/{filename}"
             chunk_paths.append(relative_path)
             markdown = (
                 "---\n"
@@ -155,7 +156,7 @@ def _write_turns(
                 "---\n\n"
                 f"{chunk_body.rstrip()}\n"
             )
-            (chunks_dir / f"{chunk_id}.md").write_text(markdown, encoding="utf-8")
+            (chunks_dir / filename).write_text(markdown, encoding="utf-8")
         records.append(
             {
                 "turn_id": turn.turn_id,
@@ -175,9 +176,9 @@ def _group_turns(messages: list[BaseMessage], *, fallback_query: str) -> list[_T
         if _is_real_user_message(message) and current_messages:
             groups.append((current_query, current_messages))
             current_messages = []
-            current_query = _content_to_text(message.content)
+            current_query = _content_to_query_text(message.content)
         elif _is_real_user_message(message):
-            current_query = _content_to_text(message.content)
+            current_query = _content_to_query_text(message.content)
         current_messages.append(message)
     if current_messages:
         groups.append((current_query, current_messages))
@@ -303,9 +304,35 @@ def _new_memory_id(recall_root: Path) -> str:
 
 
 def _query_slug(query: str) -> str:
-    compact = re.sub(r"\s+", "_", query.strip())[:10]
+    return _text_slug(query, max_chars=10, fallback="no-query")
+
+
+# Bare role headers emitted by _render_turn carry no content hint on their own,
+# so _chunk_slug skips them in favor of the first real content line.
+_BARE_SECTION_HEADERS = {"user", "assistant", "assistant reasoning"}
+
+
+def _chunk_slug(body: str) -> str:
+    """Summarize a chunk body for its filename so browsers can gauge the content.
+
+    Uses the first meaningful line (Markdown heading markers stripped): headers
+    with a payload like ``## Tool Call: read_file`` are informative as-is, bare
+    role headers (``## User``) are skipped, and a window-cut fragment is
+    acceptable for a rough hint.
+    """
+    for line in body.splitlines():
+        # Token-window cuts can split a multi-byte character at the boundary,
+        # leaving replacement chars (�) at the start of a line — strip them.
+        text = line.strip().lstrip("#").strip().strip("�").strip()
+        if text and text.lower() not in _BARE_SECTION_HEADERS:
+            return _text_slug(text, max_chars=40, fallback="empty")
+    return "empty"
+
+
+def _text_slug(text: str, *, max_chars: int, fallback: str) -> str:
+    compact = re.sub(r"\s+", "_", text.strip())[:max_chars]
     safe = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", "-", compact).strip("-._")
-    return safe or "no-query"
+    return safe or fallback
 
 
 def _safe_filename_part(value: str) -> str:
@@ -316,7 +343,7 @@ def _safe_filename_part(value: str) -> str:
 def _latest_real_user_content(messages: list[BaseMessage]) -> str:
     for message in reversed(messages):
         if _is_real_user_message(message):
-            return _content_to_text(message.content)
+            return _content_to_query_text(message.content)
     return ""
 
 
@@ -330,8 +357,62 @@ def _latest_non_empty_query(turns: list[_Turn]) -> str:
 def _is_real_user_message(message: BaseMessage) -> bool:
     if not isinstance(message, UserMessage):
         return False
-    content = _content_to_text(message.content).lstrip()
+    content = _content_to_query_text(message.content).lstrip()
     return not content.startswith(INTERNAL_USER_PREFIXES)
+
+
+def _content_to_query_text(content: Any) -> str:
+    """Extract user-visible text from structured content for query labeling.
+
+    User messages may carry multimodal parts (``[{"type": "text", "text": ...}]``);
+    flattening those with :func:`_content_to_text` yields a JSON blob whose leading
+    characters are ``[{"type":`` — useless as an archive directory name or a BM25
+    recall query. Text-bearing parts are joined; anything else yields an empty
+    string so callers fall back to ``no-query`` instead of JSON noise.
+    """
+    if isinstance(content, str) or content is None:
+        return _strip_channel_envelope(_content_to_text(content))
+    parts = content if isinstance(content, list) else [content]
+    texts: list[str] = []
+    for part in parts:
+        if isinstance(part, str):
+            texts.append(part)
+            continue
+        if isinstance(part, dict):
+            for key in ("text", "content"):
+                value = part.get(key)
+                if isinstance(value, str) and value.strip():
+                    texts.append(value)
+                    break
+    if not texts:
+        return ""
+    return _strip_channel_envelope(_content_to_text("\n".join(texts)))
+
+
+def _strip_channel_envelope(text: str) -> str:
+    """Unwrap a ``lead-in line + JSON envelope`` channel wrapper for query labeling.
+
+    Channels may deliver user text as ``你收到一条消息：\\n{"content": "...", ...}``.
+    Indexed as-is, the envelope metadata (source, timezone, timestamp) dilutes
+    BM25 turn matching and yields useless archive slugs, while the real query
+    lives in the envelope's ``content`` field. Only unwrap when the payload is
+    clearly a JSON object with a non-empty string ``content``; a message whose
+    own first line starts with ``{`` is treated as genuine user text.
+    """
+    stripped = text.strip()
+    head, sep, payload = stripped.partition("\n")
+    payload = payload.strip()
+    if not sep or head.lstrip().startswith("{") or not payload.startswith("{"):
+        return text
+    try:
+        envelope = json.loads(payload)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(envelope, dict):
+        inner = envelope.get("content")
+        if isinstance(inner, str) and inner.strip():
+            return inner
+    return text
 
 
 def _content_to_text(content: Any) -> str:

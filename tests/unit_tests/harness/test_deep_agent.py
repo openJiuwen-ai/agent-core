@@ -313,6 +313,21 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
     assert agent.loop_coordinator is None
 
 
+def test_reconstructed_deep_agents_share_inner_persistence_identity() -> None:
+    persistence_id = "stable-deep-agent"
+    first = DeepAgent(AgentCard(id=persistence_id, name="deep")).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+    second = DeepAgent(AgentCard(id=persistence_id, name="deep")).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+
+    assert first.react_agent is not None
+    assert second.react_agent is not None
+    assert first.react_agent.card.id == persistence_id
+    assert second.react_agent.card.id == persistence_id
+
+
 def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
     agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
         DeepAgentConfig(

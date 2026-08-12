@@ -31,6 +31,7 @@ from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
     from openjiuwen.agent_teams.agent.state import TeamAgentState
+    from openjiuwen.agent_teams.fork import ForkContext
     from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
     from openjiuwen.core.runner.spawn.process_manager import SpawnedProcessHandle
     from openjiuwen.core.session.stream.base import OutputSchema
@@ -75,6 +76,7 @@ class SpawnManager:
         initial_message: Optional[str] = None,
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
+        fork_from: "ForkContext | None" = None,
         resume_external_backend: bool = False,
     ) -> Optional[SpawnedProcessHandle]:
         member_name = ctx.member_name
@@ -105,6 +107,7 @@ class SpawnManager:
                 initial_message=initial_message,
                 session=session,
                 spawn_config=spawn_config,
+                fork_from=fork_from,
                 resume_external_backend=resume_external_backend,
             )
         finally:
@@ -117,6 +120,7 @@ class SpawnManager:
         initial_message: Optional[str] = None,
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
+        fork_from: "ForkContext | None" = None,
         resume_external_backend: bool = False,
     ) -> SpawnedProcessHandle:
         member_name = ctx.member_name
@@ -150,6 +154,7 @@ class SpawnManager:
                 ctx=ctx,
                 initial_message=initial_message,
                 session_id=get_session_id() or session,
+                fork_from=fork_from,
             )
             # Wire chunk fan-out so the teammate's stream chunks reach
             # the leader's stream_queue. Subprocess teammates skip this

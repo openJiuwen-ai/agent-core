@@ -3536,6 +3536,44 @@ async def test_run_evolution_all_skills_disabled(tmp_path):
     rail._handle_evolution_from_signals.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_external_signal_entry_uses_standard_optimizer_and_approval_path(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=False, auto_save=False)
+    signal = _make_signal("skill-a")
+    expected = _staged_result(SimpleNamespace(request_id="skill_evolve_1"))
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    rail._is_regular_skill = Mock(return_value=True)
+    rail._handle_evolution_from_signals = AsyncMock(return_value=expected)
+
+    result = await rail.evolve_from_external_signals(
+        signals=[signal],
+        messages=[{"role": "user", "content": "review feedback"}],
+        user_query="Add reusable validation guidance.",
+    )
+
+    assert result is expected
+    rail._handle_evolution_from_signals.assert_awaited_once_with(
+        skill_name="skill-a",
+        signals=[signal],
+        messages=[{"role": "user", "content": "review feedback"}],
+        trajectory=None,
+        ctx=None,
+        user_query="Add reusable validation guidance.",
+        requires_approval=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_signal_entry_rejects_ambiguous_skill_scope(tmp_path):
+    rail = _make_rail(tmp_path)
+    rail._handle_evolution_from_signals = AsyncMock()
+
+    result = await rail.evolve_from_external_signals(signals=[_make_signal("skill-a"), _make_signal("skill-b")])
+
+    assert result.status == "skipped_no_input"
+    rail._handle_evolution_from_signals.assert_not_awaited()
+
+
 def test_skill_evolution_rail_registers_stable_review_subagent_without_rail_state(monkeypatch, tmp_path):
     from openjiuwen.harness.rails.evolution.review.subagent import EVOLUTION_REVIEW_AGENT_NAME
 

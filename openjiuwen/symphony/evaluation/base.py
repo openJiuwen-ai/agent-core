@@ -23,6 +23,7 @@ from openjiuwen.symphony.models import (
     MetricStatus,
     SuggestionPriority,
 )
+from openjiuwen.symphony.models._message_trace import MessageTraceCall, matching_message_calls
 from openjiuwen.symphony.models._redaction import is_sensitive_name, redact_sensitive_text
 
 EvaluationScope = Literal["static", "trace"]
@@ -53,13 +54,12 @@ class EvaluationContext:
         return self.fingerprint.capability_type
 
     @property
-    def matching_calls(self) -> tuple[Any, ...]:
-        """Return calls that explicitly reference the evaluated fingerprint."""
+    def matching_calls(self) -> tuple[MessageTraceCall, ...]:
+        """Return message tool calls that reference the evaluated fingerprint."""
 
         if self.case is None:
             return ()
-        identity = (self.fingerprint.capability_id, self.fingerprint.capability_type)
-        return tuple(call for call in self.case.calls if (call.capability_id, call.capability_type) == identity)
+        return matching_message_calls(self.case.message, self.fingerprint)
 
     def payload(self) -> dict[str, Any]:
         """Build a redacted JSON-compatible payload for semantic evaluation."""
@@ -234,6 +234,8 @@ class LLMJudgeEvaluator(BaseEvaluator):
     """Base class for semantic metrics whose model calls are opt-in."""
 
     requires_llm = True
+    allows_null_score = False
+    response_instruction = "Return only JSON with score 0 or 1 and a concise reason."
     rubric: str
 
     def evaluate(self, context: EvaluationContext) -> Awaitable[MetricResult]:
@@ -257,17 +259,32 @@ class LLMJudgeEvaluator(BaseEvaluator):
                 self.metric_id,
                 self.rubric,
                 self.evaluation_payload(context),
+                response_instruction=self.response_instruction,
             )
             payload = _parse_llm_response(response)
-            score = payload.get("score")
-            if isinstance(score, bool) or not isinstance(score, (int, float)):
-                raise TypeError("the response score is not numeric")
-            numeric_score = float(score)
-            if numeric_score not in {0.0, 1.0}:
-                raise ValueError("the response score is not binary")
+            if "score" not in payload:
+                raise TypeError("the response score is missing")
+            score = payload["score"]
             reason = payload.get("reason")
             if not isinstance(reason, str) or not reason.strip():
                 raise TypeError("the response reason is missing")
+            if score is None:
+                if not self.allows_null_score:
+                    raise TypeError("the response score is not numeric")
+                numeric_score = None
+                status = "not_applicable"
+                details = {
+                    "not_applicable_code": "llm_not_applicable",
+                    "evaluation_method": "llm",
+                }
+            else:
+                if isinstance(score, bool) or not isinstance(score, (int, float)):
+                    raise TypeError("the response score is not numeric")
+                numeric_score = float(score)
+                if numeric_score not in {0.0, 1.0}:
+                    raise ValueError("the response score is not binary")
+                status = "pass" if numeric_score == 1.0 else "fail"
+                details = {"evaluation_method": "llm"}
         except Exception as exc:  # noqa: BLE001 - injected model adapters are an external boundary.
             return self.error(
                 context,
@@ -278,9 +295,9 @@ class LLMJudgeEvaluator(BaseEvaluator):
         return self.result(
             context,
             score=numeric_score,
-            status="pass" if numeric_score == 1.0 else "fail",
+            status=status,
             reason=reason,
-            details={"evaluation_method": "llm"},
+            details=details,
             evidence=(
                 EvidenceRef(
                     evidence_type="llm_judgment",
@@ -341,11 +358,16 @@ def _sanitize_payload(value: Any, max_length: int = _DEFAULT_TEXT_LIMIT) -> Any:
     return _sanitize_text(value, max_length)
 
 
-async def _invoke_llm(llm: Any, metric_id: str, rubric: str, payload: Mapping[str, Any]) -> Any:
+async def _invoke_llm(
+    llm: Any,
+    metric_id: str,
+    rubric: str,
+    payload: Mapping[str, Any],
+    *,
+    response_instruction: str = "Return only JSON with score 0 or 1 and a concise reason.",
+) -> Any:
     prompt = (
-        f"{rubric}\n"
-        "Return only JSON with score 0 or 1 and a concise reason.\n"
-        f"Evaluation data:\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
+        f"{rubric}\n{response_instruction}\nEvaluation data:\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
     )
     invoke = getattr(llm, "invoke", None)
     if callable(invoke):
@@ -399,6 +421,10 @@ def _parse_llm_response(response: Any) -> Mapping[str, Any]:
                     parts.append(item.text)
             response = "".join(parts)
     if isinstance(response, str):
+        response = response.strip()
+        fence_prefix = "```json"
+        if response[: len(fence_prefix)].casefold() == fence_prefix and response.endswith("```"):
+            response = response.removeprefix(response[: len(fence_prefix)]).removesuffix("```").strip()
         response = json.loads(response)
     if not isinstance(response, Mapping):
         raise TypeError("the model response is not a mapping")

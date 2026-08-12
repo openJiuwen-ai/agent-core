@@ -30,7 +30,10 @@ from openjiuwen.core.sys_operation.config import (
     SandboxGatewayConfig,
 )
 from openjiuwen.core.sys_operation.sys_operation import SysOperationCard, SysOperation
-from openjiuwen.harness.schema.build_context import BuildContext
+from openjiuwen.harness.schema.build_context import (
+    BuildContext,
+    PARENT_SYS_OPERATION_EXTRAS_KEY,
+)
 from openjiuwen.harness.schema.config import (
     AudioModelConfig,
     DEFAULT_ACR_BASE_URL,
@@ -548,6 +551,16 @@ class DeepAgentSpec(BaseModel):
         # so core.subagent.* / progressive_tool factories can read extras.
         build_ctx.extras["_parent_model"] = llm_model
 
+        # Resolved before rails / sub-agents so the sub-agent factories can hand
+        # it to their specs: a sub-agent that carries no sys_operation gets a
+        # fresh LOCAL one from ``create_deep_agent``, which both ignores this
+        # agent's sandbox (escaping onto the host) and turns on
+        # ``restrict_to_sandbox`` against its own narrower workspace. Resolving
+        # early is safe -- ``SysOperationSpec.resolve`` is get-or-create on a
+        # stable id, so the later consumers see the same instance.
+        sys_operation = self.sys_operation.resolve() if self.sys_operation else None
+        build_ctx.extras[PARENT_SYS_OPERATION_EXTRAS_KEY] = sys_operation
+
         rails = None
         if self.rails:
             rails = []
@@ -564,8 +577,6 @@ class DeepAgentSpec(BaseModel):
                         subagent_spec.build(parent_model=llm_model, language=language, context=build_ctx),
                     ),
                 )
-
-        sys_operation = self.sys_operation.resolve() if self.sys_operation else None
 
         return resolve_deep_agent_parts(
             llm_model,

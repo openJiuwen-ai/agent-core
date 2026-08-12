@@ -146,6 +146,30 @@ def test_registry_merges_members_in_time_order() -> None:
     assert trajectory_meta(result)["member_count"] == 2
 
 
+def test_registry_returns_only_requested_member_trajectory() -> None:
+    registry = InMemoryTrajectoryRegistry()
+    registry.publish_member_trajectory(
+        _snapshot(member_id="writer", tool_name="write_file", member_role="teammate")
+    )
+    registry.publish_member_trajectory(
+        _snapshot(member_id="reviewer", tool_name="read_file", member_role="teammate")
+    )
+
+    result = registry.get_member_trajectory(
+        team_id="team-a",
+        session_id="session-a",
+        member_id="writer",
+    )
+
+    assert _tool_names(result) == ["write_file"]
+    assert trajectory_meta(result)["member_id"] == "writer"
+    assert registry.get_member_trajectory(
+        team_id="team-a",
+        session_id="session-a",
+        member_id="missing",
+    ) is None
+
+
 def test_registry_clear_session_removes_only_target_session() -> None:
     registry = InMemoryTrajectoryRegistry()
     registry.publish_member_trajectory(_snapshot(team_id="team-a", session_id="session-a"))

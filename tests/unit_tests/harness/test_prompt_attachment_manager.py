@@ -9,6 +9,7 @@ from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY,
     PromptAttachment,
     PromptAttachmentKind,
     PromptAttachmentManager,
@@ -301,6 +302,30 @@ def test_prompt_attachment_manager_appends_attachment_message_after_image_only_u
     assert injected[-2].content == original[-1].content
     assert isinstance(injected[-1], UserMessage)
     assert injected[-1].content == "<system-reminder>attached</system-reminder>"
+
+
+def test_prompt_attachment_manager_inserts_attachment_before_preserved_tail():
+    manager = PromptAttachmentManager()
+    state = UserMessage(
+        content="<browser_state>current</browser_state>",
+        metadata={PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY: True},
+    )
+    progress = UserMessage(
+        content='<browser_state_progress>{"page_change":"unchanged"}</browser_state_progress>',
+        metadata={PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY: True},
+    )
+    original = [UserMessage(content="query"), state, progress]
+
+    injected = manager.inject_messages(original, "<system-reminder>attached</system-reminder>")
+
+    assert [message.content for message in injected] == [
+        "query",
+        "<system-reminder>attached</system-reminder>",
+        state.content,
+        progress.content,
+    ]
+    assert injected[-2] is state
+    assert injected[-1] is progress
 
 
 def test_prompt_attachment_guidance_is_rendered_only_with_attachments():

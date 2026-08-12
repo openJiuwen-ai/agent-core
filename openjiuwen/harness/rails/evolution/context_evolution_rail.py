@@ -27,7 +27,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 
 class ContextEvolutionRail(DeepAgentRail):
 
-    priority: int = 50  # run before user-defined callbacks (default priority = 100)
+    priority: int = 50  # higher runs first, so this trails callbacks left at the default 100
 
     def __init__(
         self,

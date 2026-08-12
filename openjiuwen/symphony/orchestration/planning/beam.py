@@ -12,6 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable, Sequence
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
 from openjiuwen.symphony.orchestration.language import (
@@ -557,6 +558,8 @@ class BidirectionalBeamPlanner:
                     response_observer=self.model_response_observer,
                 )
             selection = json.loads(raw)
+        except BaseError:
+            raise
         except Exception as exc:
             return {**base, "error": f"{type(exc).__name__}: {exc}"}
         if not isinstance(selection, dict):
@@ -832,7 +835,7 @@ class BidirectionalBeamPlanner:
         if not tasks:
             return {}
         output: dict[str, SemanticJudgement] = {}
-        for result in await asyncio.gather(*tasks):
+        for result in await self._gather_cancel_on_error(*tasks):
             output.update(result)
         return output
 
@@ -845,10 +848,23 @@ class BidirectionalBeamPlanner:
             self._llm_call_count += 1
             try:
                 return await self.judge_expansions(query, group)
+            except BaseError:
+                raise
             except Exception as exc:
                 candidates = ", ".join(item.candidate_id for item in group[:5])
                 self._judge_failures.append(f"beam judge failed for candidates [{candidates}]: {exc}")
                 return {}
+
+    @staticmethod
+    async def _gather_cancel_on_error(*awaitables: Awaitable[Any]) -> list[Any]:
+        tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
+        try:
+            return list(await asyncio.gather(*tasks))
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     @staticmethod
     def _cache_key(

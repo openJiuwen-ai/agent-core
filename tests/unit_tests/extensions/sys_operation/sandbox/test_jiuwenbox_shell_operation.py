@@ -1,19 +1,19 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""End-to-end tests for the jiuwenbox shell-execution paths.
+"""Jiuwenbox shell-execution tests: E2E (gated) and hybrid routing unit wiring.
 
-All tests in this module require a running jiuwenbox service and are gated
-on ``RUN_JIUWENBOX_TEST=1``. The local-execution tests in particular use a
-pair of ``SysOperationCard``s sharing the same sandbox so we can verify
-that pre-routed / fallback commands land on the host while the sandbox
-is genuinely untouched (or genuinely fails first).
+E2E tests require a running jiuwenbox service (``RUN_JIUWENBOX_TEST=1``).
+Hybrid wiring tests use a mocked ``JiuwenBoxShellProvider`` and do not need
+a live sandbox.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any, AsyncIterator
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import httpx
@@ -24,8 +24,13 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import OperationMode, SandboxGatewayConfig, SysOperation, SysOperationCard
 from openjiuwen.core.sys_operation.config import ContainerScope, PreDeployLauncherConfig, SandboxIsolationConfig
-from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import build_jiuwenbox_http_client
 from openjiuwen.core.sys_operation.result import ExecuteCmdStreamResult
+from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint
+from openjiuwen.extensions.sys_operation.sandbox.providers import jiuwenbox as jb
+from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import (
+    build_jiuwenbox_http_client,
+    resolve_jiuwenbox_cli_bin,
+)
 
 
 LONG_RUNNING_COMMAND = ["/usr/bin/python3", "-c", "import time; time.sleep(36000)"]
@@ -467,3 +472,500 @@ async def test_no_fallback_when_flag_off_keeps_failure_in_sandbox_only(
             await Runner.stop()
             client.delete(f"/api/v1/sandboxes/{sandbox_id}")
             monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+
+
+def _sandbox_read_text(client: httpx.Client, sandbox_id: str, path: str) -> str:
+    resp = client.post(
+        f"/api/v1/sandboxes/{sandbox_id}/exec",
+        json={"command": ["bash", "-lc", f"cat -- {path}"]},
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    assert body["exit_code"] == 0, body
+    return body.get("stdout") or ""
+
+
+_HAS_JIUWENBOX_CLI = resolve_jiuwenbox_cli_bin() is not None or shutil.which("jiuwenbox") is not None
+
+
+# ===========================================================================
+# E2E: hybrid excluded_commands rewrite (local leaf + remote leaf).
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.environ.get("RUN_JIUWENBOX_TEST") != "1", reason="Requires running Jiuwenbox sandbox")
+@pytest.mark.skipif(not _HAS_JIUWENBOX_CLI, reason="Requires jiuwenbox CLI on PATH/venv")
+async def test_hybrid_cat_local_pipe_dd_remote(
+    server_endpoint, monkeypatch, tmp_path: Path
+):
+    """E1: cat(host) | dd(sandbox) proves bidirectional routing."""
+    base_url = _normalize_endpoint(server_endpoint)
+    marker = uuid4().hex[:8]
+    host_file = tmp_path / f"hybrid_host_{marker}.txt"
+    payload = f"hybrid-payload-{marker}"
+    host_file.write_text(payload, encoding="utf-8")
+    sandbox_marker = f"/tmp/from_pipe_{marker}.txt"
+
+    with build_jiuwenbox_http_client(base_url) as client:
+        create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
+        assert create_resp.status_code == 201, create_resp.text
+        sandbox_id = create_resp.json()["id"]
+        monkeypatch.setenv("JIUWENBOX_SANDBOX_ID", sandbox_id)
+
+        await Runner.start()
+        card_id = f"jiuwenbox_hybrid_pipe_{marker}"
+        card_added = False
+        card = _build_card(
+            card_id=card_id,
+            base_url=base_url,
+            sandbox_id=sandbox_id,
+            extra_params={"excluded_commands": ["cat"]},
+        )
+        try:
+            assert Runner.resource_mgr.add_sys_operation(card).is_ok()
+            card_added = True
+            sys_op = Runner.resource_mgr.get_sys_operation(card_id)
+
+            cmd = f"cat {host_file} | dd of={sandbox_marker} status=none"
+            res = await sys_op.shell().execute_cmd(cmd)
+            assert res.code == StatusCode.SUCCESS.code, res.message
+            assert res.data is not None
+            assert res.data.exit_code == 0
+            assert res.data.command == cmd
+
+            assert _sandbox_has_file(client, sandbox_id, sandbox_marker)
+            assert _sandbox_read_text(client, sandbox_id, sandbox_marker) == payload
+            assert not Path(sandbox_marker).exists()
+        finally:
+            if card_added:
+                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+            await Runner.stop()
+            client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+            monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.environ.get("RUN_JIUWENBOX_TEST") != "1", reason="Requires running Jiuwenbox sandbox")
+@pytest.mark.skipif(not _HAS_JIUWENBOX_CLI, reason="Requires jiuwenbox CLI on PATH/venv")
+async def test_hybrid_or_short_circuit_remote_side_effect(
+    server_endpoint, monkeypatch, tmp_path: Path
+):
+    """E2: local false || remote write — marker only in sandbox."""
+    base_url = _normalize_endpoint(server_endpoint)
+    marker = uuid4().hex[:8]
+    sandbox_marker = f"/tmp/remote_or_{marker}.txt"
+    host_same_path = Path(sandbox_marker)
+
+    with build_jiuwenbox_http_client(base_url) as client:
+        create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
+        assert create_resp.status_code == 201, create_resp.text
+        sandbox_id = create_resp.json()["id"]
+        monkeypatch.setenv("JIUWENBOX_SANDBOX_ID", sandbox_id)
+
+        await Runner.start()
+        card_id = f"jiuwenbox_hybrid_or_{marker}"
+        card_added = False
+        card = _build_card(
+            card_id=card_id,
+            base_url=base_url,
+            sandbox_id=sandbox_id,
+            extra_params={"excluded_commands": ["false"]},
+        )
+        try:
+            assert Runner.resource_mgr.add_sys_operation(card).is_ok()
+            card_added = True
+            sys_op = Runner.resource_mgr.get_sys_operation(card_id)
+
+            cmd = f"false || sh -c 'printf remote-ok > {sandbox_marker}'"
+            res = await sys_op.shell().execute_cmd(cmd)
+            assert res.code == StatusCode.SUCCESS.code, res.message
+            assert res.data is not None
+            assert res.data.exit_code == 0
+            assert _sandbox_has_file(client, sandbox_id, sandbox_marker)
+            assert _sandbox_read_text(client, sandbox_id, sandbox_marker) == "remote-ok"
+            assert not host_same_path.exists()
+        finally:
+            if card_added:
+                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+            await Runner.stop()
+            client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+            monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.environ.get("RUN_JIUWENBOX_TEST") != "1", reason="Requires running Jiuwenbox sandbox")
+@pytest.mark.skipif(not _HAS_JIUWENBOX_CLI, reason="Requires jiuwenbox CLI on PATH/venv")
+async def test_hybrid_cwd_and_env_reach_remote_leaf(server_endpoint, monkeypatch):
+    """E3: execute_cmd cwd/environment are forwarded to remote leaf."""
+    base_url = _normalize_endpoint(server_endpoint)
+    marker = uuid4().hex[:8]
+    sandbox_marker = f"/tmp/env_cwd_{marker}.txt"
+
+    with build_jiuwenbox_http_client(base_url) as client:
+        create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
+        assert create_resp.status_code == 201, create_resp.text
+        sandbox_id = create_resp.json()["id"]
+        monkeypatch.setenv("JIUWENBOX_SANDBOX_ID", sandbox_id)
+
+        await Runner.start()
+        card_id = f"jiuwenbox_hybrid_env_{marker}"
+        card_added = False
+        card = _build_card(
+            card_id=card_id,
+            base_url=base_url,
+            sandbox_id=sandbox_id,
+            extra_params={"excluded_commands": ["false"]},
+        )
+        try:
+            assert Runner.resource_mgr.add_sys_operation(card).is_ok()
+            card_added = True
+            sys_op = Runner.resource_mgr.get_sys_operation(card_id)
+
+            # Ensure /tmp exists as cwd; write marker with env value from remote leaf.
+            cmd = f"false || sh -c 'printf \"%s:%s\" \"$HYBRID_MARK\" \"$(pwd)\" > {sandbox_marker}'"
+            res = await sys_op.shell().execute_cmd(
+                cmd,
+                cwd="/tmp",
+                environment={"HYBRID_MARK": f"mark-{marker}"},
+            )
+            assert res.code == StatusCode.SUCCESS.code, res.message
+            content = _sandbox_read_text(client, sandbox_id, sandbox_marker)
+            assert content.startswith(f"mark-{marker}:")
+            assert content.endswith("/tmp") or "/tmp" in content
+            assert not Path(sandbox_marker).exists()
+        finally:
+            if card_added:
+                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+            await Runner.stop()
+            client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+            monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.environ.get("RUN_JIUWENBOX_TEST") != "1", reason="Requires running Jiuwenbox sandbox")
+async def test_hybrid_unsupported_falls_back_to_sandbox(
+    server_endpoint, monkeypatch
+):
+    """E4: when rewrite reports unsupported, original command runs wholly in sandbox."""
+    base_url = _normalize_endpoint(server_endpoint)
+    marker = uuid4().hex[:8]
+    payload = f"unsup-{marker}"
+    sandbox_marker = f"/tmp/hybrid_unsupported_{marker}.txt"
+
+    with build_jiuwenbox_http_client(base_url) as client:
+        create_resp = client.post("/api/v1/sandboxes", json={"command": LONG_RUNNING_COMMAND})
+        assert create_resp.status_code == 201, create_resp.text
+        sandbox_id = create_resp.json()["id"]
+        monkeypatch.setenv("JIUWENBOX_SANDBOX_ID", sandbox_id)
+
+        await Runner.start()
+        card_id = f"jiuwenbox_hybrid_unsup_{marker}"
+        card_added = False
+        card = _build_card(
+            card_id=card_id,
+            base_url=base_url,
+            sandbox_id=sandbox_id,
+            extra_params={"excluded_commands": ["printf"]},
+        )
+        try:
+            assert Runner.resource_mgr.add_sys_operation(card).is_ok()
+            card_added = True
+            sys_op = Runner.resource_mgr.get_sys_operation(card_id)
+
+            # Force unsupported classification; provider should still run wholly remote.
+            monkeypatch.setattr(
+                jb,
+                "plan_command_rewrite",
+                lambda *args, **kwargs: jb.RewritePlan(
+                    mode="unsupported",
+                    reason="forced",
+                    normalized_command=str(args[0]) if args else "",
+                ),
+            )
+            cmd = f"printf '%s' '{payload}' > {sandbox_marker}"
+            res = await sys_op.shell().execute_cmd(cmd)
+            assert res.code == StatusCode.SUCCESS.code, res.message
+            assert res.data is not None
+            assert res.data.exit_code == 0
+            assert _sandbox_has_file(client, sandbox_id, sandbox_marker)
+            assert _sandbox_read_text(client, sandbox_id, sandbox_marker) == payload
+            assert not Path(sandbox_marker).exists()
+        finally:
+            if card_added:
+                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+            await Runner.stop()
+            client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+            monkeypatch.delenv("JIUWENBOX_SANDBOX_ID", raising=False)
+
+# ===========================================================================
+# Unit: hybrid excluded_commands rewrite wiring (mocked provider).
+# ===========================================================================
+
+
+class _HybridShell(jb.JiuwenBoxShellProvider):
+    """Minimal shell provider for routing tests (no real HTTP)."""
+
+    def __init__(self, *, sandbox_id: str = "sid-1", base_url: str = "http://127.0.0.1:9") -> None:
+        self.endpoint = SandboxEndpoint(base_url=base_url, sandbox_id=sandbox_id)
+        self.config = MagicMock()
+        self.config.timeout_seconds = 30
+        self.config.launcher_config = MagicMock()
+        self.config.launcher_config.extra_params = {"excluded_commands": ["cat"]}
+        self._client = MagicMock()
+        self._sandbox_id = sandbox_id
+        self._timeout_seconds = 30
+        self._recreate_calls = 0
+
+    def _launcher_extra_params(self, create: bool = False) -> dict[str, Any]:
+        return self.config.launcher_config.extra_params
+
+    def _get_client(self) -> MagicMock:
+        return self._client
+
+    def _get_sandbox_id(self) -> str:
+        return self._sandbox_id
+
+    async def _recreate_sandbox_after_loss(self, *, stale_sandbox_id: str) -> str:
+        self._recreate_calls += 1
+        self._sandbox_id = "sid-recreated"
+        return self._sandbox_id
+
+
+class TestHybridShellWiring:
+    """Provider wiring coverage for hybrid excluded_commands shell rewrite."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_caches(self):
+        jb.reset_rewrite_caches_for_tests()
+        yield
+        jb.reset_rewrite_caches_for_tests()
+
+    @pytest.mark.asyncio
+    async def test_i1_hybrid_runs_rewritten_local_command(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shell = _HybridShell()
+        shell._client.get_sandbox.return_value = {"id": "sid-1"}
+        monkeypatch.setattr(jb, "resolve_jiuwenbox_cli_bin", lambda: "/usr/bin/jiuwenbox")
+        monkeypatch.setattr(jb, "probe_jiuwenbox_cli", lambda _bin: (True, None))
+
+        captured: dict[str, Any] = {}
+
+        async def fake_pg(argv, **kwargs):
+            captured["argv"] = argv
+            captured["env"] = kwargs.get("env")
+            return {"stdout": "ok", "stderr": "", "exit_code": 0, "local": True}
+
+        monkeypatch.setattr(jb, "_run_local_subprocess_process_group", fake_pg)
+        monkeypatch.setattr(jb, "_run_local_subprocess", AsyncMock())
+        monkeypatch.setattr(
+            shell,
+            "_run_exec_pipeline",
+            AsyncMock(side_effect=AssertionError("remote pipeline must not run for hybrid")),
+        )
+
+        result = await shell.execute_cmd("cat f | grep a")
+        assert result.code == StatusCode.SUCCESS.code
+        assert result.data is not None
+        assert result.data.command == "cat f | grep a"
+        assert captured["argv"][0:2] == ["bash", "-lc"]
+        rewritten = captured["argv"][2]
+        assert "sandbox exec" in rewritten
+        assert "--stdin -" in rewritten
+        assert rewritten.startswith("cat f |")
+        assert captured["env"]["JIUWENBOX_URL"] == "http://127.0.0.1:9"
+        assert "JIUWENBOX_API_TOKEN" not in rewritten
+
+    @pytest.mark.asyncio
+    async def test_i2_local_all_and_remote_all_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shell = _HybridShell()
+        shell.config.launcher_config.extra_params = {"excluded_commands": ["cat"]}
+
+        local_mock = AsyncMock(return_value={"stdout": "L", "stderr": "", "exit_code": 0, "local": True})
+        monkeypatch.setattr(jb, "_run_local_subprocess", local_mock)
+        monkeypatch.setattr(jb, "resolve_jiuwenbox_cli_bin", lambda: (_ for _ in ()).throw(AssertionError("cli")))
+
+        res_local = await shell.execute_cmd("cat a | cat b")
+        assert res_local.code == StatusCode.SUCCESS.code
+        local_mock.assert_awaited()
+        assert local_mock.await_args.args[0] == ["bash", "-lc", "cat a | cat b"]
+
+        shell2 = _HybridShell()
+        shell2.config.launcher_config.extra_params = {"excluded_commands": ["git*"]}
+        pipeline = AsyncMock(return_value=({"stdout": "R", "stderr": "", "exit_code": 0}, None))
+        monkeypatch.setattr(shell2, "_run_exec_pipeline", pipeline)
+        monkeypatch.setattr(jb, "_run_local_subprocess", AsyncMock(side_effect=AssertionError("local")))
+        monkeypatch.setattr(jb, "resolve_jiuwenbox_cli_bin", lambda: (_ for _ in ()).throw(AssertionError("cli")))
+
+        res_remote = await shell2.execute_cmd("echo a || echo b")
+        assert res_remote.code == StatusCode.SUCCESS.code
+        pipeline.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_i3_cli_missing_returns_config_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shell = _HybridShell()
+        monkeypatch.setattr(jb, "resolve_jiuwenbox_cli_bin", lambda: None)
+        local_mock = AsyncMock()
+        remote_mock = AsyncMock()
+        monkeypatch.setattr(jb, "_run_local_subprocess", local_mock)
+        monkeypatch.setattr(jb, "_run_local_subprocess_process_group", local_mock)
+        monkeypatch.setattr(shell, "_run_exec_pipeline", remote_mock)
+
+        result = await shell.execute_cmd("cat f | grep a")
+        assert result.code != StatusCode.SUCCESS.code
+        assert "jiuwenbox CLI" in result.message
+        local_mock.assert_not_awaited()
+        remote_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_i4_preflight_recreates_stale_sandbox(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shell = _HybridShell()
+
+        def get_sandbox(sid: str):
+            request = httpx.Request("GET", f"http://x/api/v1/sandboxes/{sid}")
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError("missing", request=request, response=response)
+
+        shell._client.get_sandbox.side_effect = get_sandbox
+        monkeypatch.setattr(jb, "resolve_jiuwenbox_cli_bin", lambda: "/usr/bin/jiuwenbox")
+        monkeypatch.setattr(jb, "probe_jiuwenbox_cli", lambda _bin: (True, None))
+
+        captured: dict[str, Any] = {}
+
+        async def fake_pg(argv, **kwargs):
+            captured["argv"] = argv
+            return {"stdout": "", "stderr": "", "exit_code": 0, "local": True}
+
+        monkeypatch.setattr(jb, "_run_local_subprocess_process_group", fake_pg)
+
+        result = await shell.execute_cmd("cat f | grep a")
+        assert result.code == StatusCode.SUCCESS.code
+        assert shell._recreate_calls == 1
+        assert "sid-recreated" in captured["argv"][2]
+
+    @pytest.mark.asyncio
+    async def test_i5_hybrid_nonzero_does_not_fallback_or_rerun(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shell = _HybridShell()
+        shell.config.launcher_config.extra_params = {
+            "excluded_commands": ["cat"],
+            "fallback_on_failure": True,
+        }
+        shell._client.get_sandbox.return_value = {"id": "sid-1"}
+        monkeypatch.setattr(jb, "resolve_jiuwenbox_cli_bin", lambda: "/usr/bin/jiuwenbox")
+        monkeypatch.setattr(jb, "probe_jiuwenbox_cli", lambda _bin: (True, None))
+
+        calls = {"pg": 0}
+
+        async def fake_pg(argv, **kwargs):
+            calls["pg"] += 1
+            return {"stdout": "", "stderr": "boom", "exit_code": 7, "local": True}
+
+        monkeypatch.setattr(jb, "_run_local_subprocess_process_group", fake_pg)
+        monkeypatch.setattr(jb, "_run_local_subprocess", AsyncMock(side_effect=AssertionError("no fallback")))
+        monkeypatch.setattr(
+            shell,
+            "_run_exec_pipeline",
+            AsyncMock(side_effect=AssertionError("no pipeline")),
+        )
+
+        result = await shell.execute_cmd("cat f | grep a")
+        assert result.code == StatusCode.SUCCESS.code
+        assert result.data is not None
+        assert result.data.exit_code == 7
+        assert calls["pg"] == 1
+        assert shell._recreate_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_i6_fallback_on_failure_still_applies_to_remote_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shell = _HybridShell()
+        shell.config.launcher_config.extra_params = {
+            "excluded_commands": ["git*"],
+            "fallback_on_failure": True,
+        }
+        local_mock = AsyncMock(return_value={"stdout": "fb", "stderr": "", "exit_code": 0, "local": True})
+        monkeypatch.setattr(jb, "_run_local_subprocess", local_mock)
+
+        async def pipeline(**kwargs):
+            return await kwargs["local_op"](), None
+
+        monkeypatch.setattr(shell, "_run_exec_pipeline", pipeline)
+        result = await shell.execute_cmd("echo a || echo b")
+        assert result.code == StatusCode.SUCCESS.code
+        assert result.data is not None
+        assert result.data.stdout == "fb"
+
+    @pytest.mark.asyncio
+    async def test_i7_timeout_maps_to_124(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shell = _HybridShell()
+        shell._client.get_sandbox.return_value = {"id": "sid-1"}
+        monkeypatch.setattr(jb, "resolve_jiuwenbox_cli_bin", lambda: "/usr/bin/jiuwenbox")
+        monkeypatch.setattr(jb, "probe_jiuwenbox_cli", lambda _bin: (True, None))
+        monkeypatch.setattr(
+            jb,
+            "_run_local_subprocess_process_group",
+            AsyncMock(return_value={"stdout": "", "stderr": "timed out", "exit_code": 124, "local": True}),
+        )
+        result = await shell.execute_cmd("cat f | grep a", timeout=1)
+        assert result.data is not None
+        assert result.data.exit_code == 124
+        assert result.code != StatusCode.SUCCESS.code
+
+    @pytest.mark.asyncio
+    async def test_i8_orchestration_env_overrides_caller_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shell = _HybridShell()
+        shell._client.get_sandbox.return_value = {"id": "sid-1"}
+        monkeypatch.setenv("JIUWENBOX_API_TOKEN", "provider-token")
+        monkeypatch.setattr(jb, "resolve_jiuwenbox_cli_bin", lambda: "/usr/bin/jiuwenbox")
+        monkeypatch.setattr(jb, "probe_jiuwenbox_cli", lambda _bin: (True, None))
+        captured: dict[str, Any] = {}
+
+        async def fake_pg(argv, **kwargs):
+            captured["argv"] = argv
+            captured["env"] = kwargs.get("env")
+            return {"stdout": "", "stderr": "", "exit_code": 0, "local": True}
+
+        monkeypatch.setattr(jb, "_run_local_subprocess_process_group", fake_pg)
+        await shell.execute_cmd(
+            "cat f | grep a",
+            environment={"JIUWENBOX_API_TOKEN": "caller-token", "FOO": "1"},
+        )
+        assert captured["env"]["JIUWENBOX_API_TOKEN"] == "provider-token"
+        assert captured["env"]["FOO"] == "1"
+        assert "--api-token" not in captured["argv"][2]
+
+    @pytest.mark.asyncio
+    async def test_unsupported_mixed_runs_remote_pipeline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shell = _HybridShell()
+        shell.config.launcher_config.extra_params = {"excluded_commands": ["echo"]}
+        pipeline = AsyncMock(return_value=({"stdout": "in-sandbox", "stderr": "", "exit_code": 0}, None))
+        monkeypatch.setattr(shell, "_run_exec_pipeline", pipeline)
+        monkeypatch.setattr(jb, "resolve_jiuwenbox_cli_bin", lambda: (_ for _ in ()).throw(AssertionError("cli")))
+        monkeypatch.setattr(jb, "_run_local_subprocess", AsyncMock(side_effect=AssertionError("local")))
+        monkeypatch.setattr(
+            jb,
+            "plan_command_rewrite",
+            lambda *args, **kwargs: jb.RewritePlan(
+                mode="unsupported",
+                reason="forced",
+                normalized_command=str(args[0]) if args else "",
+            ),
+        )
+
+        result = await shell.execute_cmd("echo a | grep b")
+        assert result.code == StatusCode.SUCCESS.code
+        assert result.data is not None
+        assert result.data.stdout == "in-sandbox"
+        pipeline.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_i9_empty_patterns_skips_rewrite(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        shell = _HybridShell()
+        shell.config.launcher_config.extra_params = {"excluded_commands": []}
+        plan_mock = MagicMock(side_effect=AssertionError("plan must not run"))
+        monkeypatch.setattr(jb, "plan_command_rewrite", plan_mock)
+        pipeline = AsyncMock(return_value=({"stdout": "x", "stderr": "", "exit_code": 0}, None))
+        monkeypatch.setattr(shell, "_run_exec_pipeline", pipeline)
+        result = await shell.execute_cmd("cat f | grep a")
+        assert result.code == StatusCode.SUCCESS.code
+        pipeline.assert_awaited()
+        plan_mock.assert_not_called()
+

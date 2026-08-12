@@ -13,6 +13,8 @@ Covers:
 - ``interaction`` module routing (parse_mention, UserInbox,
   HumanAgentInbox).
 - ``prompts.sections.build_team_hitt_section`` role-specific content.
+- ``prompts.sections.build_team_role_section`` avatar channel contract
+  (``human_agent_policy``), which owns controller vs user separation.
 """
 
 from unittest.mock import AsyncMock
@@ -37,7 +39,10 @@ from openjiuwen.agent_teams.interaction import (
     parse_mention,
 )
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.prompts import build_team_hitt_section
+from openjiuwen.agent_teams.prompts import (
+    build_team_hitt_section,
+    build_team_role_section,
+)
 from openjiuwen.agent_teams.schema.blueprint import (
     LeaderSpec,
     TeamAgentSpec,
@@ -1093,38 +1098,72 @@ def test_hitt_section_human_agent_describes_constrained_tools():
 
 
 @pytest.mark.level0
-def test_hitt_section_human_agent_send_message_is_user_driven_cn():
-    """human_agent has send_message, but the prompt must bind it to
-    user-issued relay instructions and forbid autonomous use."""
-    section = build_team_hitt_section(
-        role=TeamRole.HUMAN_AGENT,
-        hitt_enabled=True,
-        language="cn",
-        self_member_name=HUMAN_AGENT_MEMBER_NAME,
-    )
-    assert section is not None
+def test_human_agent_role_section_binds_send_message_to_controller_relay_cn():
+    """human_agent has send_message, but its role policy must bind it to
+    controller-issued relay instructions and forbid autonomous use.
+
+    The channel rules live in the role section (``human_agent_policy``),
+    not the HITT section — HITT owns only the silence constraint on
+    ``for="controller"`` notifications.
+    """
+    section = build_team_role_section(role=TeamRole.HUMAN_AGENT, language="cn")
     body = section.content["cn"]
-    assert "有 `send_message`" in body
-    assert "转发通道" in body or "转告" in body
-    assert "不允许" in body
-    assert "没有 `send_message`" not in body
+    assert "`send_message`" in body
+    assert "转告" in body
+    assert "仅当" in body
 
 
 @pytest.mark.level0
-def test_hitt_section_human_agent_send_message_is_user_driven_en():
-    """English mirror of the cn user-driven send_message constraint."""
-    section = build_team_hitt_section(
-        role=TeamRole.HUMAN_AGENT,
-        hitt_enabled=True,
-        language="en",
-        self_member_name=HUMAN_AGENT_MEMBER_NAME,
-    )
-    assert section is not None
+def test_human_agent_role_section_binds_send_message_to_controller_relay_en():
+    """English mirror of the controller-driven send_message constraint."""
+    section = build_team_role_section(role=TeamRole.HUMAN_AGENT, language="en")
     body = section.content["en"]
-    assert "do have `send_message`" in body
-    assert "user-driven" in body or "relay channel" in body
-    assert "Never" in body or "never" in body
-    assert "no `send_message`" not in body
+    assert "`send_message`" in body
+    assert "relay" in body
+    assert "only when" in body
+
+
+@pytest.mark.level0
+def test_human_agent_role_section_replies_to_controller_in_plain_text_cn():
+    """Regression guard for the avatar answering its controller by
+    messaging ``user``.
+
+    The avatar's controller and the team's ``user`` are two different real
+    people. The teammate policy makes ``send_message(to="user")`` the
+    mandatory reply channel; handing that contract to an avatar routed
+    every controller reply to the wrong person. The avatar policy must
+    instead say the controller reads plain text output.
+    """
+    section = build_team_role_section(role=TeamRole.HUMAN_AGENT, language="cn")
+    body = section.content["cn"]
+    assert "纯文本输出" in body
+    assert "控制者不是 user" in body
+    # The teammate "must reply to user" clause must not reach the avatar.
+    assert "必须**用 `send_message(to=\"user\")` 作答" not in body
+
+
+@pytest.mark.level0
+def test_human_agent_role_section_replies_to_controller_in_plain_text_en():
+    """English mirror of the plain-text-to-controller contract."""
+    section = build_team_role_section(role=TeamRole.HUMAN_AGENT, language="en")
+    body = section.content["en"]
+    assert "plain text output" in body
+    assert "controller is not user" in body
+
+
+@pytest.mark.level0
+def test_human_agent_role_section_is_not_the_teammate_policy():
+    """HUMAN_AGENT must not be served the teammate role policy.
+
+    Falling through to it is what put the "you must reply to user via
+    send_message" clause into the avatar's prompt in the first place.
+    """
+    avatar = build_team_role_section(role=TeamRole.HUMAN_AGENT, language="cn").content["cn"]
+    teammate = build_team_role_section(role=TeamRole.TEAMMATE, language="cn").content["cn"]
+    assert avatar != teammate
+    assert "你是 Teammate" not in avatar
+    # No execution-mode line either: an avatar never plans or claims work.
+    assert "执行模式" not in avatar
 
 
 @pytest.mark.level0

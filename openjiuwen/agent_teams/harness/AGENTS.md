@@ -24,10 +24,18 @@ harness/
 两条队列，同一个语义——**攒住的东西整批喂给下一次模型调用**：
 
 - `send(immediate=True)` 推进当前 round 的 steering 队列，inner loop 在下一次 model call
-  之前 drain 整批；
+  之前 drain；
 - `send(immediate=False)` 进 follow-up 队列，round 结束时**整批** drain 出来驱动下一轮
   （[[F_71]]）。曾经是 `pop(0)` 一条一轮——两条队列本该同义却不同义，代价是每条排队输入
   各烧一个完整 round，而且成员对最旧那条动手时看不见后面还排着什么。
+
+**steering 侧每次取多少由 rail 现场定**（[[F_78]]）：drain 之前触发
+`BEFORE_STEERING_DRAIN`（队列为空则不触发），rail 写 `SteeringDrainInputs.limit`；不写就是
+全取，即无 rail 意见时的原行为。team 的非 leader 成员由 `TeamPolicyRail` 限到
+`steer_batch_size` 条（默认 2）——那条队列装的是信箱消息，每条各说各的、一条都不能丢，
+攒多了拼成一个巨型 turn 会把模型顶崩。取不走的原封留在队列里，inner loop 本来就在
+`has_pending_steering()` 为真时继续迭代，后续 model call 依次取完；**队列非空时至少取 1 条**，
+否则 loop 会空转到 `max_iterations` 耗尽。
 
 两条批次都**不在本层拼接**：整批以列表往下走（`InputEvent.input_data` 每条一个 text frame），
 由 inner `ReActAgent._admit_user_message` 先把列表交给 `ON_USER_MESSAGE` rail、rail 增删完

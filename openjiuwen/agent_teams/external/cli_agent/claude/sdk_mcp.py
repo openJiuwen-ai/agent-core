@@ -107,6 +107,7 @@ def build_claude_sdk_mcp_tool_set(
         messager=messager,
         team_name=team_name,
         swarmflow_model_resolver=swarmflow_model_resolver,
+        exclude_tools={"checkpoint"},
         swarmflow_worker_base_spec=swarmflow_worker_base_spec,
         swarmflow_human_base_spec=swarmflow_human_base_spec,
         concurrency_governor=concurrency_governor,

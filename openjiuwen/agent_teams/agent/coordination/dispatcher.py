@@ -34,6 +34,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
 )
 from openjiuwen.agent_teams.agent.coordination.handlers import (
     AgentLifecycleHandler,
+    CheckpointHandler,
     MemberHandler,
     MessageHandler,
     ScheduledStaleTaskHandler,
@@ -45,6 +46,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
 )
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.schema.events import TeamEvent
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback import AsyncCallbackFramework
@@ -110,12 +112,19 @@ class TeamLifecycleController(Protocol):
     ``shutdown_self`` is invoked when the team has been dissolved and a
     non-leader member must abandon its loop. ``conclude_completed_round``
     ends a completed persistent team's leader stream so the Runner finally
-    can pause it. Both coordinate across stream / session / member state,
-    so they belong here rather than on the round controller.
+    can pause it. ``observe_member_status`` folds an observed member status
+    into the leader's activity view, which may in turn emit a team-idle
+    marker on the leader's stream. All three coordinate across stream /
+    session / member state, so they belong here rather than on the round
+    controller.
     """
 
     async def shutdown_self(self) -> None:
         """Force-shutdown this agent in response to team dissolution."""
+        ...
+
+    async def observe_member_status(self, member_name: str, status: MemberStatus) -> None:
+        """Record a member's status into the leader's activity view."""
         ...
 
     async def conclude_completed_round(self, member_count: int, task_count: int) -> None:
@@ -215,6 +224,10 @@ class EventDispatcher:
         # (a dedicated event_key, no fan-out overlap), so its registration
         # position is not load-bearing.
         self.workflow = WorkflowHandler(host, blueprint, infra, poll_ctrl)
+        # Checkpoint creation announcements. Listens only for
+        # CHECKPOINT_CREATED (a dedicated event_key, no fan-out overlap), so its
+        # registration position is not load-bearing.
+        self.checkpoint = CheckpointHandler(host, blueprint, infra, poll_ctrl)
 
         # The reliability handler (leader-side remediation + team-level
         # ping-pong) mounts only when the team opts into the reliability
@@ -261,6 +274,7 @@ class EventDispatcher:
             self.stale_task,
             self.team_completion,
             self.workflow,
+            self.checkpoint,
         ]
         if self.reliability is not None:
             handlers.append(self.reliability)

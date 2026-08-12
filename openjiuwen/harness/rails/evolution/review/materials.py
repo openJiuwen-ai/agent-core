@@ -7,13 +7,20 @@ from __future__ import annotations
 from typing import Any
 
 from openjiuwen.agent_evolving.trajectory.types import (
-    LLMCallDetail,
-    ToolCallDetail,
-    Trajectory,
+    TrajectoryLike,
     trajectory_execution_id,
     trajectory_session_id,
-    trajectory_steps,
 )
+from openjiuwen.agent_evolving.trajectory.spans import (
+    iter_spans,
+    read_llm_messages,
+    read_span_error,
+    read_tool_call,
+    read_usage,
+    span_attributes,
+)
+from openjiuwen.agent_evolving.trajectory.team import span_category
+from openjiuwen.extensions.observability import semconv
 
 _REVIEW_TEXT_PREVIEW_CHARS = 240
 _REVIEW_DETAIL_TEXT_CHARS = 1200
@@ -25,14 +32,14 @@ _REVIEW_HEAD_STEPS = 10
 _REVIEW_TAIL_STEPS = 30
 
 
-def build_review_scoped_materials(trajectory: Trajectory | None) -> dict[str, Any]:
+def build_review_scoped_materials(trajectory: TrajectoryLike | None) -> dict[str, Any]:
     """Build bounded review materials from a trajectory."""
     if trajectory is None:
         return {}
 
     index_items: list[dict[str, Any]] = []
     detail_items: dict[str, dict[str, Any]] = {}
-    steps = trajectory_steps(trajectory)
+    steps = list(iter_spans(trajectory))
     selected_steps = _select_review_steps(steps)
     for index, step in selected_steps:
         ref = f"step-{index + 1}"
@@ -56,7 +63,7 @@ def build_review_scoped_materials(trajectory: Trajectory | None) -> dict[str, An
     }
 
 
-def build_swarm_review_scoped_materials(trajectory: Trajectory | None) -> dict[str, Any]:
+def build_swarm_review_scoped_materials(trajectory: TrajectoryLike | None) -> dict[str, Any]:
     """Build bounded review materials for swarm/team skill evolution review."""
     materials = build_review_scoped_materials(trajectory)
     if not materials:
@@ -76,18 +83,21 @@ def build_swarm_review_scoped_materials(trajectory: Trajectory | None) -> dict[s
 
 
 def _review_trajectory_step(ref: str, index: int, step) -> tuple[dict[str, Any], dict[str, Any]]:
-    kind = str(getattr(step, "kind", "") or "")
-    detail = getattr(step, "detail", None)
+    kind = span_category(step) or str(step.get("name") or "")
     index_item: dict[str, Any] = {
         "ref": ref,
         "index": index,
         "kind": kind,
-        "has_error": bool(getattr(step, "error", None)),
+        "has_error": read_span_error(step) is not None,
     }
     detail_item: dict[str, Any] = {"ref": ref, "index": index, "kind": kind}
-    if isinstance(detail, ToolCallDetail):
-        tool_name = str(getattr(detail, "tool_name", "") or "")
-        call_result = getattr(detail, "call_result", None)
+    if kind == "tool":
+        tool_call = read_tool_call(step)
+        tool_name = str(tool_call.get("name") or step.get("name") or "")
+        call_result = tool_call.get("output")
+        if call_result is None:
+            error = tool_call.get("error")
+            call_result = error.get("message", "") if isinstance(error, dict) else None
         result_preview = _value_preview(call_result, limit=_REVIEW_TEXT_PREVIEW_CHARS)
         result_text = _value_preview(call_result, limit=_REVIEW_DETAIL_TEXT_CHARS)
         result_original_chars = len(call_result) if isinstance(call_result, str) else None
@@ -95,39 +105,68 @@ def _review_trajectory_step(ref: str, index: int, step) -> tuple[dict[str, Any],
         index_item["summary"] = (f"tool={tool_name} result_preview={result_preview}").strip()
         detail_item["detail"] = {
             "tool_name": tool_name,
-            "call_args": _json_safe_bounded(getattr(detail, "call_args", None), limit=_REVIEW_ARG_TEXT_CHARS),
+            "call_args": _json_safe_bounded(tool_call.get("input"), limit=_REVIEW_ARG_TEXT_CHARS),
             "call_result": result_text,
             "call_result_truncated": bool(
                 result_original_chars is not None and result_original_chars > _REVIEW_DETAIL_TEXT_CHARS
             ),
             "call_result_original_chars": result_original_chars,
-            "tool_call_id": getattr(detail, "tool_call_id", None),
+            "tool_call_id": tool_call.get("id"),
         }
         return index_item, detail_item
-    if isinstance(detail, LLMCallDetail):
-        messages = list(getattr(detail, "messages", []) or [])
+    if kind == "llm":
+        messages, completions = _split_llm_messages(step)
         preview = _bounded_text(
             _message_content_text(_last_message_content(messages)),
             limit=_REVIEW_TEXT_PREVIEW_CHARS,
         )
+        model = str(span_attributes(step).get(semconv.GEN_AI_REQUEST_MODEL) or step.get("name") or "")
+        response = completions[-1] if completions else None
         index_item["summary"] = (
-            f"llm model={str(getattr(detail, 'model', '') or '')} "
-            f"messages={len(messages)} "
-            f"response_present={getattr(detail, 'response', None) is not None} "
-            f"preview={preview}"
+            f"llm model={model} messages={len(messages)} response_present={response is not None} preview={preview}"
         ).strip()
         detail_item["detail"] = {
-            "model": str(getattr(detail, "model", "") or ""),
+            "model": model,
             "message_count": len(messages),
             "message_previews": _message_previews(messages),
-            "response_present": getattr(detail, "response", None) is not None,
-            "response_preview": _value_preview(getattr(detail, "response", None), limit=_REVIEW_DETAIL_TEXT_CHARS),
-            "usage": _json_safe_bounded(getattr(detail, "usage", None), limit=_REVIEW_ARG_TEXT_CHARS),
+            "response_present": response is not None,
+            "response_preview": _value_preview(response, limit=_REVIEW_DETAIL_TEXT_CHARS),
+            "usage": _json_safe_bounded(read_usage(step), limit=_REVIEW_ARG_TEXT_CHARS),
         }
         return index_item, detail_item
-    index_item["summary"] = _bounded_text(detail, limit=_REVIEW_TEXT_PREVIEW_CHARS)
-    detail_item["detail"] = _json_safe_bounded(detail, limit=_REVIEW_DETAIL_TEXT_CHARS)
+    index_item["summary"] = _bounded_text(step.get("name"), limit=_REVIEW_TEXT_PREVIEW_CHARS)
+    detail_item["detail"] = _json_safe_bounded(step, limit=_REVIEW_DETAIL_TEXT_CHARS)
     return index_item, detail_item
+
+
+def _split_llm_messages(span: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split canonical LLM accessor output into prompt and completion lists."""
+
+    attrs = span_attributes(span)
+    messages = read_llm_messages(span, include_empty=True)
+
+    def count_indexed(base: str) -> int:
+        indexes: set[int] = set()
+        prefix = f"{base}."
+        for key in attrs:
+            if not key.startswith(prefix):
+                continue
+            parts = key.split(".")
+            if len(parts) > 2 and parts[2].isdigit():
+                indexes.add(int(parts[2]))
+        return len(indexes)
+
+    prompt_count = count_indexed(semconv.GEN_AI_PROMPT)
+    completion_count = count_indexed(semconv.GEN_AI_COMPLETION)
+    if prompt_count or completion_count:
+        completion_end = prompt_count + completion_count
+        return (
+            messages[:prompt_count],
+            messages[prompt_count:completion_end],
+        )
+    if messages and messages[-1].get("tool_calls"):
+        return messages[:-1], messages[-1:]
+    return messages, []
 
 
 def _select_review_steps(steps: list[Any]) -> list[tuple[int, Any]]:
@@ -149,9 +188,9 @@ def _select_review_steps(steps: list[Any]) -> list[tuple[int, Any]]:
 
 
 def _is_review_important_step(step: Any) -> bool:
-    if getattr(step, "error", None):
+    if isinstance(step, dict) and read_span_error(step) is not None:
         return True
-    return str(getattr(step, "kind", "") or "") == "tool"
+    return span_category(step) == "tool" if isinstance(step, dict) else False
 
 
 def _last_message_content(messages: list[Any]) -> Any:

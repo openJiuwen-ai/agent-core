@@ -20,6 +20,15 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_state_context_processor import (
+    BrowserStateContextProcessorConfig,
+)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_processor import (
+    BrowserWorkingContextProcessorConfig,
+)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_rail import (
+    BrowserWorkingContextRail,
+)
 from openjiuwen.harness.tools.browser_move.offload_recall import BrowserOffloadRecallTool
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
@@ -53,6 +62,10 @@ if TYPE_CHECKING:
 
 
 BROWSER_AGENT_FACTORY_NAME = "browser_agent"
+# Agent checkpoints are namespaced by AgentCard.id inside a conversation.
+# Keep the default stable so reconstructing this subagent can restore its
+# Session-backed working context on a same-conversation follow-up.
+BROWSER_AGENT_CARD_ID = "openjiuwen.browser_agent"
 DEFAULT_BROWSER_AGENT_TEMPERATURE = 0.4
 DEFAULT_BROWSER_AGENT_MAX_ITERATIONS = 100
 _BROWSER_MODEL_TEMPERATURE_MARKER = "_browser_agent_temperature"
@@ -63,6 +76,12 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "Plan and decide at this agent level, then use Playwright browser tools and approved runtime "
     "helper tools to navigate, click, type, select, inspect, and extract information. "
     "Keep actions targeted and avoid unnecessary page snapshots. "
+    "Every model call includes the latest complete <browser_state> observation and a following "
+    "<browser_state_progress> signal. A fresh browser capture occurs initially and after a recognized "
+    "state-invalidating browser action; otherwise the cached observation is reused. Always inspect the "
+    "progress signal after the potentially large DOM. When it reports page_change=unchanged or contains "
+    "<required_next_action>, do not repeat the previous action; use a structured probe, targeted extraction, "
+    "a materially different strategy, or finish with the available evidence. "
     "Before acting, classify the task as a simple lookup or a complex workflow and keep a compact "
     "phase plan. For a simple lookup, prefer a direct search-results URL when the search engine and "
     "query are known, unless operating the search form is itself the requested outcome. "
@@ -126,6 +145,11 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "请在当前代理层面规划和决策，并使用 Playwright 浏览器工具以及已批准的运行时辅助工具"
     "完成导航、点击、输入、选择、检查和信息提取。"
     "操作应保持目标明确，避免不必要的页面快照。"
+    "每次模型调用都会包含最新的完整 <browser_state> 观察，以及紧随其后的 "
+    "<browser_state_progress> 信号。系统仅在初始调用和已识别的浏览器状态变更操作完成后重新捕获；"
+    "其他调用复用缓存观察。必须检查位于大型 DOM 之后的进度信号。当其报告 page_change=unchanged "
+    "或包含 <required_next_action> 时，不得重复上一操作；应改用结构化探测、定向提取、实质不同的策略，"
+    "或基于现有证据结束任务。"
     "执行前先将任务判断为简单查询或复杂流程，并维护紧凑的阶段计划。"
     "简单查询在已知搜索引擎和关键词时，优先直接构造搜索结果 URL；"
     "只有当操作搜索表单本身就是任务目标时才逐项操作搜索框。"
@@ -299,6 +323,7 @@ def build_browser_agent_config(
     return SubAgentConfig(
         agent_card=card
         or AgentCard(
+            id=BROWSER_AGENT_CARD_ID,
             name="browser_agent",
             description=DEFAULT_BROWSER_AGENT_DESCRIPTION.get(
                 resolved_language,
@@ -382,6 +407,7 @@ def create_browser_agent(
     resolved_settings = _resolve_runtime_settings(browser_model, settings, instance)
 
     final_card = card or AgentCard(
+        id=BROWSER_AGENT_CARD_ID,
         name="browser_agent",
         description=DEFAULT_BROWSER_AGENT_DESCRIPTION.get(
             resolved_language,
@@ -405,15 +431,34 @@ def create_browser_agent(
     }
     browser_backend = BrowserAgentRuntime(**runtime_kwargs)
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
+    working_context_config = BrowserWorkingContextProcessorConfig(
+        language=resolved_language,
+    )
+    injected_rails: List[AgentRail] = [
+        BrowserRuntimeRail(browser_backend),
+        BrowserWorkingContextRail(working_context_config),
+    ]
     injected_tools.append(BrowserOffloadRecallTool(workspace, language=resolved_language))
-    injected_rails: List[AgentRail] = [BrowserRuntimeRail(browser_backend)]
 
-    # Window the large browser probe/snapshot results unless the caller already
-    # manages context processors via their own ContextProcessorRail.
-    # Browser probe/snapshot tools emit large results; keep only the most recent
-    # few in context and persist older ones via ToolResultWindowProcessor.
+    browser_state_processor = (
+        "BrowserStateContextProcessor",
+        BrowserStateContextProcessorConfig(provider=browser_backend),
+    )
+    browser_working_context_processor = (
+        "BrowserWorkingContextProcessor",
+        working_context_config,
+    )
     browser_windowed_tool_names = ["browser_probe_interactives", "browser_probe_cards", "browser_snapshot"]
-    if not any(isinstance(rail, ContextProcessorRail) for rail in (rails or [])):
+    caller_context_rails = [rail for rail in (rails or []) if isinstance(rail, ContextProcessorRail)]
+    if caller_context_rails:
+        for context_rail in caller_context_rails:
+            context_rail.add_processors(
+                [
+                    browser_working_context_processor,
+                    browser_state_processor,
+                ]
+            )
+    else:
         injected_rails.append(
             ContextProcessorRail(
                 processors=[
@@ -426,7 +471,9 @@ def create_browser_agent(
                             min_offload_chars=4096,
                             small_result_trim_size=800,
                         ),
-                    )
+                    ),
+                    browser_working_context_processor,
+                    browser_state_processor,
                 ],
                 preset=False,
             )
@@ -462,6 +509,7 @@ def create_browser_agent(
 
 
 __all__ = [
+    "BROWSER_AGENT_CARD_ID",
     "BROWSER_AGENT_FACTORY_NAME",
     "DEFAULT_BROWSER_AGENT_MAX_ITERATIONS",
     "DEFAULT_BROWSER_AGENT_TEMPERATURE",

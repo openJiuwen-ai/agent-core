@@ -17,8 +17,24 @@ from openjiuwen.agent_teams.tools.locales import (
     make_translator,
 )
 
-_SLOTTED = ("send_message", "send_message_scheduled", "create_task", "create_task_scheduled")
-_SLOTLESS = ("view_task", "claim_task", "update_task", "build_team")
+_SLOTTED = (
+    "send_message",
+    "send_message_scheduled",
+    "create_task",
+    "create_task_scheduled",
+    "update_task",
+    "build_team",
+)
+_SLOTLESS = ("view_task", "claim_task")
+
+#: Capability slots and the description each one is declared in. A capability
+#: slot is the only kind a caller may omit, so these are the pairs where the
+#: rendered spacing has to hold with the slot both on and off.
+_CAPABILITY_SLOTS = (
+    ("spawn_teammate", "fork_usage"),
+    ("update_task", "update_task_verify_gate"),
+    ("build_team", "build_team_verify_gate"),
+)
 
 
 @pytest.mark.level0
@@ -106,3 +122,41 @@ def test_runtime_error_strings_still_interpolate():
     t = make_translator("cn")
     rendered = t("update_task", "error_human_agent_locked_edit", task_id="T-42")
     assert "T-42" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Capability slots: omitting one must leave no trace of where it sat
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+@pytest.mark.parametrize(("desc_key", "slot"), _CAPABILITY_SLOTS)
+def test_omitted_capability_slot_drops_its_fragment(lang, desc_key, slot):
+    """Omitting a capability slot removes its prose and leaks no placeholder."""
+    t = make_translator(lang)
+    fragment = _load_fragment(slot, lang)
+
+    assert fragment in t(desc_key)
+    rendered = t(desc_key, omit=frozenset({slot}))
+    assert fragment not in rendered
+    assert "{{" not in rendered
+
+
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+@pytest.mark.parametrize(("desc_key", "slot"), _CAPABILITY_SLOTS)
+def test_omitted_capability_slot_leaves_no_blank_hole(lang, desc_key, slot):
+    """A description reads the same with a slot omitted as if it never existed.
+
+    Templates put a blank line on each side of a section-level slot, so
+    collapsing one to an empty string would leave a two-blank-line hole in the
+    middle of the prose. The model reads this text raw — a hole is a signal
+    that something was removed, which invites it to ask about a capability the
+    team does not have.
+    """
+    t = make_translator(lang)
+    for rendered in (t(desc_key), t(desc_key, omit=frozenset({slot}))):
+        assert "\n\n\n" not in rendered
+        assert not rendered.startswith("\n")
+        assert not rendered.endswith("\n")

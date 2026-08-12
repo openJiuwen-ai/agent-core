@@ -32,6 +32,7 @@ from openjiuwen.harness.tools.web._common import (
     _PPLX_ALLOWED_MODELS,
     _PPLX_DEFAULT_MODEL,
     _configured_paid_search_providers,
+    _env_url,
     _safe_env_choice,
     _safe_int,
 )
@@ -64,7 +65,7 @@ class WebPaidSearchTool(Tool):
         status, _headers, body, _final_url, _truncated = await _http.request(
             session,
             "POST",
-            "https://deepsearch.jina.ai/v1/chat/completions",
+            _env_url("JINA_API_URL", "https://deepsearch.jina.ai/v1/chat/completions"),
             headers={"Authorization": f"Bearer {jina_key}", "Content-Type": "application/json"},
             json_body=payload,
             timeout_seconds=timeout_seconds,
@@ -148,7 +149,7 @@ class WebPaidSearchTool(Tool):
         status, _headers, body, _final_url, _truncated = await _http.request(
             session,
             "POST",
-            os.environ.get("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
+            _env_url("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
             headers={"Authorization": f"Bearer {bocha_key}", "Content-Type": "application/json"},
             json_body={"query": query, "summary": True, "count": max_results},
             timeout_seconds=timeout_seconds,
@@ -174,10 +175,12 @@ class WebPaidSearchTool(Tool):
             raise build_error(StatusCode.TOOL_WEB_API_KEY_NOT_SET, key_name="SERPER_API_KEY")
 
         headers = {"X-API-KEY": serper_key, "Content-Type": "application/json"}
+        # Resolve once so the num-less retry below cannot target a different host.
+        serper_url = _env_url("SERPER_API_URL", "https://google.serper.dev/search")
         status, _headers, body, _final_url, _truncated = await _http.request(
             session,
             "POST",
-            "https://google.serper.dev/search",
+            serper_url,
             headers=headers,
             json_body={"q": query, "num": max_results},
             timeout_seconds=timeout_seconds,
@@ -186,7 +189,7 @@ class WebPaidSearchTool(Tool):
             status, _headers, body, _final_url, _truncated = await _http.request(
                 session,
                 "POST",
-                "https://google.serper.dev/search",
+                serper_url,
                 headers=headers,
                 json_body={"q": query},
                 timeout_seconds=timeout_seconds,
@@ -245,7 +248,7 @@ class WebPaidSearchTool(Tool):
         status, _headers, body, _final_url, _truncated = await _http.request(
             session,
             "POST",
-            os.environ.get("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
+            _env_url("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
             headers={"Authorization": f"Bearer {perplexity_key}", "Content-Type": "application/json"},
             json_body=payload,
             timeout_seconds=timeout_seconds,

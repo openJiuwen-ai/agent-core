@@ -64,6 +64,10 @@ def clear_search_env(monkeypatch):
         "WEB_PAID_SEARCH_PROVIDER",
         "PPLX_MODEL",
         "JINA_MODEL",
+        "BOCHA_API_URL",
+        "PPLX_API_URL",
+        "SERPER_API_URL",
+        "JINA_API_URL",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -316,6 +320,84 @@ async def test_paid_invoke_bocha_success(monkeypatch):
     assert "Paid search provider: bocha" in result
     assert "Bocha summary answer." in result
     assert "https://example.com/page1" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "key_env", "url_env", "official_url"),
+    [
+        ("bocha", "BOCHA_API_KEY", "BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
+        ("serper", "SERPER_API_KEY", "SERPER_API_URL", "https://google.serper.dev/search"),
+        ("jina", "JINA_API_KEY", "JINA_API_URL", "https://deepsearch.jina.ai/v1/chat/completions"),
+        ("perplexity", "PERPLEXITY_API_KEY", "PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
+    ],
+)
+async def test_paid_blank_endpoint_env_falls_back_to_official(
+    monkeypatch,
+    provider: str,
+    key_env: str,
+    url_env: str,
+    official_url: str,
+):
+    """A present-but-blank endpoint override must not produce an empty request URL.
+
+    Shipped ``.env`` templates declare these overrides empty to mean "use the
+    official default"; a bare ``os.environ.get(name, default)`` would return the
+    empty string and fail with a message-less transport error.
+    """
+    monkeypatch.setenv(key_env, "test-key")
+    monkeypatch.setenv(url_env, "   ")
+    recorder = _patch_request(monkeypatch, lambda method, url, json_body: _resp(200, b"{}"))
+
+    tool = WebPaidSearchTool(language="cn")
+    await tool.invoke({"query": "test query", "provider": provider})
+
+    assert recorder.calls[0]["url"] == official_url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "key_env", "url_env"),
+    [
+        ("bocha", "BOCHA_API_KEY", "BOCHA_API_URL"),
+        ("serper", "SERPER_API_KEY", "SERPER_API_URL"),
+        ("jina", "JINA_API_KEY", "JINA_API_URL"),
+        ("perplexity", "PERPLEXITY_API_KEY", "PPLX_API_URL"),
+    ],
+)
+async def test_paid_endpoint_env_override_is_honored(
+    monkeypatch,
+    provider: str,
+    key_env: str,
+    url_env: str,
+):
+    """Every paid provider honors its endpoint override for private deployments."""
+    monkeypatch.setenv(key_env, "test-key")
+    monkeypatch.setenv(url_env, "https://private.example/v1/search")
+    recorder = _patch_request(monkeypatch, lambda method, url, json_body: _resp(200, b"{}"))
+
+    tool = WebPaidSearchTool(language="cn")
+    await tool.invoke({"query": "test query", "provider": provider})
+
+    assert recorder.calls[0]["url"] == "https://private.example/v1/search"
+
+
+@pytest.mark.asyncio
+async def test_paid_serper_retry_reuses_the_overridden_endpoint(monkeypatch):
+    """The num-less retry on HTTP 400 must target the same host as the first call."""
+    monkeypatch.setenv("SERPER_API_KEY", "test-key")
+    monkeypatch.setenv("SERPER_API_URL", "https://private.example/search")
+    statuses = iter([400, 200])
+    recorder = _patch_request(
+        monkeypatch,
+        lambda method, url, json_body: _resp(next(statuses), b'{"organic": []}'),
+    )
+
+    tool = WebPaidSearchTool(language="cn")
+    await tool.invoke({"query": "test query", "provider": "serper"})
+
+    assert len(recorder.calls) == 2
+    assert [call["url"] for call in recorder.calls] == ["https://private.example/search"] * 2
 
 
 @pytest.mark.asyncio

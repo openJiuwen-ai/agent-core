@@ -52,6 +52,15 @@ class MemberInfo(BaseModel):
     execution_status: str | None = Field(default=None, description="ExecutionStatus value")
     mode: str = Field(description="MemberMode value")
     role: str = Field(description="TeamRole value (leader/teammate/human_agent)")
+    cli_agent: str | None = Field(
+        default=None,
+        description=(
+            "External CLI backend name ('claude' / 'codex' / ...) for members "
+            "spawned by spawn_external_cli; None for ordinary members. Such a "
+            "member's role is plain TEAMMATE, so this is the only field that "
+            "identifies it as CLI-backed."
+        ),
+    )
 
     @classmethod
     def from_internal(cls, member) -> MemberInfo:
@@ -60,6 +69,8 @@ class MemberInfo(BaseModel):
         Args:
             member: A ``TeamMember`` database row object.
         """
+        from openjiuwen.agent_teams.tools.member_options import load_member_options
+
         return cls(
             member_name=member.member_name,
             team_name=member.team_name,
@@ -69,6 +80,7 @@ class MemberInfo(BaseModel):
             execution_status=member.execution_status,
             mode=member.mode,
             role=member.role,
+            cli_agent=load_member_options(getattr(member, "options", None)).cli_agent,
         )
 
 

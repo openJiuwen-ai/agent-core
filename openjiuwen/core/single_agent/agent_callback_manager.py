@@ -26,7 +26,7 @@ class AgentCallbackManager:
         Args:
             event: The agent callback event to register for
             callback: The callback function (sync or async)
-            priority: Execution priority (lower = runs first)
+            priority: Execution priority (higher = runs first)
 
         Returns:
             self for chaining

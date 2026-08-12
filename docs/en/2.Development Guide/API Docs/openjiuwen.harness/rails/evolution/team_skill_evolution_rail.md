@@ -14,6 +14,29 @@ Independent Rail that auto-detects multi-agent collaboration patterns and sugges
 - When count reaches threshold (default 2) and no existing Team/Swarm Skill was used, injects a short follow_up via `TaskLoopController` to wake up the next round
 - The full self-check rules are injected as system prompt text. If the Agent finds reusable team collaboration value, it confirms through normal reply text; after user confirmation, it invokes `swarmskill-creator` or a compatible team skill creator Skill. If that creator is unavailable, the Agent should tell the user in normal reply text.
 
+### External repeated-evidence entry point
+
+A trusted host that has identified a repeated reusable pattern with no attributable existing Skill can stage a
+creation approval:
+
+```python
+staged = await create_rail.propose_from_external_evidence(
+    proposal_key="release-recovery-checklist",
+    reusable_guidance="Create a reusable release recovery checklist.",
+    evidence=["task-a: ...", "task-b: ..."],
+    reason="The same missing workflow caused two review failures.",
+)
+```
+
+The method requires `auto_trigger=True`, a non-empty key and guidance, and at least two deduplicated evidence items.
+Each key emits at most one approval host event during the Rail lifetime. It never creates or mutates a Skill directly.
+The host can identify ownership with `owns_external_proposal(request_id)` and resolve the answer with
+`resolve_external_proposal(request_id, accepted=...)`; acceptance returns a constrained creation prompt, while
+rejection and unknown requests return `None`.
+
+The Rail validates evidence count, not semantic equivalence. The caller must group matching patterns before calling
+this method and must not combine unrelated task failures merely to reach two evidence items.
+
 ```text
 class TeamSkillCreateRail(
     skills_dir: str,

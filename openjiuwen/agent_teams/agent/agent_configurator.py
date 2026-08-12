@@ -534,6 +534,7 @@ class AgentConfigurator:
                     "teammate_mode": teammate_mode,
                     "dispatch_mode": spec.dispatch_mode,
                     "lifecycle": spec.lifecycle,
+                    "team_mode": _resolve_team_mode(spec),
                     "exclude_tools": exclude,
                     "qualify_ids": spec.spawn_mode == "inprocess",
                     "team_name": resolved_team_name,
@@ -554,6 +555,7 @@ class AgentConfigurator:
                     "team_workspace_mount": team_workspace_mount,
                     "team_workspace_path": team_workspace_path,
                     "expose_human_agents_to_teammates": spec.expose_human_agents_to_teammates,
+                    "steer_batch_size": spec.steer_batch_size,
                 },
             ),
         ]
@@ -873,12 +875,24 @@ class AgentConfigurator:
             enable_bridge=spec.enable_bridge,
             dispatch_mode=spec.dispatch_mode,
             enable_task_verification=spec.enable_task_verification,
+            enable_fork=spec.enable_fork,
             external_cli_agents=spec.external_cli_agents,
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
         )
+
+        def _snapshot_length() -> int:
+            h = self.harness
+            if h is not None and hasattr(h, "get_deep_agent"):
+                native = h.get_deep_agent()
+                if native is not None:
+                    return len(native.get_current_context())
+            return 0
+
+        agent_team.set_snapshot_length(_snapshot_length)
+
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager
         self.message_manager = agent_team.message_manager

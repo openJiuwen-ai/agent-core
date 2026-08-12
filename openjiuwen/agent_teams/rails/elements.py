@@ -99,6 +99,7 @@ class TeamToolInput(ConstructionInput):
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
     dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle (temporary / persistent).")
+    team_mode: str = param_field(default="default", description="Team operating mode.")
     exclude_tools: list[str] = param_field(default_factory=list, description="Tool names to exclude.")
     qualify_ids: bool = param_field(default=False, description="Suffix tool ids per member (inprocess spawn).")
     team_name: str = param_field(default="default", description="Team name.")
@@ -130,6 +131,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         teammate_mode=inp.teammate_mode,
         dispatch_mode=inp.dispatch_mode,
         lifecycle=inp.lifecycle,
+        team_mode=inp.team_mode,
         language=inp.language,
         on_teammate_created=get_on_teammate_created(context),
         model_config_allocator=model_config_allocator,
@@ -176,6 +178,10 @@ class TeamPolicyInput(ConstructionInput):
         default=False,
         description="Whether teammates see the concrete human-agent roster.",
     )
+    steer_batch_size: int = param_field(
+        default=2,
+        description="Queued steering inputs a non-leader member takes per model call.",
+    )
 
 
 @harness_element(
@@ -206,6 +212,11 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         team_workspace_path=inp.team_workspace_path,
         team_backend=get_team_backend(context),
         expose_human_agents_to_teammates=inp.expose_human_agents_to_teammates,
+        steer_batch_size=inp.steer_batch_size,
+        # Same signal the tool factory gates the ``swarmflow`` tool on, so the
+        # prompt that describes the mechanism and the tool that runs it appear
+        # and disappear together.
+        swarmflow_enabled=get_swarmflow_model_resolver(context) is not None,
     )
 
 

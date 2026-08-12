@@ -40,9 +40,16 @@ def _quote_argv(argv: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in argv)
 
 
-def _build_remote_command(argv: list[str], *, env: dict[str, str], cwd: str | None) -> str:
+def _build_remote_command(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    cwd: str | None,
+    use_exec: bool,
+) -> str:
     """Build a remote shell command with cwd and team descriptor fallback."""
     command = _quote_argv(argv)
+    launch = f"exec {command}" if use_exec else command
     prefixes: list[str] = []
     join_descriptor = env.get(TEAM_JOIN_ENV)
     if join_descriptor:
@@ -50,8 +57,8 @@ def _build_remote_command(argv: list[str], *, env: dict[str, str], cwd: str | No
     if cwd:
         prefixes.append(f"cd {shlex.quote(cwd)}")
     if prefixes:
-        return "; ".join(prefixes) + f"; exec {command}"
-    return f"exec {command}"
+        return "; ".join(prefixes) + f"; {launch}"
+    return launch
 
 
 def build_claude_sdk_ssh_transport(
@@ -92,7 +99,12 @@ def build_claude_sdk_ssh_transport(
                 **self._options.env,
                 "CLAUDE_AGENT_SDK_VERSION": _sdk_version(),
             }
-            command = _build_remote_command(cmd, env=process_env, cwd=self._cwd)
+            command = _build_remote_command(
+                cmd,
+                env=process_env,
+                cwd=self._cwd,
+                use_exec=self._config.use_exec,
+            )
             conn = await self._ensure_connection()
             try:
                 self._process = await conn.create_process(command, env=process_env, encoding=None)

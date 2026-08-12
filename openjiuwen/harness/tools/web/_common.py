@@ -206,6 +206,25 @@ def _safe_env_choice(name: str, default: str, allowed: set[str]) -> str:
     return default
 
 
+def _env_url(name: str, default: str) -> str:
+    """Read an endpoint URL from the environment, falling back when blank.
+
+    ``os.environ.get(name, default)`` only falls back when the key is absent.
+    Deployments commonly declare the endpoint overrides as empty values to mean
+    "use the official default", so a plain ``get`` would hand back an empty URL
+    and the request would fail with a message-less transport error. Treat unset
+    and blank alike.
+
+    Args:
+        name: Environment variable name holding the endpoint override.
+        default: Official endpoint used when the variable is unset or blank.
+
+    Returns:
+        The configured endpoint URL, or ``default`` when unset or blank.
+    """
+    return str(os.environ.get(name, "") or "").strip() or default
+
+
 def _get_web_proxy_url() -> str:
     """Return the configured proxy URL used by all web tools.
 

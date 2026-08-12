@@ -294,7 +294,7 @@ class RLOnlineRail(EvolutionRail):
         attributes = {"ended_at": time.time()}
         attributes["tenant_id"] = metadata.get("tenant_id", self._tenant_id)
         attributes["status"] = metadata.get("status", "ok")
-        set_trajectory_resource_attributes(trajectory, attributes)
+        trajectory = set_trajectory_resource_attributes(trajectory, attributes)
         batch = self._converter.convert(
             trajectory,
             tenant_id=self._tenant_id,

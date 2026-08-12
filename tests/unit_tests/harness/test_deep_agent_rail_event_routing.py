@@ -49,5 +49,6 @@ def test_inner_fired_events_are_bridged() -> None:
         AgentCallbackEvent.BEFORE_MODEL_CALL,
         AgentCallbackEvent.AFTER_REACT_ITERATION,
         AgentCallbackEvent.ON_USER_MESSAGE,
+        AgentCallbackEvent.BEFORE_STEERING_DRAIN,
     ):
         assert event in _BRIDGE_EVENTS

@@ -31,7 +31,6 @@ from unittest.mock import AsyncMock, MagicMock
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.sys_operation.cwd import set_workspace
 from openjiuwen.harness.tools import BashTool
 from openjiuwen.harness.tools.filesystem import (
     _append_op_history,
@@ -240,7 +239,10 @@ async def main() -> None:
     os.makedirs(WORKSPACE)
 
     # ── real session and tool (no Runner needed) ──────────────────
-    set_workspace(WORKSPACE)
+    # Agent history now lives under JIUWENSWARM_DATA_DIR (jiuwenswarm's
+    # system working directory), not the per-agent workspace -- point it
+    # at the demo workspace so this script doesn't touch the real home dir.
+    os.environ["JIUWENSWARM_DATA_DIR"] = WORKSPACE
     session = create_agent_session(session_id=SESSION_ID, card=AgentCard(id=AGENT_ID, name=AGENT_ID))
     op = _make_operation()
     bash_tool = BashTool(op)

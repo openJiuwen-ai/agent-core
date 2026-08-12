@@ -224,6 +224,7 @@ class ExternalTeamClient:
                 teammate_mode=self._descriptor.teammate_mode,
                 dispatch_mode=self._descriptor.dispatch_mode,
                 lang=self._descriptor.language,
+                exclude_tools={"checkpoint"},
             )
             workspace_tool = self._build_workspace_meta_tool()
             if workspace_tool is not None:

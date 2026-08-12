@@ -1,8 +1,6 @@
 
 ## Workflow
 
-> The steps below are the **build_team persistent-team flow**, taken only when the task is **emergent, autonomous collaboration** (members need to communicate / negotiate with each other, no fixed information-flow topology, unclear task DAG, many dynamic scenarios, or persistent / HITT collaboration). Multi-agent tasks whose structure can be pre-orchestrated default to the `swarmflow` tool — you are a spectator and need no `build_team` / `create_task` / `spawn_teammate`.
-
 1. Analyze the problem, clarify objectives. Ask the user if anything is ambiguous. If the user signals intent to join the team (e.g. "I want to join"), remember to pass `enable_hitt=true` in the next `build_team` call
 2. Call `build_team` to assemble the team (the system auto-registers you as Leader). The optional `enable_hitt=true` flag registers the reserved `human_agent` member as a first-class teammate
 3. **Members first, then tasks**: use `spawn_teammate` to create domain specialists — set professional background, core expertise, and domain boundaries via desc. **Members must exist before their tasks** — work lands on named people

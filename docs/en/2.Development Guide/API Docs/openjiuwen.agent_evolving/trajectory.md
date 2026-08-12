@@ -197,6 +197,12 @@ Protocol for reading aggregated runtime trajectory evidence.
 
 Return the aggregated team trajectory for a session, or `None` when the source has no snapshots for that `(team_id, session_id)`.
 
+### get_member_trajectory(team_id, session_id, member_id) -> Trajectory | None
+
+Return the latest independent trajectory published by one member without merging leader or peer trajectories. This
+method returns `None` when no matching snapshot exists and is suitable for hosts that must attribute task feedback
+strictly to its assignee.
+
 ---
 
 ## class openjiuwen.agent_evolving.trajectory.registry.InMemoryTrajectoryRegistry
@@ -219,6 +225,10 @@ The receive order is registry-local internal state and is not part of `MemberTra
 ### get_trajectory(team_id, session_id, filter_collaborative=True) -> Trajectory | None
 
 Aggregate the latest snapshot for each member in the session. When `filter_collaborative=True`, teammate trajectories are filtered to collaboration-relevant steps before merging.
+
+### get_member_trajectory(team_id, session_id, member_id) -> Trajectory | None
+
+Return the latest trajectory for the full `(team_id, session_id, member_id)` key; unknown keys return `None`.
 
 ### clear_session(team_id, session_id) -> None
 

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 from openjiuwen.symphony.retrieval.build.tree.builder import TreeBuilder
+from openjiuwen.symphony.retrieval.build.tree.prompts import (
+    EQUIVALENCE_GROUPING_PROMPT,
+    EQUIVALENCE_PAIRWISE_PROMPT,
+)
 from openjiuwen.symphony.retrieval.build.tree.schema import Skill, TreeNode
 
 
@@ -203,6 +208,197 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
         self.assertEqual(group_id, "academic-literature-search")
         self.assertFalse(called["value"])
         self.assertEqual([node.id for node in root.children], ["search-research"])
+
+    def test_default_equivalence_group_keeps_cross_platform_variants(self) -> None:
+        builder = self._builder()
+        github = TreeNode(id="github-issues", name="GitHub Issues", description="在 GitHub 管理议题。")
+        gitlab = TreeNode(id="gitlab-tickets", name="GitLab Tickets", description="在 GitLab 处理工单。")
+        groups = {
+            "issue-management": {
+                "name": "Issue Management",
+                "leaf_ids": [github.id, gitlab.id],
+            }
+        }
+
+        normalized = getattr(builder, "_normalize_equivalence_groups")([github, gitlab], groups)
+
+        self.assertEqual(builder.settings.equiv_min_lexical_similarity, 0.0)
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual({leaf.id for leaf in normalized[0]["leaf_nodes"]}, {github.id, gitlab.id})
+
+        builder.settings.equiv_min_lexical_similarity = 0.12
+        guarded = getattr(builder, "_normalize_equivalence_groups")([github, gitlab], groups)
+        self.assertEqual(len(guarded), 2)
+
+    def test_configured_taxonomy_keeps_fixed_levels_and_builds_terminal_groups(self) -> None:
+        builder = self._builder()
+        builder.config.root_categories = {
+            "office": {
+                "name": "Office",
+                "children": {"issues": {"name": "Issue Management"}},
+            }
+        }
+        builder.operations = replace(
+            builder.operations,
+            discover_equivalence_groups=lambda scope, leaves, verbose=False: {
+                "issue-management": {
+                    "name": "Issue Management",
+                    "leaf_ids": [leaf.id for leaf in leaves],
+                }
+            },
+        )
+        issue_scope = TreeNode(
+            id="issues",
+            name="Issue Management",
+            depth=2,
+            parent_id="office",
+            skills=[
+                _skill("github-issues", name="GitHub Issues"),
+                _skill("gitlab-tickets", name="GitLab Tickets"),
+            ],
+        )
+        office = TreeNode(
+            id="office",
+            name="Office",
+            depth=1,
+            parent_id="root",
+            children=[issue_scope],
+        )
+        root = TreeNode(id="root", name="Root", children=[office])
+
+        getattr(builder, "_normalize_to_equivalence_groups")(root)
+
+        self.assertEqual(root.children, [office])
+        self.assertEqual(office.children, [issue_scope])
+        self.assertEqual(len(issue_scope.children), 1)
+        group = issue_scope.children[0]
+        self.assertEqual(group.id, "issue-management")
+        self.assertEqual(group.depth, 3)
+        self.assertFalse(group.children)
+        self.assertEqual({skill.id for skill in group.skills}, {"github-issues", "gitlab-tickets"})
+
+    def test_equivalence_prompt_uses_relaxed_business_semantics(self) -> None:
+        self.assertIn("Platform, provider, API versus CLI", EQUIVALENCE_GROUPING_PROMPT)
+        self.assertIn("primary or a major directly usable capability", EQUIVALENCE_GROUPING_PROMPT)
+        self.assertIn("Incidental feature overlap", EQUIVALENCE_GROUPING_PROMPT)
+        self.assertIn("Platform, provider, API versus CLI", EQUIVALENCE_PAIRWISE_PROMPT)
+        self.assertIn("broader and a narrower Skill", EQUIVALENCE_PAIRWISE_PROMPT)
+
+    def test_pairwise_equivalence_keeps_platform_variants_and_splits_other_actions(self) -> None:
+        builder = self._builder()
+        leaves = [
+            TreeNode(id="github-issues", name="GitHub Issues", description="Manage issues on GitHub."),
+            TreeNode(id="gitlab-tickets", name="GitLab Tickets", description="Manage issues on GitLab."),
+            TreeNode(id="slack-alerts", name="Slack Alerts", description="Send notifications to Slack."),
+        ]
+        responses = iter(
+            [
+                {
+                    "groups": {
+                        "collaboration": {
+                            "name": "Collaboration",
+                            "description": "Collaboration capabilities.",
+                            "leaf_ids": [leaf.id for leaf in leaves],
+                        }
+                    }
+                },
+                {
+                    "decisions": [
+                        {"pair_id": "p00001", "similar": True, "shared_capability": "Issue management"},
+                        {"pair_id": "p00002", "similar": False, "shared_capability": ""},
+                        {"pair_id": "p00003", "similar": False, "shared_capability": ""},
+                    ]
+                },
+            ]
+        )
+        prompts: list[str] = []
+
+        def call_llm_json(prompt: str) -> dict:
+            prompts.append(prompt)
+            return next(responses)
+
+        builder._call_llm_json = call_llm_json
+
+        groups = getattr(builder, "_discover_equivalence_groups")(
+            TreeNode(id="collaboration", name="Collaboration"),
+            leaves,
+        )
+
+        memberships = sorted(sorted(group["leaf_ids"]) for group in groups.values())
+        self.assertEqual(memberships, [["github-issues", "gitlab-tickets"], ["slack-alerts"]])
+        issue_group = next(group for group in groups.values() if len(group["leaf_ids"]) == 2)
+        self.assertEqual(issue_group["name"], "Issue management")
+        self.assertIn("Candidate generation pass", prompts[0])
+        self.assertIn("Pairwise verification pass", prompts[1])
+
+    def test_pairwise_equivalence_rejects_incomplete_model_coverage(self) -> None:
+        builder = self._builder()
+        leaves = [TreeNode(id="left", name="Left"), TreeNode(id="right", name="Right")]
+        responses = iter(
+            [
+                {"groups": {"candidate": {"name": "Candidate", "leaf_ids": ["left", "right"]}}},
+                {"decisions": []},
+                {"decisions": []},
+            ]
+        )
+        builder._call_llm_json = lambda prompt, **kwargs: next(responses)
+
+        with self.assertRaisesRegex(ValueError, "omitted 1 candidate pairs"):
+            getattr(builder, "_discover_equivalence_groups")(
+                TreeNode(id="parent", name="Parent"),
+                leaves,
+            )
+
+    def test_equivalence_candidates_reject_missing_leaf_after_correction(self) -> None:
+        builder = self._builder()
+        leaves = [TreeNode(id="left", name="Left"), TreeNode(id="right", name="Right")]
+        responses = iter(
+            [
+                {"groups": {"candidate": {"leaf_ids": ["left"]}}},
+                {"groups": {"candidate": {"leaf_ids": ["left"]}}},
+            ]
+        )
+        builder._call_llm_json = lambda prompt, **kwargs: next(responses)
+
+        with self.assertRaisesRegex(ValueError, "omitted 1 leaf ids"):
+            getattr(builder, "_discover_equivalence_candidates")(
+                TreeNode(id="parent", name="Parent"),
+                leaves,
+                verbose=False,
+            )
+
+    def test_pairwise_components_do_not_bridge_an_explicit_negative_pair(self) -> None:
+        components = getattr(TreeBuilder, "_equivalent_components")(
+            ["a", "b", "c"],
+            {
+                ("a", "b"): {"similar": True},
+                ("a", "c"): {"similar": False},
+                ("b", "c"): {"similar": True},
+            },
+        )
+
+        self.assertEqual(components, [["a", "b"], ["c"]])
+
+    def test_overlapping_candidate_groups_produce_unique_global_pairs(self) -> None:
+        builder = self._builder()
+        leaf_map = {
+            leaf.id: leaf
+            for leaf in [
+                TreeNode(id="a", name="A"),
+                TreeNode(id="b", name="B"),
+                TreeNode(id="c", name="C"),
+            ]
+        }
+
+        pairs = getattr(builder, "_candidate_pairs_from_groups")(
+            leaf_map,
+            {
+                "first": {"leaf_ids": ["a", "b"]},
+                "second": {"leaf_ids": ["b", "a", "c"]},
+            },
+        )
+
+        self.assertEqual(pairs, [("a", "b"), ("a", "c"), ("b", "c")])
 
 
 if __name__ == "__main__":

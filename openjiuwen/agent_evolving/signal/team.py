@@ -9,7 +9,13 @@ from enum import Enum
 
 from openjiuwen.agent_evolving.protocols import TRAJECTORY_ISSUE_SIGNAL, USER_INTENT_SIGNAL
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal, make_evolution_signal
-from openjiuwen.agent_evolving.trajectory.types import Trajectory, trajectory_steps
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.spans import (
+    iter_spans,
+    read_llm_messages,
+    read_tool_call,
+)
+from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.core.common.logging import logger
 
 
@@ -52,21 +58,31 @@ def build_team_trajectory_summary(trajectory: Trajectory) -> str:
     llm_count = 0
     tool_count = 0
 
-    for step in trajectory_steps(trajectory):
-        if step.kind == "tool" and step.detail:
+    for span in iter_spans(trajectory):
+        category = span_category(span)
+        if category == "tool":
             tool_count += 1
-            tool_name = getattr(step.detail, "tool_name", "unknown")
+            tool_call = read_tool_call(span)
+            tool_name = str(tool_call.get("name") or span.get("name") or "unknown")
             is_key = tool_name in key_tools
             args_limit = 500 if is_key else 150
             result_limit = 500 if is_key else 200
-            args = str(getattr(step.detail, "call_args", ""))[:args_limit]
-            result = str(getattr(step.detail, "call_result", ""))[:result_limit]
+            args = str(tool_call.get("input", ""))[:args_limit]
+            output = tool_call.get("output")
+            if output is None:
+                error = tool_call.get("error")
+                output = error.get("message", "") if isinstance(error, dict) else ""
+            result = str(output)[:result_limit]
             tool_lines.append(f"[Tool:{tool_name}] args={args} result={result}")
-        elif step.kind == "llm" and step.detail:
+        elif category == "llm":
             llm_count += 1
-            response = getattr(step.detail, "response", None)
-            if response:
-                llm_lines.append(f"[LLM] {str(response)[:300]}")
+            messages = read_llm_messages(span)
+            if messages:
+                response = messages[-1]
+                response_text = response.get("content") if isinstance(response, dict) else response
+                if response_text in (None, "") and isinstance(response, dict):
+                    response_text = response.get("tool_calls", response)
+                llm_lines.append(f"[LLM] {str(response_text)[:300]}")
 
     tool_section = "\n".join(tool_lines)
     if len(tool_section) > tool_budget:

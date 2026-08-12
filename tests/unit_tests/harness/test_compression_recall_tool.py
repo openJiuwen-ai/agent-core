@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,6 +11,9 @@ from openjiuwen.core.context_engine.processor.forked.compressor.dialogue_compres
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive import (
     archive_compression_messages,
+)
+from openjiuwen.core.context_engine.processor.forked.compressor.session_memory_compressor import (
+    SessionMemoryCompressorConfig,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
 from openjiuwen.core.foundation.llm.model import init_model
@@ -128,6 +132,108 @@ def test_recall_tool_result_is_added_to_existing_offloader_protection():
 
 
 @pytest.mark.asyncio
+async def test_tool_renders_compact_content_for_model(tmp_path):
+    messages = [
+        UserMessage(content="database timeout"),
+        AssistantMessage(content="retry the database operation with backoff"),
+    ]
+    archive = archive_compression_messages(
+        context=_context(tmp_path),
+        processor_type="DialogueCompressor",
+        original_messages=messages,
+        messages_to_compress=messages,
+        preceding_messages=[],
+    )
+    tool = CompressionRecallTool(str(tmp_path), agent_id="agent-1")
+    session = MagicMock()
+    session.get_session_id.return_value = "session-1"
+
+    result = await tool.invoke(
+        {"memory_id": archive.memory_id, "query": "database retry"},
+        session=session,
+    )
+
+    assert result.success is True
+    content = result.data["content"]
+    assert archive.memory_id in content
+    assert archive.path in content
+    assert str(Path(archive.path).parent) in content
+    assert "retry the database operation with backoff" in content
+    # 结构化结果仍完整保留在 data 中
+    assert result.data["chunks"]
+    assert result.data["matched_turn"]["query"] == "database timeout"
+
+
+@pytest.mark.asyncio
+async def test_tool_renders_hint_as_content_on_miss(tmp_path):
+    archive = archive_compression_messages(
+        context=_context(tmp_path),
+        processor_type="DialogueCompressor",
+        original_messages=[UserMessage(content="database"), AssistantMessage(content="retry with backoff")],
+        messages_to_compress=[UserMessage(content="database"), AssistantMessage(content="retry with backoff")],
+        preceding_messages=[],
+    )
+    tool = CompressionRecallTool(str(tmp_path), agent_id="agent-1")
+    session = MagicMock()
+    session.get_session_id.return_value = "session-1"
+
+    result = await tool.invoke(
+        {"memory_id": archive.memory_id, "query": "completely-unrelated-zebra"},
+        session=session,
+    )
+
+    assert result.success is True
+    assert result.data["content"] == result.data["hint"]
+
+
+@pytest.mark.asyncio
+async def test_tool_searches_across_archives_when_memory_id_omitted(tmp_path):
+    older = archive_compression_messages(
+        context=_context(tmp_path),
+        processor_type="DialogueCompressor",
+        original_messages=[
+            UserMessage(content="database timeout retry policy"),
+            AssistantMessage(content="use exponential backoff for database retries"),
+        ],
+        messages_to_compress=[
+            UserMessage(content="database timeout retry policy"),
+            AssistantMessage(content="use exponential backoff for database retries"),
+        ],
+        preceding_messages=[],
+    )
+    newer = archive_compression_messages(
+        context=_context(tmp_path),
+        processor_type="DialogueCompressor",
+        original_messages=[
+            UserMessage(content="cache eviction strategy"),
+            AssistantMessage(content="evict least recently used cache entries"),
+        ],
+        messages_to_compress=[
+            UserMessage(content="cache eviction strategy"),
+            AssistantMessage(content="evict least recently used cache entries"),
+        ],
+        preceding_messages=[],
+    )
+    tool = CompressionRecallTool(str(tmp_path), agent_id="agent-1")
+    session = MagicMock()
+    session.get_session_id.return_value = "session-1"
+
+    result = await tool.invoke({"query": "database backoff retry"}, session=session)
+
+    assert result.success is True
+    assert result.data["chunks"]
+    assert result.data["chunks"][0]["memory_id"] == older.memory_id
+    assert {item["memory_id"] for item in result.data["archives_in_session"]} == {
+        older.memory_id,
+        newer.memory_id,
+    }
+    assert result.data["recall_root"] == str(Path(older.path).parent)
+    content = result.data["content"]
+    assert "2" in content  # 本 session 共有 2 个压缩归档
+    assert older.memory_id in content
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("language", "expected_keywords"),
     [
@@ -156,9 +262,24 @@ async def test_tool_returns_retry_hint_with_archive_path_on_miss(tmp_path, langu
     assert result.data["chunks"] == []
     assert result.data["archive_path"] == archive.path
     hint = result.data["hint"]
-    assert archive.path in hint
+    # hint 指向归档根目录（archive.path 的父目录）并列出本 session 的归档
+    assert str(Path(archive.path).parent) in hint
+    assert archive.memory_id in hint
     for keyword in expected_keywords:
         assert keyword in hint
+
+
+@pytest.mark.asyncio
+async def test_rail_registers_recall_tool_for_session_memory_compressor(tmp_path):
+    agent = _make_agent(tmp_path / "session-memory", recall_enabled=True)
+    rail = ContextProcessorRail(
+        preset=False,
+        processors=[("SessionMemoryCompressor", SessionMemoryCompressorConfig(enabled=True))],
+    )
+    await agent.register_rail(rail)
+    await agent.ensure_initialized()
+
+    assert isinstance(agent.ability_manager.get("recall_compressed_context"), ToolCard)
 
 
 @pytest.mark.asyncio

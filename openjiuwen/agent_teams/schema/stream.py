@@ -50,4 +50,27 @@ class TeamOutputSchema(OutputSchema):
         )
 
 
-__all__ = ["TeamOutputSchema"]
+def is_team_event_marker(chunk: object) -> bool:
+    """Whether a chunk is a framework-emitted team event rather than agent output.
+
+    Team markers (``team.idle`` / ``team.completed`` / ``team.interact.failed``)
+    ride the same stream as model output so a streaming consumer sees them in
+    order, but they carry no agent content. Non-streaming callers that reduce a
+    stream to "the last thing produced" use this to skip them.
+
+    Args:
+        chunk: Any object taken off a member stream queue.
+
+    Returns:
+        True when the chunk is a team marker.
+    """
+    if not isinstance(chunk, TeamOutputSchema):
+        return False
+    payload = chunk.payload
+    if not isinstance(payload, dict):
+        return False
+    event_type = payload.get("event_type")
+    return isinstance(event_type, str) and event_type.startswith("team.")
+
+
+__all__ = ["TeamOutputSchema", "is_team_event_marker"]

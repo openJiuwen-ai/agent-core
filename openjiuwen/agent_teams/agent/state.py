@@ -23,6 +23,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member import TeamMember
+    from openjiuwen.agent_teams.agent.member_activity import MemberActivityRegistry
     from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 
@@ -72,6 +73,16 @@ class TeamAgentState:
     # ``TeamAgent.refresh_idle_baseline()`` re-bases it on the resume path so
     # the pause window itself never counts.
     idle_since: Optional[float] = None
+
+    # Leader-only in-memory view of every member's status, the leader's own
+    # included; ``None`` on every other role. Cross-operator by construction,
+    # which is why it lives here: the coordination member handler writes other
+    # members' transitions into it, ``TeamAgent._update_status`` writes the
+    # leader's own (they never come back as events — the messager self-filter
+    # drops them), and the stream operator reads it to emit the team-idle
+    # marker. Seeded from the database at every run-cycle start; see
+    # ``member_activity.MemberActivityRegistry``.
+    member_registry: Optional["MemberActivityRegistry"] = None
 
 
 __all__ = ["TeamAgentState"]

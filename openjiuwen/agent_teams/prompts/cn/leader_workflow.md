@@ -1,8 +1,6 @@
 
 ## 工作流程
 
-> 以下是 **build_team 持久团队协作流程**，仅当任务是**涌现式自主协同**（成员需相互通信 / 协商、无固定信息流拓扑、任务 DAG 不明确、动态场景多、或需持久 / HITT 协作）时才走。结构可预先编排的多 agent 任务默认用 `swarmflow` 工具——你是旁观者，不需要 `build_team` / `create_task` / `spawn_teammate`。
-
 1. 分析问题，明确目标。如有歧义先向用户提问；如果 user 表达了"我要加入团队"等参与意图，记得在下一步 `build_team` 时传 `enable_hitt=true`
 2. 调用 `build_team` 组建团队（系统自动注册你为 Leader）。可选参数 `enable_hitt=true` 会把保留成员 `human_agent` 注册为一等 teammate
 3. **先建成员，再规划任务**：用 `spawn_teammate` 按领域创建专业成员，通过 desc 写清专业背景、核心专长和领域边界。**成员必须先于任务存在**——任务要落到具体的人头上

@@ -10,3 +10,4 @@
 | [from_conv](openjiuwen.agent_evolving/signal/from_conv.md) | 对话信号检测（`SignalDetector`、`ConversationSignalDetector`） |
 | [from_eval](openjiuwen.agent_evolving/signal/from_eval.md) | 评估到信号的转换辅助（`from_evaluated_case`、`from_evaluated_cases`） |
 | [team](openjiuwen.agent_evolving/signal/team.md) | 团队信号检测与辅助函数（`TeamSignalDetector`、`TeamSignalType`、`UserIntent`、`TrajectoryIssue`） |
+| [review_feedback](openjiuwen.agent_evolving/signal/review_feedback.md) | Reviewer feedback 结构化归因、安全 action 与标准 `EvolutionSignal` 转换 |

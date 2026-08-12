@@ -14,7 +14,7 @@ import hashlib
 import json
 from typing import Dict, Optional, cast
 
-from sqlalchemy import BigInteger, Index
+from sqlalchemy import BigInteger, Index, Table
 from sqlmodel import SQLModel, Field
 from sqlmodel.main import SQLModelMetaclass
 
@@ -152,7 +152,10 @@ class TeamTaskBase(SQLModel):
         return {"task_id": self.task_id, "title": self.title, "status": self.status}
 
     def reviewers(self) -> list[str]:
-        """Parse the ``reviewer`` JSON column into a member-name list.
+        """Parse the ``reviewer`` JSON column into a member-name (reviewer_id) list.
+
+        Old format (list of strings like ``["name1", "name2"]``) is auto-upgraded
+        to the new object format on read.
 
         Returns an empty list when unset or malformed — an absent reviewer set
         means "no verify gate", which the completion path treats as direct
@@ -165,7 +168,49 @@ class TeamTaskBase(SQLModel):
             parsed = json.loads(raw)
         except (ValueError, TypeError):
             return []
-        return [str(name) for name in parsed] if isinstance(parsed, list) else []
+        if not isinstance(parsed, list):
+            return []
+        ids: list[str] = []
+        for entry in parsed:
+            if isinstance(entry, dict):
+                rid = entry.get("reviewer_id", "")
+                if rid:
+                    ids.append(str(rid))
+            elif isinstance(entry, str):
+                ids.append(entry)
+        return ids
+
+    def reviewer_details(self) -> list[dict[str, str]]:
+        """Parse the ``reviewer`` JSON column into a structured list.
+
+        Each entry contains ``type``, ``reviewer_id`` and ``description``.
+        Old string-list format is auto-upgraded to
+        ``{"type": "verifier", "reviewer_id": name, "instruction": ""}``.
+        """
+        raw = self.reviewer
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(parsed, list):
+            return []
+        result: list[dict[str, str]] = []
+        for entry in parsed:
+            if isinstance(entry, dict):
+                result.append({
+                    "type": entry.get("type", "verifier"),
+                    "reviewer_id": str(entry.get("reviewer_id", "")),
+                    "instruction": str(entry.get("instruction", "")),
+                })
+            elif isinstance(entry, str):
+                result.append({
+                    "type": "verifier",
+                    "reviewer_id": entry,
+                    "instruction": "",
+                })
+        return result
 
 
 class TeamTaskDependencyBase(SQLModel):
@@ -432,6 +477,25 @@ def _get_review_vote_model() -> type[TeamTaskReviewVoteBase]:
         _review_vote_models[session_id] = cast(type[TeamTaskReviewVoteBase], model_cls)
 
     return _review_vote_models[session_id]
+
+
+def static_tables() -> list[Table]:
+    """Return the static (team-scoped) tables registered on ``SQLModel.metadata``.
+
+    ``SQLModel.metadata`` is process-global and the dynamic factories above
+    register one table set into it per session id the process has ever bound,
+    for the lifetime of the process. Schema creation for a database must
+    therefore never walk the whole registry: doing so gives every new database
+    the tables of every unrelated session seen so far, and makes the cost of
+    creating a schema grow with that history rather than with the schema. The
+    per-session tables are owned by ``create_cur_session_tables()``, which
+    creates exactly the current session's set.
+    """
+    return [
+        table
+        for name, table in SQLModel.metadata.tables.items()
+        if not name.startswith(TEAM_DYNAMIC_TABLE_PREFIXES)
+    ]
 
 
 def _clear_session_model_cache(session_id: str) -> None:

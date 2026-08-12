@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.agent_evolving.trajectory.store import FileTrajectoryStore
+from openjiuwen.agent_evolving.trajectory.store import FileTrajectoryStore, to_json_compatible
 from openjiuwen.agent_evolving.trajectory.types import Trajectory, to_legacy_trajectory
 
 ROLE_TRAJECTORY_DIR_NAME = "tr"
@@ -54,7 +54,7 @@ class RoleFileTrajectoryStore(FileTrajectoryStore):
         file_path = self._get_file_path(version)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         legacy = to_legacy_trajectory(trajectory)
-        data = _bounded_trajectory_dict(FileTrajectoryStore._to_json_compatible(legacy))
+        data = _bounded_trajectory_dict(to_json_compatible(legacy))
         with open(_filesystem_path(file_path), "w", encoding="utf-8") as file:
             file.write(json.dumps(data, ensure_ascii=False) + "\n")
 

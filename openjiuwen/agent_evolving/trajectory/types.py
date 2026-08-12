@@ -6,24 +6,30 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union
 
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory as CanonicalTrajectory
+
+from openjiuwen.agent_evolving.trajectory.legacy_semconv import (
+    LEGACY_GEN_AI_INPUT_MESSAGES,
+    LEGACY_GEN_AI_OUTPUT_MESSAGES,
+    LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS,
+    LEGACY_GEN_AI_TOOL_CALL_ID,
+    LEGACY_GEN_AI_TOOL_CALL_RESULT,
+    LEGACY_GEN_AI_USAGE_INPUT_TOKENS,
+    LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS,
+    LEGACY_STEP_META,
+    LEGACY_TRAJECTORY_STEP_KIND,
+)
 from openjiuwen.agent_evolving.trajectory.semconv import (
     CASE_ID,
-    GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
-    GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_MODEL,
-    GEN_AI_TOOL_CALL_ARGUMENTS,
-    GEN_AI_TOOL_CALL_ID,
-    GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_DEFINITIONS,
     GEN_AI_TOOL_NAME,
-    GEN_AI_USAGE_INPUT_TOKENS,
-    GEN_AI_USAGE_OUTPUT_TOKENS,
     LEGACY_OPERATOR_ID,
     LEGACY_PARENT_LLM_CALL,
-    LEGACY_STEP_META,
     OJ_AGENT_INVOKE_TYPE,
     OJ_AGENT_NAME,
     OJ_ERROR,
@@ -43,7 +49,11 @@ from openjiuwen.agent_evolving.trajectory.semconv import (
     TRAJECTORY_SCHEMA_VERSION,
     TRAJECTORY_SCHEMA_VERSION_ATTR,
     TRAJECTORY_SOURCE,
-    TRAJECTORY_STEP_KIND,
+)
+from openjiuwen.agent_evolving.trajectory.schema import (
+    MEMBER_ID as CANONICAL_MEMBER_ID,
+    SESSION_ID as CANONICAL_SESSION_ID,
+    TEAM_ID as CANONICAL_TEAM_ID,
 )
 from openjiuwen.agent_evolving.trajectory.span_codec import (
     normalize_trace_id_hex,
@@ -65,6 +75,9 @@ RESOURCE_META_EXCLUDE_KEYS = frozenset(
         TRAJECTORY_SCHEMA_VERSION_ATTR,
         OJ_SESSION_ID,
         OLD_OJ_SESSION_ID,
+        CANONICAL_SESSION_ID,
+        CANONICAL_TEAM_ID,
+        CANONICAL_MEMBER_ID,
         CASE_ID,
         TRAJECTORY_SOURCE,
         "source",
@@ -147,8 +160,8 @@ def _otlp_usage_cost(otlp_trace: Optional[Dict[str, Any]]) -> Optional[CostInfo]
     output_tokens = 0
 
     for attrs in _otlp_span_attribute_maps(otlp_trace):
-        input_value = _to_int(attrs.get(GEN_AI_USAGE_INPUT_TOKENS))
-        output_value = _to_int(attrs.get(GEN_AI_USAGE_OUTPUT_TOKENS))
+        input_value = _to_int(attrs.get(LEGACY_GEN_AI_USAGE_INPUT_TOKENS))
+        output_value = _to_int(attrs.get(LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS))
         if input_value is not None:
             input_tokens += input_value
         if output_value is not None:
@@ -185,15 +198,19 @@ def _otlp_trajectory_meta(resource_attrs: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     aliases = {
-        "member_id": "openjiuwen.member.id",
-        "member_name": "openjiuwen.member.name",
-        "member_role": "openjiuwen.member.role",
-        "team_id": "openjiuwen.team.id",
-        "team_name": "openjiuwen.team.name",
+        "member_id": (CANONICAL_MEMBER_ID, "openjiuwen.member.id"),
+        "member_name": ("agentteam.member.name", "openjiuwen.member.name"),
+        "member_role": ("agentteam.member.role", "openjiuwen.member.role"),
+        "team_id": (CANONICAL_TEAM_ID, "openjiuwen.team.id"),
+        "team_name": ("agentteam.team.name", "openjiuwen.team.name"),
     }
-    for target, source in aliases.items():
-        if source in resource_attrs and target not in meta:
-            meta[target] = deepcopy(resource_attrs[source])
+    for target, sources in aliases.items():
+        if target in meta:
+            continue
+        for source in sources:
+            if source in resource_attrs:
+                meta[target] = deepcopy(resource_attrs[source])
+                break
     return meta
 
 
@@ -203,12 +220,12 @@ def _otlp_step_kind(span: Dict[str, Any], attrs: Dict[str, Any]) -> Optional[str
         return "llm"
     if operation_name == "execute_tool":
         return "tool"
-    if attrs.get(GEN_AI_INPUT_MESSAGES) is not None or attrs.get(GEN_AI_OUTPUT_MESSAGES) is not None:
+    if attrs.get(LEGACY_GEN_AI_INPUT_MESSAGES) is not None or attrs.get(LEGACY_GEN_AI_OUTPUT_MESSAGES) is not None:
         return "llm"
     if (
         attrs.get(GEN_AI_TOOL_NAME) is not None
-        or attrs.get(GEN_AI_TOOL_CALL_ARGUMENTS) is not None
-        or attrs.get(GEN_AI_TOOL_CALL_RESULT) is not None
+        or attrs.get(LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS) is not None
+        or attrs.get(LEGACY_GEN_AI_TOOL_CALL_RESULT) is not None
     ):
         return "tool"
 
@@ -223,7 +240,7 @@ def _otlp_step_kind(span: Dict[str, Any], attrs: Dict[str, Any]) -> Optional[str
     if invoke_type in ("plugin", "tool") or component_type in ("tool", "plugin"):
         return "tool"
 
-    explicit = attrs.get(TRAJECTORY_STEP_KIND)
+    explicit = attrs.get(LEGACY_TRAJECTORY_STEP_KIND)
     if explicit in ("llm", "tool"):
         return explicit
 
@@ -236,8 +253,8 @@ def _otlp_step_kind(span: Dict[str, Any], attrs: Dict[str, Any]) -> Optional[str
 
 
 def _otlp_step_usage(attrs: Dict[str, Any]) -> Optional[Dict[str, int]]:
-    input_tokens = _to_int(attrs.get(GEN_AI_USAGE_INPUT_TOKENS))
-    output_tokens = _to_int(attrs.get(GEN_AI_USAGE_OUTPUT_TOKENS))
+    input_tokens = _to_int(attrs.get(LEGACY_GEN_AI_USAGE_INPUT_TOKENS))
+    output_tokens = _to_int(attrs.get(LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS))
     if input_tokens is None and output_tokens is None:
         return None
     return {
@@ -304,7 +321,7 @@ def _otlp_step_meta(span: Dict[str, Any], attrs: Dict[str, Any]) -> Dict[str, An
 
 def _otlp_llm_step(span: Dict[str, Any], attrs: Dict[str, Any]) -> TrajectoryStep:
     usage = _otlp_step_usage(attrs)
-    output_messages = attrs.get(GEN_AI_OUTPUT_MESSAGES)
+    output_messages = attrs.get(LEGACY_GEN_AI_OUTPUT_MESSAGES)
     if isinstance(output_messages, list) and len(output_messages) == 1:
         response = output_messages[0]
     else:
@@ -317,7 +334,7 @@ def _otlp_llm_step(span: Dict[str, Any], attrs: Dict[str, Any]) -> TrajectorySte
         end_time_ms=_nanos_to_ms(span.get("endTimeUnixNano")),
         detail=LLMCallDetail(
             model=str(attrs.get(GEN_AI_REQUEST_MODEL) or span.get("name") or ""),
-            messages=_json_safe(attrs.get(GEN_AI_INPUT_MESSAGES) or []),
+            messages=_json_safe(attrs.get(LEGACY_GEN_AI_INPUT_MESSAGES) or []),
             response=_json_safe(response),
             tools=_json_safe(attrs.get(GEN_AI_TOOL_DEFINITIONS)),
             usage=usage,
@@ -347,9 +364,9 @@ def _otlp_tool_step(
         end_time_ms=_nanos_to_ms(span.get("endTimeUnixNano")),
         detail=ToolCallDetail(
             tool_name=str(attrs.get(GEN_AI_TOOL_NAME) or span.get("name") or ""),
-            call_args=_json_safe(attrs.get(GEN_AI_TOOL_CALL_ARGUMENTS)),
-            call_result=_json_safe(attrs.get(GEN_AI_TOOL_CALL_RESULT)),
-            tool_call_id=attrs.get(GEN_AI_TOOL_CALL_ID),
+            call_args=_json_safe(attrs.get(LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS)),
+            call_result=_json_safe(attrs.get(LEGACY_GEN_AI_TOOL_CALL_RESULT)),
+            tool_call_id=attrs.get(LEGACY_GEN_AI_TOOL_CALL_ID),
         ),
         reward=_otlp_step_reward(attrs),
         meta=meta,
@@ -613,76 +630,99 @@ class LegacyTrajectory:
 
 
 TrajectoryRecord = Trajectory
+TrajectoryLike = Union[Trajectory, "CanonicalTrajectory"]
 
 
-def trajectory_resource_attributes(trajectory: Trajectory) -> Dict[str, Any]:
+def trajectory_otlp(trajectory: TrajectoryLike) -> Dict[str, Any]:
+    """Return a detached OTLP payload for either migration-time model."""
+
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory as CanonicalTrajectory
+
+    if isinstance(trajectory, CanonicalTrajectory):
+        return trajectory.to_otlp()
+    return deepcopy(trajectory.otlp_trace) if isinstance(trajectory.otlp_trace, dict) else {}
+
+
+def trajectory_resource_attributes(trajectory: TrajectoryLike) -> Dict[str, Any]:
     """Return trajectory-level attributes from OTLP resource spans."""
-    return _otlp_resource_attributes(trajectory.otlp_trace)
+    return _otlp_resource_attributes(trajectory_otlp(trajectory))
 
 
-def trajectory_execution_id(trajectory: Trajectory) -> str:
+def trajectory_execution_id(trajectory: TrajectoryLike) -> str:
     """Read execution id directly from OTLP resource attributes."""
     return _otlp_trajectory_id(trajectory_resource_attributes(trajectory))
 
 
-def trajectory_steps(trajectory: Trajectory) -> List[TrajectoryStep]:
+def trajectory_steps(trajectory: TrajectoryLike) -> List[TrajectoryStep]:
     """Project OTLP spans to ``TrajectoryStep`` read models.
 
     Prefer this over ``to_legacy_trajectory`` when only steps are needed.
     For a full ``LegacyTrajectory`` compatibility view, use
     ``to_legacy_trajectory``.
     """
-    return _otlp_steps(trajectory.otlp_trace)
+    return _otlp_steps(trajectory_otlp(trajectory))
 
 
-def trajectory_source(trajectory: Trajectory) -> str:
+def trajectory_source(trajectory: TrajectoryLike) -> str:
     """Read trajectory source directly from OTLP resource attributes."""
     return _otlp_trajectory_source(trajectory_resource_attributes(trajectory))
 
 
-def trajectory_case_id(trajectory: Trajectory) -> Optional[str]:
+def trajectory_case_id(trajectory: TrajectoryLike) -> Optional[str]:
     """Read case id directly from OTLP resource attributes."""
     value = trajectory_resource_attributes(trajectory).get(CASE_ID)
     return str(value) if value is not None else None
 
 
-def trajectory_session_id(trajectory: Trajectory) -> Optional[str]:
+def trajectory_session_id(trajectory: TrajectoryLike) -> Optional[str]:
     """Read session id directly from OTLP resource attributes."""
     attrs = trajectory_resource_attributes(trajectory)
-    value = attrs.get(OJ_SESSION_ID) or attrs.get(OLD_OJ_SESSION_ID)
+    value = attrs.get(CANONICAL_SESSION_ID) or attrs.get(OJ_SESSION_ID) or attrs.get(OLD_OJ_SESSION_ID)
     return str(value) if value is not None else None
 
 
-def trajectory_cost(trajectory: Trajectory) -> Optional[CostInfo]:
+def trajectory_cost(trajectory: TrajectoryLike) -> Optional[CostInfo]:
     """Read aggregate cost directly from OTLP spans."""
-    return _otlp_usage_cost(trajectory.otlp_trace)
+    return _otlp_usage_cost(trajectory_otlp(trajectory))
 
 
-def trajectory_meta(trajectory: Trajectory) -> Dict[str, Any]:
+def trajectory_meta(trajectory: TrajectoryLike) -> Dict[str, Any]:
     """Read trajectory metadata directly from OTLP resource attributes."""
     return _otlp_trajectory_meta(trajectory_resource_attributes(trajectory))
 
 
 def set_trajectory_resource_attributes(
-    trajectory: Trajectory,
+    trajectory: TrajectoryLike,
     attributes: Dict[str, Any],
-) -> Trajectory:
+) -> TrajectoryLike:
     """Set resource attributes on the OTLP trace."""
+
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory as CanonicalTrajectory
+
+    if isinstance(trajectory, CanonicalTrajectory):
+        return trajectory.with_resource_attributes(attributes)
     trajectory.otlp_trace = _set_otlp_resource_attributes(trajectory.otlp_trace, attributes)
     return trajectory
 
 
 def trajectory_with_resource_attributes(
-    trajectory: Trajectory,
+    trajectory: TrajectoryLike,
     attributes: Dict[str, Any],
-) -> Trajectory:
+) -> TrajectoryLike:
     """Return a detached OTLP trajectory with resource attributes merged in."""
+
+    from openjiuwen.agent_evolving.trajectory.model import Trajectory as CanonicalTrajectory
+
+    if isinstance(trajectory, CanonicalTrajectory):
+        return trajectory.with_resource_attributes(attributes)
     return Trajectory(
         otlp_trace=_set_otlp_resource_attributes(trajectory.otlp_trace, attributes),
     )
 
 
-def to_legacy_trajectory(trajectory: Union[Trajectory, LegacyTrajectory]) -> LegacyTrajectory:
+def to_legacy_trajectory(
+    trajectory: Union[TrajectoryLike, LegacyTrajectory],
+) -> LegacyTrajectory:
     """Project an OTLP ``Trajectory`` (or clone a ``LegacyTrajectory``) to the
     step-based compatibility view.
 
@@ -703,14 +743,19 @@ def to_legacy_trajectory(trajectory: Union[Trajectory, LegacyTrajectory]) -> Leg
             meta=meta,
         )
 
-    resource_attrs = _otlp_resource_attributes(trajectory.otlp_trace)
+    payload = trajectory_otlp(trajectory)
+    resource_attrs = _otlp_resource_attributes(payload)
     return LegacyTrajectory(
         execution_id=_otlp_trajectory_id(resource_attrs),
-        steps=_otlp_steps(trajectory.otlp_trace),
+        steps=_otlp_steps(payload),
         source=_otlp_trajectory_source(resource_attrs),
         case_id=resource_attrs.get(CASE_ID),
-        session_id=resource_attrs.get(OJ_SESSION_ID) or resource_attrs.get(OLD_OJ_SESSION_ID),
-        cost=_otlp_usage_cost(trajectory.otlp_trace),
+        session_id=(
+            resource_attrs.get(CANONICAL_SESSION_ID)
+            or resource_attrs.get(OJ_SESSION_ID)
+            or resource_attrs.get(OLD_OJ_SESSION_ID)
+        ),
+        cost=_otlp_usage_cost(payload),
         meta=_otlp_trajectory_meta(resource_attrs),
     )
 
@@ -731,7 +776,7 @@ def _legacy_step_to_otlp_span(step: TrajectoryStep, index: int, trace_id: str) -
     detail = step.detail
     meta = dict(step.meta or {})
     attributes: List[Dict[str, Any]] = []
-    _append_otlp_attr(attributes, TRAJECTORY_STEP_KIND, step.kind)
+    _append_otlp_attr(attributes, LEGACY_TRAJECTORY_STEP_KIND, step.kind)
     _append_otlp_attr(attributes, OJ_INVOKE_ID, meta.get("invoke_id"))
     _append_otlp_attr(attributes, OJ_PARENT_INVOKE_ID, meta.get("parent_invoke_id"))
     _append_otlp_attr(attributes, OJ_ERROR, step.error)
@@ -748,33 +793,33 @@ def _legacy_step_to_otlp_span(step: TrajectoryStep, index: int, trace_id: str) -
         span_name = str(meta.get("span_name") or detail.model or span_name)
         _append_otlp_attr(attributes, GEN_AI_OPERATION_NAME, "chat")
         _append_otlp_attr(attributes, GEN_AI_REQUEST_MODEL, detail.model)
-        _append_otlp_attr(attributes, GEN_AI_INPUT_MESSAGES, _json_safe(detail.messages))
+        _append_otlp_attr(attributes, LEGACY_GEN_AI_INPUT_MESSAGES, _json_safe(detail.messages))
         if detail.response is not None:
             response = _json_safe(detail.response)
             _append_otlp_attr(
                 attributes,
-                GEN_AI_OUTPUT_MESSAGES,
+                LEGACY_GEN_AI_OUTPUT_MESSAGES,
                 response if isinstance(response, list) else [response],
             )
         _append_otlp_attr(attributes, GEN_AI_TOOL_DEFINITIONS, _json_safe(detail.tools))
         usage = detail.usage or {}
         _append_otlp_attr(
             attributes,
-            GEN_AI_USAGE_INPUT_TOKENS,
+            LEGACY_GEN_AI_USAGE_INPUT_TOKENS,
             usage.get("prompt_tokens", usage.get("input_tokens")),
         )
         _append_otlp_attr(
             attributes,
-            GEN_AI_USAGE_OUTPUT_TOKENS,
+            LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS,
             usage.get("completion_tokens", usage.get("output_tokens")),
         )
     elif step.kind == "tool" and isinstance(detail, ToolCallDetail):
         span_name = str(meta.get("span_name") or detail.tool_name or span_name)
         _append_otlp_attr(attributes, GEN_AI_OPERATION_NAME, "execute_tool")
         _append_otlp_attr(attributes, GEN_AI_TOOL_NAME, detail.tool_name)
-        _append_otlp_attr(attributes, GEN_AI_TOOL_CALL_ARGUMENTS, _json_safe(detail.call_args))
-        _append_otlp_attr(attributes, GEN_AI_TOOL_CALL_RESULT, _json_safe(detail.call_result))
-        _append_otlp_attr(attributes, GEN_AI_TOOL_CALL_ID, detail.tool_call_id)
+        _append_otlp_attr(attributes, LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS, _json_safe(detail.call_args))
+        _append_otlp_attr(attributes, LEGACY_GEN_AI_TOOL_CALL_RESULT, _json_safe(detail.call_result))
+        _append_otlp_attr(attributes, LEGACY_GEN_AI_TOOL_CALL_ID, detail.tool_call_id)
 
     span = {
         "traceId": normalize_trace_id_hex(trace_id),

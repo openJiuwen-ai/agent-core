@@ -183,6 +183,19 @@ class TeamWorkerBackend(AgentBackend):
                 budget_rail=budget_rail,
             )
             return AgentResult(text=text, tokens=budget_rail.call_tokens)
+        except Exception as e:
+            # Attach this call's rail tally so a failed/budget-exhausted agent's
+            # real consumption still reaches the AGENT_FAILED event tokens (the
+            # ledger already billed it; without this the run's token sum would
+            # drop it while Team budget stayed correct).
+            call_tokens = budget_rail.call_tokens or None
+            if isinstance(e, BackendError):
+                if e.tokens is None:
+                    e.tokens = call_tokens
+            elif call_tokens is not None:
+                # Wrap a non-backend error so _attempt_calls can still read .tokens
+                e = BackendError(str(e), tokens=call_tokens)
+            raise
         finally:
             await self._worktrees.finalize(member_name)
 

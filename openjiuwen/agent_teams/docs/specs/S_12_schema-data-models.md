@@ -14,8 +14,8 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-07-28 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）。其余条目见 `docs/features/` |
+| 最近一次修订日期 | 2026-08-11 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -224,7 +224,7 @@ STOPPED / RESTARTING / ERROR 不能覆盖。
 ### I-16 Session checkpoint 状态按 team 分桶
 
 session checkpoint 全局状态根上有一个 `teams` namespace：
-`state["teams"][team_name] = {spec, context, model_allocator_state, lifecycle}`。
+`state["teams"][team_name] = {spec, context, model_allocator_state, lifecycle, checkpoints}`。
 同一 session 可承载多个 team 的状态。
 
 读写一律走 `runtime/metadata.py` 的 `read_team_namespace` /
@@ -790,6 +790,15 @@ CANCELLED    -> (terminal)
   pause→resume 后报出假停滞。理由与不变量见 `S_03` 不变量 20 与
   `F_65_runtime-idle-clock-stall-nudge.md`。
 
+### steering 消费配额（F_78）
+
+- **spec 配置**（`TeamAgentSpec`，仅非 leader 成员消费）：`steer_batch_size: int = 2`
+  （条，>0——一次模型调用最多吸收几条排队的 steering 输入，取不走的原封留在队列里由后续模型
+  调用取走）。校验在独立的 `_validate_steer_batch_size`。`0` 被拒而不是当作"不限"：运行时
+  的 `drain_steering` 保证队列非空时至少取 1 条，配 `0` 会**悄悄变成 1**，比直接报错难查。
+- **无新表 / 无新列**：队列是进程内 `asyncio.Queue`（`LoopQueues.steering`），配额只影响
+  每次取多少，不改变任何持久化状态。leader 不受此配额约束，理由见 `S_09` 不变量 29。
+
 ### 消息投递载荷 `meta`（F_63）
 
 消息表 `TeamMessageBase` 新列 **`meta TEXT NULL`**（JSON 对象），承载框架模板消息的
@@ -824,6 +833,7 @@ state["teams"][team_name] = {
     "context": ...,               # TeamRuntimeContext.model_dump()
     "model_allocator_state": ...  # allocator 的 round-robin 游标 / 已分配 model_id 等
     "lifecycle": ...,             # TeamLifecycle 字符串
+    "checkpoints": ...,           # {name: {count, description, created_by}} 命名 fork 快照
 }
 ```
 

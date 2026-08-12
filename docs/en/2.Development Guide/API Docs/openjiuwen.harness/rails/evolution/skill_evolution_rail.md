@@ -78,6 +78,28 @@ When manual configuring, only one shared `EvolutionInterruptRail` should be used
 - Active evolution is available through `request_user_evolution()`; the returned prompt asks the main agent to call `prepare_skill_evolution(user_confirmed=true)` first, then call `evolve_review_task(evolution_review_ref=...)`. The prepare tool collects the current rail's execution/conversation trajectory as default review materials, and `user_intent` only adds optimization direction.
 - Regular skill evolution ignores `kind: team-skill` skills; team skills use `TeamSkillEvolutionRail` / `TeamSkillRail`.
 
+### Externally attributed signals
+
+When a host has already completed attribution, it can call:
+
+```python
+result = await skill_rail.evolve_from_external_signals(
+    signals=[signal],
+    messages=messages,
+    trajectory=trajectory,
+    user_query="Add reusable validation guidance.",
+    requires_approval=True,
+)
+```
+
+This entry point bypasses passive `signal_trigger` detection, so it remains available when `signal_trigger=False`.
+The caller owns attribution and evidence policy. The Rail still requires all signals to target exactly one existing
+regular Skill, rejects disabled, missing, and team-skill targets, and uses the standard optimizer, concurrency
+semaphore, approval, and `EvolutionStore` persistence pipeline.
+
+When `requires_approval=None`, the default remains `not auto_save`; explicit `True` stages an approval request, while
+explicit `False` allows an authorized host to save automatically. Callers should not edit `evolutions.json` directly.
+
 ```text
 class SkillEvolutionRail(
     skills_dir: Union[str, list[str]],

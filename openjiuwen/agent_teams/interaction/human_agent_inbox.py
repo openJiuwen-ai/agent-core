@@ -9,8 +9,10 @@ syntax into structured payloads. ``send`` only routes based on the
 explicit ``to`` argument:
 
 * ``to is None`` → enqueue the body into the matching avatar's own
-  coordination as user input (``interact`` → ``USER_INPUT`` event); the
-  avatar consumes it after its harness has started. No bus message.
+  coordination as user input (``interact`` → ``USER_INPUT`` event), tagged
+  ``<team-inbound from="controller">`` so the avatar can tell its
+  controller apart from the team; the avatar consumes it after its harness
+  has started. No bus message.
 * ``to in BROADCAST_TARGETS`` (``"all"`` / ``"*"``) → broadcast as the
   human-agent ``sender``.
 * ``to=<member>`` → validate the target and post a point-to-point bus
@@ -32,6 +34,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.constants import HUMAN_AGENT_MEMBER_NAME
+from openjiuwen.agent_teams.inbound_render import render_controller_input
 from openjiuwen.agent_teams.interaction.payload import (
     DeliverResult,
     HumanAgentInboundEvent,
@@ -238,7 +241,13 @@ class HumanAgentInbox:
         # leader's coroutine and crash with "NativeHarness not started"
         # whenever the avatar was spawned but its run cycle has not yet
         # started its harness (e.g. the leader's initial routed input).
-        await agent.interact(body)
+        #
+        # Tag the body as coming from the controller. Delivered bare it
+        # arrives as the harness's ordinary user turn, indistinguishable
+        # from a team message, and the avatar answers it the way a member
+        # answers ``user`` — by messaging ``user``, who is a different
+        # person on the leader's side.
+        await agent.interact(render_controller_input(content=body))
         return DeliverResult.success(None)
 
 

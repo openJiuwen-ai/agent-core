@@ -11,17 +11,24 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-from openjiuwen.agent_evolving.trajectory import (
-    LLMCallDetail,
-    Trajectory,
-    trajectory_case_id,
-    trajectory_cost,
+from openjiuwen.agent_evolving.trajectory import legacy_semconv
+from openjiuwen.agent_evolving.trajectory.schema import CASE_ID, TRAJECTORY_SOURCE
+from openjiuwen.agent_evolving.trajectory.types import (
+    TrajectoryLike,
     trajectory_execution_id,
-    trajectory_meta,
+    trajectory_resource_attributes,
     trajectory_session_id,
-    trajectory_source,
-    trajectory_steps,
 )
+from openjiuwen.agent_evolving.trajectory.spans import (
+    decode_json_attribute,
+    iter_spans,
+    read_llm_exchange,
+    read_rl_fields,
+    read_usage,
+    span_attributes,
+)
+from openjiuwen.agent_evolving.trajectory.team import span_category
+from openjiuwen.extensions.observability import semconv
 
 from .llm_response import extract_logprobs, extract_prompt_ids, extract_token_ids
 
@@ -51,58 +58,6 @@ def _json_value(value: Any) -> Any:
     return str(value)
 
 
-def _message_to_dict(message: Any) -> dict[str, Any]:
-    if isinstance(message, dict):
-        return _json_value(message)
-    dumped = _model_dump(message)
-    if dumped is not None:
-        return _json_value(dumped)
-    if getattr(message, "role", None) is not None:
-        out = {
-            "role": str(getattr(message, "role", "unknown")),
-            "content": _json_value(getattr(message, "content", "")),
-        }
-        name = getattr(message, "name", None)
-        if name is not None:
-            out["name"] = str(name)
-        metadata = getattr(message, "metadata", None)
-        if metadata:
-            out["metadata"] = _json_value(metadata)
-        tool_calls = getattr(message, "tool_calls", None)
-        if tool_calls:
-            out["tool_calls"] = _json_value(tool_calls)
-        return out
-    return {"role": "unknown", "content": str(message)}
-
-
-def _response_to_dict(response: Any) -> dict[str, Any]:
-    if response is None:
-        return {}
-    if isinstance(response, dict):
-        return _json_value(response)
-    dumped = _model_dump(response)
-    if dumped is not None:
-        return _json_value(dumped)
-
-    out: dict[str, Any] = {
-        "role": getattr(response, "role", "assistant"),
-        "content": getattr(response, "content", ""),
-    }
-    tool_calls = getattr(response, "tool_calls", None)
-    if tool_calls is not None:
-        out["tool_calls"] = _json_value(tool_calls)
-    usage = getattr(response, "usage_metadata", None) or getattr(response, "usage", None)
-    if usage is not None:
-        out["usage"] = _json_value(usage)
-    finish_reason = getattr(response, "finish_reason", None)
-    if finish_reason is not None:
-        out["finish_reason"] = finish_reason
-    reasoning_content = getattr(response, "reasoning_content", None)
-    if reasoning_content is not None:
-        out["reasoning_content"] = reasoning_content
-    return out
-
-
 def _extract_text(value: Any) -> str:
     if value is None:
         return ""
@@ -121,28 +76,37 @@ def _extract_text(value: Any) -> str:
     return str(value)
 
 
-def _coerce_logprobs(value: Any) -> Optional[list[float]]:
-    if value is None:
+def _span_meta(span: dict[str, Any], attrs: dict[str, Any]) -> dict[str, Any]:
+    """Build detached per-span metadata for the rail-v1 sample."""
+
+    meta = {str(key): _json_value(value) for key, value in attrs.items()}
+    legacy_meta = decode_json_attribute(attrs.get(legacy_semconv.LEGACY_STEP_META))
+    if isinstance(legacy_meta, dict):
+        meta.update({str(key): _json_value(value) for key, value in legacy_meta.items()})
+    for key in ("span_name", "span_id", "parent_span_id", "trace_id"):
+        source_key = {
+            "span_name": "name",
+            "span_id": "spanId",
+            "parent_span_id": "parentSpanId",
+            "trace_id": "traceId",
+        }[key]
+        if span.get(source_key) is not None:
+            meta.setdefault(key, _json_value(span[source_key]))
+    return meta
+
+
+def _trajectory_cost(trajectory: TrajectoryLike) -> Optional[dict[str, int]]:
+    input_tokens = 0
+    output_tokens = 0
+    for span in iter_spans(trajectory):
+        if span_category(span) != "llm":
+            continue
+        usage = read_usage(span)
+        input_tokens += usage.get("prompt_tokens", 0)
+        output_tokens += usage.get("completion_tokens", 0)
+    if input_tokens <= 0 and output_tokens <= 0:
         return None
-    if isinstance(value, list):
-        out: list[float] = []
-        for item in value:
-            try:
-                out.append(float(item))
-            except (TypeError, ValueError):
-                continue
-        return out or None
-    content = value.get("content") if isinstance(value, dict) else getattr(value, "content", None)
-    if isinstance(content, list):
-        out = []
-        for item in content:
-            try:
-                logprob = item.get("logprob") if isinstance(item, dict) else getattr(item, "logprob")
-                out.append(float(logprob))
-            except (AttributeError, TypeError, ValueError):
-                continue
-        return out or None
-    return None
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens}
 
 
 def _fingerprint_payload(messages: list[dict[str, Any]], tools: Any) -> dict[str, Any]:
@@ -218,7 +182,7 @@ class OnlineTrajectoryConverter:
 
     def convert(
         self,
-        trajectory: Trajectory,
+        trajectory: TrajectoryLike,
         *,
         tenant_id: Optional[str] = None,
         session_done: Optional[bool] = None,
@@ -228,48 +192,51 @@ class OnlineTrajectoryConverter:
         samples: list[PerTurnSample] = []
         model_id = self.model_id or ""
 
-        for step_index, step in enumerate(trajectory_steps(trajectory)):
-            if step.kind != "llm" or not isinstance(step.detail, LLMCallDetail):
-                continue
-            detail = step.detail
-            model_id = model_id or detail.model or ""
-            messages = [_message_to_dict(message) for message in (detail.messages or [])]
-            response = _response_to_dict(detail.response)
+        for step_index, span in enumerate(span for span in iter_spans(trajectory) if span_category(span) == "llm"):
+            attrs = span_attributes(span)
+            prompt_messages, completion_messages = read_llm_exchange(span)
+            model = str(attrs.get(semconv.GEN_AI_REQUEST_MODEL) or span.get("name") or "")
+            tools = decode_json_attribute(attrs.get(semconv.GEN_AI_TOOL_DEFINITIONS))
+            response_message = completion_messages[-1] if completion_messages else None
+            response = _json_value(response_message) if response_message is not None else {}
+            model_id = model_id or model
             response_text = _extract_text(response.get("content"))
             if not response_text.strip() and not response:
                 continue
 
-            detail_meta = dict(getattr(detail, "meta", {}) or {})
-            provider_response_json = detail_meta.get("provider_response_json")
-            token_source = provider_response_json or detail.response
-            # Prefer top-level step fields populated during trajectory
-            # collection; fall back to ``provider_response_json`` (vLLM raw
-            # payload) or any token data still on ``detail.response``.
-            response_tokens = step.completion_token_ids or extract_token_ids(token_source)
+            detail_meta = _span_meta(span, attrs)
+            provider_response_json = decode_json_attribute(detail_meta.get("provider_response_json"))
+            token_source = provider_response_json or response_message
+            rl_fields = read_rl_fields(span)
+            # Prefer immutable RL attributes captured on the canonical span;
+            # fall back to provider metadata when a service exposes raw data.
+            response_tokens = rl_fields.get("completion_token_ids") or extract_token_ids(token_source)
             prompt_ids = (
-                step.prompt_token_ids
-                or step.meta.get("prompt_ids")
+                rl_fields.get("prompt_token_ids")
+                or extract_prompt_ids({"prompt_ids": detail_meta.get("prompt_ids")})
                 or extract_prompt_ids(token_source)
             )
-            logprobs = _coerce_logprobs(step.logprobs) or extract_logprobs(token_source)
+            logprobs = rl_fields.get("logprobs") or extract_logprobs(token_source)
+            messages = [_json_value(message) for message in prompt_messages]
             sample = PerTurnSample(
                 trajectory_id=trajectory_id,
                 step_index=step_index,
                 session_id=session_id,
-                model_id=detail.model or model_id or "",
+                model_id=model or model_id or "",
                 messages=messages,
                 response=response,
                 response_text=response_text,
                 response_tokens=response_tokens,
                 logprobs=logprobs,
                 prompt_ids=prompt_ids,
-                render_fingerprint=step.meta.get("render_fingerprint") or _fingerprint_payload(messages, detail.tools),
-                tools=_json_value(detail.tools),
-                meta={**detail_meta, **dict(step.meta or {})},
+                render_fingerprint=decode_json_attribute(detail_meta.get("render_fingerprint"))
+                or _fingerprint_payload(messages, tools),
+                tools=_json_value(tools),
+                meta=detail_meta,
             )
             samples.append(sample)
 
-        trajectory_attrs = trajectory_meta(trajectory)
+        trajectory_attrs = trajectory_resource_attributes(trajectory)
         status = str((trajectory_attrs or {}).get("status") or "ok")
         meta = TrajectoryMeta(
             trajectory_id=trajectory_id,
@@ -278,9 +245,13 @@ class OnlineTrajectoryConverter:
             total_turns=len(samples),
             extra={
                 **dict(trajectory_attrs or {}),
-                "source": trajectory_source(trajectory),
-                "case_id": trajectory_case_id(trajectory),
-                "cost": trajectory_cost(trajectory),
+                "source": str(
+                    (trajectory_attrs or {}).get(TRAJECTORY_SOURCE)
+                    or (trajectory_attrs or {}).get("source")
+                    or "offline"
+                ),
+                "case_id": trajectory_attrs.get(CASE_ID) if trajectory_attrs else None,
+                "cost": _trajectory_cost(trajectory),
             },
         )
         return RailV1Batch(
@@ -296,13 +267,14 @@ class OnlineTrajectoryConverter:
         )
 
     @staticmethod
-    def extract_prev_feedback(trajectory: Trajectory) -> Optional[dict[str, Any]]:
+    def extract_prev_feedback(trajectory: TrajectoryLike) -> Optional[dict[str, Any]]:
         """Use the first user message in the new batch as previous-turn feedback."""
-        for step in trajectory_steps(trajectory):
-            if step.kind != "llm" or not isinstance(step.detail, LLMCallDetail):
+        for span in iter_spans(trajectory):
+            if span_category(span) != "llm":
                 continue
-            for message in step.detail.messages or []:
-                msg = _message_to_dict(message)
+            prompt_messages, _ = read_llm_exchange(span)
+            for message in prompt_messages:
+                msg = message
                 if msg.get("role") != "user":
                     continue
                 raw_user_text = _extract_text(msg.get("content")).strip()

@@ -30,6 +30,8 @@ clean boundary:
   the one before it as to the one after it.
 - A ``for="controller"`` attribute marks content surfaced to a human
   agent's controller (HITT), which the avatar must stay silent about.
+- ``from="controller"`` is its counterpart on the way in: the controller
+  itself instructing its avatar. Only a human agent ever sees it.
 
 These are pure structural functions: callers pass the dynamic data plus
 already-localized text fragments (resolved via ``i18n.t``) and get back an
@@ -47,6 +49,11 @@ import html
 # Stable contract tokens for the <team-inbound> ``type`` attribute.
 INBOUND_TYPE_DIRECT = "direct"
 INBOUND_TYPE_BROADCAST = "broadcast"
+
+# Stable ``from`` value for a human agent's own controller. Not a member
+# name: the controller has no roster entry and no agent process, so the
+# avatar can never address it through ``send_message``.
+CONTROLLER_SENDER = "controller"
 
 # Event kinds whose every occurrence is a *complete* snapshot of one piece of
 # state, so the newest occurrence alone says everything the earlier ones said.
@@ -139,6 +146,34 @@ def render_inbound(
     if for_controller:
         attrs.append('for="controller"')
     return _render_block("team-inbound", attrs, content, _render_note(note_kind, note_text))
+
+
+def render_controller_input(*, content: str) -> str:
+    """Render one controller instruction as ``<team-inbound from="controller">``.
+
+    A human agent's harness input carries two things that look identical
+    once they are plain text: its controller instructing it, and the team
+    delivering someone else's message. Without a marker the avatar reads
+    its controller's words as the ordinary "user" turn every harness gets,
+    and answers them the way a teammate answers ``user`` — by messaging
+    ``user``, a different real person on the leader's side. The tag makes
+    the source an attribute rather than a guess.
+
+    No ``message_id`` and no ``time``: a controller instruction is not a
+    bus message (nothing to reference or mark read) and it is consumed the
+    moment it arrives.
+
+    Args:
+        content: The controller's instruction, rendered verbatim (escaped).
+
+    Returns:
+        The rendered ``<team-inbound>`` block.
+    """
+    attrs = [
+        f'from="{CONTROLLER_SENDER}"',
+        f'type="{INBOUND_TYPE_DIRECT}"',
+    ]
+    return _render_block("team-inbound", attrs, content)
 
 
 def render_event(
@@ -252,10 +287,12 @@ def drop_superseded_snapshots(parts: list[str]) -> list[str]:
 
 
 __all__ = [
+    "CONTROLLER_SENDER",
     "INBOUND_TYPE_BROADCAST",
     "INBOUND_TYPE_DIRECT",
     "SNAPSHOT_EVENT_KINDS",
     "drop_superseded_snapshots",
+    "render_controller_input",
     "render_event",
     "render_inbound",
     "render_team_context",

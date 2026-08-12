@@ -155,6 +155,10 @@ leader 全板巡视 nudge 关闭（见 §4）。
   时写 spec 值，供观测/外部工具读），运行时真相始终是 spec。
 - **build_team 的运行时开关**只剩 `enable_hitt` 与 `enable_task_verification`（提示词驱动
   的"验证预期"开关，沿 `enable_hitt` 的 ceiling/override 范式，效果值随行记录）。
+  后者随 [[F_76]] 收成 **dispatch 门控属性**——只在 `dispatch_mode == "scheduled"` 时向模型
+  暴露，autonomous 下连同描述那节一起消失。范式仍是 ceiling/override，但与 `enable_hitt`
+  有一处关键差别：撞天花板时它**静默收窄**而不 `raise_error`，所以 scheduled 下 build_team
+  的返回结果必须回带实际生效值。
 
 ### 3. 评审投票：票据落 DB（追加写），判定在调度器
 

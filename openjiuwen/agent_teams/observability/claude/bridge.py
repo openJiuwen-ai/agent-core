@@ -12,8 +12,8 @@ from typing import Any, ContextManager
 from opentelemetry import context as otel_context
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode, set_span_in_context
 
-from openjiuwen.agent_teams.observability.redaction import redact_completion, redact_prompt
-from openjiuwen.agent_teams.observability.semconv import (
+from openjiuwen.extensions.observability.redaction import redact_completion, redact_prompt
+from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_AGENT_INPUT,
     AT_AGENT_NAME,
@@ -315,7 +315,7 @@ class ClaudeSpanBridge:
         if turn_span is None or not turn_span.is_recording():
             return nullcontext()
         try:
-            from openjiuwen.agent_teams.observability.span_context import (
+            from openjiuwen.extensions.observability.span_context import (
                 get_current_agent_span,
                 set_current_agent_span,
             )

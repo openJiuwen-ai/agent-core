@@ -27,7 +27,7 @@ from openjiuwen.core.session import get_current_session
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
+from openjiuwen.core.sys_operation.cwd import get_agent_history_root, get_cwd
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -1052,7 +1052,7 @@ class WriteFileTool(Tool):
         return "utf-16-le" if raw[:2] == b"\xff\xfe" else "utf-8"
 
     def _build_history_path(self, session: Any) -> str:
-        base_dir = get_workspace() or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        base_dir = get_agent_history_root()
         agent_id = (
             session.agent_id() if hasattr(session, "agent_id")
             else session.get_agent_id() if hasattr(session, "get_agent_id")
@@ -1404,7 +1404,7 @@ class EditFileTool(Tool):
         return content[index:index + len(old_str)]
 
     def _build_history_path(self, session: Any) -> str:
-        base_dir = get_workspace() or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        base_dir = get_agent_history_root()
         agent_id = (
             session.agent_id() if hasattr(session, "agent_id")
             else session.get_agent_id() if hasattr(session, "get_agent_id")

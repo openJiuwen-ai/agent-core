@@ -211,6 +211,11 @@ class CoordinationKernel:
                     query=host.state.pending_user_query or "",
                 )
 
+        # Re-baseline the leader's member activity view before reporting
+        # READY: that first status update is what can produce this cycle's
+        # team-idle edge, so it must be evaluated against the roster the
+        # database actually holds. No-op for every other role.
+        await host.seed_member_registry()
         await host.update_status(MemberStatus.READY)
         # Re-base the idle clock before the poll timers come back. A member
         # that was already idle when the team paused keeps its idle stamp

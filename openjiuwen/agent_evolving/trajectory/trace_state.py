@@ -9,21 +9,23 @@ from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any
 
+from openjiuwen.agent_evolving.trajectory.legacy_semconv import (
+    LEGACY_GEN_AI_INPUT_MESSAGES,
+    LEGACY_GEN_AI_OUTPUT_MESSAGES,
+    LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS,
+    LEGACY_GEN_AI_TOOL_CALL_ID,
+    LEGACY_GEN_AI_TOOL_CALL_RESULT,
+    LEGACY_GEN_AI_USAGE_INPUT_TOKENS,
+    LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS,
+)
 from openjiuwen.agent_evolving.trajectory.semconv import (
-    GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
-    GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
     GEN_AI_SYSTEM_INSTRUCTIONS,
-    GEN_AI_TOOL_CALL_ARGUMENTS,
-    GEN_AI_TOOL_CALL_ID,
-    GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_DEFINITIONS,
     GEN_AI_TOOL_NAME,
-    GEN_AI_USAGE_INPUT_TOKENS,
-    GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_TOTAL_TOKENS,
     OJ_AGENT_INPUTS,
     OJ_AGENT_INVOKE_TYPE,
@@ -202,7 +204,7 @@ class TrajectoryTraceState:
             if invoke_type == InvokeType.LLM.value:
                 state.attributes[GEN_AI_REQUEST_MODEL] = name
                 state.attributes[GEN_AI_OPERATION_NAME] = "chat"
-                state.attributes[GEN_AI_INPUT_MESSAGES] = json_safe(
+                state.attributes[LEGACY_GEN_AI_INPUT_MESSAGES] = json_safe(
                     as_message_list(unwrap_io(inputs, "inputs"))
                 )
                 input_payload = json_safe(inputs)
@@ -231,7 +233,7 @@ class TrajectoryTraceState:
             elif invoke_type == InvokeType.PLUGIN.value:
                 state.attributes[GEN_AI_OPERATION_NAME] = "execute_tool"
                 state.attributes[GEN_AI_TOOL_NAME] = name
-                state.attributes[GEN_AI_TOOL_CALL_ARGUMENTS] = json_safe(
+                state.attributes[LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS] = json_safe(
                     unwrap_io(inputs, "inputs")
                 )
                 input_payload = json_safe(inputs)
@@ -249,7 +251,7 @@ class TrajectoryTraceState:
                             tool_call_id = input_payload[key]
                             break
                 if tool_call_id is not None:
-                    state.attributes[GEN_AI_TOOL_CALL_ID] = str(tool_call_id)
+                    state.attributes[LEGACY_GEN_AI_TOOL_CALL_ID] = str(tool_call_id)
 
     def record_agent_event(
         self,
@@ -286,7 +288,7 @@ class TrajectoryTraceState:
             state.attributes[OJ_AGENT_OUTPUTS] = json_safe(outputs)
             state.attributes[OJ_STATUS] = NodeStatus.FINISH.value
             if state.attributes.get(TRAJECTORY_INVOKE_TYPE) == InvokeType.LLM.value:
-                state.attributes[GEN_AI_OUTPUT_MESSAGES] = json_safe(
+                state.attributes[LEGACY_GEN_AI_OUTPUT_MESSAGES] = json_safe(
                     as_message_list(unwrap_io(outputs, "outputs"))
                 )
                 output_payload = json_safe(outputs)
@@ -326,9 +328,9 @@ class TrajectoryTraceState:
                     if total_tokens is None and input_tokens is not None and output_tokens is not None:
                         total_tokens = int(input_tokens or 0) + int(output_tokens or 0)
                     if input_tokens is not None:
-                        state.attributes[GEN_AI_USAGE_INPUT_TOKENS] = int(input_tokens or 0)
+                        state.attributes[LEGACY_GEN_AI_USAGE_INPUT_TOKENS] = int(input_tokens or 0)
                     if output_tokens is not None:
-                        state.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] = int(output_tokens or 0)
+                        state.attributes[LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS] = int(output_tokens or 0)
                     if total_tokens is not None:
                         state.attributes[GEN_AI_USAGE_TOTAL_TOKENS] = int(total_tokens or 0)
                 response_model = None
@@ -347,7 +349,7 @@ class TrajectoryTraceState:
                         finish_reasons = [finish_reasons]
                     state.attributes[GEN_AI_RESPONSE_FINISH_REASONS] = json_safe(finish_reasons)
             elif state.attributes.get(TRAJECTORY_INVOKE_TYPE) == InvokeType.PLUGIN.value:
-                state.attributes[GEN_AI_TOOL_CALL_RESULT] = json_safe(
+                state.attributes[LEGACY_GEN_AI_TOOL_CALL_RESULT] = json_safe(
                     unwrap_io(outputs, "outputs")
                 )
                 output_payload = json_safe(outputs)
@@ -364,8 +366,8 @@ class TrajectoryTraceState:
                         if output_payload.get(key) is not None:
                             tool_call_id = output_payload[key]
                             break
-                if tool_call_id is not None and GEN_AI_TOOL_CALL_ID not in state.attributes:
-                    state.attributes[GEN_AI_TOOL_CALL_ID] = str(tool_call_id)
+                if tool_call_id is not None and LEGACY_GEN_AI_TOOL_CALL_ID not in state.attributes:
+                    state.attributes[LEGACY_GEN_AI_TOOL_CALL_ID] = str(tool_call_id)
 
     def record_agent_error(self, *, span: TraceAgentSpan | None, error: Any) -> None:
         if span is None or not span.invoke_id:

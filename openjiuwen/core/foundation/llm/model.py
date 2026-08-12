@@ -7,6 +7,7 @@ from typing import Union, List, Optional, AsyncIterator, Type, Dict
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
 from openjiuwen.core.foundation.llm.model_clients import create_model_client
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -121,18 +122,23 @@ class Model:
         Returns:
             AssistantMessage
         """
-        return await self._client.invoke(
-            messages=messages,
-            stop=stop,
-            model=model,
-            tools=tools,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            output_parser=output_parser,
-            timeout=timeout,
-            **kwargs
-        )
+        # Identify this request for the whole callback chain (input event,
+        # the client's own LLM_OUTPUT trigger, output event, error event) so
+        # observers can attribute what they receive to this call and not to
+        # another one running concurrently. See ``call_scope``.
+        with LlmCallScope():
+            return await self._client.invoke(
+                messages=messages,
+                stop=stop,
+                model=model,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                output_parser=output_parser,
+                timeout=timeout,
+                **kwargs
+            )
 
     async def stream(
             self,
@@ -168,79 +174,85 @@ class Model:
         first_chunk_timeout = self._resolve_stream_timeout("stream_first_chunk_timeout")
         idle_timeout = self._resolve_stream_timeout("stream_idle_timeout")
 
-        stream_iterable = self._client.stream(
-            messages=messages,
-            stop=stop,
-            model=model,
-            tools=tools,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            output_parser=output_parser,
-            timeout=timeout,
-            **kwargs
-        )
-        stream_iterator = stream_iterable.__aiter__()
-        started_at = time.monotonic()
-        last_chunk_at = started_at
-        chunk_count = 0
-        effective_model_name = model or getattr(self.model_config, "model_name", None)
+        # The scope is opened here, in the frame that drives the stream, and
+        # not further down inside the callback handlers: every ``__anext__``
+        # below runs in its own ``asyncio.wait_for`` task, and such a task
+        # copies the context, so an id bound inside a chunk callback would be
+        # gone by the time the next chunk arrives. See ``call_scope``.
+        with LlmCallScope():
+            stream_iterable = self._client.stream(
+                messages=messages,
+                stop=stop,
+                model=model,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                output_parser=output_parser,
+                timeout=timeout,
+                **kwargs
+            )
+            stream_iterator = stream_iterable.__aiter__()
+            started_at = time.monotonic()
+            last_chunk_at = started_at
+            chunk_count = 0
+            effective_model_name = model or getattr(self.model_config, "model_name", None)
 
-        while True:
-            stage = "first_chunk" if chunk_count == 0 else "idle_chunk"
-            next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
+            while True:
+                stage = "first_chunk" if chunk_count == 0 else "idle_chunk"
+                next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
 
-            try:
-                if next_timeout is None:
-                    chunk = await stream_iterator.__anext__()
-                else:
-                    chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
-            except StopAsyncIteration:
-                break
-            except asyncio.TimeoutError as exc:
-                close = getattr(stream_iterator, "aclose", None) or getattr(stream_iterable, "aclose", None)
-                if callable(close):
-                    await close()
+                try:
+                    if next_timeout is None:
+                        chunk = await stream_iterator.__anext__()
+                    else:
+                        chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError as exc:
+                    close = getattr(stream_iterator, "aclose", None) or getattr(stream_iterable, "aclose", None)
+                    if callable(close):
+                        await close()
 
-                now = time.monotonic()
-                total_elapsed_seconds = now - started_at
-                wait_elapsed_seconds = now - (started_at if chunk_count == 0 else last_chunk_at)
-                timeout_seconds = next_timeout if next_timeout is not None else 0
-                model_provider = getattr(self.model_client_config, "client_provider", None)
-                elapsed_label = "first_chunk_elapsed" if chunk_count == 0 else "idle_elapsed"
-                error_detail = (
-                    f"stream frame timeout: stage={stage}, timeout={timeout_seconds}s, "
-                    f"chunk_count={chunk_count}, {elapsed_label}={wait_elapsed_seconds:.2f}s, "
-                    f"total_elapsed={total_elapsed_seconds:.2f}s, "
-                    f"model={effective_model_name or ''}"
-                )
-                from openjiuwen.core.runner.callback.events import LLMCallEvents
-                await trigger(
-                    LLMCallEvents.LLM_CALL_ERROR,
-                    model_name=effective_model_name,
-                    model_provider=model_provider,
-                    is_stream=True,
-                    error=exc)
-                llm_logger.error(
-                    "LLM stream timeout.",
-                    event_type=LogEventType.LLM_CALL_ERROR,
-                    model_name=effective_model_name,
-                    model_provider=model_provider,
-                    tools=tools,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    is_stream=True,
-                    exception=error_detail
-                )
-                raise build_error(
-                    StatusCode.MODEL_CALL_FAILED,
-                    error_msg=f"LLM stream timeout: {error_detail}"
-                ) from exc
+                    now = time.monotonic()
+                    total_elapsed_seconds = now - started_at
+                    wait_elapsed_seconds = now - (started_at if chunk_count == 0 else last_chunk_at)
+                    timeout_seconds = next_timeout if next_timeout is not None else 0
+                    model_provider = getattr(self.model_client_config, "client_provider", None)
+                    elapsed_label = "first_chunk_elapsed" if chunk_count == 0 else "idle_elapsed"
+                    error_detail = (
+                        f"stream frame timeout: stage={stage}, timeout={timeout_seconds}s, "
+                        f"chunk_count={chunk_count}, {elapsed_label}={wait_elapsed_seconds:.2f}s, "
+                        f"total_elapsed={total_elapsed_seconds:.2f}s, "
+                        f"model={effective_model_name or ''}"
+                    )
+                    from openjiuwen.core.runner.callback.events import LLMCallEvents
+                    await trigger(
+                        LLMCallEvents.LLM_CALL_ERROR,
+                        model_name=effective_model_name,
+                        model_provider=model_provider,
+                        is_stream=True,
+                        error=exc)
+                    llm_logger.error(
+                        "LLM stream timeout.",
+                        event_type=LogEventType.LLM_CALL_ERROR,
+                        model_name=effective_model_name,
+                        model_provider=model_provider,
+                        tools=tools,
+                        temperature=temperature,
+                        top_p=top_p,
+                        max_tokens=max_tokens,
+                        is_stream=True,
+                        exception=error_detail
+                    )
+                    raise build_error(
+                        StatusCode.MODEL_CALL_FAILED,
+                        error_msg=f"LLM stream timeout: {error_detail}"
+                    ) from exc
 
-            chunk_count += 1
-            last_chunk_at = time.monotonic()
-            yield chunk
+                chunk_count += 1
+                last_chunk_at = time.monotonic()
+                yield chunk
 
     async def release(
             self,

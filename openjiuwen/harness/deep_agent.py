@@ -158,6 +158,9 @@ _BRIDGE_EVENTS = frozenset(
         # Same reason: the inner agent is what admits consumed inputs into the
         # conversation, so it is what fires this.
         AgentCallbackEvent.ON_USER_MESSAGE,
+        # And it is what takes them off the steering queue, one model call
+        # before that.
+        AgentCallbackEvent.BEFORE_STEERING_DRAIN,
     }
 )
 
@@ -886,6 +889,7 @@ class DeepAgent(BaseAgent):
             )
 
         inner_card = AgentCard(
+            id=self.card.id,
             name=f"{self.card.name}_react",
             description=self.card.description or "",
         )
@@ -2960,6 +2964,14 @@ class DeepAgent(BaseAgent):
                     f"Interaction loop already bound to session {self._bound_session_id}; "
                     f"cannot bind {sid}."
                 )
+
+            # The controller starts its long-lived TaskScheduler inside
+            # prepare_interaction_task_loop().  Create the mutable worktree
+            # holder first so the scheduler, supervisor, rounds, and tool
+            # tasks all inherit the same object through their copied Context.
+            from openjiuwen.harness.tools.worktree.session import init_session_state
+
+            init_session_state()
 
             self._interaction_session = session
             await self.prepare_interaction_task_loop(session)

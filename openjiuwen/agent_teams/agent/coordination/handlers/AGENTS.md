@@ -61,7 +61,13 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
 `on_member_event` 先按角色分流：
 
 - **leader 分支**：把 6 类 `MEMBER_*` 渲染成一行 `team_logger.debug` —— **纯观测，不唤醒任何人**。
-  leader 跨进程催成员那条路已经在 F_53 删掉了。唯一的副作用在 `MEMBER_STATUS_CHANGED` 上：
+  leader 跨进程催成员那条路已经在 F_53 删掉了。观测同时喂一份给 leader 的活动登记
+  （`_observe_member_activity` → `self._lifecycle.observe_member_status`，F_74）：
+  `MEMBER_STATUS_CHANGED` 用 payload 里的 `new_status`，`MEMBER_SPAWNED` / `MEMBER_RESTARTED`
+  不带状态但含义各自固定（STARTING / RESTARTING），查 `_ACTIVITY_STATUS_BY_EVENT` 映射、
+  **不回查 DB**；`MEMBER_SHUTDOWN` 不参与——它之前必有一条到 `SHUTDOWN_REQUESTED` 的状态变更。
+  这条路只补"别人"的状态，leader 自己的跃迁走本地 `TeamAgent._update_status`（自发事件被
+  `_filter_self` 丢掉，事件流永远看不到自己）。唯一的副作用在 `MEMBER_STATUS_CHANGED` 上：
   `_maybe_clean_team_after_shutdown` 在**每个非 leader 成员都到达终态 SHUTDOWN** 后自动
   `clean_team`，`_team_clean_requested` 保证只做一次。存在理由——自然语言的"解散团队"常常
   只做到 `shutdown_member` 就停了，而 persistent 团队根本不给 leader 暴露 `clean_team` 工具。

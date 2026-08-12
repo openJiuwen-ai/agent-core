@@ -19,7 +19,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails import (
-    LLMRetryRail,
+    ModelAnomalyDetectionRail,
     SecurityRail,
     SkillUseRail,
     SubagentRail,
@@ -126,8 +126,17 @@ def _inject_general_purpose_subagent(
     mcps: Optional[List[McpServerConfig]],
     model: Model,
     skills: Optional[List[str]],
+    workspace: Optional[Workspace] = None,
+    sys_operation: Optional[SysOperation] = None,
 ) -> list[SubAgentConfig | DeepAgent]:
-    """Inject general-purpose subagent if requested and not already present."""
+    """Inject general-purpose subagent if requested and not already present.
+
+    ``workspace`` and ``sys_operation`` are the parent agent's resolved values;
+    the injected spec carries both so ``create_subagent`` keeps it inside the
+    parent's filesystem boundary instead of minting a fresh LOCAL
+    sys_operation for it (``create_subagent`` only adopts a spec's
+    sys_operation when its workspace is set as well).
+    """
     effective_subagents = list(subagents or [])
     if not add_general_purpose_agent:
         return effective_subagents
@@ -153,6 +162,8 @@ def _inject_general_purpose_subagent(
         model=model,
         skills=skills,
         rails=gp_rails,
+        workspace=workspace,
+        sys_operation=sys_operation,
         restrict_to_work_dir=False,
     ))
     return effective_subagents
@@ -213,7 +224,7 @@ def resolve_deep_agent_parts(
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
-    enable_llm_retry_rail: bool = True,
+    enable_model_anomaly_detection_rail: bool = True,
     enable_sys_operation: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
@@ -260,18 +271,6 @@ def resolve_deep_agent_parts(
         False if vision_tools_enabled else enable_read_image_multimodal
     )
 
-    effective_subagents = _inject_general_purpose_subagent(
-        subagents,
-        add_general_purpose_agent=add_general_purpose_agent,
-        resolved_language=resolved_language,
-        rails=rails,
-        system_prompt=system_prompt,
-        tools=tools,
-        mcps=mcps,
-        model=model,
-        skills=skills,
-    )
-
     if not workspace:
         workspace_obj = Workspace(root_path="./", language=resolved_language)
     elif isinstance(workspace, (str, PathLike)):
@@ -306,6 +305,24 @@ def resolve_deep_agent_parts(
             sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
     else:
         sys_operation_obj = sys_operation
+
+    # Injected after the workspace / sys_operation are resolved so the
+    # general-purpose sub-agent can carry them: a spec without both makes
+    # create_subagent fall back to a fresh LOCAL sys_operation, which leaves
+    # this agent's sandbox behind.
+    effective_subagents = _inject_general_purpose_subagent(
+        subagents,
+        add_general_purpose_agent=add_general_purpose_agent,
+        resolved_language=resolved_language,
+        rails=rails,
+        system_prompt=system_prompt,
+        tools=tools,
+        mcps=mcps,
+        model=model,
+        skills=skills,
+        workspace=workspace_obj,
+        sys_operation=sys_operation_obj,
+    )
 
     config = DeepAgentConfig(
         model=model,
@@ -382,7 +399,11 @@ def resolve_deep_agent_parts(
 
     default_rails = [
         (SecurityRail, enable_security_rail, lambda: SecurityRail()),
-        (LLMRetryRail, enable_llm_retry_rail, lambda: LLMRetryRail()),
+        (
+            ModelAnomalyDetectionRail,
+            enable_model_anomaly_detection_rail,
+            lambda: ModelAnomalyDetectionRail(),
+        ),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
         (SubagentRail, bool(effective_subagents),
@@ -468,7 +489,7 @@ def create_deep_agent(
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
-    enable_llm_retry_rail: bool = True,
+    enable_model_anomaly_detection_rail: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -521,7 +542,8 @@ def create_deep_agent(
         default_mode: Initial agent mode (``AgentMode.NORMAL`` or ``AgentMode.PLAN``).
         enable_security_rail: Enable the default SecurityRail that injects the
             safety prompt section. Explicitly supplied security rails are kept.
-        enable_llm_retry_rail: Enable default LLMRetryRail for stream frame timeout and repeated-output retries.
+        enable_model_anomaly_detection_rail: Enable default ModelAnomalyDetectionRail
+            for stream frame timeout, repeated-output retries, and tool-loop compaction.
         model_selection: Optional model selection config for TaskPlanningRail.
             Dict mapping Model instance to description string. When provided along with
             enable_task_planning, TaskPlanningRail will be configured with model selection,
@@ -561,7 +583,7 @@ def create_deep_agent(
         model_selection=model_selection,
         parallel_tool_calls=parallel_tool_calls,
         enable_security_rail=enable_security_rail,
-        enable_llm_retry_rail=enable_llm_retry_rail,
+        enable_model_anomaly_detection_rail=enable_model_anomaly_detection_rail,
         **config_kwargs,
     )
     agent = DeepAgent(parts.config.card)

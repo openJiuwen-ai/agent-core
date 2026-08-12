@@ -96,18 +96,23 @@ class TestPowerShellToolHistoryPath(unittest.TestCase):
         path = tool._build_history_path(session)
         assert "default" in path
 
-    def test_workspace_path_is_base_dir(self):
-        """Workspace ContextVar is used as the base directory."""
+    def test_jiuwenswarm_data_dir_is_base_dir(self):
+        """JIUWENSWARM_DATA_DIR is used as the base directory, not the project workspace."""
         session = self._make_session("s1")
         workspace = tempfile.mkdtemp()
+        data_dir = tempfile.mkdtemp()
         try:
             set_workspace(workspace)
+            os.environ["JIUWENSWARM_DATA_DIR"] = data_dir
             tool = PowerShellTool(MagicMock(), agent_id="a")
             path = tool._build_history_path(session)
-            assert path.startswith(workspace)
+            assert path.startswith(os.path.realpath(data_dir))
+            assert not path.startswith(os.path.realpath(workspace))
             assert ".agent_history" in path
         finally:
+            os.environ.pop("JIUWENSWARM_DATA_DIR", None)
             shutil.rmtree(workspace, ignore_errors=True)
+            shutil.rmtree(data_dir, ignore_errors=True)
 
     def test_filename_pattern(self):
         """Filename follows file_ops_{agent_id}_{session_id}.json pattern."""

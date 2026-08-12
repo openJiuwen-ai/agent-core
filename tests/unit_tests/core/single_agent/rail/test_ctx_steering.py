@@ -85,3 +85,47 @@ class TestCtxSteeringQueue:
         ctx.push_steering("b")
         ctx.push_steering("c")
         assert ctx.drain_steering() == ["b", "c"]
+
+
+def _ctx_with_queue(*messages: str) -> AgentCallbackContext:
+    """Create a context whose bound queue already holds ``messages``."""
+    ctx = _make_ctx()
+    ctx.bind_steering_queue(asyncio.Queue())
+    for message in messages:
+        ctx.push_steering(message)
+    return ctx
+
+
+def test_limit_takes_the_oldest_and_leaves_the_rest_queued() -> None:
+    """The surplus stays in the queue, in order, for the next drain."""
+    ctx = _ctx_with_queue("m1", "m2", "m3", "m4", "m5")
+
+    assert ctx.drain_steering(2) == ["m1", "m2"]
+    assert ctx.has_pending_steering()
+    assert ctx.drain_steering(2) == ["m3", "m4"]
+    assert ctx.drain_steering(2) == ["m5"]
+    assert not ctx.has_pending_steering()
+
+
+def test_limit_above_the_backlog_takes_what_there_is() -> None:
+    ctx = _ctx_with_queue("only")
+    assert ctx.drain_steering(5) == ["only"]
+
+
+def test_no_limit_still_takes_everything() -> None:
+    """The default is the behaviour of a loop with no policy on the matter."""
+    ctx = _ctx_with_queue("a", "b", "c")
+    assert ctx.drain_steering() == ["a", "b", "c"]
+    assert ctx.drain_steering(None) == []
+
+
+def test_a_non_empty_queue_always_yields_one() -> None:
+    """Consumption has to advance, or the loop would spin on an untouched backlog."""
+    ctx = _ctx_with_queue("a", "b")
+    assert ctx.drain_steering(0) == ["a"]
+    assert ctx.drain_steering(-3) == ["b"]
+
+
+def test_limit_on_an_empty_queue_returns_empty() -> None:
+    ctx = _ctx_with_queue()
+    assert ctx.drain_steering(2) == []

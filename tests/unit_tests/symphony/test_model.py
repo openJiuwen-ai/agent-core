@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 
 import openjiuwen.symphony as symphony
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.symphony.orchestration.model import invoke_json, model_identity, model_usage_context
 from openjiuwen.symphony.shared.identity import endpoint_sha256, sanitize_metadata
 
@@ -266,3 +268,18 @@ async def test_invoke_json_wraps_failures(model: _FakeModel, message: str) -> No
             user_content="payload",
             error_context="graph matching",
         )
+
+
+@pytest.mark.asyncio
+async def test_invoke_json_preserves_framework_model_failure() -> None:
+    error = build_error(StatusCode.MODEL_CALL_FAILED, error_msg="model unavailable")
+
+    with pytest.raises(BaseError) as exc_info:
+        await invoke_json(
+            _FakeModel(error=error),
+            system_prompt="system",
+            user_content="payload",
+            error_context="graph matching",
+        )
+
+    assert exc_info.value is error
