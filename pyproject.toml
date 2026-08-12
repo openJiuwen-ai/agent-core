@@ -132,11 +132,6 @@ default = true
 
 [tool.setuptools.packages.find]
 include = ["openjiuwen*"]
-# dev_tools is developer-only tooling (skill_evaluator, agentrl). It is not
-# imported by any runtime package and only adds weight to the wheel, which
-# pushed the built wheel past the private PyPI upload limit (413). Keep it
-# out of the published wheel; it remains available from source.
-exclude = ["openjiuwen.dev_tools*"]
 
 [tool.setuptools.package-data]
 openjiuwen = [
