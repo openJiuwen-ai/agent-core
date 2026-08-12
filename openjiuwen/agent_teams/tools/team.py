@@ -460,12 +460,7 @@ class TeamBackend:
         rendered on the leader side as a ``<team-event kind="checkpoint">``
         with an ``announcement-only`` note — no reply is prompted.
         """
-        from openjiuwen.agent_teams.context import get_session_id
-        from openjiuwen.agent_teams.schema.events import (
-            CheckpointCreatedEvent,
-            EventMessage,
-            TeamTopic,
-        )
+        from openjiuwen.agent_teams.schema.events import CheckpointCreatedEvent
 
         try:
             await self.messager.publish(
