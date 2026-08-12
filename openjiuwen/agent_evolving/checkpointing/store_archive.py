@@ -176,6 +176,7 @@ class StoreArchiveHelper:
         if log.version:
             return log.version
         return _DEFAULT_VERSION
+
     async def set_skill_md_version(self, skill_dir: Path, version: str) -> None:
         """Write or update ``version:`` in SKILL.md YAML front-matter."""
         skill_md_path = self._store.find_skill_md(skill_dir)

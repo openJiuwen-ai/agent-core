@@ -95,6 +95,8 @@ async def test_prepare_rebuild_context_archives_filters_without_clearing():
     assert result["archive_version"] == "v1.0.0"
     assert result["archive_pair"]["skill_archive"] == "SKILL.v1.0.0.md"
     assert all(item["content"] != "bad experience" for item in result["records"])
+    assert isinstance(result.get("entries_snapshot"), list)
+    assert len(result["entries_snapshot"]) == 2
     store.skill_exists.assert_called_once_with("skill-a", subject_kind="skill")
     store.load_full_evolution_log.assert_awaited_once_with("skill-a", subject_kind="skill")
     archive_service.archive_current_pair.assert_awaited_once_with("skill-a", subject_kind="skill")
@@ -346,3 +348,50 @@ async def test_resolve_current_version_writes_default_when_missing(tmp_path: Pat
     assert "version: v1.0.0" not in front
     assert "# Skill" in body
     assert StoreArchiveHelper.archive_version_key(version) == "v1.0.0"
+
+
+@pytest.mark.asyncio
+async def test_complete_rebuild_bumps_from_snapshot_when_live_cleared(tmp_path: Path):
+    """Agent clearing evolutions.json before finalize must not skip bump/changelog."""
+    root = tmp_path / "skills"
+    skill_dir = root / "skill-a"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: skill-a\nversion: 1.0.0\n---\n\n# Skill\n",
+        encoding="utf-8",
+    )
+    store = EvolutionStore(str(root))
+    record = _make_record("fix tip", source="execution_failure", section="Examples")
+    evo_log = await store.load_full_evolution_log("skill-a")
+    evo_log.entries = [record]
+    evo_log.version = "1.0.0"
+    await store.save_evolution_log("skill-a", evo_log, skill_dir=skill_dir)
+
+    rebuild_service = ExperienceRebuildService(
+        store=store,
+        classify_fn=lambda entries: [
+            ClassifiedChangelogEntry(id=entries[0].id, category="Fixed", summary="fix tip")
+        ],
+    )
+    context = await rebuild_service.prepare_rebuild_context(
+        {"kind": "skill", "name": "skill-a"},
+        min_score=0.5,
+    )
+    assert context is not None
+    assert context["entries_snapshot"]
+
+    # Simulate Agent incorrectly clearing live evolutions before complete_rebuild.
+    empty = await store.load_full_evolution_log("skill-a")
+    empty.entries = []
+    await store.save_evolution_log("skill-a", empty, skill_dir=skill_dir)
+
+    cleared = await rebuild_service.complete_rebuild(context)
+
+    assert cleared is True
+    content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    assert "version: 1.0.1" in content
+    log = json.loads((skill_dir / "evolutions.json").read_text(encoding="utf-8"))
+    assert log["entries"] == []
+    assert log["version"] == "1.0.1"
+    changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
+    assert "## [1.0.1]" in changelog
