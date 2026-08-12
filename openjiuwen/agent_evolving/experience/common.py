@@ -111,6 +111,27 @@ async def commit_pending_change(
     if not remaining_records:
         pending_by_id.pop(change_id, None)
 
+    if applied_count > 0 and not remaining_records:
+        refresh = getattr(store, "refresh_skill_summary", None)
+        if callable(refresh):
+            try:
+                await refresh(pending.skill_name, subject_kind=pending.subject_kind)
+            except TypeError:
+                try:
+                    await refresh(pending.skill_name)
+                except Exception as exc:
+                    logger.warning(
+                        "[ExperienceCommon] refresh_skill_summary failed for %s: %s",
+                        pending.skill_name,
+                        exc,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[ExperienceCommon] refresh_skill_summary failed for %s: %s",
+                    pending.skill_name,
+                    exc,
+                )
+
     return PendingCommitResult(
         applied_count=applied_count,
         pending_count=len(remaining_records),

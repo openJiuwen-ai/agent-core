@@ -430,6 +430,7 @@ class EvolutionStore:
                 version=evo_log.version,
                 updated_at=evo_log.updated_at,
                 entries=[record for record in evo_log.entries if record.change.target == target],
+                summary=evo_log.summary,
             )
         return evo_log
 
@@ -471,9 +472,53 @@ class EvolutionStore:
         *,
         skill_dir: Optional[Path] = None,
         subject_kind: Optional[str] = None,
+        refresh_summary: bool = True,
     ) -> None:
         """Persist one evolution log through the public store facade."""
-        await self._records.save_evolution_log(name, evo_log, skill_dir=skill_dir, subject_kind=subject_kind)
+        await self._records.save_evolution_log(
+            name,
+            evo_log,
+            skill_dir=skill_dir,
+            subject_kind=subject_kind,
+            refresh_summary=refresh_summary,
+        )
+
+    async def refresh_skill_summary(
+        self,
+        name: str,
+        *,
+        llm: Any = None,
+        model: Optional[str] = None,
+        language: str = "cn",
+        subject_kind: Optional[str] = None,
+    ) -> Optional[str]:
+        """Regenerate top-level evolutions.json summary (LLM, with heuristic fallback)."""
+        # Lazy import avoids evolution_store <-> optimizer package cycles.
+        from openjiuwen.agent_evolving.checkpointing.skill_summary import (
+            generate_skill_experiences_summary,
+        )
+
+        evo_log = await self.load_full_evolution_log(name, subject_kind=subject_kind)
+        summary = await generate_skill_experiences_summary(
+            skill_id=name,
+            entries=evo_log.entries,
+            llm=llm,
+            model=model,
+            language=language,
+        )
+        evo_log.summary = summary
+        await self.save_evolution_log(
+            name,
+            evo_log,
+            subject_kind=subject_kind,
+            refresh_summary=False,
+        )
+        logger.info(
+            "[EvolutionStore] refreshed skill summary for '%s' (chars=%d)",
+            name,
+            len(summary or ""),
+        )
+        return summary
 
     async def get_pending_records(
         self,

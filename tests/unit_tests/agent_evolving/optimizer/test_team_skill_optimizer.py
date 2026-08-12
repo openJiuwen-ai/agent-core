@@ -125,8 +125,13 @@ async def test_team_profile_limits_text_and_script_records() -> None:
   {"action":"append","target":"body","section":"Workflow","summary":"A","content":"A","merge_target":null},
   {"action":"append","target":"body","section":"Collaboration","summary":"B","content":"B","merge_target":null},
   {"action":"append","target":"body","section":"Constraints","summary":"C","content":"C","merge_target":null},
+  {"action":"append","target":"body","section":"Instructions","summary":"D","content":"D","merge_target":null},
+  {"action":"append","target":"body","section":"Examples","summary":"E","content":"E","merge_target":null},
+  {"action":"append","target":"body","section":"Troubleshooting","summary":"F","content":"F","merge_target":null},
   {"action":"append","target":"script","section":"Scripts","summary":"S1","content":"print(1)","script_filename":"a.py","script_language":"python","script_purpose":"demo"},
-  {"action":"append","target":"script","section":"Scripts","summary":"S2","content":"print(2)","script_filename":"b.py","script_language":"python","script_purpose":"demo"}
+  {"action":"append","target":"script","section":"Scripts","summary":"S2","content":"print(2)","script_filename":"b.py","script_language":"python","script_purpose":"demo"},
+  {"action":"append","target":"script","section":"Scripts","summary":"S3","content":"print(3)","script_filename":"c.py","script_language":"python","script_purpose":"demo"},
+  {"action":"append","target":"script","section":"Scripts","summary":"S4","content":"print(4)","script_filename":"d.py","script_language":"python","script_purpose":"demo"}
 ]
 """
         )
@@ -146,5 +151,5 @@ async def test_team_profile_limits_text_and_script_records() -> None:
 
     text_records = [record for record in records if record.change.target != EvolutionTarget.SCRIPT]
     script_records = [record for record in records if record.change.target == EvolutionTarget.SCRIPT]
-    assert [record.change.content for record in text_records] == ["A", "B"]
-    assert [record.change.content for record in script_records] == ["print(1)"]
+    assert [record.change.content for record in text_records] == ["A", "B", "C", "D", "E"]
+    assert [record.change.content for record in script_records] == ["print(1)", "print(2)", "print(3)"]

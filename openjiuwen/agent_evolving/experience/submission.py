@@ -212,6 +212,7 @@ def _build_record_from_evolve_item(item: dict[str, Any], *, source: str) -> Evol
         source=source,
         context=item["summary"],
         summary=item["summary"],
+        root_cause=item.get("root_cause"),
         change=EvolutionPatch(
             target=item["target"],
             section=item["section"],

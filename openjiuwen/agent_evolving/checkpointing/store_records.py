@@ -95,6 +95,7 @@ class StoreRecordsHelper:
         *,
         skill_dir: Optional[Path] = None,
         subject_kind: Optional[str] = None,
+        refresh_summary: bool = True,
     ) -> None:
         target_dir = skill_dir or self._store.resolve_skill_dir(name, create=True, subject_kind=subject_kind)
         if target_dir is None:
@@ -102,6 +103,8 @@ class StoreRecordsHelper:
 
         target_dir.mkdir(parents=True, exist_ok=True)
         evo_path = target_dir / _EVOLUTION_FILENAME
+        if refresh_summary:
+            evo_log.refresh_summary()
         expected = evo_log.to_dict()
         content = json.dumps(expected, ensure_ascii=False, indent=2)
         await self._write_file_text_atomic(evo_path, content)
