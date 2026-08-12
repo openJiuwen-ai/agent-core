@@ -64,6 +64,8 @@ class SessionSpawnExecutor(TaskExecutor):
         subagent_type = meta.get("subagent_type", "general-purpose")
         query = meta.get("task_description", "")
         browser_capabilities = meta.get("browser_capabilities")
+        model_name = str(meta.get("model_name") or "").strip()
+        model_tier = str(meta.get("model_tier") or "").strip().lower()
         affinity_enabled = kv_cache_hooks.affinity_enabled(self._deep_agent)
         parent_session_id = meta.get("parent_session_id") or session.get_session_id()
         if affinity_enabled:
@@ -81,14 +83,31 @@ class SessionSpawnExecutor(TaskExecutor):
         )
 
         try:
+            from openjiuwen.harness.tools.subagent.task_tool import resolve_task_tool_model
+
+            task_model = resolve_task_tool_model(
+                self._deep_agent,
+                model_name=model_name,
+                model_tier=model_tier,
+            )
+            # Omit model= when unset so create_subagent keeps its default path
+            # (and existing unit tests that assert exact kwargs stay valid).
+            create_kwargs = {}
+            if task_model is not None:
+                create_kwargs["model"] = task_model
             if subagent_type == "browser_agent":
                 subagent = self._deep_agent.create_subagent(
                     subagent_type,
                     cid,
                     browser_capabilities=list(browser_capabilities or []),
+                    **create_kwargs,
                 )
             else:
-                subagent = self._deep_agent.create_subagent(subagent_type, cid)
+                subagent = self._deep_agent.create_subagent(
+                    subagent_type,
+                    cid,
+                    **create_kwargs,
+                )
             subagent_inputs = {
                 "query": query,
                 "conversation_id": cid,

@@ -39,7 +39,7 @@ from openjiuwen.core.controller.schema.event import (
     TaskInteractionEvent,
 )
 from openjiuwen.core.controller.schema.task import TaskStatus
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
+from openjiuwen.core.foundation.llm import BaseMessage, Model, SystemMessage
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
@@ -1153,6 +1153,7 @@ class DeepAgent(BaseAgent):
         subagent_type: str,
         subsession_id: str,
         browser_capabilities: Optional[List[str]] = None,
+        model: Optional[Model] = None,
     ) -> "DeepAgent":
         """Create a subagent instance (shared by TaskTool and SessionSpawnExecutor).
 
@@ -1160,6 +1161,8 @@ class DeepAgent(BaseAgent):
             subagent_type: Type of subagent to create (e.g., "general-purpose").
             subsession_id: The session id for the subagent.
             browser_capabilities: Task-scoped browser capability categories.
+            model: Optional per-call model override. When set, takes priority over
+                ``spec.model`` and the parent ``deep_config.model``.
 
         Returns:
             Configured DeepAgent instance.
@@ -1197,7 +1200,7 @@ class DeepAgent(BaseAgent):
             )
 
         create_kwargs = {
-            "model": spec.model or self._deep_config.model,
+            "model": model or spec.model or self._deep_config.model,
             "card": spec.agent_card,
             "system_prompt": spec.system_prompt,
             "tools": spec.tools,

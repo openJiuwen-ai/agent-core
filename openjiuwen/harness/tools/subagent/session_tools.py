@@ -278,6 +278,8 @@ class SessionsSpawnTool(Tool):
         if isinstance(inputs, dict):
             subagent_type = inputs.get("subagent_type")
             task_description = inputs.get("task_description")
+            model_name = str(inputs.get("model_name") or "").strip()
+            model_tier = str(inputs.get("model_tier") or "").strip().lower()
         else:
             raise build_error(
                 StatusCode.TOOL_SESSION_TOOL_INVOKED,
@@ -317,6 +319,10 @@ class SessionsSpawnTool(Tool):
         }
         if browser_capabilities is not None:
             task_metadata["browser_capabilities"] = browser_capabilities
+        if model_name:
+            task_metadata["model_name"] = model_name
+        if model_tier:
+            task_metadata["model_tier"] = model_tier
 
         await tm.add_task(
             CoreTask(
