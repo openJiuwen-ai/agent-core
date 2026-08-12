@@ -3,8 +3,10 @@ Claim or complete a task (Teammate only).
 ## When to Use
 
 **Claim a task to start work:**
-- After finding a pending, unclaimed task via view_task, set status=claimed
-- Pick a task matching your domain expertise
+- After finding a **pending** task whose **assignee is you** (or still unassigned) via view_task, set status=claimed
+- If the Leader reserved the task for you at create time: `claim_task` on PENDING(assignee=you) **starts** it — it does **not** fail just because an assignee is already set
+- **Do not** claim tasks whose assignee is another member (rejected)
+- Prefer tasks assigned to you; for the unassigned pool, pick work matching your domain expertise
 - **You can hold only ONE in-progress (in_progress) task at a time**: if you already have a task in flight, finish it before claiming another — otherwise the claim is refused
 
 **Mark tasks as completed:**

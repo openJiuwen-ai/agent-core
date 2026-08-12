@@ -19,6 +19,7 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     TaskStatus,
 )
+from openjiuwen.agent_teams.schema.task import TaskGraphSpec
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
@@ -1174,18 +1175,37 @@ class TestViewTaskToolV2:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_invoke_claimable(self, agent_team, t, db):
-        """Test claimable action returns only pending tasks"""
-        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
-        await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
+    async def test_invoke_claimable(self, agent_team, t, db, sample_agent_card):
+        """Claimable returns only unassigned pending work or work assigned to the viewer."""
+        for member_name in ("viewer", "other-member"):
+            await db.member.create_member(
+                member_name=member_name,
+                team_name="test_team",
+                display_name=member_name,
+                agent_card=sample_agent_card.model_dump_json(),
+                status=MemberStatus.READY.value,
+            )
+        created = await agent_team.task_manager.add_graph(
+            [
+                TaskGraphSpec(task_id="open", title="Open", content="c"),
+                TaskGraphSpec(task_id="mine", title="Mine", content="c", assignee="viewer"),
+                TaskGraphSpec(task_id="theirs", title="Theirs", content="c", assignee="other-member"),
+            ]
+        )
+        assert created.ok, created.reason
 
-        tool = ViewTaskToolV2(agent_team.task_manager, t)
+        viewer = TeamTaskManager(
+            team_name=agent_team.team_name,
+            member_name="viewer",
+            db=agent_team.db,
+            messager=agent_team.messager,
+        )
+        tool = ViewTaskToolV2(viewer, t)
         result = await tool.invoke({"action": "claimable"})
 
         assert result.success is True
-        assert result.data["count"] == 1
-        assert result.data["tasks"][0]["task_id"] == "task1"
+        assert result.data["count"] == 2
+        assert {task["task_id"] for task in result.data["tasks"]} == {"open", "mine"}
 
 
 # ========== Task Execution Tools ==========
