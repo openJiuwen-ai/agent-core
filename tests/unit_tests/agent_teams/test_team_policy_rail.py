@@ -8,6 +8,7 @@ import pytest
 
 from openjiuwen.agent_teams.prompts import (
     TeamSectionName,
+    build_team_dispatch_section,
     build_team_extra_section,
     build_team_identity_section,
     build_team_lifecycle_section,
@@ -159,6 +160,64 @@ class TestTeamRoleSection:
         content = section.render("cn")
         assert "你的 member_name" not in content
 
+    @pytest.mark.level0
+    @pytest.mark.parametrize("language", ["cn", "en"])
+    def test_autonomous_dispatch_defines_taskless_debate_and_soft_convergence(self, language):
+        leader = build_team_dispatch_section(
+            role=TeamRole.LEADER,
+            dispatch_mode="autonomous",
+            language=language,
+        ).render(language)
+        teammate = build_team_dispatch_section(
+            role=TeamRole.TEAMMATE,
+            dispatch_mode="autonomous",
+            language=language,
+        ).render(language)
+
+        if language == "cn":
+            assert "思辨分支" in leader
+            assert "禁止 `view_task` / `create_task`" in leader
+            assert "直接 P2P" in leader
+            assert "覆盖完整名册" in leader
+            assert "提前收束" in leader
+            assert "一次必要的简短补充" in leader
+            assert "思辨协作（真正无任务时）" in teammate
+            assert "没有进行中、已指派待办或可认领的任务" in teammate
+            assert "直接 P2P" in teammate
+            assert "建议收束" in teammate
+            assert "一次必要的简短补充" in teammate
+        else:
+            assert "debate branch" in leader.lower()
+            assert "do not call `view_task` or `create_task`" in leader
+            assert "direct P2P" in leader
+            assert "covers the full roster" in leader
+            assert "early convergence" in leader
+            assert "one necessary concise supplement" in leader
+            assert "debate collaboration (only when truly taskless)" in teammate.lower()
+            assert "no in-progress, assigned pending, or claimable work" in teammate
+            assert "direct P2P" in teammate
+            assert "suggestion to converge" in teammate
+            assert "one necessary concise supplement" in teammate
+
+    @pytest.mark.level0
+    @pytest.mark.parametrize("language", ["cn", "en"])
+    def test_scheduled_dispatch_keeps_stable_task_only_contract(self, language):
+        leader = build_team_dispatch_section(
+            role=TeamRole.LEADER,
+            dispatch_mode="scheduled",
+            language=language,
+        ).render(language)
+        teammate = build_team_dispatch_section(
+            role=TeamRole.TEAMMATE,
+            dispatch_mode="scheduled",
+            language=language,
+        ).render(language)
+
+        content = leader + teammate
+        assert "思辨" not in content
+        assert "Debate" not in content
+        assert "P2P" not in content
+
 
 class TestTeamIdentitySection:
     @pytest.mark.level0
@@ -182,6 +241,7 @@ class TestTeamWorkflowSection:
         section = build_team_workflow_section(
             role=TeamRole.LEADER,
             team_mode="default",
+            dispatch_mode="autonomous",
             language="cn",
         )
         assert section is not None
@@ -189,6 +249,8 @@ class TestTeamWorkflowSection:
         assert section.priority == 13
         content = section.render("cn")
         assert "# 工作流程" in content
+        assert "思辨分支" in content
+        assert "不得执行后面的任务协作流程" in content
         assert "build_team" in content
 
     @pytest.mark.level0
@@ -212,6 +274,22 @@ class TestTeamWorkflowSection:
         assert section is not None
         content = section.render("cn")
         assert "混合团队模式" in content
+
+    @pytest.mark.level0
+    @pytest.mark.parametrize("team_mode", ["default", "predefined", "hybrid"])
+    @pytest.mark.parametrize("language", ["cn", "en"])
+    def test_scheduled_workflow_keeps_stable_task_contract(self, team_mode, language):
+        section = build_team_workflow_section(
+            role=TeamRole.LEADER,
+            team_mode=team_mode,
+            dispatch_mode="scheduled",
+            language=language,
+        )
+
+        assert section is not None
+        content = section.render(language)
+        assert "思辨分支" not in content
+        assert "Debate branch" not in content
 
     @pytest.mark.level0
     def test_teammate_returns_none(self):
@@ -993,6 +1071,57 @@ class TestTagNoticeInclusion:
         prompt = build_team_member_system_prompt(role=TeamRole.LEADER, member_name="l", language="cn")
         assert "team-inbound" in prompt
         assert "prompt-attachment" not in prompt
+
+    @pytest.mark.level1
+    @pytest.mark.parametrize("language", ["cn", "en"])
+    def test_final_prompt_keeps_debate_exclusive_to_autonomous(self, language):
+        autonomous_leader = build_team_member_system_prompt(
+            role=TeamRole.LEADER,
+            member_name="leader",
+            dispatch_mode="autonomous",
+            language=language,
+        )
+        autonomous_teammate = build_team_member_system_prompt(
+            role=TeamRole.TEAMMATE,
+            member_name="expert",
+            dispatch_mode="autonomous",
+            language=language,
+        )
+        scheduled_leader = build_team_member_system_prompt(
+            role=TeamRole.LEADER,
+            member_name="leader",
+            dispatch_mode="scheduled",
+            language=language,
+        )
+        scheduled_teammate = build_team_member_system_prompt(
+            role=TeamRole.TEAMMATE,
+            member_name="expert",
+            dispatch_mode="scheduled",
+            language=language,
+        )
+
+        if language == "cn":
+            assert "思辨分支" in autonomous_leader
+            assert "不得执行后面的任务协作流程" in autonomous_leader
+            assert "直接 P2P" in autonomous_leader
+            assert "思辨协作（真正无任务时）" in autonomous_teammate
+            assert "没有进行中、已指派待办或可认领的任务" in autonomous_teammate
+            assert "调度指派模式" in scheduled_leader
+            assert "调度指派模式" in scheduled_teammate
+            forbidden = ("思辨分支", "思辨协作", "P2P", "建议收束")
+        else:
+            assert "Debate branch" in autonomous_leader
+            assert "Do not execute the task-collaboration steps below" in autonomous_leader
+            assert "direct P2P" in autonomous_leader
+            assert "Debate Collaboration (Only When Truly Taskless)" in autonomous_teammate
+            assert "no in-progress, assigned pending, or claimable work" in autonomous_teammate
+            assert "Scheduled Assignment Mode" in scheduled_leader
+            assert "Scheduled Assignment Mode" in scheduled_teammate
+            forbidden = ("Debate branch", "Debate Collaboration", "P2P", "suggestion to converge")
+
+        for marker in forbidden:
+            assert marker not in scheduled_leader
+            assert marker not in scheduled_teammate
 
     @pytest.mark.asyncio
     @pytest.mark.level1

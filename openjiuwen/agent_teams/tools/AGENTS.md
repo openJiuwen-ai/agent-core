@@ -167,7 +167,7 @@ Worktree 工具（`enter_worktree`、`exit_worktree`）对非团队调用方位�
 |---|---|---|
 | 注册与否 | 权限集合减法 | `claim_task`（autonomous） vs `member_complete_task`（scheduled） |
 | 同名不同形态 | `all_tools` **构造期**查表选类 | `create_task` / `send_message` |
-| 同形态不同文案 | 不同 `desc_key` | `member_complete_task` |
+| 同形态不同文案 | 不同 `desc_key` | `member_complete_task`；`build_team` / `spawn_*` 的 autonomous 描述 |
 
 **形态选择只发生在 `create_team_tools` 构造 `all_tools` 的那一刻，永远不在 `invoke` 里。**
 每个工具实例仍满足「schema 扁平、`invoke` 直线、零 role/mode 分支」——分支被前移到装配器。
@@ -181,7 +181,16 @@ _CREATE_TASK_CLASS = {"autonomous": TaskCreateTool, "scheduled": ScheduledTaskCr
 _SEND_MESSAGE_CLASS = {("scheduled", "member"): ReportToLeaderTool, ...}   # (dispatch, leader|member)
 _MEMBER_COMPLETE_DESC_KEY = {"autonomous": "member_complete_task", "scheduled": "member_complete_task_scheduled"}
 _VERIFY_TASK_DESC_KEY = {"autonomous": "verify_task", "scheduled": "verify_task_scheduled"}   # 裁决语义按模式分离（F_62）
+_ENTRY_DESC_KEYS = {
+    "autonomous": {"build_team": "build_team_autonomous", "spawn_teammate": "spawn_teammate_autonomous", ...},
+    "scheduled": {"build_team": "build_team", "spawn_teammate": "spawn_teammate", ...},
+}
 ```
+
+入口工具的默认文件名沿用 stable 的 scheduled 描述；autonomous 另用
+`build_team_autonomous` / `spawn_*_autonomous`，避免思辨协议泄漏到 scheduled。
+`create_task` 的历史默认形态相反：`create_task` 本身是 autonomous，scheduled 使用
+`create_task_scheduled`。这个命名不对称是兼容既有 key，不表示装配语义不一致。
 
 `send_message` 的形态是 `(dispatch, role)` 二维：scheduled 下 leader 仍要广播 / 多播 /
 `_auto_start_members`，只有成员侧收敛成 `ReportToLeaderTool`。**这个 role 维度必须由类的选择
@@ -397,10 +406,10 @@ Locale 文件在 `locales/` —— 每种语言一个扁平 `STRINGS` dict（`cn
   里的运行时错误消息。
 - 把某个 `_desc` 从 `STRINGS` 迁到 `.md` 文件时，删掉 dict 条目并留一条注释。
 
-当前 `descs/` 已覆盖：`approve_plan`、`approve_tool`、`build_team`、`claim_task`、`clean_team`、`create_task`、
+当前 `descs/` 已覆盖：`approve_plan`、`approve_tool`、`build_team`、`build_team_autonomous`、`claim_task`、`clean_team`、`create_task`、
 `create_task_scheduled`、`list_members`、`member_complete_task`、`member_complete_task_scheduled`、`send_message`、
 `send_message_scheduled`、`verify_task`、`verify_task_scheduled`、`shutdown_member`、`spawn_bridge_agent`、`spawn_external_cli`、`spawn_human_agent`、
-`spawn_teammate`、`structured_output`、`swarmflow`、`update_task`、`view_task`、`workspace_meta`、`async_tasks_list`、
+`spawn_teammate` 及上述五个入口 / spawn 工具对应的 `*_autonomous` 描述、`structured_output`、`swarmflow`、`update_task`、`view_task`、`workspace_meta`、`async_tasks_list`、
 `async_task_output`、`async_task_cancel`。
 
 `descs/<lang>/fragments/` 已覆盖：`artifact_handoff_policy`（两个 `send_message` 形态共用；

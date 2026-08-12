@@ -88,6 +88,23 @@ _VERIFY_TASK_DESC_KEY: dict[str, str] = {
     "scheduled": "verify_task_scheduled",
 }
 
+_ENTRY_DESC_KEYS: dict[str, dict[str, str]] = {
+    "autonomous": {
+        "build_team": "build_team_autonomous",
+        "spawn_teammate": "spawn_teammate_autonomous",
+        "spawn_human_agent": "spawn_human_agent_autonomous",
+        "spawn_bridge_agent": "spawn_bridge_agent_autonomous",
+        "spawn_external_cli": "spawn_external_cli_autonomous",
+    },
+    "scheduled": {
+        "build_team": "build_team",
+        "spawn_teammate": "spawn_teammate",
+        "spawn_human_agent": "spawn_human_agent",
+        "spawn_bridge_agent": "spawn_bridge_agent",
+        "spawn_external_cli": "spawn_external_cli",
+    },
+}
+
 
 # ========== Tool Factory ==========
 
@@ -163,16 +180,34 @@ def create_team_tools(
     # still has a flat schema and a branch-free ``invoke``.
     create_task_cls = _CREATE_TASK_CLASS[dispatch_mode]
     send_message_cls = _SEND_MESSAGE_CLASS[(dispatch_mode, "leader" if role == "leader" else "member")]
+    entry_desc_keys = _ENTRY_DESC_KEYS[dispatch_mode]
 
     all_tools = {
         # Team management
-        "build_team": BuildTeamTool(agent_team, t),
+        "build_team": BuildTeamTool(agent_team, t, desc_key=entry_desc_keys["build_team"]),
         "clean_team": CleanTeamTool(agent_team, t),
         # Member management — one tool per role_type (flat schema, no role branching)
-        "spawn_teammate": SpawnTeammateTool(agent_team, t, model_config_allocator=model_config_allocator),
-        "spawn_human_agent": SpawnHumanAgentTool(agent_team, t),
-        "spawn_bridge_agent": SpawnBridgeAgentTool(agent_team, t),
-        "spawn_external_cli": SpawnExternalCliTool(agent_team, t),
+        "spawn_teammate": SpawnTeammateTool(
+            agent_team,
+            t,
+            model_config_allocator=model_config_allocator,
+            desc_key=entry_desc_keys["spawn_teammate"],
+        ),
+        "spawn_human_agent": SpawnHumanAgentTool(
+            agent_team,
+            t,
+            desc_key=entry_desc_keys["spawn_human_agent"],
+        ),
+        "spawn_bridge_agent": SpawnBridgeAgentTool(
+            agent_team,
+            t,
+            desc_key=entry_desc_keys["spawn_bridge_agent"],
+        ),
+        "spawn_external_cli": SpawnExternalCliTool(
+            agent_team,
+            t,
+            desc_key=entry_desc_keys["spawn_external_cli"],
+        ),
         "shutdown_member": ShutdownMemberTool(agent_team, t),
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),

@@ -1,4 +1,5 @@
 Create team tasks (Leader only).
+**Call only on the task-collaboration branch. Whether to create tasks depends on the form of the final result the user expects, not whether the process is complex, needs fact-finding, or can be decomposed.**
 **Tasks should focus on deliverable outcomes and acceptance criteria, not execution steps.**
 
 {{create_task_edge_semantics}}

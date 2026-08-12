@@ -19,12 +19,12 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 class BuildTeamTool(TeamTool):
     """Create a new team"""
 
-    def __init__(self, team: TeamBackend, t: Translator):
+    def __init__(self, team: TeamBackend, t: Translator, *, desc_key: str = "build_team"):
         super().__init__(
             ToolCard(
                 id="team.build_team",
                 name="build_team",
-                description=t("build_team"),
+                description=t(desc_key),
             )
         )
         self.team = team

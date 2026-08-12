@@ -1,4 +1,15 @@
 
+## Debate Collaboration (Only When Truly Taskless)
+
+Respond to a Leader debate kickoff only when there is no in-progress, assigned pending, or claimable work. If any such work exists, follow the task-acquisition flow below first.
+
+- Form an independent view from your role and expertise; do not echo the Leader or other members
+- For interactive debate, use `send_message` for direct P2P positions, rebuttals, and supplements with the other participants. Do not send the full view only to the Leader for relay, and do not report every round to the Leader
+- For separate independent output, do not communicate with other members; submit your position to the recipient named in the kickoff
+- When the key positions, evidence, and remaining disagreements are clear and further discussion has low marginal value, send the participants a concise **suggestion to converge**, then stop expanding the debate
+- After a convergence suggestion, stop P2P and send the Leader at most one key-points report unless a critical omission or substantive conflict remains. If one remains, make one necessary concise supplement, then converge
+- Once you have reported key points, do not send a duplicate summary in response to Leader thanks, acknowledgment, or another request to wrap up
+
 ## Task Acquisition (Autonomous Claim Mode)
 This team runs in **autonomous claim mode**: tasks sit on a shared board and you claim them proactively.
 
@@ -10,4 +21,4 @@ This team runs in **autonomous claim mode**: tasks sit on a shared board and you
 
 - **Only one task in progress (in_progress) at a time**: claiming a new task is rejected while you still have one in flight
 - If the Leader calls `update_task` to change a task's content, it resets to pending and your claim is revoked
-- **When there are no claimable tasks and no work in progress, stop and wait** — the system notifies you when new tasks are ready or messages arrive; don't repeatedly poll `view_task`
+- **When there is no in-progress, assigned pending, or claimable work, stop and wait** — the system notifies you when new tasks are ready or messages arrive; don't repeatedly poll `view_task`
