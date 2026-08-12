@@ -11,20 +11,22 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.session_memory_manager import (
+    group_completed_api_rounds as group_completed_api_round_ranges,
+)
 from openjiuwen.core.context_engine.processor.forked.compressor.reinjection import (
     ReinjectContext,
-    StateReinjector as FullCompactStateReinjector,
     build_file_reinjected_content,
     build_plan_mode_reinjected_content,
     build_plan_reinjected_content,
-    build_skill_reinjected_content,
     build_single_reinjected_state_message,
+    build_skill_reinjected_content,
     build_task_status_reinjected_content,
     build_todo_reinjected_content,
     build_tool_result_hint_reinjected_content,
 )
-from openjiuwen.core.context_engine.context.session_memory_manager import (
-    group_completed_api_rounds as group_completed_api_round_ranges,
+from openjiuwen.core.context_engine.processor.forked.compressor.reinjection import (
+    StateReinjector as FullCompactStateReinjector,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage, UserMessage
 
@@ -37,6 +39,9 @@ INTERNAL_USER_PREFIXES = (
     "<memory_block_current>",
     "<memory_block_dialogue>",
     "<memory_block_round>",
+    # SESSION_MEMORY_BLOCK_OPEN from session_memory_compressor.py (inlined to
+    # avoid an import cycle: that module imports from this one).
+    "<memory_block_session>",
     "<recovered_context>",
     "[STATE_REINJECTION]",
 )
