@@ -723,13 +723,17 @@ class TestOnTeammateCreatedFork:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_fork_source_mismatch_notifies_leader(self):
-        """A checkpoint owned by a member other than fork_source is surfaced."""
+    async def test_fork_source_mismatch_notifies_leader_and_falls_back_to_full(self):
+        """A checkpoint owned by a member other than fork_source is surfaced and
+        the fork falls back to full context (the foreign index is not applied)."""
         agent = self._make_agent(
             {"fork": "code-ready", "since": None, "source": None, "compact": False},
             checkpoints={"code-ready": {"count": 2, "description": "", "created_by": "counter-1"}},
         )
-        await self._run(agent)
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        # ckpt_idx cleared on mismatch → full context, NOT truncated to foreign count 2.
+        assert len(fork_from.messages) == self._MESSAGE_COUNT
         agent._configurator.message_manager.send_message.assert_awaited_once()
         content = agent._configurator.message_manager.send_message.await_args.kwargs["content"]
         assert "code-ready" in content

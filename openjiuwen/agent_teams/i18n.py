@@ -57,6 +57,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "已回退为全量继承（成员 {member}）。可用 checkpoint：{available}。"
             "请用 list_checkpoints 核对名字后再 fork。"
         ),
+        "checkpoint.fork_source_mismatch": (
+            "（创建者 '{creator}' 与 fork_source '{source}' 不匹配）"
+        ),
         # agent/coordination/handlers/checkpoint.py — leader announcement body/note
         "checkpoint.created_body": (
             "成员 {member} 创建了 checkpoint '{name}'（消息位置 {count}）{description}"
@@ -323,6 +326,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "fork_source{detail}; fell back to full-context inheritance "
             "(member {member}). Available checkpoints: {available}. "
             "Use list_checkpoints to verify names before forking."
+        ),
+        "checkpoint.fork_source_mismatch": (
+            " (creator '{creator}' does not match fork_source '{source}')"
         ),
         # agent/coordination/handlers/checkpoint.py — leader announcement body/note
         "checkpoint.created_body": (

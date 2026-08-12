@@ -1171,11 +1171,17 @@ class TeamAgent(BaseAgent):
                                     "member and may not fit this source's context",
                                     fork_value, creator, source_name,
                                 )
+                                # The recorded count is only meaningful for its
+                                # creator's context. Falling back to full keeps the
+                                # behaviour consistent with the leader notification.
+                                ckpt_idx = None
+                                from openjiuwen.agent_teams.i18n import t
                                 await self._notify_fork_name_not_found(
                                     teammate_id, fork_value,
-                                    detail=(
-                                        f"（创建者 '{creator}' 与 fork_source "
-                                        f"'{source_name}' 不匹配）"
+                                    detail=t(
+                                        "checkpoint.fork_source_mismatch",
+                                        creator=creator,
+                                        source=source_name,
                                     ),
                                 )
 
@@ -1203,12 +1209,17 @@ class TeamAgent(BaseAgent):
                             else:
                                 fork_ctx.compact_split = len(fork_ctx.messages)
                         elif is_named and ckpt_idx is None:
-                            team_logger.warning(
-                                "[fork] checkpoint '%s' not found for "
-                                "member=%s; falling back to full context",
-                                fork_value, teammate_id,
-                            )
-                            await self._notify_fork_name_not_found(teammate_id, fork_value)
+                            if ckpt_record is None:
+                                # Genuinely unknown name: warn + notify. A
+                                # creator/fork_source mismatch also lands here
+                                # (ckpt_idx cleared above) but has already been
+                                # warned and notified with the detail.
+                                team_logger.warning(
+                                    "[fork] checkpoint '%s' not found for "
+                                    "member=%s; falling back to full context",
+                                    fork_value, teammate_id,
+                                )
+                                await self._notify_fork_name_not_found(teammate_id, fork_value)
                         elif is_named:
                             fork_ctx = ForkContext.from_agent(
                                 native, checkpoint=ckpt_idx,
