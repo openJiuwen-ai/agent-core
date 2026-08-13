@@ -325,6 +325,7 @@ async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
         external_cli_agents=[
             {
                 "cli_agent": "codex",
+                "cli_path": "/opt/codex-cli",
                 "codex_bin": "/opt/codex",
                 "codex_turn_idle_timeout_s": 45.0,
                 "codex_turn_idle_retries": 2,
@@ -349,6 +350,7 @@ async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
 
     assert build_kwargs["member_agent_id"] == "ext_team_codex-1"
     assert build_kwargs["resume_external_backend"] is True
+    assert build_kwargs["cli_path"] == "/opt/codex-cli"
     assert build_kwargs["codex_bin"] == "/opt/codex"
     assert build_kwargs["codex_turn_idle_timeout_s"] == 45.0
     assert build_kwargs["codex_turn_idle_retries"] == 2
@@ -389,7 +391,7 @@ async def test_external_cli_spawn_resolves_worktree_cwd_and_add_dirs(monkeypatch
         teammate_mode=MemberMode.BUILD_MODE,
         workspace={"enabled": True, "root_path": team_workspace},
         build_context=BuildContext(project_dir=project_dir),
-        external_cli_agents=[{"cli_agent": "claude"}],
+        external_cli_agents=[{"cli_agent": "claude", "cli_path": "/opt/claude"}],
     )
     team_spec = TeamSpec(team_name="ext_team", display_name="Ext")
     ctx = TeamRuntimeContext(
@@ -410,6 +412,7 @@ async def test_external_cli_spawn_resolves_worktree_cwd_and_add_dirs(monkeypatch
     await handle.force_kill()
 
     assert build_kwargs["cwd"] == worktree_path
+    assert build_kwargs["cli_path"] == "/opt/claude"
     assert build_kwargs["add_dirs"] == (project_dir, team_workspace)
 
 
