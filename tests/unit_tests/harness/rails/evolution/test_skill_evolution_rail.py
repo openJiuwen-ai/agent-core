@@ -424,7 +424,7 @@ def test_review_trigger_constructor_prefers_new_name(tmp_path):
     assert rail.fuzzy_review is False
 
 
-def test_auto_save_defaults_false_and_setter_still_updates(tmp_path):
+def test_auto_save_defaults_true_and_setter_still_updates(tmp_path):
     rail = SkillEvolutionRail(
         skills_dir=str(tmp_path),
         llm=Mock(),
@@ -432,13 +432,13 @@ def test_auto_save_defaults_false_and_setter_still_updates(tmp_path):
         review_runtime=_default_review_runtime(),
     )
 
-    assert rail.auto_save is False
-
-    rail.auto_save = True
     assert rail.auto_save is True
 
     rail.auto_save = False
     assert rail.auto_save is False
+
+    rail.auto_save = True
+    assert rail.auto_save is True
 
 
 def test_auto_save_setter_updates_only_local_state(tmp_path):

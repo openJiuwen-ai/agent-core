@@ -156,7 +156,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         trajectory_source: Optional[TrajectorySource] = None,
         trajectory_sink: Optional[TrajectorySink] = None,
         member_role: Optional[str] = None,
-        auto_save: bool = False,
+        auto_save: bool = True,
         review_runtime: EvolutionReviewRuntime,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,

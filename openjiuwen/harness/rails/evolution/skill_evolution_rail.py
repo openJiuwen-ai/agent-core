@@ -165,7 +165,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         *,
         llm: Model,
         model: str,
-        auto_save: bool = False,
+        auto_save: bool = True,
         review_runtime: EvolutionReviewRuntime,
         language: str = "cn",
         subject_kind: str = "skill",
@@ -192,7 +192,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             skills_dir: Directory or list of directories containing skill definitions
             llm: LLM client for experience generation
             model: Model name for experience generation
-            auto_save: Whether to auto-save generated experiences
+            auto_save: Whether to auto-save generated experiences (default True)
             review_runtime: Externally-managed active-review runtime. Required. Shared instances enable
                 cross-rail review state and keep rail-local orchestration stateless.
             language: Language for experience generation ("cn" or "en")
