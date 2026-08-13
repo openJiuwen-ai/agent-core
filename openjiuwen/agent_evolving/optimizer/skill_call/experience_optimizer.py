@@ -389,7 +389,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         profile: str = "regular",
         *,
-        two_stage: bool = False,
+        two_stage: bool = True,
     ) -> None:
         super().__init__()
         if profile not in {"regular", "team"}:
