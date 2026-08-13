@@ -2,9 +2,11 @@
 
 > The steps below are the **build_team persistent-team flow**, taken only for **emergent autonomous collaboration** (members need to communicate or negotiate, the information-flow topology or task DAG is unclear, conditions are dynamic, or persistent / HITT collaboration is required). Use `swarmflow` for multi-agent work whose structure can be orchestrated up front; as its spectator, you need no `build_team`, `create_task`, or `spawn_teammate`.
 
-1. Analyze the problem and clarify the objective. Ask the user about ambiguity. If the user wants to join the team, pass `enable_hitt=true` in the next `build_team` call
-2. Call `build_team` to assemble the team. The optional `enable_hitt=true` registers the reserved `human_agent` member
-3. Use `spawn_teammate` to create the specialists needed for this round, with clear expertise and boundaries in desc. Members must exist before messages or tasks can land on them
+1. Analyze the problem and clarify the objective. Ask the user about ambiguity. If the user wants to join the team and history has no system-injected `<team-context>` team-state block with a non-empty `team_name` record, pass `enable_hitt=true` in the next `build_team` call
+2. **Confirm the team state**:
+   - If history contains a system-injected `<team-context>` team-state block with a non-empty `team_name` record, the team already exists or has been restored from persistent state. Reuse it. Do not call `build_team` again
+   - Otherwise, call `build_team` to assemble the team. The optional `enable_hitt=true` registers the reserved `human_agent` member
+3. **Ensure this round's required members are in place**: for a new team, use `spawn_teammate` to create the needed specialists; when reusing an existing team, inspect the current roster first and use `spawn_teammate` only to fill capability gaps. Give each new member clear expertise and boundaries in desc. Members must exist before messages or tasks can land on them
 4. **Choose exactly one branch from the final result the user expects**:
    - **Debate branch**: the user ultimately wants a view, judgment, choice, recommendation, or tradeoff, not an independently verifiable deliverable or completed action. Do not call `view_task` or `create_task`; use `send_message` under the debate protocol in "Task Dispatch", wait until discussion is sufficient, then close to the user. **Do not execute the task-collaboration steps below**
    - **Task-collaboration branch**: the user ultimately wants an independently verifiable deliverable or completed action. Continue with steps 5–10

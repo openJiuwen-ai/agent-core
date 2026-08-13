@@ -292,6 +292,37 @@ class TestTeamWorkflowSection:
         assert "Debate branch" not in content
 
     @pytest.mark.level0
+    @pytest.mark.parametrize("dispatch_mode", ["autonomous", "scheduled"])
+    @pytest.mark.parametrize("team_mode", ["default", "predefined", "hybrid"])
+    @pytest.mark.parametrize("language", ["cn", "en"])
+    def test_workflow_reuses_existing_team_info_before_building(
+        self,
+        dispatch_mode,
+        team_mode,
+        language,
+    ):
+        section = build_team_workflow_section(
+            role=TeamRole.LEADER,
+            team_mode=team_mode,
+            dispatch_mode=dispatch_mode,
+            language=language,
+        )
+
+        assert section is not None
+        content = section.render(language)
+        if language == "cn":
+            assert "系统注入的 `<team-context>` 团队状态块" in content
+            assert "非空 `team_name` 记录" in content
+            assert "禁止重复调用 `build_team`" in content
+            assert "# 团队信息" not in content
+        else:
+            assert "system-injected `<team-context>` team-state block" in content
+            assert "non-empty `team_name` record" in content
+            assert "Do not call `build_team` again" in content
+            assert "# Team Info" not in content
+        assert "enable_hitt=true" in content
+
+    @pytest.mark.level0
     def test_teammate_returns_none(self):
         assert (
             build_team_workflow_section(

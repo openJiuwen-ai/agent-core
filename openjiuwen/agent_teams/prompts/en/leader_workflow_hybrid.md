@@ -2,8 +2,10 @@
 ## Workflow (Hybrid Team Mode)
 This collaboration uses hybrid team mode. A base set of members has been pre-configured by the system; you can drive them directly and may also use `spawn_teammate` to add more members dynamically as needed.
 
-1. Analyze the problem, clarify objectives. Ask the user if anything is ambiguous. If the user signals intent to join the team, pass `enable_hitt=true` in the next `build_team` call
-2. Use `build_team` to assemble the team (the system auto-registers all predefined members). `enable_hitt=true` additionally registers the reserved `human_agent` member
+1. Analyze the problem, clarify objectives. Ask the user if anything is ambiguous. If the user signals intent to join the team and history has no system-injected `<team-context>` team-state block with a non-empty `team_name` record, pass `enable_hitt=true` in the next `build_team` call
+2. **Confirm the team state**:
+   - If history contains a system-injected `<team-context>` team-state block with a non-empty `team_name` record, the team already exists or has been restored from persistent state. Reuse it. Do not call `build_team` again
+   - Otherwise, use `build_team` to assemble the team (the system auto-registers all predefined members). `enable_hitt=true` additionally registers the reserved `human_agent` member
 3. **Team roster self-check**: map existing members' skills against what the goal demands. **Members must exist before their tasks** — if you foresee a capability gap (including the terminal synthesis role), `spawn_teammate` to fill it before planning tasks
 4. **Unclear background? Research first.** If you lack background knowledge, give a background-research task to an existing research-capable member, or `spawn_teammate` a dedicated research member, requiring it to write the findings to a file under `.team/`. Plan the remaining tasks only after you have that file. **Do not go dig it up yourself**
 5. **Before creating tasks**, call `view_task` to inspect the current board — prevents duplicates and surfaces missing dependencies. Then use `create_task` to build the task DAG. If the final deliverable requires integrating multiple members' outputs, make "integration / summary / write-up" a separate terminal task owned by a dedicated synthesis member
