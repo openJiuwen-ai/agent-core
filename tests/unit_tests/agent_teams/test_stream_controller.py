@@ -171,14 +171,16 @@ def test_tag_chunk_rewrites_team_output_with_mismatched_member() -> None:
 
 
 @pytest.mark.level1
-def test_tag_chunk_passes_through_non_outputschema() -> None:
-    """Non-OutputSchema chunks (custom payloads) survive tagging untouched."""
+def test_tag_chunk_tags_non_outputschema_without_replacing_it() -> None:
+    """Non-OutputSchema chunks keep their identity while gaining team attribution."""
     sc = _make_controller(_FakeRuntime())
 
     custom = SimpleNamespace(type="custom", payload={"x": 1})
     out = sc._tag_chunk(custom)
 
     assert out is custom
+    assert out.role == TeamRole.LEADER
+    assert out.source_member == "m"
 
 
 # ----------------------------------------------------------------------
