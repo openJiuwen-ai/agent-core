@@ -287,7 +287,7 @@ class SteeringDrainInputs:
 
     Fired before each model call that has steering waiting, and *only* then —
     an empty queue skips the event entirely. It asks the rails one question:
-    how much of the backlog does this model call absorb? Whatever a rail does
+    how much of the queue does this model call absorb? Whatever a rail does
     not let through stays queued in order, and the loop keeps running while the
     queue is non-empty, so the rest arrives at the following model calls.
 
@@ -304,7 +304,7 @@ class SteeringDrainInputs:
             left, so the value standing at the end is the one that applies.
             A non-empty queue always yields at least one message regardless:
             consumption has to make progress or the loop would spin on a
-            backlog it refuses to touch.
+            queue it refuses to touch.
     """
     pending: int = 0
     limit: int | None = None
@@ -545,13 +545,13 @@ class AgentCallbackContext:
 
     def drain_steering(
         self, limit: int | None = None,
-    ) -> List[str]:
+    ) -> List["SteeringInput"]:
         """Drain pending steering messages, oldest first.
 
         What is not taken stays queued in order, so the next drain resumes
         where this one stopped. A non-empty queue always yields at least one
         message: consumption has to make progress, or ``has_pending_steering``
-        would keep the loop going over a backlog nothing ever consumes.
+        would keep the loop going over a queue nothing ever consumes.
 
         Args:
             limit: The most this call may take. ``None`` (the default) takes
@@ -559,19 +559,26 @@ class AgentCallbackContext:
                 policy on the matter.
 
         Returns:
-            List of steering message strings,
-            empty if no queue bound or queue empty.
+            The queued inputs, oldest first; empty if no queue is bound.
+
+        The queue has two producers writing two shapes. Hosts push through
+        ``LoopQueues.push_steer`` and may attach a request id; rails call
+        :meth:`push_steering` above, which writes a bare string straight into
+        the queue. Both are coerced here, so a reader never has to test which
+        form it received.
         """
+        from openjiuwen.harness.task_loop.loop_queues import SteeringInput
+
         if self._steering_queue is None:
             return []
         take = None if limit is None else max(1, limit)
-        msgs: List[str] = []
+        msgs: List[SteeringInput] = []
         while not self._steering_queue.empty():
             if take is not None and len(msgs) >= take:
                 break
             try:
                 msgs.append(
-                    self._steering_queue.get_nowait()
+                    SteeringInput.coerce(self._steering_queue.get_nowait())
                 )
             except asyncio.QueueEmpty:
                 break

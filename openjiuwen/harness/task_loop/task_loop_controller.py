@@ -15,6 +15,7 @@ from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.task_loop.loop_queues import (
     LoopQueues,
+    SteeringInput,
 )
 
 
@@ -136,12 +137,19 @@ class TaskLoopController(Controller):
         if queues is not None:
             queues.push_follow_up(msg)
 
-    def enqueue_steer(self, msg: str) -> None:
+    def enqueue_steer(self, msg: "str | SteeringInput") -> None:
         """Push a steering message into the current round's steering queue.
 
         The inner ReAct loop drains this queue before each model call,
         allowing real-time guidance without interrupting the current round.
         Used when a user sends a message while a goal round is running.
+
+        Args:
+            msg: Steering text, or a :class:`SteeringInput` when the caller has
+                a request id to correlate the acknowledgement with. Passing bare
+                text is still valid -- a rail steering on its own has nothing to
+                correlate -- but it leaves the entry unidentifiable, which means
+                it can never appear in ``STEER_APPLIED``'s ``dropped`` list.
         """
         queues = self._get_interaction_queues()
         if queues is not None:

@@ -288,6 +288,37 @@ class TeamHarness:
             )
         return await self._native.send(content, immediate=immediate)
 
+    @property
+    def active_round(self) -> Any:
+        """Return the native's in-flight round, or None when no cycle is live."""
+        return self._native.active_round if self._is_cycle_active() else None
+
+    async def steer_round(
+        self,
+        content: str,
+        *,
+        steer_id: str | None = None,
+        expected_round_id: int | None = None,
+    ) -> bool:
+        """Inject text into the in-flight round; False when there is none.
+
+        Named apart from the CLI runtimes' ``steer`` deliberately. That one is
+        declared ``-> None`` and *buffers* when no turn is in flight, which is
+        the silent promotion this method exists to refuse: a buffered steer
+        becomes the next turn's input and the caller is told nothing. Reusing the
+        name would have made a CLI-backed leader satisfy the type and violate the
+        contract.
+
+        Returns False rather than raising when no run cycle is live, matching
+        ``abort`` and ``pause``: steering a team that is not running is a
+        harmless impossibility, not a programming error.
+        """
+        if not self._is_cycle_active():
+            return False
+        return await self._native.steer(
+            content, steer_id=steer_id, expected_round_id=expected_round_id
+        )
+
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the active round: graceful (False) or hard+rollback (True).
 

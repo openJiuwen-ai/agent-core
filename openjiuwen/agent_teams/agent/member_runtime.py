@@ -162,4 +162,61 @@ class MemberRuntime(Protocol):
         ...
 
 
-__all__ = ["MemberRuntime"]
+@runtime_checkable
+class SupportsRoundSteering(Protocol):
+    """A runtime that can inject text into one specific in-flight round.
+
+    Kept out of :class:`MemberRuntime` on purpose. That Protocol is what *every*
+    runtime must satisfy -- ``isinstance`` checks assert exactly that -- and
+    round-scoped steering is a capability only some have. Declaring it there made
+    ``ExternalCliRuntime`` stop conforming, which is the honest answer to the
+    wrong question: the CLI runtime is a perfectly good MemberRuntime that simply
+    cannot do this.
+
+    Ask with ``isinstance(runtime, SupportsRoundSteering)`` and report the
+    absence as its own outcome. A runtime that cannot steer a round is not the
+    same as a round that ended, and telling a user "your instruction arrived
+    late" when the truth is "this member can never take one" sends them looking
+    for a race that does not exist.
+
+    Method-only on purpose: a Protocol carrying a non-method member cannot be
+    used with ``issubclass``, and a class-level check is what a test can assert
+    without constructing a runtime. ``active_round`` is therefore not declared
+    here; callers that want a round id read it defensively, since it only names
+    the round a steer is aimed at.
+    """
+
+    async def steer_round(
+        self,
+        content: str,
+        *,
+        steer_id: str | None = None,
+        expected_round_id: int | None = None,
+    ) -> bool:
+        """Inject text into the in-flight round, or report there was none.
+
+        Distinct from ``send(content, immediate=True)`` in exactly one way, and
+        that way is the whole reason this exists: ``send`` starts a round when
+        idle, turning a correction aimed at a finished round into a turn nobody
+        asked for. This refuses instead.
+
+        Also distinct from the CLI runtimes' pre-existing ``steer``, which is
+        declared ``-> None`` and *buffers* when no turn is in flight -- the same
+        silent promotion, one layer down. The names differ so that a runtime
+        cannot satisfy this contract by accident.
+
+        Args:
+            content: Steering text.
+            steer_id: Correlation id surfaced in ``STEER_APPLIED``, so a client
+                can tell which of its steers a rail dropped.
+            expected_round_id: Refuse unless that specific round is running.
+                A live round is not the invariant a caller cares about -- *which*
+                round is.
+
+        Returns:
+            True when the text was queued against the intended live round.
+        """
+        ...
+
+
+__all__ = ["MemberRuntime", "SupportsRoundSteering"]

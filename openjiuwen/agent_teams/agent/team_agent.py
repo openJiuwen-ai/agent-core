@@ -518,10 +518,48 @@ class TeamAgent(BaseAgent):
                 exc,
             )
 
-    async def steer(self, content: str) -> None:
+    async def steer(
+        self,
+        content: str,
+        *,
+        steer_id: str | None = None,
+        expected_round_id: int | None = None,
+    ) -> bool:
+        """Inject text into this agent's running round.
+
+        Goes through the runtime's ``steer_round`` rather than
+        ``send(immediate=True)`` because ``send`` starts a round when idle, which
+        turns a correction for a finished round into a new one.
+
+        The capability is checked rather than assumed, and the reason is
+        concrete: the default runtime is a ``TeamHarness``, CLI members carry an
+        ``ExternalCliRuntime``, and only the former can scope an injection to a
+        round. Assuming the method is how this path came to raise
+        ``AttributeError`` for every real team while its tests -- which built the
+        runtime surface out of mocks -- stayed green.
+
+        Returns:
+            True when the text was queued against the intended live round.
+
+        Raises:
+            NotImplementedError: when this agent's runtime has no round-scoped
+                steering. A caller must distinguish that from "nothing was
+                running", because they mean different things to a user.
+        """
+        # Imported here rather than at module scope: member_runtime is only a
+        # TYPE_CHECKING import above, and this check needs the class at runtime.
+        from openjiuwen.agent_teams.agent.member_runtime import SupportsRoundSteering
+
         harness = self.harness
-        if harness is not None:
-            await harness.send(content, immediate=True)
+        if harness is None:
+            return False
+        if not isinstance(harness, SupportsRoundSteering):
+            raise NotImplementedError(
+                f"{type(harness).__name__} has no round-scoped steering"
+            )
+        return await harness.steer_round(
+            content, steer_id=steer_id, expected_round_id=expected_round_id
+        )
 
     async def resume_interrupt(self, user_input) -> None:
         if not self._stream_controller.is_valid_interrupt_resume(user_input):

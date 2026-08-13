@@ -444,6 +444,41 @@ class _TeamRunnerMixin:
                 session_id=session_id,
             )
 
+    async def steer_agent_team(
+        self,
+        content: str,
+        *,
+        team_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+        steer_id: Optional[str] = None,
+    ):
+        """Steer the leader's in-flight round on an active TeamAgent runtime.
+
+        Text-only, and separate from :meth:`interact_agent_team` on purpose:
+        interact starts a leader round when the team is idle, while steering
+        has to report that there was nothing to steer instead.
+
+        ``steer_id`` is the caller's request id. It rides through to
+        ``STEER_APPLIED`` so a client can tell which of its steers a rail
+        dropped; omit it and that event's ``dropped`` list is always empty.
+
+        Returns a ``DeliverResult``. Missing ``team_name`` or ``session_id``
+        returns ``DeliverResult.failure("missing_target")``; the runtime layer
+        adds ``not_active``, ``no_active_round``, ``gate_closed`` and
+        ``unsupported_runtime``.
+        """
+        from openjiuwen.agent_teams.interaction.payload import DeliverResult
+
+        if team_name is None or session_id is None:
+            return DeliverResult.failure("missing_target")
+        with self._bind_interact_team_session(session_id):
+            return await self._get_team_runtime_manager().steer_leader(
+                content,
+                team_name=team_name,
+                session_id=session_id,
+                steer_id=steer_id,
+            )
+
     async def register_human_agent_inbound(
         self,
         *,
@@ -994,6 +1029,23 @@ class _TeamRunnerClassMixin:
             payload,
             team_name=team_name,
             session_id=session_id,
+        )
+
+    @classmethod
+    async def steer_agent_team(
+        cls,
+        content: str,
+        *,
+        team_name: Optional[str] = None,
+        session_id: Optional[str] = None,
+        steer_id: Optional[str] = None,
+    ):
+        """Steer the leader's in-flight round on an active TeamAgent runtime."""
+        return await _global_runner().steer_agent_team(
+            content,
+            team_name=team_name,
+            session_id=session_id,
+            steer_id=steer_id,
         )
 
     @classmethod

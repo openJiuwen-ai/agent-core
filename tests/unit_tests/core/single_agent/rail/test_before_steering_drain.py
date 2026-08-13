@@ -115,7 +115,7 @@ async def test_rail_caps_the_batch_and_leaves_the_rest_queued() -> None:
 
     batch = await _agent()._drain_steering_batch(ctx)
 
-    assert batch == ["m1", "m2"]
+    assert [item.text for item in batch] == ["m1", "m2"]
     assert ctx.has_pending_steering()
     assert ctx.steering_queue.qsize() == 3
 
@@ -128,7 +128,10 @@ async def test_successive_calls_walk_the_backlog_in_order() -> None:
     ctx = _ctx("m1", "m2", "m3", "m4", "m5", rails=[rail])
     agent = _agent()
 
-    batches = [await agent._drain_steering_batch(ctx) for _ in range(3)]
+    batches = [
+        [item.text for item in await agent._drain_steering_batch(ctx)]
+        for _ in range(3)
+    ]
 
     assert batches == [["m1", "m2"], ["m3", "m4"], ["m5"]]
     assert not ctx.has_pending_steering()
@@ -154,7 +157,8 @@ async def test_rail_is_shown_the_current_queue_depth() -> None:
 async def test_no_rail_opinion_takes_the_whole_backlog() -> None:
     ctx = _ctx("m1", "m2", "m3", rails=[_InertRail()])
 
-    assert await _agent()._drain_steering_batch(ctx) == ["m1", "m2", "m3"]
+    batch = await _agent()._drain_steering_batch(ctx)
+    assert [item.text for item in batch] == ["m1", "m2", "m3"]
 
 
 @pytest.mark.asyncio

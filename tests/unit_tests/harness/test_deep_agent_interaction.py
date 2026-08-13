@@ -12,9 +12,13 @@ import pytest
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.task_loop.loop_queues import LoopQueues, SteeringInput
+from openjiuwen.harness.task_loop.task_loop_controller import TaskLoopController
 from openjiuwen.harness.schema.interaction import (
     ActiveInteractionRound,
     InputDispatchMode,
+    InputDisposition,
+    InteractionEventType,
     RoundWorkItem,
     SendInputRequest,
 )
@@ -239,3 +243,295 @@ async def test_cancel_active_round_does_not_block_on_slow_cancel_task() -> None:
     agent.abort.assert_awaited_once()
     assert elapsed < 1.0
     assert agent._interaction_round_task.cancelled() or agent._interaction_round_task.done()
+
+
+# ------------------------------------------------- explicit steer dispatch
+
+
+def _steer(
+    request_id: str = "steer-1",
+    *,
+    expected_round_id: str | None = None,
+) -> SendInputRequest:
+    return SendInputRequest(
+        request_id=request_id,
+        inputs={"query": "prefer the async client"},
+        mode=InputDispatchMode.STEER,
+        expected_round_id=expected_round_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_steer_with_active_round_is_queued_and_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    monkeypatch.setattr(agent, "_notify_work", MagicMock())
+
+    loop = MagicMock()
+    agent._loop_controller = loop
+    agent._active_interaction_round = ActiveInteractionRound(
+        work=RoundWorkItem.user(request_id="round-1", inputs={"query": "start"}),
+        task_id="task-1",
+    )
+
+    result = await agent.send_input(_steer())
+
+    assert result.accepted is True
+    assert result.disposition is InputDisposition.STEER_QUEUED
+    assert result.reason is None
+    # The id must ride along, not just the text. STEER_APPLIED builds ``dropped``
+    # from these ids, so queuing a bare string makes every dropped steer
+    # invisible -- reported as applied when a rail actually removed it.
+    loop.enqueue_steer.assert_called_once_with(
+        SteeringInput(text="prefer the async client", id="steer-1")
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_request_id_survives_the_whole_queue_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end through a real controller and queue, not a mock.
+
+    The mock above proves ``send_input`` passes an id to ``enqueue_steer``. It
+    cannot prove the id is still there when the ReAct loop drains it, because
+    every hop between them could drop it: ``enqueue_steer`` narrowed its
+    parameter to ``str`` for a while, and coercion happens in two different
+    drains. That gap is exactly how ``dropped`` came to be permanently empty
+    while ten unit tests passed -- they all built SteeringInput by hand and so
+    never crossed a single one of these hops.
+    """
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    monkeypatch.setattr(agent, "_notify_work", MagicMock())
+
+    queues = LoopQueues()
+    controller = TaskLoopController.__new__(TaskLoopController)
+    monkeypatch.setattr(
+        controller, "_get_interaction_queues", lambda: queues, raising=False
+    )
+    agent._loop_controller = controller
+    agent._active_interaction_round = ActiveInteractionRound(
+        work=RoundWorkItem.user(request_id="round-1", inputs={"query": "start"}),
+        task_id="task-1",
+    )
+
+    await agent.send_input(_steer("steer-real-path"))
+
+    drained = queues.drain_steering()
+    assert [item.text for item in drained] == ["prefer the async client"]
+    assert [item.id for item in drained] == ["steer-real-path"]
+
+
+@pytest.mark.asyncio
+async def test_steer_with_matching_expected_round_id_is_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    monkeypatch.setattr(agent, "_notify_work", MagicMock())
+    loop = MagicMock()
+    agent._loop_controller = loop
+    agent._active_interaction_round = ActiveInteractionRound(
+        work=RoundWorkItem.user(request_id="round-a", inputs={"query": "start"}),
+        task_id="task-1",
+    )
+
+    result = await agent.send_input(_steer(expected_round_id="round-a"))
+
+    assert result.accepted is True
+    assert result.disposition is InputDisposition.STEER_QUEUED
+    loop.enqueue_steer.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_steer_with_wrong_expected_round_id_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    monkeypatch.setattr(agent, "_notify_work", MagicMock())
+    loop = MagicMock()
+    agent._loop_controller = loop
+    agent._active_interaction_round = ActiveInteractionRound(
+        work=RoundWorkItem.user(request_id="round-a", inputs={"query": "start"}),
+        task_id="task-1",
+    )
+
+    result = await agent.send_input(_steer("steer-stale-round", expected_round_id="round-b"))
+
+    assert result.accepted is False
+    assert result.reason == "round_mismatch"
+    assert result.disposition is InputDisposition.REJECTED
+    loop.enqueue_steer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_idle_steer_is_rejected_instead_of_starting_a_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance criterion: no silent downgrade to a fresh turn.
+
+    Rejection requires *both* no active round and nothing keeping the
+    interaction open -- genuinely nothing to steer.  Before the dispatch result
+    existed this case fell into the fresh-turn path, so a stale steer started a
+    whole turn the user never asked for, indistinguishable from success at the
+    wire.
+    """
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    monkeypatch.setattr(agent, "_notify_work", MagicMock())
+    monkeypatch.setattr(
+        agent, "_should_keep_interaction_open_locked", MagicMock(return_value=False)
+    )
+
+    loop = MagicMock()
+    agent._loop_controller = loop
+    assert agent._active_interaction_round is None
+
+    result = await agent.send_input(_steer("steer-stale"))
+
+    assert result.accepted is False
+    assert result.reason == "no_active_round"
+    assert result.disposition is InputDisposition.REJECTED
+
+    # The load-bearing assertion: nothing was queued at all. A rejected steer
+    # must not become a follow-up, a fresh turn, or a steer on a later round.
+    assert agent._event_manager.next_work() is None
+    loop.enqueue_steer.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_steer_with_open_interaction_still_queues_as_follow_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for the Goal-supplement path.
+
+    While a Goal is ACTIVE the Web sends ordinary input as
+    ``input_mode="steer"`` (``useWebSocket.ts:1474``) so it lands as a
+    supplementary constraint on the running Goal rather than overwriting it.
+    Between attempts there is legitimately no active round, so an
+    unconditional rejection would silently drop the user's message.
+
+    It would also stall the Goal: ``_should_keep_interaction_open_locked`` is
+    what queues the next attempt, and returning before it skips that.
+    """
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    monkeypatch.setattr(agent, "_notify_work", MagicMock())
+    keep_open = MagicMock(return_value=True)
+    monkeypatch.setattr(agent, "_should_keep_interaction_open_locked", keep_open)
+
+    agent._loop_controller = MagicMock()
+    assert agent._active_interaction_round is None
+
+    result = await agent.send_input(_steer("steer-during-goal"))
+
+    assert result.accepted is True
+    assert result.disposition is InputDisposition.FOLLOW_UP_QUEUED
+
+    work = agent._event_manager.next_work()
+    assert work is not None
+    assert work.query == "prefer the async client"
+
+    # The side effect matters as much as the queued work: this is the call that
+    # schedules the Goal's next attempt.
+    keep_open.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_accepted_paths_report_their_own_disposition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every accepted path names what it did, not merely that it succeeded."""
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    monkeypatch.setattr(agent, "_notify_work", MagicMock())
+
+    fresh = await agent.send_input(
+        SendInputRequest(request_id="turn-1", inputs={"query": "hello"})
+    )
+    assert fresh.accepted is True
+    assert fresh.disposition is InputDisposition.TURN_QUEUED
+
+    interactive_input = InteractiveInput()
+    interactive_input.update("call_1", {"action": "allow_once"})
+    resumed = await agent.send_input(
+        SendInputRequest(request_id="resume-1", inputs={"query": interactive_input})
+    )
+    assert resumed.accepted is True
+    assert resumed.disposition is InputDisposition.RESUME_QUEUED
+
+
+@pytest.mark.asyncio
+async def test_undrained_steers_are_dropped_when_the_round_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A steer ACKed after the last model call must not reach the next round.
+
+    The session steering queue outlives one interaction round. Without a
+    teardown flush, ``steer_queued`` text sits until the following round's
+    first drain and is admitted under the wrong turn.
+    """
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    monkeypatch.setattr(agent, "_notify_work", MagicMock())
+
+    queues = LoopQueues()
+    controller = TaskLoopController.__new__(TaskLoopController)
+    monkeypatch.setattr(
+        controller, "_get_interaction_queues", lambda: queues, raising=False
+    )
+    agent._loop_controller = controller
+    agent._active_interaction_round = ActiveInteractionRound(
+        work=RoundWorkItem.user(request_id="round-1", inputs={"query": "start"}),
+        task_id="task-1",
+    )
+
+    await agent.send_input(_steer("steer-late"))
+    assert queues.steering.qsize() == 1
+
+    events: list = []
+    monkeypatch.setattr(
+        agent, "_emit_interaction_event", lambda event: events.append(event)
+    )
+
+    agent._drop_undrained_steering()
+
+    assert queues.steering.qsize() == 0
+    assert len(events) == 1
+    assert events[0].type is InteractionEventType.STEER_APPLIED
+    assert events[0].payload["applied"] == []
+    assert events[0].payload["dropped"] == ["steer-late"]
+
+
+@pytest.mark.asyncio
+async def test_steer_with_expected_round_id_and_no_active_round_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client-bound round id must not fall through to follow_up_queued.
+
+    ``chat.steer`` stamps ``expected_round_id``. When that round is already
+    gone, promoting the text into a Goal follow-up is a silent race win.
+    """
+    agent = DeepAgent(AgentCard(name="deep", description="test"))
+    agent._interaction_started = True
+    monkeypatch.setattr(agent, "_notify_work", MagicMock())
+    keep_open = MagicMock(return_value=True)
+    monkeypatch.setattr(agent, "_should_keep_interaction_open_locked", keep_open)
+    loop = MagicMock()
+    agent._loop_controller = loop
+    assert agent._active_interaction_round is None
+
+    result = await agent.send_input(
+        _steer("steer-stale-bound", expected_round_id="round-gone")
+    )
+
+    assert result.accepted is False
+    assert result.reason == "round_mismatch"
+    assert result.disposition is InputDisposition.REJECTED
+    loop.enqueue_steer.assert_not_called()
+    assert agent._event_manager.next_work() is None
+    keep_open.assert_not_called()
