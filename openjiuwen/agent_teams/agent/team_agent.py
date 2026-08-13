@@ -1247,6 +1247,13 @@ class TeamAgent(BaseAgent):
         ctx = await self._spawn_manager.build_context_from_db(teammate_id)
         if ctx is None:
             return
+        # Record who this member inherited its context from, so the target's
+        # identity block can carry a conversion notice (rendered by
+        # ``TeamContextTracker``). Only meaningful when fork inheritance
+        # actually delivered messages — an empty fork context (capture yielded
+        # nothing) means nothing was inherited, so no notice.
+        if fork_ctx is not None and not fork_ctx.is_empty():
+            ctx.fork_source = fork_info.get("source") or self._member_name()
         # No first-start message: a member's DB ``prompt`` is its private
         # system-prompt addendum (carried on ``ctx.member_prompt``), not a
         # startup instruction. Members come up subscribed-only and receive

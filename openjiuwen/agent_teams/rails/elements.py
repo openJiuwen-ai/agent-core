@@ -183,6 +183,10 @@ class TeamPolicyInput(ConstructionInput):
         default=2,
         description="Queued steering inputs a non-leader member takes per model call.",
     )
+    fork_source: str = param_field(
+        default="",
+        description="Fork source member name when this member inherited context (else '').",
+    )
 
 
 @harness_element(
@@ -214,6 +218,7 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         team_backend=get_team_backend(context),
         expose_human_agents_to_teammates=inp.expose_human_agents_to_teammates,
         steer_batch_size=inp.steer_batch_size,
+        fork_source=inp.fork_source or None,
         # Same signal the tool factory gates the ``swarmflow`` tool on, so the
         # prompt that describes the mechanism and the tool that runs it appear
         # and disappear together.

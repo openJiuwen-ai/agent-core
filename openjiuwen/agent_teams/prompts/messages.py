@@ -43,6 +43,15 @@ _LABELS: dict[str, dict[str, str]] = {
             "也不要把新 skill 创建到这里"
         ),
         "private_prompt_heading": "## 私有工作约定",
+        "identity_capability": (
+            "你是拥有身份转换能力的成员：可以继承其他成员的上下文并转换身份。"
+            "当前身份以本块及你收到的身份转换通知为准。"
+        ),
+        "identity_conversion": (
+            "你继承了成员 {source} 的上下文，你的身份现在是 {member_name}。"
+            "本对话中更早的「成员身份」块描述的是【此前】的身份，其中包含的私有工作约定与"
+            "私有工作区对你不再适用。"
+        ),
         "info_heading": "# 团队信息",
         "team_name_label": "team_name（团队唯一标识）",
         "display_name_label": "display_name（团队展示名）",
@@ -69,6 +78,18 @@ _LABELS: dict[str, dict[str, str]] = {
             "team shared workspace, not here, and new skills must not be created here either"
         ),
         "private_prompt_heading": "## Private Working Agreement",
+        "identity_capability": (
+            "You are a member with identity-conversion capability: you can "
+            "inherit another member's context and switch identity. Your current "
+            "identity is set by this block and any identity-conversion notice "
+            "you receive."
+        ),
+        "identity_conversion": (
+            "You inherited the context of member {source}. Your identity is now "
+            "{member_name}. An earlier identity block in this conversation "
+            "described a previous identity; its private working agreement and "
+            "private workspace no longer apply to you."
+        ),
         "info_heading": "# Team Info",
         "team_name_label": "team_name (unique identifier)",
         "display_name_label": "display_name (human-readable label)",
@@ -195,6 +216,7 @@ def build_identity_text(
     member_workspace_path: str | None = None,
     member_prompt: str | None = None,
     language: str = "cn",
+    fork_capable: bool = False,
 ) -> str | None:
     """Render the member's own identity body.
 
@@ -211,6 +233,14 @@ def build_identity_text(
     per-member and constant, exactly like the names, so it belongs in the same
     body rather than in a channel of its own.
 
+    Fork handling (``enable_fork=True`` teams only): when ``fork_capable`` is
+    set, a constant capability statement is prepended so the member knows its
+    identity may be re-assigned by a fork conversion notice. The conversion
+    notice itself is rendered by :func:`build_identity_conversion` and
+    delivered as a nested ``<identity-conversion>`` element by the tracker —
+    the fork source's context is inherited verbatim (KV prefix stays intact),
+    so that nested element is the only place the override can live.
+
     Args:
         member_name: Semantic member identifier.
         display_name: Human-readable label; blank drops that line.
@@ -219,6 +249,9 @@ def build_identity_text(
         member_prompt: The member's private working agreement; blank (a member
             spawned without one) drops that subsection.
         language: Body language ('cn' or 'en').
+        fork_capable: When True, prepend the constant identity-conversion
+            capability statement. Default False keeps the body byte-identical
+            to the pre-fork output.
 
     Returns:
         The rendered body, or ``None`` when no field is set.
@@ -229,7 +262,12 @@ def build_identity_text(
     if not any((member_name, label, workspace, private_prompt)):
         return None
     labels = labels_for(language)
-    lines = [labels["identity_heading"], ""]
+    lines: list[str] = []
+    if fork_capable:
+        lines.append(labels["identity_capability"])
+        lines.append("")
+    lines.append(labels["identity_heading"])
+    lines.append("")
     if member_name:
         lines.append(f"{labels['member_name_line']}: {member_name}")
     if label:
@@ -240,6 +278,35 @@ def build_identity_text(
     if private_prompt:
         lines.extend(["", labels["private_prompt_heading"], "", private_prompt])
     return "\n".join(lines) + "\n"
+
+
+def build_identity_conversion(
+    *,
+    source: str,
+    member_name: str | None,
+    language: str = "cn",
+) -> str:
+    """Render the fork conversion notice.
+
+    Declares the current identity and explicitly voids the private working
+    agreement / workspace recorded in an inherited, earlier identity block.
+    Delivered as the body of a nested ``<identity-conversion>`` element in the
+    member's own ``<team-context>`` (see
+    :func:`render_team_context_with_identity`).
+
+    Args:
+        source: The fork source member's name.
+        member_name: This member's (current) semantic identifier.
+        language: Body language ('cn' or 'en').
+
+    Returns:
+        The rendered conversion body.
+    """
+    labels = labels_for(language)
+    return labels["identity_conversion"].format(
+        source=source,
+        member_name=member_name or "?",
+    )
 
 
 def build_team_info_text(
@@ -354,6 +421,7 @@ def build_roster_delta_text(
 
 __all__ = [
     "RosterDelta",
+    "build_identity_conversion",
     "build_identity_text",
     "build_roster_delta_text",
     "build_roster_snapshot_text",

@@ -450,6 +450,14 @@ class TeamRuntimeContext(BaseModel):
     """TeamModelConfig assigned to this member by the allocator."""
     worktree_path: Optional[str] = None
     """Absolute cwd override for a teammate running in an isolated worktree."""
+    fork_source: Optional[str] = None
+    """The fork source member this member inherited its context from.
+
+    ``None`` for a normal spawn. Set by the leader's ``_on_teammate_created``
+    (defaulting to the leader's own name when ``fork_source`` was omitted) and
+    serialized with the spawn payload, so the target's ``TeamPolicyRail`` /
+    ``TeamContextTracker`` can render a conversion notice in its identity block.
+    """
     cli_agent: Optional[str] = None
     """When set, this teammate is driven by an external agent backend (e.g.
     ``"claude"`` SDK, ``"codex"`` SDK, or a named CLI adapter) instead

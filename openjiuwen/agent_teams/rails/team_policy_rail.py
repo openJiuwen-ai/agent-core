@@ -125,6 +125,7 @@ class TeamPolicyRail(DeepAgentRail):
         expose_human_agents_to_teammates: bool = False,
         swarmflow_enabled: bool = False,
         steer_batch_size: int = 2,
+        fork_source: str | None = None,
     ) -> None:
         super().__init__()
         self._language = language
@@ -166,6 +167,7 @@ class TeamPolicyRail(DeepAgentRail):
             team_workspace_path=team_workspace_path,
             expose_human_agents_to_teammates=expose_human_agents_to_teammates,
             language=language,
+            fork_source=fork_source,
         )
 
     def init(self, agent: Any) -> None:

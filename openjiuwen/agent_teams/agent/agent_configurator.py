@@ -569,6 +569,7 @@ class AgentConfigurator:
                     "team_workspace_path": team_workspace_path,
                     "expose_human_agents_to_teammates": spec.expose_human_agents_to_teammates,
                     "steer_batch_size": spec.steer_batch_size,
+                    "fork_source": ctx.fork_source or "",
                 },
             ),
         ]
