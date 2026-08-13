@@ -176,6 +176,44 @@ def test_shared_attribute_decoder_and_llm_exchange_are_detached() -> None:
     assert read_llm_exchange(span)[0][0]["content"] == "hello"
 
 
+def test_llm_exchange_reads_langfuse_indexed_messages_without_rewriting_span() -> None:
+    span = _span(
+        "llm-langfuse",
+        attrs={
+            f"{semconv.LANGFUSE_GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.LANGFUSE_GEN_AI_PROMPT}.0.content": "hello",
+            f"{semconv.LANGFUSE_GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.LANGFUSE_GEN_AI_COMPLETION}.0.content": "done",
+        },
+    )
+    original = deepcopy(span)
+
+    assert read_llm_exchange(span) == (
+        [{"role": "user", "content": "hello"}],
+        [{"role": "assistant", "content": "done"}],
+    )
+    assert span == original
+
+
+def test_llm_exchange_prefers_standard_fields_and_falls_back_independently() -> None:
+    span = _span(
+        "llm-mixed",
+        attrs={
+            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "standard prompt",
+            f"{semconv.LANGFUSE_GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.LANGFUSE_GEN_AI_PROMPT}.0.content": "langfuse prompt",
+            f"{semconv.LANGFUSE_GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.LANGFUSE_GEN_AI_COMPLETION}.0.content": "langfuse completion",
+        },
+    )
+
+    assert read_llm_exchange(span) == (
+        [{"role": "user", "content": "standard prompt"}],
+        [{"role": "assistant", "content": "langfuse completion"}],
+    )
+
+
 def test_llm_exchange_preserves_tool_call_without_completion_attributes() -> None:
     span = _span(
         "llm-tool-call",

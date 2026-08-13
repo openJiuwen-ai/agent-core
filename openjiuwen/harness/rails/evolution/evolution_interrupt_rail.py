@@ -154,7 +154,7 @@ class EvolutionInterruptRail(BaseInterruptRail):
                     session_id=self._session_id(ctx),
                 )
             except KeyError as exc:
-                raise ValueError("unknown or expired evolution_review_ref") from exc
+                raise ValueError("unknown evolution_review_ref") from exc
         await self._submission_service.prepare_simplify_submission(subject, list(args.get("actions") or []))
         return None
 
@@ -371,6 +371,12 @@ class EvolutionInterruptRail(BaseInterruptRail):
 
     @staticmethod
     def _session_id(ctx: AgentCallbackContext) -> str:
+        session = ctx.session
+        get_session_id = getattr(session, "get_session_id", None)
+        if callable(get_session_id):
+            session_id = get_session_id()
+            if session_id:
+                return str(session_id)
         return str(getattr(ctx.inputs, "conversation_id", "") or "")
 
     def _is_english(self) -> bool:
