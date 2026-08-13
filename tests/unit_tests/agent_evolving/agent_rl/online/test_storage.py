@@ -30,7 +30,7 @@ def _sample(sample_id: str, *, user_id: str = "online") -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_inmemory_trajectory_store_status_flow():
-    from openjiuwen.agent_evolving.agent_rl.storage.trajectory_store import InMemoryTrajectoryStore
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rl.store import InMemoryTrajectoryStore
 
     store = InMemoryTrajectoryStore()
     await store.save_sample(_sample("s1"))
@@ -52,7 +52,7 @@ async def test_inmemory_trajectory_store_status_flow():
 
 @pytest.mark.asyncio
 async def test_redis_trajectory_store_status_flow():
-    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rl.redis_store import RedisTrajectoryStore
 
     store = RedisTrajectoryStore(_FakeRedis())
     await store.save_sample(_sample("s1"))
@@ -73,8 +73,36 @@ async def test_redis_trajectory_store_status_flow():
 
 
 @pytest.mark.asyncio
+async def test_redis_sft_store_uses_processed_status_for_raw():
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.redis_store import RedisSFTStore
+
+    store = RedisSFTStore(_FakeRedis())
+    await store.save_raw({
+        "raw_id": "r1",
+        "user_id": "u1",
+        "session_id": "sess-1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }, user_id="u1")
+
+    raw = await store.fetch_raw_and_mark_processing("u1", 1)
+    assert raw[0]["_store_status"] == "processing"
+
+    stats = await store.stats()
+    assert stats["processing_raw"] == 1
+    assert stats["processed_raw"] == 0
+    assert stats["trained_samples"] == 0
+
+    await store.mark_raw_processed(["r1"])
+
+    stats = await store.stats()
+    assert stats["processing_raw"] == 0
+    assert stats["processed_raw"] == 1
+    assert stats["trained_samples"] == 0
+
+
+@pytest.mark.asyncio
 async def test_redis_trajectory_store_save_sample_replaces_old_status_index():
-    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rl.redis_store import RedisTrajectoryStore
 
     redis = _FakeRedis()
     store = RedisTrajectoryStore(redis)
@@ -90,7 +118,7 @@ async def test_redis_trajectory_store_save_sample_replaces_old_status_index():
 
 @pytest.mark.asyncio
 async def test_redis_trajectory_store_update_status_tolerates_missing_payload():
-    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rl.redis_store import RedisTrajectoryStore
 
     redis = _FakeRedis()
     store = RedisTrajectoryStore(redis)
@@ -108,7 +136,7 @@ async def test_redis_trajectory_store_update_status_tolerates_missing_payload():
 
 @pytest.mark.asyncio
 async def test_redis_trajectory_store_management_crud():
-    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rl.redis_store import RedisTrajectoryStore
 
     store = RedisTrajectoryStore(_FakeRedis())
     await store.save_sample({**_sample("s1", user_id="u1"), "task_id": "coding", "source": "api"})

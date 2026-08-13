@@ -404,7 +404,6 @@ def resolve_deep_agent_parts(
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):
             all_rails.append(make_rail())
-    all_rails = _append_env_online_training_rail(all_rails, trajectory_span_processor)
 
     return DeepAgentParts(
         config=config,

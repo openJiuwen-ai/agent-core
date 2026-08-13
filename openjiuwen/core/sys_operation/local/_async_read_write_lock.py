@@ -51,6 +51,37 @@ if AsyncReadWriteLock is not None and ReadWriteLock is not None:
         def evict_singleton(self) -> None:
             _ManagedReadWriteLock.evict_singleton(self.lock_file, self._lock)
 else:
+    class _ManagedReadWriteLock:  # type: ignore[no-redef]
+        """Sync compatibility adapter for filelock versions without ReadWriteLock."""
+
+        def __init__(
+            self,
+            lock_file: pathlib.Path,
+            *,
+            is_singleton: bool = True,
+            executor: ThreadPoolExecutor | None = None,
+        ) -> None:
+            del is_singleton, executor
+            self.lock_file = str(lock_file)
+            self._lock = FileLock(self.lock_file)
+
+        def acquire_read(self, *, timeout: float = -1, blocking: bool = True) -> object:
+            return self._lock.acquire(timeout=timeout, blocking=blocking)
+
+        def acquire_write(self, *, timeout: float = -1, blocking: bool = True) -> object:
+            return self._lock.acquire(timeout=timeout, blocking=blocking)
+
+        def release(self) -> None:
+            self._lock.release()
+
+        def close(self) -> None:
+            return None
+
+        @staticmethod
+        def evict_singleton(*_args: object) -> None:
+            return None
+
+
     class _ManagedAsyncReadWriteLock:  # type: ignore[no-redef]
         """Compatibility adapter for filelock versions without ReadWriteLock."""
 

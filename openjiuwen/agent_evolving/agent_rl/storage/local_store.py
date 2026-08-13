@@ -172,6 +172,12 @@ class LocalTrajectoryStore:
         return await self._state.transact(_users)
 
     async def fetch_and_mark_training(self, user_id: str, limit: int) -> list[dict[str, Any]]:
+        return await self._fetch_and_mark(user_id, limit, "training")
+
+    async def fetch_and_mark_processing(self, user_id: str, limit: int) -> list[dict[str, Any]]:
+        return await self._fetch_and_mark(user_id, limit, "processing")
+
+    async def _fetch_and_mark(self, user_id: str, limit: int, status: str) -> list[dict[str, Any]]:
         normalized_limit = max(1, int(limit))
 
         def _fetch(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -190,7 +196,7 @@ class LocalTrajectoryStore:
                 stored = state["samples"].get(sample_id)
                 if stored is None:
                     continue
-                stored["_store_status"] = "training"
+                stored["_store_status"] = status
                 stored["updated_at"] = _now_iso()
                 out.append(copy.deepcopy(stored))
             return out
@@ -200,6 +206,12 @@ class LocalTrajectoryStore:
     async def mark_trained(self, sample_ids: list[str]) -> None:
         await self._update_status(sample_ids, from_status="training", to_status="trained")
 
+    async def mark_processed(self, sample_ids: list[str]) -> None:
+        await self._update_status(sample_ids, from_status="processing", to_status="processed")
+
+    async def mark_processing_failed(self, sample_ids: list[str]) -> None:
+        await self._update_status(sample_ids, from_status="processing", to_status="failed")
+
     async def mark_failed(self, sample_ids: list[str]) -> None:
         await self._update_status(sample_ids, from_status="training", to_status="failed")
 
@@ -208,7 +220,7 @@ class LocalTrajectoryStore:
 
     async def stats(self) -> dict[str, int]:
         def _stats(state: dict[str, Any]) -> dict[str, int]:
-            counts = {"pending": 0, "training": 0, "trained": 0, "failed": 0}
+            counts = {"pending": 0, "processing": 0, "training": 0, "trained": 0, "processed": 0, "failed": 0}
             for sample in state["samples"].values():
                 status = str(sample.get("_store_status") or "pending")
                 if status in counts:
@@ -216,8 +228,10 @@ class LocalTrajectoryStore:
             return {
                 "total_samples": sum(counts.values()),
                 "pending_samples": counts["pending"],
+                "processing_samples": counts["processing"],
                 "training_samples": counts["training"],
                 "trained_samples": counts["trained"],
+                "processed_samples": counts["processed"],
                 "failed_samples": counts["failed"],
             }
 
@@ -262,8 +276,8 @@ class LocalTrajectoryStore:
                 return None
             old_status = str(sample.get("_store_status") or "pending")
             new_status = str(updates.get("status") or old_status)
-            if old_status == "training" and new_status == "deleted" and not bool(updates.get("force")):
-                raise RuntimeError("cannot delete training trajectory without force=true")
+            if old_status in {"processing", "training"} and new_status == "deleted" and not bool(updates.get("force")):
+                raise RuntimeError("cannot delete active trajectory without force=true")
             for key in ("reward", "judge", "metadata", "policy_version", "source"):
                 if key in updates:
                     sample[key] = copy.deepcopy(updates[key])
@@ -278,8 +292,8 @@ class LocalTrajectoryStore:
             sample = state["samples"].get(sample_id)
             if sample is None:
                 return False
-            if str(sample.get("_store_status") or "pending") == "training" and not force:
-                raise RuntimeError("cannot delete training trajectory without force=true")
+            if str(sample.get("_store_status") or "pending") in {"processing", "training"} and not force:
+                raise RuntimeError("cannot delete active trajectory without force=true")
             del state["samples"][sample_id]
             return True
 
@@ -329,6 +343,94 @@ class LocalTrajectoryStore:
                 sample["updated_at"] = _now_iso()
 
         await self._state.transact(_update)
+
+
+class LocalSFTStore:
+    """Local file-backed SFT raw/sample queues with the RedisSFTStore API."""
+
+    def __init__(self, root_dir: str | os.PathLike[str]) -> None:
+        root = Path(root_dir)
+        self._raw_store = LocalTrajectoryStore(root / "sft_raw")
+        self._sample_store = LocalTrajectoryStore(root / "sft_sample")
+
+    async def save_raw(self, raw: dict[str, Any], *, user_id: str = "online") -> None:
+        payload = copy.deepcopy(raw)
+        raw_id = str(payload.get("raw_id") or payload.get("trajectory_id") or payload.get("sample_id") or "").strip()
+        if not raw_id:
+            raise ValueError("raw_id is required")
+        payload.setdefault("raw_id", raw_id)
+        payload.setdefault("sample_id", raw_id)
+        payload.setdefault("protocol_version", "sft-raw-v1")
+        await self._raw_store.save_sample(payload, user_id=user_id)
+
+    async def save_sample(self, sample: dict[str, Any], *, user_id: str = "online") -> None:
+        payload = copy.deepcopy(sample)
+        if not str(payload.get("sample_id") or "").strip():
+            raise ValueError("sample_id is required")
+        payload.setdefault("protocol_version", "sft-sample-v1")
+        await self._sample_store.save_sample(payload, user_id=user_id)
+
+    async def get_pending_raw_count(self, user_id: str) -> int:
+        return await self._raw_store.get_pending_count(user_id)
+
+    async def get_pending_sample_count(self, user_id: str) -> int:
+        return await self._sample_store.get_pending_count(user_id)
+
+    async def get_raw_users_above_threshold(self, threshold: int) -> list[str]:
+        return await self._raw_store.get_users_above_threshold(threshold)
+
+    async def get_sample_users_above_threshold(self, threshold: int) -> list[str]:
+        return await self._sample_store.get_users_above_threshold(threshold)
+
+    async def fetch_raw_and_mark_processing(self, user_id: str, limit: int) -> list[dict[str, Any]]:
+        return await self._raw_store.fetch_and_mark_processing(user_id, limit)
+
+    async def fetch_samples_and_mark_training(self, user_id: str, limit: int) -> list[dict[str, Any]]:
+        return await self._sample_store.fetch_and_mark_training(user_id, limit)
+
+    async def list_samples(
+        self,
+        *,
+        user_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return await self._sample_store.list_samples(user_id=user_id, status=status, limit=limit)
+
+    async def list_raw(
+        self,
+        *,
+        user_id: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return await self._raw_store.list_samples(user_id=user_id, status=status, limit=limit)
+
+    async def mark_raw_processed(self, raw_ids: list[str]) -> None:
+        await self._raw_store.mark_processed(raw_ids)
+
+    async def mark_raw_failed(self, raw_ids: list[str]) -> None:
+        await self._raw_store.mark_processing_failed(raw_ids)
+
+    async def mark_samples_trained(self, sample_ids: list[str]) -> None:
+        await self._sample_store.mark_trained(sample_ids)
+
+    async def mark_samples_failed(self, sample_ids: list[str]) -> None:
+        await self._sample_store.mark_failed(sample_ids)
+
+    async def stats(self) -> dict[str, int]:
+        raw_stats = await self._raw_store.stats()
+        sample_stats = await self._sample_store.stats()
+        return {
+            "pending_raw": raw_stats["pending_samples"],
+            "processing_raw": raw_stats.get("processing_samples", 0),
+            "processed_raw": raw_stats.get("processed_samples", 0),
+            "failed_raw": raw_stats["failed_samples"],
+            "pending_samples": sample_stats["pending_samples"],
+            "training_samples": sample_stats["training_samples"],
+            "trained_samples": sample_stats["trained_samples"],
+            "failed_samples": sample_stats["failed_samples"],
+        }
 
 
 class LocalTrainingTaskStore:

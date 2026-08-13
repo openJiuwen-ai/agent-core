@@ -33,6 +33,13 @@ class GatewayConfig:
     redis_url: str = ""
     trajectory_store_backend: str = "auto"
     local_trajectory_store_dir: str = ""
+    training_backend: str = "PPO"
+    supervisor_url: str = ""
+    supervisor_token: str = ""
+    sft_capture_mode: str = "ppo_turn"
+    sft_scenario: str = "multi_turn_supervisor"
+    session_done_on_invoke_end: bool = True
+    session_flush_token_threshold_k: int = 0
 
     upstream_max_retries: int = 2
     upstream_retry_backoff_sec: float = 0.2
