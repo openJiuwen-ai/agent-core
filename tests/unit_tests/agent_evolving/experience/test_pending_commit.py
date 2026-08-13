@@ -104,10 +104,16 @@ async def test_commit_pending_change_retains_unwritten_tail_on_record_failure(tm
         record: EvolutionRecord,
         *,
         subject_kind: str | None = None,
+        update_skill_md: bool = True,
     ) -> None:
         if record.id == "ev_2":
             raise OSError("disk full")
-        await original_append(skill_name, record, subject_kind=subject_kind)
+        await original_append(
+            skill_name,
+            record,
+            subject_kind=subject_kind,
+            update_skill_md=update_skill_md,
+        )
 
     store.append_record = append_then_fail
 
@@ -154,8 +160,8 @@ async def test_commit_pending_change_preserves_subject_kind_on_partial_retry() -
     assert result.pending_count == 1
     assert pending_by_id[pending.change_id].subject_kind == "swarm-skill"
     assert [record.id for record in pending_by_id[pending.change_id].payload] == ["ev_2"]
-    assert store.append_record.await_args_list[0].kwargs == {"subject_kind": "swarm-skill"}
-    assert store.append_record.await_args_list[1].kwargs == {"subject_kind": "swarm-skill"}
+    assert store.append_record.await_args_list[0].kwargs == {"subject_kind": "swarm-skill", "update_skill_md": True}
+    assert store.append_record.await_args_list[1].kwargs == {"subject_kind": "swarm-skill", "update_skill_md": True}
 
     store.append_record = AsyncMock()
     retry = await commit_pending_change(pending_by_id, pending.change_id, store=store)
@@ -163,7 +169,7 @@ async def test_commit_pending_change_preserves_subject_kind_on_partial_retry() -
     assert retry.applied_count == 1
     assert retry.pending_count == 0
     assert pending.change_id not in pending_by_id
-    store.append_record.assert_awaited_once_with("team-a", second_record, subject_kind="swarm-skill")
+    store.append_record.assert_awaited_once_with("team-a", second_record, subject_kind="swarm-skill", update_skill_md=True)
 
 
 @pytest.mark.asyncio

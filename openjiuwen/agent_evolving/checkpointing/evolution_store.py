@@ -440,18 +440,30 @@ class EvolutionStore:
         record: EvolutionRecord,
         *,
         subject_kind: Optional[str] = None,
+        update_skill_md: bool = True,
     ) -> None:
-        """Append or merge one evolution record to evolutions.json."""
+        """Append or merge one evolution record to evolutions.json.
+
+        When ``update_skill_md`` is False (suggest mode), the record is persisted to
+        ``evolutions.json`` only and SKILL.md / evolution/*.md are left untouched until
+        the host accepts the suggestion.
+        """
         async with self._get_skill_lock(name):
-            evo_log = await self._records.append_record_transactional(name, record, subject_kind=subject_kind)
+            evo_log = await self._records.append_record_transactional(
+                name,
+                record,
+                subject_kind=subject_kind,
+                update_skill_md=update_skill_md,
+            )
             if evo_log is None:
                 return
             logger.info(
-                "[EvolutionStore] wrote %s/%s (id=%s, target=%s)",
+                "[EvolutionStore] wrote %s/%s (id=%s, target=%s, update_skill_md=%s)",
                 name,
                 _EVOLUTION_FILENAME,
                 record.id,
                 record.change.target.value,
+                update_skill_md,
             )
 
             total = len(evo_log.entries)
@@ -669,10 +681,21 @@ class EvolutionStore:
         normalized = self._to_evolution_subject(subject)
         return await self.load_full_evolution_log(normalized.name, subject_kind=normalized.kind)
 
-    async def append_subject_record(self, subject: dict[str, Any] | Any, record: EvolutionRecord) -> None:
+    async def append_subject_record(
+        self,
+        subject: dict[str, Any] | Any,
+        record: EvolutionRecord,
+        *,
+        update_skill_md: bool = True,
+    ) -> None:
         """Append an evolution record for a subject."""
         normalized = self._to_evolution_subject(subject)
-        await self.append_record(normalized.name, record, subject_kind=normalized.kind)
+        await self.append_record(
+            normalized.name,
+            record,
+            subject_kind=normalized.kind,
+            update_skill_md=update_skill_md,
+        )
 
     async def load_subject_records_by_ids(
         self, subject: dict[str, Any] | Any, record_ids: list[str]

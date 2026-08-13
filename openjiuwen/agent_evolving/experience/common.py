@@ -92,7 +92,14 @@ async def commit_pending_change(
 
     for index, record in enumerate(records):
         try:
-            await store.append_record(pending.skill_name, record, subject_kind=pending.subject_kind)
+            # enterprise-dev: suggest/auto persist evolutions.json only (no SKILL.md).
+            update_skill_md = getattr(record, "review_status", None) not in {"suggest", "auto"}
+            await store.append_record(
+                pending.skill_name,
+                record,
+                subject_kind=pending.subject_kind,
+                update_skill_md=update_skill_md,
+            )
         except Exception as exc:
             errors.append(str(exc))
             remaining_records = list(records[index:])

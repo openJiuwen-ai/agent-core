@@ -211,6 +211,7 @@ class SkillEvolutionSharingMixin:
         ctx: Optional[AgentCallbackContext],
         shared_records: List[EvolutionRecord],
         requires_approval: bool,
+        review_status: Optional[str] = None,
     ) -> bool:
         if shared_records:
             shared_records = await self._filter_duplicate_shared_records(skill_name, shared_records)
@@ -222,13 +223,23 @@ class SkillEvolutionSharingMixin:
                 trajectory=trajectory,
                 ctx=ctx,
                 requires_approval=requires_approval,
+                review_status=review_status,
             )
             request = request_for_online_evolution_result(result)
             return request is not None
 
         if self._auto_save:
             for record in shared_records:
-                await self._evolution_store.append_record(skill_name, record)
+                if review_status and hasattr(record, "review_status"):
+                    record.review_status = review_status
+                elif not getattr(record, "review_status", None):
+                    record.review_status = "auto"
+                await self._evolution_store.append_record(
+                    skill_name,
+                    record,
+                    # enterprise-dev: suggest/auto write evolutions.json only
+                    update_skill_md=False,
+                )
             logger.info(
                 "[SkillEvolutionRail] persisted %d shared record(s) for skill=%s",
                 len(shared_records),
@@ -241,6 +252,7 @@ class SkillEvolutionSharingMixin:
                 trajectory=trajectory,
                 ctx=ctx,
                 requires_approval=False,
+                review_status=review_status,
             )
             return True
 

@@ -310,6 +310,23 @@ class TestEvolutionStoreLogCRUD:
 
     @staticmethod
     @pytest.mark.asyncio
+    async def test_append_record_suggest_mode_skips_skill_md_projection(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "skill-a")
+        store = EvolutionStore(str(root))
+        store.render_evolution_markdown = AsyncMock()
+
+        record = make_record("ev_suggest", content="suggest only")
+        record.review_status = "suggest"
+        await store.append_record("skill-a", record, update_skill_md=False)
+
+        evo_log = await store.load_evolution_log("skill-a")
+        assert [item.id for item in evo_log.entries] == ["ev_suggest"]
+        assert evo_log.entries[0].review_status == "suggest"
+        store.render_evolution_markdown.assert_not_awaited()
+
+    @staticmethod
+    @pytest.mark.asyncio
     async def test_append_record_rolls_back_log_on_failure(tmp_path: Path):
         root = tmp_path / "skills"
         prepare_skill(root, "skill-a")
