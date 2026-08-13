@@ -165,6 +165,7 @@ async def build_cli_runtime(
     cwd: str | None = None,
     add_dirs: tuple[str, ...] = (),
     command_override: tuple[str, ...] | None = None,
+    cli_path: str | None = None,
     codex_bin: str | None = None,
     inject_mcp: bool = True,
     mcp_server_name: str = "openjiuwen-team",
@@ -195,6 +196,9 @@ async def build_cli_runtime(
         add_dirs: Extra directories exposed to SDK backends that support them.
         command_override: Optional full launch argv (e.g. an absolute path).
             Adapter backends only; Codex accepts ``codex_bin`` instead.
+        cli_path: Optional executable path for SDK-backed CLIs. Claude passes
+            this to ``ClaudeAgentOptions.cli_path``; Codex maps it to
+            ``CodexConfig.codex_bin``.
         codex_bin: Optional Codex executable path. The SDK constructs all
             app-server arguments around this binary.
         inject_mcp: When True (default), configure the backend to register the
@@ -250,7 +254,7 @@ async def build_cli_runtime(
         if command_override is not None:
             raise_error(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="Claude SDK members do not support command_override; configure Claude on the local/remote PATH",
+                reason="Claude SDK members do not support command_override; configure cli_path instead",
             )
         if ssh_transport is None:
             base_env = strip_parent_claude_env(dict(os.environ))
@@ -262,6 +266,7 @@ async def build_cli_runtime(
             cwd=cwd,
             add_dirs=add_dirs,
             env=env,
+            cli_path=cli_path,
             inject_mcp=inject_mcp,
             mcp_server_name=mcp_server_name,
             mcp_server_command=mcp_server_command,
@@ -277,7 +282,7 @@ async def build_cli_runtime(
         if command_override is not None:
             raise_error(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason="Codex SDK members do not support command_override; configure codex_bin instead",
+                reason="Codex SDK members do not support command_override; configure cli_path instead",
             )
         if ssh_transport is not None:
             raise_error(
@@ -309,7 +314,7 @@ async def build_cli_runtime(
             mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
             bypass_approvals_and_sandbox=codex_bypass_approvals_and_sandbox,
             system_prompt=system_prompt,
-            codex_bin=codex_bin,
+            codex_bin=cli_path or codex_bin,
             resume_external_backend=resume_external_backend,
             turn_idle_timeout_s=codex_turn_idle_timeout_s,
             turn_idle_retries=codex_turn_idle_retries,
@@ -324,6 +329,11 @@ async def build_cli_runtime(
         raise_error(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason="codex_bin is only supported for Codex SDK members",
+        )
+    if cli_path is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="cli_path is only supported for Claude and Codex SDK members",
         )
 
     adapter: CliAgentAdapter = build_adapter(ctx.cli_agent, command_override=command_override)
