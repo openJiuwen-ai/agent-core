@@ -95,6 +95,11 @@ _CORRECTION_PATTERNS = [
 _CORRECTION_PATTERN = re.compile("|".join(_CORRECTION_PATTERNS), re.IGNORECASE)
 
 _SKILL_MD_PATTERN = re.compile(r"[/\\]+([^/\\]+)[/\\]+SKILL\.md", re.IGNORECASE)
+_SKILL_DIR_PATTERN = re.compile(r"[/\\]skills[/\\]([^/\\]+)(?:[/\\]|$)", re.IGNORECASE)
+_SKILL_FRONTMATTER_NAME_PATTERN = re.compile(
+    r"(?:^|\\n|\n)name:\s*([A-Za-z0-9._-]+)",
+    re.IGNORECASE,
+)
 _TOOL_SCHEMA_PATTERN = re.compile(r"\{'content': '---\\nname: [^\n]+\\ndescription:")
 _USER_FEEDBACK_MAX_TURNS = 9
 _USER_FEEDBACK_CONTEXT_CHAR_LIMIT = 3000
@@ -521,6 +526,31 @@ class ConversationSignalDetector:
                             if tc_id and tc_name:
                                 tool_call_id_to_name[tc_id] = tc_name
 
+                # Include the model response (assistant tool_calls live here, not only in inputs).
+                response = step.detail.response
+                resp_msg: Optional[dict] = None
+                if isinstance(response, dict):
+                    resp_msg = response
+                elif response is not None:
+                    resp_msg = {
+                        "role": str(getattr(response, "role", "") or "assistant"),
+                        "content": str(getattr(response, "content", "") or ""),
+                    }
+                    tool_calls = getattr(response, "tool_calls", None)
+                    if tool_calls:
+                        resp_msg["tool_calls"] = tool_calls
+                if resp_msg:
+                    has_payload = any(
+                        resp_msg.get(key) for key in ("role", "content", "tool_calls")
+                    )
+                    if has_payload:
+                        messages.append(resp_msg)
+                        for tc in resp_msg.get("tool_calls") or []:
+                            tc_id = _tool_call_field(tc, "id")
+                            tc_name = _tool_call_field(tc, "name")
+                            if tc_id and tc_name:
+                                tool_call_id_to_name[tc_id] = tc_name
+
             elif step.kind == "tool" and isinstance(step.detail, ToolCallDetail):
                 tool_name = step.detail.tool_name
                 tool_call_id = step.detail.tool_call_id or step.meta.get("tool_call_id", "")
@@ -580,11 +610,24 @@ class ConversationSignalDetector:
                 if not tool_name and tool_call_id:
                     tool_name = tool_call_id_to_name.get(tool_call_id, "")
 
+                for skill_name, _source in self._extract_skills_from_tool_result(
+                    content,
+                    tool_name=str(tool_name or ""),
+                ):
+                    skill_read_history.append((msg_idx, skill_name))
+
                 active_skill = self._resolve_active_skill(msg_idx, skill_read_history)
 
                 if tool_call_id and tool_call_id in pending_scripts:
                     has_failure = bool(_FAILURE_KEYWORDS.search(content)) if content else False
                     if not has_failure:
+                        logger.info(
+                            "[ConversationSignalDetector] tool attributed to skill=%s "
+                            "signal_type=script_artifact tool=%s msg_idx=%d",
+                            active_skill,
+                            tool_name or None,
+                            msg_idx,
+                        )
                         signals.append(
                             make_evolution_signal(
                                 signal_type="script_artifact",
@@ -605,6 +648,13 @@ class ConversationSignalDetector:
                     if _TOOL_SCHEMA_PATTERN.search(content):
                         continue
                     excerpt = _extract_around_match(content, match)
+                    logger.info(
+                        "[ConversationSignalDetector] tool attributed to skill=%s "
+                        "signal_type=execution_failure tool=%s msg_idx=%d",
+                        active_skill,
+                        tool_name or None,
+                        msg_idx,
+                    )
                     signals.append(
                         make_evolution_signal(
                             signal_type="execution_failure",
@@ -715,47 +765,68 @@ class ConversationSignalDetector:
                         logger.info("[ConversationSignalDetector] skill hit: %s", detail)
             elif role in ("tool", "function"):
                 content = str(_get_field(msg, "content") or "")
-                matched = _SKILL_MD_PATTERN.search(content)
-                if matched:
-                    skill_name = matched.group(1)
-                    if self._is_existing_skill(skill_name):
-                        skill_read_history.append((msg_idx, skill_name))
-                        snippet = matched.group(0)
-                        detail = (
-                            f"msg[{msg_idx}] role={role} skill={skill_name!r} "
-                            f"via tool_result path_match={snippet!r}"
-                        )
-                        hit_details.append(detail)
-                        if dump_trajectory:
-                            logger.info("[ConversationSignalDetector] skill hit: %s", detail)
-                if "unload_skill_name" in content:
-                    unload_match = re.search(
-                        r"unload_skill_name['\"]?\s*[:=]\s*['\"]([^'\"]+)['\"]",
-                        content,
+                tool_name = str(
+                    _get_field(msg, "name") or _get_field(msg, "tool_name") or ""
+                )
+                for skill_name, source in self._extract_skills_from_tool_result(
+                    content,
+                    tool_name=tool_name,
+                ):
+                    skill_read_history.append((msg_idx, skill_name))
+                    detail = (
+                        f"msg[{msg_idx}] role={role} skill={skill_name!r} "
+                        f"via tool_result {source}"
                     )
-                    if unload_match and self._is_existing_skill(unload_match.group(1)):
-                        skill_name = unload_match.group(1)
-                        skill_read_history.append((msg_idx, skill_name))
-                        detail = (
-                            f"msg[{msg_idx}] role={role} skill={skill_name!r} "
-                            f"via tool_result unload_skill_name"
-                        )
-                        hit_details.append(detail)
-                        if dump_trajectory:
-                            logger.info("[ConversationSignalDetector] skill hit: %s", detail)
-                elif "Skill '" in content and "marked as complete" in content:
-                    complete_match = re.search(r"Skill '([^']+)' marked as complete", content)
-                    if complete_match and self._is_existing_skill(complete_match.group(1)):
-                        skill_name = complete_match.group(1)
-                        skill_read_history.append((msg_idx, skill_name))
-                        detail = (
-                            f"msg[{msg_idx}] role={role} skill={skill_name!r} "
-                            f"via tool_result skill_complete"
-                        )
-                        hit_details.append(detail)
-                        if dump_trajectory:
-                            logger.info("[ConversationSignalDetector] skill hit: %s", detail)
+                    hit_details.append(detail)
+                    if dump_trajectory:
+                        logger.info("[ConversationSignalDetector] skill hit: %s", detail)
         return skill_read_history, hit_details
+
+    def _extract_skills_from_tool_result(
+        self,
+        content: str,
+        *,
+        tool_name: str = "",
+    ) -> List[Tuple[str, str]]:
+        """Extract ``(skill_name, source)`` hits from a tool/function result payload."""
+        results: List[Tuple[str, str]] = []
+        seen: Set[str] = set()
+
+        def _add(skill_name: Optional[str], source: str) -> None:
+            name = str(skill_name or "").strip()
+            if not name or name in seen or not self._is_existing_skill(name):
+                return
+            seen.add(name)
+            results.append((name, source))
+
+        matched = _SKILL_MD_PATTERN.search(content)
+        if matched:
+            _add(matched.group(1), f"path_match={matched.group(0)!r}")
+
+        dir_matched = _SKILL_DIR_PATTERN.search(content)
+        if dir_matched:
+            _add(dir_matched.group(1), f"skills_dir={dir_matched.group(0)!r}")
+
+        name_l = str(tool_name or "").lower()
+        if name_l in ("skill_tool", "skill_complete") or name_l.endswith(".skill_tool"):
+            fm = _SKILL_FRONTMATTER_NAME_PATTERN.search(content)
+            if fm:
+                _add(fm.group(1), "skill_tool_frontmatter_name")
+
+        if "unload_skill_name" in content:
+            unload_match = re.search(
+                r"unload_skill_name['\"]?\s*[:=]\s*['\"]([^'\"]+)['\"]",
+                content,
+            )
+            if unload_match:
+                _add(unload_match.group(1), "unload_skill_name")
+
+        if "Skill '" in content and "marked as complete" in content:
+            complete_match = re.search(r"Skill '([^']+)' marked as complete", content)
+            if complete_match:
+                _add(complete_match.group(1), "skill_complete")
+
+        return results
 
     def _infer_skill_from_messages(self, messages: List[dict]) -> Optional[str]:
         """Return the most recently active skill (backward-compatible single value)."""
