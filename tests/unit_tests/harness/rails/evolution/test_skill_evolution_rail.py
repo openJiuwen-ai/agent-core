@@ -1435,6 +1435,7 @@ async def test_run_evolution_auto_save_commits_via_manager_lifecycle(tmp_path):
         trajectory=trajectory,
         user_query="",
         requires_approval=False,
+        review_status="auto",
     )
     rail._emit_generated_records.assert_not_awaited()
     events = _progress_events(await rail.drain_pending_host_events())
@@ -1505,6 +1506,7 @@ async def test_run_evolution_auto_save_false_emits_events(tmp_path):
         trajectory=trajectory,
         user_query="",
         requires_approval=False,
+        review_status="suggest",
     )
     rail._emit_generated_records.assert_not_awaited()
     events = _progress_events(await rail.drain_pending_host_events())
@@ -1546,6 +1548,7 @@ async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path)
         trajectory=trajectory,
         user_query="",
         requires_approval=False,
+        review_status="suggest",
     )
     drained = await rail.drain_pending_host_events()
     assert _approval_events(drained) == []
@@ -1902,7 +1905,7 @@ async def test_on_approve_partial_failure_retains_pending_change(tmp_path):
     # Host retries: now the remaining record succeeds
     rail._evolution_store.append_record = AsyncMock()
     await rail.on_approve(request_id)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_2, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_2, subject_kind="skill", update_skill_md=True)
     assert request_id not in rail._pending_approval_snapshots
 
 
@@ -1930,7 +1933,7 @@ async def test_on_approve_full_failure_then_retry_succeeds(tmp_path):
     # Host retries: now append succeeds
     rail._evolution_store.append_record = AsyncMock()
     await rail.on_approve(request_id)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill", update_skill_md=True)
     assert request_id not in rail._pending_approval_snapshots
 
 
@@ -1957,12 +1960,12 @@ async def test_concurrent_approval_batches_are_independent(tmp_path):
 
     # Approving the first prompt should write only record_a
     await rail.on_approve(req1)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_a, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_a, subject_kind="skill", update_skill_md=True)
     rail._evolution_store.append_record.reset_mock()
 
     # Approving the second prompt should write only record_b
     await rail.on_approve(req2)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_b, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_b, subject_kind="skill", update_skill_md=True)
 
 
 @pytest.mark.asyncio
@@ -1982,7 +1985,7 @@ async def test_on_approve_only_flushes_snapshot_records(tmp_path):
     later_request = _stage_approval_request(rail, "skill-a", [pending_later])
     await rail.on_approve(request_id)
 
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", approved, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", approved, subject_kind="skill", update_skill_md=True)
     assert later_request.request_id in rail._pending_approval_snapshots
     assert request_id not in rail._pending_approval_snapshots
 
@@ -3243,7 +3246,7 @@ async def test_on_approve_uses_rebound_pending_snapshot_store(tmp_path):
 
     await rail.on_approve(request.request_id)
 
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill", update_skill_md=True)
     assert request.request_id not in rebound_snapshots
 
 

@@ -2925,7 +2925,7 @@ async def test_on_approve_record_uses_rebound_pending_snapshot_store():
 
         await rail.on_approve_record(request.request_id)
 
-        rail._store.append_record.assert_awaited_once_with("team-skill-a", record, subject_kind="swarm-skill")
+        rail._store.append_record.assert_awaited_once_with("team-skill-a", record, subject_kind="swarm-skill", update_skill_md=True)
         assert request.request_id not in rebound_snapshots
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2976,7 +2976,7 @@ async def test_on_approve_record_uses_rebound_snapshot_store_after_snapshot_dict
 
     await rail.on_approve_record(request.request_id)
 
-    rail.store.append_record.assert_awaited_once_with("team-skill-a", record, subject_kind="swarm-skill")
+    rail.store.append_record.assert_awaited_once_with("team-skill-a", record, subject_kind="swarm-skill", update_skill_md=True)
     assert request.request_id not in rail._pending_record_snapshots
 
 

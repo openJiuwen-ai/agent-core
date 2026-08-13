@@ -1014,6 +1014,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     ctx=ctx,
                     shared_records=downloaded_per_skill.get(skill_name, []),
                     requires_approval=False,
+                    # Same as enterprise-dev: review_status mirrors selfEvolution action.
+                    review_status=action,
                 )
                 if not generated:
                     deferred_cancelled.append(
@@ -1361,6 +1363,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         trajectory: Optional[Trajectory] = None,
         user_query: str = "",
         requires_approval: bool,
+        review_status: Optional[str] = None,
     ) -> OnlineEvolutionResult:
         """Generate and stage skill experiences through the unified updater flow.
 
@@ -1375,6 +1378,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             user_query=user_query,
             metadata={"language": self._language},
             source="experience_updater",
+            review_status=review_status,
         )
 
     async def _handle_evolution_from_signals(
@@ -1388,6 +1392,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         user_query: str = "",
         requires_approval: bool,
         emit_host_events: bool = True,
+        review_status: Optional[str] = None,
     ) -> OnlineEvolutionResult:
         """Handle optimizer-driven evolution and return the structured orchestration status."""
         if emit_host_events:
@@ -1403,6 +1408,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             trajectory=trajectory,
             user_query=user_query,
             requires_approval=requires_approval,
+            review_status=review_status,
         )
         request = result.request
         if result.status in ONLINE_EVOLUTION_OUTCOME_STATUSES:

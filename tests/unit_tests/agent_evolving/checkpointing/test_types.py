@@ -178,6 +178,28 @@ class TestEvolutionRecord:
         assert loaded.root_cause == "技能缺少超时重试指引"
 
     @staticmethod
+    def test_to_dict_includes_review_status_when_set():
+        record = EvolutionRecord.make(
+            source="execution_failure",
+            context="ctx",
+            change=make_patch(),
+            review_status="suggest",
+        )
+        data = record.to_dict()
+        assert data["review_status"] == "suggest"
+        loaded = EvolutionRecord.from_dict(data)
+        assert loaded.review_status == "suggest"
+
+    @staticmethod
+    def test_to_dict_omits_review_status_when_none():
+        record = EvolutionRecord.make(
+            source="execution_failure",
+            context="ctx",
+            change=make_patch(),
+        )
+        assert "review_status" not in record.to_dict()
+
+    @staticmethod
     def test_from_dict_migrates_legacy_root_causes_list():
         loaded = EvolutionRecord.from_dict({
             "id": "ev_legacy",

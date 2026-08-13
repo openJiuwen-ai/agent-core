@@ -160,6 +160,8 @@ class EvolutionRecord:
     usage_stats: Optional[UsageStats] = None
     skill_version: Optional[str] = None
     summary: Optional[str] = None
+    # suggest-mode review lifecycle: "suggest" | "auto" | "accepted" | None
+    review_status: Optional[str] = None
     # Why this experience was triggered (single sentence for evolutions.json).
     root_cause: Optional[str] = None
 
@@ -174,6 +176,7 @@ class EvolutionRecord:
         skill_version: Optional[str] = None,
         summary: Optional[str] = None,
         root_cause: Optional[str] = None,
+        review_status: Optional[str] = None,
     ) -> "EvolutionRecord":
         return cls(
             id=f"ev_{uuid.uuid4().hex[:8]}",
@@ -185,6 +188,7 @@ class EvolutionRecord:
             usage_stats=UsageStats(),
             skill_version=skill_version,
             summary=summary,
+            review_status=review_status,
             root_cause=root_cause,
         )
 
@@ -205,6 +209,8 @@ class EvolutionRecord:
             payload["usage_stats"] = self.usage_stats.to_dict()
         if self.skill_version is not None:
             payload["skill_version"] = self.skill_version
+        if self.review_status:
+            payload["review_status"] = self.review_status
         return payload
 
     @classmethod
@@ -222,6 +228,7 @@ class EvolutionRecord:
             usage_stats=usage_stats,
             skill_version=data.get("skill_version"),
             summary=data.get("summary"),
+            review_status=data.get("review_status"),
             root_cause=_coerce_root_cause(data),
         )
 

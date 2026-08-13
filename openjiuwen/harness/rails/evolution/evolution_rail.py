@@ -1096,5 +1096,58 @@ class EvolutionRail(DeepAgentRail):
             except Exception as exc:
                 logger.warning("[EvolutionRail] background task wait failed: %s", exc)
 
+    @property
+    def has_pending_evolution(self) -> bool:
+        """Whether any background evolution tasks are still running."""
+        return any(not task.done() for task in self._bg_tasks)
+
+    async def wait_for_pending_evolution(self, timeout: Optional[float] = None) -> None:
+        """Await outstanding background evolution tasks (compat with PR #2012 API)."""
+        pending = [task for task in self._bg_tasks if not task.done()]
+        if not pending:
+            return
+        gather_coro = asyncio.gather(*(task.wait() for task in pending), return_exceptions=True)
+        if timeout is None:
+            await gather_coro
+            return
+        try:
+            await asyncio.wait_for(gather_coro, timeout=timeout)
+        except TimeoutError:
+            logger.warning(
+                "[EvolutionRail] wait_for_pending_evolution timed out after %.1fs",
+                timeout,
+            )
+
+    async def cancel_pending_evolution(self, timeout: Optional[float] = None) -> None:
+        """Cancel and await outstanding background evolution tasks.
+
+        Async teardown (e.g. ``unregister_rail``) should call this so a task
+        can unwind cleanly before the rail is dropped.
+        """
+        pending = [task for task in self._bg_tasks if not task.done()]
+        if not pending:
+            self._bg_tasks.clear()
+            return
+        for task in pending:
+            try:
+                await task.cancel(reason="evolution_rail_unregister")
+            except Exception as exc:
+                logger.warning("[EvolutionRail] cancel_pending_evolution cancel failed: %s", exc)
+        gather_coro = asyncio.gather(*(task.wait() for task in pending), return_exceptions=True)
+        try:
+            if timeout is None:
+                await gather_coro
+            else:
+                await asyncio.wait_for(gather_coro, timeout=timeout)
+        except TimeoutError:
+            logger.warning(
+                "[EvolutionRail] cancel_pending_evolution timed out after %.1fs",
+                timeout,
+            )
+        except Exception as exc:
+            logger.warning("[EvolutionRail] cancel_pending_evolution wait failed: %s", exc)
+        finally:
+            self._bg_tasks = {task for task in self._bg_tasks if not task.done()}
+
 
 __all__ = ["EvolutionRail", "EvolutionTriggerPoint"]
