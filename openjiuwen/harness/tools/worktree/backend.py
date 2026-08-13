@@ -24,6 +24,7 @@ from openjiuwen.harness.tools.worktree.git import (
     get_default_branch,
     read_worktree_head_sha,
     rev_parse,
+    set_longpaths,
     sparse_checkout_set,
     worktree_add,
     worktree_remove,
@@ -135,6 +136,10 @@ class GitBackend:
                 head_commit=existing_head,
                 existed=True,
             )
+
+        # Phase 1b: enable Windows long-path support before checkout (rc=128).
+        if self._config.longpaths_support:
+            await set_longpaths(repo_root, enabled=True)
 
         # Phase 2: resolve base branch
         os.makedirs(os.path.dirname(wt_path), exist_ok=True)

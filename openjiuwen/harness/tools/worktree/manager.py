@@ -44,6 +44,7 @@ from openjiuwen.harness.tools.worktree.git import (
     status_porcelain,
     worktree_prune,
 )
+from openjiuwen.harness.tools.worktree.lock import repo_lock
 from openjiuwen.harness.tools.worktree.models import (
     WorktreeChangeSummary,
     WorktreeConfig,
@@ -165,11 +166,15 @@ class WorktreeManager:
         target_path = self._resolve_target_path(slug)
 
         start = time.monotonic()
-        result = await self._backend.create(slug, repo_root, target_path)
+        async with repo_lock(
+            repo_root,
+            timeout=self._config.repo_lock_timeout,
+            enabled=self._config.repo_lock,
+        ):
+            result = await self._backend.create(slug, repo_root, target_path)
+            if not result.existed:
+                await self._post_creation_setup(repo_root, result.worktree_path)
         duration_ms = (time.monotonic() - start) * 1000
-
-        if not result.existed:
-            await self._post_creation_setup(repo_root, result.worktree_path)
 
         session = WorktreeSession(
             original_cwd=original_cwd,
@@ -349,14 +354,19 @@ class WorktreeManager:
             raise RuntimeError("Cannot create owner worktree: not in a git repository")
 
         target_path = self._resolve_target_path(slug)
-        result = await self._backend.create(slug, repo_root, target_path)
+        async with repo_lock(
+            repo_root,
+            timeout=self._config.repo_lock_timeout,
+            enabled=self._config.repo_lock,
+        ):
+            result = await self._backend.create(slug, repo_root, target_path)
 
-        if not result.existed:
-            await self._post_creation_setup(repo_root, result.worktree_path)
-        else:
-            # Touch mtime to prevent cleanup
-            now = time.time()
-            os.utime(result.worktree_path, (now, now))
+            if not result.existed:
+                await self._post_creation_setup(repo_root, result.worktree_path)
+            else:
+                # Touch mtime to prevent cleanup
+                now = time.time()
+                os.utime(result.worktree_path, (now, now))
 
         return result
 
@@ -383,7 +393,12 @@ class WorktreeManager:
         Returns:
             True if the backend successfully removed the worktree.
         """
-        return await self._backend.remove(wt_path, repo_root, force=force)
+        async with repo_lock(
+            repo_root,
+            timeout=self._config.repo_lock_timeout,
+            enabled=self._config.repo_lock,
+        ):
+            return await self._backend.remove(wt_path, repo_root, force=force)
 
     # -- Change detection -----------------------------------------------------
 

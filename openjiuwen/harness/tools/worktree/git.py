@@ -372,6 +372,27 @@ async def sparse_checkout_set(
     await _run_git(["checkout", "HEAD"], cwd=worktree_path, check=True)
 
 
+async def set_longpaths(repo_root: str, *, enabled: bool = True) -> None:
+    """Set ``core.longpaths`` on ``repo_root`` to bypass Windows MAX_PATH.
+
+    ``git worktree add`` checks out source repo content into the new
+    worktree. On Windows, paths exceeding the 260-char MAX_PATH limit cause
+    checkout to fail with returncode 128 — the dominant worktree failure on
+    deeply-nested repos. ``core.longpaths=true`` makes git use the
+    extended-length (``\\?\``) path prefix, bypassing the Win32 limit
+    without altering the source repo's directory structure.
+
+    Args:
+        repo_root: Repository root directory to configure.
+        enabled: True sets ``core.longpaths=true``; False sets it to ``false``.
+
+    Raises:
+        GitError: If the config write fails (e.g. bare repo, read-only .git).
+    """
+    value = "true" if enabled else "false"
+    await _run_git(["config", "core.longpaths", value], cwd=repo_root, check=True)
+
+
 # -- Status queries ------------------------------------------------------------
 
 
