@@ -214,6 +214,7 @@ class DeepAgentConfig:
         completion_timeout: Max seconds to wait for a
             single task-loop iteration to complete.
             Used by the outer loop's wait_completion().
+            None means no limit.
         enable_plan_mode: Whether to enable plan mode.
         permissions: Tool permission policy dict (enabled, tools, rules, …); when
             enabled, DeepAgent mounts PermissionInterruptRail automatically.
@@ -245,7 +246,7 @@ class DeepAgentConfig:
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
     auto_create_workspace: bool = True
-    completion_timeout: float = 600.0
+    completion_timeout: Optional[float] = 600.0
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None

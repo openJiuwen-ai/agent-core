@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import anyio
@@ -40,6 +41,18 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import (
         DeepAgent,
     )
+
+
+_CANCEL_WAIT_TIMEOUT = 1.5
+
+
+def _error_result(error: str, output: Optional[str] = None) -> Dict[str, Any]:
+    """Build an error result that survives the answer-stream adapter."""
+    return {
+        "output": output or error,
+        "result_type": "error",
+        "error": error,
+    }
 
 
 class TaskLoopEventHandler(EventHandler):
@@ -78,6 +91,7 @@ class TaskLoopEventHandler(EventHandler):
             asyncio.Future
         ] = None
         self._round_id: int = 0
+        self._round_task_ids: Dict[int, str] = {}
         self._interaction_queues: Optional[
             LoopQueues
         ] = None
@@ -112,7 +126,7 @@ class TaskLoopEventHandler(EventHandler):
     def prepare_round(self) -> int:
         """Create a new Future for this round.
 
-        Must be called BEFORE publish_event_async.
+        Must be called before publishing the input event.
         Any previous unresolved Future is cancelled.
 
         Returns:
@@ -138,26 +152,99 @@ class TaskLoopEventHandler(EventHandler):
                 None means no limit.
 
         Returns:
-            Result dict. On timeout returns error dict.
+            Result dict. On timeout, cancels the scheduler task for this round
+            and returns a standard error result.
         """
         if self._current_future is None:
             return {"error": "no active round"}
+        round_id = self._round_id
         try:
             if timeout is not None:
                 with anyio.fail_after(timeout):
                     result = await self._current_future
             else:
                 result = await self._current_future
-        except TimeoutError:
-            result = {"error": "completion_timeout"}
+        except TimeoutError as exc:
+            if timeout is None:
+                raise RuntimeError(
+                    "TimeoutError caught but timeout is None"
+                ) from exc
+            await self._cancel_timed_out_round(round_id)
+            result = _error_result(
+                "completion_timeout",
+                output=(
+                    "Task loop round timed out after "
+                    f"{timeout:g} seconds."
+                ),
+            )
         except asyncio.CancelledError:
             result = {"error": "cancelled"}
             self._last_result = result
             raise
+        finally:
+            self._round_task_ids.pop(round_id, None)
         if not result:
             result = {"status": "completed"}
         self._last_result = result
         return result
+
+    async def _cancel_timed_out_round(self, round_id: int) -> None:
+        """Cancel the scheduler task associated with a timed-out round."""
+        coordinator = self._deep_agent.loop_coordinator
+        if coordinator is not None:
+            coordinator.request_abort()
+        task_id = self._round_task_ids.get(round_id)
+        if task_id is None:
+            logger.warning(
+                "Task loop round %s timed out before its task was registered",
+                round_id,
+            )
+            return
+        if self.task_scheduler is None:
+            logger.warning(
+                "Cannot cancel timed-out task %s: task scheduler is unavailable",
+                task_id,
+            )
+            return
+        cancel_task = asyncio.create_task(
+            self.task_scheduler.cancel_task(task_id),
+            name=f"task-loop-timeout-cancel[{task_id}]",
+        )
+        try:
+            cancelled = await asyncio.wait_for(
+                asyncio.shield(cancel_task),
+                timeout=_CANCEL_WAIT_TIMEOUT,
+            )
+        except TimeoutError:
+            logger.warning(
+                "Cancelling timed-out task %s for round %s exceeded %.1f seconds",
+                task_id,
+                round_id,
+                _CANCEL_WAIT_TIMEOUT,
+            )
+            cancel_task.add_done_callback(
+                self._consume_cancel_task_result
+            )
+            return
+        except Exception:
+            logger.exception(
+                "Failed to cancel timed-out task %s for round %s",
+                task_id,
+                round_id,
+            )
+            return
+        if not cancelled:
+            logger.warning(
+                "Task scheduler did not cancel timed-out task %s for round %s",
+                task_id,
+                round_id,
+            )
+
+    @staticmethod
+    def _consume_cancel_task_result(task: asyncio.Task) -> None:
+        """Retrieve a late cancellation result to avoid an orphaned error."""
+        with suppress(asyncio.CancelledError, Exception):
+            task.result()
 
     def _resolve_future(
         self,
@@ -255,7 +342,7 @@ class TaskLoopEventHandler(EventHandler):
                 "LoopCoordinator"
             )
             self._resolve_future(
-                {"error": "no LoopCoordinator"},
+                _error_result("no LoopCoordinator"),
                 current_round,
             )
             return {"status": "failed"}
@@ -317,7 +404,7 @@ class TaskLoopEventHandler(EventHandler):
                 )
             else:
                 self._resolve_future(
-                    {"error": "task_manager is None"},
+                    _error_result("task_manager is None"),
                     current_round,
                 )
                 return {"status": "failed"}
@@ -326,7 +413,7 @@ class TaskLoopEventHandler(EventHandler):
                 f"handle_input failed: {e}"
             )
             self._resolve_future(
-                {"error": str(e)}, current_round,
+                _error_result(str(e)), current_round,
             )
             return {
                 "status": "failed",
@@ -335,6 +422,7 @@ class TaskLoopEventHandler(EventHandler):
 
         # Success — do NOT resolve here; wait for
         # completion/failed callback to resolve.
+        self._round_task_ids[current_round] = task_id
         return {
             "status": "submitted",
             "task_id": task_id,

@@ -9,9 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.schema.config import DeepAgentConfig
 from openjiuwen.harness.schema.interaction import (
     ActiveInteractionRound,
     InputDispatchMode,
@@ -23,6 +25,9 @@ from openjiuwen.harness.tools.worktree.models import WorktreeSession
 from openjiuwen.harness.tools.worktree.session import (
     get_current_session,
     set_current_session,
+)
+from tests.unit_tests.agent_teams.harness.fixtures import (
+    FakeReactAgent,
 )
 
 
@@ -239,3 +244,44 @@ async def test_cancel_active_round_does_not_block_on_slow_cancel_task() -> None:
     agent.abort.assert_awaited_once()
     assert elapsed < 1.0
     assert agent._interaction_round_task.cancelled() or agent._interaction_round_task.done()
+
+
+@pytest.mark.asyncio
+async def test_interaction_timeout_is_visible_and_cancels_real_executor() -> None:
+    """The real task-loop kernel must not leave a timed-out executor running."""
+    await Runner.start()
+    agent = DeepAgent(AgentCard(name="timeout-integration", description="test"))
+    agent.configure(
+        DeepAgentConfig(
+            enable_task_loop=True,
+            completion_timeout=0.01,
+        )
+    )
+    fake = FakeReactAgent(agent.card)
+    fake.sleep_seconds = 1.0
+    agent.set_react_agent(fake, initialized=True)
+
+    try:
+        await agent.start()
+        stream = await agent.attach_output()
+        assert stream is not None
+
+        await agent.send_input(
+            SendInputRequest(
+                request_id="timeout-integration",
+                inputs={"query": "slow round"},
+            )
+        )
+        chunks = [chunk async for chunk in stream]
+
+        answers = [chunk.payload for chunk in chunks if getattr(chunk, "type", None) == "answer"]
+        assert answers == [
+            {
+                "output": "Task loop round timed out after 0.01 seconds.",
+                "result_type": "error",
+            }
+        ]
+        assert fake.cancelled_count == 1
+    finally:
+        await agent.stop()
+        await Runner.stop()

@@ -350,7 +350,7 @@ session checkpoint 全局状态根上有一个 `teams` namespace：
 | `enable_task_planning` | `bool` | `False` |
 | `restrict_to_sandbox` | `bool` | `False` |
 | `auto_create_workspace` | `bool` | `True` |
-| `completion_timeout` | `float` | `600.0` |
+| `completion_timeout` | `Optional[float]` | `600.0`（NativeHarness 的慢轮次告警阈值；`None` 禁用告警） |
 | `progressive_tool` | `Optional[ProgressiveToolSpec]` | `None` |
 | `approval_required_tools` | `Optional[list[str]]` | `None` |
 

@@ -471,7 +471,7 @@ class DeepAgentSpec(BaseModel):
     enable_task_planning: bool = False
     restrict_to_sandbox: bool = False
     auto_create_workspace: bool = True
-    completion_timeout: float = 600.0
+    completion_timeout: float | None = 600.0
     progressive_tool: Optional[ProgressiveToolSpec] = None
     approval_required_tools: Optional[list[str]] = None
     context_engine_config: Optional[Any] = None

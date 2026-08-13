@@ -69,6 +69,16 @@ class TestDeepAgentColdBuild:
         assert any(isinstance(r, TaskCompletionRail) for r in parts.rails)
         assert any(isinstance(r, AskUserRail) for r in parts.rails)
 
+    def test_resolve_parts_accepts_unlimited_completion_timeout(self) -> None:
+        """None is preserved from the serializable spec to runtime config."""
+        parts = DeepAgentSpec(
+            card=AgentCard(name="unlimited_completion_timeout"),
+            completion_timeout=None,
+            auto_create_workspace=False,
+        ).resolve_parts()
+
+        assert parts.config.completion_timeout is None
+
     def test_build_publishes_parent_model_without_mutating_caller_extras(self) -> None:
         """build injects core.subagent.* with parent model; caller extras stay untouched."""
         caller = BuildContext(language="en", extras={"marker": "keep"})

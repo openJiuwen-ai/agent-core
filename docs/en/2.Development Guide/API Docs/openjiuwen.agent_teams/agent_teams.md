@@ -97,7 +97,7 @@ JSON-serializable configuration for a single DeepAgent. Used in `TeamAgentSpec.a
 * **enable_task_planning**(bool, optional): Enable task planning rail. Default: `False`.
 * **restrict_to_sandbox**(bool, optional): Restrict file operations to sandbox. Default: `False`.
 * **auto_create_workspace**(bool, optional): Auto-create workspace directory. Default: `True`.
-* **completion_timeout**(float, optional): Timeout in seconds. Default: `600.0`.
+* **completion_timeout**(Optional[float], optional): Slow-round warning threshold in seconds. Default: `600.0`; `None` disables the warning.
 * **progressive_tool**(ProgressiveToolSpec, optional): Progressive tool loading config. Default: `None`.
 * **approval_required_tools**(list[str], optional): Tool names requiring leader approval (teammates only). Default: `None`.
 
