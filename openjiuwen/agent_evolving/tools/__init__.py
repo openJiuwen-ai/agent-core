@@ -5,9 +5,9 @@
 from openjiuwen.agent_evolving.tools.review import (
     REVIEW_EVOLUTION_TOOL_NAMES,
     EvolutionReviewListSkillExperiencesTool,
-    EvolutionReviewListTrajectoryStepsTool,
+    EvolutionReviewListTrajectorySpansTool,
     EvolutionReviewReadSkillExperiencesTool,
-    EvolutionReviewReadTrajectoryStepsTool,
+    EvolutionReviewReadTrajectorySpansTool,
     SubmitEvolutionReviewResultTool,
     create_evolution_review_tools,
 )
@@ -29,9 +29,9 @@ __all__ = [
     "MAIN_EVOLUTION_TOOL_NAMES",
     "REVIEW_EVOLUTION_TOOL_NAMES",
     "EvolutionReviewListSkillExperiencesTool",
-    "EvolutionReviewListTrajectoryStepsTool",
+    "EvolutionReviewListTrajectorySpansTool",
     "EvolutionReviewReadSkillExperiencesTool",
-    "EvolutionReviewReadTrajectoryStepsTool",
+    "EvolutionReviewReadTrajectorySpansTool",
     "EvolveReviewTaskTool",
     "EvolveSkillExperiencesTool",
     "ListSkillExperiencesTool",

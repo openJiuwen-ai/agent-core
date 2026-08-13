@@ -564,11 +564,15 @@ def _message_list(value: Any) -> list[dict[str, Any]]:
 
 
 def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Read detached prompt and completion messages from an ``llm.call`` span."""
+    """Read detached LLM messages, preferring standard attributes over Langfuse mirrors."""
 
     attrs = span_attributes(span)
     prompts = _indexed_messages(attrs, semconv.GEN_AI_PROMPT)
     completions = _indexed_messages(attrs, semconv.GEN_AI_COMPLETION)
+    if not prompts:
+        prompts = _indexed_messages(attrs, semconv.LANGFUSE_GEN_AI_PROMPT)
+    if not completions:
+        completions = _indexed_messages(attrs, semconv.LANGFUSE_GEN_AI_COMPLETION)
     if not prompts:
         prompts = _message_list(attrs.get(legacy_semconv.LEGACY_GEN_AI_INPUT_MESSAGES))
     if not completions:
