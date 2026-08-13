@@ -34,6 +34,7 @@ class PermissionResult:
     matched_rule: str | None = None
     reason: str | None = None
     external_paths: list[str] | None = None
+    findings: list[Any] | None = None
 
     @property
     def is_allowed(self) -> bool:
@@ -52,10 +53,12 @@ class PermissionResult:
 class PermissionConfirmResponse:
     """工具权限 ASK 场景下用户对「允许一次 / 会话内记住 / 永久记住 / 拒绝」的确认结果。
 
-    - ``approved and auto_confirm and persist_allow``：永久记住，走合并 ``permissions``、
-      更新内存并写盘的路径（与 ``PermissionInterruptRail._persist_allow_always`` 一致）。
-    - ``approved and auto_confirm and not persist_allow``：会话内记住，仅写入 session state
-      的 ``__interrupt_auto_confirm__``，不写磁盘。
+    - ``approved and auto_confirm and persist_allow``：永久记住（User 层 pattern /
+      file_guard / ``allow_tools``）；Global 底线不可放宽。
+    - ``approved and auto_confirm and not persist_allow``：会话内记住；有安全 suggestion
+      时经 ``persist_session_allow_rule`` 写 Session 层 pattern / file_guard，无安全
+      suggestion 时写 Session 层 ``allow_tools``；并仍可写入 session state
+      ``__interrupt_auto_confirm__``。
     - ``approved and not auto_confirm``：仅本次放行。
     - ``not approved``：拒绝。
     """
@@ -111,8 +114,13 @@ class FileGuardSection(TypedDict, total=False):
 class PermissionsSection(TypedDict, total=False):
     """与 agent YAML 中 ``permissions:`` 段落常见字段对齐的结构说明。
 
-    常见键包括 ``tools``、``defaults``、``rules``、``approval_overrides``、
-    ``file_guard``、``external_directory``（deprecated）等。
+    产品模式见 ``mode``（``full_access`` / ``auto`` / ``strict``），由
+    :class:`~openjiuwen.harness.security.mode_controller.PermissionModeController`
+    合成进 EffectivePermissions。顶层 ``defaults`` **不**落盘，仅 mode 内部注入。
+
+    常见键包括 ``mode``、``ask_tools`` / ``deny_tools`` / ``allow_tools``、``rules``、
+    ``approval_overrides``、``file_guard``、以及引擎合成后的 ``tools`` / ``permission_mode`` /
+    ``sandbox_intent``。
 
     - 工具级策略由 :func:`openjiuwen.harness.security.tiered_policy.evaluate_tiered_policy` 评估。
     - 路径防护由 :mod:`openjiuwen.harness.security.file_guard` 评估（可独立关闭）。
@@ -122,29 +130,32 @@ class PermissionsSection(TypedDict, total=False):
 
         permissions:
           enabled: true
+          mode: auto
           schema: tiered_policy
-          tools:
-            read_file: ask
+          ask_tools: [bash]
           file_guard:
             enabled: true
-            defaults: {read: ask, write: ask, exec: ask}
             paths:
               - path: "/data/public"
                 read: allow
                 write: ask
                 exec: deny
-          # deprecated：加载期投影进 file_guard（Legacy）
-          external_directory:
-            "*": ask
+                match: prefix
 
     其它键（例如产品层在 ``permissions`` 下自用的配置）可继续出现在 YAML 中；本 TypedDict
     不枚举 harness 之外的扩展字段。
     """
 
     enabled: bool
+    mode: NotRequired[str]  # full_access | auto | strict
     schema: NotRequired[str]
-    defaults: NotRequired[dict[str, Any]]
-    tools: NotRequired[dict[str, Any]]
+    defaults: NotRequired[dict[str, Any]]  # 仅 EffectivePermissions 内部；产品 YAML 勿写
+    tools: NotRequired[dict[str, Any]]  # 合成后投影；产品层优先 ask_tools/deny_tools/allow_tools
+    ask_tools: NotRequired[list[str]]
+    deny_tools: NotRequired[list[str]]
+    allow_tools: NotRequired[list[str]]
+    permission_mode: NotRequired[str]  # 引擎 severity_map：normal|strict（由 mode 注入）
+    sandbox_intent: NotRequired[str]  # optional|required（由 mode 注入，供 Host/SysOp）
     rules: NotRequired[list[dict[str, Any]]]
     approval_overrides: NotRequired[list[ApprovalOverrideEntry]]
     file_guard: NotRequired[FileGuardSection]

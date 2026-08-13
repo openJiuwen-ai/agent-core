@@ -21,7 +21,11 @@ from openjiuwen.harness.security.files.registry import (
     lookup_file_tool_specs,
 )
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
-from openjiuwen.harness.security.tiered_policy import _PATH_TOOLS, _iter_path_strings
+from openjiuwen.harness.security.tiered_policy import (
+    _PATH_TOOLS,
+    _iter_path_strings,
+    expand_path_arg_values,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +273,7 @@ def extract_accesses_native(
     """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex``。"""
     out: list[tuple[Path, FileAction, str]] = []
 
-    if tool_name in ("mcp_exec_command", "bash", "create_terminal"):
+    if tool_name in ("mcp_exec_command", "bash", "create_terminal", "powershell"):
         workdir = tool_args.get("workdir", "")
         try:
             workdir_resolved = (workspace / str(workdir)).resolve() if workdir else workspace
@@ -292,13 +296,11 @@ def extract_accesses_native(
     specs = _specs_for_tool(tool_name)
     if specs:
         for spec in specs:
-            raw = tool_args.get(spec.arg_name)
-            if not isinstance(raw, str) or not raw.strip():
-                continue
-            rp = _resolve_path_str(raw, workspace)
-            if rp is None:
-                continue
-            out.append((rp, spec.action, "tool_arg"))
+            for raw in expand_path_arg_values(tool_args.get(spec.arg_name)):
+                rp = _resolve_path_str(raw, workspace)
+                if rp is None:
+                    continue
+                out.append((rp, spec.action, "tool_arg"))
         return out
 
     if tool_name in _PATH_TOOLS:

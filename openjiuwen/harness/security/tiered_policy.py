@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.harness.security.builtin_platforms import filter_entries_for_platform
 from openjiuwen.harness.security.models import PermissionLevel
 from openjiuwen.harness.security.patterns import PathMatcher, match_wildcard
 from openjiuwen.harness.security.shell_ast import (
@@ -28,19 +30,22 @@ _TIERED_PATH_MATCHER = PathMatcher()
 _STRICT_ORDER = {PermissionLevel.DENY: 0, PermissionLevel.ASK: 1, PermissionLevel.ALLOW: 2}
 
 # 规则内 tools 必须同类（与产品设计一致）
-_SHELL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+_SHELL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal", "powershell"})
+
 _PATH_TOOLS = frozenset({
     "read_file", "write_file", "edit_file",
     "read_text_file", "write_text_file",
     "write", "read",
     "glob_file_search", "glob", "list_dir", "list_files",
     "grep", "search_replace",
+    "send_file_to_user",
 })
 _NETWORK_TOOLS = frozenset({"mcp_fetch_webpage", "mcp_free_search", "mcp_paid_search"})
 
 _PATH_ARG_KEYS = frozenset({
     "path", "file_path", "target_file", "file", "old_path", "new_path",
     "source_path", "dest_path", "directory", "dir",
+    "abs_file_path_list",
 })
 
 # (resolved_path_str, mtime, rules)；文件变更后 mtime 变化会重新加载
@@ -85,10 +90,11 @@ def _resolve_builtin_rules_yaml_path() -> Path | None:
     return None
 
 
-def get_builtin_security_rules() -> list[dict[str, Any]]:
-    """内置安全规则列表（进程内按路径+mtime 缓存）。
+def get_builtin_security_rules(*, platform: str | None = None) -> list[dict[str, Any]]:
+    """内置安全规则列表（进程内按路径+mtime 缓存全量，返回时按平台过滤）。
 
     仅加载包内 ``openjiuwen/harness/resources/builtin_rules.yaml``。
+    ``platform`` 为 ``None`` 时使用当前 OS（``windows`` / ``unix``）。
     """
     global _BUILTIN_RULES_CACHE
     path = _resolve_builtin_rules_yaml_path()
@@ -99,15 +105,19 @@ def get_builtin_security_rules() -> list[dict[str, Any]]:
     except OSError:
         mtime = -1.0
     key = str(path.resolve())
-    if _BUILTIN_RULES_CACHE is not None:
-        ck, mt, rules = _BUILTIN_RULES_CACHE
-        if ck == key and mt == mtime:
-            return rules
+    cached = _BUILTIN_RULES_CACHE
+    if cached is None or cached[0] != key or cached[1] != mtime:
+        rules = _read_builtin_security_rules(path)
+        _BUILTIN_RULES_CACHE = (key, mtime, rules)
+    else:
+        rules = cached[2]
+    return filter_entries_for_platform(rules, platform=platform)
+
+
+def _read_builtin_security_rules(path: Path) -> list[dict[str, Any]]:
     with path.open(encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    rules = [r for r in (data.get("rules") or []) if isinstance(r, dict)]
-    _BUILTIN_RULES_CACHE = (key, mtime, rules)
-    return rules
+    return [r for r in (data.get("rules") or []) if isinstance(r, dict)]
 
 
 def _parse_level(value: str) -> PermissionLevel:
@@ -160,8 +170,15 @@ def rule_tools_category_consistent(tools: list[str]) -> bool:
     return bool(cats)
 
 
+def _normalize_shell_whitespace(command: str) -> str:
+    """匹配前空白归一化（压缩连续空白）。"""
+    return re.sub(r"\s+", " ", (command or "").strip())
+
+
 def _command_text(tool_args: dict[str, Any]) -> str:
-    return str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
+    return _normalize_shell_whitespace(
+        str(tool_args.get("command", "") or tool_args.get("cmd", "") or ""),
+    )
 
 
 def _shell_pattern_matches(pattern: str, command: str) -> bool:
@@ -220,6 +237,40 @@ def _path_pattern_matches(pattern: str, value: str) -> bool:
     return _TIERED_PATH_MATCHER.match_path(p, value)
 
 
+def expand_path_arg_values(raw: Any) -> list[str]:
+    """把路径参数展开为单个路径字符串（支持 JSON 数组与 list）。"""
+    if raw is None:
+        return []
+    items: list[Any]
+    if isinstance(raw, (list, tuple)):
+        items = list(raw)
+    elif isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return []
+        if stripped[:1] == "[":
+            try:
+                parsed = json.loads(stripped)
+            except (TypeError, ValueError):
+                return [stripped]
+            if isinstance(parsed, list):
+                items = parsed
+            elif isinstance(parsed, str):
+                items = [parsed]
+            else:
+                items = [stripped]
+        else:
+            items = [stripped]
+    else:
+        items = [raw]
+    out: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return out
+
+
 def _tool_arg_value_looks_like_path(arg_key: str, value: str) -> bool:
     """是否把该参数值纳入路径类 pattern 匹配（已知名或形似路径）。"""
     if arg_key in _PATH_ARG_KEYS:
@@ -232,11 +283,18 @@ def _tool_arg_value_looks_like_path(arg_key: str, value: str) -> bool:
 def _iter_path_strings(_tool_name: str, tool_args: dict[str, Any]) -> list[str]:
     out: list[str] = []
     for k, v in tool_args.items():
-        if not isinstance(v, str) or not v.strip():
-            continue
-        if _tool_arg_value_looks_like_path(k, v):
-            out.append(v.strip())
+        for item in expand_path_arg_values(v):
+            if _tool_arg_value_looks_like_path(k, item):
+                out.append(item)
     return out
+
+
+def _rule_layer(rule: dict[str, Any]) -> str:
+    layer = str(rule.get("_config_layer") or "").strip().lower()
+    if layer in ("global", "user", "session", "builtin"):
+        return layer
+    # 未标记：视为 global（包内 builtin 走独立列表；裸 rules 偏组织底线）
+    return "global"
 
 
 def _collect_param_rule_hits(
@@ -245,11 +303,15 @@ def _collect_param_rule_hits(
         tool_args: dict[str, Any],
         mode: str,
         label_ns: str,
+        *,
+        layers: frozenset[str] | None = None,
 ) -> list[tuple[PermissionLevel, str]]:
     """参数级规则命中列表 (level, label)；``label_ns`` 为 ``builtin`` 或 ``rules``。"""
     hits: list[tuple[PermissionLevel, str]] = []
     for rule in rules:
         if not isinstance(rule, dict):
+            continue
+        if layers is not None and _rule_layer(rule) not in layers:
             continue
         r_tools = rule.get("tools") or []
         if isinstance(r_tools, str):
@@ -365,8 +427,14 @@ def tiered_policy_rule_matches(
         # 路径匹配已迁至 file_guard；A 线不再匹配 path
         return False
     if cat == "network":
-        # 产品设计：网络类暂仅整工具；参数规则不匹配
-        return False
+        from openjiuwen.harness.security.network_guard import network_url_text
+
+        url = network_url_text(tool_args)
+        if not url:
+            return False
+        from openjiuwen.harness.security.patterns import URLMatcher
+
+        return URLMatcher().match_url(pattern, url)
     return False
 
 
@@ -463,6 +531,10 @@ def _evaluate_single_invocation(
         tool_args: dict[str, Any],
         ctx: _TieredInvocationContext,
 ) -> tuple[PermissionLevel, str]:
+    """评估顺序（P1）：Global DENY → … → Global ASK 底线 → User rules → overrides → tools/defaults。
+
+    ``approval_overrides`` **不可**放宽 Global/builtin 底线。
+    """
     builtin_hits = _collect_param_rule_hits(
         ctx.builtin_rules,
         tool_name,
@@ -473,26 +545,41 @@ def _evaluate_single_invocation(
     if any(lev == PermissionLevel.DENY for lev, _ in builtin_hits):
         return _finalize_hits(builtin_hits, "builtin")
 
-    user_hits = _collect_param_rule_hits(
+    global_hits = _collect_param_rule_hits(
         ctx.rules,
         tool_name,
         tool_args,
         ctx.mode,
         "rules",
+        layers=frozenset({"global"}),
     )
-    if any(lev == PermissionLevel.DENY for lev, _ in user_hits):
-        return _finalize_hits(user_hits, "rules")
+    if any(lev == PermissionLevel.DENY for lev, _ in global_hits):
+        return _finalize_hits(global_hits, "rules")
+
+    overlay_hits = _collect_param_rule_hits(
+        ctx.rules,
+        tool_name,
+        tool_args,
+        ctx.mode,
+        "rules",
+        layers=frozenset({"user", "session"}),
+    )
+    if any(lev == PermissionLevel.DENY for lev, _ in overlay_hits):
+        return _finalize_hits(overlay_hits, "rules")
+
+    # Global ASK 底线（builtin CRITICAL→ASK / Global rules ASK）优先于 approval_overrides
+    if builtin_hits:
+        return _finalize_hits(builtin_hits, "builtin")
+    if global_hits:
+        return _finalize_hits(global_hits, "rules")
 
     override_hits = _collect_approval_override_hits(ctx.approval_overrides, tool_name, tool_args)
     if override_hits:
         contributing = sorted(set(override_hits))
         return PermissionLevel.ALLOW, _APPROVAL_OVERRIDES_PREFIX + ":" + "+".join(contributing)
 
-    if builtin_hits:
-        return _finalize_hits(builtin_hits, "builtin")
-
-    if user_hits:
-        return _finalize_hits(user_hits, "rules")
+    if overlay_hits:
+        return _finalize_hits(overlay_hits, "rules")
 
     if ctx.baseline_level is not None:
         return ctx.baseline_level, ctx.baseline_rule or f"{_MR}:tools"
@@ -520,6 +607,23 @@ def _aggregate_subcommand_results(
         return permission, matched_rule
 
     final = strictest(*(permission for _, permission, _ in results))
+    # 各段均由 approval_overrides 放行时，matched_rule 归并为 overrides 前缀，
+    # 以便 findings 升级跳过（与「会话记住分段」语义一致）。
+    if (
+        final == PermissionLevel.ALLOW
+        and all(permission == PermissionLevel.ALLOW for _, permission, _ in results)
+        and all(matched_rule_uses_approval_override(rule) for _, _, rule in results)
+    ):
+        contributing = sorted({
+            rule[len(_APPROVAL_OVERRIDES_PREFIX) + 1:]
+            if rule.startswith(_APPROVAL_OVERRIDES_PREFIX + ":")
+            else rule
+            for _, _, rule in results
+        })
+        return PermissionLevel.ALLOW, _APPROVAL_OVERRIDES_PREFIX + ":shell_subcommands:" + "+".join(
+            contributing
+        )
+
     contributing = sorted({
         f"{command}=>{matched_rule}"
         for command, permission, matched_rule in results
@@ -528,6 +632,54 @@ def _aggregate_subcommand_results(
     if not contributing:
         return final, f"{_MR}:shell_subcommands"
     return final, f"{_MR}:shell_subcommands:" + "+".join(contributing)
+
+
+def _evaluate_shell_full_command_floor(
+        tool_name: str,
+        tool_args: dict[str, Any],
+        ctx: _TieredInvocationContext,
+) -> tuple[PermissionLevel, str] | None:
+    """整命令上的 builtin / Global 底线（如 ``curl | bash``），不匹配 approval_overrides。
+
+    overrides / defaults 仍按子命令分段评估，与 suggestion 落盘一致。
+    """
+    builtin_hits = _collect_param_rule_hits(
+        ctx.builtin_rules,
+        tool_name,
+        tool_args,
+        ctx.mode,
+        "builtin",
+    )
+    if any(lev == PermissionLevel.DENY for lev, _ in builtin_hits):
+        return _finalize_hits(builtin_hits, "builtin")
+
+    global_hits = _collect_param_rule_hits(
+        ctx.rules,
+        tool_name,
+        tool_args,
+        ctx.mode,
+        "rules",
+        layers=frozenset({"global"}),
+    )
+    if any(lev == PermissionLevel.DENY for lev, _ in global_hits):
+        return _finalize_hits(global_hits, "rules")
+
+    overlay_hits = _collect_param_rule_hits(
+        ctx.rules,
+        tool_name,
+        tool_args,
+        ctx.mode,
+        "rules",
+        layers=frozenset({"user", "session"}),
+    )
+    if any(lev == PermissionLevel.DENY for lev, _ in overlay_hits):
+        return _finalize_hits(overlay_hits, "rules")
+
+    if builtin_hits:
+        return _finalize_hits(builtin_hits, "builtin")
+    if global_hits:
+        return _finalize_hits(global_hits, "rules")
+    return None
 
 
 def evaluate_tiered_policy(
@@ -541,6 +693,7 @@ def evaluate_tiered_policy(
     - 内置参数规则一旦命中则不再看用户 ``rules``。
     - 有参数级命中时结果仅来自该层（内置或用户）。
     - 无参数级命中时：仅有整工具则用整工具；否则仅用默认（整工具存在则忽略默认）。
+    - Shell ``simple``：先整命令安全底线，再按子命令分段评估后聚合。
     """
     mode = str(permission_config.get("permission_mode") or "normal").strip().lower()
     if mode not in ("normal", "strict"):
@@ -581,6 +734,10 @@ def evaluate_tiered_policy(
     )
 
     if _tool_category(tool_name) == "shell" and shell_parse is not None and shell_parse.kind == "simple":
+        full_floor = _evaluate_shell_full_command_floor(tool_name, tool_args, invocation_ctx)
+        if full_floor is not None:
+            return _apply_shell_ast_floor(*full_floor, shell_floor, shell_floor_rule)
+
         subcommand_results: list[tuple[str, PermissionLevel, str]] = []
         for subcommand in shell_parse.subcommands:
             if not subcommand.text:
@@ -606,21 +763,73 @@ def evaluate_tiered_policy(
     return _apply_shell_ast_floor(*result, shell_floor, shell_floor_rule)
 
 
+def global_baseline_blocks_persist(
+        permission_config: Mapping[str, Any],
+        tool_name: str,
+        tool_args: dict[str, Any],
+) -> bool:
+    """Global/builtin 底线（DENY 或 CRITICAL→ASK 等）命中时禁止 pattern 永久/会话放宽。"""
+    mode = str(permission_config.get("permission_mode") or "normal").strip().lower()
+    if mode not in ("normal", "strict"):
+        mode = "normal"
+    rules = permission_config.get("rules") or []
+    if not isinstance(rules, list):
+        rules = []
+    builtin_hits = _collect_param_rule_hits(
+        get_builtin_security_rules(),
+        tool_name,
+        tool_args,
+        mode,
+        "builtin",
+    )
+    if builtin_hits:
+        return True
+    global_hits = _collect_param_rule_hits(
+        rules,
+        tool_name,
+        tool_args,
+        mode,
+        "rules",
+        layers=frozenset({"global"}),
+    )
+    return bool(global_hits)
+
+
 def maybe_escalate_shell_operators(
         tool_name: str,
         tool_args: dict[str, Any],
         permission: PermissionLevel,
 ) -> PermissionLevel:
-    """与旧版一致：命令含链式/注入元字符时 ALLOW→ASK."""
-    if tool_name not in ("mcp_exec_command", "bash", "create_terminal"):
+    """重定向 / 命令替换等危险结构时 ALLOW→ASK；单纯 ``|`` / ``&&`` / ``;`` 不抬。
+
+    与 findings 的 simple-compound vs risky-structure 分级、以及
+    ``shell_subcommands`` 分段评估保持一致。
+    """
+    if tool_name not in ("mcp_exec_command", "bash", "create_terminal", "powershell"):
         return permission
     if permission != PermissionLevel.ALLOW:
         return permission
-    from openjiuwen.harness.security.checker import _SHELL_OPERATORS_RE
 
     cmd = _command_text(tool_args)
-    if cmd and _SHELL_OPERATORS_RE.search(cmd):
+    if not cmd:
+        return permission
+
+    parsed = parse_shell_for_permission(cmd)
+    if parsed.kind == "too_complex":
         return PermissionLevel.ASK
+    flags = parsed.flags
+    if any((
+            flags.has_subshell,
+            flags.has_command_group,
+            flags.has_command_substitution,
+            flags.has_process_substitution,
+            flags.has_parameter_expansion,
+            flags.has_heredoc,
+            flags.has_input_redirection,
+            flags.has_output_redirection,
+    )):
+        return PermissionLevel.ASK
+    # 仅管道 / 复合算子：留给分段评估 + INFO findings，不在此抬 ASK
     return permission
 
 

@@ -63,22 +63,36 @@ RequestPermissionConfirmationHook = Callable[
 class ToolPermissionHost:
     """由 Agent 服务或 CLI 在构造 DeepAgent / PermissionInterruptRail 时注入。"""
 
-    get_permissions_snapshot: Callable[[], dict[str, Any]] | None = None
-    """返回与 ``config['permissions']`` 同结构的 dict，用于热同步磁盘配置。"""
+    get_permissions_snapshot: Callable[..., dict[str, Any]] | None = None
+    """返回与 ``config['permissions']`` 同结构的 dict，用于热同步磁盘配置。
+
+    签名可为 ``() -> dict`` 或 ``(session_id: str | None) -> dict``。
+    Rail 在每次工具校验前会传入从 ``ctx.session`` 解析出的 ``session_id``，
+    以便 Host 合并 Session 层（``session_permissions.yaml``）。
+    """
 
     persist_allow_rule: Callable[[dict[str, Any]], bool] | None = None
-    """自定义「总是允许」写盘；入参为护栏已合并好的整份 ``permissions`` dict（与默认 YAML
-    路径下内存中的结果一致，含 ``external_directory`` 等）。
+    """永久允许（User 层）写盘；入参为护栏已合并好的整份 ``permissions`` dict。
 
     调用顺序：护栏先 ``merge_permission_allow_rule_into_permissions``、按需
-    ``merge_external_directory_allow_into_permissions``，再 ``update_config(merged)``，
-    最后调用本回调；返回 ``False`` 时护栏会回滚内存配置。未设置本回调时则使用
+    file_guard 合并，再 ``update_config(merged)``，最后调用本回调；返回 ``False``
+    时护栏会回滚内存配置。未设置本回调时则使用
     :func:`openjiuwen.harness.security.patterns.write_permissions_section_to_agent_config_yaml`
     写入 ``permission_yaml_path``。
+
+    P1：优先 pattern 级 allow / file_guard paths；无安全 suggestion 时回退 ``allow_tools``。
+    """
+
+    persist_session_allow_rule: Callable[[dict[str, Any]], bool] | None = None
+    """会话内记住（Session 层）写盘；入参为合并后的 effective permissions。
+
+    产品侧应写入 ``session_permissions.yaml`` 的 pattern 级 ``approval_overrides``
+    （或增量 file_guard paths）；无安全 suggestion 时回退 Session 层 ``allow_tools``。
+    未设置时会话记住仅保留内存 auto_confirm。
     """
 
     resolve_workspace_dir: Callable[[], Path] | None = None
-    """外部路径校验用的 workspace 根目录。"""
+    """当前任务 workspace（file_guard 区内路径）；不是 agent 数据根。"""
 
     permission_yaml_path: Path | None = None
     """Agent 配置文件路径；权限段写盘时优先使用（文件可尚不存在，父目录须存在）。

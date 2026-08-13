@@ -93,6 +93,13 @@ def test_merge_file_guard_access_allows_read_keeps_exact_dir(tmp_path: Path) -> 
         isinstance(p, dict) and str(p.get("path", "")).rstrip("/") == parent
         for p in paths
     )
+    added = merged.get("_file_guard_paths_added") or []
+    assert any(
+        isinstance(p, dict)
+        and str(p.get("path", "")).rstrip("/") == target.rstrip("/")
+        and p.get("read") == "allow"
+        for p in added
+    )
 
 
 def test_merge_file_guard_access_allows_write_escalates_axes(tmp_path: Path) -> None:

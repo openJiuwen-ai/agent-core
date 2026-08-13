@@ -55,6 +55,7 @@ def _bootstrap_builtin_specs() -> None:
         FileToolSpec("glob", "pattern", "read"),
         FileToolSpec("list_dir", "path", "read"),
         FileToolSpec("list_files", "path", "read"),
+        FileToolSpec("send_file_to_user", "abs_file_path_list", "read"),
     ]
     for s in builtins:
         register_file_tool(s)

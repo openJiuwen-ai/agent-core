@@ -84,6 +84,15 @@ class PermissionEngine:
         self._trusted_dirs = trusted_dirs
         self._rebuild_file_guard()
 
+    def update_workspace_root(self, workspace_root: Path | None) -> None:
+        """热更新 file_guard 绑定的当前任务 workspace."""
+        self._workspace_root = (
+            Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None
+            else None
+        )
+        self._rebuild_file_guard()
+
     @property
     def trusted_dirs(self) -> list[Path]:
         """获取当前受信任目录列表."""
@@ -199,6 +208,12 @@ class PermissionEngine:
             tool_args = {}
 
         # 1. Pipeline A：工具级 + 参数规则 + 默认
+        from openjiuwen.harness.security.findings import (
+            escalate_with_findings,
+            findings_for_tool_call,
+        )
+        from openjiuwen.harness.security.network_guard import evaluate_network_guard
+
         external_paths: list[str] | None = None
         permission, matched_rule = self.evaluate_global_policy_directly(
             tool_name,
@@ -214,6 +229,19 @@ class PermissionEngine:
             permission.value, matched_rule,
         )
 
+        # 1b. NetworkGuard（与 mode 相关；Full Access 默认放行）
+        net_result = evaluate_network_guard(self.config, tool_name, tool_args)
+        if net_result is not None:
+            permission = tiered_policy_strictest(permission, net_result.permission)
+            net_rule = net_result.matched_rule or "network_guard"
+            matched_rule = f"{matched_rule}|{net_rule}"
+            logger.info(
+                "[PermissionEngine] permission.network_guard.result tool=%s permission=%s matched_rule=%s",
+                tool_name,
+                net_result.permission.value,
+                net_rule,
+            )
+
         # 2. Pipeline B：file_guard（可独立关闭；含 ExternalDirectory Legacy 投影）
         if self._file_guard is not None:
             path_result = self._file_guard.evaluate(tool_name, tool_args)
@@ -228,8 +256,16 @@ class PermissionEngine:
                     path_result.external_paths,
                     permission.value,
                 )
+                prev = permission
                 permission = tiered_policy_strictest(permission, path_result.permission)
-                matched_rule = f"{matched_rule}|{path_rule}"
+                # 展示决定最终级别的规则：一侧更严时只留该侧，同级才拼接。
+                if path_result.permission == permission and prev != permission:
+                    matched_rule = path_rule
+                elif path_result.permission == permission and prev == permission:
+                    if matched_rule and path_rule and matched_rule != path_rule:
+                        matched_rule = f"{matched_rule}|{path_rule}"
+                    else:
+                        matched_rule = matched_rule or path_rule
                 external_paths = path_result.external_paths
             else:
                 logger.info(
@@ -243,20 +279,29 @@ class PermissionEngine:
                 tool_name,
             )
 
+        findings = findings_for_tool_call(tool_name, tool_args)
+        mode = str(self.config.get("mode") or "auto")
+        # 用户/会话已对整条 command 写入 approval_overrides 时，不再用 structure findings
+        # 把 ALLOW 抬回 ASK（否则管道命令永远无法「记住后放行」）。
+        if not matched_rule_uses_approval_override(matched_rule):
+            permission = escalate_with_findings(permission, findings, mode=mode)
+
         result = PermissionResult(
             permission=permission,
             matched_rule=matched_rule,
             reason=self._get_reason(permission, tool_name, matched_rule),
             external_paths=external_paths,
+            findings=list(findings) if findings else None,
         )
 
         logger.info(
             "[PermissionEngine] permission.check.final tool=%s permission=%s matched_rule=%s "
-            "external_paths=%s",
+            "external_paths=%s findings=%d",
             tool_name,
             permission.value,
             matched_rule,
             external_paths or [],
+            len(findings),
         )
         return result
 

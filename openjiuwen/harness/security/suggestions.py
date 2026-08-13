@@ -17,17 +17,21 @@ from openjiuwen.harness.security.shell_ast import (
 
 logger = logging.getLogger(__name__)
 
-_SHELL_SUGGESTION_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+_SHELL_SUGGESTION_TOOLS = frozenset({
+    "bash", "mcp_exec_command", "create_terminal", "powershell",
+})
 _PATH_SUGGESTION_TOOLS = frozenset({
     "read_file", "write_file", "edit_file",
     "read_text_file", "write_text_file",
     "write", "read",
     "glob_file_search", "glob", "list_dir", "list_files",
     "grep", "search_replace",
+    "send_file_to_user",
 })
 _PATH_SUGGESTION_KEYS = (
     "path", "file_path", "target_file", "file", "old_path", "new_path",
     "source_path", "dest_path", "directory", "dir",
+    "abs_file_path_list",
 )
 
 
@@ -86,17 +90,19 @@ def build_shell_permission_suggestions(
     )):
         return []
 
-    if shell_ast_result.kind == "simple" and len(shell_ast_result.subcommands) > 1:
-        suggestions: list[PermissionSuggestion] = []
+    # && / || / ; 等复合结构：不提供可持久化 suggestion（与评估保守策略一致）。
+    if flags.has_compound_operators:
+        return []
+
+    # 管道 / 多段 simple：按子命令分段 suggestion（与 shell_subcommands 评估、
+    # approval_overrides 落盘、auto_confirm key 一致）。
+    if shell_ast_result.kind == "simple" and len(shell_ast_result.subcommands) >= 1:
+        out: list[PermissionSuggestion] = []
         for subcommand in shell_ast_result.subcommands:
             suggestion = _build_single_shell_suggestion(tool_name, subcommand.text)
             if suggestion is not None:
-                suggestions.append(suggestion)
-        return _dedupe_suggestions(suggestions)
-
-    if shell_ast_result.kind == "simple" and len(shell_ast_result.subcommands) == 1:
-        suggestion = _build_single_shell_suggestion(tool_name, shell_ast_result.subcommands[0].text)
-        return [suggestion] if suggestion is not None else []
+                out.append(suggestion)
+        return _dedupe_suggestions(out)
 
     suggestion = _build_single_shell_suggestion(tool_name, command)
     return [suggestion] if suggestion is not None else []
@@ -170,13 +176,15 @@ def _build_path_permission_suggestion(
         tool_name: str,
         tool_args: dict[str, Any],
 ) -> PermissionSuggestion | None:
+    from openjiuwen.harness.security.tiered_policy import expand_path_arg_values
+
     for key in _PATH_SUGGESTION_KEYS:
-        value = tool_args.get(key)
-        if isinstance(value, str) and value.strip():
+        values = expand_path_arg_values(tool_args.get(key))
+        if values:
             return PermissionSuggestion(
                 tools=(tool_name,),
                 match_type="path",
-                pattern=value.strip(),
+                pattern=values[0],
                 scope="exact",
                 reason="exact_path",
             )

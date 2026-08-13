@@ -75,7 +75,12 @@ async def test_write_file_allow_path_ask_from_b_only(tmp_path: Path) -> None:
         "write_file", {"file_path": str(target)},
     )
     assert result.permission == PermissionLevel.ASK
-    assert "file_guard" in (result.matched_rule or "")
+    assert result.matched_rule == "file_guard:defaults" or (
+        result.matched_rule or ""
+    ).startswith("file_guard:")
+    # A 线已 allow 时，matched_rule 不应再带上 tiered/tools 前缀
+    assert "tools.write_file" not in (result.matched_rule or "")
+    assert "tiered_policy" not in (result.matched_rule or "")
 
 
 @pytest.mark.asyncio
@@ -109,11 +114,13 @@ async def test_write_file_allow_and_file_guard_write_allow(tmp_path: Path) -> No
     assert result.permission == PermissionLevel.ALLOW
 
 
-def test_merge_path_tool_elevates_tools_not_path_override() -> None:
-    """路径工具「总是允许」：写 tools.write_file=allow，不写 path 类 override。"""
+def test_merge_path_tool_writes_allow_tools_not_path_override() -> None:
+    """路径工具无 command suggestion：写 allow_tools，不写 path 类 approval_overrides。"""
     cfg = {
         "enabled": True,
+        "defaults": {"*": "allow"},
         "tools": {"write_file": "ask"},
+        "ask_tools": ["write_file"],
         "approval_overrides": [],
     }
     merged, applied = merge_permission_allow_rule_into_permissions(
@@ -124,4 +131,5 @@ def test_merge_path_tool_elevates_tools_not_path_override() -> None:
     assert not any(
         isinstance(o, dict) and o.get("match_type") == "path" for o in overrides
     )
+    assert "write_file" in (merged.get("allow_tools") or [])
     assert merged.get("tools", {}).get("write_file") == "allow"

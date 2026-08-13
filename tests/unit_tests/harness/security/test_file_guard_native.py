@@ -265,3 +265,95 @@ async def test_engine_native_strictest_with_tool_allow(tmp_path: Path) -> None:
     engine = PermissionEngine(cfg, workspace_root=workspace)
     result = await engine.check_permission("read_file", {"file_path": str(secret)})
     assert result.permission == PermissionLevel.DENY
+
+
+def test_trusted_dirs_follow_strict_workspace_axes(tmp_path: Path) -> None:
+    """选中目录与 workspace 轴一致：Strict 可读、写需确认。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    selected = tmp_path / "docs"
+    selected.mkdir()
+    target = selected / "a.txt"
+    cfg = {
+        "enabled": True,
+        "file_guard": {
+            "enabled": True,
+            "defaults": {"read": "ask", "write": "ask", "exec": "ask"},
+            "workspace": {"read": "allow", "write": "ask", "exec": "ask"},
+        },
+    }
+    checker = FileGuardChecker(
+        normalize_path_guard_config(
+            cfg,
+            workspace_root=workspace,
+            trusted_dirs=[selected],
+        )
+    )
+    assert checker.evaluate("read_file", {"file_path": str(target)}) is None
+    write_result = checker.evaluate(
+        "write_file",
+        {"file_path": str(target), "content": "x"},
+    )
+    assert write_result is not None
+    assert write_result.permission == PermissionLevel.ASK
+
+
+def test_trusted_dirs_follow_auto_workspace_axes(tmp_path: Path) -> None:
+    """Auto 选中目录可读写。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    selected = tmp_path / "docs"
+    selected.mkdir()
+    target = selected / "a.txt"
+    cfg = {
+        "enabled": True,
+        "file_guard": {
+            "enabled": True,
+            "defaults": {"read": "allow", "write": "ask", "exec": "ask"},
+            "workspace": {"read": "allow", "write": "allow", "exec": "allow"},
+        },
+    }
+    checker = FileGuardChecker(
+        normalize_path_guard_config(
+            cfg,
+            workspace_root=workspace,
+            trusted_dirs=[selected],
+        )
+    )
+    assert checker.evaluate("read_file", {"file_path": str(target)}) is None
+    assert checker.evaluate(
+        "write_file",
+        {"file_path": str(target), "content": "x"},
+    ) is None
+
+
+def test_deny_glob_wins_over_workspace_prefix_in_matched_rule(tmp_path: Path) -> None:
+    """Workspace 前缀 allow 与敏感 glob deny 同时命中时，matched_rule 必须指向 glob。"""
+    workspace = tmp_path / "ws"
+    key = workspace / ".ssh" / "id_rsa"
+    key.parent.mkdir(parents=True)
+    key.write_text("x", encoding="utf-8")
+    cfg = {
+        "enabled": True,
+        "file_guard": {
+            "enabled": True,
+            "defaults": {"read": "allow", "write": "ask", "exec": "ask"},
+            "workspace": {"read": "allow", "write": "allow", "exec": "allow"},
+            "paths": [
+                {
+                    "path": "**/.ssh/**",
+                    "match": "glob",
+                    "read": "deny",
+                    "write": "deny",
+                    "exec": "deny",
+                },
+            ],
+        },
+    }
+    checker = FileGuardChecker(normalize_path_guard_config(cfg, workspace_root=workspace))
+    result = checker.evaluate("read_file", {"file_path": str(key)})
+    assert result is not None
+    assert result.permission == PermissionLevel.DENY
+    rule = result.matched_rule or ""
+    assert "file_guard:glob:**/.ssh/**" in rule
+    assert "file_guard:prefix:" not in rule

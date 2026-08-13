@@ -3,10 +3,7 @@
 
 """模拟用户选择「记住 / 总是允许」(auto_confirm) 后的权限合并。
 
-护栏持久化路径会调用 :func:`merge_permission_allow_rule_into_permissions`；
-本模块用**旧版 YAML 常见写法**（``tools.<name>.*`` 字典）与标量写法验证合并结果与
-``evaluate_tiered_policy`` 二次判定一致。路径类 override 已迁出，路径工具 HITL 抬升整工具
-``tools.*: allow``，路径细则由 ``file_guard`` 落盘（见 rail 侧，不在此函数内）。
+优先 pattern 级 approval_overrides（command）或 file_guard 路径；无安全 suggestion 时回退 allow_tools。
 """
 
 from __future__ import annotations
@@ -38,10 +35,10 @@ def _base_tiered() -> dict:
         pytest.param({"read_file": "ask"}, id="scalar_ask"),
     ],
 )
-def test_read_file_merge_after_auto_confirm_elevates_whole_tool_allow(
+def test_read_file_merge_falls_back_to_allow_tools(
     tools_fragment: dict,
 ) -> None:
-    """路径工具在 ASK 下「总是允许」应抬升 ``tools.read_file: allow``，不写 path 类 override。"""
+    """路径工具无 command suggestion 时回退 allow_tools（路径细则仍可由 file_guard 并行落盘）。"""
     cfg = {**_base_tiered(), "tools": {**tools_fragment, "write_file": "deny"}}
     tool_args = {"file_path": "notes.txt"}
 
@@ -52,21 +49,9 @@ def test_read_file_merge_after_auto_confirm_elevates_whole_tool_allow(
         deepcopy(cfg), "read_file", tool_args
     )
     assert applied is True
-
-    overrides = merged.get("approval_overrides") or []
-    assert overrides == []
-    assert merged["tools"]["read_file"] == "allow"
-
-    after, matched = evaluate_tiered_policy(merged, "read_file", tool_args)
-    assert after == PermissionLevel.ALLOW
-    assert "tools.read_file" in matched
-
-    again, applied_again = merge_permission_allow_rule_into_permissions(
-        deepcopy(merged), "read_file", tool_args
-    )
-    assert applied_again is False
-    assert again.get("approval_overrides") == merged.get("approval_overrides")
-    assert again["tools"]["read_file"] == "allow"
+    assert (merged.get("approval_overrides") or []) == []
+    assert "read_file" in (merged.get("allow_tools") or [])
+    assert merged.get("_allow_tools_added") == ["read_file"]
 
 
 def test_legacy_bash_star_ask_merge_adds_command_override() -> None:
@@ -95,11 +80,12 @@ def test_legacy_bash_star_ask_merge_adds_command_override() -> None:
     assert evaluate_tiered_policy(merged, "bash", tool_args)[0] == PermissionLevel.ALLOW
 
 
-def test_plain_tool_auto_confirm_sets_whole_tool_allow() -> None:
-    """非 shell / path 工具在 ASK 下选择总是允许后，应持久化为整工具 allow。"""
+def test_plain_tool_without_suggestion_falls_back_to_allow_tools() -> None:
+    """无安全 suggestion 时 HITL 回退写入 allow_tools。"""
     cfg = {
         **_base_tiered(),
         "tools": {"cron_create_job": "ask"},
+        "ask_tools": ["cron_create_job"],
     }
     tool_args = {"cron": "0 * * * *", "name": "sync"}
 
@@ -111,9 +97,6 @@ def test_plain_tool_auto_confirm_sets_whole_tool_allow() -> None:
     )
 
     assert applied is True
-    assert merged["tools"]["cron_create_job"] == "allow"
+    assert "cron_create_job" in (merged.get("allow_tools") or [])
+    assert "cron_create_job" not in (merged.get("ask_tools") or [])
     assert merged.get("approval_overrides") == []
-
-    after, matched = evaluate_tiered_policy(merged, "cron_create_job", tool_args)
-    assert after == PermissionLevel.ALLOW
-    assert "tools.cron_create_job" in matched

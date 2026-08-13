@@ -10,11 +10,26 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.harness.security.core import PermissionEngine
+from openjiuwen.harness.security.mode import EffectivePermissions
+from openjiuwen.harness.security.mode_controller import PermissionModeController
 from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.host import ToolPermissionHost
 
 if TYPE_CHECKING:
     from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+
+_MODE_CONTROLLER = PermissionModeController()
+
+
+def compose_effective_permissions(
+    permissions: PermissionsSection | dict[str, Any] | None,
+    *,
+    user_permissions: dict[str, Any] | None = None,
+    session_permissions: dict[str, Any] | None = None,
+) -> EffectivePermissions:
+    """将 Global（及可选 User/Session）合成为 EffectivePermissions。"""
+    raw = permissions if isinstance(permissions, dict) else {}
+    return _MODE_CONTROLLER.compose(raw, user_permissions, session_permissions)
 
 
 def build_permission_interrupt_rail(
@@ -25,11 +40,24 @@ def build_permission_interrupt_rail(
     engine: PermissionEngine | None = None,
     host: ToolPermissionHost | None = None,
     workspace_root: Path | None = None,
+    user_permissions: dict[str, Any] | None = None,
+    session_permissions: dict[str, Any] | None = None,
 ) -> "PermissionInterruptRail | None":
-    """若 ``permissions.enabled`` 为真则创建护栏，否则返回 ``None``。"""
+    """迁移 + 合成 mode preset 后，若 ``enabled`` 为真则创建护栏。
+
+    旧 ``enabled: false``（Web 完全访问）会迁移为 ``mode=full_access`` 且仍挂载权限轨。
+    """
     from openjiuwen.harness.rails.security import PermissionInterruptRail
 
-    if not isinstance(permissions, dict) or not permissions.get("enabled", False):
+    if not isinstance(permissions, dict):
+        return None
+
+    effective = compose_effective_permissions(
+        permissions,
+        user_permissions=user_permissions,
+        session_permissions=session_permissions,
+    )
+    if not effective.permissions.get("enabled", False):
         return None
 
     h = host or ToolPermissionHost()
@@ -42,13 +70,15 @@ def build_permission_interrupt_rail(
         h = replace(h, resolve_workspace_dir=_root)
 
     return PermissionInterruptRail(
-        config=deepcopy(permissions),
+        config=deepcopy(effective.permissions),
         engine=engine,
         tool_names=None,
         llm=llm,
         model_name=model_name,
         host=h,
+        sandbox_intent=effective.sandbox_intent,
+        permission_mode=effective.mode,
     )
 
 
-__all__ = ["build_permission_interrupt_rail"]
+__all__ = ["build_permission_interrupt_rail", "compose_effective_permissions"]

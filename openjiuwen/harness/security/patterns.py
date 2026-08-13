@@ -89,17 +89,21 @@ def _load_agent_config_for_persist(
     return {"permissions": deepcopy(fallback_permissions)}
 
 
-_SHELL_APPROVAL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+_SHELL_APPROVAL_TOOLS = frozenset({
+    "bash", "mcp_exec_command", "create_terminal", "powershell",
+})
 _PATH_APPROVAL_TOOLS = frozenset({
     "read_file", "write_file", "edit_file",
     "read_text_file", "write_text_file",
     "write", "read",
     "glob_file_search", "glob", "list_dir", "list_files",
     "grep", "search_replace",
+    "send_file_to_user",
 })
 _PATH_APPROVAL_KEYS = (
     "path", "file_path", "target_file", "file", "old_path", "new_path",
     "source_path", "dest_path", "directory", "dir",
+    "abs_file_path_list",
 )
 
 
@@ -371,6 +375,45 @@ def _build_approval_override_id(tool_name: str, match_type: str, pattern: str) -
     return collapsed[:120]
 
 
+def _append_allow_tool(perms: dict[str, Any], tool_name: str) -> None:
+    name = str(tool_name).strip()
+    allow = [t for t in (perms.get("allow_tools") or []) if isinstance(t, str)]
+    ask = [t for t in (perms.get("ask_tools") or []) if isinstance(t, str)]
+    if name in ask:
+        ask = [t for t in ask if t != name]
+        if ask:
+            perms["ask_tools"] = ask
+        else:
+            perms.pop("ask_tools", None)
+    if name not in allow:
+        allow.append(name)
+    perms["allow_tools"] = allow
+    added = [t for t in (perms.get("_allow_tools_added") or []) if isinstance(t, str)]
+    if name not in added:
+        added.append(name)
+    perms["_allow_tools_added"] = added
+    tools = perms.get("tools")
+    if isinstance(tools, dict):
+        tools = dict(tools)
+        tools[name] = "allow"
+        perms["tools"] = tools
+
+
+def _can_persist_whole_tool_allow(
+    perms: dict[str, Any],
+    tool_name: str,
+    tool_args: dict[str, Any],
+) -> bool:
+    from openjiuwen.harness.security.models import PermissionLevel
+    from openjiuwen.harness.security.tiered_policy import evaluate_tiered_policy
+
+    deny = {t for t in (perms.get("deny_tools") or []) if isinstance(t, str)}
+    if tool_name in deny:
+        return False
+    level, _ = evaluate_tiered_policy(perms, tool_name, tool_args)
+    return level == PermissionLevel.ASK
+
+
 def _persist_tiered_tool_allow(
     permissions: PermissionsSection,
     tool_name: str,
@@ -523,11 +566,13 @@ def merge_file_guard_access_allows(
 
     - 使用触达路径本身，**不上卷父目录**（``ls dir`` → 信任 ``dir``，不是 ``dir`` 的父级）
     - 轴权限按 action：``read`` → 仅 read allow；``write`` → read+write allow；``exec`` → read+exec allow
+    - 成功写入时在副本上设置 ``_file_guard_paths_added``，供 Host 只落盘增量 paths
     """
     if not accesses:
         return cast(PermissionsSection, deepcopy(permissions)), False
     perms = cast(PermissionsSection, deepcopy(permissions))
     wrote = False
+    added: list[dict[str, Any]] = []
     for path_str, action in accesses:
         if not isinstance(path_str, str) or not path_str.strip():
             continue
@@ -538,7 +583,35 @@ def merge_file_guard_access_allows(
         perms, did = merge_file_guard_path_rule(
             perms, path_norm, read=read, write=write, exec_=exec_,
         )
-        wrote = wrote or did
+        if not did:
+            continue
+        wrote = True
+        fg = perms.get("file_guard") if isinstance(perms.get("file_guard"), dict) else {}
+        paths = fg.get("paths") if isinstance(fg, dict) else None
+        if isinstance(paths, list):
+            for entry in reversed(paths):
+                if not isinstance(entry, dict):
+                    continue
+                existing_path = str(entry.get("path") or "").replace("\\", "/").rstrip("/")
+                if existing_path == path_norm:
+                    added.append(deepcopy(entry))
+                    break
+    if added:
+        prior = perms.get("_file_guard_paths_added")
+        merged_added: list[dict[str, Any]] = []
+        if isinstance(prior, list):
+            merged_added.extend(deepcopy(x) for x in prior if isinstance(x, dict))
+        by_path = {
+            str(e.get("path") or "").replace("\\", "/").rstrip("/"): e
+            for e in merged_added
+            if isinstance(e, dict)
+        }
+        for entry in added:
+            key = str(entry.get("path") or "").replace("\\", "/").rstrip("/")
+            if not key:
+                continue
+            by_path[key] = entry
+        perms["_file_guard_paths_added"] = list(by_path.values())  # type: ignore[typeddict-unknown-key]
     return cast(PermissionsSection, perms), wrote
 
 
@@ -564,6 +637,27 @@ def merge_external_directory_allow_into_permissions(
     return merge_file_guard_access_allows(permissions, access_list)
 
 
+def can_persist_pattern_allow(
+    permissions: PermissionsSection | dict[str, Any],
+    tool_name: str,
+    tool_args: dict[str, Any],
+) -> bool:
+    """是否允许将本次调用持久化为 pattern 级 allow。
+
+    Global DENY / Global CRITICAL（及 builtin 底线 ASK/DENY）不可被 User/Session 永久允许放宽。
+    """
+    from openjiuwen.harness.security.models import PermissionLevel
+    from openjiuwen.harness.security.tiered_policy import (
+        global_baseline_blocks_persist,
+    )
+
+    return not global_baseline_blocks_persist(
+        cast(dict[str, Any], permissions),
+        tool_name,
+        tool_args,
+    )
+
+
 def merge_permission_allow_rule_into_permissions(
     permissions: PermissionsSection | dict[str, Any],
     tool_name: str,
@@ -571,25 +665,42 @@ def merge_permission_allow_rule_into_permissions(
 ) -> tuple[PermissionsSection, bool]:
     """在 ``permissions`` 副本上合并「始终允许」规则；返回 ``(merged, applied)``。
 
-    ``applied`` 为假表示未写入任何变更（如 tiered 下当前非 ASK 或无安全 suggestion）。
+    优先写入 command 等非 path 的 pattern 级 ``approval_overrides``。
+
+    - **Shell 工具**（bash / powershell 等）：只写命令级 overrides，**永不**回退
+      ``allow_tools``（避免「记住一条命令」变成整工具永久放行）。
+      若 tiered 因 defaults 为 ALLOW、但引擎曾因 findings 抬到 ASK 而触发 HITL，
+      仍允许在有安全 suggestion 时落盘 pattern。
+    - **非 Shell**：无安全 non-path suggestion 且当前为 ASK 时，可回退 ``allow_tools``
+      （Strict 下 path/杂项工具的 mode defaults ask）。
+    path 细则仍可由 rail 侧并行合并 ``file_guard.paths``。
     """
     from openjiuwen.harness.security.models import PermissionLevel
     from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
     from openjiuwen.harness.security.tiered_policy import evaluate_tiered_policy
 
     perms = cast(PermissionsSection, deepcopy(permissions))
+    is_shell = tool_name in _SHELL_APPROVAL_TOOLS
+
     current_permission, _matched_rule = evaluate_tiered_policy(
         perms, tool_name, tool_args,
     )
-    if current_permission != PermissionLevel.ASK:
+    if current_permission == PermissionLevel.DENY:
         logger.warning(
-            "[PermissionEngine] permission.merge.skip tool=%s reason=current_permission_not_ask current=%s",
+            "[PermissionEngine] permission.merge.skip tool=%s reason=current_permission_deny",
             tool_name,
-            current_permission.value,
         )
         return cast(PermissionsSection, perms), False
+
+    if not can_persist_pattern_allow(perms, tool_name, tool_args):
+        logger.warning(
+            "[PermissionEngine] permission.merge.skip tool=%s reason=global_baseline_blocks_persist",
+            tool_name,
+        )
+        return cast(PermissionsSection, perms), False
+
     shell_ast_result = None
-    if tool_name in _SHELL_APPROVAL_TOOLS:
+    if is_shell:
         shell_ast_result = parse_shell_for_permission(
             str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
         )
@@ -598,27 +709,58 @@ def merge_permission_allow_rule_into_permissions(
         tool_args,
         shell_ast_result=shell_ast_result,
     )
-    # path 类 suggestion 不写 approval_overrides（路径细则由 rail 侧 file_guard 落盘）；
-    # 若 A 当前为 ask（如 tools.write_file: ask），则抬升整工具 tools.<name>: allow。
+    # path 类 suggestion 不写 approval_overrides（路径细则由 rail 侧 file_guard 落盘）。
     non_path = [s for s in suggestions if str(s.match_type or "").lower() != "path"]
-    if not _persist_tiered_approval_override_suggestions(perms, non_path):
-        if tool_name not in _SHELL_APPROVAL_TOOLS:
-            if _persist_tiered_tool_allow(perms, tool_name):
-                logger.info(
-                    "[PermissionEngine] permission.merge.ok tool=%s target=tools",
-                    tool_name,
-                )
-                return cast(PermissionsSection, perms), True
+
+    if non_path:
+        # Shell：即便 tiered 为 ALLOW（findings 才抬 ASK），HITL 记住仍应落命令 pattern。
+        if (
+            current_permission != PermissionLevel.ASK
+            and not is_shell
+        ):
+            logger.warning(
+                "[PermissionEngine] permission.merge.skip tool=%s "
+                "reason=current_permission_not_ask current=%s",
+                tool_name,
+                current_permission.value,
+            )
+            return cast(PermissionsSection, perms), False
+        if _persist_tiered_approval_override_suggestions(perms, non_path):
+            logger.info(
+                "[PermissionEngine] permission.merge.ok tool=%s target=approval_overrides",
+                tool_name,
+            )
+            return cast(PermissionsSection, perms), True
+
+    if is_shell:
         logger.warning(
-            "[PermissionEngine] permission.merge.skip tool=%s reason=no_safe_suggestion",
+            "[PermissionEngine] permission.merge.skip tool=%s "
+            "reason=shell_no_safe_suggestion_no_allow_tools_fallback",
             tool_name,
         )
         return cast(PermissionsSection, perms), False
-    logger.info(
-        "[PermissionEngine] permission.merge.ok tool=%s target=approval_overrides",
+
+    if current_permission != PermissionLevel.ASK:
+        logger.warning(
+            "[PermissionEngine] permission.merge.skip tool=%s reason=current_permission_not_ask current=%s",
+            tool_name,
+            current_permission.value,
+        )
+        return cast(PermissionsSection, perms), False
+
+    # 非 shell：无安全 pattern 时回退整工具 allow_tools（todo_list 等）。
+    if _can_persist_whole_tool_allow(perms, tool_name, tool_args):
+        _append_allow_tool(perms, tool_name)
+        logger.info(
+            "[PermissionEngine] permission.merge.ok tool=%s target=allow_tools",
+            tool_name,
+        )
+        return cast(PermissionsSection, perms), True
+    logger.warning(
+        "[PermissionEngine] permission.merge.skip tool=%s reason=no_safe_suggestion",
         tool_name,
     )
-    return cast(PermissionsSection, perms), True
+    return cast(PermissionsSection, perms), False
 
 
 def persist_cli_trusted_directory(
