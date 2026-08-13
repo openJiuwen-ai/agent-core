@@ -1013,7 +1013,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     trajectory=trajectory,
                     ctx=ctx,
                     shared_records=downloaded_per_skill.get(skill_name, []),
-                    requires_approval=action != "auto",
+                    requires_approval=False,
                 )
                 if not generated:
                     deferred_cancelled.append(
