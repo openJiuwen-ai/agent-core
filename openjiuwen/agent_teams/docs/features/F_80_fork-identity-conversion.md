@@ -5,7 +5,7 @@
 |---|---|
 | 日期 | 2026-08-13 |
 | 范围 | `prompts/messages.py`（`build_identity_text` 加 `fork_capable`；新增 `build_identity_conversion`）、`inbound_render.py`（新增 `render_team_context_with_identity`）、`team_context.py`（`TeamContextTracker` 加 `fork_source` + `_fork_capable` 渲染分派）、`schema/team.py`（`TeamRuntimeContext.fork_source`）、`rails/team_policy_rail.py` / `rails/elements.py`（`fork_source` 透传）、`agent/agent_configurator.py`（TEAM_POLICY params）、`agent/team_agent.py`（`_on_teammate_created` 写 `ctx.fork_source`）、`prompts/{cn,en}/inbound_tags.md` |
-| 测试基线 | `test_team_messages.py` / `test_inbound_render.py` / `test_team_policy_rail.py` / `test_fork.py` / `test_spawn_payload_contract.py` 新增用例全绿；`tests/unit_tests/agent_teams/` + `core/single_agent/rail/` + `harness/test_deep_agent_rail_event_routing.py` 2613 passed |
+| 测试基线 | `test_team_messages.py` / `test_inbound_render.py` / `test_team_policy_rail.py` / `test_fork.py` / `test_spawn_payload_contract.py` 新增用例全绿；`tests/unit_tests/agent_teams/` + `core/single_agent/rail/` + `harness/test_deep_agent_rail_event_routing.py` 2694 passed |
 | Refs | fork 系列（F_75 / F_76 / list_checkpoints） |
 
 ## 背景
@@ -46,7 +46,7 @@ fork 继承把源成员（如 `reader`）的对话历史原样注入目标成员
 - `test_team_policy_rail.py`：`enable_fork=False` 身份输出不含 `<identity>` 与能力声明（字节级回归护栏）；`enable_fork=True` 普通 spawn 有 `<identity>` + 能力声明、无转换段；`fork_source` 透传后含 `<identity-conversion>`。
 - `test_fork.py`：`_on_teammate_created` 缺省 `fork_source`=leader 名、命名的源正确透传、无 fork（fork_info 为 None）不写 `fork_source`。
 - `test_spawn_payload_contract.py`：`fork_source` 序列化/还原 round-trip，默认 `None`。
-- 全量 `tests/unit_tests/agent_teams/` + `core/single_agent/rail/` + 相关 harness 测试 2613 passed。
+- 全量 `tests/unit_tests/agent_teams/` + `core/single_agent/rail/` + 相关 harness 测试 2694 passed。
 
 ## 已知遗留
 
