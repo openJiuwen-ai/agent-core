@@ -25,6 +25,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
 )
 from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_member import CheckpointTool
@@ -578,7 +579,10 @@ class TestOnTeammateCreatedFork:
             )
             agent._spawn_manager.spawned_handles[source] = handle
         agent._spawn_manager.build_context_from_db = AsyncMock(
-            return_value=MagicMock()
+            return_value=TeamRuntimeContext(
+                role=TeamRole.TEAMMATE,
+                member_name="rectangle-dev",
+            )
         )
         agent._spawn_manager.spawn_teammate = AsyncMock(return_value=None)
         return agent
@@ -592,6 +596,10 @@ class TestOnTeammateCreatedFork:
             reset_session_id(token)
         return agent._spawn_manager.spawn_teammate.call_args.kwargs["fork_from"]
 
+    def _built_ctx(self, agent):
+        """Return the TeamRuntimeContext the run handed to ``spawn_teammate``."""
+        return agent._spawn_manager.spawn_teammate.call_args.args[0]
+
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_live_fork_string_true_injects_full_context(self):
@@ -602,6 +610,35 @@ class TestOnTeammateCreatedFork:
         assert isinstance(fork_from, ForkContext)
         assert len(fork_from.messages) == self._MESSAGE_COUNT
         assert fork_from.compact_split is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_source_defaults_to_leader_name(self):
+        """Omitting fork_source records the leader as the conversion source."""
+        agent = self._make_agent(
+            {"fork": "true", "since": None, "source": None, "compact": False}
+        )
+        await self._run(agent)
+        assert self._built_ctx(agent).fork_source == "leader-1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_source_records_the_named_source(self):
+        agent = self._make_agent(
+            {"fork": "true", "since": None, "source": "reader", "compact": False},
+            source="reader",
+        )
+        await self._run(agent)
+        assert self._built_ctx(agent).fork_source == "reader"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_no_fork_leaves_fork_source_unset(self):
+        """A plain spawn (no fork_info) must not set fork_source."""
+        agent = self._make_agent(None)
+        await self._run(agent)
+        assert getattr(self._built_ctx(agent), "fork_source", None) is None
+
 
     @pytest.mark.asyncio
     @pytest.mark.level0

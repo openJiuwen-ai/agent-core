@@ -154,3 +154,26 @@ def test_worktree_spawn_context_only_carries_cwd_override():
         "worktree_head_commit",
     ):
         assert key not in context
+
+
+def test_fork_source_round_trips_through_spawn_payload():
+    """fork_source must survive the cross-process payload serialization."""
+    pytest.importorskip("openjiuwen.core.runner.runner")
+    builder = _make_builder()
+    ctx = _make_member_ctx("worker_a").model_copy(update={"fork_source": "reader"})
+
+    spawn_config = builder.build_spawn_config(ctx)
+
+    restored = TeamRuntimeContext.model_validate(spawn_config.payload["context"])
+    assert restored.fork_source == "reader"
+
+
+def test_fork_source_defaults_to_none():
+    """A plain spawn leaves fork_source unset (None), not an empty string."""
+    builder = _make_builder()
+    ctx = _make_member_ctx("worker_a")
+
+    spawn_config = builder.build_spawn_config(ctx)
+
+    restored = TeamRuntimeContext.model_validate(spawn_config.payload["context"])
+    assert restored.fork_source is None

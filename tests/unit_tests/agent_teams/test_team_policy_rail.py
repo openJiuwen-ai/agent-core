@@ -461,6 +461,7 @@ class _FakeTeamBackend:
         self._team_mtime = team_mtime
         self._members_mtime = members_mtime
         self._hitt_enabled = hitt_enabled
+        self._fork_enabled = False
         self._self_member_name = self_member_name
 
         self.team_mtime_calls = 0
@@ -494,7 +495,14 @@ class _FakeTeamBackend:
         """The rail probes this at init to gate the static HITT contract."""
         return self._hitt_enabled
 
+    def fork_enabled(self) -> bool:
+        """Whether the team's fork capability is on (gates the identity block)."""
+        return self._fork_enabled
+
     # -- Mutators used by tests ----------------------------------------------
+
+    def set_fork_enabled(self, enabled: bool) -> None:
+        self._fork_enabled = enabled
 
     def set_team(self, team: _StubTeam | None, mtime: int) -> None:
         self._team = team
@@ -961,6 +969,62 @@ class TestTeamPolicyRailTeamContext:
         rail.uninit(agent)
         for name in (TeamSectionName.BOOTSTRAP, TeamSectionName.EXTRA):
             assert not builder.has_section(name)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_off_keeps_identity_output_byte_identical(self):
+        """enable_fork=False must not change the identity render path at all."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        # Pre-fork reference: same member, fork capability off by default.
+        rail = _leader_rail(backend)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "work")
+        assert "<team-context>" in message.content
+        assert "<identity>" not in message.content
+        assert "身份转换能力" not in message.content
+        assert "你的 member_name: leader1" in message.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_on_wraps_identity_and_skips_conversion_for_plain_spawn(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        backend.set_fork_enabled(True)
+        rail = _leader_rail(backend, fork_source=None)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "work")
+        assert "<team-context>" in message.content
+        assert "<identity>" in message.content
+        assert "身份转换能力" in message.content
+        # Plain spawn (no fork_source): capability statement present, but no
+        # conversion notice.
+        assert "<identity-conversion>" not in message.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_source_renders_conversion_notice_in_identity(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        backend.set_fork_enabled(True)
+        rail = _leader_rail(backend, fork_source="reader")
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "work")
+        assert "<identity-conversion>" in message.content
+        assert "reader" in message.content
+        assert "不再适用" in message.content
 
 
 class TestTeamPolicyRailHitt:

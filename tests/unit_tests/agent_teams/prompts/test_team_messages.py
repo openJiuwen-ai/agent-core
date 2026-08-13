@@ -11,6 +11,7 @@ import pytest
 
 from openjiuwen.agent_teams.inbound_render import render_team_context
 from openjiuwen.agent_teams.prompts.messages import (
+    build_identity_conversion,
     build_identity_text,
     build_roster_delta_text,
     build_roster_snapshot_text,
@@ -115,6 +116,52 @@ def test_identity_english():
     assert "Your member_name: dev1" in body
     assert "Your display_name: Dev One" in body
     assert "## Private Working Agreement" in body
+
+
+@pytest.mark.level0
+def test_identity_default_is_byte_identical_without_fork():
+    """fork_capable=False (default) must not change the pre-fork output."""
+    plain = build_identity_text(member_name="dev1", member_workspace_path="/ws/dev1", language="cn")
+    forked = build_identity_text(
+        member_name="dev1",
+        member_workspace_path="/ws/dev1",
+        language="cn",
+        fork_capable=False,
+    )
+    assert plain is not None and forked is not None
+    assert forked == plain
+    assert "身份转换能力" not in forked
+
+
+@pytest.mark.level0
+def test_identity_fork_capable_prepends_capability_statement():
+    body = build_identity_text(member_name="dev1", language="cn", fork_capable=True)
+    assert body is not None
+    assert "你是拥有身份转换能力的成员" in body
+    assert body.index("你是拥有身份转换能力的成员") < body.index("你的 member_name: dev1")
+
+
+@pytest.mark.level0
+def test_identity_fork_capable_english():
+    body = build_identity_text(member_name="dev1", language="en", fork_capable=True)
+    assert body is not None
+    assert "identity-conversion capability" in body
+
+
+@pytest.mark.level0
+def test_identity_conversion_mentions_source_and_current_member():
+    body = build_identity_conversion(source="reader", member_name="dev1", language="cn")
+    assert "reader" in body
+    assert "dev1" in body
+    assert "不再适用" in body
+
+
+@pytest.mark.level0
+def test_identity_conversion_english():
+    body = build_identity_conversion(source="reader", member_name="dev1", language="en")
+    assert "reader" in body
+    assert "dev1" in body
+    assert "no longer apply" in body
 
 
 # ---------------------------------------------------------------------------
