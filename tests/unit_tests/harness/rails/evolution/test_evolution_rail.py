@@ -14,6 +14,7 @@ from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.agent_evolving.trajectory.store import InMemoryTrajectoryStore
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, PreparedEvolutionInput
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
+from openjiuwen.extensions.observability import semconv
 
 
 def _trajectory() -> Trajectory:
@@ -35,6 +36,27 @@ def _trajectory() -> Trajectory:
 
 def _prepared() -> PreparedEvolutionInput:
     return PreparedEvolutionInput(trajectory=_trajectory(), messages=())
+
+
+def _message_trajectory() -> Trajectory:
+    payload = _trajectory().to_otlp()
+    payload["resourceSpans"][0]["scopeSpans"][0]["spans"] = [
+        {
+            "traceId": "trace-1",
+            "spanId": "span-1",
+            "name": "llm.call",
+            "startTimeUnixNano": "1",
+            "endTimeUnixNano": "2",
+            "attributes": attributes_from_map(
+                {
+                    f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+                    f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
+                    f"{semconv.GEN_AI_PROMPT}.0.name": "caller",
+                }
+            ),
+        }
+    ]
+    return Trajectory.from_otlp(payload)
 
 
 class _FailingRail(EvolutionRail):
@@ -114,3 +136,12 @@ def test_trajectory_recorder_contract_is_explicit() -> None:
 def test_evolution_rail_requires_concrete_processor() -> None:
     with pytest.raises(TypeError, match="TrajectorySpanProcessor"):
         EvolutionRail(trajectory_span_processor=object())  # type: ignore[arg-type]
+
+
+def test_subclass_can_explicitly_select_trajectory_message_fields() -> None:
+    messages = EvolutionRail._trajectory_to_messages(
+        _message_trajectory(),
+        fields={"name"},
+    )
+
+    assert messages == [{"role": "user", "name": "caller"}]
