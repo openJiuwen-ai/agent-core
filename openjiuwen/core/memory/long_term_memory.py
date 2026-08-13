@@ -1490,6 +1490,10 @@ class LongTermMemory(metaclass=Singleton):
             # If the LLM fails to be obtained, try to use the system default configuration.
             return self._base_llm
 
+    def _truncate_content(self, msg: BaseMessage) -> None:
+        """Cap a message at ``input_msg_max_len`` characters of text."""
+        msg.content = msg.text[:self._sys_mem_config.input_msg_max_len]
+
     def _check_messages(self, messages: list[BaseMessage]) -> Tuple[bool, list[BaseMessage]]:
         out_messages = []
         has_human_msg = False
@@ -1499,7 +1503,7 @@ class LongTermMemory(metaclass=Singleton):
                 out_messages.append(msg)
                 has_human_msg = True
                 continue
-            msg.content = msg.content[:self._sys_mem_config.input_msg_max_len]
+            self._truncate_content(msg)
             out_messages.append(msg)
 
         return has_human_msg, out_messages
@@ -1525,7 +1529,7 @@ class LongTermMemory(metaclass=Singleton):
             if msg.role == human_message.role:
                 history_messages.append(msg)
                 continue
-            msg.content = msg.content[:self._sys_mem_config.input_msg_max_len]
+            self._truncate_content(msg)
             history_messages.append(msg)
         return history_messages
 

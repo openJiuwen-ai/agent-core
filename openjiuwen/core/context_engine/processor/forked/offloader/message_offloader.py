@@ -215,7 +215,7 @@ class MessageSummaryOffloader(ContextProcessor):
         truncate_offloaded_preview: bool,
         **kwargs: Any,
     ) -> BaseMessage:
-        if not offload_original and len(message.content) <= max_chars:
+        if not offload_original and len(message.text) <= max_chars:
             return message
 
         offloaded = await self._offload_message(
@@ -228,12 +228,12 @@ class MessageSummaryOffloader(ContextProcessor):
             return offloaded
         if self._should_keep_full_rule_compressed_preview(message):
             return offloaded
-        if len(offloaded.content) <= max_chars:
+        if len(offloaded.text) <= max_chars:
             return offloaded
         return offloaded.model_copy(
             update={
                 "content": self._truncate_preserving_offload_marker(
-                    offloaded.content,
+                    offloaded.text,
                     max_chars,
                 )
             }
@@ -360,7 +360,7 @@ class MessageSummaryOffloader(ContextProcessor):
                 truncate_offloaded_preview=self._should_truncate_rule_preview(),
                 **kwargs,
             )
-        if len(processed.content) <= max_chars:
+        if len(processed.text) <= max_chars:
             return processed
         if not self._should_fallback_to_plain_offload():
             return message
@@ -379,7 +379,7 @@ class MessageSummaryOffloader(ContextProcessor):
         original_message: BaseMessage,
         **kwargs: Any,
     ) -> BaseMessage:
-        content = message.content
+        content = message.text
         if not self._is_rule_compressed_message(message):
             content = self._head_tail_preview(
                 content,
@@ -421,7 +421,7 @@ class MessageSummaryOffloader(ContextProcessor):
     ) -> bool:
         return (
             isinstance(message, ToolMessage)
-            and isinstance(message.content, str)
+            and isinstance(getattr(message, "content", None), str)
             and not isinstance(message, OffloadMixin)
             and not self._is_protected_tool_message(message, context_messages)
         )

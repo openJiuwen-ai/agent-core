@@ -14,11 +14,21 @@ import base64
 import json
 import random
 
+import pytest
+
 from openjiuwen.core.context_engine.token.tiktoken_counter import (
     DEFAULT_IMAGE_PLACEHOLDER_TOKENS,
     TiktokenCounter,
 )
-from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    ImagePart,
+    SystemMessage,
+    TextPart,
+    ToolMessage,
+    UserMessage,
+)
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
 # A 200 KB payload that decodes to non-image bytes: exercises the
 # unparseable-payload fallback. The bytes are seeded-random rather than a run
@@ -245,3 +255,173 @@ def test_plain_string_paths_unchanged_and_tool_calls_still_priced() -> None:
         ]
     )
     assert with_calls > bare
+
+
+# ---------------------------------------------------------------------------
+# Typed content parts
+#
+# ``BaseMessage.content`` also accepts ``ContentPart`` instances. A part and the
+# raw dialect it normalizes from describe the same payload, so the counter must
+# price them identically — otherwise the estimate would depend on which
+# producer happened to build the message.
+# ---------------------------------------------------------------------------
+
+
+def _envelope() -> int:
+    """Cost of an empty user message: subtract to isolate a block's own tokens."""
+    return _counter().count_messages([UserMessage(content="")])
+
+
+@pytest.mark.parametrize(
+    "messages, expected",
+    [
+        ([UserMessage(content="Hello, world!")], 18),
+        (
+            [
+                SystemMessage(content="You are a helpful assistant."),
+                UserMessage(content="What is the weather in Paris?"),
+                AssistantMessage(content="Let me check."),
+            ],
+            53,
+        ),
+        ([ToolMessage(tool_call_id="call-1", content="sunny")], 17),
+        ([UserMessage(content="你好，世界")], 21),
+        ([UserMessage(content="")], 15),
+    ],
+)
+def test_text_only_counts_match_pre_refactor_values(messages, expected) -> None:
+    """Golden values captured before parts existed.
+
+    Image counting may move; text counting may not, or every compression
+    threshold in the repo shifts silently.
+    """
+    assert _counter().count_messages(messages) == expected
+
+
+def test_image_part_is_priced_by_dimensions_not_payload() -> None:
+    part = ImagePart(mime_type="image/png", data="A" * 200_000, width=800, height=600)
+
+    tokens = _counter().count_messages([UserMessage(content=[part])]) - _envelope()
+
+    # 200KB of base64 counted as text would be tens of thousands of tokens.
+    assert 0 < tokens < 2_000
+
+
+def test_image_part_tokens_scale_with_dimensions() -> None:
+    counter = _counter()
+    small = ImagePart(mime_type="image/png", data="A" * 64, width=200, height=200)
+    large = ImagePart(mime_type="image/png", data="A" * 64, width=1600, height=1200)
+
+    assert counter.count_messages([UserMessage(content=[small])]) < counter.count_messages(
+        [UserMessage(content=[large])]
+    )
+
+
+def test_image_part_without_stamped_dimensions_sniffs_the_payload() -> None:
+    """The bridge into the dict estimators: a part still gets header sniffing."""
+    counter = _counter()
+    sniffed = ImagePart.from_data_url(_png_data_url(800, 600))
+    stamped = ImagePart.from_data_url(_png_data_url(800, 600))
+    stamped.width, stamped.height = 800, 600
+
+    assert counter.count_messages([UserMessage(content=[sniffed])]) == counter.count_messages(
+        [UserMessage(content=[stamped])]
+    )
+
+
+def test_image_part_with_unreadable_payload_costs_flat_fallback() -> None:
+    part = ImagePart(mime_type="image/png", data="A" * 512)
+
+    assert _counter().count_messages([UserMessage(content=[part])]) - _envelope() == (
+        DEFAULT_IMAGE_PLACEHOLDER_TOKENS
+    )
+
+
+def test_image_part_respects_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("TIKTOKEN_IMAGE_PLACEHOLDER_TOKENS", "42")
+    part = ImagePart(mime_type="image/png", data="A" * 512)
+
+    assert _counter().count_messages([UserMessage(content=[part])]) - _envelope() == 42
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "not-a-number", "0", "-5"])
+def test_invalid_env_override_falls_back_to_the_default(monkeypatch, raw) -> None:
+    monkeypatch.setenv("TIKTOKEN_IMAGE_PLACEHOLDER_TOKENS", raw)
+    part = ImagePart(mime_type="image/png", data="A" * 512)
+
+    assert _counter().count_messages([UserMessage(content=[part])]) - _envelope() == (
+        DEFAULT_IMAGE_PLACEHOLDER_TOKENS
+    )
+
+
+def test_dict_and_part_shapes_agree() -> None:
+    """The legacy OpenAI block and the part it normalizes to cost the same."""
+    counter = _counter()
+    data_url = _png_data_url(800, 600)
+    dict_shape = UserMessage(content=[{"type": "image_url", "image_url": {"url": data_url}}])
+    part_shape = UserMessage(content=[ImagePart.from_data_url(data_url)])
+
+    assert counter.count_messages([dict_shape]) == counter.count_messages([part_shape])
+
+
+def test_text_parts_are_joined_and_image_priced_separately() -> None:
+    counter = _counter()
+    image = ImagePart(mime_type="image/png", data="A" * 64, width=800, height=600)
+    mixed = UserMessage(content=[TextPart(text="look at"), image, TextPart(text="this")])
+
+    total = counter.count_messages([mixed])
+    text_only = counter.count_messages([UserMessage(content="look at\nthis")])
+    image_only = counter.count_messages([UserMessage(content=[image])]) - _envelope()
+
+    assert total == text_only + image_only
+
+
+def test_bare_str_items_are_counted_as_text() -> None:
+    counter = _counter()
+
+    assert counter.count_messages([UserMessage(content=["a", "b"])]) == counter.count_messages(
+        [UserMessage(content="a\nb")]
+    )
+
+
+def test_untyped_dashscope_dialects_keep_their_pricing() -> None:
+    """``{"image"}``/``{"text"}`` carry no ``type``, so normalization skips them."""
+    counter = _counter()
+    message = UserMessage(content=[{"text": "hi"}, {"image": "https://example.invalid/a.png"}])
+
+    total = counter.count_messages([message])
+    text_only = counter.count_messages([UserMessage(content="hi")])
+
+    assert total - text_only == DEFAULT_IMAGE_PLACEHOLDER_TOKENS
+
+
+def test_non_str_non_dict_item_still_contributes() -> None:
+    """Nothing in the list may silently drop out of the count.
+
+    The schema rejects such an item at construction, but ``BaseMessage`` does
+    not enable ``validate_assignment``, so it can still arrive here.
+    """
+    counter = _counter()
+    message = UserMessage(content=[])
+    message.content = [123]  # type: ignore[list-item]
+
+    assert counter.count_messages([message]) == counter.count_messages([UserMessage(content="123")])
+
+
+def test_empty_list_content_counts_like_empty_text() -> None:
+    counter = _counter()
+
+    assert counter.count_messages([UserMessage(content=[])]) == counter.count_messages(
+        [UserMessage(content="")]
+    )
+
+
+def test_assistant_tool_calls_still_counted_with_list_content() -> None:
+    counter = _counter()
+    call = ToolCall(id="call-1", type="function", name="f", arguments="{}")
+    with_calls = counter.count_messages(
+        [AssistantMessage(content=[TextPart(text="hi")], tool_calls=[call])]
+    )
+    without_calls = counter.count_messages([AssistantMessage(content=[TextPart(text="hi")])])
+
+    assert with_calls > without_calls

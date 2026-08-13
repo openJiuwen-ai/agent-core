@@ -396,3 +396,60 @@ class TestRoundLevelCompressor:
         assert "完成自己负责的任务 #99，备注：done and verified [member_complete_task]" in second_messages[1].content
         assert "Task #99 completed" in second_messages[1].content
         assert "42" not in second_messages[1].content
+
+
+class TestRawFallbackWithListContent:
+    """Stage 5 removed the ``isinstance(response.content, str)`` guard here.
+
+    The guard silently discarded a usable summary whenever the compression
+    model answered with content parts: no fallback replacement was built, the
+    phase reported "no valid replacements", and compression stalled. ``.text``
+    reads either shape, so the guard has nothing left to protect against.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param("plain summary text", id="str"),
+            pytest.param([{"type": "text", "text": "plain summary text"}], id="list"),
+        ],
+    )
+    async def test_fallback_replacement_with_list_content(self, content):
+        compressor = RoundLevelCompressor(RoundLevelCompressorConfig(target_total_tokens=50))
+        target = _CompressTarget(
+            block_id="b1",
+            scope="mixed_context",
+            start_idx=0,
+            end_idx=1,
+            messages=[UserMessage(content="q"), AssistantMessage(content="a")],
+        )
+        context = MagicMock()
+
+        model = MagicMock()
+        model.invoke = AsyncMock(return_value=AssistantMessage(content=content))
+        compressor._get_model = MagicMock(return_value=model)
+        compressor._record_compression_usage = MagicMock()
+        compressor._prepare_round_compression_messages = MagicMock(
+            return_value=[UserMessage(content="compress this")]
+        )
+        compressor._build_json_replacements = AsyncMock(return_value=[])
+        compressor._is_replacement_under_budget = MagicMock(return_value=True)
+        compressor._has_compression_benefit = MagicMock(return_value=True)
+        compressor._count_context_window_tokens = MagicMock(return_value=0)
+
+        updated = await compressor._apply_llm_phase(
+            list(target.messages),
+            context,
+            system_messages=[],
+            tools=[],
+            targets=[target],
+            target_tokens=50,
+            aggressive=False,
+            phase_name="test_phase",
+            keep_recent_messages=0,
+        )
+
+        assert updated is not None, "the raw fallback must be built from either content shape"
+        assert ROUND_LEVEL_FALLBACK_MARKER in updated[0].content
+        assert "plain summary text" in updated[0].content

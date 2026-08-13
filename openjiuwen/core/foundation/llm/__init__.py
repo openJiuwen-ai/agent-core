@@ -10,6 +10,11 @@ from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutp
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig, ProviderType
 from openjiuwen.core.foundation.llm.schema.mode_info import BaseModelInfo, ModelConfig
 # Messages
+from openjiuwen.core.foundation.llm.schema.content_part import (
+    ContentPart,
+    ImagePart,
+    TextPart,
+)
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage,
     AssistantMessage,
@@ -61,6 +66,13 @@ _MESSAGE_CLASSES = [
     "UsageMetadata",
 ]
 
+# Message content parts
+_CONTENT_PART_CLASSES = [
+    "ContentPart",
+    "TextPart",
+    "ImagePart",
+]
+
 # Streaming message classes
 _MESSAGE_CHUNK_CLASSES = [
     "AssistantMessageChunk",
@@ -88,6 +100,7 @@ __all__ = (
     _CORE_CLASSES
     + _CONFIG_CLASSES
     + _MESSAGE_CLASSES
+    + _CONTENT_PART_CLASSES
     + _MESSAGE_CHUNK_CLASSES
     + _TOOL_CLASSES
     + _PREBUILT_MODEL_CLIENTS

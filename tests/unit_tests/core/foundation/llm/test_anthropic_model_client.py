@@ -8,12 +8,17 @@ normalization, and usage extraction. Network/SDK paths (invoke/stream)
 are covered separately and require the optional ``anthropic`` SDK.
 """
 
+import base64
 from unittest.mock import MagicMock
 
 from openjiuwen.core.foundation.llm import (
+    ImagePart,
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
+    TextPart,
+    ToolMessage,
+    UserMessage,
 )
 from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
     AnthropicModelClient,
@@ -491,3 +496,103 @@ class TestSamplingParams:
         params = self._params(client, top_p=1.0)
         assert "top_p" not in params
         assert "temperature" not in params
+
+
+# ---------------------------------------------------------------------------
+# G. Part rendering: _render_parts
+# ---------------------------------------------------------------------------
+
+
+_PNG_MIME = "image/png"
+_PAYLOAD = base64.b64encode(b"\x89PNG\r\n\x1a\nfake-pixels").decode("ascii")
+_DATA_URL = f"data:{_PNG_MIME};base64,{_PAYLOAD}"
+
+
+def _anthropic_content(message) -> list:
+    """Convert one message the way ``_build_request_params`` does."""
+    payload = AnthropicModelClient._convert_messages_to_dict([message])
+    _, messages = _convert_message_schemas(payload)
+    return messages[0]["content"]
+
+
+class TestRenderParts:
+    """Anthropic speaks ``source`` blocks, not OpenAI's ``image_url``."""
+
+    def test_image_part_renders_as_base64_source_block(self):
+        message = UserMessage(content=[ImagePart(mime_type=_PNG_MIME, data=_PAYLOAD)])
+
+        assert _anthropic_content(message) == [
+            {"type": "image", "source": {"type": "base64", "media_type": _PNG_MIME, "data": _PAYLOAD}}
+        ]
+
+    def test_image_part_with_url_renders_as_url_source(self):
+        message = UserMessage(
+            content=[ImagePart(mime_type=_PNG_MIME, url="https://example.invalid/a.png")]
+        )
+
+        assert _anthropic_content(message) == [
+            {"type": "image", "source": {"type": "url", "url": "https://example.invalid/a.png"}}
+        ]
+
+    def test_openai_image_block_is_translated(self):
+        """The dialect producers emit today must not reach the API verbatim."""
+        message = UserMessage(content=[{"type": "image_url", "image_url": {"url": _DATA_URL}}])
+
+        blocks = _anthropic_content(message)
+
+        assert blocks[0]["type"] == "image"
+        assert blocks[0]["source"]["data"] == _PAYLOAD
+
+    def test_text_and_image_keep_their_order(self):
+        message = UserMessage(
+            content=[TextPart(text="describe"), ImagePart(mime_type=_PNG_MIME, data=_PAYLOAD)]
+        )
+
+        assert [block["type"] for block in _anthropic_content(message)] == ["text", "image"]
+
+    def test_single_text_part_is_not_collapsed_to_a_string(self):
+        """The base class collapses to ``str``; Anthropic always wants blocks."""
+        assert _anthropic_content(UserMessage(content=[TextPart(text="hi")])) == [
+            {"type": "text", "text": "hi"}
+        ]
+
+    def test_empty_text_parts_are_dropped(self):
+        """The Messages API rejects text blocks whose content is empty."""
+        message = UserMessage(content=["a", "", "b"])
+
+        assert _anthropic_content(message) == [
+            {"type": "text", "text": "a"},
+            {"type": "text", "text": "b"},
+        ]
+
+    def test_unknown_dict_passes_through(self):
+        unknown = {"type": "video_url", "video_url": {"url": "x"}}
+        message = UserMessage(content=[TextPart(text="a"), unknown])
+
+        assert _anthropic_content(message)[1] == unknown
+
+    def test_image_in_tool_result_renders_correctly(self):
+        message = ToolMessage(
+            tool_call_id="call_1",
+            content=[TextPart(text="here"), ImagePart(mime_type=_PNG_MIME, data=_PAYLOAD)],
+        )
+
+        blocks = _anthropic_content(message)
+
+        assert blocks[0]["type"] == "tool_result"
+        assert blocks[0]["tool_use_id"] == "call_1"
+        assert [b["type"] for b in blocks[0]["content"]] == ["text", "image"]
+
+    def test_cache_control_marks_last_block_with_image_present(self):
+        """``_mark_cache_control`` must still land on the true final block."""
+        message = UserMessage(
+            content=[TextPart(text="describe"), ImagePart(mime_type=_PNG_MIME, data=_PAYLOAD)]
+        )
+        payload = AnthropicModelClient._convert_messages_to_dict([message])
+        _, messages = _convert_message_schemas(payload)
+
+        _apply_messages_cache_breakpoint(messages, exclude_tail=False)
+
+        blocks = messages[0]["content"]
+        assert "cache_control" not in blocks[0]
+        assert _is_5m_ephemeral(blocks[-1]["cache_control"])

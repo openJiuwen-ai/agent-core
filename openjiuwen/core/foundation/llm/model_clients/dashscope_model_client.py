@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Optional, List
+from typing import Any, List, Optional, Tuple
 
 import dashscope
 from dashscope import MultiModalConversation, VideoSynthesis
@@ -9,6 +9,11 @@ from dashscope import MultiModalConversation, VideoSynthesis
 from openjiuwen.core.common.exception.errors import ValidationError, ModelError
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.schema.content_part import (
+    ImagePart,
+    TextPart,
+    normalize_content_part,
+)
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
@@ -28,6 +33,63 @@ DASHSCOPE_VOICE = ["Cherry", "Serena", "Ethan", "Chelsie", "Momo", "Vivian", "Mo
 DASHSCOPE_LANGUAGE_TYPE = [
     "Chinese", "English", "German", "Italian", "Portuguese",
     "Spanish", "Japanese", "Korean", "French", "Russian"]
+
+
+def _to_dashscope_content(content: Any) -> Tuple[List[dict], int, int]:
+    """Render message content into DashScope's ``{"text"}``/``{"image"}`` list.
+
+    Used only by the MultiModalConversation (Wanx) generation APIs. The chat
+    path stays OpenAI-compatible and is deliberately untouched.
+
+    Returns:
+        The content list, plus the text and image counts the Wanx API caps.
+
+    Raises:
+        ValidationError: If ``content`` — or one of its items — is a shape
+            DashScope cannot express.
+    """
+    if isinstance(content, str):
+        return [{"text": content}], 1, 0
+
+    if not isinstance(content, list):
+        raise ValidationError(
+            StatusCode.MODEL_INVOKE_PARAM_ERROR,
+            msg=f"Message content must be string or list, but got {type(content).__name__}."
+        )
+
+    content_list: List[dict] = []
+    text_count = 0
+    image_count = 0
+
+    for item in content:
+        part = normalize_content_part(item)
+        if isinstance(part, TextPart):
+            content_list.append({"text": part.text})
+            text_count += 1
+        elif isinstance(part, ImagePart):
+            content_list.append({"image": part.url or part.to_data_url()})
+            image_count += 1
+        elif isinstance(item, dict):
+            # DashScope's own dialect carries no ``type`` key, so normalization
+            # leaves it alone and it is matched here instead.
+            if "text" in item:
+                content_list.append({"text": item["text"]})
+                text_count += 1
+            elif "image" in item:
+                content_list.append({"image": item["image"]})
+                image_count += 1
+            else:
+                raise ValidationError(
+                    StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                    msg=f"Content dict must contain 'text' or 'image' key, but got: {list(item.keys())}"
+                )
+        else:
+            raise ValidationError(
+                StatusCode.MODEL_INVOKE_PARAM_ERROR,
+                msg=f"Content item must be string or dict, but got {type(item).__name__}."
+            )
+
+    return content_list, text_count, image_count
 
 
 class DashScopeModelClient(OpenAIModelClient):
@@ -99,44 +161,7 @@ class DashScopeModelClient(OpenAIModelClient):
 
             # (2) Validate and convert message content to DashScope format
             msg = messages[0]
-            content_list = []
-            image_count = 0
-            text_count = 0
-
-            # Handle content: can be string or list of dicts
-            if isinstance(msg.content, str):
-                # Simple text prompt
-                content_list.append({"text": msg.content})
-                text_count = 1
-            elif isinstance(msg.content, list):
-                # Complex content with text and/or images
-                for item in msg.content:
-                    if isinstance(item, str):
-                        content_list.append({"text": item})
-                        text_count += 1
-                    elif isinstance(item, dict):
-                        # Validate dict structure
-                        if "text" in item:
-                            content_list.append({"text": item["text"]})
-                            text_count += 1
-                        elif "image" in item:
-                            content_list.append({"image": item["image"]})
-                            image_count += 1
-                        else:
-                            raise ValidationError(
-                                StatusCode.MODEL_INVOKE_PARAM_ERROR,
-                                msg=f"Content dict must contain 'text' or 'image' key, but got: {list(item.keys())}"
-                            )
-                    else:
-                        raise ValidationError(
-                            StatusCode.MODEL_INVOKE_PARAM_ERROR,
-                            msg=f"Content item must be string or dict, but got {type(item).__name__}."
-                        )
-            else:
-                raise ValidationError(
-                    StatusCode.MODEL_INVOKE_PARAM_ERROR,
-                    msg=f"Message content must be string or list, but got {type(msg.content).__name__}."
-                )
+            content_list, text_count, image_count = _to_dashscope_content(msg.content)
 
             # Validate content requirements
             if text_count == 0:

@@ -150,7 +150,7 @@ class MessageOffloader(ContextProcessor):
             context: ModelContext,
             **kwargs
     ) -> BaseMessage:
-        trimmed_content = message.content[:self.config.trim_size] + OMIT_STRING
+        trimmed_content = message.text[:self.config.trim_size] + OMIT_STRING
         extra_fields = message.model_dump()
         extra_fields.pop("role", None)
         extra_fields.pop("content", None)
@@ -231,7 +231,7 @@ class MessageOffloader(ContextProcessor):
             return False
         if not isinstance(getattr(message, "content", None), str):
             return False
-        if len(message.content) <= self.config.large_message_threshold:
+        if len(message.text) <= self.config.large_message_threshold:
             return False
         if isinstance(message, OffloadMixin):
             return False

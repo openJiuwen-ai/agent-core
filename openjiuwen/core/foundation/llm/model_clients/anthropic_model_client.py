@@ -42,6 +42,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
     ProviderType,
 )
+from openjiuwen.core.foundation.llm.schema.content_part import ImagePart, TextPart
 from openjiuwen.core.foundation.llm.schema.message import (
     AssistantMessage,
     BaseMessage,
@@ -62,8 +63,28 @@ if TYPE_CHECKING:
 # Shape converters: openJiuwen BaseMessage list  <->  Anthropic Messages API payload
 # ---------------------------------------------------------------------------
 
+def _to_anthropic_block(part: Any) -> Any:
+    """Render one content part into an Anthropic content block.
+
+    Anthropic does not speak OpenAI's ``image_url`` block; it wants
+    ``{"type": "image", "source": {...}}``. Unrecognized items pass through so
+    an unforeseen dialect still reaches the API instead of vanishing.
+    """
+    if isinstance(part, TextPart):
+        return {"type": "text", "text": part.text}
+    if isinstance(part, ImagePart):
+        if part.url:
+            source: dict = {"type": "url", "url": part.url}
+        else:
+            source = {"type": "base64", "media_type": part.mime_type, "data": part.data}
+        return {"type": "image", "source": source}
+    return part
+
+
 def _content_to_blocks(content: Any) -> List[dict]:
-    """Normalize OJ ``content`` (str | list[str|dict]) to Anthropic block list."""
+    """Normalize OJ ``content`` (str | list[str|dict]) to Anthropic block list.
+       BaseMessage goes trhough _render_parts before, so no need to handle TextPart/ImagePart
+    """
     if content is None:
         return []
     if isinstance(content, str):
@@ -263,6 +284,15 @@ class AnthropicModelClient(BaseModelClient):
 
     def _get_client_name(self) -> str:
         return "Anthropic client"
+
+    @classmethod
+    def _render_parts(cls, parts: List[Any]) -> Any:
+        """Render parts as Anthropic content blocks rather than OpenAI ones."""
+        return [
+            _to_anthropic_block(part)
+            for part in parts
+            if not (isinstance(part, TextPart) and not part.text)
+        ]
 
     def _use_shared_client(self) -> bool:
         """Whether to reuse the process-wide cached client (default True).

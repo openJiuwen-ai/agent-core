@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import io
 import os
 import base64
 import json
@@ -14,6 +15,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import pytest_asyncio
 from PIL import Image
+
+from openjiuwen.core.foundation.llm import ImagePart
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
@@ -1322,3 +1325,71 @@ async def test_write_file_small_file_single_full_read_allows_overwrite(sys_op, t
 
     res = await write_tool.invoke({"file_path": file_path, "content": "x\ny\nz"})
     assert res.success is True
+
+
+@pytest.mark.asyncio
+async def test_read_image_emits_dimensions_in_multimodal_payload(sys_op, temp_dir):
+    """Dimensions let ``ImagePart.estimated_tokens`` bill the real image."""
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "sized.png")
+    Image.new("RGB", (37, 19), color=(10, 20, 30)).save(file_path, format="PNG")
+
+    read_res = await read_tool.invoke({"file_path": file_path})
+
+    payload = read_res.data["multimodal"][0]
+    assert (payload["width"], payload["height"]) == (37, 19)
+
+
+@pytest.mark.asyncio
+async def test_read_image_dimensions_describe_the_transmitted_bytes(sys_op, temp_dir):
+    """Not the source image: the compression tiers downscale before sending."""
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "big_noise.png")
+    width = height = 1800
+    Image.frombytes("RGB", (width, height), os.urandom(width * height * 3)).save(
+        file_path, format="PNG"
+    )
+
+    read_res = await read_tool.invoke({"file_path": file_path})
+
+    payload = read_res.data["multimodal"][0]
+    assert payload["width"] < width and payload["height"] < height
+
+    # The reported size must match what the data URL actually carries.
+    decoded = base64.b64decode(payload["data_url"].split(",", 1)[1])
+    with Image.open(io.BytesIO(decoded)) as sent:
+        assert sent.size == (payload["width"], payload["height"])
+
+
+@pytest.mark.asyncio
+async def test_read_image_payload_shape_unchanged(sys_op, temp_dir):
+    """Contract guard: the cross-process payload only ever gained keys."""
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "shape.png")
+    Image.new("RGB", (4, 4), color=(1, 2, 3)).save(file_path, format="PNG")
+
+    read_res = await read_tool.invoke({"file_path": file_path})
+
+    payload = read_res.data["multimodal"][0]
+    assert {"type", "source", "source_path", "mime_type", "data_url"} <= set(payload)
+    assert payload["type"] == "image"
+    assert payload["source"] == "read_file"
+    assert payload["source_path"] == file_path
+
+
+@pytest.mark.asyncio
+async def test_read_image_payload_converts_to_image_part(sys_op, temp_dir):
+    """``ImagePart.from_data_url`` accepts the payload verbatim."""
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "convertible.png")
+    Image.new("RGB", (8, 6), color=(9, 9, 9)).save(file_path, format="PNG")
+
+    read_res = await read_tool.invoke({"file_path": file_path})
+    payload = read_res.data["multimodal"][0]
+
+    part = ImagePart.from_data_url(
+        payload["data_url"], width=payload["width"], height=payload["height"]
+    )
+
+    assert part.mime_type == payload["mime_type"]
+    assert part.estimated_tokens("openai") > 0

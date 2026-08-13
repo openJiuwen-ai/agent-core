@@ -1,5 +1,6 @@
 # coding: utf-8
 
+import base64
 import glob
 import json
 import os
@@ -737,3 +738,103 @@ class TestMessageOffloaderTtl:
         restored.load_state({"test_ctx": context.save_state()})
 
         assert restored.last_context_window_access_at() == 100.0
+
+
+def _openai_image_block() -> dict:
+    """The shape a multimodal tool result carries today."""
+    data_url = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\xa5" * 4096).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": data_url}}
+
+
+class TestListContentIsNeverOffloaded:
+    """The §5 decision-3 rule, in the fork's own copy of the predicate.
+
+    The fork shares no code with the official offloader, so the rule has to be
+    asserted twice or it can drift on one side only.
+    """
+
+    @pytest.mark.asyncio
+    async def test_offload_list_content_does_not_raise(self):
+        """Defect C: the head/tail preview used to slice list content as a list.
+
+        That produced no ``TypeError``, only a preview built from the repr of
+        the remaining elements — worse than a crash, because it is silent.
+        """
+        context = await create_context()
+        processor = context._processors[0]
+        message = ToolMessage(
+            tool_call_id="tc-1",
+            content=["a long tool result " * 500, _openai_image_block()],
+        )
+
+        offloaded = await processor._offload_message(message, context, original_message=message)
+
+        assert isinstance(offloaded, OffloadMixin)
+        preview = offloaded.content.split("[[OFFLOAD:")[0]
+        assert preview.startswith("a long tool result ")
+        assert "image_url" not in preview, "the base64 image must not leak into the preview"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(["x" * 200, _openai_image_block()], id="with-image"),
+            pytest.param(["x" * 200, "y" * 200], id="text-only-list"),
+        ],
+    )
+    async def test_list_content_is_never_offloaded(self, content):
+        """Text-only lists are excluded too — the rule is not image-specific."""
+        counter = _metadata_token_counter()
+        context = await create_context(context_window_tokens=100, token_counter=counter)
+
+        await context.add_messages(
+            ToolMessage(content=content, tool_call_id="tc-1", metadata={"test_token_count": 11})
+        )
+
+        message = context.get_messages()[0]
+        assert not isinstance(message, OffloadMixin)
+        assert message.content == content
+
+    @pytest.mark.asyncio
+    async def test_list_content_not_offloaded_even_when_role_is_eligible(self):
+        """Not merely a side effect of the message failing some other check.
+
+        The same ``ToolMessage``, at the same token count, differing only in
+        whether its content is a list, must be offloaded.
+        """
+        counter = _metadata_token_counter()
+        context = await create_context(context_window_tokens=100, token_counter=counter)
+
+        await context.add_messages(
+            [
+                ToolMessage(
+                    content=["describe this", _openai_image_block()],
+                    tool_call_id="tc-list",
+                    metadata={"test_token_count": 11},
+                ),
+                ToolMessage(
+                    content="describe this",
+                    tool_call_id="tc-str",
+                    metadata={"test_token_count": 11},
+                ),
+            ]
+        )
+
+        messages = context.get_messages()
+        assert not isinstance(messages[0], OffloadMixin), "image message must be kept"
+        assert isinstance(messages[1], OffloadMixin), "the message really is eligible"
+
+    @pytest.mark.asyncio
+    async def test_str_content_offload_behavior_unchanged(self):
+        """Regression guard for the ``.content`` -> ``.text`` substitution."""
+        counter = _metadata_token_counter()
+        context = await create_context(context_window_tokens=100, token_counter=counter)
+        content = "".join(str(index % 10) for index in range(5000))
+
+        await context.add_messages(
+            ToolMessage(content=content, tool_call_id="tc-1", metadata={"test_token_count": 11})
+        )
+
+        message = context.get_messages()[0]
+        assert isinstance(message, OffloadMixin)
+        assert _offloaded_content(message) == content

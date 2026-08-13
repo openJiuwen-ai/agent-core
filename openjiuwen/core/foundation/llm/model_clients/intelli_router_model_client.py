@@ -11,6 +11,11 @@ from threading import Lock
 from typing import List, Optional, AsyncIterator, Union, Dict, Any
 
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.schema.content_part import (
+    ImagePart,
+    TextPart,
+    normalize_content_part,
+)
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage, AssistantMessage, UserMessage, UsageMetadata
 )
@@ -497,9 +502,13 @@ class IntelliRouterModelClient(BaseModelClient):
                 content_list.append({"text": msg.content})
             elif isinstance(msg.content, list):
                 for item in msg.content:
-                    if isinstance(item, str):
-                        content_list.append({"text": item})
+                    part = normalize_content_part(item)
+                    if isinstance(part, TextPart):
+                        content_list.append({"text": part.text})
+                    elif isinstance(part, ImagePart):
+                        content_list.append({"image": part.url or part.to_data_url()})
                     elif isinstance(item, dict):
+                        # DashScope's native dialect carries no ``type`` key.
                         if "text" in item:
                             content_list.append({"text": item["text"]})
                         elif "image" in item:

@@ -26,6 +26,11 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
+from openjiuwen.core.foundation.llm.schema.content_part import (
+    ImagePart,
+    TextPart,
+    normalize_content_part,
+)
 from openjiuwen.core.foundation.llm.schema.generation_response import (
     AudioGenerationResponse,
     ImageGenerationResponse,
@@ -39,6 +44,20 @@ from openjiuwen.core.foundation.llm.schema.message import (
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
+
+
+def _to_openai_block(part: Any) -> Any:
+    """Render one content part into an OpenAI content block."""
+    if isinstance(part, TextPart):
+        return {"type": "text", "text": part.text}
+    if isinstance(part, ImagePart):
+        image_url: Dict[str, Any] = {"url": part.url or part.to_data_url()}
+        # ``detail`` is omitted at its default so payloads stay byte-identical
+        # to the ``{"url": ...}`` blocks producers emit today.
+        if part.detail != "auto":
+            image_url["detail"] = part.detail
+        return {"type": "image_url", "image_url": image_url}
+    return part
 
 
 class BaseModelClient(ABC):
@@ -273,8 +292,31 @@ class BaseModelClient(ABC):
         # like api.openai.com work out of the box); a user-provided ssl_cert is
         # loaded additively on top of the default store for self-signed endpoints.
 
-    @staticmethod
-    def _convert_messages_to_dict(messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:
+    @classmethod
+    def _render_parts(cls, parts: List[Any]) -> Any:
+        """Render normalized content items into this provider's wire content.
+
+        ``parts`` holds :data:`ContentPart` instances plus any item
+        ``normalize_content_part`` did not recognize; the default renderer
+        forwards those verbatim.
+
+        The default is the OpenAI shape, which every built-in client except
+        Anthropic speaks. Override this to translate parts for a provider with
+        its own content dialect.
+
+        A lone text part degrades back to a bare ``str``. That is what used to
+        go on the wire, and providers anchor their prompt cache on the exact
+        request prefix, so emitting a one-element list instead would miss the
+        cache on every single request.
+        """
+        if not parts:
+            return ""
+        if len(parts) == 1 and isinstance(parts[0], TextPart):
+            return parts[0].text
+        return [_to_openai_block(part) for part in parts]
+
+    @classmethod
+    def _convert_messages_to_dict(cls, messages: Union[str, List[BaseMessage], List[dict]]) -> List[dict]:
         """Convert messages to specific API format
 
         Args:
@@ -305,7 +347,10 @@ class BaseModelClient(ABC):
         # Convert BaseMessage list
         result = []
         for msg in messages:
-            msg_dict = {"role": msg.role, "content": msg.content}
+            content = msg.content
+            if isinstance(content, list):
+                content = cls._render_parts([normalize_content_part(item) for item in content])
+            msg_dict = {"role": msg.role, "content": content}
 
             # Handle tool_calls for AssistantMessage
             if isinstance(msg, AssistantMessage) and msg.tool_calls:

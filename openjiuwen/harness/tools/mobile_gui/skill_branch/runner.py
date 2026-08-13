@@ -10,8 +10,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, UserMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    ImagePart,
+    SystemMessage,
+    TextPart,
+    UserMessage,
+)
 from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.foundation.llm.schema.content_part import normalize_content_part
 from openjiuwen.harness.tools.mobile_gui.rails.multimodal_skill_read_rail import (
     REFERENCE_IMAGE_NOTE,
     get_mime_type,
@@ -49,10 +56,9 @@ def _assistant_text(response: AssistantMessage) -> str:
     if isinstance(content, list):
         parts: List[str] = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
+            part = normalize_content_part(block)
+            if isinstance(part, TextPart):
+                parts.append(part.text)
         return "\n".join(parts)
     return str(content)
 
@@ -71,23 +77,28 @@ def _load_image_data_url(entry: SkillImageEntry) -> Optional[str]:
     return f"data:{mime};base64,{b64}"
 
 
-def _build_live_screenshot_blocks(screenshot_b64: str) -> List[dict]:
+def _image_part_from_data_url(data_url: str) -> ImagePart:
+    """Screenshot data URL -> ``ImagePart``, at ``detail:"low"``."""
+    return ImagePart.from_data_url_unchecked(data_url, detail="low")
+
+
+def _build_live_screenshot_blocks(screenshot_b64: str) -> List[Any]:
     if not screenshot_b64:
-        return [{"type": "text", "text": "(no live device screenshot available)"}]
+        return [TextPart(text="(no live device screenshot available)")]
     url = screenshot_b64
     if not url.startswith("data:"):
         url = f"data:image/jpeg;base64,{screenshot_b64}"
     return [
-        {"type": "text", "text": "[CURRENT device screenshot — authoritative for live UI]"},
-        {"type": "image_url", "image_url": {"url": url, "detail": "low"}},
+        TextPart(text="[CURRENT device screenshot — authoritative for live UI]"),
+        _image_part_from_data_url(url),
     ]
 
 
 def _build_reference_blocks(
     entries: List[SkillImageEntry],
     selection: Dict[str, Any],
-) -> List[dict]:
-    blocks: List[dict] = []
+) -> List[Any]:
+    blocks: List[Any] = []
     request_by_id = {
         str(item.get("image_id", "")): item
         for item in (selection.get("requests") or [])
@@ -102,19 +113,16 @@ def _build_reference_blocks(
             continue
         caption = entry.alt or entry.image_id
         blocks.append(
-            {
-                "type": "text",
-                "text": "\n".join(
+            TextPart(
+                text="\n".join(
                     [
                         REFERENCE_IMAGE_NOTE.format(caption=caption),
                         f"Selection reason: {reason or '(none)'}",
                     ]
-                ),
-            }
+                )
+            )
         )
-        blocks.append(
-            {"type": "image_url", "image_url": {"url": data_url, "detail": "low"}}
-        )
+        blocks.append(_image_part_from_data_url(data_url))
     return blocks
 
 
@@ -158,7 +166,7 @@ async def run_skill_branch(
             SystemMessage(content=build_stage1_system_message(max_images=max_images)),
             UserMessage(
                 content=[
-                    {"type": "text", "text": user_parts},
+                    TextPart(text=user_parts),
                     *_build_live_screenshot_blocks(live_screenshot_b64),
                 ]
             ),
@@ -220,8 +228,8 @@ async def run_skill_branch(
         if stage2_feedback:
             user_parts += "\n\nFeedback:\n" + "\n".join(f"- {f}" for f in stage2_feedback)
 
-        content_blocks: List[dict] = [
-            {"type": "text", "text": user_parts},
+        content_blocks: List[Any] = [
+            TextPart(text=user_parts),
             *_build_live_screenshot_blocks(live_screenshot_b64),
         ]
         content_blocks.extend(_build_reference_blocks(manifest, stage1_decision))

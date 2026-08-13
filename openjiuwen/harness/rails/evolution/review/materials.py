@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from openjiuwen.core.foundation.llm import ImagePart, TextPart
+from openjiuwen.core.foundation.llm.schema.content_part import normalize_content_part
 from openjiuwen.agent_evolving.trajectory.types import (
     TrajectoryLike,
     trajectory_execution_id,
@@ -224,7 +226,15 @@ def _message_content_text(content: Any) -> str:
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
-            if isinstance(item, dict):
+            part = normalize_content_part(item)
+            if isinstance(part, TextPart):
+                if part.text:
+                    parts.append(part.text)
+            elif isinstance(part, ImagePart):
+                continue
+            elif isinstance(item, dict):
+                # Dialects normalization does not claim keep the original
+                # ``text``/``content``/``value`` probe below.
                 text = item.get("text") or item.get("content") or item.get("value")
                 if text:
                     parts.append(str(text))

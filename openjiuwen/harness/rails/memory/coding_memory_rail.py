@@ -14,6 +14,8 @@ import asyncio
 from typing import Dict, Optional
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import TextPart
+from openjiuwen.core.foundation.llm.schema.content_part import normalize_content_part
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.memory.lite.coding_memory_tool_context import CodingMemoryToolContext
 from openjiuwen.core.memory.lite.config import create_memory_settings
@@ -511,9 +513,9 @@ class CodingMemoryRail(DeepAgentRail):
                 if isinstance(content, list):
                     # 处理多模态内容
                     texts = [
-                        p.get("text", "")
-                        for p in content
-                        if isinstance(p, dict) and p.get("type") == "text"
+                        part.text
+                        for part in (normalize_content_part(p) for p in content)
+                        if isinstance(part, TextPart)
                     ]
                     return " ".join(texts) if texts else None
         
