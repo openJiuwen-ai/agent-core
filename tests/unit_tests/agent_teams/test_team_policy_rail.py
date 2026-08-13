@@ -1026,6 +1026,33 @@ class TestTeamPolicyRailTeamContext:
         assert "reader" in message.content
         assert "不再适用" in message.content
 
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_on_team_info_only_update_renders_no_empty_identity(self):
+        """A team-info change after identity was emitted must not create an
+        empty <identity> block (or a duplicated conversion notice)."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        backend.set_fork_enabled(True)
+        rail = _leader_rail(backend, fork_source="reader")
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        ctx = _StubContext()
+
+        first = await _admit(rail, ctx, "work")
+        assert "<identity>" in first.content
+        assert "<identity-conversion>" in first.content
+
+        # Identity is already emitted; only the team row changes.
+        backend.set_team(_StubTeam("Beta-renamed", "Test"), mtime=99)
+        second = await _admit(rail, ctx, "next")
+        assert "Beta-renamed" in second.content
+        assert "<identity>" not in second.content
+        assert "<identity-conversion>" not in second.content
+
+
 
 class TestTeamPolicyRailHitt:
     """HITT contract is a static builder section gated on ``hitt_enabled``; the

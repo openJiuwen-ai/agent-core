@@ -261,9 +261,10 @@ def render_team_context_with_identity(
     Returns:
         The rendered ``<team-context>`` block.
     """
-    identity = _render_block("identity", [], identity_body)
+    identity_parts = [_esc_text(identity_body)]
     if identity_conversion:
-        identity += "\n" + _render_block("identity-conversion", [], identity_conversion)
+        identity_parts.append(_render_block("identity-conversion", [], identity_conversion))
+    identity = f"<identity>\n{chr(10).join(identity_parts)}\n</identity>"
     inner = [identity]
     if info_body:
         inner.append(_esc_text(info_body))

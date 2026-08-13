@@ -297,6 +297,14 @@ def test_team_context_with_identity_nests_identity_and_conversion():
     assert "<identity>\n你的 member_name: dev1" in rendered
     assert "<identity-conversion>\n你继承了 reader\n</identity-conversion>" in rendered
     assert "# 团队信息" in rendered
+    # <identity-conversion> must be a CHILD of <identity>, i.e. it closes
+    # before </identity> closes. A sibling would break the documented
+    # contract (inbound_tags / S_09 13b).
+    assert rendered.index("<identity-conversion>") < rendered.index("</identity>")
+    assert rendered.index("</identity-conversion>") < rendered.index("</identity>")
+    # team info stays a sibling of <identity>.
+    assert rendered.index("# 团队信息") > rendered.index("</identity>")
+    assert rendered.index("# 团队信息") < rendered.index("</team-context>")
 
 
 @pytest.mark.level0

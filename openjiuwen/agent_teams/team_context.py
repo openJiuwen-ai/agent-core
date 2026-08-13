@@ -178,13 +178,16 @@ class TeamContextTracker:
         identity_body = await self._identity_body(baseline, updated)
         info_body = await self._team_info_body(baseline, updated)
         if identity_body or info_body:
-            if self._fork_capable:
+            if self._fork_capable and identity_body:
                 # Fork-enabled teams get a nested <identity> element (with an
                 # optional <identity-conversion> child) so the current identity
-                # is distinguishable from an inherited, earlier one.
+                # is distinguishable from an inherited, earlier one. Only when
+                # the identity body itself is present: a team-info-only update
+                # (identity already emitted) must not render an empty
+                # <identity>, so it falls through to the plain path below.
                 blocks.append(
                     render_team_context_with_identity(
-                        identity_body=identity_body or "",
+                        identity_body=identity_body,
                         identity_conversion=(
                             build_identity_conversion(
                                 source=self._fork_source,
@@ -198,8 +201,9 @@ class TeamContextTracker:
                     )
                 )
             else:
-                # Byte-identical to the pre-fork path: non-fork teams keep their
-                # KV prefix and prompt bytes untouched.
+                # Byte-identical to the pre-fork path: non-fork teams, and
+                # fork-enabled teams on a team-info-only update, keep their KV
+                # prefix and prompt bytes untouched.
                 standing = [part for part in (identity_body, info_body) if part]
                 blocks.append(render_team_context(body="\n".join(standing)))
 
