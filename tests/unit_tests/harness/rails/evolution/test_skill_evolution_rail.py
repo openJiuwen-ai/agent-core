@@ -1480,13 +1480,14 @@ async def test_run_evolution_uses_online_updater_path_after_init(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_auto_save_false_emits_events(tmp_path):
+    # Passive run_evolution always stages with requires_approval=False (auto-approve path).
     rail = _make_rail(tmp_path, auto_save=False)
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/skill-a/SKILL.md"}]},
         {"role": "tool", "content": "Error: command failed", "name": "bash"},
     ]
     trajectory = _trajectory_with_messages(messages)
-    approval_request = object()
+    approval_request = SimpleNamespace(request_id="skill_evolve_req")
 
     rail._collect_messages = AsyncMock(return_value=messages)
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
@@ -1503,17 +1504,19 @@ async def test_run_evolution_auto_save_false_emits_events(tmp_path):
         messages=messages,
         trajectory=trajectory,
         user_query="",
-        requires_approval=True,
+        requires_approval=False,
     )
-    rail._emit_generated_records.assert_awaited_once_with(ctx, "skill-a", approval_request)
+    rail._emit_generated_records.assert_not_awaited()
     events = _progress_events(await rail.drain_pending_host_events())
     stages = [event.payload["evolution_meta"]["stage"] for event in events]
     assert "signals_attributed" in stages
     assert "optimizing" in stages
+    assert "auto_approved" in stages
 
 
 @pytest.mark.asyncio
 async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path):
+    # Passive run_evolution does not emit approval prompts; records are auto-approved.
     rail = _make_rail(tmp_path, auto_save=False)
     record = _make_record("skill-a", content="fresh approval record")
     messages = [
@@ -1542,11 +1545,14 @@ async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path)
         messages=messages,
         trajectory=trajectory,
         user_query="",
-        requires_approval=True,
+        requires_approval=False,
     )
-    events = _approval_events(await rail.drain_pending_approval_events())
-    assert len(events) == 1
-    assert events[0].payload["evolution_meta"]["skill_name"] == "skill-a"
+    drained = await rail.drain_pending_host_events()
+    assert _approval_events(drained) == []
+    events = _progress_events(drained)
+    stages = [event.payload["evolution_meta"]["stage"] for event in events]
+    assert "auto_approved" in stages
+    assert events[-1].payload["evolution_meta"]["skill_name"] == "skill-a"
 
 
 @pytest.mark.asyncio
