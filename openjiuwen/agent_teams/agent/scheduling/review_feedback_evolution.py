@@ -18,13 +18,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from openjiuwen.agent_evolving.signal import (
-    ConversationSignalDetector,
     ReviewFeedbackAction,
     ReviewFeedbackAttributor,
     ReviewFeedbackClassification,
     ReviewFeedbackContextBuilder,
     attribution_to_evolution_signal,
 )
+from openjiuwen.agent_evolving.trajectory.messages import trajectory_to_messages
 from openjiuwen.core.common.logging import logger
 
 GLOBAL_EVOLUTION_EVENTS = "global_evolution"
@@ -257,7 +257,7 @@ class ReviewFeedbackEvolutionCoordinator:
                 )
             )
             messages = (
-                ConversationSignalDetector.convert_trajectory_to_messages(trajectory)
+                trajectory_to_messages(trajectory)
                 if trajectory is not None
                 else []
             )
@@ -337,7 +337,7 @@ class ReviewFeedbackEvolutionCoordinator:
             return False
         trajectory = self._get_team_trajectory()
         messages = (
-            ConversationSignalDetector.convert_trajectory_to_messages(trajectory)
+            trajectory_to_messages(trajectory)
             if trajectory is not None
             else []
         )

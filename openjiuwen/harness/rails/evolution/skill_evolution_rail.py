@@ -47,6 +47,7 @@ from openjiuwen.agent_evolving.signal import (
 )
 from openjiuwen.agent_evolving.tools import create_main_evolution_tools
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.messages import tool_call_arguments, tool_call_name
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.updater import SingleDimUpdater
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
@@ -1291,9 +1292,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     texts.append(str(msg.get("content", "")))
                 elif role == "assistant":
                     for tool_call in msg.get("tool_calls", []):
-                        texts.append(str(tool_call.get("arguments", "")))
-                        if tool_call.get("name") == "skill_tool":
-                            skill_tool_payloads.append(tool_call.get("arguments"))
+                        arguments = tool_call_arguments(tool_call)
+                        texts.append(str("" if arguments is None else arguments))
+                        if tool_call_name(tool_call) == "skill_tool":
+                            skill_tool_payloads.append(arguments)
             else:
                 # Pydantic model: use attribute access
                 role = getattr(msg, "role", "")
@@ -1668,8 +1670,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             if role != "assistant":
                 continue
             for tool_call in msg.get("tool_calls", []) or []:
-                tool = str(tool_call.get("name") or "").lower()
-                arguments = tool_call.get("arguments", "")
+                tool = str(tool_call_name(tool_call) or "").lower()
+                arguments = tool_call_arguments(tool_call)
+                if arguments is None:
+                    arguments = ""
                 if tool == "skill_tool":
                     args = cls._parse_tool_args_dict(arguments)
                     if str(args.get("skill_name") or "").strip() != skill_name:
@@ -1708,8 +1712,9 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 lines.append(f"[{role}] {content}")
             if role == "assistant":
                 for tool_call in msg.get("tool_calls", []) or []:
-                    tool = str(tool_call.get("name") or "")
-                    args = str(tool_call.get("arguments") or "")[:max_content_chars]
+                    tool = str(tool_call_name(tool_call) or "")
+                    arguments = tool_call_arguments(tool_call)
+                    args = str("" if arguments is None else arguments)[:max_content_chars]
                     if tool:
                         lines.append(f"[assistant/tool_call] {tool} {args}")
         return "\n".join(lines)

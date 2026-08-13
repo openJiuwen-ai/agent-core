@@ -334,7 +334,7 @@ def _prepared_input(
     if trajectory is None:
         trajectory = _trajectory_with_messages([])
     if messages is None:
-        messages = _REAL_SKILL_EVOLUTION_RAIL._collect_messages_from_trajectory(trajectory)
+        messages = _REAL_SKILL_EVOLUTION_RAIL._trajectory_to_messages(trajectory)
     return _SkillPreparedEvolutionInput(
         trajectory=trajectory,
         messages=tuple(messages),
@@ -1524,6 +1524,7 @@ async def test_run_evolution_auto_save_commits_via_manager_lifecycle(tmp_path):
     rail._stage_evolution_from_signals = AsyncMock(return_value=_staged_result(approval_request))
     rail._emit_generated_records = AsyncMock()
     trajectory = _trajectory_with_messages(messages)
+    normalized_messages = rail._trajectory_to_messages(trajectory)
 
     await rail.run_evolution(_prepared_input(trajectory))
 
@@ -1531,7 +1532,7 @@ async def test_run_evolution_auto_save_commits_via_manager_lifecycle(tmp_path):
     rail._stage_evolution_from_signals.assert_awaited_once_with(
         skill_name="skill-a",
         signals=signals,
-        messages=messages,
+        messages=normalized_messages,
         trajectory=trajectory,
         user_query="",
         requires_approval=False,
@@ -1590,6 +1591,7 @@ async def test_run_evolution_auto_save_false_emits_events(tmp_path):
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._stage_evolution_from_signals = AsyncMock(return_value=_staged_result(approval_request))
     rail._emit_generated_records = AsyncMock()
+    normalized_messages = rail._trajectory_to_messages(trajectory)
 
     await rail.run_evolution(_prepared_input(trajectory))
 
@@ -1597,7 +1599,7 @@ async def test_run_evolution_auto_save_false_emits_events(tmp_path):
     rail._stage_evolution_from_signals.assert_awaited_once_with(
         skill_name="skill-a",
         signals=signals,
-        messages=messages,
+        messages=normalized_messages,
         trajectory=trajectory,
         user_query="",
         requires_approval=True,
@@ -1628,13 +1630,14 @@ async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path)
         request_id="skill_evolve_req",
     )
     rail._stage_evolution_from_signals = AsyncMock(return_value=_staged_result(approval_request))
+    normalized_messages = rail._trajectory_to_messages(trajectory)
     await rail.run_evolution(_prepared_input(trajectory))
 
     signals = rail._stage_evolution_from_signals.await_args.kwargs["signals"]
     rail._stage_evolution_from_signals.assert_awaited_once_with(
         skill_name="skill-a",
         signals=signals,
-        messages=messages,
+        messages=normalized_messages,
         trajectory=trajectory,
         user_query="",
         requires_approval=True,

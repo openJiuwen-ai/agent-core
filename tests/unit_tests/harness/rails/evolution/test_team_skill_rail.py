@@ -516,7 +516,7 @@ def _prepared_input(
     presented_entries: list[tuple[str, Any, str]] | None = None,
 ) -> _SkillPreparedEvolutionInput:
     if messages is None:
-        messages = SkillEvolutionRail._collect_messages_from_trajectory(trajectory)
+        messages = SkillEvolutionRail._trajectory_to_messages(trajectory)
     return _SkillPreparedEvolutionInput(
         trajectory=trajectory,
         messages=tuple(messages),
