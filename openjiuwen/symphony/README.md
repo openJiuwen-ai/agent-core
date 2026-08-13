@@ -293,6 +293,9 @@ symlink、junction 或其他 reparse point，并排除凭据、版本控制和�
 
 每个 metric 保留 `status`、可选 `[0, 1]` score、reason、脱敏 evidence、failure 和 suggestion。
 默认不生成跨指标 composite score，也不固化准入阈值；没有目标值的时延只输出 raw observation。
+同一窗口内部分 evaluator 或 LLM 解析异常时，`EvaluationSuite` 只使用 `score is not None` 的可用评分样本
+计算均值和 pass/fail，异常样本不进入分母，但 `error_count` 与对应诊断仍会保留；只有所有样本都无法评分且
+存在异常时，聚合结果才为 `error`。没有评分且没有异常时，仍按原有 `observed`/`not_applicable` 规则返回。
 
 ### 指纹产物生命周期
 

@@ -25,6 +25,8 @@ from openjiuwen.symphony.models import (
     CapabilityFingerprint,
     EvaluationCase,
     EvidenceRef,
+    FailureReason,
+    ImprovementSuggestion,
     Latency,
     MetricResult,
     MetricStatus,
@@ -79,6 +81,24 @@ class FakeLLM:
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
+
+
+class SequentialFakeLLM:
+    """Return one configured response per invocation without changing FakeLLM semantics."""
+
+    def __init__(self, responses: tuple[Any, ...]) -> None:
+        self.responses = responses
+        self.messages: list[Any] = []
+
+    async def invoke(self, messages: Any, **kwargs: Any) -> Any:
+        response_index = len(self.messages)
+        self.messages.append(messages)
+        if response_index >= len(self.responses):
+            raise AssertionError("unexpected evaluation LLM invocation")
+        response = self.responses[response_index]
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def function_call(call_id: str, name: str, arguments: str = "{}") -> dict[str, Any]:
@@ -438,6 +458,181 @@ async def test_window_aggregates_success_and_separate_latency_observations() -> 
             "count": 1,
         },
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("evaluator_type", "responses", "expected_score", "expected_status", "expected_error_count"),
+    [
+        pytest.param(
+            AccuracyEvaluator,
+            (
+                '{"score": 1, "reason": "first judgment passed"}',
+                "invalid-model-response token=partial-window-secret",
+                '{"score": 1, "reason": "last judgment passed"}',
+            ),
+            1.0,
+            MetricStatus.PASS,
+            1,
+            id="accuracy-pass-with-one-invalid-response",
+        ),
+        pytest.param(
+            CompletenessEvaluator,
+            (
+                '{"score": 1, "reason": "first judgment passed"}',
+                "invalid-model-response token=partial-window-secret",
+                '{"score": 1, "reason": "last judgment passed"}',
+            ),
+            1.0,
+            MetricStatus.PASS,
+            1,
+            id="completeness-pass-with-one-invalid-response",
+        ),
+        pytest.param(
+            AccuracyEvaluator,
+            (
+                '{"score": 1, "reason": "first judgment passed"}',
+                "invalid-model-response token=partial-window-secret",
+                '{"score": 0, "reason": "last judgment failed"}',
+            ),
+            0.5,
+            MetricStatus.FAIL,
+            1,
+            id="accuracy-fail-with-one-invalid-response",
+        ),
+        pytest.param(
+            CompletenessEvaluator,
+            (
+                '{"score": 1, "reason": "first judgment passed"}',
+                "invalid-model-response token=partial-window-secret",
+                '{"score": 0, "reason": "last judgment failed"}',
+            ),
+            0.5,
+            MetricStatus.FAIL,
+            1,
+            id="completeness-fail-with-one-invalid-response",
+        ),
+        pytest.param(
+            AccuracyEvaluator,
+            (
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+            ),
+            None,
+            MetricStatus.ERROR,
+            3,
+            id="accuracy-all-invalid-responses",
+        ),
+        pytest.param(
+            CompletenessEvaluator,
+            (
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+            ),
+            None,
+            MetricStatus.ERROR,
+            3,
+            id="completeness-all-invalid-responses",
+        ),
+    ],
+)
+async def test_llm_window_aggregation_uses_scored_samples_and_retains_error_diagnostics(
+    evaluator_type: type[AccuracyEvaluator] | type[CompletenessEvaluator],
+    responses: tuple[str, ...],
+    expected_score: float | None,
+    expected_status: MetricStatus,
+    expected_error_count: int,
+) -> None:
+    evaluator = evaluator_type()
+    llm = SequentialFakeLLM(responses)
+    cases = tuple(
+        case(
+            case_id=f"partial-window-{evaluator.metric_id}-{index}",
+            expected_output=None,
+            output=f"model-judged output {index}",
+            event_time=datetime(2026, 8, 3, index, tzinfo=UTC),
+        )
+        for index in range(3)
+    )
+
+    result = await EvaluationSuite([evaluator], llm=llm, enable_llm=True).evaluate(
+        fingerprint(),
+        cases,
+        metric_ids=(evaluator.metric_id,),
+    )
+    metric = result.metrics[0]
+    serialized = metric.model_dump_json()
+
+    assert len(llm.messages) == 3
+    assert metric.status == expected_status
+    if expected_score is None:
+        assert metric.score is None
+    else:
+        assert metric.score == pytest.approx(expected_score)
+    assert metric.details["error_count"] == expected_error_count
+    assert metric.evidence
+    assert metric.failures
+    assert metric.suggestions
+    assert {failure.code for failure in metric.failures} >= {"evaluation_llm_failed"}
+    assert "invalid-model-response" not in serialized
+    assert "partial-window-secret" not in serialized
+
+
+def test_generic_aggregate_uses_scored_samples_and_preserves_error_diagnostics() -> None:
+    error_evidence = EvidenceRef(
+        evidence_type="evaluation_error",
+        reference="evaluator:generic_metric",
+        description="The evaluator failed without exposing its input payload.",
+    )
+    error_failure = FailureReason(
+        code="generic_evaluator_failed",
+        message="The generic evaluator failed.",
+        severity="error",
+        evidence=(error_evidence,),
+    )
+    error_suggestion = ImprovementSuggestion(
+        code="retry_generic_evaluation",
+        message="Retry the generic evaluator.",
+        priority="medium",
+        related_failures=(error_failure.code,),
+    )
+    results = (
+        MetricResult(
+            metric_id="generic_metric",
+            capability_id="weather",
+            capability_type="skill",
+            score=1.0,
+            status=MetricStatus.PASS,
+            reason="The scored result passed.",
+        ),
+        MetricResult(
+            metric_id="generic_metric",
+            capability_id="weather",
+            capability_type="skill",
+            score=None,
+            status=MetricStatus.ERROR,
+            reason="The generic evaluator failed.",
+            evidence=(error_evidence,),
+            failures=(error_failure,),
+            suggestions=(error_suggestion,),
+        ),
+    )
+
+    aggregated = EvaluationSuite.default().aggregate(results)
+    metric = aggregated.metrics[0]
+
+    assert metric.status == MetricStatus.PASS
+    assert metric.score == 1.0
+    assert (
+        metric.reason
+        == "Available scored metric results were aggregated; failed evaluations without scores were excluded."
+    )
+    assert metric.details["error_count"] == 1
+    assert metric.evidence == (error_evidence,)
+    assert metric.failures == (error_failure,)
+    assert metric.suggestions == (error_suggestion,)
 
 
 @pytest.mark.parametrize(
