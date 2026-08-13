@@ -48,6 +48,64 @@ FailureFormatter = Callable[[str], str | None]
 # result stay inline (as a preview) next to the retrieval pointer.
 _SPILL_SUMMARY_CHARS = 1024
 
+# Guard against pathological nesting: a cyclic or absurdly deep result tree
+# would otherwise recurse until stack overflow. On exceeding this depth we log
+# and collapse the subtree to a placeholder string instead of raising, so the
+# remaining tree can still be serialized.
+_TO_JSONABLE_MAX_DEPTH = 50
+
+
+def _to_jsonable(obj: Any, _depth: int = 0) -> Any:
+    """Recursively convert pydantic BaseModel / set objects to JSON-serializable data.
+
+    The result of a background tool may contain pydantic model instances or sets
+    nested in dicts, lists, or tuples, which json.dumps cannot serialize
+    directly. This function traverses the result tree, replacing each BaseModel
+    with the output of ``model_dump(mode="json")`` and each set/frozenset with a
+    sorted list. Pure JSON-native types are returned as-is.
+
+    Args:
+        obj: The value (or subtree) to convert.
+        _depth: Internal recursion depth counter; exceeding
+            :data:`_TO_JSONABLE_MAX_DEPTH` logs a warning and collapses the
+            subtree to a placeholder string.
+
+    Returns:
+        A JSON-serializable equivalent of ``obj``.
+    """
+    try:
+        if _depth > _TO_JSONABLE_MAX_DEPTH:
+            raise RecursionError("_to_jsonable exceeded max depth")
+        if isinstance(obj, (set, frozenset)):
+            return [_to_jsonable(v, _depth + 1) for v in sorted(obj, key=_sort_key)]
+        if hasattr(obj, "model_dump") and callable(obj.model_dump):
+            return obj.model_dump(mode="json")
+        if isinstance(obj, dict):
+            return {k: _to_jsonable(v, _depth + 1) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_to_jsonable(v, _depth + 1) for v in obj]
+        return obj
+    except RecursionError:
+        team_logger.warning(
+            "[async_tools] _to_jsonable exceeded max depth %s; collapsing subtree",
+            _TO_JSONABLE_MAX_DEPTH,
+            exc_info=True,
+        )
+        return "<truncated: result nested too deeply>"
+
+
+def _sort_key(item: Any) -> Any:
+    """Return a stable sort key for a set element, or a fallback for mixed types.
+
+    ``sorted()`` on a set of non-comparable or heterogeneous items would raise
+    TypeError; falling back on the string repr keeps the conversion from
+    crashing on such sets while still giving deterministic output.
+    """
+    try:
+        return repr(item)
+    except Exception:  # noqa: BLE001 - repr must not break the conversion
+        return str(item)
+
 
 def render_result_text(result: Any) -> str:
     """Render an async tool's return value to model-facing text, in full.
@@ -67,7 +125,13 @@ def render_result_text(result: Any) -> str:
     if isinstance(result, str):
         return result
     if isinstance(result, (dict, list)):
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        try:
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        except TypeError:
+            team_logger.info(
+                "[async_tools] pydantic BaseModel detected, converting for JSON serialization"
+            )
+            return json.dumps(_to_jsonable(result), ensure_ascii=False, indent=2)
     return str(result)
 
 
