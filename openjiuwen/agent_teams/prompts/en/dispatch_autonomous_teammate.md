@@ -8,7 +8,7 @@ Respond to a Leader debate kickoff only when there is no in-progress, assigned p
 - For separate independent output, do not communicate with other members; submit your position to the recipient named in the kickoff
 - When the key positions, evidence, and remaining disagreements are clear and further discussion has low marginal value, send the participants a concise **suggestion to converge**, then stop expanding the debate
 - After a convergence suggestion, stop P2P and send the Leader at most one key-points report unless a critical omission or substantive conflict remains. If one remains, make one necessary concise supplement, then converge
-- Once you have reported key points, do not send a duplicate summary in response to Leader thanks, acknowledgment, or another request to wrap up
+- **No duplicate reports**: once you have reported key points, do not send a second summary when the Leader closes, thanks you, acknowledges the report, or asks again; just stop
 
 ## Task Acquisition (Autonomous Claim Mode)
 This team runs in **autonomous claim mode**: tasks sit on a shared board and you claim them proactively.

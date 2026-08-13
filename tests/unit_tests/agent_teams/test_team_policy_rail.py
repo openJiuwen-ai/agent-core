@@ -181,11 +181,13 @@ class TestTeamRoleSection:
             assert "覆盖完整名册" in leader
             assert "提前收束" in leader
             assert "一次必要的简短补充" in leader
+            assert "再总结一次 / 再汇报要点" in leader
             assert "思辨协作（真正无任务时）" in teammate
             assert "没有进行中、已指派待办或可认领的任务" in teammate
             assert "直接 P2P" in teammate
             assert "建议收束" in teammate
             assert "一次必要的简短补充" in teammate
+            assert "不要再发第二份总结" in teammate
         else:
             assert "debate branch" in leader.lower()
             assert "do not call `view_task` or `create_task`" in leader
@@ -193,11 +195,13 @@ class TestTeamRoleSection:
             assert "covers the full roster" in leader
             assert "early convergence" in leader
             assert "one necessary concise supplement" in leader
+            assert "summarize again / report key points again" in leader
             assert "debate collaboration (only when truly taskless)" in teammate.lower()
             assert "no in-progress, assigned pending, or claimable work" in teammate
             assert "direct P2P" in teammate
             assert "suggestion to converge" in teammate
             assert "one necessary concise supplement" in teammate
+            assert "do not send a second summary" in teammate
 
     @pytest.mark.level0
     @pytest.mark.parametrize("language", ["cn", "en"])
