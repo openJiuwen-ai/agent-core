@@ -35,12 +35,12 @@ _STREAM_TIMEOUT_MARKERS = (
 _DEFAULT_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
 
 _TOOL_LOOP_WARNING_TEMPLATE_CN = """\
-检测到连续多轮调用了相同的工具集，且每个工具的入参和执行结果也相同。
-工具调用命令如下：
+检测到连续多轮调用了相同的工具集，且每个工具的入参也相同。
+最后一轮工具调用命令如下：
 ---
 {tool_calls}
 ---
-工具执行结果如下：
+最后一轮工具执行结果如下：
 ---
 {tool_results}
 ---
@@ -48,12 +48,12 @@ _TOOL_LOOP_WARNING_TEMPLATE_CN = """\
 """
 
 _TOOL_LOOP_WARNING_TEMPLATE_EN = """\
-Detected consecutive turns calling the same tool set with identical arguments and results.
-Tool calls:
+Detected consecutive turns calling the same tool set with identical arguments.
+Latest-round tool calls:
 ---
 {tool_calls}
 ---
-Tool results:
+Latest-round tool results:
 ---
 {tool_results}
 ---
@@ -72,7 +72,7 @@ _TOOL_LOOP_WARNING_TEMPLATES = {
 
 
 class ToolLoopCompactConfig(BaseModel):
-    """Detect and compact consecutive identical tool-call/args/result rounds."""
+    """Detect and compact consecutive identical tool-call/args rounds."""
 
     enabled: bool = Field(
         default=False,
@@ -83,8 +83,8 @@ class ToolLoopCompactConfig(BaseModel):
         ge=2,
         description=(
             "Trigger compaction when this many consecutive completed tool rounds "
-            "share the same tool name set, arguments, and return values "
-            "(order-independent)."
+            "share the same tool name set and arguments (order-independent). "
+            "Return values are not part of the match."
         ),
     )
     bailout_threshold: int = Field(
@@ -103,8 +103,8 @@ class ToolLoopCompactConfig(BaseModel):
 class _ToolRound:
     start: int
     end: int
-    # Sorted (tool_name, canonical_args, result_content) triples.
-    fingerprint: Tuple[Tuple[str, str, str], ...]
+    # Sorted (tool_name, canonical_args) pairs used for loop matching.
+    fingerprint: Tuple[Tuple[str, str], ...]
 
 
 class ModelAnomalyDetectionRail(DeepAgentRail):
@@ -113,7 +113,7 @@ class ModelAnomalyDetectionRail(DeepAgentRail):
     Handles three failure modes:
       - repeated output suffixes in reasoning/content streams
       - stream frame timeout errors raised by ``Model.stream``
-      - consecutive identical tool-call/args/result loops (compact or bail out)
+      - consecutive identical tool-call/args loops (compact or bail out)
     """
 
     priority = 70
@@ -388,7 +388,8 @@ class ModelAnomalyDetectionRail(DeepAgentRail):
 
         Runs in ``before_model_call`` so tool results for the latest round are
         already committed to context. Matching is order-independent over
-        (tool name, arguments, return value).
+        (tool name, arguments); return values are ignored for matching but the
+        latest round's calls/results are still injected into the warning.
 
         Raising ``AbortError`` (with a ``build_error`` cause) is required because
         plain exceptions raised inside a rail callback are swallowed by the
@@ -527,7 +528,6 @@ def _collect_tool_rounds(messages: Sequence[BaseMessage]) -> List[_ToolRound]:
             index += 1
             continue
 
-        result_by_id: Dict[str, str] = {}
         cursor = index + 1
         while cursor < total and pending_ids:
             next_message = messages[cursor]
@@ -535,25 +535,22 @@ def _collect_tool_rounds(messages: Sequence[BaseMessage]) -> List[_ToolRound]:
                 break
             tool_call_id = str(getattr(next_message, "tool_call_id", "") or "")
             if tool_call_id in pending_ids:
-                content = next_message.content
-                if not isinstance(content, str):
-                    content = "" if content is None else str(content)
-                result_by_id[tool_call_id] = content
                 pending_ids.discard(tool_call_id)
                 cursor += 1
                 continue
             break
 
         if pending_ids:
+            # Incomplete tool round: wait until every tool_call has a result.
             index += 1
             continue
 
+        # Match on tool name + args only; results are for the warning payload.
         fingerprint = tuple(
             sorted(
                 (
                     call_by_id[tool_call_id][0],
                     call_by_id[tool_call_id][1],
-                    result_by_id.get(tool_call_id, ""),
                 )
                 for tool_call_id in call_by_id
             )
