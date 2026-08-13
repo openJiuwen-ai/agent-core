@@ -1,10 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Temporary semantic aliases emitted by the legacy trajectory model.
+"""Semantic keys retained for read-only historical trajectory conversion.
 
-These keys exist only while ``TrajectoryStep`` callers are migrated to the
-canonical observability span format. New trajectory producers must use the
-current keys from :mod:`openjiuwen.agent_evolving.trajectory.semconv`.
+Current producers do not emit these keys. They remain isolated here so stored
+legacy records can be converted to the canonical observability span format.
 """
 
 from __future__ import annotations

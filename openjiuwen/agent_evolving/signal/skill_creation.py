@@ -13,7 +13,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     read_tool_call,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
-from openjiuwen.agent_evolving.trajectory.types import TrajectoryLike
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 
 SKILL_CREATION_SIGNAL_PROMPT_ELIGIBLE = "prompt_eligible"
 SKILL_CREATION_SIGNAL_SKILL_TOOL_COVER = "skill_tool_cover"
@@ -71,7 +71,7 @@ class SkillCreationSignalDetector:
 
     @staticmethod
     def collect_metrics(
-        trajectory: TrajectoryLike | None,
+        trajectory: Trajectory | None,
         *,
         raw_tool_call_watermark: int = 0,
     ) -> SkillCreationWindowMetrics:
@@ -119,7 +119,7 @@ class SkillCreationSignalDetector:
 
     def detect(
         self,
-        trajectory: TrajectoryLike | None,
+        trajectory: Trajectory | None,
         *,
         raw_tool_call_watermark: int = 0,
         prompted_snapshot: tuple[int, int] | None = None,
@@ -195,7 +195,7 @@ def is_effective_task_tool(tool_name: str) -> bool:
     return not any(keyword in tool for keyword in _EXCLUDED_TOOL_KEYWORDS)
 
 
-def count_tool_calling_iterations(trajectory: TrajectoryLike | None) -> int:
+def count_tool_calling_iterations(trajectory: Trajectory | None) -> int:
     """Count LLM iterations that requested at least one effective task tool."""
     if trajectory is None:
         return 0
@@ -210,7 +210,7 @@ def count_tool_calling_iterations(trajectory: TrajectoryLike | None) -> int:
 
 
 def _count_new_effective_tool_calling_iterations(
-    trajectory: TrajectoryLike,
+    trajectory: Trajectory,
     effective_call_ids_after_watermark: set[str],
     new_tool_spans: list[Any],
 ) -> int:
