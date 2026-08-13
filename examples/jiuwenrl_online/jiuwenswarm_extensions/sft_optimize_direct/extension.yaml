@@ -1,0 +1,5 @@
+id: sft_optimize_direct
+name: sft-optimize-direct
+version: 0.1.0
+description: Intercept local jiuwenswarm sft-optimize requests and run the online SFT rollout wrapper directly.
+author: openjiuwen

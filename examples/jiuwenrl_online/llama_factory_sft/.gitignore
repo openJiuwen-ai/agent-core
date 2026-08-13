@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+v1data+v0train/
+v1data+v0train.zip

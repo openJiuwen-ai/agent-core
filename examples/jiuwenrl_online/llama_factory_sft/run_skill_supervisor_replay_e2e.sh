@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SFT_E2E_DIR="$(cd "${SCRIPT_DIR}/../sft_e2e" && pwd)"
+
+: "${ONLINE_RL_CONDA_ENV:=openjiuwen-sft}"
+: "${SFT_E2E_CONDA_ENV:=openjiuwen-sft}"
+: "${MODEL_PATH:=/data1/lll/models/Qwen3-0.6B}"
+: "${MODEL_NAME:=Qwen3-0.6B}"
+: "${SFT_E2E_MODEL:=mock-supervisor}"
+: "${SFT_E2E_DRY_RUN:=0}"
+: "${SFT_E2E_CASE_LIMIT:=1}"
+: "${SFT_E2E_CONCURRENCY:=1}"
+: "${SFT_ROLLOUT_CONCURRENCY:=${SFT_E2E_CONCURRENCY}}"
+: "${SFT_E2E_TRAIN_GPU:=4}"
+: "${SFT_LLAMAFACTORY_CUTOFF_LEN:=8192}"
+: "${SFT_LLAMAFACTORY_MAX_STEPS:=1}"
+: "${SFT_E2E_REPEAT:=1}"
+
+export ONLINE_RL_CONDA_ENV SFT_E2E_CONDA_ENV MODEL_PATH MODEL_NAME
+export SFT_E2E_MODEL SFT_E2E_DRY_RUN SFT_E2E_CASE_LIMIT SFT_E2E_CONCURRENCY
+export SFT_ROLLOUT_CONCURRENCY SFT_E2E_TRAIN_GPU
+export SFT_LLAMAFACTORY_CUTOFF_LEN SFT_LLAMAFACTORY_MAX_STEPS SFT_E2E_REPEAT
+
+exec bash "${SFT_E2E_DIR}/run_sft_optimize_mock_e2e.sh"

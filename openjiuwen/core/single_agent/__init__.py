@@ -5,52 +5,28 @@
 This module provides exports for single agent functionality.
 Legacy implementations are in the legacy/ directory and should be
 imported from openjiuwen.core.single_agent.legacy explicitly.
-
-For migration guide, see: docs/AGENT_MIGRATION_GUIDE.md
-
-Note: Legacy classes have been moved to the legacy submodule.
-Please use 'from openjiuwen.core.single_agent.legacy import ...' for
-legacy classes like LegacyReActAgent, AgentConfig, etc.
 """
 
-import importlib
-from typing import TYPE_CHECKING
+from importlib import import_module
 
-# New classes (current API)
-from openjiuwen.core.session.agent import Session, create_agent_session
-from openjiuwen.core.single_agent.base import BaseAgent  # Base class import must come first
+_EXPORTS = {
+    "Session": "openjiuwen.core.session.agent",
+    "create_agent_session": "openjiuwen.core.session.agent",
+    "BaseAgent": "openjiuwen.core.single_agent.base",
+    "AbilityManager": "openjiuwen.core.single_agent.ability_manager",
+    "AddAbilityResult": "openjiuwen.core.single_agent.ability_manager",
+    "ReActAgent": "openjiuwen.core.single_agent.agents.react_agent",
+    "ReActAgentConfig": "openjiuwen.core.single_agent.agents.react_agent",
+    "ReActAgentEvolve": "openjiuwen.core.single_agent.agents.react_agent_evolve",
+    "AgentCard": "openjiuwen.core.single_agent.schema.agent_card",
+    "LegacyBaseAgent": "openjiuwen.core.single_agent.legacy",
+}
 
-from .ability_manager import AbilityManager, AddAbilityResult
-from .agents.react_agent import ReActAgent, ReActAgentConfig
-from .agents.react_agent_evolve import ReActAgentEvolve
-from .schema.agent_card import AgentCard
-
-# Legacy classes (need this import for IDE hinting to work)
-if TYPE_CHECKING:
-    from openjiuwen.core.single_agent.legacy import LegacyBaseAgent
-
-__all__ = [
-    # New classes
-    "AgentCard",
-    "ReActAgent",
-    "ReActAgentConfig",
-    "ReActAgentEvolve",
-    "Session",
-    "create_agent_session",
-    "BaseAgent",
-    "AbilityManager",
-    # For compatibility
-    "LegacyBaseAgent",
-    "AddAbilityResult"
-]
+__all__ = list(_EXPORTS)
 
 
 def __getattr__(name: str):
-    """
-    Lazy import for deprecated modules using PEP 562.
-    """
-    if name == "LegacyBaseAgent":
-        from openjiuwen.core.single_agent.legacy import LegacyBaseAgent
-
-        return LegacyBaseAgent
-    return importlib.import_module("." + name, __name__)
+    if name in _EXPORTS:
+        module = import_module(_EXPORTS[name])
+        return getattr(module, name)
+    return import_module("." + name, __name__)

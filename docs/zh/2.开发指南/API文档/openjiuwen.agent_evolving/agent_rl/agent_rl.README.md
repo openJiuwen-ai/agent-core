@@ -54,8 +54,8 @@
 | [evaluate_judge_scores](./online/judge.md) | 核心评分入口，多投票平均并归一化到 `[-1, 1]`。 |
 | [LauncherPaths](./online/launcher.md) | 在线 RL 循环编排的路径布局 dataclass。 |
 | [run_online_rl_loop](./online/launcher.md) | 顶层编排入口，拉起并监管各服务进程。 |
-| [RLOnlineRail](./online/rail.md) | 钩入智能体生命周期的在线 RL 轨迹采集 Rail。 |
-| [TrajectoryUploader](./online/rail.md) | 异步上传 rail-v1 批次到 gateway 的上传器。 |
+| [RLOnlineRail](./online/rail_runtime.md) | 钩入智能体生命周期的在线 RL 轨迹采集 Rail。 |
+| [TrajectoryUploader](./online/rail_runtime.md) | 异步上传 rail-v1 批次到 gateway 的上传器。 |
 | [OnlineTrainingScheduler](./online/scheduler.md) | 后台线程轮询 Redis 并触发 PPO 训练批次的调度器。 |
 | [PPOTrainingExecutor](./online/scheduler.md) | Ray/verl PPO runner 生命周期与批次执行器。 |
 

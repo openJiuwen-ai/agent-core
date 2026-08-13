@@ -1,0 +1,82 @@
+[
+  {
+    "sample_id": "st-a5-train-001",
+    "created_at": "2026-07-13T00:00:00Z",
+    "user_id": "st-a5-user",
+    "session_id": "st_a5_precision_session",
+    "turn_num": 1,
+    "mode": "st_precision",
+    "io_mode": "direct",
+    "model": "Qwen3-4B-Thinking-2507",
+    "trajectory": {
+      "prompt_text": "请判断在线RL训练2卡失败但4卡成功时，优先排查哪些配置。",
+      "response_text": "优先排查可见设备、PPO mini batch、样本切分和Ray worker日志。",
+      "prompt_ids": [151644, 872, 198, 1001, 1002, 1003, 1004, 1005, 1006, 151645, 198],
+      "response_ids": [151644, 77091, 198, 2001, 2002, 2003, 2004, 2005, 151645],
+      "response_logprobs": [-0.11, -0.10, -0.08, -0.12, -0.13, -0.09, -0.10, -0.14, -0.07]
+    },
+    "judge": {
+      "score": 0.82
+    }
+  },
+  {
+    "sample_id": "st-a5-train-002",
+    "created_at": "2026-07-13T00:00:01Z",
+    "user_id": "st-a5-user",
+    "session_id": "st_a5_precision_session",
+    "turn_num": 2,
+    "mode": "st_precision",
+    "io_mode": "direct",
+    "model": "Qwen3-4B-Thinking-2507",
+    "trajectory": {
+      "prompt_text": "请说明为什么固定temperature可以帮助定位推理精度问题。",
+      "response_text": "固定采样参数可以去掉随机性，让输出差异更可能来自后端实现或模型权重。",
+      "prompt_ids": [151644, 872, 198, 1011, 1012, 1013, 1014, 1015, 151645, 198],
+      "response_ids": [151644, 77091, 198, 2011, 2012, 2013, 2014, 2015, 2016, 151645],
+      "response_logprobs": [-0.12, -0.09, -0.08, -0.11, -0.10, -0.10, -0.13, -0.09, -0.12, -0.06]
+    },
+    "judge": {
+      "score": 0.87
+    }
+  },
+  {
+    "sample_id": "st-a5-train-003",
+    "created_at": "2026-07-13T00:00:02Z",
+    "user_id": "st-a5-user",
+    "session_id": "st_a5_precision_session",
+    "turn_num": 3,
+    "mode": "st_precision",
+    "io_mode": "direct",
+    "model": "Qwen3-4B-Thinking-2507",
+    "trajectory": {
+      "prompt_text": "请给出LoRA训练产物完整性的三个检查点。",
+      "response_text": "检查adapter配置、权重文件和metadata，并确认latest指向新版本。",
+      "prompt_ids": [151644, 872, 198, 1021, 1022, 1023, 1024, 1025, 1026, 151645, 198],
+      "response_ids": [151644, 77091, 198, 2021, 2022, 2023, 2024, 2025, 151645],
+      "response_logprobs": [-0.10, -0.10, -0.07, -0.12, -0.11, -0.10, -0.12, -0.10, -0.06]
+    },
+    "judge": {
+      "score": 0.9
+    }
+  },
+  {
+    "sample_id": "st-a5-train-004",
+    "created_at": "2026-07-13T00:00:03Z",
+    "user_id": "st-a5-user",
+    "session_id": "st_a5_precision_session",
+    "turn_num": 4,
+    "mode": "st_precision",
+    "io_mode": "direct",
+    "model": "Qwen3-4B-Thinking-2507",
+    "trajectory": {
+      "prompt_text": "请说明DataProto转换阶段需要固定哪些输入。",
+      "response_text": "需要固定prompt ids、response ids、logprobs、reward和截断配置。",
+      "prompt_ids": [151644, 872, 198, 1031, 1032, 1033, 1034, 1035, 151645, 198],
+      "response_ids": [151644, 77091, 198, 2031, 2032, 2033, 2034, 2035, 2036, 151645],
+      "response_logprobs": [-0.09, -0.11, -0.08, -0.10, -0.10, -0.12, -0.11, -0.10, -0.13, -0.07]
+    },
+    "judge": {
+      "score": 0.86
+    }
+  }
+]

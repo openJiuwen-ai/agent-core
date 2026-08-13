@@ -54,8 +54,8 @@
 | [evaluate_judge_scores](./online/judge.md) | Core scoring entry; multi-vote averaging normalized to `[-1, 1]`. |
 | [LauncherPaths](./online/launcher.md) | Path-layout dataclass for the online RL loop orchestration. |
 | [run_online_rl_loop](./online/launcher.md) | Top-level orchestration entry that spawns and supervises all service processes. |
-| [RLOnlineRail](./online/rail.md) | Online RL trajectory collection rail hooking into the agent lifecycle. |
-| [TrajectoryUploader](./online/rail.md) | Async uploader of rail-v1 batches to the gateway. |
+| [RLOnlineRail](./online/rail_runtime.md) | Online RL trajectory collection rail hooking into the agent lifecycle. |
+| [TrajectoryUploader](./online/rail_runtime.md) | Async uploader of rail-v1 batches to the gateway. |
 | [OnlineTrainingScheduler](./online/scheduler.md) | Background-thread scheduler polling Redis and triggering PPO training batches. |
 | [PPOTrainingExecutor](./online/scheduler.md) | Ray/verl PPO runner lifecycle and batch executor. |
 

@@ -1,0 +1,110 @@
+{
+  "description": "Generated locally: large=Qwen3-4B-Thinking-2507, small=Qwen3-0.6B. SFT target is large output.",
+  "samples": [
+    {
+      "sample_id": "generated-spec-sft-1",
+      "session_id": "generated_spec_sft_demo",
+      "turn_num": 1,
+      "tools": [],
+      "enable_thinking": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a concise technical assistant.",
+          "loss_mask": 0
+        },
+        {
+          "role": "user",
+          "content": "用三句话说明 Python 中 list 和 tuple 的主要区别。",
+          "loss_mask": 0
+        },
+        {
+          "role": "assistant",
+          "content": "首先，用户要求用三句话说明 Python 中 list 和 tuple 的主要区别。我需要确保我的回答是简洁的、技术性的，并且正好三句话。\n\n回想 Python 中 list 和 tuple 的关键区别：\n1. **Mutability**: List 是可变的（mutable），意味着你可以修改其内容（如添加、删除、修改元素）。Tuple 是不可变的（immutable），一旦创建就不能更改。\n2. **Syntax**: List 用方括号",
+          "loss_mask": 1
+        }
+      ],
+      "small": {
+        "model": "/data1/lll/models/Qwen3-0.6B",
+        "text": "Python 中的 `list` 和 `tuple` 主要区别在于它们的**可变性**和**存储方式**。`list` 是可变的，可以添加、删除和修改元素，而 `tuple` 是不可变的，元素不可更改。此外，`list` 的元素是**可变的**，而 `tuple` 的元素是**不可变的**。"
+      },
+      "large": {
+        "model": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+        "message": {
+          "role": "assistant",
+          "content": "首先，用户要求用三句话说明 Python 中 list 和 tuple 的主要区别。我需要确保我的回答是简洁的、技术性的，并且正好三句话。\n\n回想 Python 中 list 和 tuple 的关键区别：\n1. **Mutability**: List 是可变的（mutable），意味着你可以修改其内容（如添加、删除、修改元素）。Tuple 是不可变的（immutable），一旦创建就不能更改。\n2. **Syntax**: List 用方括号"
+        }
+      }
+    },
+    {
+      "sample_id": "generated-spec-sft-2",
+      "session_id": "generated_spec_sft_demo",
+      "turn_num": 2,
+      "tools": [],
+      "enable_thinking": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a concise technical assistant.",
+          "loss_mask": 0
+        },
+        {
+          "role": "user",
+          "content": "给出一个简短的排查步骤：Linux 服务器磁盘空间突然占满时应该先看什么？",
+          "loss_mask": 0
+        },
+        {
+          "role": "assistant",
+          "content": "首先，用户的问题是：“Linux 服务器磁盘空间突然占满时应该先看什么？”我需要给出一个简短的排查步骤。作为技术助理，我必须保持简洁、专业。\n\n关键点是：磁盘空间突然占满。在Linux中，当磁盘空间不足时，第一步通常是检查哪些文件或目录占用了大量空间。\n\n回想一下Linux的常用命令：\n- `df -h`：显示磁盘空间使用情况",
+          "loss_mask": 1
+        }
+      ],
+      "small": {
+        "model": "/data1/lll/models/Qwen3-0.6B",
+        "text": "1. **查看磁盘使用情况**：使用 `df -h` 或 `free -h` 查看磁盘空间使用情况。  \n2. **检查文件系统错误**：使用 `fsck` 检查文件系统是否损坏。  \n3. **查看日志文件**：检查 `/var/log/messages` 或 `/var/log/syslog` 中是否有异常日志。"
+      },
+      "large": {
+        "model": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+        "message": {
+          "role": "assistant",
+          "content": "首先，用户的问题是：“Linux 服务器磁盘空间突然占满时应该先看什么？”我需要给出一个简短的排查步骤。作为技术助理，我必须保持简洁、专业。\n\n关键点是：磁盘空间突然占满。在Linux中，当磁盘空间不足时，第一步通常是检查哪些文件或目录占用了大量空间。\n\n回想一下Linux的常用命令：\n- `df -h`：显示磁盘空间使用情况"
+        }
+      }
+    },
+    {
+      "sample_id": "generated-spec-sft-3",
+      "session_id": "generated_spec_sft_demo",
+      "turn_num": 3,
+      "tools": [],
+      "enable_thinking": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a concise technical assistant.",
+          "loss_mask": 0
+        },
+        {
+          "role": "user",
+          "content": "用一句话解释为什么 Transformer 里的 attention mask 很重要。",
+          "loss_mask": 0
+        },
+        {
+          "role": "assistant",
+          "content": "首先，用户要求用一句话解释为什么 Transformer 里的 attention mask 很重要。我需要确保我的回答是简洁的、技术性的，并且只用一句话。\n\n关键点：\n- **Transformer 里的 attention mask**：在 Transformer 模型中，attention mask 用于控制自注意力机制中哪些位置可以相互关注。它通常用于处理变长序列（如填充的序列）。\n- **为什么很重要**：attention mask 的主要作用是防止模型",
+          "loss_mask": 1
+        }
+      ],
+      "small": {
+        "model": "/data1/lll/models/Qwen3-0.6B",
+        "text": "Transformer 里的 attention mask 是为了确保模型在处理位置信息时，只关注与当前位置相关的词，从而避免位置信息被错误地计算或重复。"
+      },
+      "large": {
+        "model": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+        "message": {
+          "role": "assistant",
+          "content": "首先，用户要求用一句话解释为什么 Transformer 里的 attention mask 很重要。我需要确保我的回答是简洁的、技术性的，并且只用一句话。\n\n关键点：\n- **Transformer 里的 attention mask**：在 Transformer 模型中，attention mask 用于控制自注意力机制中哪些位置可以相互关注。它通常用于处理变长序列（如填充的序列）。\n- **为什么很重要**：attention mask 的主要作用是防止模型"
+        }
+      }
+    }
+  ]
+}

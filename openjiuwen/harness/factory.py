@@ -61,20 +61,28 @@ def _append_env_online_training_rail(
     The online-RL package owns the concrete rail selection and gateway wiring.
     """
     try:
-        from openjiuwen.agent_evolving.agent_rl.online.rail import (
-            RLOnlineRail,
-            build_rl_online_rail_from_env,
+        from openjiuwen.agent_evolving.agent_rl.online.core.rail_factory import (
+            build_online_training_rail_from_env,
+            has_online_training_rail,
         )
     except ImportError as exc:
         logger.warning("Failed to import online training rail factory: %s", exc)
         return rails
 
-    if any(isinstance(rail, RLOnlineRail) for rail in rails):
+    if has_online_training_rail(rails):
         return rails
     if trajectory_span_processor is None:
-        logger.warning("Online training rail is enabled but no trajectory span processor is available")
-        return rails
-    rail = build_rl_online_rail_from_env(trajectory_span_processor=trajectory_span_processor)
+        try:
+            from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+
+            trajectory_span_processor = TrajectorySpanProcessor()
+        except Exception as exc:
+            logger.warning("Online training rail is enabled but no trajectory span processor is available: %s", exc)
+            return rails
+    rail = build_online_training_rail_from_env(
+        rails,
+        trajectory_span_processor=trajectory_span_processor,
+    )
     if rail is None:
         return rails
     return [*rails, rail]
@@ -446,8 +454,24 @@ def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
                 continue
             agent.ability_manager.add(tool_card)
 
-    # Queue rails for lazy async registration (user rails + default rails)
+    try:
+        from openjiuwen.agent_evolving.agent_rl.online.core.rail_factory import (
+            has_online_training_rail,
+            is_online_training_rail_instance,
+        )
+    except Exception:
+        has_online_training_rail = None
+        is_online_training_rail_instance = None
+
+    # Queue rails for lazy async registration (user rails + default rails).
     for rail_inst in parts.rails:
+        if (
+            has_online_training_rail is not None
+            and is_online_training_rail_instance is not None
+            and is_online_training_rail_instance(rail_inst)
+            and has_online_training_rail(agent.configured_rails())
+        ):
+            continue
         agent.add_rail(rail_inst)
 
 

@@ -1,0 +1,41 @@
+[
+  {
+    "id": "coding_patch_summary",
+    "messages": [
+      {
+        "role": "system",
+        "content": "你是一个严谨的代码助手。只输出最终答案，不要展开推理。"
+      },
+      {
+        "role": "user",
+        "content": "/no_think\n请用三条短要点总结这个改动的风险：把在线RL训练从2卡改成4卡，并保持每步4条轨迹。每条不超过18个字。"
+      }
+    ]
+  },
+  {
+    "id": "office_meeting_action_items",
+    "messages": [
+      {
+        "role": "system",
+        "content": "你是会议纪要助手。只输出结构化结果。"
+      },
+      {
+        "role": "user",
+        "content": "/no_think\n会议记录：张三负责A5环境日志采集，李四负责LoRA产物比对，周五17:00前给出结论。请输出负责人、任务、截止时间，只输出两行。"
+      }
+    ]
+  },
+  {
+    "id": "tool_call_like_json",
+    "messages": [
+      {
+        "role": "system",
+        "content": "你是工具调用规划器。必须输出JSON。"
+      },
+      {
+        "role": "user",
+        "content": "/no_think\n用户想验证vLLM在相同prompt下输出是否一致。请给出一个包含tool、args、checks三个字段的紧凑JSON，不要解释。"
+      }
+    ]
+  }
+]

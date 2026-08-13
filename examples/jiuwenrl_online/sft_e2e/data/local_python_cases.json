@@ -1,0 +1,44 @@
+{
+  "items": [
+    {
+      "instance_id": "local_python__sort_numbers",
+      "docker_image": "local/python-sort_numbers:latest",
+      "local_program_path": "../local_programs/sort_numbers",
+      "repo": "local_python",
+      "task_prompt": "You are working on a small local Python exercise named sort_numbers. Fix problem.py so the tests under tests/ pass. The expected behavior is to return the input values in ascending order while preserving duplicates. Use the local workspace files only, run pytest if needed, and return a minimal patch.",
+      "test_cmd": "python -m pytest -q"
+    },
+    {
+      "instance_id": "local_python__linked_list",
+      "docker_image": "local/python-linked_list:latest",
+      "local_program_path": "../local_programs/linked_list",
+      "repo": "local_python",
+      "task_prompt": "You are working on a small local Python exercise named linked_list. Fix problem.py so the tests under tests/ pass. The LinkedList.append method should support the first element and preserve insertion order in to_list(). Use the local workspace files only, run pytest if needed, and return a minimal patch.",
+      "test_cmd": "python -m pytest -q"
+    },
+    {
+      "instance_id": "local_python__valid_parentheses",
+      "docker_image": "local/python-valid_parentheses:latest",
+      "local_program_path": "../local_programs/valid_parentheses",
+      "repo": "local_python",
+      "task_prompt": "You are working on a small local Python exercise named valid_parentheses. Fix problem.py so the tests under tests/ pass. The checker should accept well-nested brackets and reject mismatches or unclosed delimiters. Use the local workspace files only, run pytest if needed, and return a minimal patch.",
+      "test_cmd": "python -m pytest -q"
+    },
+    {
+      "instance_id": "local_python__fibonacci",
+      "docker_image": "local/python-fibonacci:latest",
+      "local_program_path": "../local_programs/fibonacci",
+      "repo": "local_python",
+      "task_prompt": "You are working on a small local Python exercise named fibonacci. Fix problem.py so the tests under tests/ pass. The function should implement the standard Fibonacci sequence with F(0)=0 and F(1)=1. Use the local workspace files only, run pytest if needed, and return a minimal patch.",
+      "test_cmd": "python -m pytest -q"
+    },
+    {
+      "instance_id": "local_python__merge_intervals",
+      "docker_image": "local/python-merge_intervals:latest",
+      "local_program_path": "../local_programs/merge_intervals",
+      "repo": "local_python",
+      "task_prompt": "You are working on a small local Python exercise named merge_intervals. Fix problem.py so the tests under tests/ pass. The function should merge overlapping or touching intervals after sorting them by start time. Use the local workspace files only, run pytest if needed, and return a minimal patch.",
+      "test_cmd": "python -m pytest -q"
+    }
+  ]
+}

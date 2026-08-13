@@ -123,8 +123,13 @@ class BaseVerlTrainingExecutor(RayPPOTrainer):
     @staticmethod
     def _detect_tensordict_worker_api() -> bool:
         try:
-            importlib.import_module("verl.workers.utils.padding")
-            return hasattr(DataProto, "to_tensordict") and hasattr(DataProto, "from_tensordict")
+            padding = importlib.import_module("verl.workers.utils.padding")
+            return (
+                hasattr(DataProto, "to_tensordict")
+                and hasattr(DataProto, "from_tensordict")
+                and hasattr(padding, "left_right_2_no_padding")
+                and hasattr(padding, "no_padding_2_padding")
+            )
         except Exception:
             return False
 

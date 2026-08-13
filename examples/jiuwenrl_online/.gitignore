@@ -1,0 +1,7 @@
+logs/
+records/
+.jiuwenswarm-online/
+.backend_stack.pid
+lora_repo/
+lora_repo.stale.*/
+.local_redis/
