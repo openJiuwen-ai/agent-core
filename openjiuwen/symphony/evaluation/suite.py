@@ -39,7 +39,7 @@ from openjiuwen.symphony.models import (
 )
 from openjiuwen.symphony.models._message_trace import message_references_fingerprint
 
-_EVALUATION_CACHE_PROTOCOL = "symphony-evaluation-suite-v4"
+_EVALUATION_CACHE_PROTOCOL = "symphony-evaluation-suite-v5"
 _BUILTIN_EVALUATOR_MODULE = "openjiuwen.symphony.evaluation"
 
 
