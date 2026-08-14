@@ -141,9 +141,6 @@ class RuntimeHarnessManifest(BaseModel):
     default_mode: Optional[str] = None
     permissions: Optional[Dict[str, Any]] = None
     progressive_tool_enabled: Optional[bool] = None
-    progressive_tool_always_visible_tools: List[str] = Field(default_factory=list)
-    progressive_tool_default_visible_tools: List[str] = Field(default_factory=list)
-    progressive_tool_max_loaded_tools: Optional[int] = None
 
     subagents: Optional[List[Dict[str, Any]]] = None
     context: Optional[Dict[str, Any]] = None

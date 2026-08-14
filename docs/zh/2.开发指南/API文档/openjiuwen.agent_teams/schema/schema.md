@@ -39,9 +39,6 @@
 渐进式工具暴露配置。
 
 * **enabled**(bool, 可选): 是否启用。默认值：`True`。
-* **always_visible_tools**(list[str], 可选): 始终可见的工具列表。默认值：`[]`。
-* **default_visible_tools**(list[str], 可选): 默认可见的工具列表。默认值：`[]`。
-* **max_loaded_tools**(int, 可选): 最大加载工具数。默认值：`12`。
 
 ## class SysOperationSpec
 

@@ -38,15 +38,14 @@ class _TestableProgressiveToolRail(ProgressiveToolRail):
 async def test_before_model_call_updates_builder_and_keeps_preview_messages_intact():
     config = DeepAgentConfig(
         progressive_tool_enabled=True,
-        progressive_tool_always_visible_tools=["always_tool"],
         language="cn",
     )
     rail = _TestableProgressiveToolRail(config)
     rail.seed_cached_tools(
-        meta_tool_names={"search_tools", "load_tools"},
+        meta_tool_names={"tool_search"},
         all_tool_infos=[
-            ToolInfo(name="always_tool", description="Always visible tool"),
-            ToolInfo(name="loaded_tool", description="Already loaded tool"),
+            ToolInfo(name="tool_search", description="Search the tool registry"),
+            ToolInfo(name="loaded_tool", description="Previously discovered tool"),
             ToolInfo(name="hidden_tool", description="Hidden tool"),
         ],
     )
@@ -64,26 +63,19 @@ async def test_before_model_call_updates_builder_and_keeps_preview_messages_inta
         inputs=ModelCallInputs(
             messages=preview_messages,
             tools=[
-                ToolInfo(name="search_tools", description="Search tool registry"),
-                ToolInfo(name="always_tool", description="Always visible tool"),
+                ToolInfo(name="tool_search", description="Search the tool registry"),
                 ToolInfo(name="loaded_tool", description="Already loaded tool"),
                 ToolInfo(name="hidden_tool", description="Hidden tool"),
             ],
         ),
-        session=_FakeSession(
-            {"__progressive_visible_tool_names__": ["loaded_tool"]}
-        ),
+        session=_FakeSession(),
     )
 
     await rail.before_model_call(ctx)
 
     prompt = builder.build()
     assert "Base system prompt." in prompt
-    assert "## 工具导航" in prompt
+    assert "## 工具导航" not in prompt
     assert "## 渐进式工具使用规则" in prompt
     assert preview_messages[0].content == "preview prompt"
-    assert [tool.name for tool in ctx.inputs.tools] == [
-        "search_tools",
-        "always_tool",
-        "loaded_tool",
-    ]
+    assert [tool.name for tool in ctx.inputs.tools] == ["tool_search"]

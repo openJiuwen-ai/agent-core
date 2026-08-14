@@ -5,6 +5,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.recall.archive i
     archive_compression_messages,
     delete_compression_archive,
 )
+from openjiuwen.core.context_engine.processor.forked.compressor.recall.bm25 import BM25Index
 from openjiuwen.core.context_engine.processor.forked.compressor.recall.retriever import (
     CompressionRecallError,
     recall_compressed_context,
@@ -13,6 +14,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.recall.retriever
 __all__ = [
     "CompressionArchive",
     "CompressionRecallError",
+    "BM25Index",
     "archive_compression_messages",
     "delete_compression_archive",
     "recall_compressed_context",
