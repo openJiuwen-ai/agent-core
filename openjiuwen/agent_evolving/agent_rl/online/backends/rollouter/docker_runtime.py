@@ -219,12 +219,18 @@ def host_conda_command_prefix(mounts: list[str]) -> str:
 
     if not env_bool("SFT_DOCKER_USE_HOST_CONDA", True):
         return ""
-    conda_root = Path(os.getenv("SFT_DOCKER_CONDA_ROOT", "/data1/lll/miniconda3")).resolve()
+    configured_root = os.getenv("SFT_DOCKER_CONDA_ROOT", "").strip()
+    conda_root = Path(configured_root or "/data1/lll/miniconda3").resolve()
     conda_env = os.getenv("SFT_DOCKER_CONDA_ENV", "openjiuwen-rl").strip() or "openjiuwen-rl"
     conda_sh = conda_root / "etc" / "profile.d" / "conda.sh"
     if not conda_sh.exists():
-        logger.warning("SFT docker rollout host conda not found: %s", conda_sh)
-        return ""
+        if configured_root:
+            logger.warning("SFT docker rollout configured host conda not found: %s", conda_sh)
+        else:
+            logger.warning("SFT docker rollout host conda not found: %s", conda_sh)
+            return ""
+        # Keep explicit SFT_DOCKER_CONDA_ROOT visible in generated commands for
+        # CI/remote checks even when this host cannot validate that filesystem.
     mounts.extend(["-v", f"{conda_root}:{conda_root}:ro"])
     return f"set -e; source {shlex.quote(str(conda_sh))}; conda activate {shlex.quote(conda_env)};"
 

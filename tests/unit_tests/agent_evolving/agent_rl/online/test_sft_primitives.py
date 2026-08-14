@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tarfile
 import sys
+import tarfile
 import types
 
 
@@ -58,7 +58,9 @@ def test_normalize_assistant_message_reads_openai_choice_message():
 
 
 def test_build_direct_supervisor_sft_samples_reads_openai_choice_response():
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import build_direct_supervisor_sft_samples
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import (
+        build_direct_supervisor_sft_samples,
+    )
 
     samples = build_direct_supervisor_sft_samples(
         {
@@ -86,7 +88,9 @@ def test_build_direct_supervisor_sft_samples_reads_openai_choice_response():
 
 
 def test_build_direct_supervisor_sft_samples_keeps_tool_call_response():
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import build_direct_supervisor_sft_samples
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import (
+        build_direct_supervisor_sft_samples,
+    )
 
     tool_call = {
         "id": "call-1",
@@ -119,7 +123,9 @@ def test_build_direct_supervisor_sft_samples_keeps_tool_call_response():
 
 
 def test_build_direct_supervisor_sft_samples_marks_direct_upload():
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import build_direct_supervisor_sft_samples
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import (
+        build_direct_supervisor_sft_samples,
+    )
 
     samples = build_direct_supervisor_sft_samples(
         {
@@ -711,7 +717,10 @@ def test_multi_turn_supervisor_rollouter_splits_llm_steps():
 
 
 def test_end_to_end_image_rollouter_accepts_external_samples():
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.rollouter import EndToEndImageRollouter, SFTRolloutContext
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.rollouter import (
+        EndToEndImageRollouter,
+        SFTRolloutContext,
+    )
 
     class _Supervisor:
         async def rollout(self, **kwargs):
@@ -738,13 +747,15 @@ def test_end_to_end_image_rollouter_accepts_external_samples():
     asyncio.run(_run())
 
 
-def test_docker_rollouter_uses_cpu_only_container(monkeypatch):
+def test_docker_rollouter_uses_cpu_only_container(monkeypatch, tmp_path):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rollouter.docker_runtime import (
+        build_jiuwenclaw_docker_command,
+    )
     from openjiuwen.agent_evolving.agent_rl.online.backends.sft import rollouter as rollouter_module
-    from openjiuwen.agent_evolving.agent_rl.online.backends.rollouter.docker_runtime import build_jiuwenclaw_docker_command
 
     agent_core_root = "/data1/lll/workspace/openjiuwen/code-opt/agent-core"
     jiuwenclaw_root = "/data1/lll/workspace/openjiuwen/jiuwenclaw"
-    conda_root = "/data1/lll/miniconda3"
+    conda_root = str(tmp_path / "missing-conda-root")
 
     monkeypatch.setenv("SFT_DOCKER_ROLLOUT_COMMAND", "python -m jiuwenswarm.app")
     monkeypatch.setenv("SFT_DOCKER_AGENT_CORE_HOST_PATH", agent_core_root)
@@ -881,7 +892,9 @@ def test_task_rollouter_loads_markdown_cases_and_passes_image_env(tmp_path, monk
 
 
 def test_llama_factory_converter_normalizes_v1_messages():
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.llama_factory import convert_samples_to_llama_factory_openai
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.llama_factory import (
+        convert_samples_to_llama_factory_openai,
+    )
 
     records = convert_samples_to_llama_factory_openai(
         [
