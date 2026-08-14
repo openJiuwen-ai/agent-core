@@ -122,7 +122,7 @@ def parse_unified_response(text: str) -> Tuple[List[str], List[str]]:
         for mm in re.finditer(r"\{", text):
             try:
                 obj, _ = _DECODER.raw_decode(text, mm.start())
-            except (json.JSONDecodeError, ValueError):
+            except json.JSONDecodeError:
                 continue
             if isinstance(obj, dict) and ("selected_tip_ids" in obj or "selected_tool_ids" in obj):
                 candidates.append(obj)

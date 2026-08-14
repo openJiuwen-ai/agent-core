@@ -34,7 +34,8 @@ def _parse_fenced_array(text: str) -> Optional[list]:
     """Return the last valid JSON array following a ``json`` fence."""
     last: Optional[list] = None
     for match in _JSON_FENCE_OPEN.finditer(text):
-        chunk = text[match.end() :].lstrip()
+        start = match.end()
+        chunk = text[start:].lstrip()
         try:
             value, _ = _JSON_DECODER.raw_decode(chunk)
         except json.JSONDecodeError:
