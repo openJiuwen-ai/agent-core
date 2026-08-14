@@ -425,13 +425,13 @@ def build_jiuwenbox_http_client(
 
 **参数**：
 
-* **base_url**(str)：JiuwenBox 服务基础 URL，末尾 `/` 会被去除。
+* **base_url**(str)：JiuwenBox 服务端点，末尾 `/` 会被去除。TCP 用 `http://host:port`；Unix Domain Socket 用 `unix:///abs/socket/path`（必须三斜杠 + 绝对路径）。UDS 走 `httpx.HTTPTransport(uds=...)`，相对 API 路径仍按 HTTP 拼接。
 * **timeout_seconds**(float, 可选)：请求超时（秒），默认值 `30.0`。
 * **api_token**(str | None, 可选)：API token；为 `None` 时从默认解析逻辑取，无则不加鉴权头。默认值 `None`。
 
 **返回**：
 
-* **httpx.Client**：配置好 `base_url`、超时与（可选）`Authorization: Bearer <token>` 头的客户端。
+* **httpx.Client**：配置好超时与（可选）`Authorization: Bearer <token>` 头的客户端。TCP 使用传入的 `base_url`；UDS 使用占位 `http://jiuwenbox`，实际流量走 socket。
 
 ### clear_jiuwenbox_shared_sandbox
 

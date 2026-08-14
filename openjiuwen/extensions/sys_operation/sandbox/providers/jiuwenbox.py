@@ -304,6 +304,10 @@ def _is_sandbox_exec_delivered(
 
 
 _ENV_API_TOKEN = "JIUWENBOX_API_TOKEN"
+_UDS_SCHEME = "unix://"
+# httpx still needs a legal absolute HTTP base_url to join relative paths;
+# the placeholder host is never contacted when transport is UDS.
+_UDS_PLACEHOLDER_BASE_URL = "http://jiuwenbox"
 
 
 def _resolve_api_token(api_token: str | None) -> str | None:
@@ -315,16 +319,71 @@ def _resolve_api_token(api_token: str | None) -> str | None:
     return token or None
 
 
+def _split_uds_endpoint(base_url: str) -> str | None:
+    """Return the socket path for a Unix-domain jiuwenbox endpoint.
+
+    Accepted forms:
+      - ``unix:///abs/path`` (CLI / JIUWENBOX_LISTEN)
+      - ``unix:/abs/path``
+      - absolute filesystem path ``/abs/path`` (no URL scheme)
+
+    Relative ``unix://host/...`` values raise ``ValueError``.
+    """
+    text = (base_url or "").strip()
+    if not text:
+        return None
+    lower = text.lower()
+    if lower.startswith("unix:"):
+        rest = text[5:]
+        if rest.startswith("//"):
+            rest = rest[2:]
+        if not rest.startswith("/"):
+            raise ValueError(
+                f"unix endpoint requires absolute path (unix:///abs/path), "
+                f"got {base_url!r}"
+            )
+        return rest.rstrip("/") or rest
+    if text.startswith("/") and "://" not in text:
+        return text.rstrip("/") or text
+    return None
+
+
+def _normalize_tcp_base_url(base_url: str) -> str:
+    """Ensure TCP endpoints have an http(s) scheme so httpx will accept them."""
+    text = (base_url or "").strip().rstrip("/")
+    if not text:
+        raise ValueError("jiuwenbox base_url must not be empty")
+    if "://" not in text:
+        return f"http://{text}"
+    return text
+
+
 def build_jiuwenbox_http_client(
     base_url: str,
     timeout_seconds: float = 30.0,
     api_token: str | None = None,
 ) -> httpx.Client:
-    """Build an httpx client for the jiuwenbox HTTP API with optional Bearer auth."""
+    """Build an httpx client for the jiuwenbox HTTP API with optional Bearer auth.
+
+    ``base_url`` accepts TCP (``http://host:port`` or bare ``host:port``) or
+    Unix Domain Socket (``unix:///abs/path`` / ``unix:/abs/path`` / ``/abs/path``).
+    UDS uses ``httpx.HTTPTransport(uds=...)`` and a placeholder HTTP base URL
+    so relative API paths still join.
+    """
     token = _resolve_api_token(api_token)
     headers = {"Authorization": f"Bearer {token}"} if token else None
+    cleaned = (base_url or "").strip().rstrip("/")
+    uds_path = _split_uds_endpoint(cleaned)
+    if uds_path is not None:
+        return httpx.Client(
+            transport=httpx.HTTPTransport(uds=uds_path),
+            base_url=_UDS_PLACEHOLDER_BASE_URL,
+            timeout=timeout_seconds,
+            headers=headers,
+            trust_env=False,
+        )
     return httpx.Client(
-        base_url=base_url.rstrip("/"),
+        base_url=_normalize_tcp_base_url(cleaned),
         timeout=timeout_seconds,
         headers=headers,
     )
