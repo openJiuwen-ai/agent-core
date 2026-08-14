@@ -125,6 +125,8 @@ class SubagentControl:
         self._turn_seq: dict[str, int] = {}
         self._activities: dict[str, deque[SubagentActivity]] = {}
         self._activity_seq: dict[str, int] = {}
+        self._activity_ready: set[tuple[str, str]] = set()
+        self._pending_activities: dict[tuple[str, str], list[SubagentActivity]] = {}
         self._hydrated = False
         self._activity_emitter: ActivityEmitter | None = None
         if self._config.enable_activity_stream and self._parent_session is not None:
@@ -200,6 +202,8 @@ class SubagentControl:
             raise
 
         self._registry.touch(sid)
+        self._prepare_turn_activity_gate(sid, task_id)
+        await self._emit_running_for_turn(sid, task_id)
         return SpawnResult(
             subagent_id=sid,
             task_id=task_id,
@@ -383,6 +387,8 @@ class SubagentControl:
             metadata.current_task_id = task_id
             metadata.task_description = self._truncate_task_description(query)
             metadata.updated_at_ms = time.time() * 1000
+        self._prepare_turn_activity_gate(subagent_id, task_id)
+        await self._emit_running_for_turn(subagent_id, task_id)
         return task_id
 
     async def resume(self, subagent_id: str) -> ResumeResult:
@@ -746,7 +752,57 @@ class SubagentControl:
         items.sort(key=lambda item: (item[1].subagent_id, item[1].seq, item[0], item[2]))
         return [(kind, payload) for kind, payload, _at_ms in items]
 
+    def _resolve_task_id(self, subagent_id: str) -> str:
+        instance = self._manager.find(subagent_id)
+        if instance is not None and instance.current_task_id:
+            return instance.current_task_id
+        metadata = self._registry.find_metadata(subagent_id)
+        if metadata is not None and metadata.current_task_id:
+            return metadata.current_task_id
+        return ""
+
+    def _prepare_turn_activity_gate(self, subagent_id: str, task_id: str) -> None:
+        self._activity_ready = {
+            key for key in self._activity_ready if key[0] != subagent_id
+        }
+        stale_keys = [key for key in self._pending_activities if key[0] == subagent_id]
+        for key in stale_keys:
+            del self._pending_activities[key]
+
+    async def _emit_running_for_turn(
+        self,
+        subagent_id: str,
+        task_id: str | None = None,
+    ) -> None:
+        resolved_task_id = task_id or self._resolve_task_id(subagent_id)
+        if not resolved_task_id:
+            return
+        gate_key = (subagent_id, resolved_task_id)
+        if gate_key in self._activity_ready:
+            return
+        await self.emit_status_update(subagent_id)
+        projection = self.describe_one(subagent_id)
+        if projection is None or projection.get("status") != "running":
+            return
+        self._mark_activity_ready(subagent_id, resolved_task_id)
+
+    def _mark_activity_ready(self, subagent_id: str, task_id: str) -> None:
+        gate_key = (subagent_id, task_id)
+        self._activity_ready.add(gate_key)
+        pending = self._pending_activities.pop(gate_key, [])
+        for activity in pending:
+            self._dispatch_activity(activity)
+
     def _handle_activity(self, activity: SubagentActivity) -> None:
+        task_id = activity.task_id or self._resolve_task_id(activity.subagent_id)
+        if task_id:
+            gate_key = (activity.subagent_id, task_id)
+            if gate_key not in self._activity_ready:
+                self._pending_activities.setdefault(gate_key, []).append(activity)
+                return
+        self._dispatch_activity(activity)
+
+    def _dispatch_activity(self, activity: SubagentActivity) -> None:
         if self._activity_emitter is not None:
             self._activity_emitter.offer(activity)
         if not activity.is_persistable():
@@ -921,6 +977,12 @@ class SubagentControl:
         subagent_id: str,
         status: SubagentStatus,
     ) -> None:
+        if status.kind in {
+            SubagentStatusKind.PENDING_INIT,
+            SubagentStatusKind.RUNNING,
+        }:
+            await self._emit_running_for_turn(subagent_id)
+            return
         if not is_turn_finished(status):
             return
         metadata = self._registry.find_metadata(subagent_id)

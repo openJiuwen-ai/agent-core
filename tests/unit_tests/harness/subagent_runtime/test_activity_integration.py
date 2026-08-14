@@ -126,6 +126,118 @@ async def test_spawn_emits_tool_call_activity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_running_status_precedes_activity_on_spawn() -> None:
+    parent = ActivityControlParent(
+        mock_agent=ActivityMockAgent(
+            output="done",
+            delay_s=0.02,
+            stream_chunks=[
+                {
+                    "type": "tool_call",
+                    "payload": {
+                        "tool_call": {
+                            "tool_name": "grep",
+                            "tool_call_id": "call-1",
+                            "arguments": {"pattern": "foo"},
+                        }
+                    },
+                },
+            ],
+        ),
+    )
+    parent_session = Session(session_id="parent")
+    parent_session.write_stream = AsyncMock()
+    control = SubagentControl(
+        parent,
+        "parent",
+        config=SubagentRuntimeConfig(enable_activity_stream=True),
+        parent_session=parent_session,
+    )
+    with _patch_create_session():
+        spawned = await control.spawn("explore", "hello")
+        await asyncio.sleep(parent.mock_agent.delay_s + 0.15)
+        await control._manager.remove(spawned.subagent_id, reason="test_cleanup")
+        control._registry.release(spawned.subagent_id)
+
+    event_types = [call.args[0].type for call in parent_session.write_stream.await_args_list]
+    first_status_index = next(
+        index
+        for index, event_type in enumerate(event_types)
+        if event_type == "subagent_updated"
+        and parent_session.write_stream.await_args_list[index].args[0].payload["subagent_updated"]["status"]
+        == "running"
+    )
+    first_activity_index = next(
+        index for index, event_type in enumerate(event_types) if event_type == "subagent_activity"
+    )
+    assert first_status_index < first_activity_index
+
+
+@pytest.mark.asyncio
+async def test_running_status_precedes_activity_on_send_input() -> None:
+    parent = ActivityControlParent(
+        mock_agent=ActivityMockAgent(
+            output="done",
+            delay_s=0.02,
+            stream_chunks=[
+                {
+                    "type": "tool_call",
+                    "payload": {
+                        "tool_call": {
+                            "tool_name": "grep",
+                            "tool_call_id": "call-2",
+                            "arguments": {"pattern": "bar"},
+                        }
+                    },
+                },
+            ],
+        ),
+    )
+    parent_session = Session(session_id="parent")
+    parent_session.write_stream = AsyncMock()
+    control = SubagentControl(
+        parent,
+        "parent",
+        config=SubagentRuntimeConfig(enable_activity_stream=True),
+        parent_session=parent_session,
+    )
+    with _patch_create_session():
+        spawned = await control.spawn("explore", "first")
+        await asyncio.sleep(parent.mock_agent.delay_s + 0.1)
+        parent.mock_agent.stream_chunks = [
+            {
+                "type": "tool_call",
+                "payload": {
+                    "tool_call": {
+                        "tool_name": "grep",
+                        "tool_call_id": "call-2",
+                        "arguments": {"pattern": "bar"},
+                    }
+                },
+            },
+        ]
+        await control.send_input(spawned.subagent_id, "second")
+        await asyncio.sleep(parent.mock_agent.delay_s + 0.15)
+        await control._manager.remove(spawned.subagent_id, reason="test_cleanup")
+        control._registry.release(spawned.subagent_id)
+
+    event_types = [call.args[0].type for call in parent_session.write_stream.await_args_list]
+    send_input_running_indexes = [
+        index
+        for index, call in enumerate(parent_session.write_stream.await_args_list)
+        if call.args[0].type == "subagent_updated"
+        and call.args[0].payload["subagent_updated"]["status"] == "running"
+    ]
+    assert len(send_input_running_indexes) >= 2
+    second_running_index = send_input_running_indexes[-1]
+    activity_indexes = [
+        index for index, event_type in enumerate(event_types) if event_type == "subagent_activity"
+    ]
+    assert activity_indexes
+    assert second_running_index < activity_indexes[-1]
+
+
+@pytest.mark.asyncio
 async def test_activity_stream_disabled_has_no_emitter() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.02))
     control = SubagentControl(
@@ -147,6 +259,7 @@ async def test_flush_persists_milestone_activities_only() -> None:
         config=SubagentRuntimeConfig(enable_activity_stream=True),
         parent_session=session,
     )
+    control._mark_activity_ready("sid-1", "task-1")
     control._handle_activity(
         SubagentActivity(
             subagent_id="sid-1",
