@@ -11,6 +11,7 @@ Includes:
 """
 
 from openjiuwen.core.operator.base import Operator, PreviewableOperator, TunableSpec
+from openjiuwen.core.operator.context_evolve_call import ContextEvolveOperator, MetisContextEvolveOperator, UpdatePolicy
 from openjiuwen.core.operator.llm_call import LLMCall, LLMCallOperator
 from openjiuwen.core.operator.memory_call import MemoryCallOperator
 from openjiuwen.core.operator.skill_call import SkillCallOperator, SkillExperienceOperator
@@ -24,6 +25,9 @@ __all__ = [
     "LLMCall",
     "ToolCallOperator",
     "MemoryCallOperator",
+    "ContextEvolveOperator",
+    "MetisContextEvolveOperator",
+    "UpdatePolicy",
     "SkillExperienceOperator",
     "SkillCallOperator",
 ]
