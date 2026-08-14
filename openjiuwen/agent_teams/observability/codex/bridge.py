@@ -311,11 +311,13 @@ class CodexSpanBridge:
         member_agent_id: str,
         team_name: str,
         session_id: str,
+        role: str | None = None,
     ) -> None:
         self._member_name = member_name
         self._member_agent_id = member_agent_id
         self._team_name = team_name
         self._session_id = session_id
+        self._role = role or ""
         self._turn_index = 0
         self._turn_span: Any | None = None
         self._config: Any | None = None
@@ -411,7 +413,7 @@ class CodexSpanBridge:
         span.set_attribute(AT_AGENT_INPUT, safe_prompt)
         span.set_attribute(AT_AGENT_ID, self._member_agent_id)
         span.set_attribute(AT_AGENT_NAME, self._member_name)
-        span.set_attribute(AT_AGENT_ROLE, "teammate")
+        span.set_attribute(AT_AGENT_ROLE, self._role or self._member_name)
         span.set_attribute(AT_MEMBER_ID, self._member_name)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
         if self._team_name:
@@ -1085,12 +1087,7 @@ class CodexSpanBridge:
             tool_name = str(record.get("tool_name") or "")
             item_type = str(record.get("item_type") or "")
             explicit_display_name = str(record.get("display_name") or "")
-            display_name = (
-                explicit_display_name
-                or tool_name.rsplit(".", maxsplit=1)[-1]
-                or item_type
-                or "unknown"
-            )
+            display_name = explicit_display_name or tool_name.rsplit(".", maxsplit=1)[-1] or item_type or "unknown"
             observation_tool_name = explicit_display_name or tool_name
             start_ns = int(record.get("start_ns") or now_ns)
             end_ns = max(start_ns, int(record.get("end_ns") or now_ns))

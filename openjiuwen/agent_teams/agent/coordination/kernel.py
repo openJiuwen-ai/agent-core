@@ -583,9 +583,7 @@ class CoordinationKernel:
                     and self._scheduler.is_active
                     and str(event.event_type).startswith("task_")
                 ):
-                    await self._event_bus.enqueue(
-                        InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN)
-                    )
+                    await self._event_bus.enqueue(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
                 return
             await self._event_bus.enqueue(event)
 
@@ -721,7 +719,7 @@ class CoordinationKernel:
 
     async def wake_mailbox_if_interrupt_cleared(self) -> None:
         host = self._host
-        if host.role != TeamRole.TEAMMATE:
+        if not host.role.is_coordinated_member:
             return
         if host.has_pending_interrupt():
             return

@@ -217,6 +217,7 @@ def build_claude_runtime(
     member_agent_id: str | None = None,
     team_context_tracker: Any = None,
     team_name: str | None = None,
+    role: str | None = None,
 ) -> ClaudeSdkRuntime:
     """Build a Claude SDK runtime, using an SSH SDK transport when configured."""
     _ = mcp_server_command
@@ -239,6 +240,7 @@ def build_claude_runtime(
         member_agent_id=member_agent_id,
         team_name=team_name,
         session_id=team_session_id,
+        role=role,
     )
     return ClaudeSdkRuntime(
         member_name=member_name,
@@ -285,6 +287,7 @@ def _build_claude_span_bridge(
     member_agent_id: str | None,
     team_name: str | None,
     session_id: str | None,
+    role: str | None = None,
 ) -> Any:
     """Build the optional Claude OTel bridge without making runtime import depend on OTel."""
     try:
@@ -303,6 +306,7 @@ def _build_claude_span_bridge(
         member_agent_id=member_agent_id,
         team_name=team_name,
         session_id=session_id,
+        role=role,
     )
 
 
@@ -455,7 +459,7 @@ def _is_team_mcp_tool(tool_name: str, *, mcp_server_name: str, team_tool_names: 
     prefix = f"mcp__{mcp_server_name}__"
     if not tool_name.startswith(prefix):
         return False
-    real_tool_name = tool_name[len(prefix):]
+    real_tool_name = tool_name[len(prefix) :]
     return real_tool_name in team_tool_names
 
 
