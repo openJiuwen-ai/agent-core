@@ -85,9 +85,6 @@ Full configuration dataclass for a [`DeepAgent`](../deep_agent.md#class-openjiuw
 - **audio_model_config** ([AudioModelConfig](#class-openjiuwenharnessschemaudiomodelconfig), optional): Audio model configuration. Default: `None`.
 - **rails** (list[Rail], optional): Guardrails. Default: `None`.
 - **progressive_tool_enabled** (bool, optional): Enable progressive tool exposure. Default: `None`.
-- **progressive_tool_always_visible_tools** (list[str], optional): Tools always visible to the model. Default: `None`.
-- **progressive_tool_default_visible_tools** (list[str], optional): Tools visible by default. Default: `None`.
-- **progressive_tool_max_loaded_tools** (int): Maximum number of concurrently loaded tools. Default: `12`.
 
 ---
 

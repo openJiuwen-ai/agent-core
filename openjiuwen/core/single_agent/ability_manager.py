@@ -21,7 +21,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import Tool
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import ToolCard, ToolExposure
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.foundation.tool.name_sanitize import (
     is_llm_safe_tool_name,
@@ -159,9 +159,75 @@ class AbilityManager:
         # never collide with raw keys because every raw key is pre-taken during
         # sanitization.
         self._llm_tool_aliases: Dict[str, str] = {}
+        # Monotonic registry revision used by startup-built indexes. A rail can
+        # compare this value without rebuilding its index on every model call.
+        self._registry_revision = 0
+        # Progressive disclosure is an agent-level registration policy.  It is
+        # deliberately kept here instead of changing ToolCard's global default:
+        # a normal (non-progressive) agent must continue to expose new tools
+        # directly unless a card explicitly says otherwise.
+        self._progressive_tool_enabled = False
+        self._direct_tool_names = {"tool_search"}
         # Owner agent id used to qualify stateful tool ids on registration so
         # each agent owns an exclusive resource-manager entry.
         self._owner_id: Optional[str] = owner_id
+
+    @property
+    def registry_revision(self) -> int:
+        """Return the revision of the registered ability-card catalog."""
+        return self._registry_revision
+
+    def _mark_registry_changed(self) -> None:
+        self._registry_revision += 1
+
+    def set_tool_exposure_policy(
+            self,
+            progressive_tool_enabled: bool,
+            direct_tool_names: Optional[Iterable[str]] = None,
+    ) -> None:
+        """Set the default exposure policy used by subsequent registrations.
+
+        Explicit ``ToolCard(exposure=...)`` values always win.  Existing cards
+        are intentionally not rewritten: exposure is a registration-time
+        decision, so a hot-reconfigure only affects cards registered after the
+        new policy is applied.
+        """
+        self._progressive_tool_enabled = bool(progressive_tool_enabled)
+        if direct_tool_names is not None:
+            self._direct_tool_names = {
+                str(name).strip()
+                for name in direct_tool_names
+                if str(name).strip()
+            }
+
+    def _apply_tool_exposure_policy(self, card: ToolCard) -> ToolExposure:
+        """Resolve and assign the card's exposure at registration time."""
+        name = str(getattr(card, "name", "") or "")
+        current = getattr(card, "exposure", ToolExposure.DIRECT)
+        declared_marker = card.get_exposure_declared()
+        if declared_marker is None:
+            declared_marker = "exposure" in getattr(card, "model_fields_set", set())
+            card.set_exposure_declared(declared_marker)
+        # Identify an explicitly supplied value before this registration policy
+        # mutates the card. The resolved value is stored on ToolCard itself so
+        # every later consumer reads the same registration-time decision.
+        if declared_marker:
+            return current
+
+        if name in self._direct_tool_names:
+            resolved = ToolExposure.DIRECT
+        else:
+            resolved = (
+                ToolExposure.DEFERRED
+                if self._progressive_tool_enabled
+                else ToolExposure.DIRECT
+            )
+
+        card.exposure = resolved
+        # Treat the resolved value as fixed for this card. This keeps a shared
+        # stateless card stable if another agent registers the same instance.
+        card.set_exposure_declared(True)
+        return resolved
 
     def set_owner_id(self, owner_id: Optional[str]) -> None:
         """Set the owner agent id used to qualify stateful tool ids."""
@@ -623,6 +689,21 @@ class AbilityManager:
 
         def add_single_ability(_ability: Ability) -> AddAbilityResult:
             if isinstance(_ability, ToolCard):
+                old_registered = self._tools.get(_ability.name)
+                if old_registered is not None and old_registered.id != _ability.id:
+                    logger.warning(
+                        f"Duplicate tool ability detected: "
+                        f"name='{_ability.name}', "
+                        f"existing_id='{old_registered.id}', "
+                        f"new_id='{_ability.id}'. "
+                        f"Keep existing ability and skip new one."
+                    )
+                    return AddAbilityResult(
+                        name=_ability.name,
+                        added=False,
+                        reason="duplicate_tool",
+                    )
+                self._apply_tool_exposure_policy(_ability)
                 existing = self._tools.get(_ability.name)
                 if existing is not None and existing.id == _ability.id:
                     # Same registry id: this is a re-registration of one logical
@@ -639,25 +720,14 @@ class AbilityManager:
                         f"Rebind to the new ability."
                     )
                     self._tools[_ability.name] = _ability
+                    self._mark_registry_changed()
                     return AddAbilityResult(
                         name=_ability.name,
                         added=True,
                         reason="refreshed_tool",
                     )
-                if existing is not None:
-                    logger.warning(
-                        f"Duplicate tool ability detected: "
-                        f"name='{_ability.name}', "
-                        f"existing_id='{existing.id}', "
-                        f"new_id='{_ability.id}'. "
-                        f"Keep existing ability and skip new one."
-                    )
-                    return AddAbilityResult(
-                        name=_ability.name,
-                        added=False,
-                        reason="duplicate_tool",
-                    )
                 self._tools[_ability.name] = _ability
+                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
                     added=True,
@@ -680,6 +750,7 @@ class AbilityManager:
                         reason="duplicate_workflow",
                     )
                 self._workflows[_ability.name] = _ability
+                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
                     added=True,
@@ -702,6 +773,7 @@ class AbilityManager:
                         reason="duplicate_agent",
                     )
                 self._agents[_ability.name] = _ability
+                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
                     added=True,
@@ -724,6 +796,7 @@ class AbilityManager:
                         reason="duplicate_mcp_server",
                     )
                 self._mcp_servers[_ability.server_name] = _ability
+                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.server_name,
                     added=True,
@@ -897,10 +970,12 @@ class AbilityManager:
                         if tool_card.id and tool_card.id.startswith(f"{server_id}.")
                     ]
                     for tool_name in tools_to_remove:
-                        self._tools.pop(tool_name, None)
+                        removed_card = self._tools.pop(tool_name, None)
                     self._mcp_tool_allowlists.pop(server_id, None)
                 removed = mcp_server
             self._gc_llm_tool_aliases()
+            if removed is not None:
+                self._mark_registry_changed()
             return removed
         elif isinstance(name, list):
             result = []
@@ -923,11 +998,13 @@ class AbilityManager:
                             if tool_card.id and tool_card.id.startswith(f"{server_id}.")
                         ]
                         for tool_name in tools_to_remove:
-                            self._tools.pop(tool_name, None)
+                            removed_card = self._tools.pop(tool_name, None)
                         self._mcp_tool_allowlists.pop(server_id, None)
                     removed = mcp_server
                 result.append(removed)
             self._gc_llm_tool_aliases()
+            if any(item is not None for item in result):
+                self._mark_registry_changed()
             return result
         else:
             return None
@@ -1156,9 +1233,20 @@ class AbilityManager:
                     # ToolInfo objects must never be modified here (a cached
                     # or shared instance would compound the prefix per call).
                     exposed = mcp_tool.model_copy(update={"name": mcp_tool_name})
-                    self._tools[mcp_tool_name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
-                                                          description=exposed.description,
-                                                          input_params=exposed.parameters or {})
+                    existing_card = self._tools.get(mcp_tool_name)
+                    if existing_card is None or existing_card.id != mcp_tool_id:
+                        # MCP tool cards are materialized lazily when the
+                        # server's schemas are first fetched. Route this path
+                        # through the same registration policy as ordinary
+                        # tools so progressive agents mark them deferred and
+                        # advance the ordinary registry revision through add().
+                        existing_card = ToolCard(
+                            id=mcp_tool_id,
+                            name=mcp_tool_name,
+                            description=exposed.description,
+                            input_params=exposed.parameters or {},
+                        )
+                        self.add(existing_card)
                     tool_infos.append(exposed)
 
         # Last line of defense: never hand a non-LLM-safe name to a provider —
