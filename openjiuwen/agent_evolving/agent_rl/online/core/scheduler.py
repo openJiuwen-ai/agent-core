@@ -247,7 +247,11 @@ class OnlineTrainingScheduler:
                     candidate,
                     require_min_samples=False,
                     max_samples_per_run=self._task_positive_int(task, "max_samples_per_run", self.max_samples_per_run),
-                    ppo_samples_per_step=self._task_positive_int(task, "ppo_samples_per_step", self.ppo_samples_per_step),
+                    ppo_samples_per_step=self._task_positive_int(
+                        task,
+                        "ppo_samples_per_step",
+                        self.ppo_samples_per_step,
+                    ),
                     allow_partial_last_step=self._task_bool(
                         task,
                         "allow_partial_last_step",
@@ -338,7 +342,11 @@ class OnlineTrainingScheduler:
             limit = min(limit, max_samples)
 
         step_size = self.ppo_samples_per_step if ppo_samples_per_step is None else max(0, int(ppo_samples_per_step))
-        allow_partial = self.allow_partial_last_step if allow_partial_last_step is None else bool(allow_partial_last_step)
+        allow_partial = (
+            self.allow_partial_last_step
+            if allow_partial_last_step is None
+            else bool(allow_partial_last_step)
+        )
         if step_size > 0 and not allow_partial:
             limit = (limit // step_size) * step_size
         if require_min_samples and limit < self.min_samples_for_training:

@@ -3,9 +3,9 @@
 
 """Backward-compatible online rail import namespace."""
 
-from .factory import build_online_rail_from_env, build_rl_online_rail_from_env
 from ..backends.rl.rail import RLOnlineRail
 from ..backends.sft.rail import SFTOnlineRail
+from .factory import build_online_rail_from_env, build_rl_online_rail_from_env
 
 __all__ = [
     "RLOnlineRail",

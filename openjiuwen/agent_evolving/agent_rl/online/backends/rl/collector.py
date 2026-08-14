@@ -7,9 +7,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from openjiuwen.agent_evolving.trajectory import Trajectory
-
 from openjiuwen.agent_evolving.agent_rl.online.core.interaction import TokenInTokenOutRecord
+from openjiuwen.agent_evolving.trajectory import Trajectory
 
 from .converter import OnlineTrajectoryConverter, RailV1Batch
 
@@ -20,8 +19,8 @@ class RLTrajectoryCollector:
     def __init__(self, *, converter: Optional[OnlineTrajectoryConverter] = None) -> None:
         self.converter = converter or OnlineTrajectoryConverter()
 
+    @staticmethod
     def collect_llm_interaction(
-        self,
         record: TokenInTokenOutRecord,
         *,
         step: Any,

@@ -6,14 +6,14 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
 import json
 import logging
 import os
-from functools import lru_cache
-from pathlib import Path
 import re
 import shlex
+from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from ..abstract.rollouter import SFTDockerCommandSpec, SFTTaskRolloutBackend
@@ -287,7 +287,10 @@ def _cases_from_markdown(path: Path) -> list[SFTTaskCase]:
 
 def _case_from_mapping(item: dict[str, Any], *, base_dir: Path | None = None) -> SFTTaskCase:
     image = str(item.get("docker_image") or item.get("image") or "").strip()
-    local_program_path = _resolve_case_path(item.get("local_program_path") or item.get("program_path"), base_dir=base_dir)
+    local_program_path = _resolve_case_path(
+        item.get("local_program_path") or item.get("program_path"),
+        base_dir=base_dir,
+    )
     if not image and local_program_path:
         image = f"local/python-{str(item.get('instance_id') or 'program').strip() or 'program'}:latest"
     if not image:
@@ -300,8 +303,12 @@ def _case_from_mapping(item: dict[str, Any], *, base_dir: Path | None = None) ->
     local_repo_path = _resolve_case_path(item.get("local_repo_path") or item.get("repo_path"), base_dir=base_dir)
     problem_statement = str(item.get("problem_statement") or swe_case.get("problem_statement") or "").strip()
     test_cmd = str(item.get("test_cmd") or swe_case.get("test_cmd") or "").strip()
-    fail_to_pass = _coerce_str_list(item.get("fail_to_pass") or swe_case.get("FAIL_TO_PASS") or swe_case.get("fail_to_pass"))
-    pass_to_pass = _coerce_str_list(item.get("pass_to_pass") or swe_case.get("PASS_TO_PASS") or swe_case.get("pass_to_pass"))
+    fail_to_pass = _coerce_str_list(
+        item.get("fail_to_pass") or swe_case.get("FAIL_TO_PASS") or swe_case.get("fail_to_pass")
+    )
+    pass_to_pass = _coerce_str_list(
+        item.get("pass_to_pass") or swe_case.get("PASS_TO_PASS") or swe_case.get("pass_to_pass")
+    )
     gold_patch = str(item.get("gold_patch") or swe_case.get("patch") or "").strip()
     task_prompt = (
         str(item.get("task_prompt") or item.get("prompt") or "").strip()
@@ -315,28 +322,27 @@ def _case_from_mapping(item: dict[str, Any], *, base_dir: Path | None = None) ->
             pass_to_pass=pass_to_pass,
         )
     )
-    metadata = {
-        k: v
-        for k, v in item.items()
-        if k
-        not in {
-            "image",
-            "docker_image",
-            "task_prompt",
-            "prompt",
-            "repo",
-            "base_commit",
-            "problem_statement",
-            "test_cmd",
-            "fail_to_pass",
-            "pass_to_pass",
-            "gold_patch",
-            "repo_url",
-            "local_repo_path",
-            "local_program_path",
-            "program_path",
-        }
+    case_keys = {
+        "image",
+        "docker_image",
+        "task_prompt",
+        "prompt",
+        "repo",
+        "base_commit",
+        "problem_statement",
+        "test_cmd",
+        "fail_to_pass",
+        "pass_to_pass",
+        "gold_patch",
+        "repo_url",
+        "local_repo_path",
+        "local_program_path",
+        "program_path",
     }
+    metadata: dict[str, Any] = {}
+    for key, value in item.items():
+        if key not in case_keys:
+            metadata[key] = value
     return SFTTaskCase(
         instance_id=instance_id,
         docker_image=image,

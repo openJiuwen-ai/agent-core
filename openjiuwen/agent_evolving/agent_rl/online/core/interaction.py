@@ -166,8 +166,8 @@ class TokenInTokenOutForwarder:
     that intentionally wants this object to call a simple LLM interface.
     """
 
+    @staticmethod
     def from_model_call_context(
-        self,
         ctx: AgentCallbackContext,
         *,
         prompt_ids: Optional[list[int]] = None,

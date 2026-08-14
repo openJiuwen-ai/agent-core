@@ -159,9 +159,10 @@ class PPOTrainingExecutor:
             self.close()
 
         import ray
+
+        from openjiuwen.agent_evolving.agent_rl.optimizer.task_runner import OnlineTaskRunner, get_ppo_ray_runtime_env
+
         from ...scheduler.ppo_config import compose_online_ppo_config
-        from openjiuwen.agent_evolving.agent_rl.optimizer.task_runner import OnlineTaskRunner
-        from openjiuwen.agent_evolving.agent_rl.optimizer.task_runner import get_ppo_ray_runtime_env
 
         if not ray.is_initialized():
             runtime_env = get_ppo_ray_runtime_env()
@@ -200,6 +201,7 @@ class PPOTrainingExecutor:
     ) -> Optional[LoRAVersion]:
         """Convert samples to DataProto, run PPO train_step(s), export one LoRA."""
         import ray
+
         from ....rl_trainer.verl_converter import VerlDataProtoConverter
 
         if not samples:

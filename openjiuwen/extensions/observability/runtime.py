@@ -116,6 +116,8 @@ class ObservabilityRuntime:
                 logger.info("observability disabled by config")
                 return
             if self._provider is not None:
+                if span_exporter_override is not None:
+                    self._provider.add_span_processor(SimpleSpanProcessor(span_exporter_override))
                 self.add_span_processors(additional_span_processors)
                 return
             if self._initializing:

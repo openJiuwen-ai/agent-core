@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from openjiuwen.agent_evolving.agent_rl.online.inference.notifier import InferenceNotifier
+from openjiuwen.agent_evolving.agent_rl.online.abstract.lora import LoRARepositoryProtocol
 from openjiuwen.agent_evolving.agent_rl.online.backends.sft.llama_factory import (
     LLaMAFactoryTrainConfig,
     LLaMAFactoryTrainerAdapter,
@@ -27,8 +27,8 @@ from openjiuwen.agent_evolving.agent_rl.online.backends.sft.rollouter import (
     build_sft_rollouter,
 )
 from openjiuwen.agent_evolving.agent_rl.online.backends.sft.supervisor_client import SupervisorClient
-from openjiuwen.agent_evolving.agent_rl.online.abstract.lora import LoRARepositoryProtocol
 from openjiuwen.agent_evolving.agent_rl.online.core.training_process import ManagedTrainingProcess
+from openjiuwen.agent_evolving.agent_rl.online.inference.notifier import InferenceNotifier
 from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRAPublishRequest
 
 logger = logging.getLogger("online_rl.scheduler")

@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..message_utils import extract_last_user_instruction
 from .judge_dispatcher import JudgeDispatcher
@@ -39,11 +38,11 @@ class GatewayTrajectoryRuntime:
         pending_judge_store: Optional[Any] = None,
         task_reward_redis: Optional[Any] = None,
     ) -> None:
-        if redis is None and (trajectory_store is None or sft_store is None):
+        if redis is None and trajectory_store is None:
             raise ValueError("GatewayTrajectoryRuntime requires injected stores or a redis client")
         os.makedirs(config.record_dir, exist_ok=True)
         self._default_user_id = _SINGLE_USER_DEFAULT_ID if getattr(config, "single_user_default", False) else ""
-        if trajectory_store is None or sft_store is None:
+        if trajectory_store is None or (sft_store is None and redis is not None):
             from ...backends.rl.redis_store import RedisTrajectoryStore
             from ...backends.sft.redis_store import RedisSFTStore
 
@@ -144,6 +143,8 @@ class GatewayTrajectoryRuntime:
         await self._sample_recorder.record_sample(normalized)
 
     async def record_sft_raw(self, raw: dict[str, Any]) -> None:
+        if self._sft_store is None:
+            raise ValueError("SFT upload requires an SFT store or a Redis client")
         normalized = dict(raw)
         normalized_user_id = str(
             normalized.get("user_id")
@@ -157,6 +158,8 @@ class GatewayTrajectoryRuntime:
         await self._sft_store.save_raw(normalized, user_id=normalized_user_id)
 
     async def record_sft_sample(self, sample: dict[str, Any]) -> None:
+        if self._sft_store is None:
+            raise ValueError("SFT upload requires an SFT store or a Redis client")
         normalized = dict(sample)
         normalized_user_id = str(
             normalized.get("user_id")
@@ -320,7 +323,19 @@ class GatewayTrajectoryRuntime:
     async def snapshot_stats(self) -> dict[str, Any]:
         sample_stats = await self._sample_recorder.snapshot_stats()
         train_stats = await self._trajectory_store.stats()
-        sft_stats = await self._sft_store.stats()
+        if self._sft_store is None:
+            sft_stats = {
+                "pending_raw": 0,
+                "processing_raw": 0,
+                "processed_raw": 0,
+                "failed_raw": 0,
+                "pending_samples": 0,
+                "training_samples": 0,
+                "trained_samples": 0,
+                "failed_samples": 0,
+            }
+        else:
+            sft_stats = await self._sft_store.stats()
         return {
             "total_samples": sample_stats["total_samples"],
             "trajectory_store_backend": self.store_backend,

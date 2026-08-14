@@ -108,7 +108,11 @@ class SFTRawTrajectoryConverter:
             if category == "llm":
                 prompt_messages, completion_messages = read_llm_exchange(span)
                 response = normalize_assistant_message(completion_messages[-1] if completion_messages else {})
-                step_model_id = str(attrs.get(semconv.GEN_AI_REQUEST_MODEL) or attrs.get(semconv.GEN_AI_RESPONSE_MODEL) or "")
+                step_model_id = str(
+                    attrs.get(semconv.GEN_AI_REQUEST_MODEL)
+                    or attrs.get(semconv.GEN_AI_RESPONSE_MODEL)
+                    or ""
+                )
                 model_id = model_id or step_model_id
                 meta = self._span_meta(span, attrs)
                 raw_steps.append(

@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import time
 import uuid
 from typing import Any, Optional
@@ -28,12 +28,12 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCa
 from openjiuwen.extensions.observability import semconv
 from openjiuwen.harness.rails.evolution import PreparedEvolutionInput
 
-from ...core.rail import BaseOnlineTrainingRail
-from .collector import RLTrajectoryCollector
-from .converter import OnlineTrajectoryConverter
 from ...core.interaction import TokenInTokenOutForwarder
 from ...core.llm_response import extract_logprobs, extract_prompt_ids, extract_token_ids
+from ...core.rail import BaseOnlineTrainingRail
 from ...core.uploader import TrajectoryUploader
+from .collector import RLTrajectoryCollector
+from .converter import OnlineTrajectoryConverter
 
 logger = logging.getLogger(__name__)
 
@@ -228,8 +228,8 @@ class RLOnlineRail(BaseOnlineTrainingRail):
         if hasattr(value, "model_dump"):
             try:
                 return RLOnlineRail._json_safe(value.model_dump())
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("failed to model_dump value type=%s: %r", type(value).__name__, exc)
         return str(value)
 
     @classmethod
@@ -260,8 +260,8 @@ class RLOnlineRail(BaseOnlineTrainingRail):
                 session_id = str(get_session_id())
                 if session_id:
                     return session_id
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("failed to resolve callback session id from session: %r", exc)
         context = getattr(ctx, "context", None)
         context_session_id = getattr(context, "session_id", None)
         if callable(context_session_id):
@@ -269,13 +269,14 @@ class RLOnlineRail(BaseOnlineTrainingRail):
                 session_id = str(context_session_id())
                 if session_id:
                     return session_id
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("failed to resolve callback session id from context: %r", exc)
         return "default_session"
 
     def _resolve_model_name(self, ctx: AgentCallbackContext) -> str:
         config = self._react_config(ctx)
-        return str(getattr(config, "model_name", "") or getattr(getattr(config, "model_config_obj", None), "model", "") or "unknown")
+        model_config = getattr(config, "model_config_obj", None)
+        return str(getattr(config, "model_name", "") or getattr(model_config, "model", "") or "unknown")
 
     @staticmethod
     def _write_usage_attrs(attrs: dict[str, Any], usage: Any) -> None:

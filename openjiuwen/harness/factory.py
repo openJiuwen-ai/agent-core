@@ -5,18 +5,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from os import PathLike
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
-from os import PathLike
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
+from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode, SysOperation, SysOperationCard
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.rails import (
     ModelAnomalyDetectionRail,
     SecurityRail,
@@ -36,11 +38,9 @@ from openjiuwen.harness.schema.config import (
     VisionModelConfig,
     is_vision_model_config_complete,
 )
-from openjiuwen.harness.workspace.workspace import Workspace
-from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.skills import collect_disabled_skills
 from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
+from openjiuwen.harness.workspace.workspace import Workspace
 
 if TYPE_CHECKING:
     from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
@@ -404,6 +404,11 @@ def resolve_deep_agent_parts(
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):
             all_rails.append(make_rail())
+
+    all_rails = _append_env_online_training_rail(
+        all_rails,
+        trajectory_span_processor,
+    )
 
     return DeepAgentParts(
         config=config,

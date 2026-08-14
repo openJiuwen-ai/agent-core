@@ -6,14 +6,14 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import json
 import logging
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import textwrap
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from openjiuwen.agent_evolving.agent_rl.online.abstract.rollouter import (
@@ -80,13 +80,14 @@ def docker_runtime_mounts() -> tuple[list[str], str, str]:
     agent_core_host = Path(
         os.getenv("SFT_DOCKER_AGENT_CORE_HOST_PATH", "") or Path(__file__).resolve().parents[6]
     ).resolve()
+    configured_jiuwenclaw_host = os.getenv("SFT_DOCKER_JIUWENCLAW_HOST_PATH", "").strip()
     jiuwenclaw_host = default_jiuwenclaw_host_path(agent_core_host)
     agent_core_container = os.getenv("SFT_DOCKER_AGENT_CORE_CONTAINER_PATH", str(agent_core_host))
     jiuwenclaw_container = os.getenv("SFT_DOCKER_JIUWENCLAW_CONTAINER_PATH", str(jiuwenclaw_host))
 
     mounts = ["-v", f"{agent_core_host}:{agent_core_container}:ro"]
     pythonpath = [agent_core_container]
-    if jiuwenclaw_host.exists():
+    if configured_jiuwenclaw_host or jiuwenclaw_host.exists():
         mounts.extend(["-v", f"{jiuwenclaw_host}:{jiuwenclaw_container}:ro"])
         pythonpath.append(jiuwenclaw_container)
     command_prefix = host_conda_command_prefix(mounts)
@@ -290,7 +291,11 @@ async def run_docker_command_specs(
 
     async def _run_one(spec: SFTDockerCommandSpec) -> SFTDockerCommandResult:
         async with semaphore:
-            logger.info("Starting SFT Docker command name=%s command=%s", spec.name, shlex.join(spec.command[:8] + ["..."]))
+            logger.info(
+                "Starting SFT Docker command name=%s command=%s",
+                spec.name,
+                shlex.join(spec.command[:8] + ["..."]),
+            )
             result = await run_docker_command_spec(spec)
             logger.info("Finished SFT Docker command name=%s exit=%s", spec.name, result.exit_code)
             return result
@@ -428,13 +433,14 @@ def default_jiuwenclaw_task_command() -> str:
             print(f"[sft-task] warning: failed to sync config dotenv: {exc!r}", flush=True)
         PY
         python - <<'PY'
+        import importlib
         import os
 
         path = os.path.join(os.environ["JIUWENSWARM_DATA_DIR"], "sft_online.env")
         try:
             from openjiuwen.agent_evolving.agent_rl.online.backends.sft.rail import SFTOnlineRail
 
-            sft_rail_path = getattr(__import__(SFTOnlineRail.__module__, fromlist=["__file__"]), "__file__", "")
+            sft_rail_path = getattr(importlib.import_module(SFTOnlineRail.__module__), "__file__", "")
         except Exception as exc:
             sft_rail_path = f"<import failed: {exc!r}>"
         print("[sft-task] online rail env", {
@@ -453,10 +459,12 @@ def default_jiuwenclaw_task_command() -> str:
         }, flush=True)
         PY
         app_entry="$(tail -n 1 "$JIUWENSWARM_DATA_DIR/app_entry" | tr -d '\r')"
+        app_log="$JIUWENSWARM_DATA_DIR/app.log"
+        app_cmd=(python -m "$app_entry" --dotenv "$JIUWENSWARM_DATA_DIR/sft_online.env")
         if command -v setsid >/dev/null 2>&1; then
-          setsid python -m "$app_entry" --dotenv "$JIUWENSWARM_DATA_DIR/sft_online.env" > "$JIUWENSWARM_DATA_DIR/app.log" 2>&1 &
+          setsid "${app_cmd[@]}" > "$app_log" 2>&1 &
         else
-          python -m "$app_entry" --dotenv "$JIUWENSWARM_DATA_DIR/sft_online.env" > "$JIUWENSWARM_DATA_DIR/app.log" 2>&1 &
+          "${app_cmd[@]}" > "$app_log" 2>&1 &
         fi
         app_pid=$!
         cleanup() {

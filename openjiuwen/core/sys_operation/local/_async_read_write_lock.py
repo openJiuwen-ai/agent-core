@@ -4,15 +4,17 @@
 import asyncio
 import pathlib
 import sqlite3
-from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Callable, Literal
 
 try:
-    from filelock import AsyncReadWriteLock, ReadWriteLock, Timeout as FileLockTimeout
+    from filelock import AsyncReadWriteLock, ReadWriteLock
+    from filelock import Timeout as FileLockTimeout
 except ImportError:
-    from filelock import FileLock, Timeout as FileLockTimeout
+    from filelock import FileLock
+    from filelock import Timeout as FileLockTimeout
 
     AsyncReadWriteLock = None  # type: ignore[assignment]
     ReadWriteLock = None  # type: ignore[assignment]
@@ -74,7 +76,8 @@ else:
         def release(self) -> None:
             self._lock.release()
 
-        def close(self) -> None:
+        @staticmethod
+        def close() -> None:
             return None
 
         @staticmethod

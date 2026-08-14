@@ -180,7 +180,10 @@ def run_llama_factory_train_cli(
 
     selected_cli = cli_bin or os.getenv("LLAMAFACTORY_CLI", "llamafactory-cli")
     executable = shutil.which(selected_cli)
-    command = [executable, "train", str(train_yaml_file)] if executable else [sys.executable, "-m", "llamafactory.cli", "train", str(train_yaml_file)]
+    if executable:
+        command = [executable, "train", str(train_yaml_file)]
+    else:
+        command = [sys.executable, "-m", "llamafactory.cli", "train", str(train_yaml_file)]
     env = os.environ.copy()
     if executable:
         # LLaMA-Factory launches distributed workers through ``torchrun`` from
@@ -734,7 +737,11 @@ def _dataset_info(dataset_name: str, file_name: str) -> dict[str, Any]:
 
 def _stats(records: list[dict[str, Any]]) -> dict[str, Any]:
     token_counts = [
-        int(record.get("metadata", {}).get("token_count_after_truncate") or record.get("metadata", {}).get("token_count") or 0)
+        int(
+            record.get("metadata", {}).get("token_count_after_truncate")
+            or record.get("metadata", {}).get("token_count")
+            or 0
+        )
         for record in records
         if isinstance(record.get("metadata"), dict)
     ]

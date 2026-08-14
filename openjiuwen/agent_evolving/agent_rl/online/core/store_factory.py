@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...storage.local_store import LocalPendingJudgeStore, LocalSFTStore, LocalTrajectoryStore, LocalTrainingTaskStore
+from ...storage.local_store import LocalPendingJudgeStore, LocalSFTStore, LocalTrainingTaskStore, LocalTrajectoryStore
 from ...storage.training_task_store import TrainingTaskStore
 from ..backends.rl.redis_store import RedisTrajectoryStore
 from ..backends.sft.redis_store import RedisSFTStore

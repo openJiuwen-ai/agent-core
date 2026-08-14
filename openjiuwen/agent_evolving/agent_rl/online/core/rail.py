@@ -179,7 +179,12 @@ class BaseOnlineTrainingRail(RLRail):
                 return None
             return payload
         except Exception as exc:
-            logger.warning("[%s] gateway effective LoRA request failed user=%s err=%r", type(self).__name__, user_id, exc)
+            logger.warning(
+                "[%s] gateway effective LoRA request failed user=%s err=%r",
+                type(self).__name__,
+                user_id,
+                exc,
+            )
             return None
 
     async def _apply_latest_lora_model(self, ctx: AgentCallbackContext) -> None:

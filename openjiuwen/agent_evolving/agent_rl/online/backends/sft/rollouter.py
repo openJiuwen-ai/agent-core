@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import json
 import logging
 import os
-from pathlib import Path
 import re
 import shlex
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from openjiuwen.agent_evolving.agent_rl.online.abstract.rollouter import (
@@ -30,8 +30,8 @@ from openjiuwen.agent_evolving.agent_rl.online.backends.rollouter.docker_runtime
 )
 from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import (
     SFT_SAMPLE_PROTOCOL_VERSION,
-    build_sft_samples_from_raw_steps,
     build_sft_sample,
+    build_sft_samples_from_raw_steps,
     json_safe,
     normalize_assistant_message,
     normalize_messages,
@@ -397,7 +397,8 @@ def _docker_rollout_request_from_raw(
 
     effective_user_id = rollout_user_id or str(raw.get("user_id") or raw.get("tenant_id") or "")
     logger.info(
-        "Prepared SFT Docker replay request raw_id=%s instance=%s image=%s original_user=%s rollout_user=%s task_chars=%d",
+        "Prepared SFT Docker replay request raw_id=%s instance=%s image=%s "
+        "original_user=%s rollout_user=%s task_chars=%d",
         raw_id,
         instance_id,
         image,
@@ -431,6 +432,7 @@ async def _samples_from_uploaded_rollout_raw(
     if not redis_url or not rollout_user_id:
         return []
     from redis.asyncio import from_url as redis_from_url
+
     from openjiuwen.agent_evolving.agent_rl.online.backends.sft.redis_store import RedisSFTStore
 
     redis = redis_from_url(redis_url, decode_responses=False)

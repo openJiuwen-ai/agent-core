@@ -23,15 +23,15 @@ from openjiuwen.agent_evolving.trajectory.schema import (
 )
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans, read_usage
 from openjiuwen.agent_evolving.trajectory.team import span_category
-from openjiuwen.extensions.observability import semconv
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.extensions.observability import semconv
 from openjiuwen.harness.rails.evolution import PreparedEvolutionInput
 
-from ...core.rail import BaseOnlineTrainingRail
-from .collector import SFTTrajectoryCollector
 from ...core.interaction import TokenInTokenOutForwarder
-from .raw_converter import SFTRawTrajectoryConverter
+from ...core.rail import BaseOnlineTrainingRail
 from ...core.uploader import TrajectoryUploader
+from .collector import SFTTrajectoryCollector
+from .raw_converter import SFTRawTrajectoryConverter
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,10 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
         ctx: AgentCallbackContext,
         trajectory: Trajectory | None,
     ) -> None:
-        self._pending_flush_reason = self._flush_policy.resolve(ctx, token_count=self._trajectory_token_count(trajectory))
+        self._pending_flush_reason = self._flush_policy.resolve(
+            ctx,
+            token_count=self._trajectory_token_count(trajectory),
+        )
         if self._pending_flush_reason:
             self._record_text_fallback_turn(ctx)
         logger.info(
@@ -422,8 +425,16 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
             session_done=True,
             flush_reason=flush_reason,
             original_task=str(raw_metadata.get("original_task") or ""),
-            dataset_case=raw_metadata.get("dataset_case") if isinstance(raw_metadata.get("dataset_case"), dict) else {},
-            workspace_ref=raw_metadata.get("workspace_ref") if isinstance(raw_metadata.get("workspace_ref"), dict) else {},
+            dataset_case=(
+                raw_metadata.get("dataset_case")
+                if isinstance(raw_metadata.get("dataset_case"), dict)
+                else {}
+            ),
+            workspace_ref=(
+                raw_metadata.get("workspace_ref")
+                if isinstance(raw_metadata.get("workspace_ref"), dict)
+                else {}
+            ),
             context_compression=(
                 raw_metadata.get("context_compression")
                 if isinstance(raw_metadata.get("context_compression"), dict)
@@ -530,8 +541,8 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
         if callable(get_session_id):
             try:
                 return str(get_session_id())
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("failed to resolve SFT upload session id: %r", exc)
         inputs = getattr(ctx, "inputs", None)
         return str(getattr(inputs, "conversation_id", "") or "")
 
@@ -694,7 +705,14 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
             flush_reason,
         )
         if not samples:
-            first_llm = next((step for step in raw_payload.get("steps") or [] if isinstance(step, dict) and step.get("type") == "llm"), {})
+            first_llm = next(
+                (
+                    step
+                    for step in raw_payload.get("steps") or []
+                    if isinstance(step, dict) and step.get("type") == "llm"
+                ),
+                {},
+            )
             logger.warning(
                 "[SFTOnlineRail] direct sample conversion produced no samples trajectory=%s tenant=%s "
                 "messages=%d response_chars=%d first_llm_keys=%s",

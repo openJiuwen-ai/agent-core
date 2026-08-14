@@ -229,8 +229,8 @@ def start_online_training_scheduler(
     runtime: LaunchRuntime,
 ):
     """Start the OnlineTrainingScheduler that polls the configured trajectory store."""
-    from openjiuwen.agent_evolving.agent_rl.online.inference.notifier import InferenceNotifier
     from openjiuwen.agent_evolving.agent_rl.online.core.scheduler import OnlineTrainingScheduler
+    from openjiuwen.agent_evolving.agent_rl.online.inference.notifier import InferenceNotifier
     from openjiuwen.agent_evolving.agent_rl.online.scheduler.plugins import load_plugin
     from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
 

@@ -8,16 +8,17 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json as json_module
+import logging
 import os
-from pathlib import Path
+import shutil
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
-
+from pathlib import Path
 
 DEFAULT_CASES = "/data1/lll/workspace/sft_train_demo/swebench_verified_mini_docker_model.md"
+logger = logging.getLogger("online_rl.sft_optimize")
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,7 +49,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--supervisor-token", default=os.getenv("SUPERVISOR_TOKEN", "EMPTY"))
     parser.add_argument("--supervisor-model", default=os.getenv("SUPERVISOR_MODEL", ""))
-    parser.add_argument("--tenant-id", default=os.getenv("RL_ONLINE_TENANT_ID") or os.getenv("WEB_USER_ID") or "local-web-user")
+    parser.add_argument(
+        "--tenant-id",
+        default=os.getenv("RL_ONLINE_TENANT_ID") or os.getenv("WEB_USER_ID") or "local-web-user",
+    )
     parser.add_argument(
         "--concurrency",
         type=int,
@@ -72,7 +76,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--command", default=os.getenv("SFT_DOCKER_ROLLOUT_COMMAND", ""))
     parser.add_argument("--timeout", type=int, default=int(os.getenv("SFT_TASK_ROLLOUT_TIMEOUT", "900")))
-    parser.add_argument("--trigger-training", action="store_true", help="Create a /v1/training/tasks task after rollout.")
+    parser.add_argument(
+        "--trigger-training",
+        action="store_true",
+        help="Create a /v1/training/tasks task after rollout.",
+    )
     parser.add_argument("--gateway-api-key", default=os.getenv("TRAJECTORY_GATEWAY_API_KEY", ""))
     parser.add_argument(
         "--upload-check-timeout",
@@ -84,6 +92,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def configure_logging() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
 def main() -> int:
     from openjiuwen.agent_evolving.agent_rl.online.core.task_rollouter import (
         SFTTaskRolloutConfig,
@@ -93,18 +105,19 @@ def main() -> int:
         run_sft_task_cases,
     )
 
+    configure_logging()
     args = parse_args()
     if not args.gateway_url:
-        print("missing --gateway-url or RL_GATEWAY_URL", file=sys.stderr)
+        logger.error("missing --gateway-url or RL_GATEWAY_URL")
         return 2
     if not args.supervisor_url:
-        print("missing --supervisor-url or SUPERVISOR_URL", file=sys.stderr)
+        logger.error("missing --supervisor-url or SUPERVISOR_URL")
         return 2
 
     cases = load_sft_task_cases(Path(args.dataset_mapping))
-    selected = cases[args.offset : args.offset + max(0, args.limit)]
+    selected = cases[args.offset:args.offset + max(0, args.limit)]
     if not selected:
-        print("no cases selected", file=sys.stderr)
+        logger.error("no cases selected")
         return 2
 
     config = SFTTaskRolloutConfig(
@@ -123,31 +136,46 @@ def main() -> int:
         local_repo_agent_port_base=int(os.getenv("SFT_LOCAL_REPO_AGENT_PORT_BASE", "18092")),
     )
     backend = args.backend.strip().lower().replace("-", "_")
-    print(
+    logger.info(
         "[sft-optimize] direct supervisor rollout "
-        f"backend={args.backend} cases={len(selected)} concurrency={args.concurrency} user={args.tenant_id} "
-        f"gateway={args.gateway_url} scheduler={args.scheduler_url or '<gateway-task-api>'}"
+        "backend=%s cases=%d concurrency=%d user=%s gateway=%s scheduler=%s",
+        args.backend,
+        len(selected),
+        args.concurrency,
+        args.tenant_id,
+        args.gateway_url,
+        args.scheduler_url or "<gateway-task-api>",
     )
     for case in selected:
-        print(f"[sft-optimize] instance={case.instance_id} image={case.docker_image} repo={case.repo} base_commit={case.base_commit}")
+        logger.info(
+            "[sft-optimize] instance=%s image=%s repo=%s base_commit=%s",
+            case.instance_id,
+            case.docker_image,
+            case.repo,
+            case.base_commit,
+        )
         if args.dry_run:
             if backend in {"local_program", "local-program", "program"}:
-                print(f"local_program path={case.local_program_path or '<unset>'}")
+                logger.info("local_program path=%s", case.local_program_path or "<unset>")
             elif backend in {"akernel", "local_repo", "local"}:
-                print(f"akernel repo={case.repo} base_commit={case.base_commit or '<current-head>'}")
+                logger.info(
+                    "akernel repo=%s base_commit=%s",
+                    case.repo,
+                    case.base_commit or "<current-head>",
+                )
             else:
-                print(command_for_log(build_task_rollout_docker_command(case, config)))
+                logger.info("%s", command_for_log(build_task_rollout_docker_command(case, config)))
     if args.dry_run:
         return 0
 
     results = asyncio.run(run_sft_task_cases(selected, config, concurrency=args.concurrency))
     failed = 0
     for result in results:
-        print(f"[sft-optimize] exit={result.exit_code} instance={result.case.instance_id}")
+        logger.info("[sft-optimize] exit=%d instance=%s", result.exit_code, result.case.instance_id)
         if result.stdout_tail:
-            print(result.stdout_tail)
+            logger.info("%s", result.stdout_tail)
         if result.stderr_tail:
-            print(result.stderr_tail, file=sys.stderr)
+            logger.error("%s", result.stderr_tail)
         if result.exit_code != 0:
             failed += 1
     if failed:
@@ -160,22 +188,23 @@ def main() -> int:
         gateway_url=args.gateway_url,
         gateway_api_key=args.gateway_api_key,
     )
-    print(
-        f"[sft-optimize] uploaded_samples={uploaded} expected={len(selected)} "
-        f"user={args.tenant_id} source={source}"
+    logger.info(
+        "[sft-optimize] uploaded_samples=%d expected=%d user=%s source=%s",
+        uploaded,
+        len(selected),
+        args.tenant_id,
+        source,
     )
     if uploaded >= 0 and uploaded < len(selected):
-        print(
+        logger.error(
             "[sft-optimize] ERROR: supervisor replay finished but uploaded SFT samples are insufficient; "
             "check that the Docker containers can reach the gateway and that the sample status is visible.",
-            file=sys.stderr,
         )
         return 1
     if uploaded < 0:
-        print(
+        logger.warning(
             "[sft-optimize] warning: uploaded sample visibility could not be verified; "
             "continuing to training trigger so the full chain still exercises the scheduler.",
-            file=sys.stderr,
         )
 
     if args.trigger_training:
@@ -190,7 +219,7 @@ def main() -> int:
                 scheduler_url=args.scheduler_url,
             ),
         )
-        print("[sft-optimize] training_task=" + json_module.dumps(task, ensure_ascii=False))
+        logger.info("[sft-optimize] training_task=%s", json_module.dumps(task, ensure_ascii=False))
     return 0
 
 
@@ -247,7 +276,7 @@ def pending_sft_sample_count(user_id: str) -> int:
         finally:
             client.close()
     except Exception as exc:
-        print(f"[sft-optimize] warning: failed to check uploaded samples redis={redis_url}: {exc!r}", file=sys.stderr)
+        logger.warning("[sft-optimize] failed to check uploaded samples redis=%s err=%r", redis_url, exc)
         return -1
 
 
@@ -257,13 +286,15 @@ def detect_redis_url() -> str:
         return configured
     container = os.getenv("REDIS_CONTAINER_NAME", "pinchbench-redis")
     port = os.getenv("REDIS_PORT", "6379")
+    docker_bin = shutil.which("docker") or "/usr/bin/docker"
     try:
         ip = subprocess.check_output(
-            ["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", container],
+            [docker_bin, "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", container],
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
-    except Exception:
+    except Exception as exc:
+        logger.debug("failed to inspect redis docker container=%s err=%r", container, exc)
         ip = ""
     return f"redis://{ip or '127.0.0.1'}:{port}/0"
 

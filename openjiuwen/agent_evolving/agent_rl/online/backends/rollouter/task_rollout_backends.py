@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-from pathlib import Path
 import shlex
 import shutil
 import subprocess
@@ -16,8 +16,11 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+from pathlib import Path
 from urllib.parse import urlsplit
 
+from ...abstract.rollouter import SFTDockerCommandResult
+from ...core.task_rollouter import SFTTaskCase, SFTTaskRolloutBackend, SFTTaskRolloutConfig
 from .docker_runtime import (
     SFTDockerCommandSpec,
     SFTJiuwenclawDockerRequest,
@@ -27,8 +30,6 @@ from .docker_runtime import (
     default_jiuwenclaw_task_command,
     normalize_dataset_case,
 )
-from ...abstract.rollouter import SFTDockerCommandResult
-from ...core.task_rollouter import SFTTaskCase, SFTTaskRolloutBackend, SFTTaskRolloutConfig
 
 logger = logging.getLogger(__name__)
 AKERNEL_WAL_DIR = "/workspace/records/rail_v1_wal"
@@ -117,12 +118,17 @@ def _local_repo_source_path(case: SFTTaskCase, config: SFTTaskRolloutConfig) -> 
         if (candidate / ".git").exists():
             return candidate.resolve()
     raise FileNotFoundError(
-        f"local SWE repo checkout not found for {case.instance_id}: searched {[str(path) for path in candidates]}"
+        f"local SWE repo checkout not found for {case.instance_id}: "
+        f"searched {[str(path) for path in candidates]}"
     )
 
 
 def _local_repo_work_dir(case: SFTTaskCase, config: SFTTaskRolloutConfig) -> Path:
-    work_root = Path(config.local_repo_work_root or os.getenv("SFT_LOCAL_REPO_WORK_ROOT", "/tmp/jiuwenswarm-local-repos"))
+    configured = config.local_repo_work_root or os.getenv(
+        "SFT_LOCAL_REPO_WORK_ROOT",
+        "/tmp/jiuwenswarm-local-repos",
+    )
+    work_root = Path(configured)
     work_root = work_root.expanduser().resolve()
     work_root.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(prefix=f"{case.instance_id}-", dir=str(work_root)))
@@ -132,8 +138,9 @@ def _prepare_local_repo_checkout(case: SFTTaskCase, config: SFTTaskRolloutConfig
     source_repo = _local_repo_source_path(case, config)
     work_dir = _local_repo_work_dir(case, config)
     repo_dir = work_dir / "repo"
+    git_bin = shutil.which("git") or "/usr/bin/git"
     clone_result = subprocess.run(
-        ["git", "clone", "--no-hardlinks", str(source_repo), str(repo_dir)],
+        [git_bin, "clone", "--no-hardlinks", str(source_repo), str(repo_dir)],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -144,7 +151,7 @@ def _prepare_local_repo_checkout(case: SFTTaskCase, config: SFTTaskRolloutConfig
         raise RuntimeError(f"failed to clone local SWE repo {source_repo} -> {repo_dir}: {detail}")
     if case.base_commit:
         checkout_result = subprocess.run(
-            ["git", "-C", str(repo_dir), "checkout", "--force", case.base_commit],
+            [git_bin, "-C", str(repo_dir), "checkout", "--force", case.base_commit],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -384,7 +391,7 @@ def _resolve_akernel_sandbox_image(case: SFTTaskCase) -> str:
         "swe.cn-east-3.myhuaweicloud.com/openyuanrong/",
     ):
         if image.startswith(known_prefix):
-            image = image[len(known_prefix) :]
+            image = image[len(known_prefix):]
             break
 
     image_name = image.rsplit("/", 1)[-1]
@@ -578,7 +585,7 @@ class AKernelTaskRolloutBackend(SFTTaskRolloutBackend):
         index: int = 0,
     ) -> SFTDockerCommandResult:
         del index
-        return await __import__("asyncio").to_thread(self._run_remote_case, case, config)
+        return await asyncio.to_thread(self._run_remote_case, case, config)
 
     def _run_remote_case(
         self,

@@ -21,9 +21,9 @@ from openjiuwen.extensions.observability.setup import (
 )
 
 if TYPE_CHECKING:
-    from openjiuwen.harness.rails import EvolutionRail
     from openjiuwen.agent_evolving.agent_rl.online.backends.rl.rail import RLOnlineRail
     from openjiuwen.agent_evolving.agent_rl.online.backends.sft.rail import SFTOnlineRail
+    from openjiuwen.harness.rails import EvolutionRail
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +277,8 @@ def build_online_training_rail_from_env(
             capture_mode=env_config.capture_mode,
         )
     logger.info(
-        "build_online_training_rail_from_env: %s ready, gateway=%s, backend=%s, lora_policy=%s, capture_mode=%s, sft_upload=%s",
+        "build_online_training_rail_from_env: %s ready, gateway=%s, backend=%s, "
+        "lora_policy=%s, capture_mode=%s, sft_upload=%s",
         type(rail).__name__,
         env_config.gateway_endpoint,
         env_config.backend,

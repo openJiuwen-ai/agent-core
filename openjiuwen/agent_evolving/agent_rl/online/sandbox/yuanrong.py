@@ -152,7 +152,8 @@ class YuanrongSandboxManager:
 
         tunnel_port = int(proxy_port) - 1
         timeout_seconds = float(timeout if timeout is not None else os.getenv("AKERNEL_TUNNEL_CONNECT_TIMEOUT", "60"))
-        self._yr_get(self.sandbox._instance.start_tunnel_server.invoke(tunnel_port, proxy_port))
+        sandbox_instance = getattr(self.sandbox, "_instance")
+        self._yr_get(sandbox_instance.start_tunnel_server.invoke(tunnel_port, proxy_port))
         tunnel_ws_url = self._build_tunnel_ws_url(tunnel_port)
         tunnel_client = TunnelClient(upstream)
         logger.info(
@@ -285,18 +286,23 @@ class YuanrongSandboxManager:
     # Filesystem operations
     # ========================================================================
 
-    def read(self, path: str, *, format: str = "text") -> str | bytes:
+    def read(self, path: str, *, read_format: str = "text", **kwargs: Any) -> str | bytes:
         """Read file content from sandbox filesystem.
 
         Args:
             path: Remote file path in sandbox.
-            format: "text" returns str, "bytes" returns bytes.
+            read_format: "text" returns str, "bytes" returns bytes.
 
         Returns:
             File content as str or bytes.
         """
-        logger.debug("Reading sandbox file path=%s format=%s", path, format)
-        raw = self.sandbox.files.read(path, format=format)
+        if "format" in kwargs:
+            read_format = str(kwargs.pop("format"))
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"unexpected keyword argument(s): {unexpected}")
+        logger.debug("Reading sandbox file path=%s format=%s", path, read_format)
+        raw = self.sandbox.files.read(path, format=read_format)
         return raw
 
     def write(self, path: str, data: str | bytes) -> SandboxEntryInfo:

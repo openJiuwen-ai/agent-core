@@ -179,7 +179,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help='Treat each invoke end as session done for trajectory upload',
     )
-    parser.add_argument('--session-flush-token-threshold-k', type=int, default=None, help='SFT raw flush threshold in K tokens')
+    parser.add_argument(
+        '--session-flush-token-threshold-k',
+        type=int,
+        default=None,
+        help='SFT raw flush threshold in K tokens',
+    )
     parser.add_argument('--sft-scenario', default=None, help='SFT scenario name')
     parser.add_argument('--lora-repo', default=None, help='LoRA storage dir (default: ./lora_repo)')
     parser.add_argument('--jiuwen-agent-server-port', type=int, default=None, help='JiuwenClaw agent server port')

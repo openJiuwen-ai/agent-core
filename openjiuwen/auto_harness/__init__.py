@@ -23,7 +23,7 @@ from openjiuwen.rsi.auto_harness import (
 
 # Keep old submodule imports working, for example
 # ``openjiuwen.auto_harness.infra.git_auth`` used by older JiuwenSwarm builds.
-__path__ = list(_rsi_auto_harness.__path__)
+globals()["__path__"] = list(_rsi_auto_harness.__path__)
 
 __all__ = [
     "AutoHarnessConfig",

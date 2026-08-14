@@ -21,8 +21,8 @@ class SFTTrajectoryCollector:
     def __init__(self, *, converter: Optional[SFTRawTrajectoryConverter] = None) -> None:
         self.converter = converter or SFTRawTrajectoryConverter()
 
+    @staticmethod
     def collect_llm_interaction(
-        self,
         record: TokenInTokenOutRecord,
         *,
         step: Any,
