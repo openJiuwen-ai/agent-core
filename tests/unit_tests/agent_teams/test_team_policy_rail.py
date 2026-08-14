@@ -1120,6 +1120,14 @@ class TestTagNoticeInclusion:
         assert "team-inbound" in prompt
         assert "prompt-attachment" not in prompt
 
+    @pytest.mark.level1
+    def test_external_cli_prompt_includes_task_dispatch_section(self):
+        # EXTERNAL_CLI shares the teammate dispatch template (claim/complete);
+        # _DISPATCH_ROLE_SLUGS must list it or the section vanishes and the
+        # member loses its task-intake instructions.
+        prompt = build_team_member_system_prompt(role=TeamRole.EXTERNAL_CLI, member_name="cli-1", language="cn")
+        assert "# 任务下发与获取" in prompt
+
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_rail_static_sections_include_the_notice(self):

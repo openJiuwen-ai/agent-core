@@ -198,7 +198,6 @@ class MessageHandler(BaseCoordinationHandler):
         is_human_agent = backend is not None and await backend.is_human_agent(member_name)
         is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
 
-
         while True:
             all_unread = await self._read_all_unread(member_name)
             new_messages = [m for m in all_unread if m.message_id not in seen_ids]
@@ -396,6 +395,8 @@ class MessageHandler(BaseCoordinationHandler):
             return TeamRole.HUMAN_AGENT
         if backend.is_bridge_agent(member_name):
             return TeamRole.BRIDGE_AGENT
+        if backend.is_external_cli_agent(member_name):
+            return TeamRole.EXTERNAL_CLI
         # The leader uses the team's leader_member_name from team_spec.
         team_spec = self._blueprint.team_spec
         if team_spec is not None and member_name == team_spec.leader_member_name:

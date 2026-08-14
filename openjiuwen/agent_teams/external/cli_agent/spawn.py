@@ -277,6 +277,7 @@ async def build_cli_runtime(
             member_agent_id=member_agent_id,
             team_context_tracker=team_context_tracker,
             team_name=descriptor.team_name,
+            role=ctx.role.value,
         )
     if ctx.cli_agent == "codex":
         if command_override is not None:
@@ -319,6 +320,7 @@ async def build_cli_runtime(
             turn_idle_timeout_s=codex_turn_idle_timeout_s,
             turn_idle_retries=codex_turn_idle_retries,
             team_context_tracker=team_context_tracker,
+            role=ctx.role.value,
         )
     if ssh_transport is not None:
         raise_error(

@@ -58,11 +58,8 @@ def team_context(configurator: Any) -> tuple[Any, str] | None:
 async def teammate_member_names(team_backend: Any, team_name: str) -> list[str]:
     """Return teammate member names for a team."""
     members = await team_backend.db.member.get_team_members(team_name)
-    return [
-        member.member_name
-        for member in members
-        if getattr(member, "role", None) == TeamRole.TEAMMATE.value
-    ]
+    coordinated_roles = {TeamRole.TEAMMATE.value, TeamRole.EXTERNAL_CLI.value}
+    return [m.member_name for m in members if getattr(m, "role", None) in coordinated_roles]
 
 
 def matches_scope(
@@ -97,12 +94,7 @@ def info_from_options(
     scope: WorktreeOwnerScope,
 ) -> MemberWorktreeInfo | None:
     """Build host worktree metadata from persisted DB member options."""
-    if not (
-        worktree.path
-        and worktree.session_id
-        and worktree.project_hash
-        and worktree.managed_root
-    ):
+    if not (worktree.path and worktree.session_id and worktree.project_hash and worktree.managed_root):
         team_logger.warning(
             "Keeping worktree for teammate {} because worktree ownership metadata is incomplete: {}",
             member_name,
@@ -153,11 +145,7 @@ async def resolve_current_session_member_worktree(
         return None
     worktree = get_member_worktree(teammate)
     worktree_info = member_worktree_info.get(member_name)
-    has_db_worktree = (
-        worktree is not None
-        and worktree.isolation == "worktree"
-        and bool(worktree.path)
-    )
+    has_db_worktree = worktree is not None and worktree.isolation == "worktree" and bool(worktree.path)
     if worktree_info is None and not has_db_worktree:
         return None
 

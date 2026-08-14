@@ -97,6 +97,16 @@ class TeamRole(str, Enum):
     that ends by calling the structured-output tool, then is torn down.
     Context is fresh per call ("用完即弃"); workers never poll the
     mailbox, claim tasks, or run multi-turn.
+
+    ``EXTERNAL_CLI`` is a teammate driven by a third-party CLI subprocess
+    (e.g. Claude CLI / Codex CLI) rather than a local DeepAgent. It is a
+    full coordination participant — it polls the mailbox, claims tasks,
+    and self-nudges on stale claimed tasks exactly like ``TEAMMATE``;
+    its ``role`` distinguishes the runtime provenance so observability and
+    prompt/worktree policies can treat it as a coordinated member without
+    aliasing it onto the plain ``TEAMMATE`` label. Role-driven dispatch
+    (CLI-vs-DeepAgent) is gated on the ``cli_agent`` registry, not on this
+    role value.
     """
 
     LEADER = "leader"
@@ -104,6 +114,20 @@ class TeamRole(str, Enum):
     HUMAN_AGENT = "human_agent"
     BRIDGE_AGENT = "bridge_agent"
     WORKER = "worker"
+    EXTERNAL_CLI = "external_cli"
+
+    @property
+    def is_coordinated_member(self) -> bool:
+        """Whether this role participates in the coordination loop as an autonomous member.
+
+        ``TEAMMATE`` and ``EXTERNAL_CLI`` both poll the mailbox, claim tasks,
+        self-nudge on stale claimed tasks, and receive team tool-approval /
+        worktree policies. They are the two coordinated-member roles; gates
+        that previously branched on ``== TEAMRole.TEAMMATE`` as a proxy for
+        "is a participating autonomous member" should use this instead so the
+        next coordinated role does not silently fall out of those paths.
+        """
+        return self in (TeamRole.TEAMMATE, TeamRole.EXTERNAL_CLI)
 
 
 class BridgeMailboxInjectMode(str, Enum):

@@ -63,7 +63,7 @@ async def test_spawn_external_cli_agent_registers_member(make_backend):
 
     member = await backend.get_member("cli-1")
     assert member is not None
-    assert member.role == "teammate"
+    assert member.role == "external_cli"
 
 
 @pytest.mark.asyncio
