@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from ..abstract.rollouter import SFTDockerCommandSpec, SFTTaskRolloutBackend
+from ..abstract.rollouter import TaskRolloutBackend, TaskRolloutCommandSpec
 from ..backends.rollouter.docker_runtime import (
     sft_rollout_concurrency,
 )
@@ -111,19 +111,19 @@ def _normalize_rollout_backend(raw: str) -> str:
     return "docker"
 
 
-def _backend_registry() -> dict[str, SFTTaskRolloutBackend]:
+def _backend_registry() -> dict[str, TaskRolloutBackend]:
     from ..backends.rollouter.task_rollout_backends import (
         AKernelTaskRolloutBackend,
         DockerTaskRolloutBackend,
         LocalProgramTaskRolloutBackend,
     )
 
-    backends: tuple[SFTTaskRolloutBackend, ...] = (
+    backends: tuple[TaskRolloutBackend, ...] = (
         DockerTaskRolloutBackend(),
         LocalProgramTaskRolloutBackend(),
         AKernelTaskRolloutBackend(),
     )
-    registry: dict[str, SFTTaskRolloutBackend] = {}
+    registry: dict[str, TaskRolloutBackend] = {}
     for backend in backends:
         for name in (backend.name, *backend.aliases):
             registry[_normalize_rollout_backend(name)] = backend
@@ -131,7 +131,7 @@ def _backend_registry() -> dict[str, SFTTaskRolloutBackend]:
     return registry
 
 
-def get_task_rollout_backend(name: str) -> SFTTaskRolloutBackend:
+def get_task_rollout_backend(name: str) -> TaskRolloutBackend:
     """Return the concrete rollout backend selected by ``name``."""
 
     registry = _backend_registry()
@@ -172,7 +172,7 @@ def build_task_rollout_local_repo_spec(
     config: SFTTaskRolloutConfig,
     *,
     index: int = 0,
-) -> SFTDockerCommandSpec:
+) -> TaskRolloutCommandSpec:
     """Build a host-process rollout command for a local SWE checkout.
 
     Compatibility wrapper for the ``akernel`` backend.
@@ -188,7 +188,7 @@ def build_task_rollout_local_program_spec(
     config: SFTTaskRolloutConfig,
     *,
     index: int = 0,
-) -> SFTDockerCommandSpec:
+) -> TaskRolloutCommandSpec:
     """Build a host-process rollout command for a self-contained local Python task."""
 
     from ..backends.rollouter.task_rollout_backends import LocalProgramTaskRolloutBackend

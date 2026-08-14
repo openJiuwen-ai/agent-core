@@ -19,10 +19,9 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ...abstract.rollouter import SFTDockerCommandResult
-from ...core.task_rollouter import SFTTaskCase, SFTTaskRolloutBackend, SFTTaskRolloutConfig
+from ...abstract.rollouter import TaskRolloutBackend, TaskRolloutCommandResult, TaskRolloutCommandSpec
+from ...core.task_rollouter import SFTTaskCase, SFTTaskRolloutConfig
 from .docker_runtime import (
-    SFTDockerCommandSpec,
     SFTJiuwenclawDockerRequest,
     build_jiuwenclaw_docker_command,
     build_jiuwenclaw_docker_env,
@@ -491,7 +490,7 @@ def _build_akernel_bundle(
     return work_dir, archive_path
 
 
-class DockerTaskRolloutBackend(SFTTaskRolloutBackend):
+class DockerTaskRolloutBackend(TaskRolloutBackend):
     """Run each SWE case inside its declared task Docker image."""
 
     name = "docker"
@@ -522,16 +521,16 @@ class DockerTaskRolloutBackend(SFTTaskRolloutBackend):
         config: SFTTaskRolloutConfig,
         *,
         index: int = 0,
-    ) -> SFTDockerCommandSpec:
+    ) -> TaskRolloutCommandSpec:
         del index
-        return SFTDockerCommandSpec(
+        return TaskRolloutCommandSpec(
             name=case.instance_id,
             command=self.build_command(case, config),
             timeout_seconds=config.timeout_seconds,
         )
 
 
-class AKernelTaskRolloutBackend(SFTTaskRolloutBackend):
+class AKernelTaskRolloutBackend(TaskRolloutBackend):
     """Run one case in a remote Yuanrong/AKernel sandbox."""
 
     name = "akernel"
@@ -546,9 +545,9 @@ class AKernelTaskRolloutBackend(SFTTaskRolloutBackend):
         config: SFTTaskRolloutConfig,
         *,
         index: int = 0,
-    ) -> SFTDockerCommandSpec:
+    ) -> TaskRolloutCommandSpec:
         del config, index
-        return SFTDockerCommandSpec(
+        return TaskRolloutCommandSpec(
             name=case.instance_id,
             command=["akernel-sandbox", "--case", case.instance_id],
             timeout_seconds=900,
@@ -583,7 +582,7 @@ class AKernelTaskRolloutBackend(SFTTaskRolloutBackend):
         config: SFTTaskRolloutConfig,
         *,
         index: int = 0,
-    ) -> SFTDockerCommandResult:
+    ) -> TaskRolloutCommandResult:
         del index
         return await asyncio.to_thread(self._run_remote_case, case, config)
 
@@ -591,7 +590,7 @@ class AKernelTaskRolloutBackend(SFTTaskRolloutBackend):
         self,
         case: SFTTaskCase,
         config: SFTTaskRolloutConfig,
-    ) -> SFTDockerCommandResult:
+    ) -> TaskRolloutCommandResult:
         manager = None
         work_dir = None
         remote_command = ["akernel-sandbox", "--case", case.instance_id]
@@ -664,7 +663,7 @@ class AKernelTaskRolloutBackend(SFTTaskRolloutBackend):
                 gateway_url=config.gateway_url,
                 api_key=os.getenv("TRAJECTORY_GATEWAY_API_KEY", ""),
             )
-            return SFTDockerCommandResult(
+            return TaskRolloutCommandResult(
                 name=case.instance_id,
                 command=remote_command,
                 exit_code=int(result.exit_code or 0),
@@ -673,7 +672,7 @@ class AKernelTaskRolloutBackend(SFTTaskRolloutBackend):
             )
         except Exception as exc:
             logger.exception("AKernel rollout failed case=%s", case.instance_id)
-            return SFTDockerCommandResult(
+            return TaskRolloutCommandResult(
                 name=case.instance_id,
                 command=remote_command,
                 exit_code=1,
@@ -687,7 +686,7 @@ class AKernelTaskRolloutBackend(SFTTaskRolloutBackend):
                 shutil.rmtree(work_dir, ignore_errors=True)
 
 
-class LocalProgramTaskRolloutBackend(SFTTaskRolloutBackend):
+class LocalProgramTaskRolloutBackend(TaskRolloutBackend):
     """Run a self-contained local Python task directory without Docker."""
 
     name = "local_program"
@@ -699,7 +698,7 @@ class LocalProgramTaskRolloutBackend(SFTTaskRolloutBackend):
         config: SFTTaskRolloutConfig,
         *,
         index: int = 0,
-    ) -> SFTDockerCommandSpec:
+    ) -> TaskRolloutCommandSpec:
         source_dir, work_dir, repo_dir = _prepare_local_program_workspace(case, config)
         data_dir = work_dir / "jiuwenswarm"
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -724,7 +723,7 @@ class LocalProgramTaskRolloutBackend(SFTTaskRolloutBackend):
             source_dir,
             work_dir,
         )
-        return SFTDockerCommandSpec(
+        return TaskRolloutCommandSpec(
             name=case.instance_id,
             command=_host_task_command(config),
             timeout_seconds=config.timeout_seconds,

@@ -1,17 +1,17 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Rollouter interfaces for task execution and SFT sample generation."""
+"""Rollouter interfaces for task execution backends."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
 @dataclass(frozen=True)
-class SFTDockerCommandSpec:
+class TaskRolloutCommandSpec:
     """One bounded task-rollout command plus metadata needed to run it."""
 
     name: str
@@ -21,7 +21,7 @@ class SFTDockerCommandSpec:
 
 
 @dataclass(frozen=True)
-class SFTDockerCommandResult:
+class TaskRolloutCommandResult:
     """Bounded process output from one task-rollout command."""
 
     name: str
@@ -31,8 +31,8 @@ class SFTDockerCommandResult:
     stderr_tail: str
 
 
-class SFTTaskRolloutBackend(ABC):
-    """Execute one SFT task through a pluggable rollout backend."""
+class TaskRolloutBackend(ABC):
+    """Execute one task through a pluggable rollout backend."""
 
     name = ""
     aliases: tuple[str, ...] = ()
@@ -44,7 +44,7 @@ class SFTTaskRolloutBackend(ABC):
         config: Any,
         *,
         index: int = 0,
-    ) -> SFTDockerCommandSpec:
+    ) -> TaskRolloutCommandSpec:
         """Return one bounded process spec for the selected task case."""
 
     async def run_case(
@@ -53,7 +53,7 @@ class SFTTaskRolloutBackend(ABC):
         config: Any,
         *,
         index: int = 0,
-    ) -> SFTDockerCommandResult:
+    ) -> TaskRolloutCommandResult:
         """Run one case.
 
         Command-based backends use this default implementation. Backends that
@@ -66,34 +66,8 @@ class SFTTaskRolloutBackend(ABC):
         return await run_docker_command_spec(self.build_spec(case, config, index=index))
 
 
-@dataclass
-class SFTRolloutContext:
-    """Runtime dependencies and defaults shared by SFT rollouters."""
-
-    supervisor: Any = None
-    default_user_id: str = ""
-    target_model_id: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-class SFTRollouter(ABC):
-    """Base class for raw-trajectory to SFT-sample conversion."""
-
-    scenario: str = ""
-
-    @abstractmethod
-    async def rollout(
-        self,
-        raw_trajectories: list[dict[str, Any]],
-        context: SFTRolloutContext,
-    ) -> list[dict[str, Any]]:
-        """Generate normalized ``sft-sample-v1`` payloads."""
-
-
 __all__ = [
-    "SFTDockerCommandResult",
-    "SFTDockerCommandSpec",
-    "SFTRolloutContext",
-    "SFTRollouter",
-    "SFTTaskRolloutBackend",
+    "TaskRolloutBackend",
+    "TaskRolloutCommandResult",
+    "TaskRolloutCommandSpec",
 ]

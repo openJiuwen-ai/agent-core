@@ -17,11 +17,6 @@ from typing import Any
 import httpx
 
 from openjiuwen.agent_evolving.agent_rl.online.abstract.lora import LoRARepositoryProtocol
-from openjiuwen.agent_evolving.agent_rl.online.backends.sft.llama_factory import (
-    LLaMAFactoryTrainConfig,
-    LLaMAFactoryTrainerAdapter,
-    prepare_llama_factory_sft_run,
-)
 from openjiuwen.agent_evolving.agent_rl.online.backends.sft.rollouter import (
     SFTRolloutContext,
     build_sft_rollouter,
@@ -62,11 +57,6 @@ class SFTTrainingExecutor:
         self.dry_run = bool(dry_run)
         self._process_runner = ManagedTrainingProcess("sft")
         self._stop_requested = False
-        self._llama_factory = LLaMAFactoryTrainerAdapter(
-            base_model_path=self.base_model_path,
-            training_gpu_ids=self.training_gpu_ids,
-            process_runner=self._process_runner,
-        )
         self._supervisor = (
             SupervisorClient(supervisor_url, token=supervisor_token, model=supervisor_model)
             if supervisor_url
@@ -132,39 +122,26 @@ class SFTTrainingExecutor:
             len(samples),
             run_dir,
             self.rollouter.scenario,
-            "custom-command" if self.trainer_command else "llama-factory",
+            "custom-command" if self.trainer_command else "none",
         )
 
+        dataset_path = run_dir / "train.json"
         if self.dry_run:
-            paths = prepare_llama_factory_sft_run(
-                samples,
-                dataset_dir=run_dir / "llama_factory",
-                train_config=LLaMAFactoryTrainConfig.from_env(
-                    model_name_or_path=self.base_model_path,
-                    output_dir=str(output_dir),
-                ),
-            )
-            return str(paths.train_file)
+            self._write_dataset(dataset_path, samples)
+            return str(dataset_path)
+
+        if not self.trainer_command:
+            raise ValueError("SFT trainer_command is required when dry_run is disabled")
 
         try:
-            if self.trainer_command:
-                dataset_path = run_dir / "train.json"
-                self._write_dataset(dataset_path, samples)
-                await asyncio.to_thread(
-                    self._run_trainer_command,
-                    user_id=user_id,
-                    dataset_path=dataset_path,
-                    output_dir=output_dir,
-                    run_dir=run_dir,
-                )
-            else:
-                await asyncio.to_thread(
-                    self._llama_factory.train,
-                    samples=samples,
-                    dataset_dir=run_dir / "llama_factory",
-                    output_dir=output_dir,
-                    run_dir=run_dir,
-                )
+            self._write_dataset(dataset_path, samples)
+            await asyncio.to_thread(
+                self._run_trainer_command,
+                user_id=user_id,
+                dataset_path=dataset_path,
+                output_dir=output_dir,
+                run_dir=run_dir,
+            )
         except subprocess.CalledProcessError as exc:
             publish_dir = self._resolve_publish_dir(output_dir)
             if self._stop_requested and self._is_publishable_lora_dir(publish_dir):

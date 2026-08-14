@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.agent_evolving.agent_rl.online.abstract.rollouter import (
-    SFTDockerCommandResult,
-    SFTDockerCommandSpec,
+    TaskRolloutCommandResult,
+    TaskRolloutCommandSpec,
 )
 
 logger = logging.getLogger(__name__)
@@ -264,7 +264,7 @@ def sft_rollout_concurrency(default: int = 1) -> int:
     return value
 
 
-async def run_docker_command_spec(spec: SFTDockerCommandSpec) -> SFTDockerCommandResult:
+async def run_docker_command_spec(spec: TaskRolloutCommandSpec) -> TaskRolloutCommandResult:
     """Run one Docker command in a worker thread and keep only bounded logs."""
 
     completed = await asyncio.to_thread(
@@ -277,7 +277,7 @@ async def run_docker_command_spec(spec: SFTDockerCommandSpec) -> SFTDockerComman
         timeout=max(1, int(spec.timeout_seconds)),
         check=False,
     )
-    return SFTDockerCommandResult(
+    return TaskRolloutCommandResult(
         name=spec.name,
         command=spec.command,
         exit_code=completed.returncode,
@@ -287,15 +287,15 @@ async def run_docker_command_spec(spec: SFTDockerCommandSpec) -> SFTDockerComman
 
 
 async def run_docker_command_specs(
-    specs: list[SFTDockerCommandSpec],
+    specs: list[TaskRolloutCommandSpec],
     *,
     concurrency: int,
-) -> list[SFTDockerCommandResult]:
+) -> list[TaskRolloutCommandResult]:
     """Run Docker rollout commands concurrently while preserving input order."""
 
     semaphore = asyncio.Semaphore(max(1, int(concurrency)))
 
-    async def _run_one(spec: SFTDockerCommandSpec) -> SFTDockerCommandResult:
+    async def _run_one(spec: TaskRolloutCommandSpec) -> TaskRolloutCommandResult:
         async with semaphore:
             logger.info(
                 "Starting SFT Docker command name=%s command=%s",

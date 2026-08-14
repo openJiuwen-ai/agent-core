@@ -5,6 +5,9 @@ import json
 import sys
 import tarfile
 import types
+from pathlib import Path
+
+import pytest
 
 
 def _install_dashscope_stub(monkeypatch):
@@ -387,10 +390,10 @@ def test_docker_runtime_default_agent_core_root(monkeypatch):
     assert command_prefix == ""
 
 
-def test_raw_converter_builds_session_batch():
+def test_sft_converter_builds_session_batch():
     from datetime import datetime
 
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.raw_converter import SFTRawTrajectoryConverter
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.converter import SFTRawTrajectoryConverter
     from openjiuwen.agent_evolving.trajectory.model import Trajectory
     from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID, TRAJECTORY_SOURCE
     from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
@@ -891,78 +894,35 @@ def test_task_rollouter_loads_markdown_cases_and_passes_image_env(tmp_path, monk
     assert "SFT_ONLINE_UPLOAD_MODE=sample" in direct_cmd
 
 
-def test_llama_factory_converter_normalizes_v1_messages():
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.llama_factory import (
-        convert_samples_to_llama_factory_openai,
-    )
-
-    records = convert_samples_to_llama_factory_openai(
-        [
-            {
-                "sample_id": "s1",
-                "session_id": "sess-1",
-                "messages": [
-                    {"role": "system", "content": [{"type": "text", "value": "system prompt"}], "loss_weight": 0.0},
-                    {"role": "user", "content": [{"type": "text", "value": "hello"}], "loss_weight": 0.0},
-                    {"role": "user", "content": [{"type": "text", "value": "world"}], "loss_weight": 0.0},
-                    {"role": "assistant", "content": [{"type": "text", "value": "done"}], "loss_weight": 1.0},
-                ],
-            }
-        ]
-    )
-
-    assert len(records) == 1
-    assert records[0]["messages"][0]["role"] == "system"
-    assert records[0]["messages"][1]["role"] == "user"
-    assert "hello" in records[0]["messages"][1]["content"]
-    assert "world" in records[0]["messages"][1]["content"]
-    assert records[0]["messages"][-1]["role"] == "assistant"
-    assert records[0]["messages"][-1]["content"] == "done"
-
-
-def test_llama_factory_dataset_files_are_written(tmp_path):
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.llama_factory import (
-        LLaMAFactoryTrainConfig,
-        prepare_llama_factory_sft_run,
-    )
-
-    paths = prepare_llama_factory_sft_run(
-        [
-            {
-                "sample_id": "s1",
-                "session_id": "sess-1",
-                "messages": [
-                    {"role": "user", "content": "hello"},
-                    {"role": "assistant", "content": "world", "loss_mask": 1},
-                ],
-                "tools": [{"type": "function", "function": {"name": "echo", "description": "echo"}}],
-            }
-        ],
-        dataset_dir=tmp_path / "dataset",
-        train_config=LLaMAFactoryTrainConfig(
-            model_name_or_path="/models/Qwen3-4B-Instruct-2507",
-            output_dir=str(tmp_path / "lora"),
-        ),
-    )
-
-    assert paths.train_file.exists()
-    assert paths.dataset_info_file.exists()
-    assert paths.train_yaml_file.exists()
-    assert paths.stats_file.exists()
-
-
-def test_sft_executor_defaults_to_llama_factory(monkeypatch, tmp_path):
+def test_sft_executor_dry_run_writes_generic_dataset(tmp_path):
     from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
 
-    captured = {}
+    executor = SFTTrainingExecutor(
+        base_model_path="/models/Qwen3-4B-Instruct-2507",
+        lora_repo=None,
+        notifier=None,
+        training_gpu_ids="4,5",
+        target_model_id="teacher",
+        trainer_command="",
+        dry_run=True,
+    )
 
-    def _fake_train(*, samples, dataset_dir, output_dir, run_dir):
-        captured["samples"] = samples
-        captured["dataset_dir"] = dataset_dir
-        captured["output_dir"] = output_dir
-        captured["run_dir"] = run_dir
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+    async def _run():
+        dataset_path = await executor.train_batch(
+            user_id="u1",
+            samples=[{"sample_id": "s1", "messages": [{"role": "user", "content": "hello"}], "assistant_message": {"role": "assistant", "content": "world"}}],
+            training_count=1,
+            tmp_root=str(tmp_path),
+        )
+        payload = json.loads(Path(dataset_path).read_text(encoding="utf-8"))
+        assert payload["samples"][0]["sample_id"] == "s1"
+        assert payload["samples"][0]["messages"][-1]["loss_mask"] == 1
+
+    asyncio.run(_run())
+
+
+def test_sft_executor_requires_trainer_command_when_not_dry_run(tmp_path):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
 
     executor = SFTTrainingExecutor(
         base_model_path="/models/Qwen3-4B-Instruct-2507",
@@ -973,17 +933,14 @@ def test_sft_executor_defaults_to_llama_factory(monkeypatch, tmp_path):
         trainer_command="",
         dry_run=False,
     )
-    monkeypatch.setattr(executor._llama_factory, "train", _fake_train)
 
     async def _run():
-        result = await executor.train_batch(
-            user_id="u1",
-            samples=[{"sample_id": "s1", "messages": [{"role": "user", "content": "hello"}], "assistant_message": {"role": "assistant", "content": "world"}}],
-            training_count=1,
-            tmp_root=str(tmp_path),
-        )
-        assert result is None or isinstance(result, str)
+        with pytest.raises(ValueError, match="trainer_command"):
+            await executor.train_batch(
+                user_id="u1",
+                samples=[{"sample_id": "s1", "messages": [{"role": "user", "content": "hello"}], "assistant_message": {"role": "assistant", "content": "world"}}],
+                training_count=1,
+                tmp_root=str(tmp_path),
+            )
 
     asyncio.run(_run())
-    assert captured["samples"][0]["sample_id"] == "s1"
-    assert captured["dataset_dir"].name == "llama_factory"

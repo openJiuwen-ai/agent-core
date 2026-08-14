@@ -11,16 +11,14 @@ import logging
 import os
 import re
 import shlex
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.agent_evolving.agent_rl.online.abstract.rollouter import (
-    SFTRolloutContext,
-    SFTRollouter,
-)
+from openjiuwen.agent_evolving.agent_rl.online.abstract.rollouter import TaskRolloutCommandSpec
 from openjiuwen.agent_evolving.agent_rl.online.backends.rollouter.docker_runtime import (
-    SFTDockerCommandSpec,
     SFTJiuwenclawDockerRequest,
     build_jiuwenclaw_docker_command,
     default_jiuwenclaw_task_command,
@@ -41,6 +39,30 @@ from openjiuwen.agent_evolving.agent_rl.online.backends.sft.supervisor_client im
 
 logger = logging.getLogger(__name__)
 SUPERVISOR_ROLLOUT_RAW_PROTOCOL_VERSION = "sft-supervisor-rollout-raw-v1"
+
+
+@dataclass
+class SFTRolloutContext:
+    """Runtime dependencies and defaults shared by SFT sample rollouters."""
+
+    supervisor: Any = None
+    default_user_id: str = ""
+    target_model_id: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class SFTRollouter(ABC):
+    """Base class for raw-trajectory to SFT-sample conversion."""
+
+    scenario: str = ""
+
+    @abstractmethod
+    async def rollout(
+        self,
+        raw_trajectories: list[dict[str, Any]],
+        context: SFTRolloutContext,
+    ) -> list[dict[str, Any]]:
+        """Generate normalized ``sft-sample-v1`` payloads."""
 
 
 # Scenario 2-2 and 2-1 both consume raw trajectories, but they split them
@@ -345,7 +367,7 @@ async def _run_docker_rollout(raw: dict[str, Any], *, rollout_user_id: str = "")
     docker_cmd = build_jiuwenclaw_docker_command(request)
     logger.info("SFT docker rollout image=%s command=%s", request.image, shlex.join(docker_cmd[:8] + ["..."]))
     completed = await run_docker_command_spec(
-        SFTDockerCommandSpec(
+        TaskRolloutCommandSpec(
             name=request.instance_id or str(raw.get("raw_id") or "case"),
             command=docker_cmd,
             timeout_seconds=int(os.getenv("SFT_DOCKER_ROLLOUT_TIMEOUT", "600")),

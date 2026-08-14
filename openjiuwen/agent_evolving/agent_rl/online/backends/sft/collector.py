@@ -12,7 +12,7 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import iter_spans
 from openjiuwen.agent_evolving.trajectory.team import span_category
 
-from .raw_converter import SFTRawTrajectoryBatch, SFTRawTrajectoryConverter
+from .converter import SFTRawTrajectoryBatch, SFTRawTrajectoryConverter
 
 
 class SFTTrajectoryCollector:

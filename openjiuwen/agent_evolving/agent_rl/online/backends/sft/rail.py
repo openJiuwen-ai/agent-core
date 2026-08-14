@@ -31,7 +31,7 @@ from ...core.interaction import TokenInTokenOutForwarder
 from ...core.rail import BaseOnlineTrainingRail
 from ...core.uploader import TrajectoryUploader
 from .collector import SFTTrajectoryCollector
-from .raw_converter import SFTRawTrajectoryConverter
+from .converter import SFTRawTrajectoryConverter
 
 logger = logging.getLogger(__name__)
 
