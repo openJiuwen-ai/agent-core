@@ -8,8 +8,9 @@ import asyncio
 import json
 import os
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import List, Any, Union, Optional, Tuple, Dict, Iterable
+from typing import List, Any, Union, Optional, Tuple, Dict, Iterable, ClassVar
 
 import anyio
 from pydantic import BaseModel
@@ -36,6 +37,7 @@ from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptExcept
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.single_agent.tool_batch_concurrency import ToolBatchConcurrencyController
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
@@ -115,6 +117,8 @@ class AbilityManager:
     # updates when an LLM emits multiple calls for one file in a single turn.
     _FILE_PATH_TOOL_NAMES = frozenset({"read_file", "write_file", "edit_file"})
 
+    _tool_batch_concurrency: ClassVar[Optional[ToolBatchConcurrencyController]] = None
+
     def __init__(self, owner_id: Optional[str] = None):
         self._tools: Dict[str, ToolCard] = {}
         self._workflows: Dict[str, WorkflowCard] = {}
@@ -129,6 +133,77 @@ class AbilityManager:
     def set_owner_id(self, owner_id: Optional[str]) -> None:
         """Set the owner agent id used to qualify stateful tool ids."""
         self._owner_id = owner_id
+
+    @classmethod
+    def configure_tool_batch_concurrency(
+        cls,
+        controller: Optional[ToolBatchConcurrencyController],
+    ) -> None:
+        """Register batch-scoped tool concurrency controller (optional, host-provided).
+
+        Registering a controller does **not** limit all ``execute`` / single-tool
+        calls. Callers must enter ``tool_batch_scope`` (e.g. ReAct iteration or
+        resume paths) so ``run_with_slot`` sees an active batch context.
+
+        Thread-unsafe: call once at startup on the agent asyncio event loop.
+        """
+        cls._tool_batch_concurrency = controller
+
+    @classmethod
+    @asynccontextmanager
+    async def tool_batch_scope(cls, session: Optional[Session]):
+        """Re-entrant batch scope for one model-response tool batch.
+
+        Required for policy limits to apply: ``run_with_slot`` is a no-op when
+        no batch context is active (scope-outside execution is unlimited).
+        """
+        ctrl = cls._tool_batch_concurrency
+        if ctrl is None:
+            yield
+            return
+        async with ctrl.batch_scope(session_id=cls._session_label(session)):
+            yield
+
+    @staticmethod
+    def _session_label(session: Optional[Session]) -> str:
+        """Resolve a session id string for batch-scope logging.
+
+        Fallback order matches jiuwenclaw agent Session (``get_session_id``),
+        workflow sessions (``session_id()``), then generic attributes.
+        """
+        if session is None:
+            return "-"
+
+        sid_getter = getattr(session, "get_session_id", None)
+        if callable(sid_getter):
+            try:
+                value = sid_getter()
+                if value:
+                    return str(value)
+            except Exception as exc:
+                logger.debug(
+                    "Failed to read session id via get_session_id(): %s",
+                    exc,
+                )
+
+        sid_attr = getattr(session, "session_id", None)
+        if callable(sid_attr):
+            try:
+                value = sid_attr()
+                if value:
+                    return str(value)
+            except Exception as exc:
+                logger.debug(
+                    "Failed to read session id via session_id(): %s",
+                    exc,
+                )
+        elif sid_attr:
+            return str(sid_attr)
+
+        sid = getattr(session, "id", None)
+        if sid:
+            return str(sid)
+        return "-"
 
     def set_mcp_tool_allowlist(
             self,
@@ -996,7 +1071,7 @@ class AbilityManager:
                 )
             else:
                 tasks.append(
-                    self._railed_execute_single_tool_call(
+                    self._execute_single_with_batch_slot(
                         ctx=tool_ctx,
                         tool_call=single_tool_call,
                         session=session,
@@ -1179,6 +1254,32 @@ class AbilityManager:
             tool_ctx.inputs.tool_result = tool_result
             tool_ctx.inputs.tool_msg = tool_message
         return tool_result, tool_message
+
+    async def _execute_single_with_batch_slot(
+            self,
+            ctx: AgentCallbackContext,
+            tool_call: ToolCall,
+            session: Session,
+            tag=None,
+    ) -> Tuple[Any, ToolMessage]:
+        """Run one railed tool call under the optional batch concurrency controller.
+
+        This is the stable-branch equivalent of enterprise ``execute_single``'s
+        ``run_with_slot`` wiring: limits apply only inside ``tool_batch_scope``.
+        """
+
+        async def _run_railed() -> Tuple[Any, ToolMessage]:
+            return await self._railed_execute_single_tool_call(
+                ctx=ctx,
+                tool_call=tool_call,
+                session=session,
+                tag=tag,
+            )
+
+        controller = AbilityManager._tool_batch_concurrency
+        if controller is not None:
+            return await controller.run_with_slot(tool_call, _run_railed)
+        return await _run_railed()
 
     @rail(
         before=AgentCallbackEvent.BEFORE_TOOL_CALL,

@@ -27,6 +27,7 @@ Use the todo tools (todo_create, todo_modify, todo_list, todo_get) to break down
 **When NOT to create a task list:**
 - The task is simple: a one-off question, a single action, or a few straightforward steps that can be completed directly
 - Executing directly is more efficient than planning first
+- The user's intent is only to list a plan or checklist, with no request to carry out the work in this turn — present the list in your reply as text or a table; do not call todo_create, todo_modify, todo_get, etc.
 
 **Task granularity — avoid over-decomposing:**
 - Each todo should represent an execution stage that needs to be advanced or verified independently, not a single tool call, a small action, or a component of the final deliverable; do not mechanically convert the structure of the final deliverable into todos
@@ -72,6 +73,7 @@ TODO_SYSTEM_PROMPT_CN = """
 **何时不创建任务列表：**
 - 任务本身简单：一次性问答、单一动作，或几步连续操作即可直接完成
 - 直接执行比先规划更高效的场景
+- 用户意图仅是列出计划或清单，本轮并不要求实际推进工作 — 直接在回复中以文本或表格呈现清单，勿调用 todo_create、todo_modify、todo_get等
 
 **任务粒度 — 拆分任务时避免过度细化：**
 - 每条 todo 应对应一个需要独立推进或验证的执行阶段，而不是一次工具调用、一个细小动作或最终交付内容的组成部分；不要把最终交付内容的结构机械地转换为 todo
@@ -139,6 +141,36 @@ PROGRESS_REMINDER_USER_PROMPT_CN = """
 PROGRESS_REMINDER_USER_PROMPT: Dict[str, str] = {
     "cn": PROGRESS_REMINDER_USER_PROMPT_CN,
     "en": PROGRESS_REMINDER_USER_PROMPT_EN,
+}
+
+# ---------------------------------------------------------------------------
+# Advance reminder user prompt (bilingual) - pending without in_progress
+# ---------------------------------------------------------------------------
+TODO_ADVANCE_REMINDER_USER_PROMPT_CN = """
+以下是当前任务规划中所有任务的内容和状态：
+
+{tasks}
+
+没有 in_progress 任务，但仍有 pending，请调用 todo_modify 推进：
+若当前步骤未完成，先将对应 pending 设为 in_progress；
+若当前步骤完成，同一批将已完成项设为 completed、下一项 pending 设为 in_progress；
+不确定 id 时先 todo_list。
+"""
+
+TODO_ADVANCE_REMINDER_USER_PROMPT_EN = """
+Current task plan:
+
+{tasks}
+
+No task is in_progress, but pending items remain. Call todo_modify to advance:
+If the current step is not finished, set the corresponding pending item to in_progress first;
+If the current step is finished, mark the completed item completed and the next pending item in_progress in the same batch;
+Call todo_list if IDs are uncertain.
+"""
+
+TODO_ADVANCE_REMINDER_USER_PROMPT: Dict[str, str] = {
+    "cn": TODO_ADVANCE_REMINDER_USER_PROMPT_CN,
+    "en": TODO_ADVANCE_REMINDER_USER_PROMPT_EN,
 }
 
 # ---------------------------------------------------------------------------
@@ -269,6 +301,17 @@ def build_progress_reminder_user_prompt(language: str = "cn",
         language, PROGRESS_REMINDER_USER_PROMPT["cn"]
     )
     return prompt_template.format(tasks=tasks, in_progress_task=in_progress_task)
+
+
+def build_todo_advance_reminder_user_prompt(
+    language: str = "cn",
+    tasks: str = "",
+) -> str:
+    """Reminder when pending todos exist but none are in_progress."""
+    prompt_template = TODO_ADVANCE_REMINDER_USER_PROMPT.get(
+        language, TODO_ADVANCE_REMINDER_USER_PROMPT["cn"]
+    )
+    return prompt_template.format(tasks=tasks)
 
 
 def build_todo_section(language: str = "cn", model_selection: Optional[Dict] = None) -> Optional["PromptSection"]:

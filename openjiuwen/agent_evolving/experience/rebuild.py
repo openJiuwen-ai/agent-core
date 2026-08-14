@@ -94,6 +94,8 @@ class ExperienceRebuildService:
             "archive_pair": archive_pair.to_payload() if archive_pair else None,
             "archive_version": archive_pair.version if archive_pair else None,
             "archive_error": archive_error,
+            # Full live entries at prepare time for bump/changelog if Agent clears disk early.
+            "entries_snapshot": [entry.to_dict() for entry in records_log.entries],
         }
         if normalized_ids is not None:
             context_payload["record_ids"] = normalized_ids
@@ -143,12 +145,18 @@ class ExperienceRebuildService:
         self,
         rebuild_context: dict[str, Any],
     ) -> list[EvolutionRecord]:
-        """Select entries for version bump and changelog."""
+        """Select entries for version bump and changelog.
+
+        Prefer live ``evolutions.json``. If Agent cleared it before finalize,
+        fall back to ``entries_snapshot`` captured during prepare.
+        """
         skill_name = str(rebuild_context.get("skill_name") or "").strip()
         subject_kind = rebuild_context.get("subject_kind")
         record_ids = _normalize_record_ids(rebuild_context.get("record_ids"))
         evo_log = await self._store.load_full_evolution_log(skill_name, subject_kind=subject_kind)
         entries = list(getattr(evo_log, "entries", None) or [])
+        if not entries:
+            entries = _entries_from_snapshot(rebuild_context.get("entries_snapshot"))
         if not record_ids:
             return entries
         return _filter_rebuild_records(
@@ -211,6 +219,25 @@ def _normalize_record_ids(record_ids: Optional[Sequence[str]]) -> Optional[List[
         seen.add(item)
         normalized.append(item)
     return normalized or None
+
+
+def _entries_from_snapshot(snapshot: Any) -> list[EvolutionRecord]:
+    """Restore EvolutionRecord list from prepare-time ``entries_snapshot``."""
+    if not isinstance(snapshot, list) or not snapshot:
+        return []
+    restored: list[EvolutionRecord] = []
+    for item in snapshot:
+        if not isinstance(item, dict):
+            continue
+        try:
+            restored.append(EvolutionRecord.from_dict(item))
+        except (TypeError, ValueError, KeyError) as exc:
+            logger.warning(
+                "[ExperienceRebuildService] skip invalid snapshot entry id=%s: %s",
+                item.get("id"),
+                exc,
+            )
+    return restored
 
 
 def _filter_rebuild_records(

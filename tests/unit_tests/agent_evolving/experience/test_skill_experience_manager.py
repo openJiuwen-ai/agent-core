@@ -540,7 +540,7 @@ async def test_commit_proposal_uses_shared_lifecycle(monkeypatch):
     assert result.applied_count == 1
     assert captured["approved_request_id"] == captured["request_id"]
     assert manager.pending_approval_snapshots == {}
-    manager._store.append_record.assert_awaited_once_with("skill-a", record, subject_kind=None)
+    manager._store.append_record.assert_awaited_once_with("skill-a", record, subject_kind=None, update_skill_md=True)
 
 
 def test_stage_records_registers_pending_change_in_snapshot_store():
@@ -749,7 +749,7 @@ async def test_approve_request_applies_pending_snapshot_and_clears_on_success():
     assert result.to_host_result(request_id=pending.request_id).status == "persisted"
     assert result.to_host_result(request_id=pending.request_id).applied_count == 1
     assert pending.request_id not in manager.pending_approval_snapshots
-    manager._store.append_record.assert_awaited_once_with("skill-a", record, subject_kind=None)
+    manager._store.append_record.assert_awaited_once_with("skill-a", record, subject_kind=None, update_skill_md=True)
 
 
 @pytest.mark.asyncio
@@ -765,7 +765,7 @@ async def test_approve_request_applies_only_approved_record_ids():
     assert result.rejected_count == 1
     assert result.pending_count == 0
     assert pending.request_id not in manager.pending_approval_snapshots
-    manager._store.append_record.assert_awaited_once_with("skill-a", record_1, subject_kind=None)
+    manager._store.append_record.assert_awaited_once_with("skill-a", record_1, subject_kind=None, update_skill_md=True)
 
 
 @pytest.mark.asyncio
@@ -790,7 +790,7 @@ async def test_approve_request_failure_retries_only_approved_record_ids():
     assert retry.applied_count == 1
     assert retry.rejected_count == 0
     assert retry.pending_count == 0
-    manager._store.append_record.assert_awaited_once_with("skill-a", record_1, subject_kind=None)
+    manager._store.append_record.assert_awaited_once_with("skill-a", record_1, subject_kind=None, update_skill_md=True)
 
 
 @pytest.mark.asyncio
@@ -843,7 +843,7 @@ async def test_retry_request_reuses_unified_lifecycle_for_pending_batch():
 
     assert second.applied_count == 1
     assert second.pending_count == 0
-    manager._store.append_record.assert_awaited_once_with("skill-a", record_2, subject_kind=None)
+    manager._store.append_record.assert_awaited_once_with("skill-a", record_2, subject_kind=None, update_skill_md=True)
 
 
 @pytest.mark.asyncio

@@ -159,6 +159,67 @@ class TestEvolutionRecord:
         assert record.source == "unknown"
         assert record.change.target == EvolutionTarget.BODY
         assert record.applied is False
+        assert record.root_cause is None
+
+    @staticmethod
+    def test_to_dict_includes_root_cause_and_summary():
+        record = EvolutionRecord.make(
+            source="execution_failure",
+            context="ctx",
+            change=make_patch(summary="short summary"),
+            summary="short summary",
+            root_cause="技能缺少超时重试指引",
+        )
+        data = record.to_dict()
+        assert data["summary"] == "short summary"
+        assert data["root_cause"] == "技能缺少超时重试指引"
+        loaded = EvolutionRecord.from_dict(data)
+        assert loaded.summary == "short summary"
+        assert loaded.root_cause == "技能缺少超时重试指引"
+
+    @staticmethod
+    def test_to_dict_includes_review_status_when_set():
+        record = EvolutionRecord.make(
+            source="execution_failure",
+            context="ctx",
+            change=make_patch(),
+            review_status="suggest",
+        )
+        data = record.to_dict()
+        assert data["review_status"] == "suggest"
+        loaded = EvolutionRecord.from_dict(data)
+        assert loaded.review_status == "suggest"
+
+    @staticmethod
+    def test_to_dict_omits_review_status_when_none():
+        record = EvolutionRecord.make(
+            source="execution_failure",
+            context="ctx",
+            change=make_patch(),
+        )
+        assert "review_status" not in record.to_dict()
+
+    @staticmethod
+    def test_from_dict_migrates_legacy_root_causes_list():
+        loaded = EvolutionRecord.from_dict({
+            "id": "ev_legacy",
+            "source": "execution_failure",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "context": "ctx",
+            "change": {
+                "section": "Troubleshooting",
+                "action": "append",
+                "content": "x",
+                "target": "body",
+            },
+            "root_causes": [{
+                "failure_type": "skill_instruction_gap",
+                "confidence": 0.8,
+                "evidence": ["timeout"],
+                "should_evolve": True,
+            }],
+        })
+        assert loaded.root_cause == "skill_instruction_gap：timeout"
 
 
 class TestEvolutionLog:
@@ -176,15 +237,35 @@ class TestEvolutionLog:
             version="1.0.0",
             updated_at="2026-01-01T00:00:00+00:00",
             entries=[make_record()],
+            summary="技能经验总摘要",
         )
         data = original.to_dict()
         loaded = EvolutionLog.from_dict(data)
         empty = EvolutionLog.empty("skill-x")
 
         assert loaded.skill_id == "skill-a"
+        assert loaded.summary == "技能经验总摘要"
+        assert "summary" in data
         assert len(loaded.entries) == 1
         assert empty.skill_id == "skill-x"
         assert empty.entries == []
+        assert empty.summary is None
+
+    @staticmethod
+    def test_refresh_summary_joins_entry_summaries_and_caps_at_100():
+        log = EvolutionLog(
+            skill_id="skill-a",
+            entries=[
+                make_record(id="ev_1", summary="超时先重试"),
+                make_record(id="ev_2", summary="权限不足用sudo"),
+                make_record(id="ev_3", summary="字" * 80),
+            ],
+        )
+        log.refresh_summary()
+        assert log.summary is not None
+        assert "超时先重试" in log.summary
+        assert "权限不足用sudo" in log.summary
+        assert len(log.summary) <= 100
 
 
 class TestEvolutionSignal:

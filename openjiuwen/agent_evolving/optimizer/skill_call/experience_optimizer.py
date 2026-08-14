@@ -21,6 +21,8 @@ from openjiuwen.agent_evolving.optimizer.llm_resilience import (
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser import (
     ParsedExperienceDraft,
+    normalize_root_cause,
+    normalize_summary,
     parse_experience_drafts_with_error,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call.templates import (
@@ -318,7 +320,19 @@ def _build_existing_summary(records: List[EvolutionRecord], label: str = "") -> 
             lines.append(f"- {record}")
             continue
         prefix = f"[{label}] " if label else ""
-        lines.append(f"- {prefix}[{record.id}] [{record.change.section}] {record.change.content}")
+        summary = normalize_summary(
+            getattr(record, "summary", None)
+            or getattr(record.change, "summary", None)
+            or ""
+        )
+        if not summary:
+            first_line = (
+                record.change.content.splitlines()[0]
+                if record.change.content
+                else record.id
+            )
+            summary = normalize_summary(first_line) or record.id
+        lines.append(f"- {prefix}[{record.id}] [{record.change.section}] {summary}")
     return "\n".join(lines)
 
 
@@ -337,6 +351,9 @@ def _parse_analyzer_response(raw: str) -> Optional[dict]:
         data["candidates"] = []
     if "root_causes" not in data:
         data["root_causes"] = []
+    data["root_cause"] = normalize_root_cause(
+        data.get("root_cause", data.get("root_causes"))
+    )
     return data
 
 
@@ -372,7 +389,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         profile: str = "regular",
         *,
-        two_stage: bool = False,
+        two_stage: bool = True,
     ) -> None:
         super().__init__()
         if profile not in {"regular", "team"}:
@@ -583,11 +600,10 @@ class SkillExperienceOptimizer(BaseOptimizer):
             analyzer_preview,
         )
         if not data["candidates"]:
-            causes = data.get("root_causes", [])
             logger.info(
                 "[SkillExperienceOptimizer] analyzer produced 0 candidates "
-                "(root_causes=%d, skill=%s)",
-                len(causes),
+                "(root_cause=%r, skill=%s)",
+                data.get("root_cause"),
                 ctx.skill_name,
             )
         return data
@@ -633,6 +649,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
     async def _generate_regular_records(self, ctx: EvolutionContext) -> List[EvolutionRecord]:
         """Generate regular-profile records via two-stage or single-stage pipeline."""
         inputs = self._build_generation_inputs(ctx)
+        default_root_cause: Optional[str] = None
 
         if self._two_stage:
             logger.info(
@@ -643,20 +660,23 @@ class SkillExperienceOptimizer(BaseOptimizer):
             try:
                 analyzer_data = await self._run_analyzer(ctx, inputs)
                 if not analyzer_data or not analyzer_data.get("candidates"):
-                    root_cause_count = len((analyzer_data or {}).get("root_causes", []))
                     logger.info(
                         "[SkillExperienceOptimizer] two-stage early exit (skill=%s): "
-                        "no candidates (root_causes=%d)",
+                        "no candidates (root_cause=%r)",
                         ctx.skill_name,
-                        root_cause_count,
+                        (analyzer_data or {}).get("root_cause"),
                     )
                     return []
                 candidates = analyzer_data.get("candidates", [])
+                default_root_cause = normalize_root_cause(
+                    analyzer_data.get("root_cause")
+                )
                 logger.info(
                     "[SkillExperienceOptimizer] analyzer done (skill=%s): "
-                    "candidates=%d, entering formatter",
+                    "candidates=%d, root_cause=%r, entering formatter",
                     ctx.skill_name,
                     len(candidates),
+                    default_root_cause,
                 )
                 drafts = await self._run_formatter(analyzer_data, ctx.skill_name)
             except BaseError as exc:
@@ -695,6 +715,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
             except ValueError:
                 logger.warning("[SkillExperienceOptimizer] all retries exhausted, returning no records")
                 return []
+            default_root_cause = self._root_cause_from_signals(ctx.signals)
 
         if not drafts:
             return []
@@ -704,7 +725,17 @@ class SkillExperienceOptimizer(BaseOptimizer):
             skip_log_message="LLM decided to skip",
             empty_log_message="LLM returned empty content, skipping",
             generated_log_prefix="",
+            default_root_cause=default_root_cause,
         )
+
+    @staticmethod
+    def _root_cause_from_signals(signals: List[EvolutionSignal]) -> Optional[str]:
+        """Fallback trigger reason when single-stage drafts omit root_cause."""
+        parts: List[str] = []
+        for signal in signals[:3]:
+            evidence = (signal.excerpt or "").strip()
+            parts.append(evidence[:100] if evidence else signal.signal_type)
+        return normalize_root_cause("；".join(parts))
 
     async def _generate_team_records(self, ctx: EvolutionContext) -> List[EvolutionRecord]:
         """Generate team/swarm skill records with the team prompt profile."""
@@ -755,6 +786,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
             skip_log_message="team profile skipped record",
             empty_log_message="team profile returned empty content, skipping",
             generated_log_prefix="team profile ",
+            default_root_cause=self._root_cause_from_signals(ctx.signals),
         )
 
     def _default_existing_summary(self) -> str:
@@ -775,9 +807,11 @@ class SkillExperienceOptimizer(BaseOptimizer):
         skip_log_message: str,
         empty_log_message: str,
         generated_log_prefix: str,
+        default_root_cause: Optional[str] = None,
     ) -> List[EvolutionRecord]:
         source = signals[0].signal_type
         merged_context = _build_context(signals)
+        fallback_cause = normalize_root_cause(default_root_cause)
         text_records: List[EvolutionRecord] = []
         script_records: List[EvolutionRecord] = []
         for draft in drafts:
@@ -793,28 +827,36 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 logger.info("[SkillExperienceOptimizer] %s", empty_log_message)
                 continue
             is_script = patch.target == EvolutionTarget.SCRIPT
-            if is_script and len(script_records) >= 1:
+            if is_script and len(script_records) >= 3:
                 continue
-            if not is_script and len(text_records) >= 2:
+            if not is_script and len(text_records) >= 5:
                 continue
+            summary = normalize_summary(draft.summary)
+            if summary and patch.summary != summary:
+                patch.summary = summary
+            root_cause = normalize_root_cause(draft.root_cause) or fallback_cause
             record = EvolutionRecord.make(
                 source=source,
                 context=merged_context,
                 change=patch,
                 score=INITIAL_SCORE_BY_SIGNAL.get(source, 0.6),
-                summary=draft.summary,
+                summary=summary,
+                root_cause=root_cause,
             )
             if is_script:
                 script_records.append(record)
             else:
                 text_records.append(record)
             logger.info(
-                "[SkillExperienceOptimizer] %sgenerated record %s -> [%s] target=%s merge_target=%s",
+                "[SkillExperienceOptimizer] %sgenerated record %s -> [%s] target=%s "
+                "merge_target=%s root_cause=%r summary_chars=%d",
                 generated_log_prefix,
                 record.id,
                 patch.section,
                 patch.target.value,
                 patch.merge_target,
+                root_cause,
+                len(summary or ""),
             )
         return text_records + script_records
 

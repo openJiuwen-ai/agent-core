@@ -10,10 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from openjiuwen.agent_evolving.checkpointing.store_archive import StoreArchiveHelper
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionLog
 from openjiuwen.agent_evolving.checkpointing.versioning import parse_semver
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
-from openjiuwen.agent_evolving.utils import split_markdown_frontmatter
 from openjiuwen.core.common.logging import logger
 
 _EVOLUTION_FILENAME = "evolutions.json"
@@ -22,7 +22,7 @@ _SKILL_ARCHIVE_PREFIX = "SKILL."
 _SKILL_ARCHIVE_SUFFIX = ".md"
 _EVOLUTION_ARCHIVE_PREFIX = "evolutions."
 _EVOLUTION_ARCHIVE_SUFFIX = ".json"
-_DEFAULT_VERSION = "v1.0.0"
+_DEFAULT_VERSION = "1.0.0"
 DEFAULT_ARCHIVE_KEEP_LATEST = 10
 
 
@@ -192,7 +192,8 @@ class EvolutionArchiveService:
         state. Live ``evolutions.json`` is always cleared (empty entries,
         retained version). Evolution archives are empty by design, so their
         contents are never restored. ``render_evolution_markdown`` is not
-        called so the restored ``SKILL.md`` is left unmodified.
+        called so the restored ``SKILL.md`` body and any leftover files under
+        ``evolution/`` are left unmodified by this path.
         """
         name, kind = self._subject_name_and_kind(subject, subject_kind=subject_kind)
         pair = self._resolve_pair(subject, pair_or_version, subject_kind=kind)
@@ -325,9 +326,19 @@ class EvolutionArchiveService:
         skill_md = self._store.find_skill_md(skill_dir) or skill_dir / "SKILL.md"
         if skill_md.is_file():
             content = await self._store.read_file_text(skill_md)
-            frontmatter_version = self._extract_version_from_skill_md(content)
-            if frontmatter_version:
-                return frontmatter_version
+            parsed = self._extract_version_from_skill_md(content)
+            if parsed:
+                return parsed
+            set_version = getattr(self._store, "set_skill_md_version", None)
+            if callable(set_version):
+                await set_version(skill_dir, _DEFAULT_VERSION)
+            else:
+                # Local fallback when store has no SemVer helper: prepend default FM.
+                await self._store.write_file_text(
+                    skill_md,
+                    f"---\nversion: {_DEFAULT_VERSION}\n---\n{content}",
+                )
+            return _DEFAULT_VERSION
         evo_log = await self._store.load_full_evolution_log(name, subject_kind=subject_kind)
         if evo_log.version:
             return evo_log.version
@@ -335,14 +346,7 @@ class EvolutionArchiveService:
 
     @staticmethod
     def _extract_version_from_skill_md(content: str) -> Optional[str]:
-        front_matter, _ = split_markdown_frontmatter(content)
-        if front_matter is None:
-            return None
-        for line in front_matter.strip().split("\n"):
-            if line.startswith("version:"):
-                value = line.split(":", 1)[1].strip().strip('"').strip("'")
-                return value or None
-        return None
+        return StoreArchiveHelper.extract_version_from_skill_md(content)
 
     @staticmethod
     def _archive_version_key(version: str) -> str:

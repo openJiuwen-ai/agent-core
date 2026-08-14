@@ -3,9 +3,25 @@
 
 from unittest.mock import patch
 import pytest
+import pytest_asyncio
 
 from openjiuwen.core.common.clients.connector_pool import ConnectorPool, ConnectorPoolConfig, ConnectorPoolManager, \
     TcpConnectorPool
+from openjiuwen.core.common.utils.singleton import Singleton
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def isolated_connector_pool_manager():
+    """Give every test a fresh process-wide connector pool singleton."""
+    stale_manager = Singleton._instances.pop(ConnectorPoolManager, None)
+    if stale_manager is not None:
+        await stale_manager.close_all()
+
+    yield
+
+    manager = Singleton._instances.pop(ConnectorPoolManager, None)
+    if manager is not None:
+        await manager.close_all()
 
 
 class TestConnectorPool:

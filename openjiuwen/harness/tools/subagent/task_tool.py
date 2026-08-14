@@ -43,6 +43,40 @@ def _summarize_task_description(task_description: Any) -> dict[str, Any]:
     }
 
 
+def resolve_task_tool_model(
+    parent_agent: Any,
+    *,
+    model_name: str = "",
+    model_tier: str = "",
+) -> Any | None:
+    """Resolve an optional per-call Model via host-bound ``resolve_subagent_model``.
+
+    Product layers (e.g. jiuwenswarm) may bind
+    ``parent_agent.resolve_subagent_model(model_name=..., model_tier=...)``
+    returning ``(Model, err|None)`` or a bare ``Model``. When unbound or both
+    selectors are empty, returns ``None`` so ``create_subagent`` keeps its
+    existing ``spec.model or deep_config.model`` fallback.
+    """
+    name = (model_name or "").strip()
+    tier = (model_tier or "").strip().lower()
+    if not name and not tier:
+        return None
+    resolver = getattr(parent_agent, "resolve_subagent_model", None)
+    if not callable(resolver):
+        logger.debug(
+            "[TaskTool] model_name/model_tier ignored: resolve_subagent_model not bound"
+        )
+        return None
+    try:
+        result = resolver(model_name=name, model_tier=tier)
+    except Exception as exc:  # noqa: BLE001 — never break spawn
+        logger.warning("[TaskTool] resolve_subagent_model failed: %s", exc)
+        return None
+    if isinstance(result, tuple):
+        return result[0] if result else None
+    return result
+
+
 class TaskTool(Tool):
     """Tool for delegating tasks to ephemeral subagents with isolated context.
 
@@ -102,6 +136,8 @@ class TaskTool(Tool):
             subagent_type = inputs.get("subagent_type")
             task_description = inputs.get("task_description")
             thinking = str(inputs.get("thinking") or "").strip()
+            model_name = str(inputs.get("model_name") or "").strip()
+            model_tier = str(inputs.get("model_tier") or "").strip().lower()
         else:
             raise build_error(
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
@@ -136,14 +172,29 @@ class TaskTool(Tool):
             f"parent_session={parent_session_id}, sub_session={sub_session_id}"
         )
 
+        task_model = resolve_task_tool_model(
+            self.parent_agent,
+            model_name=model_name,
+            model_tier=model_tier,
+        )
+        # Omit model= when unset so create_subagent keeps its default path.
+        create_kwargs = {}
+        if task_model is not None:
+            create_kwargs["model"] = task_model
+
         try:
             if browser_capabilities is None:
-                subagent = self.parent_agent.create_subagent(subagent_type, sub_session_id)
+                subagent = self.parent_agent.create_subagent(
+                    subagent_type,
+                    sub_session_id,
+                    **create_kwargs,
+                )
             else:
                 subagent = self.parent_agent.create_subagent(
                     subagent_type,
                     sub_session_id,
                     browser_capabilities=browser_capabilities,
+                    **create_kwargs,
                 )
         except Exception as exc:
             logger.error(f"[TaskTool] Subagent creation failed: type={subagent_type}, error={exc}")

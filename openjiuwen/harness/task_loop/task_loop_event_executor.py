@@ -93,7 +93,7 @@ class TaskLoopEventExecutor(TaskExecutor):
 
         query: Any = task_id
         raw_input: Any = None
-        input_parts: List[str] | None = None
+        input_parts: list[str] | None = None
 
         if tasks:
             core_task = tasks[0]
@@ -398,7 +398,7 @@ class TaskLoopEventExecutor(TaskExecutor):
         return None
 
     @staticmethod
-    def _extract_input_parts(event: Any) -> List[str] | None:
+    def _extract_input_parts(event: Any) -> list[str] | None:
         """Return the round's inputs unjoined, when there is more than one.
 
         Inputs that queued up together drive one round and reach the model as

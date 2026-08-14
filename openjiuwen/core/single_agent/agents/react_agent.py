@@ -56,7 +56,7 @@ from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
-from openjiuwen.core.single_agent.ability_manager import illegal_tool_call_reason
+from openjiuwen.core.single_agent.ability_manager import AbilityManager, illegal_tool_call_reason
 from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext
 from openjiuwen.core.single_agent.interrupt.state import (
     BaseInterruptionState,
@@ -1798,7 +1798,10 @@ class ReActAgent(BaseAgent):
             tc_copy.arguments = entry.collected_input
             all_tool_calls.append(tc_copy)
 
-        results = await self._execute_tool_call(ctx, all_tool_calls, session, context)
+        async with AbilityManager.tool_batch_scope(session):
+            results = await self._execute_tool_call(
+                ctx, all_tool_calls, session, context,
+            )
         workflow_interrupt = self._after_execute_tool_call(
             results, all_tool_calls, resume_ai_message, resume_iteration,
             original_query=interruption_state.original_query,
@@ -2120,86 +2123,13 @@ class ReActAgent(BaseAgent):
                                 prefix="[STEERING] ",
                             )
 
-                        ai_message = await self._call_model(
-                            ctx,
-                            context,
-                            tools,
-                        )
-
-                        finish = ctx.consume_force_finish()
-                        if finish:
-                            await self.context_engine.save_contexts(session)
-                            invoke_inputs.result = finish.result
-                            break
-
-                        if not isinstance(ai_message, AssistantMessage):
-                            invoke_inputs.result = ai_message if isinstance(ai_message, dict) else {}
-                            break
-
-                        if ai_message.tool_calls:
-                            kept_tool_calls = []
-                            for tc in ai_message.tool_calls:
-                                illegal_reason = illegal_tool_call_reason(tc)
-                                if illegal_reason:
-                                    session_id = ""
-                                    if session is not None:
-                                        try:
-                                            session_id = str(session.get_session_id() or "")
-                                        except Exception:
-                                            session_id = ""
-                                    logger.warning(
-                                        "[ReActAgent] illegal tool_call stripped before context "
-                                        "session_id=%s reason=%s name=%r tool_call_id=%r",
-                                        session_id,
-                                        illegal_reason,
-                                        getattr(tc, "name", ""),
-                                        getattr(tc, "id", ""),
-                                    )
-                                    continue
-                                kept_tool_calls.append(tc)
-                            ai_message.tool_calls = kept_tool_calls
-
-                        _truncation_detected = (
-                            ai_message is not None
-                            and getattr(ai_message, "finish_reason", "null") == "length"
-                        )
-
-                        if _truncation_detected and _truncation_retry_count < 1:
-                            _truncation_retry_count += 1
-                            logger.info(
-                                "[ReActAgent] truncation detected session_id=%s iteration=%s, "
-                                "retrying with increased max_tokens",
-                                session.get_session_id(),
-                                iteration + 1,
-                            )
-                            await session.write_stream(OutputSchema(
-                                type="truncation_retry",
-                                index=0,
-                                payload={
-                                    "finish_reason": "length",
-                                    "truncated_content": (ai_message.content or "")[:200],
-                                    "phase": "retry_attempt",
-                                },
-                            ))
-                            _truncated_output_tokens = (
-                                getattr(ai_message.usage_metadata, "output_tokens", None)
-                                or 16384
-                            )
-                            ctx.extra["_max_tokens_override"] = _truncated_output_tokens
-                            await self._inject_truncation_notice(ai_message, context)
+                        async with AbilityManager.tool_batch_scope(session):
                             ai_message = await self._call_model(
                                 ctx,
                                 context,
                                 tools,
                             )
-                            ctx.extra.pop("_max_tokens_override", None)
-                            logger.debug(
-                                "[ReActAgent] truncation_retry done session_id=%s iteration=%s "
-                                "finish_reason=%s",
-                                session.get_session_id(),
-                                iteration + 1,
-                                getattr(ai_message, "finish_reason", "null"),
-                            )
+
                             finish = ctx.consume_force_finish()
                             if finish:
                                 await self.context_engine.save_contexts(session)
@@ -2210,105 +2140,179 @@ class ReActAgent(BaseAgent):
                                 invoke_inputs.result = ai_message if isinstance(ai_message, dict) else {}
                                 break
 
+                            if ai_message.tool_calls:
+                                kept_tool_calls = []
+                                for tc in ai_message.tool_calls:
+                                    illegal_reason = illegal_tool_call_reason(tc)
+                                    if illegal_reason:
+                                        session_id = ""
+                                        if session is not None:
+                                            try:
+                                                session_id = str(session.get_session_id() or "")
+                                            except Exception:
+                                                session_id = ""
+                                        logger.warning(
+                                            "[ReActAgent] illegal tool_call stripped before context "
+                                            "session_id=%s reason=%s name=%r tool_call_id=%r",
+                                            session_id,
+                                            illegal_reason,
+                                            getattr(tc, "name", ""),
+                                            getattr(tc, "id", ""),
+                                        )
+                                        continue
+                                    kept_tool_calls.append(tc)
+                                ai_message.tool_calls = kept_tool_calls
+
                             _truncation_detected = (
                                 ai_message is not None
                                 and getattr(ai_message, "finish_reason", "null") == "length"
                             )
 
-                        if _truncation_detected:
-                            logger.info(
-                                "[ReActAgent] truncation persists session_id=%s iteration=%s, "
-                                "continuing to next iteration with truncation notice",
-                                session.get_session_id(),
-                                iteration + 1,
-                            )
-                            await self._inject_truncation_notice(ai_message, context)
-                            await session.write_stream(OutputSchema(
-                                type="truncation_retry",
-                                index=0,
-                                payload={
-                                    "finish_reason": "length",
-                                    "truncated_content": (ai_message.content or "")[:200],
-                                    "phase": "persist",
-                                },
-                            ))
-                            continue
+                            if _truncation_detected and _truncation_retry_count < 1:
+                                _truncation_retry_count += 1
+                                logger.info(
+                                    "[ReActAgent] truncation detected session_id=%s iteration=%s, "
+                                    "retrying with increased max_tokens",
+                                    session.get_session_id(),
+                                    iteration + 1,
+                                )
+                                await session.write_stream(OutputSchema(
+                                    type="truncation_retry",
+                                    index=0,
+                                    payload={
+                                        "finish_reason": "length",
+                                        "truncated_content": (ai_message.content or "")[:200],
+                                        "phase": "retry_attempt",
+                                    },
+                                ))
+                                _truncated_output_tokens = (
+                                    getattr(ai_message.usage_metadata, "output_tokens", None)
+                                    or 16384
+                                )
+                                ctx.extra["_max_tokens_override"] = _truncated_output_tokens
+                                await self._inject_truncation_notice(ai_message, context)
+                                ai_message = await self._call_model(
+                                    ctx,
+                                    context,
+                                    tools,
+                                )
+                                ctx.extra.pop("_max_tokens_override", None)
+                                logger.debug(
+                                    "[ReActAgent] truncation_retry done session_id=%s iteration=%s "
+                                    "finish_reason=%s",
+                                    session.get_session_id(),
+                                    iteration + 1,
+                                    getattr(ai_message, "finish_reason", "null"),
+                                )
+                                finish = ctx.consume_force_finish()
+                                if finish:
+                                    await self.context_engine.save_contexts(session)
+                                    invoke_inputs.result = finish.result
+                                    break
 
-                        await context.add_messages(
-                            AssistantMessage(
-                                content=ai_message.content,
-                                tool_calls=ai_message.tool_calls,
-                                reasoning_content=ai_message.reasoning_content,
-                                usage_metadata=ai_message.usage_metadata,
-                                finish_reason=ai_message.finish_reason,
-                            ),
-                            system_messages=ctx.extra.get("_active_system_messages") or [],
-                            tools=ctx.extra.get("_active_tools") or [],
-                        )
+                                if not isinstance(ai_message, AssistantMessage):
+                                    invoke_inputs.result = ai_message if isinstance(ai_message, dict) else {}
+                                    break
 
-                        if not ai_message.tool_calls:
-                            # If steering arrived while the
-                            # model was generating, continue
-                            # the loop so the next iteration
-                            # drains and injects it.
-                            if ctx.has_pending_steering():
+                                _truncation_detected = (
+                                    ai_message is not None
+                                    and getattr(ai_message, "finish_reason", "null") == "length"
+                                )
+
+                            if _truncation_detected:
+                                logger.info(
+                                    "[ReActAgent] truncation persists session_id=%s iteration=%s, "
+                                    "continuing to next iteration with truncation notice",
+                                    session.get_session_id(),
+                                    iteration + 1,
+                                )
+                                await self._inject_truncation_notice(ai_message, context)
+                                await session.write_stream(OutputSchema(
+                                    type="truncation_retry",
+                                    index=0,
+                                    payload={
+                                        "finish_reason": "length",
+                                        "truncated_content": (ai_message.content or "")[:200],
+                                        "phase": "persist",
+                                    },
+                                ))
                                 continue
-                            await self.context_engine.save_contexts(session)
-                            content = (getattr(ai_message, "content", None) or "").strip()
-                            reasoning = (
-                                getattr(ai_message, "reasoning_content", None) or ""
-                            ).strip()
-                            if not content and not reasoning:
-                                result = {
-                                    "output": (
-                                        "模型未返回有效内容（空响应），"
-                                        "请重试或检查上下文。"
-                                    ),
-                                    "result_type": "error",
-                                    "finish_reason": getattr(
-                                        ai_message, "finish_reason", "null"
-                                    ),
-                                }
-                            else:
-                                result = {
-                                    "output": ai_message.content,
-                                    "result_type": "answer",
-                                    "finish_reason": getattr(
-                                        ai_message, "finish_reason", "null"
-                                    ),
-                                }
-                            invoke_inputs.result = result
-                            break
 
-                        results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
+                            await context.add_messages(
+                                AssistantMessage(
+                                    content=ai_message.content,
+                                    tool_calls=ai_message.tool_calls,
+                                    reasoning_content=ai_message.reasoning_content,
+                                    usage_metadata=ai_message.usage_metadata,
+                                    finish_reason=ai_message.finish_reason,
+                                ),
+                                system_messages=ctx.extra.get("_active_system_messages") or [],
+                                tools=ctx.extra.get("_active_tools") or [],
+                            )
 
-                        finish = ctx.consume_force_finish()
-                        if finish:
-                            await self.context_engine.save_contexts(session)
-                            invoke_inputs.result = finish.result
-                            break
+                            if not ai_message.tool_calls:
+                                # If steering arrived while the
+                                # model was generating, continue
+                                # the loop so the next iteration
+                                # drains and injects it.
+                                if ctx.has_pending_steering():
+                                    continue
+                                await self.context_engine.save_contexts(session)
+                                content = (getattr(ai_message, "content", None) or "").strip()
+                                reasoning = (
+                                    getattr(ai_message, "reasoning_content", None) or ""
+                                ).strip()
+                                if not content and not reasoning:
+                                    result = {
+                                        "output": (
+                                            "模型未返回有效内容（空响应），"
+                                            "请重试或检查上下文。"
+                                        ),
+                                        "result_type": "error",
+                                        "finish_reason": getattr(
+                                            ai_message, "finish_reason", "null"
+                                        ),
+                                    }
+                                else:
+                                    result = {
+                                        "output": ai_message.content,
+                                        "result_type": "answer",
+                                        "finish_reason": getattr(
+                                            ai_message, "finish_reason", "null"
+                                        ),
+                                    }
+                                invoke_inputs.result = result
+                                break
 
-                        hitl_interrupt, sub_agent_outputs = self._after_execute_tool_call_for_hitl(
-                            results, ai_message.tool_calls, ai_message, iteration,
-                            original_query=ctx.extra.get("_original_query", ""),
-                        )
-                        if hitl_interrupt:
-                            await self._commit_interrupt(hitl_interrupt, context, session, invoke_inputs,
-                                                         sub_agent_outputs)
-                            break
+                            results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
 
-                        workflow_interrupt = self._after_execute_tool_call(
-                            results, ai_message.tool_calls, ai_message, iteration,
-                            original_query=ctx.extra.get("_original_query", ""),
-                        )
-                        if workflow_interrupt:
-                            await self._commit_interrupt(workflow_interrupt, context, session, invoke_inputs)
-                            break
+                            finish = ctx.consume_force_finish()
+                            if finish:
+                                await self.context_engine.save_contexts(session)
+                                invoke_inputs.result = finish.result
+                                break
 
-                        # Iteration fully succeeded (LLM + all tools + ToolMessages
-                        # all written). Fire AFTER_REACT_ITERATION so rails (e.g.
-                        # SnapshotRail) can capture a safe-state snapshot.
-                        await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
+                            hitl_interrupt, sub_agent_outputs = self._after_execute_tool_call_for_hitl(
+                                results, ai_message.tool_calls, ai_message, iteration,
+                                original_query=ctx.extra.get("_original_query", ""),
+                            )
+                            if hitl_interrupt:
+                                await self._commit_interrupt(hitl_interrupt, context, session, invoke_inputs,
+                                                             sub_agent_outputs)
+                                break
+
+                            workflow_interrupt = self._after_execute_tool_call(
+                                results, ai_message.tool_calls, ai_message, iteration,
+                                original_query=ctx.extra.get("_original_query", ""),
+                            )
+                            if workflow_interrupt:
+                                await self._commit_interrupt(workflow_interrupt, context, session, invoke_inputs)
+                                break
+
+                            # Iteration fully succeeded (LLM + all tools + ToolMessages
+                            # all written). Fire AFTER_REACT_ITERATION so rails (e.g.
+                            # SnapshotRail) can capture a safe-state snapshot.
+                            await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
                     else:
                         # The loop exhausted its iteration budget. Honor a
                         # force_finish requested by the final iteration's

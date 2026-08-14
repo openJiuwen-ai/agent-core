@@ -95,6 +95,7 @@ class StoreRecordsHelper:
         *,
         skill_dir: Optional[Path] = None,
         subject_kind: Optional[str] = None,
+        refresh_summary: bool = True,
     ) -> None:
         target_dir = skill_dir or self._store.resolve_skill_dir(name, create=True, subject_kind=subject_kind)
         if target_dir is None:
@@ -102,6 +103,8 @@ class StoreRecordsHelper:
 
         target_dir.mkdir(parents=True, exist_ok=True)
         evo_path = target_dir / _EVOLUTION_FILENAME
+        if refresh_summary:
+            evo_log.refresh_summary()
         expected = evo_log.to_dict()
         content = json.dumps(expected, ensure_ascii=False, indent=2)
         await self._write_file_text_atomic(evo_path, content)
@@ -142,8 +145,14 @@ class StoreRecordsHelper:
         *,
         skill_dir: Optional[Path] = None,
         subject_kind: Optional[str] = None,
+        update_skill_md: bool = True,
     ) -> Optional[EvolutionLog]:
-        """Append or merge one record and roll back all related files on failure."""
+        """Append or merge one record and roll back all related files on failure.
+
+        When ``update_skill_md`` is False (suggest mode), the record is persisted to
+        ``evolutions.json`` only and SKILL.md / evolution/*.md are left untouched until
+        the host accepts the suggestion.
+        """
         target_dir = skill_dir or self._store.resolve_skill_dir(name, create=True, subject_kind=subject_kind)
         if target_dir is None:
             return None
@@ -152,7 +161,7 @@ class StoreRecordsHelper:
         evo_path = target_dir / _EVOLUTION_FILENAME
         had_log = evo_path.exists()
         old_log_content = evo_path.read_text(encoding="utf-8") if had_log else None
-        projection_backups = self._snapshot_projection_files(target_dir)
+        projection_backups = self._snapshot_projection_files(target_dir) if update_skill_md else {}
 
         try:
             prepared_record = copy.deepcopy(record)
@@ -164,9 +173,11 @@ class StoreRecordsHelper:
             evo_log.updated_at = datetime.now(tz=timezone.utc).isoformat()
 
             await self.save_evolution_log(name, evo_log, skill_dir=target_dir)
-            await self._store.render_evolution_markdown(name, subject_kind=subject_kind)
+            if update_skill_md:
+                await self._store.render_evolution_markdown(name, subject_kind=subject_kind)
         except Exception:
-            await self._restore_projection_files(target_dir, projection_backups)
+            if update_skill_md:
+                await self._restore_projection_files(target_dir, projection_backups)
             await self._restore_text_file(evo_path, old_log_content if had_log else None)
             raise
 
@@ -175,9 +186,10 @@ class StoreRecordsHelper:
             record.change.content = prepared_record.change.content
 
         logger.info(
-            "[EvolutionStore] atomically wrote record %s for skill=%s",
+            "[EvolutionStore] atomically wrote record %s for skill=%s update_skill_md=%s",
             record.id,
             name,
+            update_skill_md,
         )
         return evo_log
 

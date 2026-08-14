@@ -19,6 +19,7 @@ from openjiuwen.agent_evolving.checkpointing.types import (
 from openjiuwen.agent_evolving.experience.types import EvolutionContext, OnlineEvolutionContext
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser import (
+    normalize_root_cause,
     normalize_summary,
     parse_experience_draft,
     parse_experience_drafts_with_error,
@@ -324,7 +325,7 @@ class TestSkillExperienceOptimizerGenerate:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_generate_filters_skip_empty_and_truncates_to_two():
+    async def test_generate_filters_skip_empty_and_applies_limits():
         llm = MagicMock()
         candidates = [
             {"action": "append", "target": "body", "section": "Troubleshooting", "content": "A"},
@@ -351,6 +352,31 @@ class TestSkillExperienceOptimizerGenerate:
             },
             {"action": "append", "target": "body", "section": "Examples", "content": "C", "merge_target": None},
             {"action": "append", "target": "body", "section": "Examples", "content": "   ", "merge_target": None},
+            *[
+                {
+                    "action": "append",
+                    "target": "body",
+                    "section": "Troubleshooting",
+                    "summary": f"Extra tip {idx}",
+                    "content": f"EXTRA{idx}",
+                    "merge_target": None,
+                }
+                for idx in range(4)
+            ],
+            *[
+                {
+                    "action": "append",
+                    "target": "script",
+                    "section": "Scripts",
+                    "summary": f"Script tip {idx}",
+                    "content": f"print({idx})",
+                    "script_filename": f"s{idx}.py",
+                    "script_language": "python",
+                    "script_purpose": "demo",
+                    "merge_target": None,
+                }
+                for idx in range(4)
+            ],
         ]
         llm.invoke = AsyncMock(side_effect=_two_stage_llm_side_effect(candidates, patches))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en", two_stage=True)
@@ -363,13 +389,43 @@ class TestSkillExperienceOptimizerGenerate:
             existing_body_records=[make_record("ev_b1", "body old")],
         )
         records = await optimizer.generate_records(ctx)
-        assert len(records) == 2
-        assert records[0].change.content == "A"
-        assert records[0].summary == "When tool calls time out, retry with a shorter prompt."
-        assert records[1].change.content == "B"
-        assert records[1].summary == "Clarify selection wording when users ask for audits."
+        text_records = [record for record in records if record.change.target != EvolutionTarget.SCRIPT]
+        script_records = [record for record in records if record.change.target == EvolutionTarget.SCRIPT]
+        assert len(text_records) == 5
+        assert len(script_records) == 3
+        assert text_records[0].change.content == "A"
+        assert text_records[0].summary == "When tool calls time out, retry with a shorter prompt."
+        assert text_records[0].root_cause == "skill_instruction_gap：test signal"
+        assert text_records[1].change.content == "B"
+        assert text_records[1].summary == "Clarify selection wording when users ask for audits."
         assert llm.invoke.await_args_list[0].kwargs["timeout"] == 150
         assert llm.invoke.await_count == 2
+
+    @staticmethod
+    def test_two_stage_prompts_require_summary_keywords_and_root_cause():
+        from openjiuwen.agent_evolving.optimizer.skill_call.templates import (
+            SKILL_EXPERIENCE_ANALYZER_PROMPT,
+            SKILL_EXPERIENCE_FORMATTER_PROMPT,
+            SKILL_EXPERIENCE_GENERATE_PROMPT,
+        )
+
+        for lang in ("cn", "en"):
+            generate = SKILL_EXPERIENCE_GENERATE_PROMPT[lang]
+            analyzer = SKILL_EXPERIENCE_ANALYZER_PROMPT[lang]
+            formatter = SKILL_EXPERIENCE_FORMATTER_PROMPT[lang]
+            assert '"summary"' in generate
+            assert '"keywords"' in generate
+            assert '"root_cause"' in generate
+            assert "100" in generate
+            assert '"summary"' in analyzer
+            assert '"keywords"' in analyzer
+            assert '"root_cause"' in analyzer
+            assert "root_causes" in analyzer
+            assert "100" in analyzer
+            assert '"summary"' in formatter
+            assert '"keywords"' in formatter
+            assert '"root_cause"' in formatter
+            assert "100" in formatter
 
     @staticmethod
     @pytest.mark.asyncio
@@ -628,6 +684,7 @@ class TestParsing:
         assert normalize_summary("null") is None
         assert normalize_summary(None) is None
         assert normalize_summary(["not", "a", "summary"]) is None
+        assert len(normalize_summary("字" * 150) or "") == 100
 
     @staticmethod
     def test_parse_experience_draft_carries_patch_and_summary():
@@ -637,6 +694,7 @@ class TestParsing:
                 "target": "body",
                 "section": "Troubleshooting",
                 "summary": "Check encoding before reading CSV files.",
+                "root_cause": "Skill lacks encoding guidance",
                 "content": "### CSV input checks\n- Validate encoding first.",
             }
         )
@@ -645,6 +703,10 @@ class TestParsing:
         assert draft.patch.section == "Troubleshooting"
         assert draft.patch.content.startswith("### CSV input checks")
         assert draft.summary == "Check encoding before reading CSV files."
+        assert draft.root_cause == "Skill lacks encoding guidance"
+        assert normalize_root_cause(
+            [{"failure_type": "skill_instruction_gap", "evidence": ["timeout"]}]
+        ) == "skill_instruction_gap：timeout"
 
     @staticmethod
     def test_parse_experience_draft_ignores_summary_for_skip():
@@ -1136,34 +1198,26 @@ class TestScriptLimit:
     async def test_text_and_script_limits_independent():
         llm = MagicMock()
         candidates = [
-            {"action": "append", "target": "body", "section": "Troubleshooting", "content": "A"},
-            {"action": "append", "target": "body", "section": "Examples", "content": "B"},
-            {"action": "append", "target": "body", "section": "Instructions", "content": "C-overflow"},
-            {"action": "append", "target": "script", "section": "Scripts", "content": "import os"},
-            {"action": "append", "target": "script", "section": "Scripts", "content": "import sys"},
+            {"action": "append", "target": "body", "section": "Troubleshooting", "content": f"T{i}"}
+            for i in range(6)
+        ] + [
+            {"action": "append", "target": "script", "section": "Scripts", "content": f"print({i})"}
+            for i in range(4)
         ]
         patches = [
-            {"action": "append", "target": "body", "section": "Troubleshooting", "content": "A"},
-            {"action": "append", "target": "body", "section": "Examples", "content": "B"},
-            {"action": "append", "target": "body", "section": "Instructions", "content": "C-overflow"},
+            {"action": "append", "target": "body", "section": "Troubleshooting", "content": f"T{i}"}
+            for i in range(6)
+        ] + [
             {
                 "action": "append",
                 "target": "script",
                 "section": "Scripts",
-                "content": "import os",
-                "script_filename": "s.py",
+                "content": f"print({i})",
+                "script_filename": f"s{i}.py",
                 "script_language": "python",
                 "script_purpose": "test",
-            },
-            {
-                "action": "append",
-                "target": "script",
-                "section": "Scripts",
-                "content": "import sys",
-                "script_filename": "s2.py",
-                "script_language": "python",
-                "script_purpose": "test2",
-            },
+            }
+            for i in range(4)
         ]
         llm.invoke = AsyncMock(side_effect=_two_stage_llm_side_effect(candidates, patches))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en", two_stage=True)
@@ -1178,10 +1232,10 @@ class TestScriptLimit:
         records = await optimizer.generate_records(ctx)
         text_recs = [r for r in records if r.change.target != EvolutionTarget.SCRIPT]
         script_recs = [r for r in records if r.change.target == EvolutionTarget.SCRIPT]
-        assert len(text_recs) == 2
-        assert len(script_recs) == 1
-        assert text_recs[0].change.content == "A"
-        assert text_recs[1].change.content == "B"
+        assert len(text_recs) == 5
+        assert len(script_recs) == 3
+        assert [r.change.content for r in text_recs] == ["T0", "T1", "T2", "T3", "T4"]
+        assert [r.change.content for r in script_recs] == ["print(0)", "print(1)", "print(2)"]
 
 
 class TestBackwardContextBinding:

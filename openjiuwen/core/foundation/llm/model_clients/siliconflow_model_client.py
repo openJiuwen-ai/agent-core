@@ -321,12 +321,6 @@ class SiliconFlowModelClient(BaseModelClient):
                 if output_parser:
                     # Use streaming parser
                     async for parsed_result in self._astream_with_parser(response, output_parser):
-                        await trigger(
-                            LLMCallEvents.LLM_OUTPUT,
-                            model_name=params.get("model"),
-                            model_provider=self.model_client_config.client_provider,
-                            result=parsed_result,
-                            is_stream=True)
                         if final_message:
                             final_message = final_message + parsed_result
                         else:
@@ -338,12 +332,6 @@ class SiliconFlowModelClient(BaseModelClient):
                         if line:
                             parsed_chunk = self._parse_stream_chunk(line)
                             if parsed_chunk:
-                                await trigger(
-                                    LLMCallEvents.LLM_OUTPUT,
-                                    model_name=params.get("model"),
-                                    model_provider=self.model_client_config.client_provider,
-                                    result=parsed_chunk,
-                                    is_stream=True)
                                 if final_message:
                                     final_message = final_message + parsed_chunk
                                 else:
@@ -351,6 +339,16 @@ class SiliconFlowModelClient(BaseModelClient):
                                 yield parsed_chunk
             if tracer_record_data:
                 await tracer_record_data(llm_response=final_message)
+
+            await trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+                response=final_message.content if final_message else None,
+                reasoning_content=final_message.reasoning_content if final_message else None,
+                usage=final_message.usage_metadata if final_message else None,
+                tool_calls=final_message.tool_calls if final_message else None)
 
         except Exception as e:
             await trigger(

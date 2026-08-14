@@ -50,7 +50,7 @@ async def test_apply_experience_drafts_persists_records():
     assert snapshots == {}
     store.skill_exists.assert_called_once_with("skill-a", subject_kind="skill")
     store.append_record.assert_awaited_once()
-    assert store.append_record.await_args.kwargs == {"subject_kind": "skill"}
+    assert store.append_record.await_args.kwargs == {"subject_kind": "skill", "update_skill_md": True}
 
 
 @pytest.mark.asyncio
@@ -152,7 +152,7 @@ async def test_submission_service_accepts_shared_subject_kinds_without_configura
     assert result["subject"]["kind"] == "swarm-skill"
     store.append_record.assert_awaited_once()
     assert store.append_record.await_args.args[0] == "team-a"
-    assert store.append_record.await_args.kwargs == {"subject_kind": "swarm-skill"}
+    assert store.append_record.await_args.kwargs == {"subject_kind": "swarm-skill", "update_skill_md": True}
 
 
 @pytest.mark.asyncio

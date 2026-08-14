@@ -32,7 +32,7 @@ def configure_skill_evolution(
     model: str,
     team: bool = False,
     review_runtime: EvolutionReviewRuntime | None = None,
-    auto_save: bool = False,
+    auto_save: bool = True,
     language: str = "cn",
     **rail_kwargs,
 ):
@@ -50,7 +50,7 @@ def configure_skill_evolution(
         team: When True, configure TeamSkillEvolutionRail (for team/swarm skills).
             When False (default), configure regular SkillEvolutionRail.
         review_runtime: Optional shared review runtime. Created fresh if omitted.
-        auto_save: Whether to auto-save generated experiences.
+        auto_save: Whether to auto-save generated experiences (default True).
         language: Language for experience generation ("cn" or "en").
         **rail_kwargs: Additional keyword arguments forwarded to the evolution rail.
 
@@ -100,7 +100,7 @@ async def configure_skill_evolution_runtime(
     model: str,
     team: bool = False,
     review_runtime: EvolutionReviewRuntime | None = None,
-    auto_save: bool = False,
+    auto_save: bool = True,
     language: str = "cn",
     **rail_kwargs,
 ):

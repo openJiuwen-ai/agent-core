@@ -12,13 +12,14 @@ Verifies that:
 """
 
 import pytest
-import pytest_asyncio
 
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.runner.callback import AsyncCallbackFramework
 from openjiuwen.core.runner.callback.events import LLMCallEvents, ToolCallEvents, WorkflowEvents
+from openjiuwen.core.runner.runner import GLOBAL_RUNNER
 from openjiuwen.core.workflow.workflow import Workflow
 
 # === Echo implementations ===
@@ -87,13 +88,10 @@ def _make_model(mocker):
 # === Fixtures ===
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def cleanup_callbacks():
-    """Unregister all event callbacks from Runner.callback_framework after each test."""
-    yield
-    fw = Runner.callback_framework
-    for event in list(fw.callbacks.keys()):
-        await fw.unregister_event(event)
+@pytest.fixture(autouse=True)
+def isolate_callbacks(monkeypatch: pytest.MonkeyPatch):
+    """Give each test a callback framework without mutating global callbacks."""
+    monkeypatch.setattr(GLOBAL_RUNNER, "_callback_framework", AsyncCallbackFramework())
 
 
 # === trigger() skips transform callbacks ===

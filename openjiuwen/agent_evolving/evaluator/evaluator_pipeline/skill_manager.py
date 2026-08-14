@@ -222,18 +222,19 @@ class SkillManager:
             "<!-- evolution-howtoread-start -->",
             "### How to Read Evolution Details",
             "",
-            "**IMPORTANT**: Before applying this skill, review the Experience Index below. "
-            "If any experience summary matches your current task or a failure you encountered, "
-            "you MUST read the linked detail section for specific guidance.",
+            "**IMPORTANT**: Before applying this skill, review persisted experiences under "
+            "`evolution/*.md`. If any detail matches your current task or a failure you "
+            "encountered, follow that guidance while planning and executing.",
             "",
-            "1. Check the **Summary** column below for relevant experiences",
-            "2. Click or read the **Detail** path to find the full guidance",
-            "3. Read the evolution file using: `cat <skill-dir>/evolution/<filename>.md`",
-            "4. Look for the specific experience ID anchor (e.g., `#ev_xxxxxxxx`)",
+            "1. List detail files under `<skill-dir>/evolution/` "
+            "(for example `troubleshooting.md`)",
+            "2. Read the relevant file and look for experience ID anchors "
+            "(e.g., `#ev_xxxxxxxx`)",
+            "3. For reusable helper code, first review `evolution/scripts/_index.md`, "
+            "then inspect the specific script source before adapting or running it",
             "",
-            "For narrative guidance, read the relevant `evolution/*.md` detail section. "
-            "For reusable helper code, first review `evolution/scripts/_index.md`, "
-            "then inspect the specific script source before adapting or running it.",
+            "Experience details live only under `evolution/`; they are not injected "
+            "into this SKILL.md body.",
             "<!-- evolution-howtoread-end -->",
         ])
 
@@ -242,14 +243,9 @@ class SkillManager:
             r'<!--\s*evolution-howtoread-start\s*-->.*?<!--\s*evolution-howtoread-end\s*-->',
             re.DOTALL,
         )
-        index_pattern = re.compile(
-            r'<!--\s*evolution-index-start\s*-->',
-        )
 
         if howtoread_pattern.search(content):
             content = howtoread_pattern.sub(howtoread_block, content)
-        elif index_pattern.search(content):
-            content = index_pattern.sub(howtoread_block + "\n\n<!-- evolution-index-start -->", content)
         else:
             content = content.rstrip() + "\n\n" + howtoread_block + "\n"
 

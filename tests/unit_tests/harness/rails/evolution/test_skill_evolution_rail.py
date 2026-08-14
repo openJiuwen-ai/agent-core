@@ -216,6 +216,7 @@ def _active_request_detector(
 ) -> Mock:
     detector = Mock()
     detector.bind_llm.return_value = detector
+    detector.collect_skills_from_messages.return_value = []
     if trajectory_error is None:
         detector.detect_trajectory_signals.return_value = trajectory_signals or []
     else:
@@ -423,7 +424,7 @@ def test_review_trigger_constructor_prefers_new_name(tmp_path):
     assert rail.fuzzy_review is False
 
 
-def test_auto_save_defaults_false_and_setter_still_updates(tmp_path):
+def test_auto_save_defaults_true_and_setter_still_updates(tmp_path):
     rail = SkillEvolutionRail(
         skills_dir=str(tmp_path),
         llm=Mock(),
@@ -431,13 +432,13 @@ def test_auto_save_defaults_false_and_setter_still_updates(tmp_path):
         review_runtime=_default_review_runtime(),
     )
 
-    assert rail.auto_save is False
-
-    rail.auto_save = True
     assert rail.auto_save is True
 
     rail.auto_save = False
     assert rail.auto_save is False
+
+    rail.auto_save = True
+    assert rail.auto_save is True
 
 
 def test_auto_save_setter_updates_only_local_state(tmp_path):
@@ -1434,6 +1435,7 @@ async def test_run_evolution_auto_save_commits_via_manager_lifecycle(tmp_path):
         trajectory=trajectory,
         user_query="",
         requires_approval=False,
+        review_status="auto",
     )
     rail._emit_generated_records.assert_not_awaited()
     events = _progress_events(await rail.drain_pending_host_events())
@@ -1454,6 +1456,7 @@ async def test_run_evolution_uses_online_updater_path_after_init(tmp_path):
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = [_make_signal("skill-a")]
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
     rail._handle_evolution_from_signals = AsyncMock(return_value=_no_records_result())
     ability_manager = SimpleNamespace(add=Mock(return_value=SimpleNamespace(added=True)))
     agent = SimpleNamespace(
@@ -1478,13 +1481,14 @@ async def test_run_evolution_uses_online_updater_path_after_init(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_auto_save_false_emits_events(tmp_path):
+    # Passive run_evolution always stages with requires_approval=False (auto-approve path).
     rail = _make_rail(tmp_path, auto_save=False)
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/skill-a/SKILL.md"}]},
         {"role": "tool", "content": "Error: command failed", "name": "bash"},
     ]
     trajectory = _trajectory_with_messages(messages)
-    approval_request = object()
+    approval_request = SimpleNamespace(request_id="skill_evolve_req")
 
     rail._collect_messages = AsyncMock(return_value=messages)
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
@@ -1501,17 +1505,20 @@ async def test_run_evolution_auto_save_false_emits_events(tmp_path):
         messages=messages,
         trajectory=trajectory,
         user_query="",
-        requires_approval=True,
+        requires_approval=False,
+        review_status="suggest",
     )
-    rail._emit_generated_records.assert_awaited_once_with(ctx, "skill-a", approval_request)
+    rail._emit_generated_records.assert_not_awaited()
     events = _progress_events(await rail.drain_pending_host_events())
     stages = [event.payload["evolution_meta"]["stage"] for event in events]
     assert "signals_attributed" in stages
     assert "optimizing" in stages
+    assert "auto_approved" in stages
 
 
 @pytest.mark.asyncio
 async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path):
+    # Passive run_evolution does not emit approval prompts; records are auto-approved.
     rail = _make_rail(tmp_path, auto_save=False)
     record = _make_record("skill-a", content="fresh approval record")
     messages = [
@@ -1540,11 +1547,15 @@ async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path)
         messages=messages,
         trajectory=trajectory,
         user_query="",
-        requires_approval=True,
+        requires_approval=False,
+        review_status="suggest",
     )
-    events = _approval_events(await rail.drain_pending_approval_events())
-    assert len(events) == 1
-    assert events[0].payload["evolution_meta"]["skill_name"] == "skill-a"
+    drained = await rail.drain_pending_host_events()
+    assert _approval_events(drained) == []
+    events = _progress_events(drained)
+    stages = [event.payload["evolution_meta"]["stage"] for event in events]
+    assert "auto_approved" in stages
+    assert events[-1].payload["evolution_meta"]["skill_name"] == "skill-a"
 
 
 @pytest.mark.asyncio
@@ -1557,6 +1568,7 @@ async def test_run_evolution_emits_cancelled_when_attributed_signals_generate_no
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = [signal]
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
 
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._online_updater.bind = Mock()
@@ -1893,7 +1905,7 @@ async def test_on_approve_partial_failure_retains_pending_change(tmp_path):
     # Host retries: now the remaining record succeeds
     rail._evolution_store.append_record = AsyncMock()
     await rail.on_approve(request_id)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_2, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_2, subject_kind="skill", update_skill_md=True)
     assert request_id not in rail._pending_approval_snapshots
 
 
@@ -1921,7 +1933,7 @@ async def test_on_approve_full_failure_then_retry_succeeds(tmp_path):
     # Host retries: now append succeeds
     rail._evolution_store.append_record = AsyncMock()
     await rail.on_approve(request_id)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill", update_skill_md=True)
     assert request_id not in rail._pending_approval_snapshots
 
 
@@ -1948,12 +1960,12 @@ async def test_concurrent_approval_batches_are_independent(tmp_path):
 
     # Approving the first prompt should write only record_a
     await rail.on_approve(req1)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_a, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_a, subject_kind="skill", update_skill_md=True)
     rail._evolution_store.append_record.reset_mock()
 
     # Approving the second prompt should write only record_b
     await rail.on_approve(req2)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_b, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_b, subject_kind="skill", update_skill_md=True)
 
 
 @pytest.mark.asyncio
@@ -1973,7 +1985,7 @@ async def test_on_approve_only_flushes_snapshot_records(tmp_path):
     later_request = _stage_approval_request(rail, "skill-a", [pending_later])
     await rail.on_approve(request_id)
 
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", approved, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", approved, subject_kind="skill", update_skill_md=True)
     assert later_request.request_id in rail._pending_approval_snapshots
     assert request_id not in rail._pending_approval_snapshots
 
@@ -2137,6 +2149,7 @@ async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_p
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = []
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
     trajectory = trajectory_from_steps(
         execution_id="exec-message-object",
         steps=[
@@ -2166,7 +2179,8 @@ async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_p
         trajectory,
         signal_types={"execution_failure", "script_artifact"},
     )
-    detector.detect_user_intent.assert_not_awaited()
+    detector.detect_user_intent.assert_awaited_once()
+    assert detector.detect_user_intent.await_args.args[0] == snapshot["messages"]
 
 
 @pytest.mark.asyncio
@@ -2181,19 +2195,27 @@ async def test_run_evolution_does_not_use_llm_for_passive_user_messages(tmp_path
         },
         {"role": "user", "content": "不对，你应该先检查文件是否存在"},
     ]
+    feedback = _make_signal("skill-a", excerpt="不对，你应该先检查文件是否存在")
+    detector = Mock()
+    detector.bind_llm.return_value = detector
+    detector.detect_trajectory_signals.return_value = []
+    detector.detect_user_intent = AsyncMock(return_value=[feedback])
+    detector.collect_skills_from_messages.return_value = ["skill-a"]
+
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
-    rail._infer_primary_skill = Mock(return_value="skill-a")
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
 
-    rail._evolver._llm.invoke = AsyncMock(
-        return_value={"content": '{"is_feedback": true, "excerpt": "不对，你应该先检查文件是否存在"}'}
-    )
-    await rail.run_evolution(
-        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
-    )
+    with patch(
+        "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
+        return_value=detector,
+    ):
+        await rail.run_evolution(
+            _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+        )
 
-    rail._stage_evolution_from_signals.assert_not_awaited()
-    rail._evolver._llm.invoke.assert_not_awaited()
+    detector.detect_user_intent.assert_awaited_once()
+    rail._stage_evolution_from_signals.assert_awaited_once()
+    assert rail._stage_evolution_from_signals.await_args.kwargs["skill_name"] == "skill-a"
 
 
 @pytest.mark.asyncio
@@ -2350,6 +2372,7 @@ async def test_run_evolution_cancels_when_all_signals_are_unattributed(tmp_path)
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = [_make_signal(None)]
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
 
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._stage_evolution_from_signals = AsyncMock()
@@ -2474,6 +2497,7 @@ async def test_run_evolution_continues_when_only_some_signals_are_attributed(tmp
         _make_signal("skill-b", excerpt="Error: b"),
     ]
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
 
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a", "skill-b"])
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
@@ -2870,6 +2894,7 @@ async def test_run_evolution_evaluates_presented_entries_from_snapshot(tmp_path)
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals = Mock(return_value=[])
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
     with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector", return_value=detector):
         await rail.run_evolution(
             None,
@@ -3221,7 +3246,7 @@ async def test_on_approve_uses_rebound_pending_snapshot_store(tmp_path):
 
     await rail.on_approve(request.request_id)
 
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill", update_skill_md=True)
     assert request.request_id not in rebound_snapshots
 
 
@@ -3613,6 +3638,7 @@ async def test_run_evolution_regular_signal_uses_online_updater_without_passive_
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = [_make_signal("skill-a")]
     detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
 
     with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector", return_value=detector):
         await rail.run_evolution(
@@ -3689,7 +3715,6 @@ async def test_rollback_skill_restores_body_and_clears_live_evolutions(tmp_path)
         skills_dir=str(root),
         llm=Mock(),
         model="dummy-model",
-        auto_scan=False,
         auto_save=False,
         review_runtime=_default_review_runtime(),
     )

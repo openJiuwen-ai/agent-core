@@ -89,6 +89,11 @@ you MUST send a single message with multiple task_tool calls. \
 For example, if you need to launch both a build-validator subagent and a \
 test-runner subagent in parallel, send a single message with both tool calls.
 
+Optional model selection: pass `model_tier` (lite/pro from host config) or \
+`model_name` (exact model name / alias). Omit both to use the parent agent's \
+current default model. If the requested tier is not configured, or the name \
+is unknown, the parent default is used instead.
+
 ## Writing the prompt
 
 Brief the subagent like a smart colleague who just walked into the room — it \
@@ -153,6 +158,11 @@ task_tool 启动专门的子代理来自主处理复杂任务。每种子代理�
 例如，如果你需要同时启动 build-validator 子代理和 \
 test-runner 子代理，请在同一条消息中发出两个 tool 调用。
 
+可选模型选择：可传 `model_tier`（配置中的 lite/pro）或 `model_name`\
+（精确模型名/别名）。两者都省略时使用父 Agent 当前默认模型。\
+若请求的等级未配置或模型名无效，则回退到父 Agent 默认模型。\
+技能或用户可用自然语言表达，例如「用 lite 模型」或「用 pro 开子代理」。
+
 ## 如何写好任务描述
 
 像给一位刚走进房间的聪明同事做简报一样描述任务——子代理没看过本次对话，\
@@ -205,6 +215,19 @@ TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
         "cn": "浏览器子代理所需的额外能力类别列表；仅使用核心能力时传入空列表",
         "en": "Additional capability categories required by browser_agent; use an empty list for core-only tasks",
     },
+    "model_name": {
+        "cn": "可选：为本次子代理指定精确模型名（或别名 / name#index）。"
+              "与 model_tier 同时给出时优先使用 model_name。",
+        "en": "Optional exact model name (or alias / name#index) for this "
+              "subagent. When both are set, model_name takes priority over "
+              "model_tier.",
+    },
+    "model_tier": {
+        "cn": "可选：模型等级 lite 或 pro（来自主机 models.defaults[].tier）。"
+              "未配置或非法时回退父 Agent 默认模型。",
+        "en": "Optional model tier lite or pro from host models.defaults[].tier. "
+              "Unconfigured or invalid values fall back to the parent default.",
+    },
 }
 
 
@@ -237,6 +260,14 @@ def get_task_tool_input_params(language: str = "cn") -> Dict[str, Any]:
                 "type": "array",
                 "items": {"type": "string"},
                 "description": p["browser_capabilities"].get(language, p["browser_capabilities"]["cn"]),
+            },
+            "model_name": {
+                "type": "string",
+                "description": p["model_name"].get(language, p["model_name"]["cn"]),
+            },
+            "model_tier": {
+                "type": "string",
+                "description": p["model_tier"].get(language, p["model_tier"]["cn"]),
             },
         },
         "required": ["subagent_type", "task_description"],

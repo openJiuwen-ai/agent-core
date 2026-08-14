@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -48,8 +49,8 @@ def _captured_logs(monkeypatch: pytest.MonkeyPatch) -> dict:
 
         return _log
 
-    monkeypatch.setattr(rail_base.logger, "info", _record("info"))
-    monkeypatch.setattr(rail_base.logger, "debug", _record("debug"))
+    fake_logger = SimpleNamespace(info=_record("info"), debug=_record("debug"))
+    monkeypatch.setattr(rail_base, "logger", fake_logger)
     return records
 
 

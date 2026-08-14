@@ -24,6 +24,7 @@ Quickstart::
 from openjiuwen.agent_teams.observability.config import ObservabilityConfig
 from openjiuwen.agent_teams.observability.rail import ObservabilityRail
 from openjiuwen.agent_teams.observability.setup import (
+    abort_current_llm_span,
     attach_to_team_agent,
     finalize_team_trace,
     get_tracer,
@@ -36,6 +37,7 @@ from openjiuwen.agent_teams.observability.span_context import flush_child_spans
 __all__ = [
     "ObservabilityConfig",
     "ObservabilityRail",
+    "abort_current_llm_span",
     "attach_to_team_agent",
     "finalize_team_trace",
     "init_observability",

@@ -62,6 +62,7 @@ class OnlineEvolutionOrchestrator:
         requires_approval: bool,
         metadata: Optional[Dict[str, Any]] = None,
         source: Optional[str] = None,
+        review_status: Optional[str] = None,
     ) -> OnlineEvolutionResult:
         """Run online evolution and return a structured orchestration result."""
         if not skill_name or not signals:
@@ -114,6 +115,12 @@ class OnlineEvolutionOrchestrator:
                 status="no_evolution_no_records",
                 message=message,
             )
+
+        # review_status mirrors resolve_skill_evolution_action() ("suggest" | "auto").
+        if review_status:
+            for record in preview.records:
+                if hasattr(record, "review_status"):
+                    record.review_status = review_status
 
         request = self._manager.stage_apply_results(
             skill_name,

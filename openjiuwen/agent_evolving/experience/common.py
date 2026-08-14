@@ -92,7 +92,14 @@ async def commit_pending_change(
 
     for index, record in enumerate(records):
         try:
-            await store.append_record(pending.skill_name, record, subject_kind=pending.subject_kind)
+            # enterprise-dev: suggest/auto persist evolutions.json only (no SKILL.md).
+            update_skill_md = getattr(record, "review_status", None) not in {"suggest", "auto"}
+            await store.append_record(
+                pending.skill_name,
+                record,
+                subject_kind=pending.subject_kind,
+                update_skill_md=update_skill_md,
+            )
         except Exception as exc:
             errors.append(str(exc))
             remaining_records = list(records[index:])
@@ -110,6 +117,27 @@ async def commit_pending_change(
     pending.payload[:] = remaining_records
     if not remaining_records:
         pending_by_id.pop(change_id, None)
+
+    if applied_count > 0 and not remaining_records:
+        refresh = getattr(store, "refresh_skill_summary", None)
+        if callable(refresh):
+            try:
+                await refresh(pending.skill_name, subject_kind=pending.subject_kind)
+            except TypeError:
+                try:
+                    await refresh(pending.skill_name)
+                except Exception as exc:
+                    logger.warning(
+                        "[ExperienceCommon] refresh_skill_summary failed for %s: %s",
+                        pending.skill_name,
+                        exc,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[ExperienceCommon] refresh_skill_summary failed for %s: %s",
+                    pending.skill_name,
+                    exc,
+                )
 
     return PendingCommitResult(
         applied_count=applied_count,

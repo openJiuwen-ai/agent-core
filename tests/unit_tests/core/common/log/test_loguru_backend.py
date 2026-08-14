@@ -220,11 +220,13 @@ def test_runtime_reconfigure_rebuilds_common_and_runner_loggers(tmp_path, capsys
         assert isinstance(events_module._get_common_logger(), _get_loguru_logger_class())
 
         set_session_id("TRACE-RECONFIGURE")
-        logging_module.logger.info("common switched to loguru")
-        logging_module.runner_logger.info("runner switched to loguru")
+        # Prefer LogManager instances: module LazyLogger may still hold a pre-reconfigure
+        # backend under xdist / concurrent LogManager.reset, so stdout would miss lines.
+        common_logger.info("common switched to loguru")
+        runner_logger.info("runner switched to loguru")
 
-        assert isinstance(logging_module.logger._logger, _get_loguru_logger_class())
-        assert isinstance(logging_module.runner_logger._logger, _get_loguru_logger_class())
+        assert isinstance(LogManager.get_logger("common"), _get_loguru_logger_class())
+        assert isinstance(LogManager.get_logger("runner"), _get_loguru_logger_class())
 
         output = capsys.readouterr().out
         assert "common | TRACE-RECONFIGURE | common switched to loguru" in output

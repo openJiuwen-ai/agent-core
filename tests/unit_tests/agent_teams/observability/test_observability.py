@@ -15,20 +15,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from inspect import getattr_static
 from typing import Any, Iterator
 from unittest.mock import MagicMock
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind
 
 from openjiuwen.agent_teams.observability import (
     ObservabilityConfig,
     ObservabilityRail,
+    abort_current_llm_span,
+    attach_to_team_agent,
+    get_tracer,
     init_observability,
     shutdown_observability,
 )
+from openjiuwen.agent_teams.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
 from openjiuwen.agent_teams.observability.semconv import (
     AT_AGENT_ID,
@@ -60,6 +68,9 @@ from openjiuwen.core.runner.callback.events import (
     LLMCallEvents,
     ToolCallEvents,
 )
+
+
+_STREAM_CLIENT_PROVIDERS = ("InferenceAffinity", "SiliconFlow")
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +124,28 @@ class _FakeChunk:
         self.finish_reason = finish_reason
 
 
+class _TrackingTracerProvider(TracerProvider):
+    """TracerProvider that records whether AgentCore shuts it down."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.shutdown_calls = 0
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+        super().shutdown()
+
+
+class _ListenerTeamAgent:
+    """Minimal TeamAgent surface used by ``attach_to_team_agent``."""
+
+    def __init__(self) -> None:
+        self._state = type("_State", (), {"event_listeners": []})()
+
+    def add_event_listener(self, listener: Any) -> None:
+        self._state.event_listeners.append(listener)
+
+
 @pytest.fixture
 def in_memory_exporter() -> Iterator[InMemorySpanExporter]:
     """Per-test fresh exporter; tear down observability between cases."""
@@ -152,9 +185,526 @@ def _create_team_span(team_name: str) -> Any:
     return get_or_create_team_span(team_name, get_tracer("openjiuwen.agent_teams.observability"))
 
 
+def _real_stream_client(
+    provider: str,
+    monkeypatch: pytest.MonkeyPatch,
+    chunks: list[Any],
+    *,
+    stream_error: BaseException | None = None,
+) -> Any:
+    """Build a real provider client while replacing only its network stream."""
+    from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import (
+        InferenceAffinityModelClient,
+    )
+    from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import (
+        SiliconFlowModelClient,
+    )
+    from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+
+    config = ModelClientConfig(
+        client_provider=provider,
+        api_key="test-key",
+        api_base="https://example.test/v1",
+        verify_ssl=False,
+    )
+    request = ModelRequestConfig(model="test-model")
+
+    if provider == "InferenceAffinity":
+        client = InferenceAffinityModelClient(request, config)
+
+        async def _stream_response(*_args: Any, **_kwargs: Any) -> Any:
+            for chunk in chunks:
+                yield chunk
+            if stream_error is not None:
+                raise stream_error
+
+        monkeypatch.setattr(client, "_stream_response", _stream_response)
+        return client
+
+    client = SiliconFlowModelClient(request, config)
+    lines = [f"line-{index}".encode() for index in range(len(chunks))]
+
+    async def _content() -> Any:
+        for line in lines:
+            yield line
+        if stream_error is not None:
+            raise stream_error
+
+    response = type("_Response", (), {"content": _content()})()
+
+    @asynccontextmanager
+    async def _apost(*_args: Any, **_kwargs: Any) -> Any:
+        yield response
+
+    parsed = dict(zip(lines, chunks))
+    monkeypatch.setattr(client, "_apost", _apost)
+    monkeypatch.setattr(client, "_parse_stream_chunk", parsed.__getitem__)
+    return client
+
+
+def test_external_provider_is_used_but_not_owned() -> None:
+    """AgentCore emits through an injected provider without shutting it down."""
+    exporter = InMemorySpanExporter()
+    provider = _TrackingTracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+    try:
+        init_observability(
+            ObservabilityConfig(enabled=True, service_name="external-provider-test"),
+            tracer_provider_override=provider,
+            owns_provider=False,
+        )
+        span = get_tracer("test.external").start_span("external.provider.span")
+        span.end()
+        shutdown_observability()
+
+        assert [item.name for item in exporter.get_finished_spans()] == ["external.provider.span"]
+        assert provider.shutdown_calls == 0
+    finally:
+        shutdown_observability()
+        provider.shutdown()
+
+
+def test_provider_override_rejects_exporter_override() -> None:
+    """An injected provider cannot be combined with an exporter override."""
+    provider = _TrackingTracerProvider()
+
+    try:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            init_observability(
+                ObservabilityConfig(enabled=True),
+                tracer_provider_override=provider,
+                span_exporter_override=InMemorySpanExporter(),
+            )
+    finally:
+        provider.shutdown()
+
+
+def test_disabled_config_ignores_provider_arguments() -> None:
+    """Disabled observability retains its no-op behavior for provider arguments."""
+    init_observability(
+        ObservabilityConfig(enabled=False),
+        tracer_provider_override=object(),  # type: ignore[arg-type]
+        span_exporter_override=InMemorySpanExporter(),
+        owns_provider=False,
+    )
+    shutdown_observability()
+
+
+def test_reinitialization_ignores_provider_arguments() -> None:
+    """An active observability lifecycle still skips subsequent provider arguments."""
+    exporter = InMemorySpanExporter()
+    init_observability(ObservabilityConfig(enabled=True), span_exporter_override=exporter)
+
+    try:
+        init_observability(
+            ObservabilityConfig(enabled=True),
+            tracer_provider_override=object(),  # type: ignore[arg-type]
+            span_exporter_override=InMemorySpanExporter(),
+            owns_provider=False,
+        )
+    finally:
+        shutdown_observability()
+
+
+def test_provider_override_rejects_non_sdk_provider() -> None:
+    """A fresh enabled lifecycle requires an SDK ``TracerProvider`` override."""
+    with pytest.raises(TypeError, match="TracerProvider"):
+        init_observability(
+            ObservabilityConfig(enabled=True),
+            tracer_provider_override=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_non_owned_provider_requires_override() -> None:
+    """A fresh enabled lifecycle cannot make an internal provider non-owned."""
+    with pytest.raises(ValueError, match="requires tracer_provider_override"):
+        init_observability(ObservabilityConfig(enabled=True), owns_provider=False)
+
+
+def test_external_provider_is_owned_by_default() -> None:
+    """An injected provider is shut down once unless ownership is opted out."""
+    provider = _TrackingTracerProvider()
+    initialized = False
+
+    try:
+        init_observability(ObservabilityConfig(enabled=True), tracer_provider_override=provider)
+        initialized = True
+        shutdown_observability()
+
+        assert provider.shutdown_calls == 1
+    finally:
+        shutdown_observability()
+        if not initialized:
+            provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_external_provider_installs_agentcore_components_without_ownership() -> None:
+    """An external provider receives AgentCore tracker, callbacks, and monitor."""
+    from openjiuwen.agent_teams.observability.span_context import (
+        remove_team_span,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = _TrackingTracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    team_span = None
+
+    try:
+        init_observability(
+            ObservabilityConfig(enabled=True, service_name="external-components-test"),
+            tracer_provider_override=provider,
+            owns_provider=False,
+        )
+
+        team_agent = _ListenerTeamAgent()
+        attach_to_team_agent(team_agent)
+        monitor_handler = next(
+            listener for listener in team_agent._state.event_listeners if isinstance(listener, OtelTeamMonitorHandler)
+        )
+
+        team_span = _create_team_span("external_components_team")
+        messages = [{"role": "user", "content": "trace this callback"}]
+        await Runner.callback_framework.trigger(
+            LLMCallEvents.LLM_INVOKE_INPUT,
+            messages=messages,
+            model="fake-llm-1",
+        )
+        await Runner.callback_framework.trigger(
+            LLMCallEvents.LLM_INVOKE_OUTPUT,
+            messages=messages,
+            result=_FakeAssistantMessage(content="traced"),
+        )
+        await monitor_handler(
+            EventMessage.from_event(MemberSpawnedEvent(team_name="external_components_team", member_name="alice")),
+        )
+
+        assert _spans_by_name(exporter, "llm.call")
+        assert _spans_by_name(exporter, "member.alice.spawned")
+        assert provider.shutdown_calls == 0
+    finally:
+        removed = remove_team_span("external_components_team")
+        if removed is not None and removed.is_recording():
+            removed.end()
+        elif team_span is not None and team_span.is_recording():
+            team_span.end()
+        shutdown_observability()
+        provider.shutdown()
+
+
+def test_non_owned_lifecycle_does_not_leak_ownership_to_next_lifecycle() -> None:
+    """A later owned provider is still shut down after a non-owned lifecycle."""
+    non_owned_provider = _TrackingTracerProvider()
+    owned_provider = _TrackingTracerProvider()
+
+    try:
+        init_observability(
+            ObservabilityConfig(enabled=True),
+            tracer_provider_override=non_owned_provider,
+            owns_provider=False,
+        )
+        shutdown_observability()
+        assert non_owned_provider.shutdown_calls == 0
+
+        init_observability(ObservabilityConfig(enabled=True), tracer_provider_override=owned_provider)
+        shutdown_observability()
+        assert owned_provider.shutdown_calls == 1
+    finally:
+        shutdown_observability()
+        non_owned_provider.shutdown()
+        if owned_provider.shutdown_calls == 0:
+            owned_provider.shutdown()
+
+
+def test_external_provider_shutdown_preserves_caller_spans_and_flushes_agentcore_spans() -> None:
+    """A non-owned provider retains caller spans while AgentCore flushes only its own."""
+    exporter = InMemorySpanExporter()
+    provider = _TrackingTracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    caller_span = None
+    agentcore_span = None
+
+    try:
+        init_observability(
+            ObservabilityConfig(enabled=True),
+            tracer_provider_override=provider,
+            owns_provider=False,
+        )
+        caller_span = provider.get_tracer("caller.unrelated").start_span("caller.operation")
+        agentcore_span = get_tracer("openjiuwen.agent_teams.observability.test").start_span("agentcore.orphan")
+
+        shutdown_observability()
+
+        assert caller_span.is_recording()
+        assert _spans_by_name(exporter, "agentcore.orphan")
+        assert not agentcore_span.is_recording()
+    finally:
+        if caller_span is not None and caller_span.is_recording():
+            caller_span.end()
+        if agentcore_span is not None and agentcore_span.is_recording():
+            agentcore_span.end()
+        shutdown_observability()
+        provider.shutdown()
+
+
+def test_external_provider_shutdown_preserves_near_prefix_spans() -> None:
+    """A scope that only shares a textual prefix is not an AgentCore scope."""
+    provider = _TrackingTracerProvider()
+    near_prefix_span = None
+
+    try:
+        init_observability(
+            ObservabilityConfig(enabled=True),
+            tracer_provider_override=provider,
+            owns_provider=False,
+        )
+        near_prefix_span = provider.get_tracer("openjiuwen.agent_teams.observability_extra").start_span(
+            "caller.near_prefix"
+        )
+
+        shutdown_observability()
+
+        assert near_prefix_span.is_recording()
+    finally:
+        if near_prefix_span is not None and near_prefix_span.is_recording():
+            near_prefix_span.end()
+        shutdown_observability()
+        provider.shutdown()
+
+
+def test_external_tracker_is_inert_after_shutdown() -> None:
+    """A residual external-provider tracker cannot flush spans created after shutdown."""
+    from openjiuwen.agent_teams.observability.span_context import get_active_span_tracker
+
+    provider = _TrackingTracerProvider()
+    post_shutdown_span = None
+
+    try:
+        init_observability(
+            ObservabilityConfig(enabled=True),
+            tracer_provider_override=provider,
+            owns_provider=False,
+        )
+        tracker = get_active_span_tracker()
+        assert tracker is not None
+
+        shutdown_observability()
+        post_shutdown_span = provider.get_tracer("openjiuwen.agent_teams.observability.test").start_span(
+            "agentcore.after_shutdown"
+        )
+        tracker.flush_all_spans(exclude_team_span=False)
+
+        assert post_shutdown_span.is_recording()
+    finally:
+        if post_shutdown_span is not None and post_shutdown_span.is_recording():
+            post_shutdown_span.end()
+        shutdown_observability()
+        provider.shutdown()
+
+
+def test_external_tracker_ignores_span_end_after_shutdown() -> None:
+    """A stopped residual processor does not mutate its completion counters."""
+    from openjiuwen.agent_teams.observability.span_context import get_active_span_tracker
+
+    provider = _TrackingTracerProvider()
+    post_shutdown_span = None
+
+    try:
+        init_observability(
+            ObservabilityConfig(enabled=True),
+            tracer_provider_override=provider,
+            owns_provider=False,
+        )
+        tracker = get_active_span_tracker()
+        assert tracker is not None
+
+        shutdown_observability()
+        on_end_count = tracker._on_end_count
+        post_shutdown_span = provider.get_tracer("openjiuwen.agent_teams.observability.test").start_span(
+            "agentcore.ended_after_shutdown"
+        )
+        post_shutdown_span.end()
+
+        assert tracker._on_end_count == on_end_count
+    finally:
+        if post_shutdown_span is not None and post_shutdown_span.is_recording():
+            post_shutdown_span.end()
+        shutdown_observability()
+        provider.shutdown()
+
+
+def test_external_tracker_cleanup_is_idempotent_when_provider_shuts_down_first() -> None:
+    """AgentCore shutdown is idempotent after an external provider closes first."""
+    from openjiuwen.agent_teams.observability.span_context import get_active_span_tracker
+
+    provider = _TrackingTracerProvider()
+    agentcore_span = None
+
+    try:
+        init_observability(
+            ObservabilityConfig(enabled=True),
+            tracer_provider_override=provider,
+            owns_provider=False,
+        )
+        tracker = get_active_span_tracker()
+        assert tracker is not None
+        agentcore_span = get_tracer("openjiuwen.agent_teams.observability.test").start_span(
+            "agentcore.provider_shutdown"
+        )
+
+        provider.shutdown()
+
+        assert not agentcore_span.is_recording()
+        assert tracker._on_end_count == 0
+        shutdown_observability()
+        assert tracker._on_end_count == 0
+    finally:
+        if agentcore_span is not None and agentcore_span.is_recording():
+            agentcore_span.end()
+        shutdown_observability()
+
+
 # ---------------------------------------------------------------------------
 # Callback handler: LLM streaming + reasoning + TTFT
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", _STREAM_CLIENT_PROVIDERS)
+async def test_real_provider_stream_emits_one_terminal_output(
+    provider: str,
+    in_memory_exporter: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider chunks stay stream events; LLM_OUTPUT is one terminal event."""
+    from openjiuwen.agent_teams.observability.span_context import get_current_llm_span, remove_team_span
+    from openjiuwen.core.foundation.llm import model as model_module
+    from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+    from openjiuwen.core.foundation.llm.schema.message import UsageMetadata
+    from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+
+    chunks = [
+        AssistantMessageChunk(content="hel", reasoning_content="think "),
+        AssistantMessageChunk(
+            content="lo",
+            reasoning_content="done",
+            finish_reason="stop",
+            usage_metadata=UsageMetadata(input_tokens=3, output_tokens=2, total_tokens=5),
+        ),
+    ]
+    client = _real_stream_client(provider, monkeypatch, chunks)
+    monkeypatch.setattr(model_module, "create_model_client", lambda **_: client)
+    model = model_module.Model(
+        model_client_config=ModelClientConfig(
+            client_provider=provider,
+            api_key="test-key",
+            api_base="https://example.test/v1",
+            verify_ssl=False,
+        ),
+        model_config=ModelRequestConfig(model="test-model"),
+    )
+
+    terminal_outputs: list[dict[str, Any]] = []
+
+    async def _record_terminal(**kwargs: Any) -> None:
+        terminal_outputs.append(kwargs)
+
+    fw = Runner.callback_framework
+    fw.register_sync(LLMCallEvents.LLM_OUTPUT, _record_terminal, namespace="test.stream.contract")
+    _create_team_span("test_team")
+    recording_during_yield: list[bool] = []
+    try:
+        results = []
+        async for chunk in model.stream(
+            [{"role": "user", "content": "hello"}],
+            model="test-model",
+        ):
+            results.append(chunk)
+            span = get_current_llm_span()
+            recording_during_yield.append(span is not None and span.is_recording())
+    finally:
+        fw.unregister_sync(LLMCallEvents.LLM_OUTPUT, _record_terminal)
+
+    assert results == chunks
+    assert recording_during_yield == [True, True]
+    assert get_current_llm_span() is None
+    assert len(terminal_outputs) == 1
+    assert terminal_outputs[0]["is_stream"] is True
+    assert terminal_outputs[0]["response"] == "hello"
+    assert terminal_outputs[0]["reasoning_content"] == "think done"
+    assert terminal_outputs[0]["usage"].total_tokens == 5
+
+    spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(spans) == 1
+    span = spans[0]
+    assert _attr(span, "gen_ai.operation.name") == "chat"
+    assert _attr(span, "gen_ai.usage.total_tokens") == 5
+    assert _attr(span, "gen_ai.response.time_to_first_token_ms") is not None
+    assert [event.name for event in span.events].count("llm.chunk") == 2
+
+    team_span = remove_team_span("test_team")
+    if team_span is not None and team_span.is_recording():
+        team_span.end()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", _STREAM_CLIENT_PROVIDERS)
+async def test_real_provider_stream_error_emits_error_and_closes_span(
+    provider: str,
+    in_memory_exporter: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider stream failure closes the active span through LLM_CALL_ERROR."""
+    from openjiuwen.agent_teams.observability.span_context import get_current_llm_span, remove_team_span
+    from openjiuwen.core.foundation.llm import model as model_module
+    from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+    from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+
+    error = RuntimeError("provider stream failed")
+    chunks = [AssistantMessageChunk(content="partial")]
+    client = _real_stream_client(provider, monkeypatch, chunks, stream_error=error)
+    monkeypatch.setattr(model_module, "create_model_client", lambda **_: client)
+    model = model_module.Model(
+        model_client_config=ModelClientConfig(
+            client_provider=provider,
+            api_key="test-key",
+            api_base="https://example.test/v1",
+            verify_ssl=False,
+        ),
+        model_config=ModelRequestConfig(model="test-model"),
+    )
+
+    errors: list[BaseException] = []
+
+    async def _record_error(**kwargs: Any) -> None:
+        errors.append(kwargs["error"])
+
+    fw = Runner.callback_framework
+    fw.register_sync(LLMCallEvents.LLM_CALL_ERROR, _record_error, namespace="test.stream.contract")
+    _create_team_span("test_team")
+    try:
+        stream = model.stream(
+            [{"role": "user", "content": "hello"}],
+            model="test-model",
+        )
+        assert await anext(stream) is chunks[0]
+        span = get_current_llm_span()
+        assert span is not None and span.is_recording()
+        with pytest.raises(Exception, match="provider stream failed"):
+            await anext(stream)
+    finally:
+        fw.unregister_sync(LLMCallEvents.LLM_CALL_ERROR, _record_error)
+
+    assert errors == [error]
+    assert get_current_llm_span() is None
+    spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(spans) == 1
+    assert spans[0].status.status_code.name == "ERROR"
+
+    team_span = remove_team_span("test_team")
+    if team_span is not None and team_span.is_recording():
+        team_span.end()
 
 
 @pytest.mark.asyncio
@@ -279,10 +829,9 @@ async def test_backend_langfuse_only_writes_langfuse_attrs(
     )
     final = _FakeAssistantMessage(content="test answer", usage=_FakeUsage())
     await fw.trigger(
-        LLMCallEvents.LLM_OUTPUT,
+        LLMCallEvents.LLM_INVOKE_OUTPUT,
         messages=messages,
-        response=final.content,
-        usage=final.usage_metadata,
+        result=final,
     )
 
     span = _spans_by_name(in_memory_exporter, "llm.call")[0]
@@ -331,6 +880,100 @@ async def test_streaming_content_not_mistaken_for_finish_reason(
     finish_reason = _attr(span, "gen_ai.response.finish_reason")
     assert finish_reason != "hello", "content string leaked into finish_reason"
     assert finish_reason is None, f"finish_reason should be unset, got {finish_reason!r}"
+
+
+@pytest.mark.asyncio
+async def test_real_model_nonstream_keeps_span_open_until_complete_result(
+    in_memory_exporter: InMemorySpanExporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The inner LLM_OUTPUT must not close a non-streaming Model span."""
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_current_llm_span,
+    )
+    from openjiuwen.core.foundation.llm import model as model_module
+    from openjiuwen.core.foundation.llm.schema.config import (
+        ModelClientConfig,
+        ModelRequestConfig,
+    )
+
+    _create_team_span("test_team")
+    tool_call = {
+        "id": "call_123",
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "arguments": '{"location":"Beijing"}',
+        },
+    }
+    final = _FakeAssistantMessage(
+        content="Let me check.",
+        reasoning_content="Need current weather.",
+        finish_reason="tool_calls",
+        tool_calls=[tool_call],
+        usage=_FakeUsage(reasoning_tokens=3, cache_tokens=2),
+    )
+    recording_after_inner_output: list[bool] = []
+
+    class _RealOrderClient:
+        async def invoke(self, messages: Any, **kwargs: Any) -> Any:
+            await Runner.callback_framework.trigger(
+                LLMCallEvents.LLM_OUTPUT,
+                model_name=kwargs.get("model"),
+                model_provider="OpenAI",
+                is_stream=False,
+                response=final.content,
+                reasoning_content=final.reasoning_content,
+                usage=final.usage_metadata,
+                tool_calls=final.tool_calls,
+            )
+            span = get_current_llm_span()
+            recording_after_inner_output.append(
+                span is not None and span.is_recording()
+            )
+            return final
+
+        async def stream(self, messages: Any, **kwargs: Any) -> Any:
+            del messages, kwargs
+            if False:
+                yield None
+
+    client = _RealOrderClient()
+    monkeypatch.setattr(
+        model_module,
+        "create_model_client",
+        lambda **_: client,
+    )
+    model = model_module.Model(
+        model_client_config=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="https://example.com",
+        ),
+        model_config=ModelRequestConfig(),
+    )
+
+    result = await model.invoke(
+        [{"role": "user", "content": "What is the weather?"}],
+        model="fake-llm-1",
+    )
+
+    assert result is final
+    assert recording_after_inner_output == [True]
+    assert get_current_llm_span() is None
+    spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(spans) == 1
+    span = spans[0]
+    assert _attr(span, "langfuse.gen_ai.completion.0.content") == final.content
+    assert _attr(span, "gen_ai.response.finish_reason") == "tool_calls"
+    assert _attr(span, "gen_ai.usage.total_tokens") == 19
+    assert "get_weather" in _attr(span, "gen_ai.tool_calls", "")
+
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+
+    team_span = remove_team_span("test_team")
+    if team_span is not None and team_span.is_recording():
+        team_span.end()
 
 
 # ---------------------------------------------------------------------------
@@ -728,6 +1371,60 @@ async def test_llm_call_error_marks_span_error(
 
     assert span.status.status_code == StatusCode.ERROR
     assert "provider down" in (span.status.description or "")
+
+
+def test_abort_current_llm_span_is_staticmethod() -> None:
+    descriptor = getattr_static(OtelCallbackHandler, "abort_current_llm_span")
+
+    assert isinstance(descriptor, staticmethod)
+
+
+def test_abort_current_llm_span_is_idempotent_without_an_active_owner() -> None:
+    shutdown_observability()
+    error = RuntimeError("nothing to abort")
+
+    assert abort_current_llm_span(error) is False
+
+    exporter = InMemorySpanExporter()
+    init_observability(
+        ObservabilityConfig(enabled=True),
+        span_exporter_override=exporter,
+    )
+    try:
+        assert abort_current_llm_span(error) is False
+    finally:
+        shutdown_observability()
+
+
+@pytest.mark.asyncio
+async def test_abort_current_llm_span_closes_only_the_current_owner_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    from openjiuwen.agent_teams.observability.span_context import (
+        get_current_llm_span,
+        remove_team_span,
+    )
+
+    _create_team_span("test_team")
+    await Runner.callback_framework.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=[{"role": "user", "content": "cancel me"}],
+        model="fake-llm-1",
+    )
+
+    error = asyncio.CancelledError("cancelled")
+    assert abort_current_llm_span(error) is True
+    assert abort_current_llm_span(error) is False
+    assert get_current_llm_span() is None
+
+    spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(spans) == 1
+    assert spans[0].status.status_code.name == "ERROR"
+    assert "cancelled" in (spans[0].status.description or "")
+
+    team_span = remove_team_span("test_team")
+    if team_span is not None and team_span.is_recording():
+        team_span.end()
 
 
 # ---------------------------------------------------------------------------
