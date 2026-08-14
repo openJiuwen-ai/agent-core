@@ -156,6 +156,40 @@ def test_task_rollout_backend_registry_preserves_compatible_aliases():
     assert type(get_task_rollout_backend("local_repo")).__name__ == "AKernelTaskRolloutBackend"
 
 
+def test_local_program_rollout_uses_current_python_env(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from openjiuwen.agent_evolving.agent_rl.online.core.task_rollouter import (
+        SFTTaskCase,
+        SFTTaskRolloutConfig,
+        build_task_rollout_local_program_spec,
+    )
+
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    monkeypatch.setenv("SFT_DOCKER_CONDA_ENV", "wrong-env")
+
+    spec = build_task_rollout_local_program_spec(
+        SFTTaskCase(
+            instance_id="local-task",
+            docker_image="local/python-local-task:latest",
+            task_prompt="prompt",
+            local_program_path=str(task_dir),
+        ),
+        SFTTaskRolloutConfig(
+            gateway_url="http://127.0.0.1:18080",
+            supervisor_url="http://127.0.0.1:18002",
+            rollout_command="python -c 'import sys; print(sys.executable)'",
+            local_repo_work_root=str(tmp_path / "work"),
+        ),
+    )
+
+    command_text = spec.command[-1]
+    assert "conda activate wrong-env" not in command_text
+    assert f"export PATH={Path(sys.executable).resolve().parent}:$PATH" in command_text
+    assert spec.env["SFT_TASK_LIGHT_CONFIG"] == "1"
+
+
 def test_akernel_bundle_contains_project_metadata(tmp_path, monkeypatch):
     from openjiuwen.agent_evolving.agent_rl.online.backends.rollouter.task_rollout_backends import (
         _build_akernel_bundle,

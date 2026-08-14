@@ -338,7 +338,8 @@ def default_jiuwenclaw_task_command() -> str:
         import os
 
         max_iterations = os.environ.get("SFT_TASK_MAX_ITERATIONS", "").strip()
-        if max_iterations:
+        light_config = os.environ.get("SFT_TASK_LIGHT_CONFIG", "").strip().lower() in {"1", "true", "yes", "on"}
+        if max_iterations or light_config:
             try:
                 import yaml
                 from jiuwenswarm.common.utils import get_config_file
@@ -346,11 +347,24 @@ def default_jiuwenclaw_task_command() -> str:
                 path = get_config_file()
                 data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
                 react = data.setdefault("react", {})
-                react["max_iterations"] = int(max_iterations)
+                if max_iterations:
+                    react["max_iterations"] = int(max_iterations)
+                    print(f"[sft-task] set react.max_iterations={max_iterations} config={path}", flush=True)
+                if light_config:
+                    react["skill_mode"] = os.environ.get("SFT_TASK_SKILL_MODE", "auto_list")
+                    subagents = react.setdefault("subagents", {})
+                    for name in ("general_agent", "browser_agent", "research_agent"):
+                        subagents.setdefault(name, {})["enabled"] = False
+                    data["auto_memory_enabled"] = False
+                    memory = data.setdefault("memory", {})
+                    memory["engine"] = "none"
+                    tools = data.get("tools")
+                    if isinstance(tools, list):
+                        data["tools"] = [item for item in tools if item not in {"skill"}]
+                    print("[sft-task] applied light jiuwenswarm config", flush=True)
                 path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
-                print(f"[sft-task] set react.max_iterations={max_iterations} config={path}", flush=True)
             except Exception as exc:
-                print(f"[sft-task] warning: failed to set max_iterations: {exc!r}", flush=True)
+                print(f"[sft-task] warning: failed to update config: {exc!r}", flush=True)
         PY
         python - <<'PY' > "$JIUWENSWARM_DATA_DIR/app_entry"
         import importlib.util
@@ -439,7 +453,11 @@ def default_jiuwenclaw_task_command() -> str:
         }, flush=True)
         PY
         app_entry="$(tail -n 1 "$JIUWENSWARM_DATA_DIR/app_entry" | tr -d '\r')"
-        python -m "$app_entry" --dotenv "$JIUWENSWARM_DATA_DIR/sft_online.env" > "$JIUWENSWARM_DATA_DIR/app.log" 2>&1 &
+        if command -v setsid >/dev/null 2>&1; then
+          setsid python -m "$app_entry" --dotenv "$JIUWENSWARM_DATA_DIR/sft_online.env" > "$JIUWENSWARM_DATA_DIR/app.log" 2>&1 &
+        else
+          python -m "$app_entry" --dotenv "$JIUWENSWARM_DATA_DIR/sft_online.env" > "$JIUWENSWARM_DATA_DIR/app.log" 2>&1 &
+        fi
         app_pid=$!
         cleanup() {
           if [ "${SFT_TASK_PRINT_APP_LOG:-0}" = "1" ] && [ -f "$JIUWENSWARM_DATA_DIR/app.log" ]; then
@@ -447,8 +465,12 @@ def default_jiuwenclaw_task_command() -> str:
             tail -n "${SFT_TASK_APP_LOG_TAIL:-240}" "$JIUWENSWARM_DATA_DIR/app.log" >&2 || true
             printf '%s\n' "===== end jiuwenclaw app.log =====" >&2
           fi
+          kill -TERM "-$app_pid" >/dev/null 2>&1 || true
+          pkill -TERM -P "$app_pid" >/dev/null 2>&1 || true
           kill "$app_pid" >/dev/null 2>&1 || true
           wait "$app_pid" >/dev/null 2>&1 || true
+          kill -KILL "-$app_pid" >/dev/null 2>&1 || true
+          pkill -KILL -P "$app_pid" >/dev/null 2>&1 || true
         }
         trap cleanup EXIT
         python - <<'PY'

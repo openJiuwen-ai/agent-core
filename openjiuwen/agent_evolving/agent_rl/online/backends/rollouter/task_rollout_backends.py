@@ -12,6 +12,7 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.request
@@ -24,7 +25,6 @@ from .docker_runtime import (
     build_jiuwenclaw_docker_env,
     default_jiuwenclaw_host_path,
     default_jiuwenclaw_task_command,
-    host_conda_command_prefix,
     normalize_dataset_case,
 )
 from ...abstract.rollouter import SFTDockerCommandResult
@@ -248,8 +248,9 @@ def _build_host_process_env(
 
 def _host_task_command(config: SFTTaskRolloutConfig) -> list[str]:
     rollout_command = config.rollout_command.strip() or default_jiuwenclaw_task_command()
-    conda_prefix = host_conda_command_prefix([])
-    command_text = f"{conda_prefix} {rollout_command}" if conda_prefix else rollout_command
+    python_bin = Path(sys.executable).resolve().parent
+    command_prefix = f"set -e; export PATH={shlex.quote(str(python_bin))}:$PATH; hash -r;"
+    command_text = f"{command_prefix} {rollout_command}"
     return ["bash", "-lc", command_text]
 
 
@@ -707,6 +708,7 @@ class LocalProgramTaskRolloutBackend(SFTTaskRolloutBackend):
             extra={
                 "SFT_LOCAL_PROGRAM_SOURCE_DIR": str(source_dir),
                 "SFT_LOCAL_PROGRAM_WORKDIR": str(work_dir),
+                "SFT_TASK_LIGHT_CONFIG": os.getenv("SFT_TASK_LIGHT_CONFIG", "1"),
             },
         )
         logger.info(
