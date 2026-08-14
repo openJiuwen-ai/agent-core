@@ -321,7 +321,7 @@ async def external_cli_spawn(
             team_logger.info("[external-cli] member {} cancelled", member_name)
             raise
         except Exception:
-            team_logger.error("[external-cli] member {} crashed", member_name, exc_info=True)
+            team_logger.exception("[external-cli] member {} crashed", member_name)
             raise
         finally:
             await runtime.stop()
