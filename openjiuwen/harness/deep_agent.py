@@ -216,6 +216,7 @@ class DeepAgent(BaseAgent):
         self._react_agent: Optional[ReActAgent] = None
         self._pending_rails: List[AgentRail] = []
         self._stale_rails: List[AgentRail] = []
+        self._online_training_trajectory_span_processor: Any | None = None
         self._registered_rails: List[AgentRail] = []
         self._loop_coordinator: Optional[LoopCoordinator] = None
         self._loop_controller: Optional[TaskLoopController] = None
@@ -619,6 +620,61 @@ class DeepAgent(BaseAgent):
             )
             if prail is not None:
                 self._pending_rails.append(prail)
+
+        self._queue_online_training_rail_from_env()
+
+    def _queue_online_training_rail_from_env(self) -> None:
+        """Queue the env-selected online training Rail when enabled by the host process."""
+
+        if self._has_online_training_rail():
+            return
+        rail = self._build_online_training_rail_from_env()
+        if rail is None:
+            return
+        self._pending_rails.append(rail)
+        logger.info("[DeepAgent] %s added from environment", type(rail).__name__)
+
+    def _has_online_training_rail(self) -> bool:
+        try:
+            from openjiuwen.agent_evolving.agent_rl.online.core.rail_factory import has_online_training_rail
+        except Exception:
+            return False
+        return has_online_training_rail(self.configured_rails())
+
+    def _build_online_training_rail_from_env(self) -> AgentRail | None:
+        """Build the env-selected online training Rail without duplicating existing rails."""
+
+        try:
+            from openjiuwen.agent_evolving.agent_rl.online.core.rail_factory import (
+                build_online_training_rail_from_env,
+            )
+            from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+        except Exception as exc:
+            logger.warning("[DeepAgent] online training rail factory unavailable: %s", exc)
+            return None
+
+        processor = self._online_training_trajectory_span_processor
+        if processor is None:
+            processor = TrajectorySpanProcessor()
+            self._online_training_trajectory_span_processor = processor
+            self._attach_online_training_span_processor(processor)
+        return build_online_training_rail_from_env(
+            self.configured_rails(),
+            trajectory_span_processor=processor,
+        )
+
+    @staticmethod
+    def _attach_online_training_span_processor(processor: Any) -> None:
+        """Best-effort attach of env-created trajectory capture to observability."""
+
+        try:
+            from openjiuwen.extensions.observability.setup import get_observability_runtime
+
+            runtime = get_observability_runtime()
+            if runtime.is_initialized():
+                runtime.add_span_processors((processor,))
+        except Exception as exc:
+            logger.debug("[DeepAgent] online training span processor not attached: %s", exc)
 
     def set_react_agent(
         self,
@@ -1057,7 +1113,10 @@ class DeepAgent(BaseAgent):
             # Reused subagent instances skip full init; still refresh cwd so
             # create_subagent does not have to mutate the parent's ContextVar.
             self._apply_inherited_artifact_cwd()
+            await self._register_online_training_rail_from_env_if_needed()
             return
+
+        self._queue_online_training_rail_from_env()
 
         # Initialize ContextVar CWD in the current asyncio Task context.
         # Each agent sets its own CWD unconditionally — ContextVar copies
@@ -1089,7 +1148,7 @@ class DeepAgent(BaseAgent):
             await self.init_workspace()
 
         await self._resolve_read_image_multimodal()
-        
+
         self._sync_prompt_builder_references()
 
         # Unregister stale rails left over from a previous configure() cycle.
@@ -1121,6 +1180,18 @@ class DeepAgent(BaseAgent):
         self._pending_rails.clear()
         self._sync_prompt_builder_references()
         self._initialized = True
+
+    async def _register_online_training_rail_from_env_if_needed(self) -> None:
+        """Register the env-selected online Rail if env became available after configure()."""
+
+        if not self._initialized:
+            return
+
+        rail = self._build_online_training_rail_from_env()
+        if rail is None:
+            return
+        await self.register_rail(rail)
+        logger.info("[DeepAgent] %s registered from environment", type(rail).__name__)
 
     def _needs_workspace_init(self) -> bool:
         """Check if workspace initialization is needed."""

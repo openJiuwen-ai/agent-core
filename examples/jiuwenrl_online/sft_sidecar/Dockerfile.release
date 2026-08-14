@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+
+FROM python:3.12
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/workspace/agent-core:/workspace/jiuwenclaw
+
+WORKDIR /workspace/agent-core
+
+# Release-mode image should mirror the same runtime contract as dev-mode:
+# current agent-core source + jiuwenswarm source are provided as immutable
+# filesystem inputs, while the actual conda/runtime dependencies are supplied
+# at run time by mounting the host openjiuwen-sft environment.
+COPY agent-core/ /workspace/agent-core/
+COPY jiuwenclaw/ /workspace/jiuwenclaw/
+
+ARG USE_CONDA=1
+RUN if [ "${USE_CONDA}" = "0" ]; then \
+      python -m pip install --no-cache-dir "openjiuwen[online-rl]" && \
+      python -m pip install --no-cache-dir "jiuwenswarm"; \
+    fi

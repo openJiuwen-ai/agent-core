@@ -1,0 +1,1427 @@
+{
+  "schema_version": 1,
+  "mode": "baseline",
+  "runs": 10,
+  "pair_count": 45,
+  "model": {
+    "name": "Qwen3-4B-Thinking-2507",
+    "path": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+  },
+  "fixture": "/data1/lll/workspace/openjiuwen/refactor/agent-core/examples/jiuwenrl_online/accuracy_validate/fixtures/a5_training_trajectories.json",
+  "train_gpu": "6,7",
+  "ppo_samples_per_step": "4",
+  "train_threshold": "4",
+  "seed": "20260713",
+  "threshold_policy": {
+    "max_abs_margin_ratio": 0.1,
+    "mean_abs_margin_ratio": 0.1,
+    "absolute_epsilon": 1e-06
+  },
+  "observed": {
+    "max_abs": {
+      "min": 0.03949934244155884,
+      "max": 0.03952653706073761,
+      "mean": 0.03951709576778942,
+      "median": 0.039518386125564575
+    },
+    "mean_abs": {
+      "min": 0.0048353355426852,
+      "max": 0.004838609384779241,
+      "mean": 0.004836710370271008,
+      "median": 0.004836732909762445
+    },
+    "adapter_abs_max": {
+      "min": 0.01976422779262066,
+      "max": 0.019764233380556107,
+      "mean": 0.01976423095911741,
+      "median": 0.019764231517910957
+    },
+    "adapter_abs_mean": {
+      "min": 0.003627794011260037,
+      "max": 0.0036295779771522677,
+      "mean": 0.0036289994875643413,
+      "median": 0.0036291855280489293
+    },
+    "adapter_l2": {
+      "min": 36.65141027542534,
+      "max": 36.66446549978284,
+      "mean": 36.65868828395297,
+      "median": 36.65887233629423
+    },
+    "different_tensors": {
+      "min": 504,
+      "max": 504
+    }
+  },
+  "suggested_thresholds": {
+    "max_abs": 0.04348019076681137,
+    "mean_abs": 0.005323470323257166,
+    "adapter_abs_max": 0.02174165671861172,
+    "adapter_abs_mean": 0.003993535774867495,
+    "adapter_l2": 40.33091304976113
+  },
+  "adapters": [
+    {
+      "index": 0,
+      "run_name": "drift_00",
+      "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_00/st-a5-drift_00/v1",
+      "manifest": {
+        "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_00/st-a5-drift_00/v1",
+        "adapter_config": {
+          "task_type": "CAUSAL_LM",
+          "peft_type": "LORA",
+          "auto_mapping": null,
+          "peft_version": "0.18.1",
+          "base_model_name_or_path": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+          "revision": null,
+          "inference_mode": false,
+          "r": 16,
+          "target_modules": [
+            "gate_proj",
+            "o_proj",
+            "up_proj",
+            "k_proj",
+            "q_proj",
+            "v_proj",
+            "down_proj"
+          ],
+          "exclude_modules": null,
+          "lora_alpha": 32,
+          "lora_dropout": 0.0,
+          "fan_in_fan_out": false,
+          "bias": "none",
+          "use_rslora": false,
+          "modules_to_save": null,
+          "init_lora_weights": true,
+          "layers_to_transform": null,
+          "layers_pattern": null,
+          "rank_pattern": {},
+          "alpha_pattern": {},
+          "megatron_config": null,
+          "megatron_core": "megatron.core",
+          "trainable_token_indices": null,
+          "loftq_config": {},
+          "eva_config": null,
+          "corda_config": null,
+          "use_dora": false,
+          "alora_invocation_tokens": null,
+          "use_qalora": false,
+          "qalora_group_size": 16,
+          "layer_replication": null,
+          "runtime_config": {
+            "ephemeral_gpu_offload": false
+          },
+          "lora_bias": false,
+          "target_parameters": null,
+          "arrow_config": null,
+          "ensure_weight_tying": false
+        },
+        "metadata_without_timestamp": {
+          "user_id": "st-a5-drift_00",
+          "trajectory_count": 4,
+          "reward_avg": 0.8625,
+          "base_model": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+        },
+        "adapter_model_name": "adapter_model.safetensors",
+        "adapter_config_sha256": "42b5b696468086172116d7b308a728bccaeb703139007381a0001caa4f88d227",
+        "adapter_model_sha256": "0987b16763da5995081e69bc9fbcc6bbaa1ec05726c6cefb1826ca2f86a0de4f"
+      },
+      "tensor_stats": {
+        "tensor_count": 504,
+        "numel": 33030144,
+        "adapter_abs_max": 0.01976422779262066,
+        "adapter_abs_mean": 0.0036292951975747923,
+        "adapter_l2": 36.660696892713204
+      }
+    },
+    {
+      "index": 1,
+      "run_name": "drift_01",
+      "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_01/st-a5-drift_01/v1",
+      "manifest": {
+        "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_01/st-a5-drift_01/v1",
+        "adapter_config": {
+          "task_type": "CAUSAL_LM",
+          "peft_type": "LORA",
+          "auto_mapping": null,
+          "peft_version": "0.18.1",
+          "base_model_name_or_path": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+          "revision": null,
+          "inference_mode": false,
+          "r": 16,
+          "target_modules": [
+            "gate_proj",
+            "o_proj",
+            "up_proj",
+            "k_proj",
+            "q_proj",
+            "v_proj",
+            "down_proj"
+          ],
+          "exclude_modules": null,
+          "lora_alpha": 32,
+          "lora_dropout": 0.0,
+          "fan_in_fan_out": false,
+          "bias": "none",
+          "use_rslora": false,
+          "modules_to_save": null,
+          "init_lora_weights": true,
+          "layers_to_transform": null,
+          "layers_pattern": null,
+          "rank_pattern": {},
+          "alpha_pattern": {},
+          "megatron_config": null,
+          "megatron_core": "megatron.core",
+          "trainable_token_indices": null,
+          "loftq_config": {},
+          "eva_config": null,
+          "corda_config": null,
+          "use_dora": false,
+          "alora_invocation_tokens": null,
+          "use_qalora": false,
+          "qalora_group_size": 16,
+          "layer_replication": null,
+          "runtime_config": {
+            "ephemeral_gpu_offload": false
+          },
+          "lora_bias": false,
+          "target_parameters": null,
+          "arrow_config": null,
+          "ensure_weight_tying": false
+        },
+        "metadata_without_timestamp": {
+          "user_id": "st-a5-drift_01",
+          "trajectory_count": 4,
+          "reward_avg": 0.8625,
+          "base_model": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+        },
+        "adapter_model_name": "adapter_model.safetensors",
+        "adapter_config_sha256": "42b5b696468086172116d7b308a728bccaeb703139007381a0001caa4f88d227",
+        "adapter_model_sha256": "fa057955a1f4a8b83c2ee3026edfcd5f65dacccd82ef2df8c763660d40c5447d"
+      },
+      "tensor_stats": {
+        "tensor_count": 504,
+        "numel": 33030144,
+        "adapter_abs_max": 0.019764231517910957,
+        "adapter_abs_mean": 0.003629418548727125,
+        "adapter_l2": 36.6607364557633
+      }
+    },
+    {
+      "index": 2,
+      "run_name": "drift_02",
+      "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_02/st-a5-drift_02/v1",
+      "manifest": {
+        "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_02/st-a5-drift_02/v1",
+        "adapter_config": {
+          "task_type": "CAUSAL_LM",
+          "peft_type": "LORA",
+          "auto_mapping": null,
+          "peft_version": "0.18.1",
+          "base_model_name_or_path": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+          "revision": null,
+          "inference_mode": false,
+          "r": 16,
+          "target_modules": [
+            "gate_proj",
+            "o_proj",
+            "up_proj",
+            "k_proj",
+            "q_proj",
+            "v_proj",
+            "down_proj"
+          ],
+          "exclude_modules": null,
+          "lora_alpha": 32,
+          "lora_dropout": 0.0,
+          "fan_in_fan_out": false,
+          "bias": "none",
+          "use_rslora": false,
+          "modules_to_save": null,
+          "init_lora_weights": true,
+          "layers_to_transform": null,
+          "layers_pattern": null,
+          "rank_pattern": {},
+          "alpha_pattern": {},
+          "megatron_config": null,
+          "megatron_core": "megatron.core",
+          "trainable_token_indices": null,
+          "loftq_config": {},
+          "eva_config": null,
+          "corda_config": null,
+          "use_dora": false,
+          "alora_invocation_tokens": null,
+          "use_qalora": false,
+          "qalora_group_size": 16,
+          "layer_replication": null,
+          "runtime_config": {
+            "ephemeral_gpu_offload": false
+          },
+          "lora_bias": false,
+          "target_parameters": null,
+          "arrow_config": null,
+          "ensure_weight_tying": false
+        },
+        "metadata_without_timestamp": {
+          "user_id": "st-a5-drift_02",
+          "trajectory_count": 4,
+          "reward_avg": 0.8625,
+          "base_model": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+        },
+        "adapter_model_name": "adapter_model.safetensors",
+        "adapter_config_sha256": "42b5b696468086172116d7b308a728bccaeb703139007381a0001caa4f88d227",
+        "adapter_model_sha256": "34591349f791765ac3bdc3076292119ebcc56d4e028f0149cce6527fa6ab146d"
+      },
+      "tensor_stats": {
+        "tensor_count": 504,
+        "numel": 33030144,
+        "adapter_abs_max": 0.01976422779262066,
+        "adapter_abs_mean": 0.0036295779771522677,
+        "adapter_l2": 36.66446549978284
+      }
+    },
+    {
+      "index": 3,
+      "run_name": "drift_03",
+      "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_03/st-a5-drift_03/v1",
+      "manifest": {
+        "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_03/st-a5-drift_03/v1",
+        "adapter_config": {
+          "task_type": "CAUSAL_LM",
+          "peft_type": "LORA",
+          "auto_mapping": null,
+          "peft_version": "0.18.1",
+          "base_model_name_or_path": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+          "revision": null,
+          "inference_mode": false,
+          "r": 16,
+          "target_modules": [
+            "gate_proj",
+            "o_proj",
+            "up_proj",
+            "k_proj",
+            "q_proj",
+            "v_proj",
+            "down_proj"
+          ],
+          "exclude_modules": null,
+          "lora_alpha": 32,
+          "lora_dropout": 0.0,
+          "fan_in_fan_out": false,
+          "bias": "none",
+          "use_rslora": false,
+          "modules_to_save": null,
+          "init_lora_weights": true,
+          "layers_to_transform": null,
+          "layers_pattern": null,
+          "rank_pattern": {},
+          "alpha_pattern": {},
+          "megatron_config": null,
+          "megatron_core": "megatron.core",
+          "trainable_token_indices": null,
+          "loftq_config": {},
+          "eva_config": null,
+          "corda_config": null,
+          "use_dora": false,
+          "alora_invocation_tokens": null,
+          "use_qalora": false,
+          "qalora_group_size": 16,
+          "layer_replication": null,
+          "runtime_config": {
+            "ephemeral_gpu_offload": false
+          },
+          "lora_bias": false,
+          "target_parameters": null,
+          "arrow_config": null,
+          "ensure_weight_tying": false
+        },
+        "metadata_without_timestamp": {
+          "user_id": "st-a5-drift_03",
+          "trajectory_count": 4,
+          "reward_avg": 0.8625,
+          "base_model": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+        },
+        "adapter_model_name": "adapter_model.safetensors",
+        "adapter_config_sha256": "42b5b696468086172116d7b308a728bccaeb703139007381a0001caa4f88d227",
+        "adapter_model_sha256": "f9dce3df84f660113c559416a67abb2a848b3f9fda71666e145f2be89caa2670"
+      },
+      "tensor_stats": {
+        "tensor_count": 504,
+        "numel": 33030144,
+        "adapter_abs_max": 0.019764233380556107,
+        "adapter_abs_mean": 0.0036291863983106193,
+        "adapter_l2": 36.65897982847939
+      }
+    },
+    {
+      "index": 4,
+      "run_name": "drift_04",
+      "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_04/st-a5-drift_04/v1",
+      "manifest": {
+        "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_04/st-a5-drift_04/v1",
+        "adapter_config": {
+          "task_type": "CAUSAL_LM",
+          "peft_type": "LORA",
+          "auto_mapping": null,
+          "peft_version": "0.18.1",
+          "base_model_name_or_path": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+          "revision": null,
+          "inference_mode": false,
+          "r": 16,
+          "target_modules": [
+            "gate_proj",
+            "o_proj",
+            "up_proj",
+            "k_proj",
+            "q_proj",
+            "v_proj",
+            "down_proj"
+          ],
+          "exclude_modules": null,
+          "lora_alpha": 32,
+          "lora_dropout": 0.0,
+          "fan_in_fan_out": false,
+          "bias": "none",
+          "use_rslora": false,
+          "modules_to_save": null,
+          "init_lora_weights": true,
+          "layers_to_transform": null,
+          "layers_pattern": null,
+          "rank_pattern": {},
+          "alpha_pattern": {},
+          "megatron_config": null,
+          "megatron_core": "megatron.core",
+          "trainable_token_indices": null,
+          "loftq_config": {},
+          "eva_config": null,
+          "corda_config": null,
+          "use_dora": false,
+          "alora_invocation_tokens": null,
+          "use_qalora": false,
+          "qalora_group_size": 16,
+          "layer_replication": null,
+          "runtime_config": {
+            "ephemeral_gpu_offload": false
+          },
+          "lora_bias": false,
+          "target_parameters": null,
+          "arrow_config": null,
+          "ensure_weight_tying": false
+        },
+        "metadata_without_timestamp": {
+          "user_id": "st-a5-drift_04",
+          "trajectory_count": 4,
+          "reward_avg": 0.8625,
+          "base_model": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+        },
+        "adapter_model_name": "adapter_model.safetensors",
+        "adapter_config_sha256": "42b5b696468086172116d7b308a728bccaeb703139007381a0001caa4f88d227",
+        "adapter_model_sha256": "d365f26e9498906b1b7e430d084cec0c7e918d4d4e7bc7afe0e04f8dbf8a49e6"
+      },
+      "tensor_stats": {
+        "tensor_count": 504,
+        "numel": 33030144,
+        "adapter_abs_max": 0.019764231517910957,
+        "adapter_abs_mean": 0.003629400803458252,
+        "adapter_l2": 36.66358208867433
+      }
+    },
+    {
+      "index": 5,
+      "run_name": "drift_05",
+      "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_05/st-a5-drift_05/v1",
+      "manifest": {
+        "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_05/st-a5-drift_05/v1",
+        "adapter_config": {
+          "task_type": "CAUSAL_LM",
+          "peft_type": "LORA",
+          "auto_mapping": null,
+          "peft_version": "0.18.1",
+          "base_model_name_or_path": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+          "revision": null,
+          "inference_mode": false,
+          "r": 16,
+          "target_modules": [
+            "gate_proj",
+            "o_proj",
+            "up_proj",
+            "k_proj",
+            "q_proj",
+            "v_proj",
+            "down_proj"
+          ],
+          "exclude_modules": null,
+          "lora_alpha": 32,
+          "lora_dropout": 0.0,
+          "fan_in_fan_out": false,
+          "bias": "none",
+          "use_rslora": false,
+          "modules_to_save": null,
+          "init_lora_weights": true,
+          "layers_to_transform": null,
+          "layers_pattern": null,
+          "rank_pattern": {},
+          "alpha_pattern": {},
+          "megatron_config": null,
+          "megatron_core": "megatron.core",
+          "trainable_token_indices": null,
+          "loftq_config": {},
+          "eva_config": null,
+          "corda_config": null,
+          "use_dora": false,
+          "alora_invocation_tokens": null,
+          "use_qalora": false,
+          "qalora_group_size": 16,
+          "layer_replication": null,
+          "runtime_config": {
+            "ephemeral_gpu_offload": false
+          },
+          "lora_bias": false,
+          "target_parameters": null,
+          "arrow_config": null,
+          "ensure_weight_tying": false
+        },
+        "metadata_without_timestamp": {
+          "user_id": "st-a5-drift_05",
+          "trajectory_count": 4,
+          "reward_avg": 0.8625,
+          "base_model": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+        },
+        "adapter_model_name": "adapter_model.safetensors",
+        "adapter_config_sha256": "42b5b696468086172116d7b308a728bccaeb703139007381a0001caa4f88d227",
+        "adapter_model_sha256": "39ac603af24e252125c58275a33bc164c290b8453dda0d6ddf81102cfc65265f"
+      },
+      "tensor_stats": {
+        "tensor_count": 504,
+        "numel": 33030144,
+        "adapter_abs_max": 0.01976422779262066,
+        "adapter_abs_mean": 0.003627794011260037,
+        "adapter_l2": 36.65141027542534
+      }
+    },
+    {
+      "index": 6,
+      "run_name": "drift_06",
+      "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_06/st-a5-drift_06/v1",
+      "manifest": {
+        "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_06/st-a5-drift_06/v1",
+        "adapter_config": {
+          "task_type": "CAUSAL_LM",
+          "peft_type": "LORA",
+          "auto_mapping": null,
+          "peft_version": "0.18.1",
+          "base_model_name_or_path": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+          "revision": null,
+          "inference_mode": false,
+          "r": 16,
+          "target_modules": [
+            "gate_proj",
+            "o_proj",
+            "up_proj",
+            "k_proj",
+            "q_proj",
+            "v_proj",
+            "down_proj"
+          ],
+          "exclude_modules": null,
+          "lora_alpha": 32,
+          "lora_dropout": 0.0,
+          "fan_in_fan_out": false,
+          "bias": "none",
+          "use_rslora": false,
+          "modules_to_save": null,
+          "init_lora_weights": true,
+          "layers_to_transform": null,
+          "layers_pattern": null,
+          "rank_pattern": {},
+          "alpha_pattern": {},
+          "megatron_config": null,
+          "megatron_core": "megatron.core",
+          "trainable_token_indices": null,
+          "loftq_config": {},
+          "eva_config": null,
+          "corda_config": null,
+          "use_dora": false,
+          "alora_invocation_tokens": null,
+          "use_qalora": false,
+          "qalora_group_size": 16,
+          "layer_replication": null,
+          "runtime_config": {
+            "ephemeral_gpu_offload": false
+          },
+          "lora_bias": false,
+          "target_parameters": null,
+          "arrow_config": null,
+          "ensure_weight_tying": false
+        },
+        "metadata_without_timestamp": {
+          "user_id": "st-a5-drift_06",
+          "trajectory_count": 4,
+          "reward_avg": 0.8625,
+          "base_model": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+        },
+        "adapter_model_name": "adapter_model.safetensors",
+        "adapter_config_sha256": "42b5b696468086172116d7b308a728bccaeb703139007381a0001caa4f88d227",
+        "adapter_model_sha256": "9a119c5c4f882581bcb7a3daaed387195a5978c5628ac08cabb2e1ca6edaaaee"
+      },
+      "tensor_stats": {
+        "tensor_count": 504,
+        "numel": 33030144,
+        "adapter_abs_max": 0.019764233380556107,
+        "adapter_abs_mean": 0.0036286412406764516,
+        "adapter_l2": 36.65553399485889
+      }
+    },
+    {
+      "index": 7,
+      "run_name": "drift_07",
+      "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_07/st-a5-drift_07/v1",
+      "manifest": {
+        "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_07/st-a5-drift_07/v1",
+        "adapter_config": {
+          "task_type": "CAUSAL_LM",
+          "peft_type": "LORA",
+          "auto_mapping": null,
+          "peft_version": "0.18.1",
+          "base_model_name_or_path": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+          "revision": null,
+          "inference_mode": false,
+          "r": 16,
+          "target_modules": [
+            "gate_proj",
+            "o_proj",
+            "up_proj",
+            "k_proj",
+            "q_proj",
+            "v_proj",
+            "down_proj"
+          ],
+          "exclude_modules": null,
+          "lora_alpha": 32,
+          "lora_dropout": 0.0,
+          "fan_in_fan_out": false,
+          "bias": "none",
+          "use_rslora": false,
+          "modules_to_save": null,
+          "init_lora_weights": true,
+          "layers_to_transform": null,
+          "layers_pattern": null,
+          "rank_pattern": {},
+          "alpha_pattern": {},
+          "megatron_config": null,
+          "megatron_core": "megatron.core",
+          "trainable_token_indices": null,
+          "loftq_config": {},
+          "eva_config": null,
+          "corda_config": null,
+          "use_dora": false,
+          "alora_invocation_tokens": null,
+          "use_qalora": false,
+          "qalora_group_size": 16,
+          "layer_replication": null,
+          "runtime_config": {
+            "ephemeral_gpu_offload": false
+          },
+          "lora_bias": false,
+          "target_parameters": null,
+          "arrow_config": null,
+          "ensure_weight_tying": false
+        },
+        "metadata_without_timestamp": {
+          "user_id": "st-a5-drift_07",
+          "trajectory_count": 4,
+          "reward_avg": 0.8625,
+          "base_model": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+        },
+        "adapter_model_name": "adapter_model.safetensors",
+        "adapter_config_sha256": "42b5b696468086172116d7b308a728bccaeb703139007381a0001caa4f88d227",
+        "adapter_model_sha256": "75684fee58d8d86c8868156c575f7107c3b6492eaf5784fb9cc95748b5614ef8"
+      },
+      "tensor_stats": {
+        "tensor_count": 504,
+        "numel": 33030144,
+        "adapter_abs_max": 0.019764233380556107,
+        "adapter_abs_mean": 0.0036291846577872398,
+        "adapter_l2": 36.65876484410907
+      }
+    },
+    {
+      "index": 8,
+      "run_name": "drift_08",
+      "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_08/st-a5-drift_08/v1",
+      "manifest": {
+        "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_08/st-a5-drift_08/v1",
+        "adapter_config": {
+          "task_type": "CAUSAL_LM",
+          "peft_type": "LORA",
+          "auto_mapping": null,
+          "peft_version": "0.18.1",
+          "base_model_name_or_path": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+          "revision": null,
+          "inference_mode": false,
+          "r": 16,
+          "target_modules": [
+            "gate_proj",
+            "o_proj",
+            "up_proj",
+            "k_proj",
+            "q_proj",
+            "v_proj",
+            "down_proj"
+          ],
+          "exclude_modules": null,
+          "lora_alpha": 32,
+          "lora_dropout": 0.0,
+          "fan_in_fan_out": false,
+          "bias": "none",
+          "use_rslora": false,
+          "modules_to_save": null,
+          "init_lora_weights": true,
+          "layers_to_transform": null,
+          "layers_pattern": null,
+          "rank_pattern": {},
+          "alpha_pattern": {},
+          "megatron_config": null,
+          "megatron_core": "megatron.core",
+          "trainable_token_indices": null,
+          "loftq_config": {},
+          "eva_config": null,
+          "corda_config": null,
+          "use_dora": false,
+          "alora_invocation_tokens": null,
+          "use_qalora": false,
+          "qalora_group_size": 16,
+          "layer_replication": null,
+          "runtime_config": {
+            "ephemeral_gpu_offload": false
+          },
+          "lora_bias": false,
+          "target_parameters": null,
+          "arrow_config": null,
+          "ensure_weight_tying": false
+        },
+        "metadata_without_timestamp": {
+          "user_id": "st-a5-drift_08",
+          "trajectory_count": 4,
+          "reward_avg": 0.8625,
+          "base_model": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+        },
+        "adapter_model_name": "adapter_model.safetensors",
+        "adapter_config_sha256": "42b5b696468086172116d7b308a728bccaeb703139007381a0001caa4f88d227",
+        "adapter_model_sha256": "4be23e1e68418f67dfd7195cbd743b4d7f5591927a7f93c8d1cbfa12bb7db8b7"
+      },
+      "tensor_stats": {
+        "tensor_count": 504,
+        "numel": 33030144,
+        "adapter_abs_max": 0.019764231517910957,
+        "adapter_abs_mean": 0.0036286980821166204,
+        "adapter_l2": 36.655826844495564
+      }
+    },
+    {
+      "index": 9,
+      "run_name": "drift_09",
+      "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_09/st-a5-drift_09/v1",
+      "manifest": {
+        "adapter_dir": "/tmp/jiuwen_lora_drift_gpu/lora_repo_drift_09/st-a5-drift_09/v1",
+        "adapter_config": {
+          "task_type": "CAUSAL_LM",
+          "peft_type": "LORA",
+          "auto_mapping": null,
+          "peft_version": "0.18.1",
+          "base_model_name_or_path": "/data1/lll/models/Qwen3-4B-Thinking-2507",
+          "revision": null,
+          "inference_mode": false,
+          "r": 16,
+          "target_modules": [
+            "gate_proj",
+            "o_proj",
+            "up_proj",
+            "k_proj",
+            "q_proj",
+            "v_proj",
+            "down_proj"
+          ],
+          "exclude_modules": null,
+          "lora_alpha": 32,
+          "lora_dropout": 0.0,
+          "fan_in_fan_out": false,
+          "bias": "none",
+          "use_rslora": false,
+          "modules_to_save": null,
+          "init_lora_weights": true,
+          "layers_to_transform": null,
+          "layers_pattern": null,
+          "rank_pattern": {},
+          "alpha_pattern": {},
+          "megatron_config": null,
+          "megatron_core": "megatron.core",
+          "trainable_token_indices": null,
+          "loftq_config": {},
+          "eva_config": null,
+          "corda_config": null,
+          "use_dora": false,
+          "alora_invocation_tokens": null,
+          "use_qalora": false,
+          "qalora_group_size": 16,
+          "layer_replication": null,
+          "runtime_config": {
+            "ephemeral_gpu_offload": false
+          },
+          "lora_bias": false,
+          "target_parameters": null,
+          "arrow_config": null,
+          "ensure_weight_tying": false
+        },
+        "metadata_without_timestamp": {
+          "user_id": "st-a5-drift_09",
+          "trajectory_count": 4,
+          "reward_avg": 0.8625,
+          "base_model": "/data1/lll/models/Qwen3-4B-Thinking-2507"
+        },
+        "adapter_model_name": "adapter_model.safetensors",
+        "adapter_config_sha256": "42b5b696468086172116d7b308a728bccaeb703139007381a0001caa4f88d227",
+        "adapter_model_sha256": "80c4448a26f9ecb37669dca3fb401f178a93e8e24ecf2c3904286c9b5029e49e"
+      },
+      "tensor_stats": {
+        "tensor_count": 504,
+        "numel": 33030144,
+        "adapter_abs_max": 0.019764231517910957,
+        "adapter_abs_mean": 0.0036287979585800092,
+        "adapter_l2": 36.65688611522781
+      }
+    }
+  ],
+  "comparisons": [
+    {
+      "left_index": 0,
+      "right_index": 1,
+      "left_sha256": "0987b16763da5995081e69bc9fbcc6bbaa1ec05726c6cefb1826ca2f86a0de4f",
+      "right_sha256": "fa057955a1f4a8b83c2ee3026edfcd5f65dacccd82ef2df8c763660d40c5447d",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039520397782325745,
+        "mean_abs": 0.004838609384779241
+      }
+    },
+    {
+      "left_index": 0,
+      "right_index": 2,
+      "left_sha256": "0987b16763da5995081e69bc9fbcc6bbaa1ec05726c6cefb1826ca2f86a0de4f",
+      "right_sha256": "34591349f791765ac3bdc3076292119ebcc56d4e028f0149cce6527fa6ab146d",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952234238386154,
+        "mean_abs": 0.004835349436504769
+      }
+    },
+    {
+      "left_index": 0,
+      "right_index": 3,
+      "left_sha256": "0987b16763da5995081e69bc9fbcc6bbaa1ec05726c6cefb1826ca2f86a0de4f",
+      "right_sha256": "f9dce3df84f660113c559416a67abb2a848b3f9fda71666e145f2be89caa2670",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039521194994449615,
+        "mean_abs": 0.004836409102244673
+      }
+    },
+    {
+      "left_index": 0,
+      "right_index": 4,
+      "left_sha256": "0987b16763da5995081e69bc9fbcc6bbaa1ec05726c6cefb1826ca2f86a0de4f",
+      "right_sha256": "d365f26e9498906b1b7e430d084cec0c7e918d4d4e7bc7afe0e04f8dbf8a49e6",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951650857925415,
+        "mean_abs": 0.004837208877629131
+      }
+    },
+    {
+      "left_index": 0,
+      "right_index": 5,
+      "left_sha256": "0987b16763da5995081e69bc9fbcc6bbaa1ec05726c6cefb1826ca2f86a0de4f",
+      "right_sha256": "39ac603af24e252125c58275a33bc164c290b8453dda0d6ddf81102cfc65265f",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952539712190628,
+        "mean_abs": 0.0048353355426852
+      }
+    },
+    {
+      "left_index": 0,
+      "right_index": 6,
+      "left_sha256": "0987b16763da5995081e69bc9fbcc6bbaa1ec05726c6cefb1826ca2f86a0de4f",
+      "right_sha256": "9a119c5c4f882581bcb7a3daaed387195a5978c5628ac08cabb2e1ca6edaaaee",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951682895421982,
+        "mean_abs": 0.0048360664115218045
+      }
+    },
+    {
+      "left_index": 0,
+      "right_index": 7,
+      "left_sha256": "0987b16763da5995081e69bc9fbcc6bbaa1ec05726c6cefb1826ca2f86a0de4f",
+      "right_sha256": "75684fee58d8d86c8868156c575f7107c3b6492eaf5784fb9cc95748b5614ef8",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951405733823776,
+        "mean_abs": 0.004836732909762445
+      }
+    },
+    {
+      "left_index": 0,
+      "right_index": 8,
+      "left_sha256": "0987b16763da5995081e69bc9fbcc6bbaa1ec05726c6cefb1826ca2f86a0de4f",
+      "right_sha256": "4be23e1e68418f67dfd7195cbd743b4d7f5591927a7f93c8d1cbfa12bb7db8b7",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951609134674072,
+        "mean_abs": 0.004836017144150049
+      }
+    },
+    {
+      "left_index": 0,
+      "right_index": 9,
+      "left_sha256": "0987b16763da5995081e69bc9fbcc6bbaa1ec05726c6cefb1826ca2f86a0de4f",
+      "right_sha256": "80c4448a26f9ecb37669dca3fb401f178a93e8e24ecf2c3904286c9b5029e49e",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952089697122574,
+        "mean_abs": 0.004836576742770867
+      }
+    },
+    {
+      "left_index": 1,
+      "right_index": 2,
+      "left_sha256": "fa057955a1f4a8b83c2ee3026edfcd5f65dacccd82ef2df8c763660d40c5447d",
+      "right_sha256": "34591349f791765ac3bdc3076292119ebcc56d4e028f0149cce6527fa6ab146d",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03950010985136032,
+        "mean_abs": 0.004837450214194762
+      }
+    },
+    {
+      "left_index": 1,
+      "right_index": 3,
+      "left_sha256": "fa057955a1f4a8b83c2ee3026edfcd5f65dacccd82ef2df8c763660d40c5447d",
+      "right_sha256": "f9dce3df84f660113c559416a67abb2a848b3f9fda71666e145f2be89caa2670",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951667249202728,
+        "mean_abs": 0.004837231638811361
+      }
+    },
+    {
+      "left_index": 1,
+      "right_index": 4,
+      "left_sha256": "fa057955a1f4a8b83c2ee3026edfcd5f65dacccd82ef2df8c763660d40c5447d",
+      "right_sha256": "d365f26e9498906b1b7e430d084cec0c7e918d4d4e7bc7afe0e04f8dbf8a49e6",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952149301767349,
+        "mean_abs": 0.004836840635119545
+      }
+    },
+    {
+      "left_index": 1,
+      "right_index": 5,
+      "left_sha256": "fa057955a1f4a8b83c2ee3026edfcd5f65dacccd82ef2df8c763660d40c5447d",
+      "right_sha256": "39ac603af24e252125c58275a33bc164c290b8453dda0d6ddf81102cfc65265f",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951958566904068,
+        "mean_abs": 0.004835659934917387
+      }
+    },
+    {
+      "left_index": 1,
+      "right_index": 6,
+      "left_sha256": "fa057955a1f4a8b83c2ee3026edfcd5f65dacccd82ef2df8c763660d40c5447d",
+      "right_sha256": "9a119c5c4f882581bcb7a3daaed387195a5978c5628ac08cabb2e1ca6edaaaee",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.0395110584795475,
+        "mean_abs": 0.004836475894498404
+      }
+    },
+    {
+      "left_index": 1,
+      "right_index": 7,
+      "left_sha256": "fa057955a1f4a8b83c2ee3026edfcd5f65dacccd82ef2df8c763660d40c5447d",
+      "right_sha256": "75684fee58d8d86c8868156c575f7107c3b6492eaf5784fb9cc95748b5614ef8",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039518505334854126,
+        "mean_abs": 0.004835995963721943
+      }
+    },
+    {
+      "left_index": 1,
+      "right_index": 8,
+      "left_sha256": "fa057955a1f4a8b83c2ee3026edfcd5f65dacccd82ef2df8c763660d40c5447d",
+      "right_sha256": "4be23e1e68418f67dfd7195cbd743b4d7f5591927a7f93c8d1cbfa12bb7db8b7",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039518386125564575,
+        "mean_abs": 0.0048379610644188244
+      }
+    },
+    {
+      "left_index": 1,
+      "right_index": 9,
+      "left_sha256": "fa057955a1f4a8b83c2ee3026edfcd5f65dacccd82ef2df8c763660d40c5447d",
+      "right_sha256": "80c4448a26f9ecb37669dca3fb401f178a93e8e24ecf2c3904286c9b5029e49e",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952474147081375,
+        "mean_abs": 0.004837156404216821
+      }
+    },
+    {
+      "left_index": 2,
+      "right_index": 3,
+      "left_sha256": "34591349f791765ac3bdc3076292119ebcc56d4e028f0149cce6527fa6ab146d",
+      "right_sha256": "f9dce3df84f660113c559416a67abb2a848b3f9fda71666e145f2be89caa2670",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951367735862732,
+        "mean_abs": 0.004835820957059434
+      }
+    },
+    {
+      "left_index": 2,
+      "right_index": 4,
+      "left_sha256": "34591349f791765ac3bdc3076292119ebcc56d4e028f0149cce6527fa6ab146d",
+      "right_sha256": "d365f26e9498906b1b7e430d084cec0c7e918d4d4e7bc7afe0e04f8dbf8a49e6",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039524197578430176,
+        "mean_abs": 0.004836532882699257
+      }
+    },
+    {
+      "left_index": 2,
+      "right_index": 5,
+      "left_sha256": "34591349f791765ac3bdc3076292119ebcc56d4e028f0149cce6527fa6ab146d",
+      "right_sha256": "39ac603af24e252125c58275a33bc164c290b8453dda0d6ddf81102cfc65265f",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951914981007576,
+        "mean_abs": 0.004837213699854403
+      }
+    },
+    {
+      "left_index": 2,
+      "right_index": 6,
+      "left_sha256": "34591349f791765ac3bdc3076292119ebcc56d4e028f0149cce6527fa6ab146d",
+      "right_sha256": "9a119c5c4f882581bcb7a3daaed387195a5978c5628ac08cabb2e1ca6edaaaee",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951514512300491,
+        "mean_abs": 0.004837182006080336
+      }
+    },
+    {
+      "left_index": 2,
+      "right_index": 7,
+      "left_sha256": "34591349f791765ac3bdc3076292119ebcc56d4e028f0149cce6527fa6ab146d",
+      "right_sha256": "75684fee58d8d86c8868156c575f7107c3b6492eaf5784fb9cc95748b5614ef8",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952653706073761,
+        "mean_abs": 0.004838228910364882
+      }
+    },
+    {
+      "left_index": 2,
+      "right_index": 8,
+      "left_sha256": "34591349f791765ac3bdc3076292119ebcc56d4e028f0149cce6527fa6ab146d",
+      "right_sha256": "4be23e1e68418f67dfd7195cbd743b4d7f5591927a7f93c8d1cbfa12bb7db8b7",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951869159936905,
+        "mean_abs": 0.004837714587332747
+      }
+    },
+    {
+      "left_index": 2,
+      "right_index": 9,
+      "left_sha256": "34591349f791765ac3bdc3076292119ebcc56d4e028f0149cce6527fa6ab146d",
+      "right_sha256": "80c4448a26f9ecb37669dca3fb401f178a93e8e24ecf2c3904286c9b5029e49e",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03950944170355797,
+        "mean_abs": 0.004837312231634838
+      }
+    },
+    {
+      "left_index": 3,
+      "right_index": 4,
+      "left_sha256": "f9dce3df84f660113c559416a67abb2a848b3f9fda71666e145f2be89caa2670",
+      "right_sha256": "d365f26e9498906b1b7e430d084cec0c7e918d4d4e7bc7afe0e04f8dbf8a49e6",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951001912355423,
+        "mean_abs": 0.004838466011573616
+      }
+    },
+    {
+      "left_index": 3,
+      "right_index": 5,
+      "left_sha256": "f9dce3df84f660113c559416a67abb2a848b3f9fda71666e145f2be89caa2670",
+      "right_sha256": "39ac603af24e252125c58275a33bc164c290b8453dda0d6ddf81102cfc65265f",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951380029320717,
+        "mean_abs": 0.004836675780087345
+      }
+    },
+    {
+      "left_index": 3,
+      "right_index": 6,
+      "left_sha256": "f9dce3df84f660113c559416a67abb2a848b3f9fda71666e145f2be89caa2670",
+      "right_sha256": "9a119c5c4f882581bcb7a3daaed387195a5978c5628ac08cabb2e1ca6edaaaee",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952421993017197,
+        "mean_abs": 0.004836814524937367
+      }
+    },
+    {
+      "left_index": 3,
+      "right_index": 7,
+      "left_sha256": "f9dce3df84f660113c559416a67abb2a848b3f9fda71666e145f2be89caa2670",
+      "right_sha256": "75684fee58d8d86c8868156c575f7107c3b6492eaf5784fb9cc95748b5614ef8",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.0395214706659317,
+        "mean_abs": 0.004836735044202145
+      }
+    },
+    {
+      "left_index": 3,
+      "right_index": 8,
+      "left_sha256": "f9dce3df84f660113c559416a67abb2a848b3f9fda71666e145f2be89caa2670",
+      "right_sha256": "4be23e1e68418f67dfd7195cbd743b4d7f5591927a7f93c8d1cbfa12bb7db8b7",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951398283243179,
+        "mean_abs": 0.004836625411126449
+      }
+    },
+    {
+      "left_index": 3,
+      "right_index": 9,
+      "left_sha256": "f9dce3df84f660113c559416a67abb2a848b3f9fda71666e145f2be89caa2670",
+      "right_sha256": "80c4448a26f9ecb37669dca3fb401f178a93e8e24ecf2c3904286c9b5029e49e",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952166438102722,
+        "mean_abs": 0.0048369472497487975
+      }
+    },
+    {
+      "left_index": 4,
+      "right_index": 5,
+      "left_sha256": "d365f26e9498906b1b7e430d084cec0c7e918d4d4e7bc7afe0e04f8dbf8a49e6",
+      "right_sha256": "39ac603af24e252125c58275a33bc164c290b8453dda0d6ddf81102cfc65265f",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039517927914857864,
+        "mean_abs": 0.004836936345208457
+      }
+    },
+    {
+      "left_index": 4,
+      "right_index": 6,
+      "left_sha256": "d365f26e9498906b1b7e430d084cec0c7e918d4d4e7bc7afe0e04f8dbf8a49e6",
+      "right_sha256": "9a119c5c4f882581bcb7a3daaed387195a5978c5628ac08cabb2e1ca6edaaaee",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952406719326973,
+        "mean_abs": 0.004837595702996043
+      }
+    },
+    {
+      "left_index": 4,
+      "right_index": 7,
+      "left_sha256": "d365f26e9498906b1b7e430d084cec0c7e918d4d4e7bc7afe0e04f8dbf8a49e6",
+      "right_sha256": "75684fee58d8d86c8868156c575f7107c3b6492eaf5784fb9cc95748b5614ef8",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952239453792572,
+        "mean_abs": 0.0048368030753618
+      }
+    },
+    {
+      "left_index": 4,
+      "right_index": 8,
+      "left_sha256": "d365f26e9498906b1b7e430d084cec0c7e918d4d4e7bc7afe0e04f8dbf8a49e6",
+      "right_sha256": "4be23e1e68418f67dfd7195cbd743b4d7f5591927a7f93c8d1cbfa12bb7db8b7",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039511583745479584,
+        "mean_abs": 0.004836201558102884
+      }
+    },
+    {
+      "left_index": 4,
+      "right_index": 9,
+      "left_sha256": "d365f26e9498906b1b7e430d084cec0c7e918d4d4e7bc7afe0e04f8dbf8a49e6",
+      "right_sha256": "80c4448a26f9ecb37669dca3fb401f178a93e8e24ecf2c3904286c9b5029e49e",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951359540224075,
+        "mean_abs": 0.004837796981991546
+      }
+    },
+    {
+      "left_index": 5,
+      "right_index": 6,
+      "left_sha256": "39ac603af24e252125c58275a33bc164c290b8453dda0d6ddf81102cfc65265f",
+      "right_sha256": "9a119c5c4f882581bcb7a3daaed387195a5978c5628ac08cabb2e1ca6edaaaee",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03952120244503021,
+        "mean_abs": 0.0048364213272783846
+      }
+    },
+    {
+      "left_index": 5,
+      "right_index": 7,
+      "left_sha256": "39ac603af24e252125c58275a33bc164c290b8453dda0d6ddf81102cfc65265f",
+      "right_sha256": "75684fee58d8d86c8868156c575f7107c3b6492eaf5784fb9cc95748b5614ef8",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039518967270851135,
+        "mean_abs": 0.0048357016634652285
+      }
+    },
+    {
+      "left_index": 5,
+      "right_index": 8,
+      "left_sha256": "39ac603af24e252125c58275a33bc164c290b8453dda0d6ddf81102cfc65265f",
+      "right_sha256": "4be23e1e68418f67dfd7195cbd743b4d7f5591927a7f93c8d1cbfa12bb7db8b7",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03950715810060501,
+        "mean_abs": 0.004835763187026302
+      }
+    },
+    {
+      "left_index": 5,
+      "right_index": 9,
+      "left_sha256": "39ac603af24e252125c58275a33bc164c290b8453dda0d6ddf81102cfc65265f",
+      "right_sha256": "80c4448a26f9ecb37669dca3fb401f178a93e8e24ecf2c3904286c9b5029e49e",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03950377553701401,
+        "mean_abs": 0.004835474101358588
+      }
+    },
+    {
+      "left_index": 6,
+      "right_index": 7,
+      "left_sha256": "9a119c5c4f882581bcb7a3daaed387195a5978c5628ac08cabb2e1ca6edaaaee",
+      "right_sha256": "75684fee58d8d86c8868156c575f7107c3b6492eaf5784fb9cc95748b5614ef8",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039516884833574295,
+        "mean_abs": 0.004836352264674593
+      }
+    },
+    {
+      "left_index": 6,
+      "right_index": 8,
+      "left_sha256": "9a119c5c4f882581bcb7a3daaed387195a5978c5628ac08cabb2e1ca6edaaaee",
+      "right_sha256": "4be23e1e68418f67dfd7195cbd743b4d7f5591927a7f93c8d1cbfa12bb7db8b7",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.0395175963640213,
+        "mean_abs": 0.004835349636726915
+      }
+    },
+    {
+      "left_index": 6,
+      "right_index": 9,
+      "left_sha256": "9a119c5c4f882581bcb7a3daaed387195a5978c5628ac08cabb2e1ca6edaaaee",
+      "right_sha256": "80c4448a26f9ecb37669dca3fb401f178a93e8e24ecf2c3904286c9b5029e49e",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039522767066955566,
+        "mean_abs": 0.004836192498549918
+      }
+    },
+    {
+      "left_index": 7,
+      "right_index": 8,
+      "left_sha256": "75684fee58d8d86c8868156c575f7107c3b6492eaf5784fb9cc95748b5614ef8",
+      "right_sha256": "4be23e1e68418f67dfd7195cbd743b4d7f5591927a7f93c8d1cbfa12bb7db8b7",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03949934244155884,
+        "mean_abs": 0.004836750254318148
+      }
+    },
+    {
+      "left_index": 7,
+      "right_index": 9,
+      "left_sha256": "75684fee58d8d86c8868156c575f7107c3b6492eaf5784fb9cc95748b5614ef8",
+      "right_sha256": "80c4448a26f9ecb37669dca3fb401f178a93e8e24ecf2c3904286c9b5029e49e",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.03951621055603027,
+        "mean_abs": 0.004836066741349878
+      }
+    },
+    {
+      "left_index": 8,
+      "right_index": 9,
+      "left_sha256": "4be23e1e68418f67dfd7195cbd743b4d7f5591927a7f93c8d1cbfa12bb7db8b7",
+      "right_sha256": "80c4448a26f9ecb37669dca3fb401f178a93e8e24ecf2c3904286c9b5029e49e",
+      "tensor_diff": {
+        "left_only": [],
+        "right_only": [],
+        "common_tensors": 504,
+        "different_tensors": 504,
+        "max_abs": 0.039519570767879486,
+        "mean_abs": 0.004837214725137796
+      }
+    }
+  ]
+}

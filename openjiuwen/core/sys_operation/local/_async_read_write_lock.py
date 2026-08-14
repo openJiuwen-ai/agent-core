@@ -1,92 +1,116 @@
-# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
 import pathlib
 import sqlite3
-from functools import partial
+import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from typing import Callable, Literal
+from typing import Any, ClassVar, Literal
 
 try:
-    from filelock import AsyncReadWriteLock, ReadWriteLock, Timeout as FileLockTimeout
-except ImportError:
-    from filelock import FileLock, Timeout as FileLockTimeout
+    from filelock import AsyncReadWriteLock, ReadWriteLock
+    from filelock import Timeout as FileLockTimeout
+except ImportError:  # pragma: no cover - depends on installed filelock version
+    from filelock import AsyncFileLock, FileLock
+    from filelock import Timeout as FileLockTimeout
 
-    AsyncReadWriteLock = None  # type: ignore[assignment]
-    ReadWriteLock = None  # type: ignore[assignment]
+    class ReadWriteLock:  # type: ignore[no-redef]
+        """Compatibility wrapper for filelock versions without ReadWriteLock.
 
+        The old dependency only supports exclusive file locks. We keep the
+        ReadWriteLock-shaped surface so local sys-operation registration can
+        run, while read/read concurrency is unavailable until filelock is
+        upgraded.
+        """
 
-if AsyncReadWriteLock is not None and ReadWriteLock is not None:
-    class _ManagedReadWriteLock(ReadWriteLock):
-        """Expose lifecycle management for filelock's singleton registry."""
+        _instances: ClassVar[dict[pathlib.Path, Any]] = {}
+        _instances_lock = threading.RLock()
+
+        def __init__(self, lock_file: pathlib.Path, **kwargs: Any):
+            self.lock_file = pathlib.Path(lock_file)
+            self._lock = FileLock(lock_file, **self._filelock_kwargs(kwargs))
+
+        @staticmethod
+        def _filelock_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+            return {key: value for key, value in kwargs.items() if key not in {"executor", "is_singleton"}}
 
         def _configure_and_begin(
-                self,
-                mode: Literal["read", "write"],
-                timeout: float,
-                *,
-                blocking: bool,
-                start_time: float,
-        ) -> None:
-            try:
-                super()._configure_and_begin(mode, timeout, blocking=blocking, start_time=start_time)
-            except sqlite3.OperationalError as exc:
-                if mode != "read" or "no such table: sqlite_schema" not in str(exc).lower():
-                    raise
-                self._con.execute("SELECT name FROM sqlite_master LIMIT 1;").close()
-
-        @classmethod
-        def evict_singleton(cls, lock_file: str, expected: ReadWriteLock) -> None:
-            normalized_path = pathlib.Path(lock_file).resolve()
-            with cls._instances_lock:
-                if cls._instances.get(normalized_path) is expected:
-                    cls._instances.pop(normalized_path, None)
-
-
-    class _ManagedAsyncReadWriteLock(AsyncReadWriteLock):
-        """Add an explicit singleton-eviction operation to the async adapter."""
-
-        def evict_singleton(self) -> None:
-            _ManagedReadWriteLock.evict_singleton(self.lock_file, self._lock)
-else:
-    class _ManagedAsyncReadWriteLock:  # type: ignore[no-redef]
-        """Compatibility adapter for filelock versions without ReadWriteLock."""
-
-        def __init__(
             self,
-            lock_file: pathlib.Path,
+            mode: Literal["read", "write"],
+            timeout: float,
             *,
-            is_singleton: bool = True,
-            executor: ThreadPoolExecutor | None = None,
+            blocking: bool,
+            start_time: float,
         ) -> None:
-            del is_singleton
-            self.lock_file = str(lock_file)
-            self._lock = FileLock(self.lock_file)
-            self._executor = executor
+            del mode, timeout, blocking, start_time
 
-        async def acquire_read(self, *, timeout: float = -1, blocking: bool = True) -> None:
-            await self._acquire(timeout=timeout, blocking=blocking)
+        def acquire_read(self, *args: Any, **kwargs: Any) -> Any:
+            return self._lock.acquire(*args, **kwargs)
 
-        async def acquire_write(self, *, timeout: float = -1, blocking: bool = True) -> None:
-            await self._acquire(timeout=timeout, blocking=blocking)
+        def acquire_write(self, *args: Any, **kwargs: Any) -> Any:
+            return self._lock.acquire(*args, **kwargs)
 
-        async def release(self) -> None:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(self._executor, self._lock.release)
+        def release(self, *args: Any, **kwargs: Any) -> Any:
+            return self._lock.release(*args, **kwargs)
+
+    class AsyncReadWriteLock:  # type: ignore[no-redef]
+        """Compatibility wrapper for filelock versions without AsyncReadWriteLock.
+
+        Older ``filelock`` releases only expose AsyncFileLock. Falling back to a
+        single exclusive lock preserves correctness, but cross-process readers
+        cannot run concurrently until the dependency is upgraded.
+        """
+
+        def __init__(self, lock_file: pathlib.Path, **kwargs: Any):
+            self.lock_file = pathlib.Path(lock_file)
+            self._lock = AsyncFileLock(lock_file, **ReadWriteLock._filelock_kwargs(kwargs))
+
+        async def acquire_read(self, *args: Any, **kwargs: Any) -> Any:
+            return await self._lock.acquire(*args, **kwargs)
+
+        async def acquire_write(self, *args: Any, **kwargs: Any) -> Any:
+            return await self._lock.acquire(*args, **kwargs)
+
+        async def release(self, *args: Any, **kwargs: Any) -> Any:
+            return await self._lock.release(*args, **kwargs)
 
         async def close(self) -> None:
             return None
 
-        @staticmethod
-        def evict_singleton() -> None:
-            return None
 
-        async def _acquire(self, *, timeout: float, blocking: bool) -> None:
-            loop = asyncio.get_running_loop()
-            call = partial(self._lock.acquire, timeout=timeout, blocking=blocking)
-            await loop.run_in_executor(self._executor, call)
+class _ManagedReadWriteLock(ReadWriteLock):
+    """Expose lifecycle management for filelock's singleton registry."""
+
+    def _configure_and_begin(
+            self,
+            mode: Literal["read", "write"],
+            timeout: float,
+            *,
+            blocking: bool,
+            start_time: float,
+    ) -> None:
+        try:
+            super()._configure_and_begin(mode, timeout, blocking=blocking, start_time=start_time)
+        except sqlite3.OperationalError as exc:
+            if mode != "read" or "no such table: sqlite_schema" not in str(exc).lower():
+                raise
+            self._con.execute("SELECT name FROM sqlite_master LIMIT 1;").close()
+
+    @classmethod
+    def evict_singleton(cls, lock_file: str, expected: ReadWriteLock) -> None:
+        normalized_path = pathlib.Path(lock_file).resolve()
+        with cls._instances_lock:
+            if cls._instances.get(normalized_path) is expected:
+                cls._instances.pop(normalized_path, None)
+
+
+class _ManagedAsyncReadWriteLock(AsyncReadWriteLock):
+    """Add an explicit singleton-eviction operation to the async adapter."""
+
+    def evict_singleton(self) -> None:
+        _ManagedReadWriteLock.evict_singleton(self.lock_file, self._lock)
 
 
 class HybridAsyncReadWriteLock:
@@ -125,7 +149,7 @@ class HybridAsyncReadWriteLock:
             raise self._timeout()
         try:
             await asyncio.wait_for(self._condition.wait_for(predicate), timeout=remaining)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise self._timeout() from None
 
     async def _acquire_file(self, mode: Literal["read", "write"], deadline: float) -> None:

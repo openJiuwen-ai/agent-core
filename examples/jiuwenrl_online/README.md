@@ -45,7 +45,7 @@
 
 ### JiuwenClaw 端：RLOnlineRail（rail-v1）
 
-在线轨迹由 DeepAgent 上的 **`RLOnlineRail`** 上送到 Gateway（`openjiuwen.agent_evolving.agent_rl.online.rail`），与离线 Rail 采集语义对齐。配置 **`TRAJECTORY_GATEWAY_URL`** / **`TRAJECTORY_GATEWAY_API_KEY`**（若 Gateway 启用了 key）以及 **`USE_RL_ONLINE_RAIL=1`**。
+在线轨迹由 DeepAgent 上的 **`RLOnlineRail`** 上送到 Gateway（`openjiuwen.agent_evolving.agent_rl.online.backends.rl.rail`），与离线 Rail 采集语义对齐。配置 **`TRAJECTORY_GATEWAY_URL`** / **`TRAJECTORY_GATEWAY_API_KEY`**（若 Gateway 启用了 key）以及 **`USE_RL_ONLINE_RAIL=1`**。
 
 **示例（JiuwenClaw 与 agent-core 同机、已起 Gateway）：**
 
@@ -337,6 +337,8 @@ ray stop --force
 | `--scan-interval` | `30` | OnlineTrainingScheduler 扫描间隔（秒） |
 | `--train-gpu` | `4,5` | PPO 训练 GPU（逗号分隔） |
 | `--ppo-config` | — | 自定义 PPO 配置 YAML（默认使用内置 `ppo_online_trainer.yaml`） |
+| `--rollouter` | — | Scheduler rollout 插件导入路径，如 `pkg.mod:Rollouter` |
+| `--evaler` | — | 可选的外部 Scheduler eval 插件导入路径，如 `pkg.mod:Evaler`；仓库不再内置 SWE-bench evaler |
 | `--lora-repo` | `./lora_repo` | LoRA adapter 版本化存储目录 |
 | `--trajectory-batch-size` | `4` | 写入 workspace/JiuwenClaw 的轨迹相关 env（如 `TRAJECTORY_BATCH_SIZE`） |
 | **其他** | | |
@@ -479,12 +481,34 @@ Gateway 使用**延迟触发**的 LLM-as-Judge 评分：
 
 可通过 `--ppo-config` 参数覆盖为自定义配置。
 
+### Sandbox rollout 插件
+
+`agentos-v2-dev` 提供最小示例插件：
+
+```bash
+export ENABLE_SANDBOX_PLUGINS=1
+export AKERNEL_SERVER_ADDRESS="host:443"
+export OPENYUANRONG_SERVER_ADDRESS="host:443"
+export AKERNEL_TOKEN="..."
+bash examples/jiuwenrl_online/deploy_scripts/start_online_rl_services.sh
+```
+
+开启后脚本会把
+`examples.jiuwenrl_online.sandbox_plugins:BasicSandboxRollouter` 传给
+scheduler。示例插件只调用一次 Yuanrong sandbox 并写日志，不改变当前
+训练样本。可以单独运行 `deploy_scripts/test_sandbox_plugins.sh` 验证插件
+导入和沙箱调用。仓库不再提供内置 SWE-bench evaler；如需评估，请通过
+`--evaler` 注入外部插件，设计说明见
+`docs/agent_rl_online_evaler_design.md`。
+
 ## 组件依赖
 
 | 组件 | 说明 |
 |------|------|
 | `agent_rl/online/gateway/` | Gateway 核心：上游透传、LoRA 注入、Rail batch 接收、延迟 Judge、写训练队列 |
-| `agent_rl/online/rail/` | JiuwenClaw 端 `RLOnlineRail`：抓取逐轮 token_ids/logprobs，按批 POST 到 Gateway |
+| `agent_rl/online/core/` | 在线 Rail 公共运行时、交互解析和 Gateway 上传器 |
+| `agent_rl/online/backends/rl/` | `RLOnlineRail` 及 RL 轨迹采集、转换实现 |
+| `agent_rl/online/backends/sft/` | `SFTOnlineRail` 及 SFT 轨迹采集、转换、训练实现 |
 | `agent_rl/online/launcher/` | 启动配置 schema/loader/cli 与服务编排 runner（split by b8e6ac4） |
 | `agent_rl/online/scheduler/` | OnlineTrainingScheduler（轮询 RedisTrajectoryStore，触发 PPO） |
 | `agent_rl/online/inference/` | vLLM 热加载通知 |
@@ -505,6 +529,12 @@ Gateway 使用**延迟触发**的 LLM-as-Judge 评分：
 | 文件 | 说明 |
 |------|------|
 | `run_online_rl.py` | 在线 RL 闭环启动脚本（一键拉起全部服务） |
+| `deploy_scripts/` | 本地服务部署、启动、清理、消息发送、管理 API、LoRA 热加载和 sandbox 插件验证脚本 |
+| `sandbox_plugins.py` | 最基础的 Yuanrong sandbox rollouter 示例 |
+| `yuanrong_sandbox.py` | Yuanrong sandbox SDK smoke test |
+| `train_only/` | 从轨迹 JSON 直接触发 online PPO/RL 训练的脚本 |
+| `sft_only/` | 从 speculative/trajectory JSON 直接触发 LoRA SFT 或全参 SFT 的脚本 |
+| `accuracy_validate/` | GPU/A5 推理、DataProto、LoRA 训练漂移验证用例 |
 | `ARCHITECTURE.md` | 详细架构与数据流说明 |
 
 > 早期版本附带的 `ctl_online_rl.sh` / `ctl_online_rl_local.sh` / `check_env.sh` / `test_online_ppo.py` 已不再随仓库分发（commit b8e6ac4 起 ctl 脚本本地维护）。如有需要可在本地自行维护。

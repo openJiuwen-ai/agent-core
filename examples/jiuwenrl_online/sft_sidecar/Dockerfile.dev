@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+
+FROM python:3.12
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/workspace/agent-core:/workspace/jiuwenclaw
+
+WORKDIR /workspace/agent-core
+
+COPY agent-core/ /workspace/agent-core/
+COPY jiuwenclaw/ /workspace/jiuwenclaw/
+
+# USE_CONDA=0 builds a self-contained system-Python sidecar. The default
+# keeps dependency installation optional because conda-backed deployments
+# provide the runtime environment at container start.
+ARG USE_CONDA=1
+RUN if [ "${USE_CONDA}" = "0" ]; then \
+      python -c "from pathlib import Path; p=Path('/workspace/jiuwenclaw/pyproject.toml'); text=p.read_text(encoding='utf-8'); text=text.replace('\"openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@develop\",', '\"openjiuwen[online-rl] @ file:///workspace/agent-core\",'); p.write_text(text, encoding='utf-8')" && \
+      python -m pip install --no-cache-dir -e "/workspace/agent-core[online-rl]" && \
+      python -m pip install --no-cache-dir -e /workspace/jiuwenclaw; \
+    fi

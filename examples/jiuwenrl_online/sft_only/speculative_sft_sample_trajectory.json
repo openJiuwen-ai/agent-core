@@ -1,0 +1,39 @@
+{
+  "samples": [
+    {
+      "sample_id": "spec-sft-demo-1",
+      "session_id": "spec_sft_demo_session",
+      "turn_num": 1,
+      "tools": [],
+      "enable_thinking": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a helpful assistant.",
+          "loss_mask": 0
+        },
+        {
+          "role": "user",
+          "content": "用一句话解释为什么水会在低温下结冰。",
+          "loss_mask": 0
+        },
+        {
+          "role": "assistant",
+          "content": "低温会降低水分子的热运动，使分子间氢键更稳定并排列成固态晶格，所以水会结冰。",
+          "loss_mask": 1
+        }
+      ],
+      "small": {
+        "model": "student-draft-model",
+        "text": "低温会降低水分子的运动，使它们排列成固态结构，所以水会结冰。"
+      },
+      "large": {
+        "model": "teacher-target-model",
+        "message": {
+          "role": "assistant",
+          "content": "低温会降低水分子的热运动，使分子间氢键更稳定并排列成固态晶格，所以水会结冰。"
+        }
+      }
+    }
+  ]
+}

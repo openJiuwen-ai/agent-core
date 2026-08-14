@@ -1,8 +1,8 @@
-# openjiuwen.agent_evolving.agent_rl.online.rail
+# openjiuwen.agent_evolving.agent_rl.online.backends.rl.rail and online.core
 
 JiuwenClaw / DeepAgent-side online RL trajectory collection and upload pipeline (the "rail-v1" client). It hooks into the agent invoke lifecycle, captures per-turn token-level data (`prompt_ids`, `completion_token_ids`, `logprobs`) from LLM responses, converts each completed trajectory into a `RailV1Batch`, and uploads it asynchronously to the online-RL gateway at `POST /v1/gateway/upload/batch`.
 
-## class openjiuwen.agent_evolving.agent_rl.online.rail.converter.PerTurnSample
+## class openjiuwen.agent_evolving.agent_rl.online.backends.rl.converter.PerTurnSample
 
 ```python
 @dataclass
@@ -27,7 +27,7 @@ Complete token-level sample for a single LLM turn.
 * **tools**(Any): Tool definitions. Default: `None`.
 * **meta**(dict[str, Any]): Metadata. Default: `{}`.
 
-## class openjiuwen.agent_evolving.agent_rl.online.rail.converter.TrajectoryMeta
+## class openjiuwen.agent_evolving.agent_rl.online.backends.rl.converter.TrajectoryMeta
 
 ```python
 @dataclass
@@ -46,7 +46,7 @@ Trajectory-level metadata.
 * **ended_at**(float): End timestamp. Default: current time.
 * **extra**(dict[str, Any]): Extra info. Default: `{}`.
 
-## class openjiuwen.agent_evolving.agent_rl.online.rail.converter.RailV1Batch
+## class openjiuwen.agent_evolving.agent_rl.online.backends.rl.converter.RailV1Batch
 
 ```python
 @dataclass
@@ -75,7 +75,7 @@ def to_dict() -> dict[str, Any]
 
 Returns `_json_value(asdict(self))`, a JSON-serializable dict.
 
-## class openjiuwen.agent_evolving.agent_rl.online.rail.converter.OnlineTrajectoryConverter
+## class openjiuwen.agent_evolving.agent_rl.online.backends.rl.converter.OnlineTrajectoryConverter
 
 ```python
 class OnlineTrajectoryConverter(*, tenant_id: Optional[str] = None, model_id: Optional[str] = None, session_done: bool = False)
@@ -116,7 +116,7 @@ def extract_prev_feedback(trajectory: Trajectory) -> Optional[dict[str, Any]]
 
 Extracts `{"raw_user_text": <text>, "source": "first_user_msg_of_next_batch"}` from the first non-empty user message in the trajectory's LLM steps; returns `None` if none.
 
-## def openjiuwen.agent_evolving.agent_rl.online.rail.llm_response.extract_token_ids
+## def openjiuwen.agent_evolving.agent_rl.online.core.llm_response.extract_token_ids
 
 ```python
 def extract_token_ids(response: Any) -> Optional[list[int]]
@@ -132,7 +132,7 @@ Best-effort extraction of response token ID list from OpenAI-style / vLLM respon
 
 `Optional[list[int]]`, the token ID list; `None` if absent.
 
-## def openjiuwen.agent_evolving.agent_rl.online.rail.llm_response.extract_prompt_ids
+## def openjiuwen.agent_evolving.agent_rl.online.core.llm_response.extract_prompt_ids
 
 ```python
 def extract_prompt_ids(response: Any) -> Optional[list[int]]
@@ -148,7 +148,7 @@ Best-effort extraction of prompt token ID list from vLLM payloads (`prompt_token
 
 `Optional[list[int]]`, the prompt token ID list; `None` if absent.
 
-## def openjiuwen.agent_evolving.agent_rl.online.rail.llm_response.extract_logprobs
+## def openjiuwen.agent_evolving.agent_rl.online.core.llm_response.extract_logprobs
 
 ```python
 def extract_logprobs(response: Any) -> Optional[list[float]]
@@ -164,7 +164,7 @@ Best-effort extraction of logprob list from OpenAI-style / dict responses. Looks
 
 `Optional[list[float]]`, the logprob list; `None` if absent or empty.
 
-## class openjiuwen.agent_evolving.agent_rl.online.rail.online_rail.RLOnlineRail
+## class openjiuwen.agent_evolving.agent_rl.online.backends.rl.rail.RLOnlineRail
 
 ```python
 class RLOnlineRail(EvolutionRail)
@@ -228,7 +228,7 @@ async def run_evolution(trajectory: Trajectory, ctx: Optional[AgentCallbackConte
 
 Sets trajectory resource attributes (`ended_at`, `tenant_id`, `status`), calls `self._converter.convert(trajectory, tenant_id=..., session_done=...)`, and if `batch.samples` is non-empty, `await self._uploader.enqueue(batch)`; debug-logs if no samples.
 
-## class openjiuwen.agent_evolving.agent_rl.online.rail.uploader.TrajectoryUploader
+## class openjiuwen.agent_evolving.agent_rl.online.core.uploader.TrajectoryUploader
 
 ```python
 class TrajectoryUploader(gateway_endpoint: str, *, capacity: int = 256, max_retries: int = 5, backoff_base_sec: float = 0.2, wal_dir: str | Path = "records/rail_v1_wal", api_key: str = "", client: Optional[httpx.AsyncClient] = None, timeout: float = 30.0)
@@ -271,7 +271,7 @@ async def replay_wal() -> None
 
 Replays any `*.json` files in `wal_dir` (sorted), posting each and unlinking on success.
 
-## def openjiuwen.agent_evolving.agent_rl.online.rail.factory.is_rl_online_rail_enabled_from_env
+## def openjiuwen.agent_evolving.agent_rl.online.core.rail_factory.is_rl_online_rail_enabled_from_env
 
 ```python
 def is_rl_online_rail_enabled_from_env() -> bool
@@ -279,7 +279,7 @@ def is_rl_online_rail_enabled_from_env() -> bool
 
 Returns `True` when env `USE_RL_ONLINE_RAIL` (stripped, lowercased) is one of `"1"`, `"true"`, `"yes"`, `"on"`.
 
-## def openjiuwen.agent_evolving.agent_rl.online.rail.factory.build_rl_online_rail_from_env
+## def openjiuwen.agent_evolving.agent_rl.online.core.rail_factory.build_rl_online_rail_from_env
 
 ```python
 def build_rl_online_rail_from_env() -> Optional[RLOnlineRail]

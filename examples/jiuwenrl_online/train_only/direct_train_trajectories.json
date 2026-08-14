@@ -1,0 +1,74 @@
+[
+  {
+    "sample_id": "direct-fixture-0",
+    "created_at": "2026-07-07T00:00:00+00:00",
+    "user_id": "local-web-user",
+    "session_id": "direct_fixture_session",
+    "turn_num": 1,
+    "mode": "fixture",
+    "io_mode": "direct",
+    "model": "Qwen3-4B-Thinking-2507",
+    "trajectory": {
+      "prompt_text": "User: Return only the number 1.\nAssistant:",
+      "response_text": "1"
+    },
+    "judge": {
+      "score": 1.0,
+      "overall_raw": 10.0
+    }
+  },
+  {
+    "sample_id": "direct-fixture-1",
+    "created_at": "2026-07-07T00:00:01+00:00",
+    "user_id": "local-web-user",
+    "session_id": "direct_fixture_session",
+    "turn_num": 2,
+    "mode": "fixture",
+    "io_mode": "direct",
+    "model": "Qwen3-4B-Thinking-2507",
+    "trajectory": {
+      "prompt_text": "User: Return only the number 2.\nAssistant:",
+      "response_text": "2"
+    },
+    "judge": {
+      "score": 0.5,
+      "overall_raw": 7.5
+    }
+  },
+  {
+    "sample_id": "direct-fixture-2",
+    "created_at": "2026-07-07T00:00:02+00:00",
+    "user_id": "local-web-user",
+    "session_id": "direct_fixture_session",
+    "turn_num": 3,
+    "mode": "fixture",
+    "io_mode": "direct",
+    "model": "Qwen3-4B-Thinking-2507",
+    "trajectory": {
+      "prompt_text": "User: Return only the number 3.\nAssistant:",
+      "response_text": "3"
+    },
+    "judge": {
+      "score": 1.0,
+      "overall_raw": 10.0
+    }
+  },
+  {
+    "sample_id": "direct-fixture-3",
+    "created_at": "2026-07-07T00:00:03+00:00",
+    "user_id": "local-web-user",
+    "session_id": "direct_fixture_session",
+    "turn_num": 4,
+    "mode": "fixture",
+    "io_mode": "direct",
+    "model": "Qwen3-4B-Thinking-2507",
+    "trajectory": {
+      "prompt_text": "User: Return only the number 4.\nAssistant:",
+      "response_text": "4"
+    },
+    "judge": {
+      "score": 0.5,
+      "overall_raw": 7.5
+    }
+  }
+]
