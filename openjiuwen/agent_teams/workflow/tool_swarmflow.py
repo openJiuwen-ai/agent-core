@@ -157,7 +157,8 @@ class SwarmflowTool(AsyncTool):
             error=error,
         )
 
-    def _format_early_return(self, reply: str | None, edit_hints: str | None, *, run_id: str) -> str:
+    @staticmethod
+    def _format_early_return(reply: str | None, edit_hints: str | None, *, run_id: str) -> str:
         parts = [f"[swarmflow {run_id}] 用户要求修改脚本后重跑。"]
         if edit_hints:
             parts.append(f"编辑要点：{edit_hints}")
@@ -166,7 +167,8 @@ class SwarmflowTool(AsyncTool):
         parts.append("请据此编辑盘上脚本（勿改 META.name），然后用相同 script_path 重新发起 swarmflow。")
         return "\n".join(parts)
 
-    def _format_stopped(self, *, run_id: str) -> str:
+    @staticmethod
+    def _format_stopped(*, run_id: str) -> str:
         return (
             f"[swarmflow {run_id}] workflow 已停止。\n"
             "session 仍可用，可继续对话，或用相同 script_path 重新发起 swarmflow（命中已跑 agent 前缀）。"
