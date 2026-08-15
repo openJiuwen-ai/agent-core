@@ -329,6 +329,7 @@ class SwarmflowTool(AsyncTool):
             controller.register(
                 SwarmflowRunHandle(
                     task_id=task_id,
+                    run_id=run_id,
                     abort_event=abort_event,
                     backend=backend,
                     native=self._parent_agent,
@@ -422,7 +423,7 @@ class SwarmflowTool(AsyncTool):
             raise asyncio.CancelledError() from exc
         finally:
             if controller is not None:
-                controller.deregister(task_id)
+                controller.deregister(run_id)
             if self._governor is not None:
                 await self._governor.release_workflow(ticket)
 

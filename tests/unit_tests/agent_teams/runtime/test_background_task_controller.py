@@ -1,69 +1,131 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-
-"""BackgroundTaskController: external pause/resume orchestration.
-
-Verifies the control surface deterministically (no harness, no engine): pause
-runs its three ordered steps — set the engine abort_event, abort sessions, then
-cancel the top-level task — and parks the run for resume; resume relaunches it and
-clears the parked set; both are no-ops with nothing registered.
-"""
 from __future__ import annotations
-
 import asyncio
-
+import pytest
 from openjiuwen.agent_teams.runtime.background_task_controller import (
-    BackgroundTaskController,
-    SwarmflowRunHandle,
-)
+    BackgroundTaskController, SwarmflowRunHandle)
 
 
-class _StubBackend:
-    """Records the abort_sessions call into a shared order sequence."""
-
-    def __init__(self, seq: list) -> None:
-        self._seq = seq
-
-    async def abort_sessions(self) -> None:
-        self._seq.append("abort_sessions")
+class _FakeBackend:
+    def __init__(self):
+        self.aborted = False
+    async def abort_sessions(self):
+        self.aborted = True
 
 
-class _StubRuntime:
-    def __init__(self, seq: list) -> None:
-        self._seq = seq
+class _FakeNative:
+    def __init__(self):
+        self.cancelled = None
+    @property
+    def async_tool_runtime(self):
+        class _RT:
+            async def cancel(self, task_id):
+                self.outer.cancelled = task_id
+        rt = _RT()
+        rt.outer = self
+        return rt
+
+
+def _make_handle(run_id="wf_1", task_id="t_1"):
+    return SwarmflowRunHandle(
+        task_id=task_id, run_id=run_id, abort_event=asyncio.Event(),
+        backend=_FakeBackend(), native=_FakeNative(), relaunch=lambda: None)
+
+
+@pytest.mark.asyncio
+async def test_pause_one_run_by_id():
+    ctl = BackgroundTaskController()
+    ctl.register(_make_handle("wf_1"))
+    ok = await ctl.pause("wf_1")
+    assert ok
+    assert "wf_1" not in ctl._active
+    assert "wf_1" in ctl._paused
+
+
+@pytest.mark.asyncio
+async def test_pause_none_is_full_collection():
+    ctl = BackgroundTaskController()
+    ctl.register(_make_handle("wf_1"))
+    ctl.register(_make_handle("wf_2"))
+    ok = await ctl.pause(None)
+    assert ok and len(ctl._paused) == 2
+
+
+@pytest.mark.asyncio
+async def test_stop_is_terminal_not_in_paused():
+    ctl = BackgroundTaskController()
+    ctl.register(_make_handle("wf_1"))
+    ok = await ctl.stop("wf_1")
+    assert ok
+    assert "wf_1" not in ctl._active
+    assert "wf_1" not in ctl._paused
+
+
+@pytest.mark.asyncio
+async def test_resume_relaunches():
+    ctl = BackgroundTaskController()
+    ctl.register(_make_handle("wf_1"))
+    await ctl.pause("wf_1")
+    relaunched = []
+    h = ctl._paused["wf_1"]
+    h.relaunch = lambda: relaunched.append(1)
+    ok = await ctl.resume("wf_1")
+    assert ok and relaunched == [1] and "wf_1" not in ctl._paused
+
+
+@pytest.mark.asyncio
+async def test_stop_unknown_returns_false():
+    ctl = BackgroundTaskController()
+    assert await ctl.stop("nope") is False
+
+
+# ---------------------------------------------------------------------------
+# Preserved legacy coverage (prior task), adapted to run_id-addressed keys.
+# ---------------------------------------------------------------------------
+
+
+class _RecBackend:
+    def __init__(self, seq):
+        self.seq = seq
+    async def abort_sessions(self):
+        self.seq.append("abort_sessions")
+
+
+class _RecNative:
+    def __init__(self, seq):
+        self.seq = seq
+        self.async_tool_runtime = _RecRuntime(seq)
+
+
+class _RecRuntime:
+    def __init__(self, seq):
+        self.seq = seq
         self.cancelled: list[str] = []
-
-    async def cancel(self, task_id: str) -> bool:
-        self._seq.append(f"cancel:{task_id}")
+    async def cancel(self, task_id):
+        self.seq.append(f"cancel:{task_id}")
         self.cancelled.append(task_id)
         return True
 
 
-class _StubNative:
-    def __init__(self, seq: list) -> None:
-        self.async_tool_runtime = _StubRuntime(seq)
-
-
-def _make_handle(task_id: str, seq: list, relaunched: list):
-    """Build a SwarmflowRunHandle wired to recording stubs."""
+def _rec_handle(task_id, seq):
     ev = asyncio.Event()
-    native = _StubNative(seq)
+    native = _RecNative(seq)
     handle = SwarmflowRunHandle(
         task_id=task_id,
+        run_id=task_id,
         abort_event=ev,
-        backend=_StubBackend(seq),
+        backend=_RecBackend(seq),
         native=native,
-        relaunch=lambda: relaunched.append(task_id),
+        relaunch=lambda: None,
     )
     return handle, ev, native
 
 
 def test_pause_runs_three_steps_in_order_and_parks_for_resume():
     """pause(): set abort_event → abort_sessions → cancel task; then parked."""
-    seq: list = []
-    relaunched: list = []
+    seq = []
     ctl = BackgroundTaskController()
-    handle, ev, native = _make_handle("w1", seq, relaunched)
+    handle, ev, native = _rec_handle("w1", seq)
     ctl.register(handle)
 
     ok = asyncio.run(ctl.pause())
@@ -74,15 +136,16 @@ def test_pause_runs_three_steps_in_order_and_parks_for_resume():
     assert seq == ["abort_sessions", "cancel:w1"]
     assert native.async_tool_runtime.cancelled == ["w1"]
     assert ctl.is_paused() is True
-    assert relaunched == []  # resume not yet called
+    assert ctl.is_paused("w1") is True
 
 
 def test_resume_relaunches_and_clears_paused():
     """resume(): relaunch every parked run with its remembered closure."""
-    seq: list = []
-    relaunched: list = []
+    seq = []
+    relaunched = []
     ctl = BackgroundTaskController()
-    handle, _ev, _native = _make_handle("w1", seq, relaunched)
+    handle, _ev, _native = _rec_handle("w1", seq)
+    handle.relaunch = lambda: relaunched.append("w1")
     ctl.register(handle)
 
     async def scenario() -> bool:
@@ -101,3 +164,18 @@ def test_pause_and_resume_are_noops_when_nothing_registered():
     ctl = BackgroundTaskController()
     assert asyncio.run(ctl.pause()) is False
     assert asyncio.run(ctl.resume()) is False
+
+
+def test_deregister_by_run_id_drops_from_active_and_paused():
+    """deregister is keyed by run_id and drops the run from either map."""
+    ctl = BackgroundTaskController()
+    ctl.register(_rec_handle("w1", [])[0])
+    assert "w1" in ctl._active
+    ctl.deregister("w1")
+    assert "w1" not in ctl._active
+
+    ctl.register(_rec_handle("w2", [])[0])
+    asyncio.run(ctl.pause("w2"))
+    assert "w2" in ctl._paused
+    ctl.deregister("w2")
+    assert "w2" not in ctl._paused
