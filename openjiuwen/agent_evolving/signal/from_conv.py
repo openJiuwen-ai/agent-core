@@ -434,7 +434,19 @@ class ConversationSignalDetector:
             )
             return []
         enabled_signal_types = signal_types or {"execution_failure", "script_artifact"}
-        return self._deduplicate([signal for signal in signals if signal.signal_type in enabled_signal_types])
+        deduped = self._deduplicate(
+            [signal for signal in signals if signal.signal_type in enabled_signal_types]
+        )
+        for signal in deduped:
+            tool_name = (signal.context or {}).get("tool_name")
+            logger.info(
+                "[ConversationSignalDetector] after_dedup tool attributed to skill=%s "
+                "signal_type=%s tool=%s",
+                signal.skill_name,
+                signal.signal_type,
+                tool_name,
+            )
+        return deduped
 
     def detect_trajectory_signals(
         self,
@@ -544,15 +556,6 @@ class ConversationSignalDetector:
             conversation_context=conversation_context,
             last_user_message=last_user_message,
         )
-        logger.info(
-            "[detect_user_intent] conversation_context=%s",
-            conversation_context,
-        )
-        logger.info(
-            "[detect_user_intent] last_user_message=%s",
-            last_user_message,
-        )
-        logger.info("[detect_user_intent] prompt=%s", prompt)
 
         try:
             response = await self._llm.invoke(
@@ -709,7 +712,7 @@ class ConversationSignalDetector:
                 if tool_call_id and tool_call_id in pending_scripts:
                     has_failure = bool(_FAILURE_KEYWORDS.search(content)) if content else False
                     if not has_failure:
-                        logger.info(
+                        logger.debug(
                             "[ConversationSignalDetector] tool attributed to skill=%s "
                             "signal_type=script_artifact tool=%s msg_idx=%d",
                             active_skill,
@@ -736,7 +739,7 @@ class ConversationSignalDetector:
                     if _TOOL_SCHEMA_PATTERN.search(content):
                         continue
                     excerpt = _extract_around_match(content, match)
-                    logger.info(
+                    logger.debug(
                         "[ConversationSignalDetector] tool attributed to skill=%s "
                         "signal_type=execution_failure tool=%s msg_idx=%d",
                         active_skill,

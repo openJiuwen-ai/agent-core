@@ -563,7 +563,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
             async def _on_after_tool_call(self, ctx):
                 call_log.append("tool")
 
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 call_log.append("evolution")
 
         rail = TestEvolutionRail(trajectory_store=self.store, async_evolution=False)
@@ -631,7 +631,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
                 call_log.append(f"allow:{trigger_point.value}:{self.allow_trigger}")
                 return self.allow_trigger
 
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 call_log.append("evolution")
 
         rail = ConditionalEvolutionRail(
@@ -735,7 +735,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         evolution_calls: List[str] = []
 
         class DefaultAfterToolRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 evolution_calls.append("evolution")
 
         rail = DefaultAfterToolRail(
@@ -853,7 +853,7 @@ class TestEvolutionRail(IsolatedAsyncioTestCase):
         call_log: List[str] = []
 
         class HookedEvolutionRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 call_log.append("evolution")
 
             async def _on_after_evolution_triggered(self, trajectory, ctx):
@@ -962,7 +962,7 @@ class TestEvolutionRailAccumulation(IsolatedAsyncioTestCase):
         evolution_calls: List[Trajectory] = []
 
         class AccumulatingRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 evolution_calls.append(trajectory)
 
         rail = AccumulatingRail(
@@ -1037,7 +1037,7 @@ class TestEvolutionRailAccumulation(IsolatedAsyncioTestCase):
         evolution_calls: List[Trajectory] = []
 
         class PerRoundRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 evolution_calls.append(trajectory)
 
         rail = PerRoundRail(trajectory_store=self.store, async_evolution=False)
@@ -1203,7 +1203,7 @@ class TestEvolutionRailCustomEvolution(IsolatedAsyncioTestCase):
                 super().__init__(trajectory_store=store, async_evolution=False)
                 self.call_log = call_log
 
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 self.call_log.append(trajectory)
 
         rail = CustomEvolutionRail(self.store, self.evolution_calls)
@@ -1272,7 +1272,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         received_args: List[tuple] = []
 
         class SyncRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 received_args.append((trajectory, ctx, snapshot))
 
         rail = SyncRail(trajectory_store=self.store, async_evolution=False)
@@ -1299,7 +1299,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         received_args: List[tuple] = []
 
         class AsyncRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 received_args.append((trajectory, ctx, snapshot))
 
         rail = AsyncRail(trajectory_store=self.store, async_evolution=True)
@@ -1353,7 +1353,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         """_safe_run_evolution catches and logs exceptions."""
 
         class FailingRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 raise RuntimeError("evolution failed")
 
         rail = FailingRail(trajectory_store=self.store)
@@ -1380,7 +1380,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
             def _get_evolution_total_timeout_secs(self) -> float | None:
                 return 0.01
 
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 await asyncio.sleep(0.05)
                 self.completed = True
 
@@ -1407,7 +1407,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         """_safe_run_evolution should preserve failed outcome for downstream watchers."""
 
         class FailingRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 raise RuntimeError("evolution failed")
 
         rail = FailingRail(trajectory_store=self.store)
@@ -1432,7 +1432,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         """Successful background evolution should not retain drainable outcome state."""
 
         class SuccessfulRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 return None
 
         rail = SuccessfulRail(trajectory_store=self.store)
@@ -1453,7 +1453,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         """Failure outcomes should use the shared host event buffer."""
 
         class FailingRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 raise RuntimeError(f"failed-{trajectory_execution_id(trajectory)}")
 
         rail = FailingRail(trajectory_store=self.store)
@@ -1501,7 +1501,7 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         from openjiuwen.core.session.stream import OutputSchema
 
         class EmitRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
                 event = OutputSchema(type="test", index=0, payload={})
                 self._pending_host_events.append(event)
 
