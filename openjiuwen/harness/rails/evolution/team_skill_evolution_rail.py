@@ -648,8 +648,16 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         ctx: Optional[AgentCallbackContext] = None,
         *,
         snapshot: Optional[dict] = None,
+        trigger_point: Optional[str] = None,
     ) -> None:
         """Triggered when view_task shows all member tasks completed."""
+        resolved_trigger = trigger_point
+        if resolved_trigger is None and snapshot is not None:
+            resolved_trigger = snapshot.get("trigger_point")
+        logger.info(
+            "[TeamSkillEvolutionRail] run_evolution called (trigger=%s)",
+            resolved_trigger or "unknown",
+        )
         t0 = time.time()
         try:
             self._emit_progress(

@@ -388,7 +388,11 @@ class EvolutionRail(DeepAgentRail):
         ):
             trajectory = self._build_trajectory(ctx)
             if trajectory is not None:
-                await self._trigger_evolution(trajectory, ctx)
+                await self._trigger_evolution(
+                    trajectory,
+                    ctx,
+                    trigger_point=EvolutionTriggerPoint.AFTER_MODEL_CALL,
+                )
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Record tool step and trigger evolution extension point."""
@@ -436,7 +440,11 @@ class EvolutionRail(DeepAgentRail):
         ):
             trajectory = self._build_trajectory(ctx)
             if trajectory is not None:
-                await self._trigger_evolution(trajectory, ctx)
+                await self._trigger_evolution(
+                    trajectory,
+                    ctx,
+                    trigger_point=EvolutionTriggerPoint.AFTER_TOOL_CALL,
+                )
 
     async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Called after each task-loop iteration."""
@@ -447,7 +455,11 @@ class EvolutionRail(DeepAgentRail):
         ):
             trajectory = self._build_trajectory(ctx)
             if trajectory is not None:
-                await self._trigger_evolution(trajectory, ctx)
+                await self._trigger_evolution(
+                    trajectory,
+                    ctx,
+                    trigger_point=EvolutionTriggerPoint.AFTER_TASK_ITERATION,
+                )
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         """Finalize trajectory for this invoke round."""
@@ -471,7 +483,11 @@ class EvolutionRail(DeepAgentRail):
             if self._evolution_trigger == EvolutionTriggerPoint.AFTER_INVOKE and self._allow_evolution_trigger(
                 EvolutionTriggerPoint.AFTER_INVOKE, ctx
             ):
-                await self._trigger_evolution(trajectory, ctx)
+                await self._trigger_evolution(
+                    trajectory,
+                    ctx,
+                    trigger_point=EvolutionTriggerPoint.AFTER_INVOKE,
+                )
                 await self._on_after_evolution_triggered(trajectory, ctx)
         finally:
             if trace_id is not None:
@@ -724,11 +740,16 @@ class EvolutionRail(DeepAgentRail):
         self,
         trajectory: Trajectory,
         ctx: AgentCallbackContext,
+        *,
+        trigger_point: EvolutionTriggerPoint,
     ) -> None:
         """Internal: trigger evolution with async/sync handling."""
+        trigger_name = trigger_point.value
+        logger.info("[EvolutionRail] triggering evolution at %s", trigger_name)
         if self._async_evolution:
             snapshot = await self._snapshot_for_evolution(trajectory, ctx)
             if snapshot is not None:
+                snapshot["trigger_point"] = trigger_name
                 snapshot_contract = EvolutionSnapshot.from_legacy_dict(snapshot)
 
                 # Detach from the request task group. create_background_task() would
@@ -745,7 +766,11 @@ class EvolutionRail(DeepAgentRail):
                 # Prune completed tasks to prevent unbounded growth
                 self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
         else:
-            await self.run_evolution(trajectory, ctx)
+            await self.run_evolution(
+                trajectory,
+                ctx,
+                trigger_point=trigger_name,
+            )
 
     # ---- Evolution extension points (override as needed, default no-op) ----
 
@@ -916,14 +941,25 @@ class EvolutionRail(DeepAgentRail):
         outcome: dict[str, str] | None = None
         try:
             trajectory = snapshot["trajectory"]
+            trigger_point = snapshot.get("trigger_point")
             total_timeout = self._get_evolution_total_timeout_secs()
             if total_timeout is None:
                 async with self._evolution_sem:
-                    await self.run_evolution(trajectory, ctx=None, snapshot=snapshot)
+                    await self.run_evolution(
+                        trajectory,
+                        ctx=None,
+                        snapshot=snapshot,
+                        trigger_point=trigger_point,
+                    )
             else:
                 async with asyncio.timeout(total_timeout):
                     async with self._evolution_sem:
-                        await self.run_evolution(trajectory, ctx=None, snapshot=snapshot)
+                        await self.run_evolution(
+                            trajectory,
+                            ctx=None,
+                            snapshot=snapshot,
+                            trigger_point=trigger_point,
+                        )
         except TimeoutError:
             total_timeout = self._get_evolution_total_timeout_secs()
             timeout_text = f"{total_timeout:.2f}".rstrip("0").rstrip(".") if total_timeout is not None else "unknown"
@@ -949,6 +985,7 @@ class EvolutionRail(DeepAgentRail):
         ctx: Optional[AgentCallbackContext] = None,
         *,
         snapshot: Optional[dict] = None,
+        trigger_point: Optional[str] = None,
     ) -> None:
         """Called when evolution_trigger fires or subclass calls manually.
 
@@ -959,6 +996,7 @@ class EvolutionRail(DeepAgentRail):
             trajectory: Complete trajectory for this conversation round
             ctx: Callback context (None in async mode)
             snapshot: Captured data from _snapshot_for_evolution (None in sync mode)
+            trigger_point: Lifecycle node that triggered evolution (e.g. after_invoke)
         """
         pass
 
