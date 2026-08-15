@@ -46,7 +46,7 @@ from openjiuwen.agent_teams.tools.structured_output_tool import (
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
-from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
 from openjiuwen.core.common.logging import team_logger
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -74,6 +74,24 @@ _SCHEMA_TURN_NUDGE = (
 )
 # Default ceiling on how long a human turn waits for a person before giving up.
 _DEFAULT_HUMAN_TIMEOUT = 600.0
+
+# One-shot intent classification (see ``_classify_intent``): is the person's raw
+# reply a request to edit the script/flow and rerun, or a plain continue? Kept
+# as module constants (like the tiny-agent title/summary presets) — minimal.
+_INTENT_CLASSIFY_PROMPT = (
+    "你判断用户的回复是否表示要修改脚本并重跑。"
+    "如果用户要改脚本/改 prompt/调整流程后重跑，intent=edit_rerun 并记下编辑要点；"
+    "否则 intent=continue。只输出结构化结果。"
+)
+
+_INTENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "intent": {"type": "string", "enum": ["continue", "edit_rerun"]},
+        "edit_instructions": {"type": ["string", "null"]},
+    },
+    "required": ["intent"],
+}
 
 
 @dataclass
@@ -111,6 +129,9 @@ class AvatarSessionManager:
         language: Prompt language hint (drives the structured-output tool i18n).
         model_resolver: Optional ``agent(model=...)`` name → ``TeamModelConfig``
             resolver (same contract as the worker backend).
+        leader_model_name: Optional model name for the intent-classifier tiny
+            agent (resolved through ``model_resolver``). ``None`` disables
+            classification so a human turn always continues.
         build_context: Optional leader ``BuildContext`` forwarded to each avatar.
         budget: The run's shared token ledger — every avatar bills its model
             calls to it and is cut short once it is dry, so sessions draw down
@@ -125,6 +146,7 @@ class AvatarSessionManager:
         team_name: str = "swarmflow",
         language: str = "cn",
         model_resolver: Any = None,
+        leader_model_name: str | None = None,
         build_context: Any = None,
         t: Translator | None = None,
         messager: Any = None,
@@ -141,6 +163,7 @@ class AvatarSessionManager:
         self._team_name = team_name
         self._language = language
         self._model_resolver = model_resolver
+        self._leader_model_name = leader_model_name
         self._build_context = build_context
         self._t = t if t is not None else make_translator(language if language in ("cn", "en") else "cn")
         self._sessions: dict[str, _SessionState] = {}
@@ -512,6 +535,19 @@ class AvatarSessionManager:
         raw = await self._await_human_reply(state, prompt, opts, correlation_id)
         if raw is None:  # timed out / no answer
             return AgentResult(skipped=True)
+        # NEW: classify intent before formatting (best-effort; any failure
+        # degrades to the existing formatting path rather than failing the turn).
+        try:
+            intent = await self._classify_intent(raw, prompt)
+        except Exception:
+            team_logger.debug("[swarmflow] intent classify raised; degrade to continue")
+            intent = None
+        if intent and intent.get("intent") == "edit_rerun":
+            raise WorkflowAborted(
+                reason="early_return",
+                reply=raw,
+                edit_hints=intent.get("edit_instructions"),
+            )
         format_prompt = (
             f"You put this question to the person:\n{prompt}\n\n"
             f"The person replied:\n{raw}\n\n"
@@ -521,6 +557,34 @@ class AvatarSessionManager:
         # The avatar (human stand-in) formats the raw reply; reuse the agent turn
         # path so schema capture / round settling work identically.
         return await self._agent_turn(state, format_prompt, schema_json)
+
+    async def _classify_intent(self, raw: str, prompt: str) -> dict | None:
+        """One-shot TinyAgent classification: is this reply 'edit & rerun' or 'continue'?
+
+        Reuses the leader's own model via the manager's model_resolver (same precedent
+        as SwarmflowTool's ``model = self._parent_agent.model``). Ephemeral: async with
+        auto-dispose. Returns None on any failure (degrades to existing formatting path).
+        """
+        from openjiuwen.agent_teams.tiny_agent import create_tiny_agent
+        model_name = self._leader_model_name
+        if not model_name or self._model_resolver is None:
+            return None
+        try:
+            async with create_tiny_agent(
+                system_prompt=_INTENT_CLASSIFY_PROMPT,
+                model_name=model_name,
+                model_resolver=self._model_resolver,
+                default_schema=_INTENT_SCHEMA,
+                language=self._language,
+                max_iterations=3,
+            ) as classifier:
+                return await classifier.run(
+                    f"问题:{prompt}\n\n回复:{raw}",
+                    schema=_INTENT_SCHEMA,
+                )
+        except Exception:
+            team_logger.debug("[swarmflow] intent classify failed; degrade to continue")
+            return None
 
     async def _await_human_reply(
         self,
