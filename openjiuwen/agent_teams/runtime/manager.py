@@ -566,12 +566,20 @@ class TeamRuntimeManager:
         if backend is None and not isinstance(payload, GodViewMessage):
             return DeliverResult.failure("no_team_backend")
 
+        async def _reset_finalized_debate() -> None:
+            from openjiuwen.agent_teams.debate import DebateRunState
+
+            debate_state = getattr(backend, "debate_state", None)
+            if isinstance(debate_state, DebateRunState):
+                await debate_state.reset_finalized_leader_round()
+
         if isinstance(payload, GodViewMessage):
             # GodView is the explicit "talk straight to the leader's
             # DeepAgent" channel — no mention parsing here. Routing
             # decisions (``@<member>`` / ``# body`` / ``$<avatar>``)
             # live in ``parse_interact_str`` on the str-input boundary
             # and surface as concrete payload types of their own.
+            await _reset_finalized_debate()
             return await UserInbox.deliver_to_leader(agent.deliver_input, payload.body)
         if isinstance(payload, OperatorMessage):
             inbox = UserInbox(backend.message_manager)
@@ -580,6 +588,7 @@ class TeamRuntimeManager:
                 # so they subscribe to the event bus before the
                 # MessageEvent is published.
                 await agent.auto_start_all()
+                await _reset_finalized_debate()
                 result = await inbox.broadcast(payload.body)
                 return result
             # Start the targeted member before delivering the message
@@ -587,6 +596,8 @@ class TeamRuntimeManager:
             # is published. Startup failure does not prevent message
             # persistence — the message stays in DB for later consumption.
             await agent.auto_start_member(payload.target)
+            if payload.target == getattr(backend, "leader_member_name", None):
+                await _reset_finalized_debate()
             result = await inbox.direct(payload.target, payload.body)
             return result
         if isinstance(payload, HumanAgentMessage):

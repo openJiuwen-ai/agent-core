@@ -335,6 +335,8 @@ class SendMessageTool(_SendMessageBase):
         t: Translator,
         team: TeamBackend | None = None,
         on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
+        *,
+        enable_final_report: bool = False,
     ):
         super().__init__(
             message_manager,
@@ -350,6 +352,12 @@ class SendMessageTool(_SendMessageBase):
                 "description": t("send_message", "to"),
             },
         )
+        if enable_final_report:
+            self.card.input_params["properties"]["final_report"] = {
+                "type": "boolean",
+                "description": t("send_message", "final_report"),
+                "default": False,
+            }
 
     async def _dispatch(
         self,

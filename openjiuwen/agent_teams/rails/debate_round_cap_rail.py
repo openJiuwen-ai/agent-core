@@ -67,7 +67,8 @@ class DebateRoundCapRail(DeepAgentRail):
         debate_state.language = self._language
         self._debate = debate_state
         if self._role == TeamRole.LEADER:
-            self._debate.reset_leader_round()
+            if not self._debate.finalized:
+                self._debate.reset_leader_round()
         else:
             self._debate.reset_participant_round()
         self._count = 0
@@ -78,7 +79,7 @@ class DebateRoundCapRail(DeepAgentRail):
         """Enroll valid Leader invitations emitted by one model response."""
         if self._role != TeamRole.LEADER or ctx.extra.get(FORCE_SKIP_ALL_KEY):
             return
-        if self._debate.round_id and not self._debate.finalized:
+        if self._debate.round_id:
             return
         response = getattr(ctx.inputs, "response", None)
         if not isinstance(response, AssistantMessage) or not response.tool_calls:
@@ -129,10 +130,14 @@ class DebateRoundCapRail(DeepAgentRail):
             return
         args = self._parse_args(ctx.inputs.tool_args)
         if await self._is_leader_target(args.get("to")):
-            self._inject_meta(
-                ctx,
-                make_debate_invocation_meta(round_id, DebateMessageRole.FINAL_REPORT),
-            )
+            if args.get("final_report") is True:
+                self._inject_meta(
+                    ctx,
+                    make_debate_invocation_meta(
+                        round_id,
+                        DebateMessageRole.FINAL_REPORT,
+                    ),
+                )
             return
 
         eligibility_key = self._eligibility_key(ctx)
@@ -166,8 +171,9 @@ class DebateRoundCapRail(DeepAgentRail):
         round_id = self._debate.participant_round_id
         if not round_id:
             return
-        if await self._is_leader_target(self._parse_args(ctx.inputs.tool_args).get("to")):
-            if self._tool_succeeded(ctx):
+        args = self._parse_args(ctx.inputs.tool_args)
+        if await self._is_leader_target(args.get("to")):
+            if args.get("final_report") is True and self._tool_succeeded(ctx):
                 await self._debate.complete_participant(round_id)
             return
         eligible = ctx.extra.pop(self._eligibility_key(ctx), None)
@@ -205,13 +211,13 @@ class DebateRoundCapRail(DeepAgentRail):
         if "*" in targets:
             return True
         leader = await self._leader_name()
-        excluded = {USER_PSEUDO_MEMBER_NAME, "leader", self._member_name, leader}
+        excluded = {USER_PSEUDO_MEMBER_NAME, self._member_name, leader}
         return any(target not in excluded for target in targets)
 
     async def _is_leader_target(self, raw_target: Any) -> bool:
         if not isinstance(raw_target, str):
             return False
-        return raw_target.strip() in {"leader", await self._leader_name()}
+        return raw_target.strip() == await self._leader_name()
 
     async def _trackable_participants(self) -> tuple[set[str], set[str]] | None:
         try:

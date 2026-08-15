@@ -227,6 +227,11 @@ def create_team_tools(
             t,
             team=agent_team,
             on_teammate_created=on_teammate_created,
+            **(
+                {"enable_final_report": True}
+                if dispatch_mode == "autonomous" and role == "teammate"
+                else {}
+            ),
         ),
         # Swarmflow orchestration (leader-only, gated by swarmflow_model_resolver).
         "swarmflow": SwarmflowTool(

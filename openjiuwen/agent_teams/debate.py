@@ -29,7 +29,7 @@ class _DebateInvocationMeta:
     message_role: DebateMessageRole
 
 
-LeaderWakeup = Callable[[str], Awaitable[None]]
+LeaderWakeup = Callable[[str], Awaitable[bool]]
 
 
 class DebateRunState:
@@ -67,6 +67,14 @@ class DebateRunState:
     def reset_participant_round(self) -> None:
         """Clear teammate-local state when a new harness run cycle is built."""
         self.participant_round_id = None
+
+    async def reset_finalized_leader_round(self) -> bool:
+        """Clear a completed round before the next external user input."""
+        async with self._lock:
+            if not self.finalized:
+                return False
+            self.reset_leader_round()
+            return True
 
     async def begin_round(self, invitation_calls: dict[str, set[str]]) -> str:
         """Replace Leader state with a newly enrolled invitation batch."""
@@ -187,7 +195,7 @@ class DebateRunState:
             return
         round_id, prompt, callback = delivery
         try:
-            await callback(prompt)
+            accepted = await callback(prompt)
         except BaseException:
             async with self._lock:
                 if self.round_id == round_id:
@@ -196,7 +204,7 @@ class DebateRunState:
         async with self._lock:
             if self.round_id == round_id:
                 self.finalizing = False
-                self.finalized = True
+                self.finalized = accepted
 
     def _finalization_prompt(self) -> str:
         reports = [

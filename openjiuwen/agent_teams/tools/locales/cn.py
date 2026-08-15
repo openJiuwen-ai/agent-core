@@ -252,6 +252,7 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
+    "send_message.final_report": "仅在思辨结束、以名册中 Leader 的真实 member_name 作为字符串收件人发送最终要点汇报时设为 true；不要把 'leader' 当作角色别名（仅当它确实是该 member_name 时才有效），也不要使用数组或广播，普通沟通保持 false",
     "send_message.error_leader_to_user": "Leader 不能 send_message 给 'user'。请直接用普通回复输出给用户。",
     "send_message.error_content_too_long": (
         "'content' 过长（{actual} 字符，上限 {limit}）：这个体量的内容是产物，不是消息。"

@@ -77,8 +77,11 @@ class MessageHandler(BaseCoordinationHandler):
         if blueprint.role == TeamRole.LEADER and debate_state is not None:
             debate_state.bind_leader_wakeup(self._wake_leader_for_debate)
 
-    async def _wake_leader_for_debate(self, prompt: str) -> None:
+    async def _wake_leader_for_debate(self, prompt: str) -> bool:
+        if self._round.has_pending_interrupt():
+            return False
         await self._round.deliver_input(prompt, use_steer=True)
+        return True
 
     async def on_message_or_broadcast(self, event: EventMessage) -> None:
         """Handle MESSAGE / BROADCAST events.

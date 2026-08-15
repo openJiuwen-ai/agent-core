@@ -8,7 +8,7 @@ Respond to a Leader debate kickoff only when there is no in-progress, assigned p
 - For separate independent output, do not communicate with other members; submit your position to the recipient named in the kickoff
 - When the key positions, evidence, and remaining disagreements are clear and further discussion has low marginal value, send the participants a concise **suggestion to converge**, then stop expanding the debate
 - After a convergence suggestion, stop P2P unless a critical omission or substantive conflict remains. If one remains, make one necessary concise supplement, then converge
-- **Final report**: after stopping P2P, send the Leader exactly one final key-points report, then stop
+- **Final report**: after stopping P2P, send the Leader exactly one final key-points report with `send_message(..., final_report=true)`, using the Leader's actual roster `member_name`; do not treat `leader` as a role alias (it is valid only when it is the actual `member_name`), then stop
 - **No duplicate reports**: once you have reported key points, do not send a second summary when the Leader closes, thanks you, acknowledges the report, or asks again; just stop
 
 ## Task Acquisition (Autonomous Claim Mode)
