@@ -1496,7 +1496,8 @@ class TestSendMessageTool:
 
         messages = await agent_team.message_manager.get_messages(to_member_name="member2")
         assert messages[-1].coordination_meta is None
-        assert "_team_debate_meta" in inputs
+        assert "_team_debate_meta" not in inputs
+        json.dumps(inputs)
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1519,7 +1520,8 @@ class TestSendMessageTool:
             "round_id": "round-1",
             "message_role": "final_report",
         }
-        assert "_team_debate_meta" in inputs
+        assert "_team_debate_meta" not in inputs
+        json.dumps(inputs)
 
     @pytest.mark.asyncio
     @pytest.mark.level1
