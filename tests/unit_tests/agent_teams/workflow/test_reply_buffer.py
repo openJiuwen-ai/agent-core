@@ -45,3 +45,34 @@ def test_abort_clears_buffer():
     loop.run_until_complete(mgr.abort_all())
     assert mgr._pending_reply_buffer == {}
     loop.close()
+
+
+def test_await_human_reply_consumes_buffered_reply_end_to_end():
+    # Drive _await_human_reply through its buffer-consume branch: a buffered
+    # reply must be returned immediately, no new future registered, no prompt
+    # re-pushed, and _on_human_replied fired exactly once.
+    replied_calls = []
+    mgr = AvatarSessionManager(
+        team_name="t",
+        run_id="wf_1",
+        on_human_replied=lambda member, corr, reply: replied_calls.append((member, corr, reply)),
+    )
+    mgr._pending_reply_buffer["corr_1"] = "缓存的回复"
+
+    class _FakeState:
+        member_name = "wf-human-test"
+
+    loop = asyncio.new_event_loop()
+    try:
+        raw = loop.run_until_complete(
+            mgr._await_human_reply(
+                state=_FakeState(), prompt="问", opts={}, correlation_id="corr_1"
+            )
+        )
+    finally:
+        loop.close()
+
+    assert raw == "缓存的回复"
+    assert "corr_1" not in mgr._pending_reply_buffer
+    assert "corr_1" not in mgr._pending_human
+    assert replied_calls == [("wf-human-test", "corr_1", "缓存的回复")]
