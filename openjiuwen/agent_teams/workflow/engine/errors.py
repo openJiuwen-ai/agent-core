@@ -43,13 +43,26 @@ class BackendError(WorkflowError):
 
 
 class WorkflowAborted(BaseException):
-    """Cooperative pause signal raised at an ``agent()`` abort checkpoint.
+    """Cooperative control signal raised at an abort checkpoint.
 
-    A ``BaseException`` (not ``WorkflowError`` / ``Exception``) so it propagates
-    through ``parallel()`` / ``pipeline()`` branch bodies' ``except Exception``
-    exactly like ``CancelledError`` — the in-flight call neither journals its
-    result nor maps to ``None``; the run unwinds so a later resume reruns it.
+    Carries a ``reason`` distinguishing the three control intents (early_return
+    / pause / stop), plus an optional payload (reply + edit_hints) for the
+    early-return path so SwarmflowTool can inject them into the leader's next
+    turn. A bare ``WorkflowAborted()`` defaults to ``reason="pause"`` (back-compat
+    with the controller pause path).
     """
+
+    def __init__(
+        self,
+        *,
+        reason: str = "pause",
+        reply: str | None = None,
+        edit_hints: str | None = None,
+    ) -> None:
+        super().__init__("workflow aborted")
+        self.reason = reason
+        self.reply = reply
+        self.edit_hints = edit_hints
 
 
 class BudgetExhausted(BaseException):
