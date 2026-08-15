@@ -78,10 +78,9 @@ class _SendMessageBase(TeamTool, ABC):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        debate_meta = inputs.pop(_DEBATE_META_ARG, None)
         effective_inputs = dict(inputs)
-        coordination_meta = normalize_debate_meta(
-            effective_inputs.pop(_DEBATE_META_ARG, None)
-        )
+        coordination_meta = normalize_debate_meta(debate_meta)
         to_raw = effective_inputs.get("to")
         content = effective_inputs.get("content", "").strip()
         summary = effective_inputs.get("summary", "").strip()
