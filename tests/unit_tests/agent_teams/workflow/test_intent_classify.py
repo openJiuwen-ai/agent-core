@@ -59,3 +59,63 @@ async def test_classify_failure_degrades_to_continue():
             with patch.object(mgr, "_agent_turn", new=AsyncMock(return_value=AgentResult(text="x"))) as m:
                 await mgr._human_turn(state=None, prompt="问", opts={}, schema_json=None, correlation_id="c")
     assert m.called  # degrade 到格式化路径
+
+
+class _FakeTinyAgent:
+    """Async-context-manager fake standing in for ``TinyAgent`` (used via ``async with``)."""
+
+    def __init__(self, result):
+        self._result = result
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def run(self, content, *, schema=None):
+        return self._result
+
+
+def _make_classifying_manager():
+    # leader_model_name set + model_resolver present => _classify_intent does NOT early-return.
+    return AvatarSessionManager(
+        team_name="t",
+        run_id="wf_1",
+        model_resolver=lambda n: object(),
+        leader_model_name="leader-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_classify_intent_internal_degrade_on_tiny_agent_failure():
+    """create_tiny_agent raising must be caught inside _classify_intent -> None.
+
+    Exercises the internal ``except Exception -> None`` degrade path directly
+    (review gap: prior tests mocked ``_classify_intent`` itself, so this catch was
+    never exercised).
+    """
+    mgr = _make_classifying_manager()
+    with patch(
+        "openjiuwen.agent_teams.tiny_agent.create_tiny_agent",
+        side_effect=Exception("LLM 挂了"),
+    ):
+        result = await mgr._classify_intent("改脚本", "问")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_classify_intent_real_invocation_returns_structured_dict():
+    """The real create_tiny_agent -> async-with -> run path returns the intent dict.
+
+    Proves the actual invocation path works (not just the failure path), so a future
+    behavior change inside the real method cannot slip past this suite.
+    """
+    mgr = _make_classifying_manager()
+    fake = _FakeTinyAgent({"intent": "edit_rerun", "edit_instructions": "改 X"})
+    with patch(
+        "openjiuwen.agent_teams.tiny_agent.create_tiny_agent",
+        return_value=fake,
+    ):
+        result = await mgr._classify_intent("改脚本", "问")
+    assert result == {"intent": "edit_rerun", "edit_instructions": "改 X"}
