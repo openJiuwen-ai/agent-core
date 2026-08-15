@@ -157,6 +157,21 @@ class SwarmflowTool(AsyncTool):
             error=error,
         )
 
+    def _format_early_return(self, reply: str | None, edit_hints: str | None, *, run_id: str) -> str:
+        parts = [f"[swarmflow {run_id}] 用户要求修改脚本后重跑。"]
+        if edit_hints:
+            parts.append(f"编辑要点：{edit_hints}")
+        if reply:
+            parts.append(f"原回复：{reply}")
+        parts.append("请据此编辑盘上脚本（勿改 META.name），然后用相同 script_path 重新发起 swarmflow。")
+        return "\n".join(parts)
+
+    def _format_stopped(self, *, run_id: str) -> str:
+        return (
+            f"[swarmflow {run_id}] workflow 已停止。\n"
+            "session 仍可用，可继续对话，或用相同 script_path 重新发起 swarmflow（命中已跑 agent 前缀）。"
+        )
+
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         """Validate the script source, admit via governor, launch background run.
 
@@ -392,7 +407,13 @@ class SwarmflowTool(AsyncTool):
             # relaunching would only hit the same gate.
             raise BackendError(str(exc)) from exc
         except WorkflowAborted as exc:
-            # Paused at an abort checkpoint: the WAL holds the completed prefix.
+            if exc.reason == "early_return":
+                msg = self._format_early_return(exc.reply, exc.edit_hints, run_id=run_id)
+                raise BackendError(msg) from exc
+            if exc.reason == "stop":
+                msg = self._format_stopped(run_id=run_id)
+                raise BackendError(msg) from exc
+            # reason == "pause" (default): silent cancel, controller relaunches on resume.
             # Re-raise as CancelledError so the async-tool runtime treats it as a
             # silent cancellation (no completion injected) — matching the cancel
             # the controller triggers as pause's third step.
