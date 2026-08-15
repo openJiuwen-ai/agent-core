@@ -17,8 +17,11 @@ resolver) and reaches the harness via ``parent_agent`` — never through TeamAge
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from openjiuwen.agent_teams.harness.async_tools import AsyncTool, render_result_text
@@ -45,6 +48,18 @@ _OBSERVER_CTX_KEY = "observer"
 def new_swarmflow_run_id() -> str:
     """Mint a unique workflow run id: ``wf_{12hex}``."""
     return f"wf_{uuid.uuid4().hex[:12]}"
+
+
+@dataclass
+class _StructuralDiff:
+    """AST-level structural delta between two script sources.
+
+    ``changed_nodes`` lists await-call node names present in one source but not
+    the other (added / removed). Prompt-string differences are intentionally
+    NOT compared.
+    """
+
+    changed_nodes: list[str]
 
 
 class SwarmflowTool(AsyncTool):
@@ -174,6 +189,45 @@ class SwarmflowTool(AsyncTool):
             "session 仍可用，可继续对话，或用相同 script_path 重新发起 swarmflow（命中已跑 agent 前缀）。"
         )
 
+    def _lint_rerun(self, *, old_source: str, new_source: str) -> None:
+        """Pre-launch lint on a re-run: hard-block a ``META.name`` change.
+
+        Renaming would orphan the journal and invalidate the entire cache
+        prefix, so it is rejected before launch.
+        """
+        from openjiuwen.agent_teams.workflow.engine.loader import extract_workflow_meta
+
+        old_meta = extract_workflow_meta(old_source)
+        new_meta = extract_workflow_meta(new_source)
+        if new_meta.get("name") != old_meta.get("name"):
+            from openjiuwen.agent_teams.workflow.engine.errors import MetaError
+
+            raise MetaError(
+                f"Cannot change META.name ({old_meta.get('name')!r} → {new_meta.get('name')!r}): "
+                "it would orphan the journal and invalidate the entire cache prefix."
+            )
+
+    def _compute_structural_diff(self, old_source: str, new_source: str) -> "_StructuralDiff":
+        """AST-level structural comparison; does NOT compare prompt strings."""
+        def _call_nodes(src: str) -> list[str]:
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                return []
+            nodes: list[str] = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Await) and isinstance(node.value, ast.Call):
+                    fn = node.value.func
+                    name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", "?")
+                    nodes.append(name)
+            return nodes
+
+        old_nodes = _call_nodes(old_source)
+        new_nodes = _call_nodes(new_source)
+        changed = [n for n in new_nodes if n not in old_nodes] or \
+                  [n for n in old_nodes if n not in new_nodes]
+        return _StructuralDiff(changed_nodes=changed)
+
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         """Validate the script source, admit via governor, launch background run.
 
@@ -234,6 +288,28 @@ class SwarmflowTool(AsyncTool):
             except Exception as exc:  # noqa: BLE001 - never escape as an exception
                 await self._governor.release_workflow(ticket)
                 return ToolOutput(success=False, error=f"Failed to materialise inline script: {exc}")
+
+        # Re-run lint: only bites when a disk script already exists AND an
+        # inline edit is being applied (a plain script_path, or a freshly
+        # materialised inline script, has old == new and trivially passes).
+        # Hard-blocks META.name changes (they would orphan the journal and
+        # invalidate the whole cache prefix) and logs a structural-impact
+        # preview otherwise. Release the ticket on any failure so a rejected
+        # re-run does not leak a governor slot.
+        if script_path and Path(script_path).exists():
+            try:
+                old_source = Path(script_path).read_text(encoding="utf-8")
+                new_source = script if script else old_source
+                self._lint_rerun(old_source=old_source, new_source=new_source)
+                diff = self._compute_structural_diff(old_source, new_source)
+                if diff.changed_nodes:
+                    team_logger.info(
+                        "[swarmflow] re-run impact: structural changes at %s",
+                        diff.changed_nodes,
+                    )
+            except Exception as exc:  # noqa: BLE001 - never escape as an exception
+                await self._governor.release_workflow(ticket)
+                return ToolOutput(success=False, error=f"Re-run lint failed: {exc}")
 
         run_id = new_swarmflow_run_id()
         task_id = generate_id(self.card.name)
