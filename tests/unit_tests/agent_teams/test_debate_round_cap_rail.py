@@ -34,23 +34,32 @@ def _context(
     to: object = "peer",
     tool_name: str = "send_message",
     result: object = None,
+    final_report: bool | None = None,
 ) -> SimpleNamespace:
+    tool_args = {"to": to, "content": "message"}
+    if final_report is not None:
+        tool_args["final_report"] = final_report
     return SimpleNamespace(
         inputs=ToolCallInputs(
             tool_call=SimpleNamespace(id="call-1"),
             tool_name=tool_name,
-            tool_args={"to": to, "content": "message"},
+            tool_args=tool_args,
             tool_result=result,
         ),
         extra={},
     )
 
 
-def _rail(*, cap: int = 2, role: TeamRole = TeamRole.TEAMMATE) -> DebateRoundCapRail:
+def _rail(
+    *,
+    cap: int = 2,
+    role: TeamRole = TeamRole.TEAMMATE,
+    leader_name: str = "leader",
+) -> DebateRoundCapRail:
     backend = MagicMock()
-    backend.leader_member_name = "leader"
+    backend.leader_member_name = leader_name
     backend.task_manager.list_tasks = AsyncMock(return_value=[])
-    backend.resolve_leader_member_name = AsyncMock(return_value="leader")
+    backend.resolve_leader_member_name = AsyncMock(return_value=leader_name)
     backend.list_member_roster = AsyncMock(return_value=[])
     backend.is_external_cli_agent = MagicMock(return_value=False)
     backend.list_members = AsyncMock(
@@ -109,7 +118,7 @@ async def test_ignores_non_debate_targets_other_tools_and_failed_results() -> No
 
 
 @pytest.mark.asyncio
-async def test_cap_rejects_peers_but_tags_final_report_without_waking_leader() -> None:
+async def test_cap_rejects_peers_but_only_tags_explicit_final_report() -> None:
     rail = _rail(cap=1)
     await rail._debate.activate_participant("round-1")
     await rail.after_tool_call(
@@ -121,14 +130,19 @@ async def test_cap_rejects_peers_but_tags_final_report_without_waking_leader() -
     await rail.after_tool_call(peer)
     broadcast = _context(to="*")
     await rail.before_tool_call(broadcast)
-    leader = _context(to="leader")
-    await rail.before_tool_call(leader)
+    ordinary_leader = _context(to="leader", result=ToolOutput(success=True))
+    await rail.before_tool_call(ordinary_leader)
+    await rail.after_tool_call(ordinary_leader)
+    final_report = _context(to="leader", final_report=True)
+    await rail.before_tool_call(final_report)
 
     assert peer.extra["_skip_tool"] is True
     assert broadcast.extra["_skip_tool"] is True
     assert peer.inputs.tool_result["error"]
-    assert leader.extra.get("_skip_tool") is None
-    assert normalize_debate_meta(leader.inputs.tool_args["_team_debate_meta"]) == {
+    assert ordinary_leader.extra.get("_skip_tool") is None
+    assert "_team_debate_meta" not in ordinary_leader.inputs.tool_args
+    assert rail._debate.participant_round_id == "round-1"
+    assert normalize_debate_meta(final_report.inputs.tool_args["_team_debate_meta"]) == {
         "kind": "team_debate",
         "round_id": "round-1",
         "message_role": "final_report",
@@ -140,14 +154,78 @@ async def test_cap_rejects_peers_but_tags_final_report_without_waking_leader() -
 async def test_successful_final_report_closes_teammate_round_but_failure_can_retry() -> None:
     rail = _rail(cap=1)
     await rail._debate.activate_participant("round-1")
-    failed = _context(to="leader", result=ToolOutput(success=False, error="failed"))
+    failed = _context(
+        to="leader",
+        final_report=True,
+        result=ToolOutput(success=False, error="failed"),
+    )
     await rail.before_tool_call(failed)
     await rail.after_tool_call(failed)
     assert rail._debate.participant_round_id == "round-1"
 
-    succeeded = _context(to="leader", result=ToolOutput(success=True))
+    succeeded = _context(
+        to="leader",
+        final_report=True,
+        result=ToolOutput(success=True),
+    )
     await rail.before_tool_call(succeeded)
     await rail.after_tool_call(succeeded)
+
+    assert rail._debate.participant_round_id is None
+
+
+@pytest.mark.asyncio
+async def test_final_report_requires_a_string_leader_target() -> None:
+    rail = _rail(cap=1)
+    await rail._debate.activate_participant("round-1")
+    leader_list = _context(
+        to=["leader"],
+        final_report=True,
+        result=ToolOutput(success=True),
+    )
+
+    await rail.before_tool_call(leader_list)
+    await rail.after_tool_call(leader_list)
+
+    assert "_team_debate_meta" not in leader_list.inputs.tool_args
+    assert rail._debate.participant_round_id == "round-1"
+
+
+@pytest.mark.asyncio
+async def test_literal_leader_is_a_peer_when_real_leader_has_another_name() -> None:
+    rail = _rail(cap=1, leader_name="office")
+    await rail._debate.activate_participant("round-1")
+    peer_named_leader = _context(
+        to="leader",
+        final_report=True,
+        result=ToolOutput(success=True),
+    )
+
+    await rail.before_tool_call(peer_named_leader)
+    await rail.after_tool_call(peer_named_leader)
+
+    assert "_team_debate_meta" not in peer_named_leader.inputs.tool_args
+    assert rail._debate.participant_round_id == "round-1"
+    assert rail._count == 1
+
+
+@pytest.mark.asyncio
+async def test_final_report_uses_the_real_leader_member_name() -> None:
+    rail = _rail(cap=1, leader_name="office")
+    await rail._debate.activate_participant("round-1")
+    final_report = _context(
+        to="office",
+        final_report=True,
+        result=ToolOutput(success=True),
+    )
+
+    await rail.before_tool_call(final_report)
+    assert normalize_debate_meta(final_report.inputs.tool_args["_team_debate_meta"]) == {
+        "kind": "team_debate",
+        "round_id": "round-1",
+        "message_role": "final_report",
+    }
+    await rail.after_tool_call(final_report)
 
     assert rail._debate.participant_round_id is None
 
@@ -205,7 +283,7 @@ async def test_task_query_failure_stays_fail_open_when_query_recovers_after_send
 @pytest.mark.asyncio
 async def test_leader_wakes_once_after_all_successful_invites_report_or_fail() -> None:
     rail = _rail(role=TeamRole.LEADER)
-    wake = AsyncMock()
+    wake = AsyncMock(return_value=True)
     rail._debate.bind_leader_wakeup(wake)
     calls = (
         ToolCall(id="call-a", type="function", name="send_message", arguments=json.dumps({"to": "member-a"})),
@@ -237,7 +315,7 @@ async def test_leader_wakes_once_after_all_successful_invites_report_or_fail() -
 @pytest.mark.asyncio
 async def test_partial_multicast_tracks_only_members_that_received_the_invite() -> None:
     rail = _rail(role=TeamRole.LEADER)
-    wake = AsyncMock()
+    wake = AsyncMock(return_value=True)
     rail._debate.bind_leader_wakeup(wake)
     call = ToolCall(
         id="call-a",
@@ -278,7 +356,7 @@ async def test_failed_or_cancelled_leader_wakeup_can_retry_without_losing_report
     failure: BaseException,
 ) -> None:
     state = DebateRunState(language="en")
-    wake = AsyncMock(side_effect=[failure, None])
+    wake = AsyncMock(side_effect=[failure, True])
     state.bind_leader_wakeup(wake)
     round_id = await state.begin_round({"call-a": {"member-a"}})
     await state.settle_invitation("call-a", succeeded=True)
@@ -297,7 +375,7 @@ async def test_failed_or_cancelled_leader_wakeup_can_retry_without_losing_report
 
 
 @pytest.mark.asyncio
-async def test_new_rail_resets_role_local_state_from_previous_run_cycle() -> None:
+async def test_new_rail_resets_local_unfinished_state_but_preserves_finalized_leader_round() -> None:
     backend = MagicMock()
     backend.leader_member_name = "leader"
     backend.task_manager.list_tasks = AsyncMock(return_value=[])
@@ -315,7 +393,7 @@ async def test_new_rail_resets_role_local_state_from_previous_run_cycle() -> Non
     )
     assert backend.debate_state.participant_round_id is None
 
-    await backend.debate_state.begin_round({"old-call": {"member-a"}})
+    await backend.debate_state.begin_round({"stale-call": {"member-a"}})
     DebateRoundCapRail(
         max_debate_rounds=2,
         team_backend=backend,
@@ -324,13 +402,39 @@ async def test_new_rail_resets_role_local_state_from_previous_run_cycle() -> Non
         language="en",
     )
     assert backend.debate_state.round_id is None
-    assert backend.debate_state.invitation_calls == {}
+
+    backend.debate_state.round_id = "completed-round"
+    backend.debate_state.invitation_calls = {
+        "old-call": frozenset({"member-a"}),
+    }
+    backend.debate_state.finalized = True
+    leader_rail = DebateRoundCapRail(
+        max_debate_rounds=2,
+        team_backend=backend,
+        member_name="leader",
+        role=TeamRole.LEADER,
+        language="en",
+    )
+    assert backend.debate_state.round_id == "completed-round"
+    assert backend.debate_state.finalized is True
+
+    new_invite = ToolCall(
+        id="new-call",
+        type="function",
+        name="send_message",
+        arguments=json.dumps({"to": "member-a"}),
+    )
+    await leader_rail.after_model_call(_model_context(new_invite))
+
+    assert backend.debate_state.invitation_calls == {
+        "old-call": frozenset({"member-a"}),
+    }
 
 
 @pytest.mark.asyncio
 async def test_leader_tracks_only_teammates_that_can_tag_final_reports() -> None:
     rail = _rail(role=TeamRole.LEADER)
-    wake = AsyncMock()
+    wake = AsyncMock(return_value=True)
     rail._debate.bind_leader_wakeup(wake)
     rail._team.list_members.return_value = [
         SimpleNamespace(member_name="member-a", role=TeamRole.TEAMMATE.value),
@@ -371,7 +475,7 @@ async def test_leader_tracks_only_teammates_that_can_tag_final_reports() -> None
 @pytest.mark.asyncio
 async def test_report_and_failure_are_mutually_exclusive() -> None:
     state = DebateRunState(language="en")
-    wake = AsyncMock()
+    wake = AsyncMock(return_value=True)
     state.bind_leader_wakeup(wake)
     round_id = await state.begin_round({"call-a": {"member-a"}})
 
@@ -411,9 +515,40 @@ async def test_leader_does_not_replace_an_active_debate_round() -> None:
 
 
 @pytest.mark.asyncio
+async def test_leader_does_not_reopen_a_finalized_round_from_internal_summary() -> None:
+    rail = _rail(role=TeamRole.LEADER)
+    wake = AsyncMock(return_value=True)
+    rail._debate.bind_leader_wakeup(wake)
+    first = ToolCall(
+        id="call-a",
+        type="function",
+        name="send_message",
+        arguments=json.dumps({"to": "member-a"}),
+    )
+    await rail.after_model_call(_model_context(first))
+    invite = _context(to="member-a", result=ToolOutput(success=True))
+    invite.inputs.tool_call.id = "call-a"
+    await rail.after_tool_call(invite)
+    round_id = rail._debate.round_id
+    await rail._debate.capture_report(round_id, "member-a", "report A")
+    assert rail._debate.finalized is True
+
+    second = ToolCall(
+        id="call-b",
+        type="function",
+        name="send_message",
+        arguments=json.dumps({"to": "member-b"}),
+    )
+    await rail.after_model_call(_model_context(second))
+
+    assert rail._debate.round_id == round_id
+    assert set(rail._debate.invitation_calls) == {"call-a"}
+
+
+@pytest.mark.asyncio
 async def test_leader_settles_registered_invitation_skipped_by_another_rail() -> None:
     rail = _rail(role=TeamRole.LEADER)
-    wake = AsyncMock()
+    wake = AsyncMock(return_value=True)
     rail._debate.bind_leader_wakeup(wake)
     call = ToolCall(
         id="call-a",

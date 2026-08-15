@@ -22,6 +22,9 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventMessage,
     InnerEventType,
 )
+from openjiuwen.agent_teams.agent.coordination.handlers.agent_lifecycle import (
+    AgentLifecycleHandler,
+)
 from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.member import MemberHandler
 from openjiuwen.agent_teams.agent.infra import TeamInfra
@@ -462,6 +465,60 @@ async def test_mailbox_poll_retries_finalization_after_failure_event_wakeup_erro
 
     assert state.finalized is True
     assert host.deliver_input.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_failure_event_defers_debate_wakeup_until_interrupt_clears() -> None:
+    state, host, blueprint, infra, message_handler = _debate_message_handler(
+        TeamRole.LEADER,
+    )
+    member_handler = MemberHandler(host, blueprint, infra, SimpleNamespace())
+    await state.begin_round({"call-a": {"member-a"}})
+    await state.settle_invitation("call-a", succeeded=True)
+    host.has_pending_interrupt.return_value = True
+
+    event = EventMessage.from_event(
+        MemberStatusChangedEvent(
+            team_name="test-team",
+            member_name="member-a",
+            old_status=MemberStatus.BUSY.value,
+            new_status=MemberStatus.ERROR.value,
+        )
+    )
+    await member_handler.on_member_event(event)
+
+    assert state.failed_participants == {"member-a"}
+    assert state.finalizing is False
+    assert state.finalized is False
+    host.deliver_input.assert_not_awaited()
+
+    host.has_pending_interrupt.return_value = False
+    message_handler._read_all_unread = AsyncMock(return_value=[])
+    await message_handler._process_unread_messages("leader-1")
+
+    assert state.finalized is True
+    host.deliver_input.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_external_user_input_resets_a_finalized_leader_debate() -> None:
+    state, host, blueprint, infra, _ = _debate_message_handler(TeamRole.LEADER)
+    state.round_id = "completed-round"
+    state.finalized = True
+    handler = AgentLifecycleHandler(host, blueprint, infra, SimpleNamespace())
+
+    await handler.on_user_input(
+        InnerEventMessage(
+            event_type=InnerEventType.USER_INPUT,
+            payload={"content": "start another debate"},
+        )
+    )
+
+    assert state.round_id is None
+    assert state.finalized is False
+    host.deliver_input.assert_awaited_once_with("start another debate")
 
 
 @pytest.mark.asyncio

@@ -48,6 +48,7 @@ from openjiuwen.agent_teams.tools.team_tools import (
     TaskCreateTool,
     UpdateTaskTool,
     ViewTaskToolV2,
+    create_team_tools,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -1437,6 +1438,33 @@ class TestSendMessageTool:
         assert "content" in props
         assert "summary" in props
         assert "_team_debate_meta" not in props
+
+    @pytest.mark.level0
+    @pytest.mark.parametrize(
+        ("role", "dispatch_mode", "expected"),
+        [
+            ("teammate", "autonomous", True),
+            ("leader", "autonomous", False),
+            ("teammate", "scheduled", False),
+            ("leader", "scheduled", False),
+        ],
+    )
+    def test_final_report_schema_is_autonomous_teammate_only(
+        self,
+        agent_team,
+        role: str,
+        dispatch_mode: str,
+        expected: bool,
+    ) -> None:
+        tools = create_team_tools(
+            role=role,
+            agent_team=agent_team,
+            dispatch_mode=dispatch_mode,
+        )
+        send_message = next(tool for tool in tools if tool.card.name == "send_message")
+
+        properties = send_message.card.input_params["properties"]
+        assert ("final_report" in properties) is expected
 
     @pytest.mark.asyncio
     @pytest.mark.level1

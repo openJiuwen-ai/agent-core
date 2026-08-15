@@ -190,6 +190,7 @@ class TestTeamRoleSection:
             assert "一次必要的简短补充" in teammate
             assert "不要再发第二份总结" in teammate
             assert "只向 Leader 发送一次最终要点汇报" in teammate
+            assert "final_report=true" in teammate
         else:
             assert "debate branch" in leader.lower()
             assert "do not call `view_task` or `create_task`" in leader
@@ -206,6 +207,7 @@ class TestTeamRoleSection:
             assert "one necessary concise supplement" in teammate
             assert "do not send a second summary" in teammate
             assert "send the Leader exactly one final key-points report" in teammate
+            assert "final_report=true" in teammate
 
     @pytest.mark.level0
     @pytest.mark.parametrize("language", ["cn", "en"])
