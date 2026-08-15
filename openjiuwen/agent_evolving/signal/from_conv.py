@@ -155,6 +155,76 @@ def _extract_dialog_turns(messages: Sequence[object]) -> List[Tuple[str, str]]:
     return turns
 
 
+def _unwrap_channel_user_message(text: str) -> str:
+    """Extract real user text from channel ``lead-in + JSON`` envelopes.
+
+    Inbound wrappers look like ``你收到一条消息：\\n{"content": "...", ...}``.
+    Feedback detection only needs the inner ``content``; envelope metadata
+    (source/timezone/supplementary_info) is noise for intent classification.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return text
+    head, sep, payload = stripped.partition("\n")
+    payload = payload.strip()
+    if not sep or head.lstrip().startswith("{") or not payload.startswith("{"):
+        return text
+    try:
+        envelope = json.loads(payload)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(envelope, dict):
+        inner = envelope.get("content")
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip()
+    return text
+
+
+def _is_feedback_context_noise(content: str) -> bool:
+    """Return True for injected reminders / attachments with no real user text."""
+    text = (content or "").strip()
+    if not text:
+        return True
+    lower = text.lower()
+    if "<system-reminder>" not in lower and "<prompt-attachment" not in lower:
+        return False
+    without = re.sub(
+        r"<system-reminder>[\s\S]*?</system-reminder>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    without = re.sub(
+        r"<prompt-attachment\b[^>]*>[\s\S]*?</prompt-attachment>",
+        "",
+        without,
+        flags=re.IGNORECASE,
+    ).strip()
+    return not without
+
+
+def _prepare_feedback_dialog_turns(
+    messages: Sequence[object],
+) -> List[Tuple[str, str]]:
+    """Build cleaned user/assistant turns for feedback prompts.
+
+    - Unwrap channel JSON envelopes for user turns
+    - Drop system-reminder / prompt-attachment-only noise
+    - Collapse consecutive duplicate (role, content) pairs
+    """
+    cleaned: List[Tuple[str, str]] = []
+    for role, content in _extract_dialog_turns(messages):
+        if role == "user":
+            content = _unwrap_channel_user_message(content)
+        content = str(content or "").strip()
+        if not content or _is_feedback_context_noise(content):
+            continue
+        if cleaned and cleaned[-1][0] == role and cleaned[-1][1] == content:
+            continue
+        cleaned.append((role, content))
+    return cleaned
+
+
 def _format_feedback_dialog_line(role: str, content: str, *, language: str) -> str:
     if language == "cn":
         label = "用户" if role == "user" else "助手"
@@ -170,7 +240,7 @@ def _build_user_feedback_prompt_inputs(
     max_turns: int = _USER_FEEDBACK_MAX_TURNS,
 ) -> Optional[Tuple[str, str]]:
     """Build ``(conversation_context, last_user_message)`` for feedback detection."""
-    dialog = _extract_dialog_turns(messages)
+    dialog = _prepare_feedback_dialog_turns(messages)
     last_user_idx: Optional[int] = None
     for idx in range(len(dialog) - 1, -1, -1):
         if dialog[idx][0] == "user":
@@ -443,15 +513,24 @@ class ConversationSignalDetector:
         if prompt_inputs is None:
             return []
         conversation_context, last_user_message = prompt_inputs
-
-        traj_skills = self.collect_skills_from_messages(messages)
-        extra = [str(s).strip() for s in (extra_skills or []) if str(s).strip()]
-        skill_names = list(dict.fromkeys([*traj_skills, *extra]))
         logger.info(
-            "[detect_user_intent] skills from messages = %s extra=%s merged=%s",
-            traj_skills,
-            extra,
+            "[detect_user_intent] last_user_message=%s",
+            last_user_message,
+        )
+
+        # Same candidate set as SkillEvolutionRail:
+        #   session used skills=[...] (traj=[...])
+        # Rail passes extra_skills=sorted(session_skills) which already is
+        # session history ∪ current traj hits; prefer that list as skill_names.
+        traj_skills = self.collect_skills_from_messages(messages)
+        session_used_skills = [
+            str(s).strip() for s in (extra_skills or []) if str(s).strip()
+        ]
+        skill_names = list(dict.fromkeys(session_used_skills or traj_skills))
+        logger.info(
+            "[detect_user_intent] session used skills=%s (traj=%s)",
             skill_names,
+            traj_skills,
         )
         if not skill_names:
             return []
@@ -465,6 +544,15 @@ class ConversationSignalDetector:
             conversation_context=conversation_context,
             last_user_message=last_user_message,
         )
+        logger.info(
+            "[detect_user_intent] conversation_context=%s",
+            conversation_context,
+        )
+        logger.info(
+            "[detect_user_intent] last_user_message=%s",
+            last_user_message,
+        )
+        logger.info("[detect_user_intent] prompt=%s", prompt)
 
         try:
             response = await self._llm.invoke(
