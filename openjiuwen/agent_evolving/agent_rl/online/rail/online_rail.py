@@ -138,6 +138,7 @@ class RLOnlineRail(EvolutionRail):
         ctx: Optional[AgentCallbackContext] = None,
         *,
         snapshot: Optional[dict[str, Any]] = None,
+        trigger_point: Optional[str] = None,
     ) -> None:
         metadata = trajectory_meta(trajectory)
         attributes = {"ended_at": time.time()}
