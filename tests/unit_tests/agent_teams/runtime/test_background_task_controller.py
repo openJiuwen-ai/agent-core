@@ -79,6 +79,23 @@ async def test_stop_unknown_returns_false():
     assert await ctl.stop("nope") is False
 
 
+@pytest.mark.asyncio
+async def test_stop_terminates_an_already_paused_run():
+    ctl = BackgroundTaskController()
+    relaunched = []
+    ctl.register(_make_handle("wf_1"))
+    await ctl.pause("wf_1")
+    ctl._paused["wf_1"].relaunch = lambda: relaunched.append(1)
+
+    ok = await ctl.stop("wf_1")
+
+    assert ok is True
+    assert "wf_1" not in ctl._paused
+    # dropping the relaunch closure means a later resume must not relaunch.
+    resumed = await ctl.resume("wf_1")
+    assert resumed is False and relaunched == []
+
+
 # ---------------------------------------------------------------------------
 # Preserved legacy coverage (prior task), adapted to run_id-addressed keys.
 # ---------------------------------------------------------------------------
