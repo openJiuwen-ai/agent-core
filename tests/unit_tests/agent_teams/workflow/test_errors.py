@@ -1,6 +1,5 @@
 # coding: utf-8
 from __future__ import annotations
-import pytest
 from openjiuwen.agent_teams.workflow.engine.errors import WorkflowAborted
 
 
