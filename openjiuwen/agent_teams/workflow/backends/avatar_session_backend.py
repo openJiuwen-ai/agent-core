@@ -162,6 +162,10 @@ class AvatarSessionManager:
         # inbound reply arrives on the dedicated messager topic (subscribed lazily
         # on the first human session) and is routed by ``_on_reply_event``.
         self._pending_human: dict[str, asyncio.Future] = {}
+        # Human replies that arrive during a pause window (no live future, so the
+        # usual path would drop them) are parked here and consumed by
+        # ``_await_human_reply`` before it registers a new future.
+        self._pending_reply_buffer: dict[str, str] = {}
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
         self._human_timeout = human_timeout if human_timeout is not None else _DEFAULT_HUMAN_TIMEOUT
@@ -503,6 +507,7 @@ class AvatarSessionManager:
             if not fut.done():
                 fut.cancel()
         self._pending_human.clear()
+        self._pending_reply_buffer.clear()
         if self._reply_topic_subscribed and self._messager is not None and self._session_id is not None:
             from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
 
@@ -533,6 +538,7 @@ class AvatarSessionManager:
             if not fut.done():
                 fut.cancel()
         self._pending_human.clear()
+        self._pending_reply_buffer.clear()
         for state in list(self._sessions.values()):
             if state.harness is not None:
                 try:
@@ -545,18 +551,18 @@ class AvatarSessionManager:
 
         The inbound seam: whatever transport carries a real person's answer
         (messager round-trip from ``interact_agent_team``) calls this with the
-        ``correlation_id`` from the outbound prompt. An unknown / already-resolved
-        correlation is rejected (returns ``False``) — an illegal id from an
-        external caller is dropped, not applied to some other turn.
+        ``correlation_id`` from the outbound prompt. A live pending future is
+        resolved directly; a reply for an unknown / paused correlation (no live
+        future) is buffered instead of dropped, so a resume that re-awaits the
+        turn still sees the person's answer.
         """
         fut = self._pending_human.get(correlation_id)
-        if fut is None or fut.done():
-            team_logger.warning(
-                "[swarmflow] rejected human reply for unknown/closed correlation_id %r",
-                correlation_id,
-            )
-            return False
-        fut.set_result(answer)
+        if fut is not None and not fut.done():
+            fut.set_result(answer)
+            return True
+        # No live future: buffer instead of drop (pause window or late reply).
+        self._pending_reply_buffer[correlation_id] = answer
+        team_logger.info("[swarmflow] buffered reply for pending correlation_id %r", correlation_id)
         return True
 
     # ------------------------------------------------------------------
@@ -836,6 +842,15 @@ class AvatarSessionManager:
         issued for an interrupted-then-resumed turn still matches.
         """
         corr = correlation_id or f"{state.member_name}:{state.turns_executed}"
+        # Consume a buffered reply first (don't re-push the prompt).
+        buffered = self._pending_reply_buffer.pop(corr, None)
+        if buffered is not None:
+            if self._on_human_replied is not None:
+                try:
+                    self._on_human_replied(state.member_name, corr, buffered)
+                except Exception:
+                    team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
+            return buffered
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending_human[corr] = fut
