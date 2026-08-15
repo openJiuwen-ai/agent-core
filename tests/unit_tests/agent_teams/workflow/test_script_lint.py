@@ -15,7 +15,7 @@ def _make_tool():
 def test_lint_blocks_meta_name_change():
     tool = _make_tool()
     new_src = 'META = {"name": "xyz", "phases": []}\nasync def run(args): pass\n'
-    with pytest.raises((MetaError, Exception)):
+    with pytest.raises(MetaError):
         tool._lint_rerun(old_source=_OLD, new_source=new_src)
 
 
