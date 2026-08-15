@@ -242,12 +242,16 @@ def test_swarmflow_tool_requires_a_script_source():
 
 
 def test_swarmflow_tool_rejects_unsupported_sources():
-    """name / resume_id are on the surface but not wired to execution yet."""
+    """name is on the surface but not wired to execution yet.
+
+    (resume_id alone is no longer "not supported yet": resume_id+action is the
+    control entry, and resume_id without action fails with its own message —
+    covered in test_swarmflow_invoke_control.py.)
+    """
     tool = _tool(_FakeHarness())
-    for src in ("name", "resume_id"):
-        out = asyncio.run(tool.invoke({src: "x"}))
-        assert out.success is False
-        assert "not supported yet" in (out.error or ""), (src, out.error)
+    out = asyncio.run(tool.invoke({"name": "x"}))
+    assert out.success is False
+    assert "not supported yet" in (out.error or "")
 
 
 def test_swarmflow_tool_launches_inline_script(tmp_path):

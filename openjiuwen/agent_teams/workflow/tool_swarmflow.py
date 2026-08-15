@@ -107,7 +107,8 @@ class SwarmflowTool(AsyncTool):
         # in ``invoke`` rather than via JSON-Schema ``required`` because the rule
         # is a one-of, not a fixed key. ``script_path`` (disk) and ``script``
         # (inline source, materialised to disk) are wired to execution; ``name``
-        # / ``resume_id`` are accepted and rejected with a clear message.
+        # is accepted and rejected with a clear message. ``resume_id`` doubles as
+        # the control entry (with ``action``) into pause/resume/stop.
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -115,6 +116,11 @@ class SwarmflowTool(AsyncTool):
                 "script": {"type": "string", "description": translator("swarmflow", "script")},
                 "name": {"type": "string", "description": translator("swarmflow", "name")},
                 "resume_id": {"type": "string", "description": translator("swarmflow", "resume_id")},
+                "action": {
+                    "type": "string",
+                    "enum": ["pause", "resume", "stop"],
+                    "description": "Control action on an existing run (requires resume_id).",
+                },
                 "args": {"type": "string", "description": translator("swarmflow", "args")},
             },
         }
@@ -236,14 +242,32 @@ class SwarmflowTool(AsyncTool):
         the launch round) so the launched receipt can report the resolved
         absolute ``script_path``; the resolved path is threaded into the
         background inputs, so ``run_background`` and any resume relaunch load
-        from disk uniformly. ``name`` / ``resume_id`` are recognised and
-        rejected with an explicit "not supported yet" message (never a silent
-        no-op), so the surface is honest about what is wired.
+        from disk uniformly. ``resume_id`` + ``action`` routes to the
+        background-task controller (pause / resume / stop) instead of the
+        launch path; ``resume_id`` alone, and ``name``, are rejected with an
+        explicit message (never a silent no-op), so the surface is honest about
+        what is wired.
         """
         script_path = (inputs.get("script_path") or "").strip()
         script = (inputs.get("script") or "").strip()
         name = (inputs.get("name") or "").strip()
         resume_id = (inputs.get("resume_id") or "").strip()
+        action = (inputs.get("action") or "").strip()
+        if resume_id:
+            if not action:
+                return ToolOutput(success=False, error="'action' is required with 'resume_id'")
+            controller = getattr(self._parent_agent, "background_task_controller", None)
+            if controller is None:
+                return ToolOutput(success=False, error="Runtime controller not configured")
+            if action == "pause":
+                ok = await controller.pause(resume_id)
+            elif action == "resume":
+                ok = await controller.resume(resume_id)
+            elif action == "stop":
+                ok = await controller.stop(resume_id)
+            else:
+                return ToolOutput(success=False, error=f"unknown action {action!r}")
+            return ToolOutput(success=ok, data={"run_id": resume_id, "action": action, "status": "done" if ok else "not_found"})
         if not any((script_path, script, name, resume_id)):
             return ToolOutput(
                 success=False,
