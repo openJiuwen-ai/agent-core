@@ -95,11 +95,16 @@ class BackgroundTaskController:
     async def stop(self, run_id: str) -> bool:
         async with self._lock:
             h = self._active.get(run_id)
-            if h is None:
-                return False
-            await self._abort_one(h)
-            self._active.pop(run_id, None)   # terminal: NOT into _paused
-            return True
+            if h is not None:
+                await self._abort_one(h)
+                self._active.pop(run_id, None)   # terminal: NOT into _paused
+                return True
+            if run_id in self._paused:
+                # Already aborted at pause time; just drop the relaunch
+                # closure so a later resume(run_id) cannot relaunch.
+                self._paused.pop(run_id, None)
+                return True
+            return False
 
     def is_paused(self, run_id: str | None = None) -> bool:
         if run_id is None:
