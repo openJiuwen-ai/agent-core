@@ -5,7 +5,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-08-15 |
-| 范围 | `debate.py`、`rails/debate_round_cap_rail.py`、`rails/elements.py`、`agent/agent_configurator.py`、`agent/coordination/handlers/{message,member}.py`、消息内部元数据链路、autonomous Leader/teammate 中英文提示词及定向单测 |
+| 范围 | `debate.py`、`rails/debate_round_cap_rail.py`、`rails/elements.py`、`agent/agent_configurator.py`、`agent/coordination/handlers/{agent_lifecycle,message,member}.py`、`runtime/manager.py`、autonomous teammate 的 `send_message` 参数、消息内部元数据链路、中英文提示词及定向单测 |
 | 调度模式 | 仅 `autonomous`；`scheduled` 行为保持不变 |
 | Refs | #751 |
 
@@ -37,8 +37,10 @@ handler 之间共享。Leader 侧状态包括：
 
 teammate 只保存当前收到的 `round_id`，互发计数仍由各成员自己的 rail 实例维护。
 
-这些状态不落数据库。每次 harness run cycle 重建时清空，避免 cold resume 复用已经失效的进程内
-轮次；本特性不尝试恢复进程中断时尚未结束的思辨。
+这些状态不落数据库。rail 随 harness run cycle 重建时，teammate-local 状态和未 finalized 的
+Leader 轮次会清空，避免复用中断的旧轮；同进程内已 finalized 的 Leader 状态则保留到下一条
+外部用户输入，以阻止内部总结轮重新发起讨论。进程退出后全部自然丢失，本特性不尝试恢复尚未
+结束的思辨。
 
 ### 2. Leader 只跟踪实际发出的邀请
 
@@ -56,8 +58,10 @@ Leader 在首个模型响应完成后检查 `send_message` 调用并登记本轮
 
 ### 3. 使用隐藏消息元数据关联邀请与最终汇报
 
-模型可见的 `send_message` schema 不变。框架通过私有 Python 参数创建内部元数据，并在消息入库时
-规范化为：
+只有 autonomous teammate 的 `send_message` schema 增加可选布尔参数 `final_report`（默认
+`false`）；Leader、scheduled teammate 与 human-agent 的 schema 不变。成员只有在当前存在已激活
+的思辨轮、`to` 是名册中 Leader 的真实 `member_name` 字符串（`leader` 不作为角色别名，仅在它确实是该 `member_name` 时有效）且显式传 `final_report=true` 时，
+rail 才通过私有 Python 参数创建内部元数据，并在消息入库时规范化为：
 
 ```python
 {
@@ -69,10 +73,12 @@ Leader 在首个模型响应完成后检查 `send_message` 调用并登记本轮
 
 - Leader 发出的本轮邀请标记为 `invite`；
 - teammate 收到邀请后激活本地 `round_id`；
-- teammate 在该轮中发给 Leader 的最终汇报标记为 `final_report`；
+- teammate 在该轮中显式以 `final_report=true` 发给 Leader 的最终汇报标记为 `final_report`；
 - peer 消息和普通未标记消息沿用原邮箱行为。
 
-私有元数据对象不能由模型 tool arguments 伪造；持久化后的字典只用于跨进程 mailbox 传递和校验。
+模型不能直接伪造私有元数据对象；公开布尔参数只触发 rail 在上述边界内注入。工具调用成功后才
+清除成员的 `round_id`，失败时保留，允许成员重试。持久化后的元数据字典只用于跨进程 mailbox
+传递和校验。
 
 ### 4. `max_debate_rounds` 保持成员粒度
 
@@ -106,24 +112,36 @@ agent-core 内再增加一套思辨超时。
 3. 每个预期参与者都已提交最终汇报或进入明确失败状态。
 
 首个满足条件的检查者在锁内把状态翻转为 `finalizing`，随后通过
-`Leader.deliver_input(..., use_steer=True)` 唤醒 Leader。投递成功后标记 `finalized`；投递抛错或
-取消时释放 claim，由后续 mailbox poll 重试，避免一次瞬时失败永久丢失收束。
+`Leader.deliver_input(..., use_steer=True)` 唤醒 Leader。wakeup 回调返回是否接受本次投递：接受后
+标记 `finalized`；返回 `false`、投递抛错或取消时只释放 `finalizing` claim，由后续 mailbox poll
+重试，避免一次瞬时失败或 pending interrupt 永久丢失收束。
 
 生成给 Leader 的输入包含已收集的成员最终汇报和失败成员列表，并明确要求只向用户总结一次、
 不要再次邀请成员。
 
 ### 7. pending interrupt 仍具有优先级
 
-如果 Leader 当前已有待处理 interrupt，最终汇报仍可被捕获，但不会越过既有 interrupt gating
-立即投递新的收束输入。后续正常 mailbox poll 再尝试完成收束，保持 coordination 层原有的输入
-优先级和顺序。
+如果 Leader 在读取报告前已有待处理 interrupt，该消息保持未读，待 interrupt 结束后再捕获；若
+interrupt 在报告已捕获、收束 wakeup 前出现，消息可以标记已读，但报告仍保存在进程内
+`DebateRunState`，wakeup 返回 `false` 且不调用 `deliver_input()`，状态只撤销 `finalizing`、保持
+`finalized=false`。两种情况都由后续 mailbox poll 再试。报告集合不是持久化恢复状态，进程退出后
+仍遵循本文“已知遗留”的冷恢复边界。
 
-### 8. 提示词与框架契约对齐
+### 8. 内部总结轮不能重新开启思辨
+
+收束投递成功后，`finalized=true` 会阻止 `after_model_call()` 在内部总结轮重新 `begin_round()`。
+只有下一条真正从团队外部投给 Leader 的输入才重置上一轮状态，包括 `USER_INPUT` / `GodViewMessage`、
+Operator 广播和 Operator 直发 Leader；Operator 只定向其他成员时不重置。mailbox 消息、调度消息和框架
+生成的收束 prompt 都不会重置。这样当前轮只总结一次，而下一条真实用户消息
+仍可开始一轮新讨论。rail 随 harness/run cycle 重建时只保留已 finalized 的 Leader 状态；未完成
+的旧轮会清理，新进程也自然创建空状态。
+
+### 9. 提示词与框架契约对齐
 
 autonomous 提示词只补充框架已经实现的职责边界：
 
 - Leader 发起讨论后等待框架提供的团队级收束输入，并且只总结一次；
-- teammate 在讨论充分后向 Leader 发送一份最终汇报并停止继续扩张；
+- teammate 在讨论充分后以 `final_report=true` 向 Leader 发送一份最终汇报并停止继续扩张；
 - 中文和英文语义一致。
 
 scheduled 提示词不修改。测试只保留中英文 Leader/teammate 的关键契约断言，不逐句锁定文案。
@@ -139,7 +157,7 @@ Leader 首次模型响应
 teammate 收到 invite
   -> 激活本地 round_id
   -> 与其他参与者互发，使用自己的 peer cap
-  -> 向 Leader 发送一次带 final_report metadata 的最终汇报
+  -> 以 final_report=true 向 Leader 发送一次最终汇报
 
 Leader mailbox
   -> 捕获并按 sender 去重，不逐条唤醒 Leader
@@ -152,10 +170,10 @@ Leader mailbox
 ## 兼容性边界
 
 - 普通未标记消息仍按原 mailbox 逻辑投递。
-- `send_message` 的模型可见参数和返回结构不因收束协议改变。
+- 只有 autonomous teammate 的 `send_message` 增加可选 `final_report` 布尔参数；其余形态与返回结构不变。
 - scheduled dispatch 不装配本特性。
 - Relay 的 300 秒 watchdog 保持唯一外部超时边界。
-- 不新增数据库表、DAO、数据迁移或持久化 debate 状态。
+- 不新增 debate 专用表或持久化 debate 状态；消息表只通过可空 `coordination_meta` 携带跨进程关联信息。
 - 不增加全局流式输出闸门，也不改变所有 `send_message` variant 的并发属性。
 
 ## 拒绝的方案
@@ -173,15 +191,15 @@ Leader mailbox
 
 ## 验证
 
-- focused convergence cases：26 passed。
-- `tests/unit_tests/agent_teams/test_team_policy_rail.py`：72 passed。
-- `tests/unit_tests/agent_teams/test_team_agent_coordination.py`：106 passed，6 个既有 dispatcher-routing
-  用例失败；在本特性修改前同样失败，不属于本次范围。
+- 本轮新增 / 受影响的 focused cases：11 passed。
+- 6 个相关测试文件合跑：390 passed、14 skipped；另有 6 个既有 dispatcher-routing 用例失败，
+  名称与本特性修改前一致，不属于本次范围。
 - `ruff`、`py_compile`、`git diff --check` 通过。
 
 覆盖的关键行为包括：部分 multicast、重复/迟到汇报、预先失败和运行中失败、投递异常与
-`CancelledError` 重试、pending interrupt gating、run-cycle reset、Human/Bridge/external CLI 排除、
-scheduled 隔离，以及 autonomous 中英文提示词的最小契约。
+`CancelledError` 重试、pending interrupt gating、外部用户输入 reset、内部总结不重开、
+Human/Bridge/external CLI 排除、scheduled 隔离、显式 `final_report` schema 隔离，以及 autonomous
+中英文提示词的最小契约。
 
 ## 已知遗留
 
