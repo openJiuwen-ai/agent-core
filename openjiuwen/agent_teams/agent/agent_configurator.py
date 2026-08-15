@@ -582,7 +582,11 @@ class AgentConfigurator:
         if is_team_plan_leader:
             team_rail_specs.append(RailSpec(type=TEAM_PLAN_MODE, params={}))
 
-        if ctx.role == TeamRole.TEAMMATE and spec.max_debate_rounds is not None:
+        if (
+            spec.dispatch_mode == "autonomous"
+            and ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE}
+            and spec.max_debate_rounds is not None
+        ):
             team_rail_specs.append(
                 RailSpec(
                     type=TEAM_DEBATE_ROUND_CAP,

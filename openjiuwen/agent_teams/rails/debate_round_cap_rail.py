@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Per-teammate ceiling for debate-oriented ``send_message`` calls."""
+"""Autonomous debate enrollment and per-teammate message ceiling."""
 
 from __future__ import annotations
 
@@ -10,15 +10,22 @@ import json
 from typing import Any
 
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
-from openjiuwen.agent_teams.schema.status import TaskStatus
-from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.agent_teams.debate import (
+    DebateMessageRole,
+    DebateRunState,
+    make_debate_invocation_meta,
+)
+from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus, TaskStatus
+from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.foundation.llm import ToolMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.rails.llm_stability_rail import FORCE_SKIP_ALL_KEY, SKIP_KEY
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
+_DEBATE_META_ARG = "_team_debate_meta"
 _OPEN_TASK_STATUSES = frozenset(
     {
         TaskStatus.PENDING.value,
@@ -26,13 +33,13 @@ _OPEN_TASK_STATUSES = frozenset(
         TaskStatus.PLANNING.value,
         TaskStatus.IN_PROGRESS.value,
         TaskStatus.IN_REVIEW.value,
-    },
+    }
 )
 _ELIGIBILITY_KEY_PREFIX = "_team_debate_round_cap_eligible"
 
 
 class DebateRoundCapRail(DeepAgentRail):
-    """Cap successful teammate-to-teammate debate messages."""
+    """Coordinate Leader invitations and cap teammate peer messages."""
 
     priority = 55
 
@@ -41,8 +48,8 @@ class DebateRoundCapRail(DeepAgentRail):
         *,
         max_debate_rounds: int,
         team_backend: TeamBackend,
-        message_manager: TeamMessageManager,
         member_name: str,
+        role: TeamRole | str = TeamRole.TEAMMATE,
         language: str = "cn",
     ) -> None:
         super().__init__()
@@ -50,32 +57,118 @@ class DebateRoundCapRail(DeepAgentRail):
             raise ValueError(f"max_debate_rounds must be >= 1, got {max_debate_rounds}")
         self._max = max_debate_rounds
         self._team = team_backend
-        self._messages = message_manager
         self._member_name = member_name
+        self._role = TeamRole(role)
         self._language = (language or "cn").lower()
+        debate_state = getattr(team_backend, "debate_state", None)
+        if not isinstance(debate_state, DebateRunState):
+            debate_state = DebateRunState(language=self._language)
+            team_backend.debate_state = debate_state
+        debate_state.language = self._language
+        self._debate = debate_state
+        if self._role == TeamRole.LEADER:
+            self._debate.reset_leader_round()
+        else:
+            self._debate.reset_participant_round()
         self._count = 0
         self._count_lock = asyncio.Lock()
-        self._leader_notified = False
-        self._leader_notify_in_flight = False
-        self._notify_lock = asyncio.Lock()
+        self._count_round_id: str | None = None
+
+    async def after_model_call(self, ctx: AgentCallbackContext) -> None:
+        """Enroll valid Leader invitations emitted by one model response."""
+        if self._role != TeamRole.LEADER or ctx.extra.get(FORCE_SKIP_ALL_KEY):
+            return
+        if self._debate.round_id and not self._debate.finalized:
+            return
+        response = getattr(ctx.inputs, "response", None)
+        if not isinstance(response, AssistantMessage) or not response.tool_calls:
+            return
+        if await self._has_open_tasks() is not False:
+            return
+        participant_snapshot = await self._trackable_participants()
+        if participant_snapshot is None:
+            return
+        trackable_participants, initially_failed = participant_snapshot
+        if not trackable_participants:
+            return
+
+        skipped = ctx.extra.get(SKIP_KEY, {})
+        invitation_calls: dict[str, set[str]] = {}
+        for call in response.tool_calls:
+            call_id = str(getattr(call, "id", "") or "")
+            tool_name = getattr(call, "name", "")
+            if not call_id or call_id in skipped or not self._is_send_message(tool_name):
+                continue
+            args = self._parse_args(getattr(call, "arguments", None))
+            targets = self._invitation_targets(
+                args.get("to"),
+                trackable_participants,
+            )
+            if targets:
+                invitation_calls[call_id] = targets
+        if invitation_calls:
+            await self._debate.begin_round(invitation_calls)
+            invited = set().union(*invitation_calls.values())
+            for member_name in initially_failed & invited:
+                await self._debate.mark_failed(member_name)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Reject debate sends after the successful-call counter reaches the cap."""
+        """Tag debate messages and reject teammate peer sends at the cap."""
         if ctx.extra.get("_skip_tool") or not self._is_send_message(ctx.inputs.tool_name):
             return
-        eligibility_key = self._eligibility_key(ctx)
-        eligible = await self._should_apply(ctx.inputs.tool_args)
-        ctx.extra[eligibility_key] = eligible
-        if not eligible:
+        if self._role == TeamRole.LEADER:
+            call_id = str(getattr(ctx.inputs.tool_call, "id", "") or "")
+            meta = await self._debate.invitation_meta(call_id)
+            if meta is not None:
+                self._inject_meta(ctx, meta)
             return
 
-        if self._count >= self._max:
+        self._sync_participant_round()
+        round_id = self._debate.participant_round_id
+        if not round_id:
+            return
+        args = self._parse_args(ctx.inputs.tool_args)
+        if await self._is_leader_target(args.get("to")):
+            self._inject_meta(
+                ctx,
+                make_debate_invocation_meta(round_id, DebateMessageRole.FINAL_REPORT),
+            )
+            return
+
+        eligibility_key = self._eligibility_key(ctx)
+        eligible = await self._should_apply(args)
+        ctx.extra[eligibility_key] = eligible
+        if eligible and self._count >= self._max:
             self._reject_tool(ctx, self._limit_error_text())
-            await self._notify_leader_once()
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Count a successful debate send and notify the Leader at the cap."""
-        if ctx.extra.get("_skip_tool") or not self._is_send_message(ctx.inputs.tool_name):
+        """Settle Leader invitations or count a successful teammate peer send."""
+        if not self._is_send_message(ctx.inputs.tool_name):
+            return
+        if self._role == TeamRole.LEADER:
+            call_id = str(getattr(ctx.inputs.tool_call, "id", "") or "")
+            succeeded = not ctx.extra.get("_skip_tool") and self._tool_succeeded(ctx)
+            delivered = (
+                set()
+                if ctx.extra.get("_skip_tool")
+                else self._multicast_delivered_participants(ctx.inputs.tool_result)
+            )
+            await self._debate.settle_invitation(
+                call_id,
+                succeeded=succeeded,
+                delivered_participants=delivered,
+            )
+            return
+        if ctx.extra.get("_skip_tool"):
+            return
+
+        self._sync_participant_round()
+        round_id = self._debate.participant_round_id
+        if not round_id:
+            return
+        if await self._is_leader_target(self._parse_args(ctx.inputs.tool_args).get("to")):
+            if self._tool_succeeded(ctx):
+                await self._debate.complete_participant(round_id)
             return
         eligible = ctx.extra.pop(self._eligibility_key(ctx), None)
         if eligible is None:
@@ -84,28 +177,21 @@ class DebateRoundCapRail(DeepAgentRail):
             return
 
         async with self._count_lock:
-            if self._count >= self._max:
-                return
-            self._count += 1
-            reached_cap = self._count >= self._max
-
-        if reached_cap:
-            await self._notify_leader_once()
+            if self._count < self._max:
+                self._count += 1
 
     async def _should_apply(self, tool_args: Any) -> bool:
         args = self._parse_args(tool_args)
         if not await self._is_debate_target(args.get("to")):
             return False
         open_tasks = await self._has_open_tasks()
-        # None means the board could not be queried. Fail open for the tool:
-        # do not consume budget and do not reject the call.
         return open_tasks is False
 
     async def _has_open_tasks(self) -> bool | None:
         try:
             tasks = await self._team.task_manager.list_tasks()
         except Exception as exc:  # noqa: BLE001 - a guard rail must not block work on DB failure
-            team_logger.warning("[DebateRoundCap] list_tasks failed; skipping cap check: {}", exc)
+            team_logger.warning("[DebateRoundCap] list_tasks failed; skipping debate check: {}", exc)
             return None
         return any(
             getattr(task, "status", None) in _OPEN_TASK_STATUSES
@@ -113,22 +199,57 @@ class DebateRoundCapRail(DeepAgentRail):
         )
 
     async def _is_debate_target(self, raw_target: Any) -> bool:
-        if isinstance(raw_target, str):
-            targets = [raw_target.strip()]
-        elif isinstance(raw_target, list):
-            targets = [item.strip() for item in raw_target if isinstance(item, str)]
-        else:
-            return False
-        targets = [target for target in targets if target]
+        targets = self._target_list(raw_target)
         if not targets:
             return False
         if "*" in targets:
             return True
         leader = await self._leader_name()
-        # Scheduled send_message uses the role placeholder "leader" while
-        # autonomous mode normally uses the concrete leader member name.
         excluded = {USER_PSEUDO_MEMBER_NAME, "leader", self._member_name, leader}
         return any(target not in excluded for target in targets)
+
+    async def _is_leader_target(self, raw_target: Any) -> bool:
+        if not isinstance(raw_target, str):
+            return False
+        return raw_target.strip() in {"leader", await self._leader_name()}
+
+    async def _trackable_participants(self) -> tuple[set[str], set[str]] | None:
+        try:
+            members = await self._team.list_members()
+        except Exception as exc:  # noqa: BLE001 - fail open when roster roles cannot be read
+            team_logger.warning("[DebateRoundCap] list_members failed: {}", exc)
+            return None
+        trackable: set[str] = set()
+        failed: set[str] = set()
+        for member in members:
+            member_name = str(getattr(member, "member_name", "") or "")
+            if (
+                not member_name
+                or getattr(member, "role", TeamRole.TEAMMATE.value)
+                != TeamRole.TEAMMATE.value
+                or self._team.is_external_cli_agent(member_name)
+            ):
+                continue
+            trackable.add(member_name)
+            if (
+                getattr(member, "status", None) == MemberStatus.ERROR.value
+                or getattr(member, "execution_status", None)
+                == ExecutionStatus.FAILED.value
+            ):
+                failed.add(member_name)
+        return trackable, failed
+
+    def _invitation_targets(
+        self,
+        raw_target: Any,
+        trackable_participants: set[str],
+    ) -> set[str]:
+        targets = self._target_list(raw_target)
+        if not targets:
+            return set()
+        if "*" in targets:
+            return set(trackable_participants)
+        return set(targets) & trackable_participants
 
     async def _leader_name(self) -> str:
         configured = str(getattr(self._team, "leader_member_name", "") or "").strip()
@@ -136,29 +257,8 @@ class DebateRoundCapRail(DeepAgentRail):
             return configured
         try:
             return str(await self._team.resolve_leader_member_name() or "").strip()
-        except Exception:  # noqa: BLE001 - preserve report path if metadata lookup fails
+        except Exception:  # noqa: BLE001 - preserve final-report path on lookup failure
             return "team_leader"
-
-    async def _notify_leader_once(self) -> None:
-        async with self._notify_lock:
-            if self._leader_notified or self._leader_notify_in_flight:
-                return
-            self._leader_notify_in_flight = True
-        try:
-            message_id = await self._messages.send_message(
-                content=self._leader_notify_text(),
-                to_member_name=await self._leader_name(),
-            )
-            if message_id:
-                async with self._notify_lock:
-                    self._leader_notified = True
-            else:
-                team_logger.error("[DebateRoundCap] failed to persist leader notification")
-        except Exception as exc:  # noqa: BLE001 - the completed user tool call stays successful
-            team_logger.error("[DebateRoundCap] failed to notify leader: {}", exc)
-        finally:
-            async with self._notify_lock:
-                self._leader_notify_in_flight = False
 
     def _limit_error_text(self) -> str:
         if self._language.startswith("zh") or self._language == "cn":
@@ -171,16 +271,31 @@ class DebateRoundCapRail(DeepAgentRail):
             "Stop messaging peers or broadcasting; send one final report to the Leader only if needed."
         )
 
-    def _leader_notify_text(self) -> str:
-        if self._language.startswith("zh") or self._language == "cn":
-            return (
-                f"[思辨轮数限制] 成员 `{self._member_name}` 已达到 {self._max} 次互发上限。"
-                "请基于现有讨论收束，不要再要求成员继续互论或重复总结。"
-            )
-        return (
-            f"[Debate round cap] Teammate `{self._member_name}` reached the {self._max}-message cap. "
-            "Close from the existing discussion; do not request more peer debate or duplicate summaries."
-        )
+    def _sync_participant_round(self) -> None:
+        round_id = self._debate.participant_round_id
+        if round_id != self._count_round_id:
+            self._count_round_id = round_id
+            self._count = 0
+
+    @staticmethod
+    def _inject_meta(ctx: AgentCallbackContext, meta: Any) -> None:
+        args = DebateRoundCapRail._parse_args(ctx.inputs.tool_args)
+        if not args:
+            return
+        args[_DEBATE_META_ARG] = meta
+        ctx.inputs.tool_args = args
+
+    @staticmethod
+    def _target_list(raw_target: Any) -> list[str]:
+        if isinstance(raw_target, str):
+            return [raw_target.strip()] if raw_target.strip() else []
+        if isinstance(raw_target, list):
+            return [
+                item.strip()
+                for item in raw_target
+                if isinstance(item, str) and item.strip()
+            ]
+        return []
 
     @staticmethod
     def _is_send_message(tool_name: Any) -> bool:
@@ -212,6 +327,22 @@ class DebateRoundCapRail(DeepAgentRail):
         return result is not None and not (
             isinstance(result, dict) and bool(result.get("error"))
         )
+
+    @staticmethod
+    def _multicast_delivered_participants(result: Any) -> set[str] | None:
+        data = result.data if isinstance(result, ToolOutput) else None
+        if isinstance(result, dict):
+            data = result.get("data")
+        if not isinstance(data, dict) or data.get("type") != "multicast":
+            return None
+        delivered = data.get("delivered")
+        if not isinstance(delivered, list):
+            return set()
+        return {
+            member.strip()
+            for member in delivered
+            if isinstance(member, str) and member.strip()
+        }
 
     @staticmethod
     def _reject_tool(ctx: AgentCallbackContext, error: str) -> None:

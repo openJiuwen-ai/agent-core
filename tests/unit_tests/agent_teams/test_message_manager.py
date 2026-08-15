@@ -4,6 +4,7 @@
 """Unit tests for TeamMessageManager module"""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -109,6 +110,29 @@ class TestSendMessage:
         assert messages[0].to_member_name == "member2"
         assert messages[0].broadcast is False
         assert messages[0].is_read is False
+        assert messages[0].coordination_meta is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_send_message_persists_coordination_meta_separately(
+        self, team_messaging
+    ):
+        coordination_meta = {
+            "kind": "team_debate",
+            "round_id": "round-1",
+            "message_role": "final_report",
+        }
+
+        message_id = await team_messaging.send_message(
+            content="Final report",
+            to_member_name="member2",
+            meta={"template": "handoff"},
+            coordination_meta=coordination_meta,
+        )
+
+        message = await team_messaging.db.message.get_message(message_id)
+        assert json.loads(message.coordination_meta) == coordination_meta
+        assert json.loads(message.meta) == {"template": "handoff"}
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -157,9 +181,15 @@ class TestBroadcastMessage:
         """Test successful broadcast message sending"""
         leader_messaging = TeamMessageManager(team_messaging.team_name, member_name="leader", db=team_messaging.db,
                                               messager=message_bus)
+        coordination_meta = {
+            "kind": "team_debate",
+            "round_id": "round-1",
+            "message_role": "invite",
+        }
 
         message_id = await leader_messaging.broadcast_message(
             content="Team meeting at 3PM",
+            coordination_meta=coordination_meta,
         )
 
         assert message_id is not None
@@ -174,6 +204,7 @@ class TestBroadcastMessage:
         assert broadcasts[0].to_member_name is None
         assert broadcasts[0].broadcast is True
         assert broadcasts[0].is_read is False
+        assert json.loads(broadcasts[0].coordination_meta) == coordination_meta
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -724,7 +755,16 @@ async def test_multicast_message_single_batch(db, team_messaging):
         status="busy",
     )
 
-    ids = await team_messaging.multicast_message(content="ping all", to_member_names=["member2", "member3"])
+    coordination_meta = {
+        "kind": "team_debate",
+        "round_id": "round-1",
+        "message_role": "invite",
+    }
+    ids = await team_messaging.multicast_message(
+        content="ping all",
+        to_member_names=["member2", "member3"],
+        coordination_meta=coordination_meta,
+    )
     assert len(ids) == 2
 
     msgs2 = await team_messaging.get_messages(to_member_name="member2")
@@ -735,6 +775,8 @@ async def test_multicast_message_single_batch(db, team_messaging):
     assert msgs3[0].content == "ping all"
     assert msgs2[0].from_member_name == "member1"
     assert msgs2[0].timestamp == msgs3[0].timestamp
+    assert json.loads(msgs2[0].coordination_meta) == coordination_meta
+    assert json.loads(msgs3[0].coordination_meta) == coordination_meta
 
 
 @pytest.mark.asyncio

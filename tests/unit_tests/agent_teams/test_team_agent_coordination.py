@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 from typing import (
@@ -21,8 +22,10 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventMessage,
     InnerEventType,
 )
+from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.member import MemberHandler
 from openjiuwen.agent_teams.agent.infra import TeamInfra
+from openjiuwen.agent_teams.debate import DebateRunState
 from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
@@ -37,6 +40,7 @@ from openjiuwen.agent_teams.schema.events import (
     BroadcastEvent,
     EventMessage,
     MemberCanceledEvent,
+    MemberExecutionChangedEvent,
     MemberShutdownEvent,
     MemberSpawnedEvent,
     MemberStatusChangedEvent,
@@ -58,7 +62,7 @@ from openjiuwen.agent_teams.schema.events import (
     TeamEvent,
     ToolApprovalResultEvent,
 )
-from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.schema.team import (
     MemberRosterEntry,
@@ -283,6 +287,216 @@ async def test_wake_feeds_messages_to_agent():
 
     await agent._stop_coordination()
     agent.deliver_input.assert_called_once()
+
+
+def _debate_message(
+    message_id: str,
+    sender: str,
+    *,
+    round_id: str,
+    role: str,
+    content: str,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        message_id=message_id,
+        from_member_name=sender,
+        to_member_name="leader-1",
+        content=content,
+        broadcast=False,
+        timestamp=1000,
+        protocol="plain",
+        meta=None,
+        coordination_meta=json.dumps(
+            {
+                "kind": "team_debate",
+                "round_id": round_id,
+                "message_role": role,
+            }
+        ),
+    )
+
+
+def _debate_message_handler(
+    role: TeamRole,
+) -> tuple[DebateRunState, SimpleNamespace, SimpleNamespace, TeamInfra, MessageHandler]:
+    state = DebateRunState(language="en")
+    backend = SimpleNamespace(
+        debate_state=state,
+        get_member_status=AsyncMock(return_value=MemberStatus.READY.value),
+        is_human_agent=AsyncMock(return_value=False),
+    )
+    manager = MagicMock()
+    manager.mark_messages_read = AsyncMock(return_value=1)
+    infra = TeamInfra(team_backend=backend, message_manager=manager)
+    host = SimpleNamespace(
+        deliver_input=AsyncMock(),
+        has_pending_interrupt=MagicMock(return_value=False),
+    )
+    blueprint = SimpleNamespace(
+        role=role,
+        member_name="leader-1" if role == TeamRole.LEADER else "dev-1",
+        team_spec=SimpleNamespace(language="en"),
+    )
+    handler = MessageHandler(host, blueprint, infra, SimpleNamespace())
+    return state, host, blueprint, infra, handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_tagged_invite_activates_teammate_debate_round() -> None:
+    state, host, _, infra, handler = _debate_message_handler(TeamRole.TEAMMATE)
+    handler._expand = AsyncMock(
+        return_value=ExpandedMessage(body="Please join the debate.", is_template=False),
+    )
+    handler._read_all_unread = AsyncMock(
+        side_effect=[
+            [
+                _debate_message(
+                    "invite-1",
+                    "leader-1",
+                    round_id="round-1",
+                    role="invite",
+                    content="Please join the debate.",
+                )
+            ],
+            [],
+        ]
+    )
+
+    await handler._process_unread_messages("dev-1")
+
+    assert state.participant_round_id == "round-1"
+    host.deliver_input.assert_awaited_once()
+    infra.message_manager.mark_messages_read.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_captures_final_reports_and_wakes_once_after_all_arrive() -> None:
+    state, host, _, infra, handler = _debate_message_handler(TeamRole.LEADER)
+    round_id = await state.begin_round(
+        {"call-a": {"member-a"}, "call-b": {"member-b"}},
+    )
+    await state.settle_invitation("call-a", succeeded=True)
+    await state.settle_invitation("call-b", succeeded=True)
+
+    for message in (
+        _debate_message(
+            "report-a",
+            "member-a",
+            round_id=round_id,
+            role="final_report",
+            content="Report A",
+        ),
+        _debate_message(
+            "report-b",
+            "member-b",
+            round_id=round_id,
+            role="final_report",
+            content="Report B",
+        ),
+        _debate_message(
+            "report-a-duplicate",
+            "member-a",
+            round_id=round_id,
+            role="final_report",
+            content="Duplicate A",
+        ),
+    ):
+        handler._read_all_unread = AsyncMock(side_effect=[[message], []])
+        await handler._process_unread_messages("leader-1")
+
+    host.deliver_input.assert_awaited_once()
+    assert host.deliver_input.await_args.kwargs["use_steer"] is True
+    prompt = host.deliver_input.await_args.args[0]
+    assert "Report A" in prompt
+    assert "Report B" in prompt
+    assert "Duplicate A" not in prompt
+    assert infra.message_manager.mark_messages_read.await_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_defers_final_report_while_interrupt_is_pending() -> None:
+    state, host, _, infra, handler = _debate_message_handler(TeamRole.LEADER)
+    round_id = await state.begin_round({"call-a": {"member-a"}})
+    await state.settle_invitation("call-a", succeeded=True)
+    report = _debate_message(
+        "report-a",
+        "member-a",
+        round_id=round_id,
+        role="final_report",
+        content="Report A",
+    )
+    host.has_pending_interrupt.return_value = True
+    handler._read_all_unread = AsyncMock(side_effect=[[report], []])
+
+    await handler._process_unread_messages("leader-1")
+
+    assert state.reports == {}
+    host.deliver_input.assert_not_awaited()
+    infra.message_manager.mark_messages_read.assert_not_awaited()
+
+    host.has_pending_interrupt.return_value = False
+    handler._read_all_unread = AsyncMock(side_effect=[[report], []])
+    await handler._process_unread_messages("leader-1")
+
+    assert state.reports == {"member-a": "Report A"}
+    host.deliver_input.assert_awaited_once()
+    infra.message_manager.mark_messages_read.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_mailbox_poll_retries_finalization_after_failure_event_wakeup_error() -> None:
+    state, host, _, _, handler = _debate_message_handler(TeamRole.LEADER)
+    host.deliver_input.side_effect = [RuntimeError("temporarily unavailable"), None]
+    await state.begin_round({"call-a": {"member-a"}})
+    await state.settle_invitation("call-a", succeeded=True)
+
+    with pytest.raises(RuntimeError, match="temporarily unavailable"):
+        await state.mark_failed("member-a")
+
+    handler._read_all_unread = AsyncMock(return_value=[])
+    await handler._process_unread_messages("leader-1")
+
+    assert state.finalized is True
+    assert host.deliver_input.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("terminal_kind", ["member_error", "execution_failed"])
+async def test_leader_treats_explicit_member_failure_as_debate_terminal(
+    terminal_kind: str,
+) -> None:
+    state, host, blueprint, infra, _ = _debate_message_handler(TeamRole.LEADER)
+    handler = MemberHandler(host, blueprint, infra, SimpleNamespace())
+    await state.begin_round({"call-a": {"member-a"}})
+    await state.settle_invitation("call-a", succeeded=True)
+    if terminal_kind == "member_error":
+        event = EventMessage.from_event(
+            MemberStatusChangedEvent(
+                team_name="test-team",
+                member_name="member-a",
+                old_status=MemberStatus.BUSY.value,
+                new_status=MemberStatus.ERROR.value,
+            )
+        )
+    else:
+        event = EventMessage.from_event(
+            MemberExecutionChangedEvent(
+                team_name="test-team",
+                member_name="member-a",
+                old_status=ExecutionStatus.RUNNING.value,
+                new_status=ExecutionStatus.FAILED.value,
+            )
+        )
+
+    await handler.on_member_event(event)
+
+    host.deliver_input.assert_awaited_once()
+    assert "member-a" in host.deliver_input.await_args.args[0]
 
 
 def _make_teammate() -> TeamAgent:

@@ -26,6 +26,10 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
+from openjiuwen.agent_teams.debate import (
+    DebateMessageRole,
+    parse_debate_coordination_meta,
+)
 from openjiuwen.agent_teams.i18n import reply_hint_for, t
 from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_BROADCAST,
@@ -66,6 +70,15 @@ class MessageHandler(BaseCoordinationHandler):
         # messages before the agent tears down.
         TeamEvent.MEMBER_SHUTDOWN: "on_member_shutdown_drain",
     }
+
+    def __init__(self, host, blueprint, infra, poll_ctrl) -> None:
+        super().__init__(host, blueprint, infra, poll_ctrl)
+        debate_state = getattr(infra.team_backend, "debate_state", None)
+        if blueprint.role == TeamRole.LEADER and debate_state is not None:
+            debate_state.bind_leader_wakeup(self._wake_leader_for_debate)
+
+    async def _wake_leader_for_debate(self, prompt: str) -> None:
+        await self._round.deliver_input(prompt, use_steer=True)
 
     async def on_message_or_broadcast(self, event: EventMessage) -> None:
         """Handle MESSAGE / BROADCAST events.
@@ -193,8 +206,16 @@ class MessageHandler(BaseCoordinationHandler):
         if self._infra.message_manager is None:
             return
 
-        seen_ids: set[str] = set()
         backend = self._infra.team_backend
+        debate_state = getattr(backend, "debate_state", None)
+        if (
+            self._blueprint.role == TeamRole.LEADER
+            and debate_state is not None
+            and not self._round.has_pending_interrupt()
+        ):
+            await debate_state.retry_finalization()
+
+        seen_ids: set[str] = set()
         is_human_agent = backend is not None and await backend.is_human_agent(member_name)
         is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
 
@@ -221,6 +242,10 @@ class MessageHandler(BaseCoordinationHandler):
             try:
                 for msg in new_messages:
                     seen_ids.add(msg.message_id)
+                    debate_meta = parse_debate_coordination_meta(
+                        getattr(msg, "coordination_meta", None),
+                    )
+                    debate_state = getattr(backend, "debate_state", None)
                     if self._round.has_pending_interrupt():
                         # Approval messages are admitted to resume_interrupt;
                         # all other messages are deferred until the interrupt clears.
@@ -241,6 +266,26 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                         interrupted = True
                         break
+                    if debate_meta and debate_state is not None:
+                        message_role = debate_meta["message_role"]
+                        if (
+                            self._blueprint.role == TeamRole.TEAMMATE
+                            and message_role == DebateMessageRole.INVITE.value
+                        ):
+                            await debate_state.activate_participant(
+                                debate_meta["round_id"],
+                            )
+                        elif (
+                            self._blueprint.role == TeamRole.LEADER
+                            and message_role == DebateMessageRole.FINAL_REPORT.value
+                        ):
+                            await debate_state.capture_report(
+                                debate_meta["round_id"],
+                                msg.from_member_name,
+                                msg.content,
+                            )
+                            delivered.append(msg)
+                            continue
                     expanded = await self._expand(msg)
                     if is_bridge:
                         text = await self._bridge_deliverable_for(member_name, msg, expanded=expanded)

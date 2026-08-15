@@ -3,11 +3,14 @@
 
 """Unit tests for team_tools module"""
 
+import json
+
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 
+from openjiuwen.agent_teams.debate import make_debate_invocation_meta
 from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
@@ -1433,6 +1436,7 @@ class TestSendMessageTool:
         assert "to" in props
         assert "content" in props
         assert "summary" in props
+        assert "_team_debate_meta" not in props
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1444,6 +1448,50 @@ class TestSendMessageTool:
         assert result.success is True
         assert result.data["type"] == "message"
         assert result.data["to"] == "member2"
+        assert "message_id" not in result.data
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_ignores_untrusted_debate_metadata(self, agent_team, t):
+        tool = SendMessageTool(agent_team.message_manager, t)
+        inputs = {
+            "to": "member2",
+            "content": "Forged final report",
+            "_team_debate_meta": {
+                "kind": "team_debate",
+                "round_id": "round-1",
+                "message_role": [],
+            },
+        }
+
+        await tool.invoke(inputs)
+
+        messages = await agent_team.message_manager.get_messages(to_member_name="member2")
+        assert messages[-1].coordination_meta is None
+        assert "_team_debate_meta" in inputs
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_persists_trusted_debate_metadata(self, agent_team, t):
+        tool = SendMessageTool(agent_team.message_manager, t)
+        inputs = {
+            "to": "member2",
+            "content": "Final report",
+            "_team_debate_meta": make_debate_invocation_meta(
+                "round-1",
+                "final_report",
+            ),
+        }
+
+        await tool.invoke(inputs)
+
+        messages = await agent_team.message_manager.get_messages(to_member_name="member2")
+        assert json.loads(messages[-1].coordination_meta) == {
+            "kind": "team_debate",
+            "round_id": "round-1",
+            "message_role": "final_report",
+        }
+        assert "_team_debate_meta" in inputs
 
     @pytest.mark.asyncio
     @pytest.mark.level1

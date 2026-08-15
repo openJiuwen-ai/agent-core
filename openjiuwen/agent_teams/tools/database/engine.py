@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
-from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
+from sqlalchemy.exc import DBAPIError, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -341,6 +341,38 @@ def _ensure_message_meta_column(sync_conn) -> None:
             continue
         sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN meta TEXT")
         team_logger.info("Migrated legacy message table %s: added meta column", table_name)
+
+
+def _ensure_message_coordination_meta_column(sync_conn) -> None:
+    """Backfill nullable debate coordination metadata on legacy messages."""
+    inspector = inspect(sync_conn)
+    for table_name in inspector.get_table_names():
+        if not table_name.startswith("team_message_"):
+            continue
+        columns = {col["name"] for col in inspector.get_columns(table_name)}
+        if "coordination_meta" in columns:
+            continue
+        if sync_conn.dialect.name == "postgresql":
+            sync_conn.exec_driver_sql(
+                f"ALTER TABLE {table_name} "
+                "ADD COLUMN IF NOT EXISTS coordination_meta TEXT"
+            )
+        else:
+            try:
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN coordination_meta TEXT"
+                )
+            except DBAPIError:
+                refreshed = inspect(sync_conn)
+                refreshed_columns = {
+                    col["name"] for col in refreshed.get_columns(table_name)
+                }
+                if "coordination_meta" not in refreshed_columns:
+                    raise
+        team_logger.info(
+            "Migrated legacy message table %s: added coordination_meta column",
+            table_name,
+        )
 
 
 def _ensure_dynamic_table_indexes(sync_conn) -> None:
@@ -728,6 +760,7 @@ async def create_cur_session_tables(engine: AsyncEngine) -> None:
             await conn.run_sync(model.__table__.create, checkfirst=True)
         await conn.run_sync(_ensure_message_protocol_column)
         await conn.run_sync(_ensure_message_meta_column)
+        await conn.run_sync(_ensure_message_coordination_meta_column)
         await conn.run_sync(_ensure_dynamic_table_indexes)
 
     team_logger.info("Session tables ready for session %s", session_id)

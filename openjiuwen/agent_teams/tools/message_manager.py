@@ -64,6 +64,7 @@ class TeamMessageManager:
         from_member_name: str | None = None,
         protocol: str = "plain",
         meta: dict | None = None,
+        coordination_meta: dict | None = None,
     ) -> Optional[str]:
         """Send a point-to-point message.
 
@@ -78,6 +79,8 @@ class TeamMessageManager:
                 params). Not reachable from the send_message tool — only the
                 framework (scheduler handoffs) sets it. See
                 ``message_template.py``.
+            coordination_meta: Framework-only coordination facts persisted
+                separately from delivery-template ``meta``.
         """
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
@@ -92,6 +95,7 @@ class TeamMessageManager:
             is_read=False,
             protocol=protocol,
             meta=meta,
+            coordination_meta=coordination_meta,
         )
         if not success:
             team_logger.error(f"Failed to create message {message_id}")
@@ -120,6 +124,7 @@ class TeamMessageManager:
         self,
         content: str,
         from_member_name: str | None = None,
+        coordination_meta: dict | None = None,
     ) -> Optional[str]:
         """Send a broadcast message.
 
@@ -127,6 +132,7 @@ class TeamMessageManager:
             content: Message content.
             from_member_name: Override sender ID. Defaults to
                 ``self.member_name``.
+            coordination_meta: Framework-only coordination facts.
         """
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
@@ -138,6 +144,7 @@ class TeamMessageManager:
             content=content,
             to_member_name=None,
             broadcast=True,
+            coordination_meta=coordination_meta,
         )
         if not success:
             team_logger.error(f"Failed to create broadcast message {message_id}")
@@ -167,6 +174,7 @@ class TeamMessageManager:
         to_member_names: List[str],
         from_member_name: str | None = None,
         protocol: str = "plain",
+        coordination_meta: dict | None = None,
     ) -> List[str]:
         """Send identical content to several members as N point-to-point messages.
 
@@ -184,6 +192,7 @@ class TeamMessageManager:
             from_member_name: Override sender id. Defaults to
                 ``self.member_name``.
             protocol: Message format (``"plain"`` / ``"json"``).
+            coordination_meta: Shared framework-only coordination facts.
 
         Returns:
             The created message ids in recipient order, or an empty list when
@@ -200,6 +209,7 @@ class TeamMessageManager:
             content=content,
             recipients=pairs,
             protocol=protocol,
+            coordination_meta=coordination_meta,
         )
         if created != len(pairs):
             team_logger.error("Failed to batch-create multicast messages from %s", sender)

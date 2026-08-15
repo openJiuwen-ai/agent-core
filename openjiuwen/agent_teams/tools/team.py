@@ -187,6 +187,8 @@ class TeamBackend:
                 public ``leader_desc`` is supplied separately by the
                 ``build_team`` caller (LLM-filled tool arg).
         """
+        from openjiuwen.agent_teams.debate import DebateRunState
+
         self.team_name = team_name
         self.member_name = member_name
         self.is_leader = is_leader
@@ -197,6 +199,7 @@ class TeamBackend:
         self._leader_name_cache: str | None = None
         self.db = db
         self.messager = messager
+        self.debate_state = DebateRunState()
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator

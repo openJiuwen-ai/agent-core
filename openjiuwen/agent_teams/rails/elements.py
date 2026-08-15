@@ -354,12 +354,12 @@ def build_team_reliability_rail(params: dict[str, Any], context: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# team.debate_round_cap - DebateRoundCapRail (teammate-only)
+# team.debate_round_cap - autonomous debate convergence
 # ---------------------------------------------------------------------------
 
 
 class TeamDebateRoundCapInput(ConstructionInput):
-    """Construction inputs for the teammate debate round-cap rail."""
+    """Construction inputs for the autonomous debate rail."""
 
     role: str = context_field(attr="role", default="teammate", description="Team role value.")
     member_name: str = context_field(attr="member_name", default="", description="Member name.")
@@ -375,28 +375,24 @@ class TeamDebateRoundCapInput(ConstructionInput):
     input_model=TeamDebateRoundCapInput,
 )
 def build_team_debate_round_cap_rail(params: dict[str, Any], context: Any) -> Any:
-    """Build the enabled teammate rail when its live handles are available."""
+    """Build the enabled Leader or teammate rail when handles are available."""
     from openjiuwen.agent_teams.rails.debate_round_cap_rail import DebateRoundCapRail
     from openjiuwen.agent_teams.schema.team import TeamRole
-    from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 
     inp = TeamDebateRoundCapInput.resolve(params, context)
-    if inp.max_debate_rounds < 1 or inp.role != TeamRole.TEAMMATE.value:
+    if inp.max_debate_rounds < 1 or inp.role not in {
+        TeamRole.LEADER.value,
+        TeamRole.TEAMMATE.value,
+    }:
         return None
     backend = get_team_backend(context)
-    messager = get_messager(context)
-    if backend is None or messager is None or not inp.member_name:
+    if backend is None or not inp.member_name:
         return None
     return DebateRoundCapRail(
         max_debate_rounds=inp.max_debate_rounds,
         team_backend=backend,
-        message_manager=TeamMessageManager(
-            team_name=inp.team_name or backend.team_name,
-            member_name=inp.member_name,
-            db=backend.db,
-            messager=messager,
-        ),
         member_name=inp.member_name,
+        role=TeamRole(inp.role),
         language=inp.language,
     )
 
