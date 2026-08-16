@@ -14,7 +14,6 @@ or directly with ``MockBackend`` from tests; library code must not ``print``.
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Callable
 
 from .admission import AgentAdmission
@@ -27,7 +26,7 @@ from .loader import load_workflow_source
 from .primitives import _budget_snapshot, _fresh_holder, _invoke_loaded, _path, _preview, _rt, _seq
 from .progress import PhasePlan, ProgressKind, ProgressSink, WorkflowProgressEvent, noop_progress_sink
 from .provider import ENGINE_PROVIDER
-from .runtime import Runtime
+from .runtime import AbortSignal, Runtime
 from .seam import reset_provider, use_provider
 
 
@@ -123,7 +122,7 @@ async def run_workflow(
     cap: int | None = None,
     agent_gate: AgentAdmission | None = None,
     budget: BudgetLedger | None = None,
-    abort_event: asyncio.Event | None = None,
+    abort_event: AbortSignal | None = None,
 ) -> Any:
     # The ``swarmflow`` name a script imports the primitives under is registered
     # in ``sys.modules`` once at facade import time; the mapping is fixed for the
