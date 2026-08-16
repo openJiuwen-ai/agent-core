@@ -120,7 +120,7 @@ class SwarmflowTool(AsyncTool):
                 "action": {
                     "type": "string",
                     "enum": ["pause", "resume", "stop"],
-                    "description": "Control action on an existing run (requires resume_id).",
+                    "description": translator("swarmflow", "action"),
                 },
                 "args": {"type": "string", "description": translator("swarmflow", "args")},
             },

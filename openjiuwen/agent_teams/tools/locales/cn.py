@@ -334,9 +334,11 @@ STRINGS: dict[str, str] = {
         "接口已就位、执行推进中——当前请改用 script_path。"
     ),
     "swarmflow.resume_id": (
-        "要续跑的上次运行 run_id。内容未变的 agent() 调用（prompt + opts + schema 一致）瞬时返回缓存结果，"
-        "只有改动 / 新增的调用重跑（上游变更级联失效下游）；同脚本 + 同 args → 全缓存命中。"
-        "接口已就位、执行推进中——当前请改用 script_path。"
+        "要续跑 / 控制的上次运行 run_id。单独传用于断点续跑（内容未变的 agent() 调用瞬时复用缓存）；"
+        "配合 action 参数控制正在运行的工作流——action='pause' 暂停、'resume' 恢复、'stop' 停止（不停 session）。"
+    ),
+    "swarmflow.action": (
+        "对已有运行的控制动作：'pause' 暂停、'resume' 恢复、'stop' 停止（需同时传 resume_id）。"
     ),
     "swarmflow.args": (
         "传给脚本 async def run(args) 的可选参数，作为**字符串**原样传入（如研究问题、目标路径）。"
