@@ -100,6 +100,13 @@ class CoordinationKernel:
                 build_context=host.build_context,
             )
 
+    def _leader_debate_state(self) -> Any | None:
+        host = self._host
+        if host.role != TeamRole.LEADER:
+            return None
+        backend = getattr(host.infra, "team_backend", None)
+        return getattr(backend, "debate_state", None)
+
     @property
     def event_bus(self) -> Optional[EventBus]:
         """Return the event bus instance, or None before setup()."""
@@ -251,6 +258,9 @@ class CoordinationKernel:
         # This is the final stable readiness boundary: harness, transport,
         # context refresh, completion guard, scheduler, lifecycle state, and
         # resume setup are all established before retained wakes are replayed.
+        debate_state = self._leader_debate_state()
+        if debate_state is not None:
+            await debate_state.resume_terminal_grace()
         if self._dispatcher is not None:
             await self._dispatcher.activate_and_flush()
 
@@ -294,6 +304,9 @@ class CoordinationKernel:
             return
         host = self._host
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
+        debate_state = self._leader_debate_state()
+        if debate_state is not None:
+            debate_state.suspend_terminal_grace()
         scheduler_was_active = bool(
             self._scheduler is not None and self._scheduler.is_active
         )
@@ -348,6 +361,8 @@ class CoordinationKernel:
                                 "[{}] failed to restore scheduler after park failure",
                                 host.member_name or "?",
                             )
+                    if debate_state is not None:
+                        await debate_state.resume_terminal_grace()
                     raise
                 park_raced_termination = True
                 team_logger.warning(
@@ -568,6 +583,9 @@ class CoordinationKernel:
             return
         host = self._host
         team_logger.info("[{}] coordination stopping", host.member_name or "?")
+        debate_state = self._leader_debate_state()
+        if debate_state is not None:
+            debate_state.suspend_terminal_grace()
         if self._dispatcher is not None:
             await self._dispatcher.deactivate()
         if self._scheduler is not None:

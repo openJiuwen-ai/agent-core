@@ -14,6 +14,7 @@ from openjiuwen.agent_teams.debate import (
     DebateMessageRole,
     DebateRunState,
     make_debate_invocation_meta,
+    parse_debate_coordination_meta,
 )
 from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -143,8 +144,12 @@ class DebateRoundCapRail(DeepAgentRail):
         eligibility_key = self._eligibility_key(ctx)
         eligible = await self._should_apply(args)
         ctx.extra[eligibility_key] = eligible
-        if eligible and self._count >= self._max:
-            self._reject_tool(ctx, self._limit_error_text())
+        if eligible:
+            inactive = await self._inactive_targets(args.get("to"))
+            if inactive:
+                self._reject_tool(ctx, self._inactive_target_text(inactive))
+            elif self._count >= self._max:
+                self._reject_tool(ctx, self._limit_error_text())
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Settle Leader invitations or count a successful teammate peer send."""
@@ -219,6 +224,87 @@ class DebateRoundCapRail(DeepAgentRail):
             return False
         return raw_target.strip() == await self._leader_name()
 
+    async def _inactive_targets(self, raw_target: Any) -> set[str]:
+        round_id = self._debate.participant_round_id
+        if not round_id:
+            return set()
+        terminal = await self._terminal_participants(round_id)
+        if terminal is None:
+            return set()
+        targets = self._target_list(raw_target)
+        if "*" not in targets:
+            return set(targets) & terminal
+        snapshot = await self._trackable_participants()
+        if snapshot is None:
+            return set()
+        participants, _ = snapshot
+        round_participants = await self._round_participants(round_id, participants)
+        if round_participants is None:
+            return set()
+        active = round_participants - terminal - {self._member_name}
+        return {"*"} if not active else set()
+
+    async def _round_participants(
+        self,
+        round_id: str,
+        trackable_participants: set[str],
+    ) -> set[str] | None:
+        message_manager = self._team.message_manager
+        try:
+            messages = await message_manager.get_team_messages(
+                message_manager.team_name,
+            )
+        except Exception as exc:  # noqa: BLE001 - target checks must fail open
+            team_logger.warning("[DebateRoundCap] invite lookup failed: {}", exc)
+            return None
+        participants: set[str] = set()
+        invited_all = False
+        for message in messages:
+            meta = parse_debate_coordination_meta(
+                getattr(message, "coordination_meta", None),
+            )
+            if (
+                not meta
+                or meta["round_id"] != round_id
+                or meta["message_role"] != DebateMessageRole.INVITE.value
+            ):
+                continue
+            if getattr(message, "broadcast", False) is True:
+                invited_all = True
+                continue
+            recipient = str(getattr(message, "to_member_name", "") or "")
+            if recipient:
+                participants.add(recipient)
+        if invited_all:
+            participants.update(trackable_participants)
+        return participants & trackable_participants
+
+    async def _terminal_participants(self, round_id: str) -> set[str] | None:
+        snapshot = await self._trackable_participants()
+        if snapshot is None:
+            return None
+        _, failed = snapshot
+        terminal = set(failed)
+        try:
+            messages = await self._team.message_manager.get_messages(
+                to_member_name=await self._leader_name(),
+            )
+        except Exception as exc:  # noqa: BLE001 - target checks must fail open
+            team_logger.warning("[DebateRoundCap] final-report lookup failed: {}", exc)
+            return None
+        for message in messages:
+            meta = parse_debate_coordination_meta(
+                getattr(message, "coordination_meta", None),
+            )
+            if (
+                meta
+                and meta["round_id"] == round_id
+                and meta["message_role"] == DebateMessageRole.FINAL_REPORT.value
+            ):
+                terminal.add(str(getattr(message, "from_member_name", "") or ""))
+        terminal.discard("")
+        return terminal
+
     async def _trackable_participants(self) -> tuple[set[str], set[str]] | None:
         try:
             members = await self._team.list_members()
@@ -275,6 +361,25 @@ class DebateRoundCapRail(DeepAgentRail):
         return (
             f"Debate send_message limit reached ({self._count}/{self._max}). "
             "Stop messaging peers or broadcasting; send one final report to the Leader only if needed."
+        )
+
+    def _inactive_target_text(self, inactive: set[str]) -> str:
+        names = ", ".join(sorted(inactive - {"*"}))
+        if self._language.startswith("zh") or self._language == "cn":
+            if names:
+                return (
+                    f"这些成员已经结束本轮思辨：{names}。不要再向他们发送消息；"
+                    "如果没有其他可讨论成员，请向 Leader 发送 final_report。"
+                )
+            return "本轮已经没有可继续响应的思辨成员。请停止互发并向 Leader 发送 final_report。"
+        if names:
+            return (
+                f"These members already completed this debate round: {names}. "
+                "Do not message them again; if no active peers remain, send your final report to the Leader."
+            )
+        return (
+            "No active peers remain in this debate round. "
+            "Stop peer messaging and send your final report to the Leader."
         )
 
     def _sync_participant_round(self) -> None:

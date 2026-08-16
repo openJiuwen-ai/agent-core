@@ -5,10 +5,13 @@
 
 import asyncio
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable
+
+from openjiuwen.core.common.logging import team_logger
 
 
 _DEBATE_META_ARG = "_team_debate_meta"
@@ -42,11 +45,16 @@ class DebateRunState:
         self.pending_invitation_calls: set[str] = set()
         self.expected_participants: set[str] = set()
         self.failed_participants: set[str] = set()
+        self.unreported_participants: set[str] = set()
         self.reports: dict[str, str] = {}
         self.finalizing = False
         self.finalized = False
         self.participant_round_id: str | None = None
         self._leader_wakeup: LeaderWakeup | None = None
+        self._clock = time.monotonic
+        self._terminal_grace_seconds = 300.0
+        self._terminal_deadline: float | None = None
+        self._terminal_timer_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
     def bind_leader_wakeup(self, callback: LeaderWakeup) -> None:
@@ -60,9 +68,12 @@ class DebateRunState:
         self.pending_invitation_calls.clear()
         self.expected_participants.clear()
         self.failed_participants.clear()
+        self.unreported_participants.clear()
         self.reports.clear()
         self.finalizing = False
         self.finalized = False
+        self._terminal_deadline = None
+        self._cancel_terminal_timer()
 
     def reset_participant_round(self) -> None:
         """Clear teammate-local state when a new harness run cycle is built."""
@@ -87,9 +98,12 @@ class DebateRunState:
             self.pending_invitation_calls = set(self.invitation_calls)
             self.expected_participants.clear()
             self.failed_participants.clear()
+            self.unreported_participants.clear()
             self.reports.clear()
             self.finalizing = False
             self.finalized = False
+            self._terminal_deadline = None
+            self._cancel_terminal_timer()
             return self.round_id
 
     async def activate_participant(self, round_id: str) -> bool:
@@ -140,28 +154,36 @@ class DebateRunState:
     async def capture_report(self, round_id: str, sender: str, content: str) -> bool:
         """Capture the first final report from a participant without waking early."""
         delivery = None
+        accepted = False
         async with self._lock:
             if not self.round_id or round_id != self.round_id or self.finalized:
                 return False
-            if sender in self.failed_participants:
-                return False
-            self.reports.setdefault(sender, content)
+            self._expire_terminal_grace_locked()
+            if sender not in self.failed_participants and sender not in self.unreported_participants:
+                accepted = True
+                if sender not in self.reports:
+                    self.reports[sender] = content
+                    self._refresh_terminal_grace_locked(sender)
             delivery = self._claim_finalization_locked()
         await self._deliver_finalization(delivery)
-        return True
+        return accepted
 
     async def mark_failed(self, sender: str) -> bool:
         """Mark a participant as explicitly failed for the active Leader round."""
         delivery = None
+        accepted = False
         async with self._lock:
             if not self.round_id or self.finalized:
                 return False
-            if sender in self.reports:
-                return False
-            self.failed_participants.add(sender)
+            self._expire_terminal_grace_locked()
+            if sender not in self.reports and sender not in self.unreported_participants:
+                accepted = True
+                if sender not in self.failed_participants:
+                    self.failed_participants.add(sender)
+                    self._refresh_terminal_grace_locked(sender)
             delivery = self._claim_finalization_locked()
         await self._deliver_finalization(delivery)
-        return True
+        return accepted
 
     async def retry_finalization(self) -> bool:
         """Retry a ready Leader wake-up from an existing coordination poll."""
@@ -170,9 +192,25 @@ class DebateRunState:
         await self._deliver_finalization(delivery)
         return delivery is not None
 
+    def suspend_terminal_grace(self) -> None:
+        """Stop the run-cycle timer while preserving its monotonic deadline."""
+        self._cancel_terminal_timer()
+
+    async def resume_terminal_grace(self) -> bool:
+        """Resume or immediately settle a grace period after run-cycle start."""
+        async with self._lock:
+            if self._terminal_deadline is None or self.finalized:
+                return False
+            delivery = self._claim_finalization_locked()
+            if delivery is None and self._terminal_deadline is not None:
+                self._schedule_terminal_timer_locked(self._terminal_deadline)
+        await self._deliver_finalization(delivery)
+        return delivery is not None
+
     def _claim_finalization_locked(
         self,
     ) -> tuple[str, str, LeaderWakeup] | None:
+        self._expire_terminal_grace_locked()
         if (
             self.finalized
             or self.finalizing
@@ -181,11 +219,66 @@ class DebateRunState:
             or self._leader_wakeup is None
         ):
             return None
-        terminal = set(self.reports) | self.failed_participants
+        terminal = set(self.reports) | self.failed_participants | self.unreported_participants
         if not self.expected_participants.issubset(terminal):
             return None
+        self._terminal_deadline = None
+        self._cancel_terminal_timer()
         self.finalizing = True
         return self.round_id, self._finalization_prompt(), self._leader_wakeup
+
+    def _refresh_terminal_grace_locked(self, sender: str) -> None:
+        invited = any(sender in targets for targets in self.invitation_calls.values())
+        if invited:
+            self._terminal_deadline = self._clock() + self._terminal_grace_seconds
+            self._schedule_terminal_timer_locked(self._terminal_deadline)
+
+    def _schedule_terminal_timer_locked(self, deadline: float) -> None:
+        self._cancel_terminal_timer()
+        self._terminal_timer_task = asyncio.create_task(
+            self._wait_for_terminal_deadline(deadline),
+        )
+
+    def _expire_terminal_grace_locked(self) -> None:
+        if (
+            self._terminal_deadline is None
+            or self._clock() < self._terminal_deadline
+            or self.pending_invitation_calls
+        ):
+            return
+        terminal = set(self.reports) | self.failed_participants
+        self.unreported_participants.update(self.expected_participants - terminal)
+        self._terminal_deadline = None
+        self._cancel_terminal_timer()
+
+    async def _wait_for_terminal_deadline(self, deadline: float) -> None:
+        try:
+            delay = max(0.0, deadline - self._clock())
+            await asyncio.sleep(delay)
+            async with self._lock:
+                if self._terminal_deadline != deadline:
+                    return
+                delivery = self._claim_finalization_locked()
+            await self._deliver_finalization(delivery)
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001 - periodic mailbox retry remains available
+            team_logger.warning("[DebateRunState] terminal grace finalization failed: {}", exc)
+        finally:
+            if self._terminal_timer_task is asyncio.current_task():
+                self._terminal_timer_task = None
+
+    def _cancel_terminal_timer(self) -> None:
+        task = self._terminal_timer_task
+        self._terminal_timer_task = None
+        if task is None or task.done():
+            return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not current:
+            task.cancel()
 
     async def _deliver_finalization(
         self,
@@ -212,12 +305,15 @@ class DebateRunState:
             for member in sorted(self.expected_participants & set(self.reports))
         ]
         failed = sorted(self.expected_participants & self.failed_participants)
+        unreported = sorted(self.expected_participants & self.unreported_participants)
         if self.language.startswith("zh") or self.language == "cn":
             sections = ["本轮团队讨论已收束。请基于以下成员最终汇报，仅向用户综合总结一次，不要再次召集成员。"]
             if reports:
                 sections.extend(["成员最终汇报：", *reports])
             if failed:
                 sections.append("未能完成汇报的成员：" + "、".join(failed))
+            if unreported:
+                sections.append("收束宽限期内未汇报的成员：" + "、".join(unreported))
             return "\n".join(sections)
         sections = [
             "The team debate has converged. Synthesize the following final reports for the user exactly once; do not invite members again."
@@ -226,6 +322,8 @@ class DebateRunState:
             sections.extend(["Final member reports:", *reports])
         if failed:
             sections.append("Members that failed to report: " + ", ".join(failed))
+        if unreported:
+            sections.append("Members that did not report within the wrap-up grace period: " + ", ".join(unreported))
         return "\n".join(sections)
 
 
