@@ -4,6 +4,7 @@ import asyncio
 import pytest
 from openjiuwen.agent_teams.runtime.background_task_controller import (
     BackgroundTaskController, SwarmflowRunHandle)
+from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
 
 
 class _FakeBackend:
@@ -28,7 +29,7 @@ class _FakeNative:
 
 def _make_handle(run_id="wf_1", task_id="t_1"):
     return SwarmflowRunHandle(
-        task_id=task_id, run_id=run_id, abort_event=asyncio.Event(),
+        task_id=task_id, run_id=run_id, abort_event=AbortSignal(),
         backend=_FakeBackend(), native=_FakeNative(), relaunch=lambda: None)
 
 
@@ -96,6 +97,28 @@ async def test_stop_terminates_an_already_paused_run():
     assert resumed is False and relaunched == []
 
 
+@pytest.mark.asyncio
+async def test_pause_sets_abort_reason_pause():
+    ctl = BackgroundTaskController()
+    h = _make_handle("wf_1")
+    ctl.register(h)
+    ok = await ctl.pause("wf_1")
+    assert ok is True
+    assert h.abort_event.reason == "pause"
+    assert h.abort_event.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_stop_sets_abort_reason_stop():
+    ctl = BackgroundTaskController()
+    h = _make_handle("wf_1")
+    ctl.register(h)
+    ok = await ctl.stop("wf_1")
+    assert ok is True
+    assert h.abort_event.reason == "stop"
+    assert h.abort_event.is_set() is True
+
+
 # ---------------------------------------------------------------------------
 # Preserved legacy coverage (prior task), adapted to run_id-addressed keys.
 # ---------------------------------------------------------------------------
@@ -125,7 +148,7 @@ class _RecRuntime:
 
 
 def _rec_handle(task_id, seq):
-    ev = asyncio.Event()
+    ev = AbortSignal()
     native = _RecNative(seq)
     handle = SwarmflowRunHandle(
         task_id=task_id,

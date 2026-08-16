@@ -30,6 +30,7 @@ from openjiuwen.agent_teams.id_generator import generate_id
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -420,7 +421,7 @@ class SwarmflowTool(AsyncTool):
         session_id = get_session_id()
 
         controller = getattr(self._parent_agent, "background_task_controller", None)
-        abort_event = asyncio.Event()
+        abort_event = AbortSignal()
 
         def _on_backend_ready(backend: Any) -> None:
             """Register this run's control handle once its backend exists (pause path)."""

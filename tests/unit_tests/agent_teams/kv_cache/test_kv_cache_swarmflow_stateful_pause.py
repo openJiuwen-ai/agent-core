@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine import run_workflow
+from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig, KVCacheIdentity
 from openjiuwen.core.session.agent import Session
 
@@ -185,7 +186,7 @@ async def test_stateful_pause_unwinds_cleanup_and_resume_cold_starts(
         block_send=block_send,
         send_started=send_started,
     )
-    abort_event = asyncio.Event()
+    abort_event = AbortSignal()
 
     task = asyncio.create_task(
         run_workflow(script, backend=pause_backend, journal_path=journal, abort_event=abort_event)
