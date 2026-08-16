@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
+from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
 
 
@@ -85,11 +86,75 @@ def test_run_background_pause_raises_cancelled_error():
             asyncio.run(tool.run_background("task-pause", _inputs("wf_1")))
 
 
-def _make_tool() -> SwarmflowTool:
+class _CapturingMessager:
+    """Records every publish (topic, EventMessage) without fanning out."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, Any]] = []
+
+    async def publish(self, topic_id: str, message) -> None:
+        self.published.append((topic_id, message))
+
+
+def _run_abort_and_drain(tool, task_id: str, inputs: dict[str, Any], *, expect: type[BaseException]) -> None:
+    """Run run_background to an abort, then drain the fire-and-forget publish task.
+
+    ``_publish`` schedules via ``asyncio.create_task``; ``asyncio.run`` would
+    cancel that still-pending task on exit, so drive a manual loop and let the
+    publish task complete before asserting on the recording messager.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(expect):
+            loop.run_until_complete(tool.run_background(task_id, inputs))
+        loop.run_until_complete(asyncio.sleep(0))  # run the scheduled publish task
+    finally:
+        loop.close()
+
+
+def _published_kinds(tool) -> list[str]:
+    return [message.payload["kind"] for _, message in tool._messager.published]
+
+
+def test_run_background_stop_publishes_workflow_stopped_event():
+    """reason=stop publishes WORKFLOW_STOPPED progress before the BackendError."""
+    tool = _make_tool(messager=_CapturingMessager())
+    with patch(
+        "openjiuwen.agent_teams.workflow.runner.run_swarmflow",
+        side_effect=WorkflowAborted(reason="stop"),
+    ):
+        _run_abort_and_drain(
+            tool, "task-stop-pub", _inputs("wf_1"), expect=BackendError
+        )
+    assert ProgressKind.WORKFLOW_STOPPED in _published_kinds(tool)
+    stopped = [
+        m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_STOPPED
+    ]
+    assert stopped and stopped[0].payload["text"] == "workflow stopped"
+
+
+def test_run_background_pause_publishes_workflow_paused_event():
+    """reason=pause (default) publishes WORKFLOW_PAUSED before the silent cancel."""
+    tool = _make_tool(messager=_CapturingMessager())
+    with patch(
+        "openjiuwen.agent_teams.workflow.runner.run_swarmflow",
+        side_effect=WorkflowAborted(),
+    ):
+        _run_abort_and_drain(
+            tool, "task-pause-pub", _inputs("wf_1"), expect=asyncio.CancelledError
+        )
+    assert ProgressKind.WORKFLOW_PAUSED in _published_kinds(tool)
+    paused = [
+        m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_PAUSED
+    ]
+    assert paused and paused[0].payload["text"] == "workflow paused"
+
+
+def _make_tool(messager=None) -> SwarmflowTool:
     # 用最小构造绕过完整 leader；仅设置 run_background 触及的属性
     tool = object.__new__(SwarmflowTool)
     tool._parent_agent = _FakeParentAgent()
-    tool._messager = None
+    tool._messager = messager
     tool._team_name = "t"
     tool._language = "cn"
     tool._model_resolver = None
