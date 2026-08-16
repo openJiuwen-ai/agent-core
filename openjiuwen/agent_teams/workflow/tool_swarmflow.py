@@ -400,6 +400,10 @@ class SwarmflowTool(AsyncTool):
             BudgetExhausted,
             WorkflowAborted,
         )
+        from openjiuwen.agent_teams.workflow.engine.progress import (
+            ProgressKind,
+            WorkflowProgressEvent,
+        )
         from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
         from openjiuwen.agent_teams.workflow.runner import run_swarmflow
 
@@ -515,12 +519,29 @@ class SwarmflowTool(AsyncTool):
                 msg = self._format_early_return(exc.reply, exc.edit_hints, run_id=run_id)
                 raise BackendError(msg) from exc
             if exc.reason == "stop":
+                # A control-state change, not a leader failure: announce it on
+                # the team topic BEFORE surfacing the stopped message, so the
+                # Monitor can flip the workflow card to stopped.
+                _publish(
+                    WorkflowProgressEvent(
+                        kind=ProgressKind.WORKFLOW_STOPPED,
+                        message="workflow stopped",
+                    )
+                )
                 msg = self._format_stopped(run_id=run_id)
                 raise BackendError(msg) from exc
             # reason == "pause" (default): silent cancel, controller relaunches on resume.
-            # Re-raise as CancelledError so the async-tool runtime treats it as a
-            # silent cancellation (no completion injected) — matching the cancel
-            # the controller triggers as pause's third step.
+            # Announce the pause on the team topic first, so the Monitor can flip
+            # the workflow card to paused; then re-raise as CancelledError so the
+            # async-tool runtime treats it as a silent cancellation (no completion
+            # injected) — matching the cancel the controller triggers as pause's
+            # third step.
+            _publish(
+                WorkflowProgressEvent(
+                    kind=ProgressKind.WORKFLOW_PAUSED,
+                    message="workflow paused",
+                )
+            )
             raise asyncio.CancelledError() from exc
         finally:
             if controller is not None:
