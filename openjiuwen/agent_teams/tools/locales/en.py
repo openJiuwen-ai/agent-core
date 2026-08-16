@@ -469,10 +469,15 @@ STRINGS: dict[str, str] = {
         "Interface is in place; execution is coming — use script_path for now."
     ),
     "swarmflow.resume_id": (
-        "The run_id of a prior run to resume. Unchanged agent() calls (same prompt + opts + schema) return "
-        "their cached results instantly; only edited / new calls re-run (an upstream change cascades to "
-        "invalidate downstream); same script + same args → full cache hit. Interface is in place; execution "
-        "is coming — use script_path for now."
+        "The run_id of a prior run to resume or control. Passed alone it resumes: unchanged agent() calls "
+        "(same prompt + opts + schema) return their cached results instantly; only edited / new calls re-run "
+        "(an upstream change cascades to invalidate downstream); same script + same args → full cache hit. "
+        "Combined with the action param it controls a live run — action='pause' pauses, 'resume' resumes, "
+        "'stop' stops (keeps the session alive)."
+    ),
+    "swarmflow.action": (
+        "Control action on an existing run: 'pause' to pause, 'resume' to resume, 'stop' to stop "
+        "(requires resume_id to be passed as well)."
     ),
     "swarmflow.args": (
         "Optional argument passed to the script's async def run(args), as a **string** verbatim (e.g. a "
