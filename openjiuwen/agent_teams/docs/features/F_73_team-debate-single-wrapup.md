@@ -100,8 +100,14 @@ Leader mailbox 遇到匹配当前 `round_id` 的 `final_report` 时：
 - 同一发送者的重复汇报和已经收束后的迟到汇报不再次唤醒 Leader。
 
 成员进入 `ERROR` / `FAILED` 时视为终态，从等待集合中移除；在本轮建立前已经失败的受邀成员也按
-同样规则处理。静默但未失败的成员继续保持 pending，最终由上层既有 watchdog 处理，而不是在
-agent-core 内再增加一套思辨超时。
+同样规则处理。第一个新的终态事件启动 300 秒收束宽限期，后续每个新的终态成员刷新宽限期；同一
+成员的重复汇报不刷新。一个可取消的进程内 timer 负责到期触发；run cycle pause / stop 时取消
+timer，start 后按原 monotonic deadline 恢复或立即结算。宽限期到期后，仍 pending 的成员记为
+`unreported`，使用已有报告收束一次。mailbox poll 继续承担投递失败或 interrupt 清除后的重试。
+
+teammate 发送 peer 消息前会读取当前 `round_id` 已持久化的 invite、最终汇报和成员失败状态，以实际
+收到 invite 的成员为本轮参与者。明确目标已经终态时直接返回工具反馈；广播仅在本轮已经没有其他
+active teammate 时拒绝。拒绝调用不投递，也不计入该成员自己的 peer cap。
 
 ### 6. 收束条件只允许触发一次
 
@@ -109,7 +115,7 @@ agent-core 内再增加一套思辨超时。
 
 1. 所有邀请调用都已 settled；
 2. 预期参与者只包含实际邀请成功且可跟踪的成员；
-3. 每个预期参与者都已提交最终汇报或进入明确失败状态。
+3. 每个预期参与者都已提交最终汇报、进入明确失败状态，或在收束宽限期到期后记为 `unreported`。
 
 首个满足条件的检查者在锁内把状态翻转为 `finalizing`，随后通过
 `Leader.deliver_input(..., use_steer=True)` 唤醒 Leader。wakeup 回调返回是否接受本次投递：接受后
@@ -157,12 +163,14 @@ Leader 首次模型响应
 teammate 收到 invite
   -> 激活本地 round_id
   -> 与其他参与者互发，使用自己的 peer cap
+  -> 已终态目标不可再接收本轮 peer 消息
   -> 以 final_report=true 向 Leader 发送一次最终汇报
 
 Leader mailbox
   -> 捕获并按 sender 去重，不逐条唤醒 Leader
   -> 成员 ERROR/FAILED 记为终态
-  -> 全部预期参与者终态后，在锁内 claim 一次 finalization
+  -> 第一个终态启动 300 秒宽限期，新终态刷新
+  -> 全部预期参与者终态或宽限期到期后，在锁内 claim 一次 finalization
   -> deliver_input() 一次
   -> Leader 面向用户综合总结一次
 ```
@@ -172,7 +180,7 @@ Leader mailbox
 - 普通未标记消息仍按原 mailbox 逻辑投递。
 - 只有 autonomous teammate 的 `send_message` 增加可选 `final_report` 布尔参数；其余形态与返回结构不变。
 - scheduled dispatch 不装配本特性。
-- Relay 的 300 秒 watchdog 保持唯一外部超时边界。
+- 300 秒只约束第一个终态出现后的收束宽限期，不限制此前的实际讨论时长。
 - 不新增 debate 专用表或持久化 debate 状态；消息表只通过可空 `coordination_meta` 携带跨进程关联信息。
 - 不增加全局流式输出闸门，也不改变所有 `send_message` variant 的并发属性。
 
@@ -186,13 +194,13 @@ Leader mailbox
   收束。等待集合必须来自实际 delivery。
 - **新增 debate 表和数据库 CAS**：本轮状态只在一个 Team run cycle 内有意义，持久化会显著扩大
   生命周期、清理和恢复语义，且不能解决进程中断后的模型执行恢复。
-- **增加思辨专用超时**：与 Relay 已有 watchdog 重复，形成两套竞态边界。
+- **从思辨启动时计算固定总时长**：会截断仍持续产生有效讨论的 Team；宽限期只从第一个终态开始。
 - **全局限制 `send_message` 并发**：影响非思辨、scheduled 和普通消息链路，范围远超本问题。
 
 ## 验证
 
-- 本轮新增 / 受影响的 focused cases：11 passed。
-- 6 个相关测试文件合跑：390 passed、14 skipped；另有 6 个既有 dispatcher-routing 用例失败，
+- debate round-cap focused cases：31 passed；coordination / runtime 的 debate 相关用例和生命周期：10 passed。
+- 6 个相关测试文件合跑：353 passed、14 skipped；另有 6 个既有 dispatcher-routing 用例失败，
   名称与本特性修改前一致，不属于本次范围。
 - `ruff`、`py_compile`、`git diff --check` 通过。
 
@@ -203,7 +211,7 @@ Human/Bridge/external CLI 排除、scheduled 隔离、显式 `final_report` sche
 
 ## 已知遗留
 
-- 静默参与者不会被 agent-core 主动剔除，仍依赖 Relay watchdog 终止整次请求。
+- 如果整轮没有任何成员进入终态，收束宽限期不会启动，仍由外层请求生命周期处理。
 - 进程在思辨中途退出后不会恢复尚未完成的 `round_id` 和汇报集合；cold resume 会开始新的
   进程内状态。
 - peer cap 是成功调用后的本地计数，并发调用可能在竞争窗口中多成功一次；本特性有意不引入
