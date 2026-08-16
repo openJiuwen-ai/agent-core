@@ -138,7 +138,7 @@ that middle `transform` needs no barrier — rewrite as a pipeline with the tran
 
 ## Resume
 - `resume_id` = a prior run's **run_id** (the handle this tool returns). On resume it is **content-addressed**: unchanged `agent()` calls reuse cached results instantly; an upstream prompt change flips the downstream signature and re-runs it automatically (no manual marking). **Same script + same args → 100% cache hit.**
-- Maintained by the async-tool execution framework via a content-addressed journal (same model as the reference tool's runId). (Execution coming.)
+- Maintained by the async-tool execution framework via a content-addressed journal (same model as the reference tool's runId).
 
 ## Runtime control (pause / resume / stop)
 When a workflow is still running in the background and the user wants to control it, combine `resume_id` + `action` on this tool — `run_id` is the handle this tool returned on the earlier launch. Pick the action from the user's wording:
