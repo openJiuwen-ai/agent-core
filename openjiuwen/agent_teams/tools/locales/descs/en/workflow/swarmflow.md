@@ -33,7 +33,7 @@ Larger work can be **split into several scripts run in sequence** (start the nex
 - `script` (**available today**): inline script source, no disk write needed. **Prefer it for simple cases** — pass the source straight in to run, skipping the file and iterating fastest.
 - `script_path` (**available today**): path to a script file on disk. Best for scripts already on disk (`swarmskill-creator` output, or ones you iterate / resume repeatedly).
 - `name` (interface in place, execution coming): a saved / named workflow, resolved to a self-contained script.
-- `resume_id` (interface in place, execution coming): a prior run's run_id, to resume.
+- `resume_id`: a prior run's run_id; on its own = resume, combined with `action` = runtime control (pause/resume/stop).
 - `args`: a **string** argument passed to the script's `run(args)` (e.g. a question, a target path). For structured input, `json.loads(args)` inside the script.
 
 > **Pick a source by complexity**: for a simple task whose orchestration is obvious at a glance, **prefer inline `script`** and run it directly, or hand-write a minimal script file and use `script_path` — no need to involve `swarmskill-creator`. Only for complex work (multi-phase / multi-role / needing executable retry·degrade·budget constraints / meant to become a reusable skill) use the `swarmskill-creator` skill to author a script through its full develop-and-validate flow — **it produces a script file on disk, which you then run with `swarmflow(script_path=...)`** (don't re-inline the whole source into `script`).
@@ -44,7 +44,7 @@ Larger work can be **split into several scripts run in sequence** (start the nex
 >
 > **To iterate**: edit the script file on disk and re-invoke with the same `script_path` — no need to resend the source. If `swarmskill-creator` is unavailable, tell the user honestly rather than forcing the call or hand-writing one.
 >
-> `name` (saved / named workflow) and `resume_id` (resume) have their interface in place but execution is still coming; a call today is rejected with an **explicit error** (never a silent no-op).
+> `name` (saved / named workflow) is still not supported; a call today is rejected with an **explicit error** (never a silent no-op). `resume_id` is now supported (optionally combined with `action` for runtime control).
 
 ## Script structure (Python)
 A script is a Python module: a top-level `META` (pure literal) plus `async def run(args)`, importing the primitives from `swarmflow`.
@@ -136,6 +136,13 @@ that middle `transform` needs no barrier — rewrite as a pipeline with the tran
 ## Resume
 - `resume_id` = a prior run's **run_id** (the handle this tool returns). On resume it is **content-addressed**: unchanged `agent()` calls reuse cached results instantly; an upstream prompt change flips the downstream signature and re-runs it automatically (no manual marking). **Same script + same args → 100% cache hit.**
 - Maintained by the async-tool execution framework via a content-addressed journal (same model as the reference tool's runId). (Execution coming.)
+
+## Runtime control (pause / resume / stop)
+When a workflow is still running in the background and the user wants to control it, combine `resume_id` + `action` on this tool — `run_id` is the handle this tool returned on the earlier launch. Pick the action from the user's wording:
+- User says "hold on / pause the workflow" → `swarmflow(resume_id=<run_id>, action='pause')`: pauses execution, **preserving the completed prefix**, which `action='resume'` later continues from.
+- User says "carry on / resume" → `action='resume'`.
+- User says "never mind / stop" → `action='stop'`: **terminal** (cannot be resumed), but it only stops the workflow — it does **not** stop the session.
+- Example: `swarmflow(resume_id='wf_xxx', action='stop')`.
 
 ## Orchestration pattern library (compose by scale)
 - **Adversarial verify**: spawn N independent skeptics per finding, each told to **refute**; kill it if a majority refute — stops plausible-but-wrong findings.
