@@ -190,17 +190,19 @@ def _outcome_from_result(raw_text: str | None, result: Any) -> str | None:
 
 
 def _check_abort(rt) -> None:
-    """Raise ``WorkflowAborted`` when an external pause signal is set.
+    """Raise ``WorkflowAborted`` when an external pause/stop signal is set.
 
     Called twice per ``agent()`` / session ``send()``: an entry gate (before the
     concurrency permit / backend) stops a queued call; a pre-journal guard (after
     the backend succeeds, before ``journal.use``) ensures a call that finished
     inside the pause window does NOT persist to the WAL — so a resume reruns it.
-    A ``None`` event disables both checks (the back-compat default).
+    The raised ``WorkflowAborted`` carries the signal's ``reason`` (``"pause"``
+    vs ``"stop"``) so the caller can tell a resumable pause from a terminal stop.
+    A ``None`` signal disables both checks (the back-compat default).
     """
     ev = rt.abort_event
     if ev is not None and ev.is_set():
-        raise WorkflowAborted()
+        raise WorkflowAborted(reason=ev.reason)
 
 
 def _check_budget(rt) -> None:

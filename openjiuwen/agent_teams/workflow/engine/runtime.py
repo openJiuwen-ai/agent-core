@@ -26,6 +26,26 @@ def _noop_log(message: str) -> None:
 
 
 @dataclass
+class AbortSignal:
+    """Cooperative abort flag that carries the control reason (pause vs stop).
+
+    Wraps an ``asyncio.Event`` so the engine's abort checkpoints keep their
+    wait/set semantics, while the ``reason`` lets the unwind site distinguish a
+    pause (relaunch on resume) from a terminal stop (never relaunch).
+    """
+
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    reason: str = "pause"
+
+    def set(self, reason: str = "pause") -> None:
+        self.reason = reason
+        self.event.set()
+
+    def is_set(self) -> bool:
+        return self.event.is_set()
+
+
+@dataclass
 class Runtime:
     backend: AgentBackend
     journal: Journal
@@ -47,11 +67,13 @@ class Runtime:
     reports real usage into it). Default: an unbounded ledger. The engine only
     reads it — at the ``agent()`` / ``send()`` budget gates and via ``budget.*``."""
     cap_override: int | None = None  # force the concurrency cap (tests)
-    abort_event: asyncio.Event | None = field(default=None, repr=False)
-    """External cooperative pause signal. When set, the ``agent()`` /
-    ``AgentSession.send()`` abort checkpoints raise ``WorkflowAborted`` — the
-    in-flight call does not journal and the run unwinds (resume reruns it).
-    ``None`` disables the checkpoints (default; full back-compat)."""
+    abort_event: AbortSignal | None = field(default=None, repr=False)
+    """External cooperative pause/stop signal. When set, the ``agent()`` /
+    ``AgentSession.send()`` abort checkpoints raise ``WorkflowAborted`` carrying
+    the signal's ``reason`` (``"pause"`` → relaunch on resume; ``"stop"`` →
+    terminal) — the in-flight call does not journal and the run unwinds (a
+    resume reruns it). ``None`` disables the checkpoints (default; full
+    back-compat)."""
 
     # Mutable run state (created/advanced inside the running loop).
     agent_gate: AgentAdmission | None = field(default=None, repr=False)

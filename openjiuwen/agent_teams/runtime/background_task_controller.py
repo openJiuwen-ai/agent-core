@@ -23,6 +23,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -30,7 +31,7 @@ from openjiuwen.core.common.logging import team_logger
 class SwarmflowRunHandle:
     task_id: str
     run_id: str          # NEW
-    abort_event: asyncio.Event
+    abort_event: AbortSignal
     backend: Any
     native: Any
     relaunch: Callable[[], None]
@@ -49,8 +50,8 @@ class BackgroundTaskController:
         self._active.pop(run_id, None)
         self._paused.pop(run_id, None)
 
-    async def _abort_one(self, h: SwarmflowRunHandle) -> None:
-        h.abort_event.set()
+    async def _abort_one(self, h: SwarmflowRunHandle, reason: str) -> None:
+        h.abort_event.set(reason)
         try:
             await h.backend.abort_sessions()
         except Exception:
@@ -70,7 +71,7 @@ class BackgroundTaskController:
                     return False
                 targets = {run_id: h}
             for rid, h in targets.items():
-                await self._abort_one(h)
+                await self._abort_one(h, "pause")
                 self._paused[rid] = h
                 self._active.pop(rid, None)
             return bool(targets)
@@ -96,7 +97,7 @@ class BackgroundTaskController:
         async with self._lock:
             h = self._active.get(run_id)
             if h is not None:
-                await self._abort_one(h)
+                await self._abort_one(h, "stop")
                 self._active.pop(run_id, None)   # terminal: NOT into _paused
                 return True
             if run_id in self._paused:
