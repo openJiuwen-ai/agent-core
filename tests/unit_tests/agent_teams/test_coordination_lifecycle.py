@@ -202,6 +202,20 @@ async def test_pause_stops_at_boundary_and_never_hard_cancels():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_pause_suspends_active_debate_grace_timer():
+    host = _make_kernel_host()
+    debate_state = SimpleNamespace(suspend_terminal_grace=MagicMock())
+    host.infra.team_backend = SimpleNamespace(debate_state=debate_state)
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.pause()
+
+    debate_state.suspend_terminal_grace.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_pause_treats_terminated_harness_as_cold_pause():
     """Round finalization may stop native before persistent cleanup runs."""
     host = _make_kernel_host()
@@ -458,6 +472,15 @@ async def test_start_resumes_a_round_left_paused():
     host = _make_kernel_host()
     host.session_manager.team_session = session
     host.resources.harness.state = HarnessState.PAUSED
+    debate_state = SimpleNamespace(resume_terminal_grace=AsyncMock())
+    host.infra.team_backend = SimpleNamespace(
+        debate_state=debate_state,
+        team_name="test-team",
+        db=SimpleNamespace(
+            initialize=AsyncMock(),
+            team=SimpleNamespace(get_team=AsyncMock(return_value=None)),
+        ),
+    )
     kernel = _arm_kernel_for_start(host)
 
     await kernel.start(session)
@@ -467,6 +490,7 @@ async def test_start_resumes_a_round_left_paused():
     assert isinstance(event, InnerEventMessage)
     assert event.event_type == InnerEventType.REFRESH_TEAM_CONTEXT
     host.stream_controller.resume_agent.assert_awaited_once_with()
+    debate_state.resume_terminal_grace.assert_awaited_once_with()
     kernel._dispatcher.activate_and_flush.assert_awaited_once()
 
 

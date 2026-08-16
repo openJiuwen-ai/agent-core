@@ -13,7 +13,9 @@ import pytest
 from openjiuwen.agent_teams.agent import agent_configurator as configurator_module
 from openjiuwen.agent_teams.agent.agent_configurator import AgentConfigurator
 from openjiuwen.agent_teams.debate import (
+    DebateMessageRole,
     DebateRunState,
+    make_debate_invocation_meta,
     normalize_debate_meta,
 )
 from openjiuwen.agent_teams.rails.debate_round_cap_rail import DebateRoundCapRail
@@ -62,6 +64,9 @@ def _rail(
     backend.resolve_leader_member_name = AsyncMock(return_value=leader_name)
     backend.list_member_roster = AsyncMock(return_value=[])
     backend.is_external_cli_agent = MagicMock(return_value=False)
+    backend.message_manager.get_messages = AsyncMock(return_value=[])
+    backend.message_manager.get_team_messages = AsyncMock(return_value=[])
+    backend.message_manager.team_name = "team"
     backend.list_members = AsyncMock(
         return_value=[
             SimpleNamespace(member_name=name, role=TeamRole.TEAMMATE.value)
@@ -310,6 +315,157 @@ async def test_leader_wakes_once_after_all_successful_invites_report_or_fail() -
 
     await rail._debate.capture_report(round_id, "member-a", "duplicate")
     wake.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_terminal_grace_refreshes_and_finalizes_pending_members_after_expiry(
+) -> None:
+    now = 100.0
+    state = DebateRunState(language="en")
+    state._clock = lambda: now
+    wake = AsyncMock(return_value=True)
+    state.bind_leader_wakeup(wake)
+    round_id = await state.begin_round(
+        {"call-a": {"member-a", "member-b", "member-c"}},
+    )
+    await state.settle_invitation("call-a", succeeded=True)
+
+    await state.capture_report(round_id, "member-a", "report A")
+    now = 200.0
+    await state.capture_report(round_id, "member-a", "duplicate report A")
+    assert state._terminal_deadline == 400.0
+
+    now = 399.0
+    await state.mark_failed("member-b")
+    now = 698.0
+    await state.retry_finalization()
+    wake.assert_not_awaited()
+
+    now = 699.0
+    await state.retry_finalization()
+
+    wake.assert_awaited_once()
+    assert state.unreported_participants == {"member-c"}
+    assert "member-c" in wake.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_terminal_grace_timer_finalizes_without_another_mailbox_event() -> None:
+    state = DebateRunState(language="en")
+    state._terminal_grace_seconds = 0.01
+    wake = AsyncMock(return_value=True)
+    state.bind_leader_wakeup(wake)
+    round_id = await state.begin_round({"call-a": {"member-a", "member-b"}})
+    await state.settle_invitation("call-a", succeeded=True)
+
+    await state.capture_report(round_id, "member-a", "report A")
+    await asyncio.sleep(0.03)
+
+    wake.assert_awaited_once()
+    assert state.unreported_participants == {"member-b"}
+
+
+@pytest.mark.asyncio
+async def test_terminal_grace_suspends_across_run_cycle_teardown() -> None:
+    state = DebateRunState(language="en")
+    state._terminal_grace_seconds = 0.01
+    wake = AsyncMock(return_value=True)
+    state.bind_leader_wakeup(wake)
+    round_id = await state.begin_round({"call-a": {"member-a", "member-b"}})
+    await state.settle_invitation("call-a", succeeded=True)
+    await state.capture_report(round_id, "member-a", "report A")
+
+    state.suspend_terminal_grace()
+    await asyncio.sleep(0.03)
+
+    wake.assert_not_awaited()
+    assert state._terminal_timer_task is None
+
+    await state.resume_terminal_grace()
+
+    wake.assert_awaited_once()
+    assert state.unreported_participants == {"member-b"}
+
+
+@pytest.mark.asyncio
+async def test_terminal_event_after_deadline_cannot_refresh_expired_grace() -> None:
+    now = 100.0
+    state = DebateRunState(language="en")
+    state._clock = lambda: now
+    wake = AsyncMock(return_value=True)
+    state.bind_leader_wakeup(wake)
+    round_id = await state.begin_round({"call-a": {"member-a", "member-b"}})
+    await state.settle_invitation("call-a", succeeded=True)
+    await state.capture_report(round_id, "member-a", "report A")
+
+    now = 401.0
+    accepted = await state.capture_report(round_id, "member-b", "late report B")
+
+    assert accepted is False
+    wake.assert_awaited_once()
+    assert state.reports == {"member-a": "report A"}
+    assert state.unreported_participants == {"member-b"}
+
+
+@pytest.mark.asyncio
+async def test_teammate_rejects_peer_that_already_sent_a_final_report() -> None:
+    rail = _rail()
+    await rail._debate.activate_participant("round-1")
+    rail._team.message_manager.get_messages.return_value = [
+        SimpleNamespace(
+            from_member_name="peer",
+            coordination_meta=normalize_debate_meta(
+                make_debate_invocation_meta(
+                    "round-1",
+                    DebateMessageRole.FINAL_REPORT,
+                ),
+            ),
+        ),
+    ]
+    peer = _context(to="peer")
+
+    await rail.before_tool_call(peer)
+
+    assert peer.extra["_skip_tool"] is True
+    assert "already completed" in peer.inputs.tool_result["error"]
+    assert rail._count == 0
+
+
+@pytest.mark.asyncio
+async def test_teammate_rejects_broadcast_when_all_invited_peers_are_terminal() -> None:
+    rail = _rail()
+    await rail._debate.activate_participant("round-1")
+    rail._team.message_manager.get_team_messages.return_value = [
+        SimpleNamespace(
+            broadcast=False,
+            to_member_name=member_name,
+            coordination_meta=normalize_debate_meta(
+                make_debate_invocation_meta(
+                    "round-1",
+                    DebateMessageRole.INVITE,
+                ),
+            ),
+        )
+        for member_name in ("self", "peer")
+    ]
+    rail._team.message_manager.get_messages.return_value = [
+        SimpleNamespace(
+            from_member_name="peer",
+            coordination_meta=normalize_debate_meta(
+                make_debate_invocation_meta(
+                    "round-1",
+                    DebateMessageRole.FINAL_REPORT,
+                ),
+            ),
+        )
+    ]
+    broadcast = _context(to="*")
+
+    await rail.before_tool_call(broadcast)
+
+    assert broadcast.extra["_skip_tool"] is True
+    assert "No active peers remain" in broadcast.inputs.tool_result["error"]
+    assert rail._count == 0
 
 
 @pytest.mark.asyncio
