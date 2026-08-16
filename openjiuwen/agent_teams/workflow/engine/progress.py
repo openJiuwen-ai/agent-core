@@ -47,6 +47,8 @@ class ProgressKind:
     LOG = "log"
     WORKFLOW_COMPLETED = "workflow_completed"
     WORKFLOW_FAILED = "workflow_failed"
+    WORKFLOW_PAUSED = "workflow_paused"
+    WORKFLOW_STOPPED = "workflow_stopped"
 
 
 @dataclass(frozen=True, slots=True)
