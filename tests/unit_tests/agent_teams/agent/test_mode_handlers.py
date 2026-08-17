@@ -203,11 +203,13 @@ async def test_dispatch_routes_by_mode_handler_set(db, bus):
     )
 
     autonomous = EventDispatcher(host, blueprint, infra, poll)
+    await autonomous.activate_and_flush()
     await autonomous.dispatch(event)
     assert len(host.delivered) == 1  # autonomous: reviewer is steered to verify_task
 
     host.delivered.clear()
     scheduled = EventDispatcher(host, blueprint, infra, poll, dispatch_mode="scheduled")
+    await scheduled.activate_and_flush()
     await scheduled.dispatch(event)
     assert host.delivered == []  # scheduled: the scheduler's mail owns the handoff
 

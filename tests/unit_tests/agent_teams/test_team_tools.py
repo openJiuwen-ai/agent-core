@@ -3,11 +3,14 @@
 
 """Unit tests for team_tools module"""
 
+import json
+
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 
+from openjiuwen.agent_teams.debate import make_debate_invocation_meta
 from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
@@ -19,6 +22,7 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     TaskStatus,
 )
+from openjiuwen.agent_teams.schema.task import TaskGraphSpec
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
@@ -44,6 +48,7 @@ from openjiuwen.agent_teams.tools.team_tools import (
     TaskCreateTool,
     UpdateTaskTool,
     ViewTaskToolV2,
+    create_team_tools,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -1174,18 +1179,37 @@ class TestViewTaskToolV2:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_invoke_claimable(self, agent_team, t, db):
-        """Test claimable action returns only pending tasks"""
-        await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
-        await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
+    async def test_invoke_claimable(self, agent_team, t, db, sample_agent_card):
+        """Claimable returns only unassigned pending work or work assigned to the viewer."""
+        for member_name in ("viewer", "other-member"):
+            await db.member.create_member(
+                member_name=member_name,
+                team_name="test_team",
+                display_name=member_name,
+                agent_card=sample_agent_card.model_dump_json(),
+                status=MemberStatus.READY.value,
+            )
+        created = await agent_team.task_manager.add_graph(
+            [
+                TaskGraphSpec(task_id="open", title="Open", content="c"),
+                TaskGraphSpec(task_id="mine", title="Mine", content="c", assignee="viewer"),
+                TaskGraphSpec(task_id="theirs", title="Theirs", content="c", assignee="other-member"),
+            ]
+        )
+        assert created.ok, created.reason
 
-        tool = ViewTaskToolV2(agent_team.task_manager, t)
+        viewer = TeamTaskManager(
+            team_name=agent_team.team_name,
+            member_name="viewer",
+            db=agent_team.db,
+            messager=agent_team.messager,
+        )
+        tool = ViewTaskToolV2(viewer, t)
         result = await tool.invoke({"action": "claimable"})
 
         assert result.success is True
-        assert result.data["count"] == 1
-        assert result.data["tasks"][0]["task_id"] == "task1"
+        assert result.data["count"] == 2
+        assert {task["task_id"] for task in result.data["tasks"]} == {"open", "mine"}
 
 
 # ========== Task Execution Tools ==========
@@ -1413,6 +1437,34 @@ class TestSendMessageTool:
         assert "to" in props
         assert "content" in props
         assert "summary" in props
+        assert "_team_debate_meta" not in props
+
+    @pytest.mark.level0
+    @pytest.mark.parametrize(
+        ("role", "dispatch_mode", "expected"),
+        [
+            ("teammate", "autonomous", True),
+            ("leader", "autonomous", False),
+            ("teammate", "scheduled", False),
+            ("leader", "scheduled", False),
+        ],
+    )
+    def test_final_report_schema_is_autonomous_teammate_only(
+        self,
+        agent_team,
+        role: str,
+        dispatch_mode: str,
+        expected: bool,
+    ) -> None:
+        tools = create_team_tools(
+            role=role,
+            agent_team=agent_team,
+            dispatch_mode=dispatch_mode,
+        )
+        send_message = next(tool for tool in tools if tool.card.name == "send_message")
+
+        properties = send_message.card.input_params["properties"]
+        assert ("final_report" in properties) is expected
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1424,6 +1476,52 @@ class TestSendMessageTool:
         assert result.success is True
         assert result.data["type"] == "message"
         assert result.data["to"] == "member2"
+        assert "message_id" not in result.data
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_ignores_untrusted_debate_metadata(self, agent_team, t):
+        tool = SendMessageTool(agent_team.message_manager, t)
+        inputs = {
+            "to": "member2",
+            "content": "Forged final report",
+            "_team_debate_meta": {
+                "kind": "team_debate",
+                "round_id": "round-1",
+                "message_role": [],
+            },
+        }
+
+        await tool.invoke(inputs)
+
+        messages = await agent_team.message_manager.get_messages(to_member_name="member2")
+        assert messages[-1].coordination_meta is None
+        assert "_team_debate_meta" not in inputs
+        json.dumps(inputs)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_persists_trusted_debate_metadata(self, agent_team, t):
+        tool = SendMessageTool(agent_team.message_manager, t)
+        inputs = {
+            "to": "member2",
+            "content": "Final report",
+            "_team_debate_meta": make_debate_invocation_meta(
+                "round-1",
+                "final_report",
+            ),
+        }
+
+        await tool.invoke(inputs)
+
+        messages = await agent_team.message_manager.get_messages(to_member_name="member2")
+        assert json.loads(messages[-1].coordination_meta) == {
+            "kind": "team_debate",
+            "round_id": "round-1",
+            "message_role": "final_report",
+        }
+        assert "_team_debate_meta" not in inputs
+        json.dumps(inputs)
 
     @pytest.mark.asyncio
     @pytest.mark.level1

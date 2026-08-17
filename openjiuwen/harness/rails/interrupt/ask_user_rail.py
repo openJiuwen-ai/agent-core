@@ -91,7 +91,12 @@ class AskUserRail(BaseInterruptRail):
             return self.interrupt(self._build_ask_request(tool_call))
 
         if not payload.answers:
-            return self.interrupt(self._build_ask_request(tool_call))
+            # Empty answers (user skipped / left unselected / auto-cancelled on
+            # timeout) must resolve the interrupt, not re-pend it: a re-asked
+            # frame reuses the same request_id and is swallowed by the team
+            # sidecar's dedup, leaving the leader pending until the relay
+            # watchdog kills the run. Resolve with an explicit skip result.
+            return self.reject(tool_result=self._build_skipped_tool_result())
 
         tool_result = self._format_tool_result(tool_call, payload)
         return self.reject(tool_result=tool_result)
@@ -107,6 +112,19 @@ class AskUserRail(BaseInterruptRail):
             if "answer" in user_input:
                 return AskUserPayload(answers={first_question: user_input["answer"]})
         return AskUserPayload()
+
+    @staticmethod
+    def _build_skipped_tool_result() -> str:
+        """Tool result for empty answers: tell the model the user did not answer."""
+        if resolve_language() == "cn":
+            return (
+                "用户未提供回答（跳过、未选择或超时未答）。"
+                "请不要重复提问，基于现有信息继续推进任务。"
+            )
+        return (
+            "The user did not provide an answer (skipped, left unselected, or timed out). "
+            "Do not ask again; continue the task with the information already available."
+        )
 
     def _format_tool_result(self, tool_call: Optional[ToolCall], payload: AskUserPayload) -> str:
         """Format tool result in Claude Code style."""

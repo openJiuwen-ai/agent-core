@@ -36,6 +36,7 @@ from openjiuwen.agent_teams.tools.database.engine import (
 )
 from openjiuwen.agent_teams.tools.database.engine import (
     drop_session_tables_by_id as _drop_session_tables_by_id,
+    clear_session_task_board_by_id as _clear_session_task_board_by_id,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
     get_current_time as _get_current_time,
@@ -224,6 +225,25 @@ class TeamDatabase:
         if self.engine is None:
             return []
         return await _drop_session_tables_by_id(self.engine, session_id)
+
+    async def clear_session_task_board_by_id(self, session_id: str) -> int:
+        """Clear the unfinished-task rows for a session without active context.
+
+        Used by ``TeamRuntimeManager.reset_session`` to drop the task board
+        (rows) while keeping the ``team_message_<hash>`` deliberation history
+        and ``message_read_status_<hash>`` read high-water, so the next
+        ``chat.send`` routes through ``COLD_RECOVER`` with full history.
+
+        Args:
+            session_id: Session identifier whose task board to clear.
+
+        Returns:
+            Number of task rows deleted (dependency rows cascade via FK).
+        """
+        await self._ensure_initialized()
+        if self.engine is None:
+            return 0
+        return await _clear_session_task_board_by_id(self.engine, session_id)
 
     async def force_delete_team_session(self, team_name: str) -> bool:
         """Delete a team's persisted row and drop current session tables.

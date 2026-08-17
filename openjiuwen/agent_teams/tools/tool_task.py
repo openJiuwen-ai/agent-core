@@ -439,6 +439,9 @@ class ViewTaskToolV2(TeamTool):
             result = await self.task_manager.list_tasks_with_deps(
                 status=TaskStatus.PENDING.value,
             )
+            member_name = self.task_manager.member_name
+            tasks = [task for task in result.tasks if not task.assignee or task.assignee == member_name]
+            result = result.model_copy(update={"tasks": tasks, "count": len(tasks)})
         else:
             result = await self.task_manager.list_tasks_with_deps(
                 status=inputs.get("status"),

@@ -320,6 +320,13 @@ class TeamHarness:
             return None
         return self._native.paused_query
 
+    @property
+    def active_round(self) -> Any:
+        """The native round currently in flight, if any."""
+        if self._native is None:
+            return None
+        return self._native.active_round
+
     def _is_cycle_active(self) -> bool:
         """Return whether a run cycle is live (native started, not yet stopped).
 

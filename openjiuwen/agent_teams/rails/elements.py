@@ -3,8 +3,8 @@
 
 """Manifest declarations for the built-in team rails.
 
-The six team rails (tool / policy / workspace / tool-approval / plan-mode /
-reliability) plus ``core.observability`` are declared here as
+The seven team rails (tool / policy / workspace / tool-approval / plan-mode /
+reliability / debate-round-cap) plus ``core.observability`` are declared here as
 ``@harness_element`` factories so they assemble through the same provider
 path as every other DeepAgent capability — no more hand-``new`` +
 ``TeamHarness.build`` named params + closure ``add_rail``.
@@ -61,6 +61,7 @@ TEAM_WORKSPACE = "core.team.workspace"
 TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
 TEAM_RELIABILITY = "core.team.reliability"
+TEAM_DEBATE_ROUND_CAP = "core.team.debate_round_cap"
 OBSERVABILITY = "core.observability"
 
 
@@ -353,6 +354,50 @@ def build_team_reliability_rail(params: dict[str, Any], context: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# team.debate_round_cap - autonomous debate convergence
+# ---------------------------------------------------------------------------
+
+
+class TeamDebateRoundCapInput(ConstructionInput):
+    """Construction inputs for the autonomous debate rail."""
+
+    role: str = context_field(attr="role", default="teammate", description="Team role value.")
+    member_name: str = context_field(attr="member_name", default="", description="Member name.")
+    language: str = context_field(attr="language", default="cn", description="Resolved language code.")
+    max_debate_rounds: int = param_field(default=0, description="Per-teammate debate send ceiling.")
+    team_name: str = param_field(default="default", description="Team name.")
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_DEBATE_ROUND_CAP,
+    description="Per-teammate send_message ceiling for interactive debate.",
+    input_model=TeamDebateRoundCapInput,
+)
+def build_team_debate_round_cap_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build the enabled Leader or teammate rail when handles are available."""
+    from openjiuwen.agent_teams.rails.debate_round_cap_rail import DebateRoundCapRail
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    inp = TeamDebateRoundCapInput.resolve(params, context)
+    if inp.max_debate_rounds < 1 or inp.role not in {
+        TeamRole.LEADER.value,
+        TeamRole.TEAMMATE.value,
+    }:
+        return None
+    backend = get_team_backend(context)
+    if backend is None or not inp.member_name:
+        return None
+    return DebateRoundCapRail(
+        max_debate_rounds=inp.max_debate_rounds,
+        team_backend=backend,
+        member_name=inp.member_name,
+        role=TeamRole(inp.role),
+        language=inp.language,
+    )
+
+
+# ---------------------------------------------------------------------------
 # core.observability — ObservabilityRail
 # ---------------------------------------------------------------------------
 
@@ -387,6 +432,7 @@ __all__ = [
     "TEAM_TOOL_APPROVAL",
     "TEAM_PLAN_MODE",
     "TEAM_RELIABILITY",
+    "TEAM_DEBATE_ROUND_CAP",
     "OBSERVABILITY",
     "observability_dependency_installed",
 ]

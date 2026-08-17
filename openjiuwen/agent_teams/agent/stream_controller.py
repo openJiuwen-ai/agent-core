@@ -153,18 +153,28 @@ class StreamController:
 
         Plain ``OutputSchema`` instances are upgraded to ``TeamOutputSchema``;
         already-tagged chunks whose ``source_member`` and ``role`` match are
-        returned untouched. Non-OutputSchema chunks pass through unchanged.
+        returned untouched. Non-OutputSchema chunks are tagged in place when
+        their attribution fields are missing.
         """
         bp = self._get_blueprint()
         member_name = bp.member_name if bp else None
         role = bp.role if bp else None
-        if not member_name or not isinstance(chunk, OutputSchema):
+        if not member_name:
             return chunk
-        if isinstance(chunk, TeamOutputSchema):
-            if chunk.source_member == member_name and chunk.role == role:
-                return chunk
-            return chunk.model_copy(update={"source_member": member_name, "role": role})
-        return TeamOutputSchema.from_output(chunk, source_member=member_name, role=role)
+        if isinstance(chunk, OutputSchema):
+            if isinstance(chunk, TeamOutputSchema):
+                if chunk.source_member == member_name and chunk.role == role:
+                    return chunk
+                return chunk.model_copy(update={"source_member": member_name, "role": role})
+            return TeamOutputSchema.from_output(chunk, source_member=member_name, role=role)
+        try:
+            if getattr(chunk, "role", None) is None:
+                object.__setattr__(chunk, "role", role)
+            if getattr(chunk, "source_member", None) is None:
+                object.__setattr__(chunk, "source_member", member_name)
+        except (AttributeError, TypeError):
+            pass
+        return chunk
 
     # ------------------------------------------------------------------
     # Lifecycle: attach to / detach from the runtime for one run cycle

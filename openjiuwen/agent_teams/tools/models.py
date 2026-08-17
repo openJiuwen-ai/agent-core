@@ -249,6 +249,9 @@ class TeamMessageBase(SQLModel):
     # Shape: {"template": <prompts/<lang>/<key>.md>, "refs": {"task": id,
     # "member": name}, "params": {<scalar>}}. See ``message_template.py``.
     meta: Optional[str] = Field(default=None, nullable=True)
+    # Framework-only coordination facts, kept separate from delivery-template
+    # ``meta`` so neither contract becomes a mixed-purpose JSON bag.
+    coordination_meta: Optional[str] = Field(default=None, nullable=True)
 
 
 class MessageReadStatusBase(SQLModel):

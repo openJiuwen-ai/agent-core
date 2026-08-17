@@ -20,12 +20,10 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 | 模板文件 | 触发条件 | 装配位置 | 主要内容 |
 |---|---|---|---|
 | （无模板，Python 装配） | `member_name` 或 `member_prompt` 非空 | `messages.build_identity_text` → `build_team_identity_section` | **唯一的 per-member 内容**：自身 `member_name` 一行 + `## 私有工作约定` 子节（`member_prompt` 为空则只出名字）。正文只有一份（`build_identity_text`），section 只是它给外部 CLI 用的包装（P:10，`include_member_specific=True` 内联进静态 prompt）；**进程内成员经对话历史收到它**（`<team-context>`），留在系统提示词会让每个成员各占一份前缀 KV cache。见 [[F_68]] / [[F_70]] |
-| `leader_policy.md` | `role == LEADER` | `build_team_role_section` | Leader 的核心理念、协作机制选择（按任务协同性质：结构可确定性编排 → swarmflow；涌现式自主协同 → build_team）、职责、成果交接（通道由内容形态决定：短内容直接进消息正文，成型产物落盘、消息只传路径）、决策原则（禁止自执行 / 背景不清先建调研成员 / 无人认领时指派或 spawn / 整合总结交独立汇总成员）、响应节奏、任务状态流转 |
-| `teammate_policy.md` | `role == TEAMMATE` | `build_team_role_section` | Teammate 的自主规划/领取/协作规范、通信协议、代码/文件协作约定 |
-| `leader_workflow.md` | Leader 且 `team_mode="default"` | `build_team_workflow_section` | 常规 Leader 工作流：建队 → 建任务 → spawn 成员 → 广播启动 → 等通知 |
-| `leader_workflow_predefined.md` | Leader 且 `team_mode="predefined"` | `build_team_workflow_section` | 预定义团队工作流：禁止 `spawn_teammate` 等 spawn 工具，成员已预先注册 |
-| `leader_workflow_hybrid.md` | Leader 且 `team_mode="hybrid"` | `build_team_workflow_section` | 混合团队工作流：预注册基础成员 + 允许动态 `spawn_teammate` 扩员 |
-| `dispatch_autonomous_leader.md` · `dispatch_autonomous_teammate.md` | `dispatch_mode="autonomous"`（默认），按角色挑版 | `build_team_dispatch_section` | 任务经公共看板自主认领，也可在 `create_task` 时预指派给已存在的非 leader 成员；Leader 用 `send_message(to="*")` 广播启动；Teammate 用 `claim_task` 领取 / 启动指派给自己的任务 / 完成。`human_agent` 无 `claim_task`、需 Leader 显式指派的说明也在 leader 版里 |
+| `leader_policy.md` | `role == LEADER` | `build_team_role_section` | Leader 的核心理念、协作机制选择（结构可确定性编排 → swarmflow；涌现式自主协同 → build_team）、职责、成果交接、决策原则、响应节奏、任务状态流转 |
+| `teammate_policy.md` / `teammate_policy_external.md` | `role == TEAMMATE`，按 workspace variant 选择 | `build_team_role_section` | Native / external Teammate 的自主规划、领取、通信和代码 / 文件协作规范 |
+| `leader_workflow*.md` | Leader，按 `team_mode` 与 `dispatch_mode` 选版 | `build_team_workflow_section` | scheduled 继续使用 stable 的 default / predefined / hybrid 任务流程；autonomous 使用对应的 `*_autonomous` 版本，先按最终结果形态分为思辨或任务协作，只有任务协作才进入任务板流程 |
+| `dispatch_autonomous_leader.md` · `dispatch_autonomous_teammate.md` | `dispatch_mode="autonomous"`（默认），按角色挑版 | `build_team_dispatch_section` | 思辨的参与范围、P2P 和软收束协议；任务协作经公共看板自主认领，也可在 `create_task` 时预指派。`human_agent` 无 `claim_task`、需 Leader 显式指派的说明也在 leader 版里 |
 | `dispatch_scheduled_leader.md` · `dispatch_scheduled_teammate.md` | `dispatch_mode="scheduled"`，按角色挑版 | `build_team_dispatch_section` | 任务由 Leader 直接指派：`create_task` 必带 assignee（已存在且非 leader）、成员先于任务存在、**不广播启动**（调度框架自动通知并拉起）；Teammate 不自主认领，用 `member_complete_task` 完成 |
 | `lifecycle_persistent.md` | Leader 且 `lifecycle="persistent"` | `build_team_lifecycle_section` | 长期团队收尾语义（完成任务后待命，不解散） |
 | `lifecycle_temporary.md` | Leader 且 `lifecycle="temporary"`（默认） | `build_team_lifecycle_section` | 临时团队收尾语义（shutdown → clean_team） |
@@ -35,7 +33,7 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 
 Teammate 不消费 workflow / lifecycle 模板；`sections.py` 在 `role != LEADER` 时对这两个 section 直接返回 None。
 
-**`dispatch_mode` 与 `team_mode` 正交**——`team_mode` 决定名册能否生长（能否 spawn），`dispatch_mode` 决定任务如何到达执行它的成员。两者各自独立成 section，模板数是 `3 + 2` 而非 `3 × 2`；再加一维仍是加法。因此 **workflow 模板不许写"怎么让成员开工"**（那是 dispatch 的职责），**dispatch 模板不许写"能不能 spawn"**（那是 workflow 的职责）。同理，`leader_policy.md` / `teammate_policy.md` 全模式共用，**不许出现任何模式专属的动作指令或例外**（如"预定义模式下无法 spawn"）——`tests/unit_tests/agent_teams/test_predefined_team.py` 会断言 default 模式的提示词里不含 `预定义团队模式` 字样。`dispatch_autonomous_*` 只在 LEADER / TEAMMATE 上渲染：`HUMAN_AGENT` 的"等指派"契约已在 `hitt_human_agent.md` 里，`BRIDGE_AGENT` 不承接看板任务，两者 `build_team_dispatch_section` 返回 None。HITT 模板在 `hitt_enabled` 时按角色挑版（见 `_hitt_template_name`）；Bridge 只有 `bridge_agent`（avatar 自契约），仅 `role == BRIDGE_AGENT` 时出现。
+**`dispatch_mode` 与 `team_mode` 的配置语义仍正交**——`team_mode` 决定名册能否生长（能否 spawn），`dispatch_mode` 决定协调与任务到达方式。Prompt 装配必须保证同一组合内部无冲突：scheduled workflow 保持任务板流程；autonomous workflow 可先分流思辨 / 任务协作，思辨协议再由 autonomous dispatch 模板细化。`leader_policy.md` / `teammate_policy.md` 全模式共用，**不许出现任何模式专属的动作指令或例外**。`dispatch_autonomous_*` 只在 LEADER / TEAMMATE 上渲染：`HUMAN_AGENT` 的"等指派"契约已在 `hitt_human_agent.md` 里，`BRIDGE_AGENT` 不承接看板任务，两者 `build_team_dispatch_section` 返回 None。HITT 模板在 `hitt_enabled` 时按角色挑版（见 `_hitt_template_name`）；Bridge 只有 `bridge_agent`（avatar 自契约），仅 `role == BRIDGE_AGENT` 时出现。
 
 ## 编辑规则（Hard Constraints）
 

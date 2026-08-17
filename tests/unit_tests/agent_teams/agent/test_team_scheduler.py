@@ -156,7 +156,7 @@ def _dm_targets(message_manager) -> list[tuple[str, dict]]:
     """
     calls = []
     for call in message_manager.send_message.await_args_list:
-        calls.append((call.kwargs["to_member_name"], call.kwargs["meta"]))
+        calls.append((call.kwargs["to_member_name"], call.kwargs["options"].meta))
     return calls
 
 
@@ -229,8 +229,8 @@ async def test_handoffs_carry_no_body_only_meta(db, bus):
     assert sent
     for call in sent:
         assert call.kwargs["content"] == ""
-        assert call.kwargs["meta"]["template"]
-        assert call.kwargs["meta"]["refs"]["task"] == "a"
+        assert call.kwargs["options"].meta["template"]
+        assert call.kwargs["options"].meta["refs"]["task"] == "a"
 
 
 @pytest.mark.asyncio

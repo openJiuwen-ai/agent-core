@@ -18,6 +18,7 @@ import pytest_asyncio
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.status import MemberMode, TaskStatus
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -64,7 +65,14 @@ async def db():
         await database.close()
 
 
-def _backend(db, member_name: str, is_leader: bool, dispatch_mode: str = "autonomous") -> TeamBackend:
+def _backend(
+    db,
+    member_name: str,
+    is_leader: bool,
+    dispatch_mode: str = "autonomous",
+    *,
+    all_capabilities: bool = False,
+) -> TeamBackend:
     # No leader_member_name passed: a member resolves it from the team_info DB
     # row (the source of truth), exercising resolve_leader_member_name.
     return TeamBackend(
@@ -74,6 +82,13 @@ def _backend(db, member_name: str, is_leader: bool, dispatch_mode: str = "autono
         db=db,
         messager=AsyncMock(spec=Messager),
         dispatch_mode=dispatch_mode,
+        enable_hitt=all_capabilities,
+        enable_bridge=all_capabilities,
+        external_cli_agents=(
+            [ExternalCliAgentSpec(cli_agent="codex")]
+            if all_capabilities
+            else None
+        ),
     )
 
 
@@ -143,6 +158,45 @@ async def test_variants_keep_card_identity(db, dispatch_mode):
     )
     send_message = _by_name(member_tools, "send_message")
     assert send_message.card.id == "team.send_message"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+async def test_leader_entry_tools_select_dispatch_specific_descriptions(db, lang):
+    """Autonomous debate guidance must not change scheduled tool contracts."""
+    backend = _backend(db, LEADER_NAME, True, all_capabilities=True)
+    autonomous = {
+        tool.card.name: tool.card.description
+        for tool in create_team_tools(role="leader", agent_team=backend, lang=lang)
+    }
+    scheduled = {
+        tool.card.name: tool.card.description
+        for tool in create_team_tools(
+            role="leader",
+            agent_team=backend,
+            dispatch_mode="scheduled",
+            lang=lang,
+        )
+    }
+    entry_tools = (
+        "build_team",
+        "spawn_teammate",
+        "spawn_human_agent",
+        "spawn_bridge_agent",
+        "spawn_external_cli",
+    )
+
+    if lang == "cn":
+        autonomous_markers = ("思辨分支", "任务协作分支")
+        scheduled_forbidden = "思辨分支"
+    else:
+        autonomous_markers = ("Debate branch", "Task-collaboration branch")
+        scheduled_forbidden = "Debate branch"
+
+    for name in entry_tools:
+        assert all(marker in autonomous[name] for marker in autonomous_markers)
+        assert scheduled_forbidden not in scheduled[name]
 
 
 @pytest.mark.asyncio

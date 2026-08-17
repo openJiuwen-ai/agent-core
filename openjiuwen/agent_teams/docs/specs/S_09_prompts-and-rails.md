@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-07-31 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md` |
+| 最近一次修订日期 | 2026-08-15 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_team-debate-single-wrapup.md` |
 
 ## 范围 / 边界
 
@@ -15,7 +15,7 @@
 
 - `agent_teams/prompts/` 下系统提示词的全部产出路径：模板加载、占位符装配、`PromptSection` 构造。
 - `agent_teams/prompts/messages.py` 与 `agent_teams/team_context.py`：团队状态（自身身份 / 团队元数据 / 成员名册）的消息正文、名册 diff、投递时机与持久化基线。
-- `agent_teams/rails/` 下四个团队级 Rail（`TeamPolicyRail` / `FirstIterationGate` / `TeamToolApprovalRail` / `TeamPermissionRail`）及 team-specific confirmation payload models（`TeamConfirmPayload` / `TeamPermissionConfirmResponse`）的契约、注入时机、与 DeepAgent rail registry 的交互。
+- `agent_teams/rails/` 下五个团队级 Rail（`TeamPolicyRail` / `FirstIterationGate` / `TeamToolApprovalRail` / `TeamPermissionRail` / `DebateRoundCapRail`）及 team-specific confirmation payload models（`TeamConfirmPayload` / `TeamPermissionConfirmResponse`）的契约、注入时机、与 DeepAgent rail registry 的交互。
 - prompts 子模块的 `cn/` `en/` 双语模板布局，以及与 `agent_teams/i18n.py`（运行时硬编码字符串）的边界。
 
 **不管：**
@@ -84,6 +84,8 @@
 16. **Mount order load-bearing**：`TeamHarness.build` 必须先挂 `TeamToolRail` 并 eager `init`，再挂 `TeamPolicyRail`。原因：policy 输出引用 ability 快照，能力必须先就位。Rail 顺序的修改必须同步检视 mount path。
 17. **`uninit` 必须把自己写入 builder 的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section（HITT 契约 / bridge 自契约都在其中）。团队状态写在成员自己的对话历史里，那是它的历史、不由 rail 清理。rail 卸载后 builder 不得残留团队 section。
 18. **`team_backend is None` 时状态通道退化**：单测可只关心 static 内容；缺 backend 时 `team_info` / 名册两条通道整体跳过，只剩恒定的 identity 通道（它不需要 backend）。
+
+18b. **`DebateRoundCapRail` 只在 autonomous 且 `max_debate_rounds` 有效时装配，并用显式最终汇报收束**（F_73）：成员发给 Leader 的普通消息不算完成；只有 autonomous teammate 传 `final_report=true`、`to` 是名册中 Leader 的真实 `member_name` 字符串（`leader` 不作为 scheduled 式角色别名，仅在它确实是该 `member_name` 时有效）、当前已有 invite 激活的 `round_id` 且工具调用成功时，rail 才注入 final-report 元数据并清除该成员轮次；数组和广播目标不算最终汇报。Leader 已 `finalized` 后，内部总结轮的 `after_model_call` 不得重新 `begin_round()`，rail 随 harness 重建也必须保留该状态；下一条实际投给 Leader 的外部输入由 coordination/runtime 边界负责重置。scheduled 模式不挂本 rail。
 
 ### `FirstIterationGate`
 

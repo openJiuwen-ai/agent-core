@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
+from openjiuwen.agent_teams.rails.debate_round_cap_rail import DebateRoundCapRail
+from openjiuwen.harness.tools.base_tool import ToolOutput
 from tests.unit_tests.agent_teams.harness.fixtures import (
     FakeReactAgent,
     answer_outputs,
@@ -178,5 +181,80 @@ async def test_follow_ups_queued_together_drive_one_round() -> None:
         # rails can drop a whole superseded entry rather than parse a body.
         assert fake.invocations[1]["_input_parts"] == ["q2", "q3"]
         assert "_input_parts" not in fake.invocations[0]
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_debate_cap_rail_persists_across_idle_mailbox_rounds() -> None:
+    """The same mounted rail accumulates across IDLE -> mailbox input rounds."""
+    await Runner.start()
+    try:
+        backend = MagicMock()
+        backend.leader_member_name = "leader"
+        backend.task_manager.list_tasks = AsyncMock(return_value=[])
+        backend.resolve_leader_member_name = AsyncMock(return_value="leader")
+        backend.list_members = AsyncMock(return_value=[])
+        rail = DebateRoundCapRail(
+            max_debate_rounds=2,
+            team_backend=backend,
+            member_name="member",
+            language="en",
+        )
+        await rail._debate.activate_participant("round-1")
+        harness = NativeHarness(make_spec(rails=[rail]))
+        fake = await start_harness(harness, emit_tools=True)
+        fake.tool_calls_by_invocation = [
+            [
+                {
+                    "name": "send_message",
+                    "args": {"to": "peer", "content": "first"},
+                    "result": ToolOutput(success=True),
+                },
+            ],
+            [
+                {
+                    "name": "send_message",
+                    "args": {"to": "peer", "content": "second"},
+                    "result": ToolOutput(success=True),
+                },
+                {
+                    "name": "send_message",
+                    "args": {"to": "peer", "content": "third"},
+                    "result": ToolOutput(success=True),
+                },
+                {
+                    "name": "send_message",
+                    "args": {"to": "leader", "content": "final report"},
+                    "result": ToolOutput(success=True),
+                },
+            ],
+        ]
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            mounted = [
+                item for item in harness._registered_rails
+                if isinstance(item, DebateRoundCapRail)
+            ]
+            assert mounted == [rail]
+            await harness.send("first mailbox input")
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert rail._count == 1
+
+            await harness.send("second mailbox input")
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            await harness.stop()
+            await consumer
+
+        assert [
+            item for item in harness._registered_rails
+            if isinstance(item, DebateRoundCapRail)
+        ] == [rail]
+        assert rail._count == 2
+        assert fake.tool_contexts[2].extra["_skip_tool"] is True
+        assert fake.tool_contexts[3].extra.get("_skip_tool") is None
     finally:
         await Runner.stop()

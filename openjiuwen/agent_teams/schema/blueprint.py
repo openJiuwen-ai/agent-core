@@ -350,6 +350,12 @@ class TeamAgentSpec(BaseModel):
     stops the automatic rework loop and escalates to the leader instead.
     See F_62.
     """
+    max_debate_rounds: Optional[int] = None
+    """Optional per-teammate ceiling for successful debate messages.
+
+    Peer, multicast, and broadcast ``send_message`` calls count once each.
+    Leader and user reports remain available. ``None`` disables the rail.
+    """
     review_stall_timeout: int = 1800
     """Seconds before a stalled review round escalates to the leader.
 
@@ -621,6 +627,10 @@ class TeamAgentSpec(BaseModel):
         if self.default_max_review_rounds < 1:
             raise ValueError(
                 f"default_max_review_rounds must be >= 1, got {self.default_max_review_rounds}",
+            )
+        if self.max_debate_rounds is not None and self.max_debate_rounds < 1:
+            raise ValueError(
+                f"max_debate_rounds must be >= 1 when set, got {self.max_debate_rounds}",
             )
         if self.review_stall_timeout <= 0:
             raise ValueError(

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -25,6 +26,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.core.runner.spawn import SpawnAgentKind
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
@@ -60,6 +62,13 @@ class _FakeCoordination:
 
     async def finalize_round(self) -> None:
         self.finalized = True
+
+
+def test_initial_leader_route_ignores_non_text_or_blank_input() -> None:
+    agent = SimpleNamespace(role=TeamRole.LEADER, team_backend=object())
+
+    assert TeamAgent._initial_leader_route_payloads(agent, InteractiveInput("answer")) is None
+    assert TeamAgent._initial_leader_route_payloads(agent, "   \t\n") is None
 
 
 @pytest.mark.level0

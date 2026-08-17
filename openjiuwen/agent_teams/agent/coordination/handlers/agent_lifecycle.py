@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
+from openjiuwen.agent_teams.debate import DebateRunState
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -51,6 +52,12 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         reaches the inner event bus it is already aimed at this agent.
         """
         content = event.payload.get("content", "")
+        debate_state = getattr(self._infra.team_backend, "debate_state", None)
+        if self._blueprint.role == TeamRole.LEADER and isinstance(
+            debate_state,
+            DebateRunState,
+        ):
+            await debate_state.reset_finalized_leader_round()
         team_logger.info("user_input → deliver_input")
         await self._round.deliver_input(content)
 

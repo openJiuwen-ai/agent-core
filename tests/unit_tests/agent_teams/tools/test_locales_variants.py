@@ -101,6 +101,25 @@ def test_param_descriptions_are_shared_across_variants(lang):
 
 
 @pytest.mark.level0
+@pytest.mark.parametrize("language", ["cn", "en"])
+def test_autonomous_create_task_description_preserves_debate_without_tasks(language):
+    t = make_translator(language)
+
+    create_task = t("create_task")
+    build_team = t("build_team")
+    create_task_scheduled = t("create_task_scheduled")
+
+    if language == "cn":
+        assert "最终结果形态" in create_task
+        assert "思辨" not in build_team
+        assert "思辨" not in create_task_scheduled
+    else:
+        assert "form of the final result" in create_task
+        assert "Debate" not in build_team
+        assert "Debate" not in create_task_scheduled
+
+
+@pytest.mark.level0
 def test_runtime_error_strings_still_interpolate():
     """STRINGS values keep their ``{key}`` / format_map path (runtime errors)."""
     t = make_translator("cn")

@@ -237,11 +237,18 @@ _WORKFLOW_TEMPLATES: dict[str, str] = {
     "hybrid": "leader_workflow_hybrid",
 }
 
+_AUTONOMOUS_WORKFLOW_TEMPLATES: dict[str, str] = {
+    "default": "leader_workflow_autonomous",
+    "predefined": "leader_workflow_predefined_autonomous",
+    "hybrid": "leader_workflow_hybrid_autonomous",
+}
+
 
 def build_team_workflow_section(
     *,
     role: TeamRole,
     team_mode: str = "default",
+    dispatch_mode: str = "autonomous",
     language: str = "cn",
 ) -> Optional[PromptSection]:
     """Build the workflow section (LEADER only).
@@ -249,6 +256,8 @@ def build_team_workflow_section(
     Args:
         role: LEADER or TEAMMATE.
         team_mode: Workflow variant — "default", "predefined", or "hybrid".
+        dispatch_mode: Selects the autonomous debate-aware workflow or the
+            original scheduled task workflow.
         language: Prompt language.
 
     Returns:
@@ -258,7 +267,12 @@ def build_team_workflow_section(
     if role != TeamRole.LEADER:
         return None
     labels = _labels_for(language)
-    template_name = _WORKFLOW_TEMPLATES.get(team_mode, "leader_workflow")
+    templates = (
+        _WORKFLOW_TEMPLATES
+        if dispatch_mode == "scheduled"
+        else _AUTONOMOUS_WORKFLOW_TEMPLATES
+    )
+    template_name = templates.get(team_mode, templates["default"])
     workflow_text = load_template(template_name, language).content.strip()
     body = f"{labels['workflow_heading']}\n\n{workflow_text}\n"
     return PromptSection(
@@ -288,9 +302,10 @@ def build_team_dispatch_section(
     """Build the task-dispatch section (LEADER + TEAMMATE).
 
     The dispatch mode is orthogonal to ``team_mode``: ``team_mode`` decides
-    whether the roster can grow, this decides how a task reaches the member
-    who executes it. Keeping them in separate sections avoids a template
-    matrix (``3 x 2``) — each dimension contributes its own file.
+    whether the roster can grow, while this section defines autonomous claim
+    or scheduled assignment behavior. The workflow section may still select a
+    dispatch-specific variant so its top-level flow does not contradict this
+    section (for example, autonomous debate skips the task board entirely).
 
     Args:
         role: Team role; roles outside ``_DISPATCH_ROLE_SLUGS`` get None.
@@ -614,6 +629,7 @@ def build_team_static_sections(
         build_team_workflow_section(
             role=role,
             team_mode=team_mode,
+            dispatch_mode=dispatch_mode,
             language=language,
         ),
         build_team_dispatch_section(

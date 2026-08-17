@@ -100,6 +100,13 @@ class CoordinationKernel:
                 build_context=host.build_context,
             )
 
+    def _leader_debate_state(self) -> Any | None:
+        host = self._host
+        if host.role != TeamRole.LEADER:
+            return None
+        backend = getattr(host.infra, "team_backend", None)
+        return getattr(backend, "debate_state", None)
+
     @property
     def event_bus(self) -> Optional[EventBus]:
         """Return the event bus instance, or None before setup()."""
@@ -248,6 +255,14 @@ class CoordinationKernel:
         # new message arrives. Runs last, once the kernel is fully live, and
         # is a no-op when there is nothing suspended to resume.
         await self.resume_paused_round()
+        # This is the final stable readiness boundary: harness, transport,
+        # context refresh, completion guard, scheduler, lifecycle state, and
+        # resume setup are all established before retained wakes are replayed.
+        debate_state = self._leader_debate_state()
+        if debate_state is not None:
+            await debate_state.resume_terminal_grace()
+        if self._dispatcher is not None:
+            await self._dispatcher.activate_and_flush()
 
     def _build_wake_callback(self):
         """Compose the bus wake callback: coordination first, scheduler second.
@@ -289,13 +304,77 @@ class CoordinationKernel:
             return
         host = self._host
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
+        debate_state = self._leader_debate_state()
+        if debate_state is not None:
+            debate_state.suspend_terminal_grace()
+        scheduler_was_active = bool(
+            self._scheduler is not None and self._scheduler.is_active
+        )
+        if self._dispatcher is not None:
+            await self._dispatcher.deactivate()
         if self._scheduler is not None:
             self._scheduler.deactivate()
-        # Pause, do not tear down: the round stops at a clean inner-iteration
-        # boundary and stays resumable in place. This used to hard-cancel via
-        # ``drain_agent_task`` → ``abort(immediate=True)``, which threw away
-        # everything the member had done in the round it interrupted mid-way.
-        await self.pause_agent_round()
+        # Park the round only while the harness is alive. ``finalize_round``
+        # may already have stopped it; that is a cold pause, and the next run
+        # rebuilds native from the session checkpoint.
+        harness = getattr(host.resources, "harness", None)
+        harness_was_live = harness is not None and getattr(harness, "state", None) is not HarnessState.TERMINATED
+        resume_query = ""
+        park_succeeded = False
+        park_raced_termination = False
+        if harness_was_live:
+            # Capture before the park command: round-end can terminate the
+            # harness concurrently and erase its continuation state.
+            active_round = getattr(harness, "active_round", None)
+            if active_round is None:
+                resume_query = str(
+                    getattr(getattr(host, "state", None), "pending_user_query", "") or ""
+                )
+            else:
+                original_query = getattr(active_round, "original_query", None)
+                if isinstance(original_query, str):
+                    resume_query = original_query
+                elif isinstance(original_query, list):
+                    resume_query = "\n".join(
+                        item for item in original_query if isinstance(item, str)
+                    )
+            # The alive check is not atomic with the pause command. If a
+            # concurrent finalizer stops native here, finish cold-pause
+            # cleanup instead of aborting the persistent-team finalizer.
+            try:
+                await self.pause_agent_round()
+            except Exception as exc:
+                if getattr(harness, "state", None) is not HarnessState.TERMINATED:
+                    if self._dispatcher is not None:
+                        try:
+                            await self._dispatcher.activate_and_flush()
+                        except Exception:
+                            team_logger.exception(
+                                "[{}] failed to restore dispatcher after park failure",
+                                host.member_name or "?",
+                            )
+                    if self._scheduler is not None and scheduler_was_active:
+                        try:
+                            await self._scheduler.activate()
+                        except Exception:
+                            team_logger.exception(
+                                "[{}] failed to restore scheduler after park failure",
+                                host.member_name or "?",
+                            )
+                    if debate_state is not None:
+                        await debate_state.resume_terminal_grace()
+                    raise
+                park_raced_termination = True
+                team_logger.warning(
+                    "[{}] park round failed; continuing with cold pause: {}",
+                    host.member_name or "?",
+                    exc,
+                )
+            else:
+                park_succeeded = True
+                paused_query = str(getattr(harness, "paused_query", None) or "")
+                if paused_query.strip():
+                    resume_query = paused_query
         host.persist_allocator_state()
         # Extract team memories while the session is still bound and the DB
         # is accessible. Moved from finalize_round so extraction runs once
@@ -310,7 +389,15 @@ class CoordinationKernel:
             self._persist_team_lifecycle("paused")
             # Make a later cold start (pause -> stop -> start) continue this
             # round rather than idle waiting for a new message.
-            self._persist_pending_resume()
+            harness_state = getattr(harness, "state", None)
+            should_persist_resume = (
+                harness_state is HarnessState.TERMINATED and not harness_was_live
+            ) or park_raced_termination or (
+                park_succeeded
+                and (bool(resume_query.strip()) or harness_state is HarnessState.PAUSED)
+            )
+            if should_persist_resume:
+                self._persist_pending_resume(resume_query)
         messager = host.infra.messager
         if messager and host.role == TeamRole.LEADER:
             from openjiuwen.agent_teams.context import get_session_id
@@ -406,7 +493,7 @@ class CoordinationKernel:
                 e,
             )
 
-    def _persist_pending_resume(self) -> None:
+    def _persist_pending_resume(self, query: str = "") -> None:
         """Record what a later cold start needs to continue the paused round.
 
         ``pause`` suspends the round at a clean inner-iteration boundary and the
@@ -426,16 +513,12 @@ class CoordinationKernel:
         host = self._host
         session = host.session_manager.team_session
         team_name = host.team_name
-        harness = host.resources.harness
-        if session is None or team_name is None or harness is None:
-            return
-        # Nothing was suspended (no in-flight round), so nothing to continue.
-        if harness.state is not HarnessState.PAUSED:
+        if session is None or team_name is None:
             return
         from openjiuwen.agent_teams.runtime.metadata import merge_pending_resume
 
         try:
-            merge_pending_resume(session, team_name, {"query": harness.paused_query or ""})
+            merge_pending_resume(session, team_name, {"query": str(query or "")})
         except Exception as e:
             team_logger.warning(
                 "[{}] failed to persist pending resume: {}",
@@ -500,6 +583,11 @@ class CoordinationKernel:
             return
         host = self._host
         team_logger.info("[{}] coordination stopping", host.member_name or "?")
+        debate_state = self._leader_debate_state()
+        if debate_state is not None:
+            debate_state.suspend_terminal_grace()
+        if self._dispatcher is not None:
+            await self._dispatcher.deactivate()
         if self._scheduler is not None:
             self._scheduler.deactivate()
         await self.drain_agent_task()
@@ -702,12 +790,20 @@ class CoordinationKernel:
         pending = self._read_pending_resume()
         if pending is None:
             return
+        resume_query = str(pending.get("query") or "").strip()
+        if not resume_query:
+            team_logger.info(
+                "[{}] pending_resume is empty; waiting for new input",
+                self._host.member_name or "?",
+            )
+            self._clear_pending_resume()
+            return
         team_logger.info(
             "[{}] resuming the paused round from the session checkpoint",
             self._host.member_name or "?",
         )
         await self._host.stream_controller.resume_agent(
-            query=str(pending.get("query") or ""),
+            query=resume_query,
         )
         self._clear_pending_resume()
 

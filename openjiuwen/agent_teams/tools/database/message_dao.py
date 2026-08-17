@@ -51,6 +51,7 @@ class MessageDao:
         is_read: bool = False,
         protocol: str = "plain",
         meta: Optional[dict] = None,
+        coordination_meta: Optional[dict] = None,
     ) -> bool:
         """Create a new team message.
 
@@ -66,6 +67,8 @@ class MessageDao:
                 ``meta`` column. A templated message carries the template key
                 plus its refs/params here and stores an empty ``content`` —
                 the delivery path expands it. See ``message_template.py``.
+            coordination_meta: Framework-only coordination facts, serialized
+                into their own column and never used for template rendering.
         """
         message_model = _get_message_model()
 
@@ -82,6 +85,11 @@ class MessageDao:
                         broadcast=broadcast,
                         protocol=protocol,
                         meta=json.dumps(meta, ensure_ascii=False) if meta else None,
+                        coordination_meta=(
+                            json.dumps(coordination_meta, ensure_ascii=False)
+                            if coordination_meta
+                            else None
+                        ),
                         is_read=None if broadcast else is_read,
                     )
                     session.add(message)
@@ -102,6 +110,7 @@ class MessageDao:
         content: str,
         recipients: List[tuple[str, str]],
         protocol: str = "plain",
+        coordination_meta: Optional[dict] = None,
     ) -> int:
         """Insert N point-to-point messages (same content) in ONE transaction.
 
@@ -121,6 +130,7 @@ class MessageDao:
                 order. Message ids are minted by the caller (mirrors
                 ``create_message``).
             protocol: Message format (``"plain"`` / ``"json"``).
+            coordination_meta: Shared framework-only coordination facts.
 
         Returns:
             Number of rows inserted; 0 when ``recipients`` is empty or the
@@ -145,6 +155,11 @@ class MessageDao:
                                 timestamp=now,
                                 broadcast=False,
                                 protocol=protocol,
+                                coordination_meta=(
+                                    json.dumps(coordination_meta, ensure_ascii=False)
+                                    if coordination_meta
+                                    else None
+                                ),
                                 is_read=False,
                             )
                         )

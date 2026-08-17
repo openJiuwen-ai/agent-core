@@ -46,6 +46,7 @@ BRIDGE-event hooks onto the injected fake — otherwise phase tracking is dead.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 from openjiuwen.core.foundation.llm import UserMessage
@@ -57,6 +58,7 @@ from openjiuwen.core.single_agent.agent_callback_manager import (
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
+    ToolCallInputs,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import DeepAgent
@@ -171,6 +173,10 @@ class FakeReactAgent:
         # Observability for assertions.
         self.completed_iterations: int = 0
         self.completed_tools: int = 0
+        # Per outer invocation, an ordered list of tool calls routed through
+        # the real callback manager. Each item supplies name/args/result.
+        self.tool_calls_by_invocation: list[list[dict[str, Any]]] = []
+        self.tool_contexts: list[SimpleNamespace] = []
 
     @property
     def agent_callback_manager(self) -> AgentCallbackManager:
@@ -278,15 +284,39 @@ class FakeReactAgent:
             context.add_message(UserMessage(content=f"assistant-{self.completed_iterations}"))
 
             if self.emit_tools:
-                await ctx.fire(AgentCallbackEvent.BEFORE_TOOL_CALL)
-                self.tool_running.set()
-                try:
-                    if self.tool_sleep_seconds > 0:
-                        await asyncio.sleep(self.tool_sleep_seconds)
-                finally:
-                    self.tool_running.clear()
-                self.completed_tools += 1
-                await ctx.fire(AgentCallbackEvent.AFTER_TOOL_CALL)
+                invocation_index = len(self.invocations) - 1
+                if invocation_index >= len(self.tool_calls_by_invocation):
+                    await ctx.fire(AgentCallbackEvent.BEFORE_TOOL_CALL)
+                    self.tool_running.set()
+                    try:
+                        if self.tool_sleep_seconds > 0:
+                            await asyncio.sleep(self.tool_sleep_seconds)
+                    finally:
+                        self.tool_running.clear()
+                    self.completed_tools += 1
+                    await ctx.fire(AgentCallbackEvent.AFTER_TOOL_CALL)
+                else:
+                    for tool_index, tool in enumerate(self.tool_calls_by_invocation[invocation_index]):
+                        ctx.inputs = ToolCallInputs(
+                            tool_call=SimpleNamespace(id=f"tool-{invocation_index}-{tool_index}"),
+                            tool_name=tool.get("name", ""),
+                            tool_args=tool.get("args", {}),
+                        )
+                        ctx.extra = {}
+                        await ctx.fire(AgentCallbackEvent.BEFORE_TOOL_CALL)
+                        if not ctx.extra.get("_skip_tool"):
+                            self.tool_running.set()
+                            try:
+                                if self.tool_sleep_seconds > 0:
+                                    await asyncio.sleep(self.tool_sleep_seconds)
+                            finally:
+                                self.tool_running.clear()
+                            ctx.inputs.tool_result = tool.get("result")
+                            self.completed_tools += 1
+                        await ctx.fire(AgentCallbackEvent.AFTER_TOOL_CALL)
+                        self.tool_contexts.append(
+                            SimpleNamespace(inputs=ctx.inputs, extra=dict(ctx.extra)),
+                        )
 
             # Iteration fully succeeded: the rail snapshots this clean boundary.
             await ctx.fire(AgentCallbackEvent.AFTER_REACT_ITERATION)
@@ -312,7 +342,12 @@ def make_card(name: str = "native_harness_test") -> AgentCard:
     return AgentCard(name=name, description="native-harness-test")
 
 
-def make_spec(card: AgentCard | None = None, *, completion_timeout: float = 600.0) -> Any:
+def make_spec(
+    card: AgentCard | None = None,
+    *,
+    completion_timeout: float = 600.0,
+    rails: list[Any] | None = None,
+) -> Any:
     """Build a fake DeepAgentSpec whose ``resolve_parts`` yields task-loop parts.
 
     Forward construction: NativeHarness configures itself from this spec's
@@ -340,7 +375,7 @@ def make_spec(card: AgentCard | None = None, *, completion_timeout: float = 600.
                     enable_task_loop=True,
                     completion_timeout=completion_timeout,
                 ),
-                rails=[],
+                rails=list(rails or []),
                 tool_cards=[],
                 tool_instances=[],
             )

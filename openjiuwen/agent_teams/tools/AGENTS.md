@@ -114,7 +114,7 @@ PostgreSQL / MySQL 后端（`engine.py`），不要用 SQLite。
 | `update_task` | ✓ | | 一个工具处理标题/内容编辑、取消、指派、`reviewer`（设置/清除 verify 闸验证者，须真实成员且 ≠ assignee）、`max_review_rounds`（≥1，任务须已配或同时配 reviewer，F_62）以及 `add_blocked_by`。改派走 `TeamTaskManager.reassign`（DAO 原子 CAS 交换 assignee，发 `TASK_REVOKED`+`TASK_CLAIMED`，不发 `TASK_RELEASED`）；取消/编辑发 `TASK_CANCELLED`/`TASK_UPDATED`（带 `member_name`）——三者都**不再** `cancel_member`（编辑保持任务 `IN_PROGRESS`；仅 `IN_REVIEW` 锁）。强制「目标成员至多一个活跃任务」（活跃 = `{PLANNING, IN_PROGRESS, IN_REVIEW}`，见 F_59）；**在队**人类持有的任务对 cancel / reassign / 改标题·内容均 leader-immutable（HITT 锁 key 在 `is_live_human_agent` / `live_human_agent_names`，**非**裸 role：leader `shutdown_member` 让人类退队后锁即解除，遗留任务按普通遗留任务处置——否则踢掉一个不响应的人类会把他手上的任务永久搁浅。见 S_07 运行约束 3）。见 F_54 / F_56 |
 | `view_task` | ✓ | ✓ | `action ∈ {list, get, claimable, in_review}`；默认 `list`。`in_review` 列出指派给本成员验证、当前 `IN_REVIEW` 的任务（verify 闸拉取入口，见 F_59） |
 | `claim_task` | | ✓（仅 autonomous） | `status ∈ {claimed, completed}`（工具动词；claim 后任务落 `IN_PROGRESS`）；claim 前强制「本成员至多一个活跃任务」（活跃 = `{PLANNING, IN_PROGRESS, IN_REVIEW}`，见 F_54 / F_59）；完成路径追加一句下一步 nudge。scheduled 下**不注册**——没有自主认领 |
-| `send_message` | ✓ | ✓ | **两个形态**：`SendMessageTool`（leader 全模式 + autonomous 成员）`to == "*"` → 广播，leader 调用会自动拉起 UNSTARTED 成员；leader `to == "user"` 会被拒绝，直接普通输出即可；`ReportToLeaderTool`（scheduled 成员）`to` 收成 `enum ["leader", "user"]`（角色词，投递时翻译成真实 leader），无多播/广播。也挂到 `human_agent` 作为一条用户驱动的转发通道 —— HITT prompt section 禁止自主使用；只有用户下达的"tell `<member>` …"指令才可触发。**`content` 硬上限** `MAX_CONTENT_CHARS`（2000 字符）：`invoke` 内、`_dispatch` 之前校验，一处覆盖两形态 × 三路径 + MCP 客户端；超限返回教 LLM 改走文件通道的错误（`write_file` → `.team/` → 重发路径 + 摘要）。**无收件人豁免**——约束的是内容形态，`user` 也一样（用户经自己的助手 agent 读文件），故长度校验不看 `to`。见 F_64 与 `S_08` 不变量 22 |
+| `send_message` | ✓ | ✓ | **两个形态**：`SendMessageTool`（leader 全模式 + autonomous 成员）`to == "*"` → 广播，leader 调用会自动拉起 UNSTARTED 成员；只有 autonomous teammate 的 schema 额外暴露可选 `final_report: boolean=false`，用于显式标记以 Leader 真实 `member_name` 为字符串收件人的思辨最终汇报（`leader` 不作为角色别名，仅在它确实是该 `member_name` 时有效），其他角色/模式不暴露；leader `to == "user"` 会被拒绝，直接普通输出即可；`ReportToLeaderTool`（scheduled 成员）`to` 收成 `enum ["leader", "user"]`（角色词，投递时翻译成真实 leader），无多播/广播。也挂到 `human_agent` 作为一条用户驱动的转发通道 —— HITT prompt section 禁止自主使用；只有用户下达的"tell `<member>` …"指令才可触发。**`content` 硬上限** `MAX_CONTENT_CHARS`（2000 字符）：`invoke` 内、`_dispatch` 之前校验，一处覆盖两形态 × 三路径 + MCP 客户端；超限返回教 LLM 改走文件通道的错误（`write_file` → `.team/` → 重发路径 + 摘要）。**无收件人豁免**——约束的是内容形态，`user` 也一样（用户经自己的助手 agent 读文件），故长度校验不看 `to`。见 F_64 与 `S_08` 不变量 22 |
 | `member_complete_task` | | ✓（仅 scheduled） | `human_agent` 全模式可用；scheduled 下也进 teammate 工具集，替代 `claim_task`。只能完成自己的任务。行为与模式无关，仅描述分化（`desc_key`）。**verify 闸**：任务配了 `reviewer` 时，完成落 `IN_REVIEW` 交验证而非 `COMPLETED`；完成后 re-fetch 据实反馈（F_59） |
 | `verify_task` | | ✓（成员，非 leader） | reviewer 对 `IN_REVIEW` 任务裁决，语义按 dispatch_mode（静态 spec 配置）二分、描述随语义分离（desc_key：`verify_task` / `verify_task_scheduled`，F_62）：**autonomous** 首裁即决——`decision=pass` → `COMPLETED`（解依赖，发 `TASK_VERIFIED`）/ `fail` → `IN_PROGRESS`（返工，`feedback` 定向 author，发 `TASK_REVISION_REQUESTED`）；**scheduled** 只记一票——追加 `team_review_vote_*` 行（重复调用=改票取最新）+ 发 `TASK_REVIEW_VOTE`，不翻转状态，由 leader 调度器按票数判定并经 `settle_review` 翻转。守卫两模式相同：任务须 `IN_REVIEW`、caller ∈ 任务 `reviewer` 列且 ≠ author。进 autonomous / scheduled / human_agent 成员集，不进 leader 集。见 F_59 / F_62 与 `S_22` |
 | `workspace_meta` | ✓ | ✓ | workspace 锁 + 版本历史 |
@@ -167,7 +167,7 @@ Worktree 工具（`enter_worktree`、`exit_worktree`）对非团队调用方位�
 |---|---|---|
 | 注册与否 | 权限集合减法 | `claim_task`（autonomous） vs `member_complete_task`（scheduled） |
 | 同名不同形态 | `all_tools` **构造期**查表选类 | `create_task` / `send_message` |
-| 同形态不同文案 | 不同 `desc_key` | `member_complete_task` |
+| 同形态不同文案 | 不同 `desc_key` | `member_complete_task`；`build_team` / `spawn_*` 的 autonomous 描述 |
 
 **形态选择只发生在 `create_team_tools` 构造 `all_tools` 的那一刻，永远不在 `invoke` 里。**
 每个工具实例仍满足「schema 扁平、`invoke` 直线、零 role/mode 分支」——分支被前移到装配器。
@@ -181,7 +181,16 @@ _CREATE_TASK_CLASS = {"autonomous": TaskCreateTool, "scheduled": ScheduledTaskCr
 _SEND_MESSAGE_CLASS = {("scheduled", "member"): ReportToLeaderTool, ...}   # (dispatch, leader|member)
 _MEMBER_COMPLETE_DESC_KEY = {"autonomous": "member_complete_task", "scheduled": "member_complete_task_scheduled"}
 _VERIFY_TASK_DESC_KEY = {"autonomous": "verify_task", "scheduled": "verify_task_scheduled"}   # 裁决语义按模式分离（F_62）
+_ENTRY_DESC_KEYS = {
+    "autonomous": {"build_team": "build_team_autonomous", "spawn_teammate": "spawn_teammate_autonomous", ...},
+    "scheduled": {"build_team": "build_team", "spawn_teammate": "spawn_teammate", ...},
+}
 ```
+
+入口工具的默认文件名沿用 stable 的 scheduled 描述；autonomous 另用
+`build_team_autonomous` / `spawn_*_autonomous`，避免思辨协议泄漏到 scheduled。
+`create_task` 的历史默认形态相反：`create_task` 本身是 autonomous，scheduled 使用
+`create_task_scheduled`。这个命名不对称是兼容既有 key，不表示装配语义不一致。
 
 `send_message` 的形态是 `(dispatch, role)` 二维：scheduled 下 leader 仍要广播 / 多播 /
 `_auto_start_members`，只有成员侧收敛成 `ReportToLeaderTool`。**这个 role 维度必须由类的选择
@@ -397,10 +406,10 @@ Locale 文件在 `locales/` —— 每种语言一个扁平 `STRINGS` dict（`cn
   里的运行时错误消息。
 - 把某个 `_desc` 从 `STRINGS` 迁到 `.md` 文件时，删掉 dict 条目并留一条注释。
 
-当前 `descs/` 已覆盖：`approve_plan`、`approve_tool`、`build_team`、`claim_task`、`clean_team`、`create_task`、
+当前 `descs/` 已覆盖：`approve_plan`、`approve_tool`、`build_team`、`build_team_autonomous`、`claim_task`、`clean_team`、`create_task`、
 `create_task_scheduled`、`list_members`、`member_complete_task`、`member_complete_task_scheduled`、`send_message`、
 `send_message_scheduled`、`verify_task`、`verify_task_scheduled`、`shutdown_member`、`spawn_bridge_agent`、`spawn_external_cli`、`spawn_human_agent`、
-`spawn_teammate`、`structured_output`、`swarmflow`、`update_task`、`view_task`、`workspace_meta`、`async_tasks_list`、
+`spawn_teammate` 及上述五个入口 / spawn 工具对应的 `*_autonomous` 描述、`structured_output`、`swarmflow`、`update_task`、`view_task`、`workspace_meta`、`async_tasks_list`、
 `async_task_output`、`async_task_cancel`。
 
 `descs/<lang>/fragments/` 已覆盖：`artifact_handoff_policy`（两个 `send_message` 形态共用；

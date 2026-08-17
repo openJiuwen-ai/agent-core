@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
-from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
+from sqlalchemy.exc import DBAPIError, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -341,6 +341,38 @@ def _ensure_message_meta_column(sync_conn) -> None:
             continue
         sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN meta TEXT")
         team_logger.info("Migrated legacy message table %s: added meta column", table_name)
+
+
+def _ensure_message_coordination_meta_column(sync_conn) -> None:
+    """Backfill nullable debate coordination metadata on legacy messages."""
+    inspector = inspect(sync_conn)
+    for table_name in inspector.get_table_names():
+        if not table_name.startswith("team_message_"):
+            continue
+        columns = {col["name"] for col in inspector.get_columns(table_name)}
+        if "coordination_meta" in columns:
+            continue
+        if sync_conn.dialect.name == "postgresql":
+            sync_conn.exec_driver_sql(
+                f"ALTER TABLE {table_name} "
+                "ADD COLUMN IF NOT EXISTS coordination_meta TEXT"
+            )
+        else:
+            try:
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ADD COLUMN coordination_meta TEXT"
+                )
+            except DBAPIError:
+                refreshed = inspect(sync_conn)
+                refreshed_columns = {
+                    col["name"] for col in refreshed.get_columns(table_name)
+                }
+                if "coordination_meta" not in refreshed_columns:
+                    raise
+        team_logger.info(
+            "Migrated legacy message table %s: added coordination_meta column",
+            table_name,
+        )
 
 
 def _ensure_dynamic_table_indexes(sync_conn) -> None:
@@ -728,6 +760,7 @@ async def create_cur_session_tables(engine: AsyncEngine) -> None:
             await conn.run_sync(model.__table__.create, checkfirst=True)
         await conn.run_sync(_ensure_message_protocol_column)
         await conn.run_sync(_ensure_message_meta_column)
+        await conn.run_sync(_ensure_message_coordination_meta_column)
         await conn.run_sync(_ensure_dynamic_table_indexes)
 
     team_logger.info("Session tables ready for session %s", session_id)
@@ -825,3 +858,51 @@ async def drop_session_tables_by_id(engine: AsyncEngine, session_id: str) -> lis
     if dropped:
         team_logger.info("Dropped session tables for session %s: %s", session_id, dropped)
     return dropped
+
+
+def _clear_table_rows(sync_conn, table_name: str) -> int:
+    """Delete all rows from one dynamic table, preserving its structure.
+
+    Used to clear a session's task board (unfinished tasks) without dropping
+    the table or touching the deliberation-message / read-status tables.
+    """
+    quoted_name = table_name.replace('"', '""')
+    result = sync_conn.exec_driver_sql(f'DELETE FROM "{quoted_name}"')
+    return int(result.rowcount or 0)
+
+
+async def clear_session_task_board_by_id(engine: AsyncEngine, session_id: str) -> int:
+    """Clear the unfinished-task rows for a session, KEEPING the table
+    structures and the deliberation history.
+
+    Deletes every row from ``team_task_<suffix>`` (the task board) — the FK
+    ``ondelete=CASCADE`` on ``team_task_dependency_<suffix>`` (models.py) auto
+    -removes dependency rows — and from ``team_review_vote_<suffix>`` (no FK,
+    orphaned verify-gate votes). Leaves ``team_message_<suffix>`` (member
+    deliberation history) and ``message_read_status_<suffix>`` (read
+    high-water) intact so COLD_RECOVER still sees the conversation history.
+
+    Rows-only (no DROP): COLD_RECOVER's ``recover_from_session`` does not
+    recreate tables, so dropping would leave a missing task table; deleting
+    rows keeps the structure so the leader can dispatch fresh tasks into the
+    same (now-empty) table.
+    """
+    if engine is None or not session_id:
+        return 0
+
+    suffix = _sanitize_session_id_for_table(session_id)
+    deleted = 0
+    # review_vote has no FK to task; clear it first, then team_task (cascades
+    # team_task_dependency rows via FK ondelete=CASCADE).
+    async with engine.begin() as conn:
+        table_names = await conn.run_sync(_get_table_names)
+        for prefix in ("team_review_vote_", "team_task_"):
+            table = f"{prefix}{suffix}"
+            if table in table_names:
+                deleted += await conn.run_sync(_clear_table_rows, table)
+
+    if deleted:
+        team_logger.info(
+            "Cleared task board rows for session %s (deleted %s)", session_id, deleted
+        )
+    return deleted

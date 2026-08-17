@@ -198,13 +198,61 @@ async def test_multi_question_interrupt_contains_all_questions():
 
 
 @pytest.mark.asyncio
-async def test_invalid_user_input_returns_interrupt():
-    """Invalid user input should return InterruptResult to re-prompt."""
+async def test_resume_with_empty_answers_resolves_as_skip():
+    """Empty answers resolve as 'user skipped' instead of re-interrupting.
+
+    A re-interrupted ask frame reuses the same request_id and is swallowed by the
+    team sidecar's dedup (_is_duplicate_ask_user_question), leaving the leader
+    pending forever until the relay watchdog kills the run. Empty answers
+    (user skipped / left unselected / auto-cancelled on timeout) must terminate
+    the interrupt with an explicit skip result.
+    """
+    rail = AskUserRail()
+    tool_call = _build_tool_call(_single_question_args())
+    user_input = {"answers": {}}
+
+    decision = await rail.resolve_interrupt(ctx=None, tool_call=tool_call, user_input=user_input)
+
+    assert isinstance(decision, RejectResult)
+    assert isinstance(decision.tool_result, str)
+    assert "用户未提供回答" in decision.tool_result
+
+
+@pytest.mark.asyncio
+async def test_resume_with_empty_answers_english_skip_text(monkeypatch):
+    """Skip tool result follows resolve_language() — English when configured."""
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.interrupt.ask_user_rail.resolve_language",
+        lambda *args, **kwargs: "en",
+    )
+    rail = AskUserRail()
+    tool_call = _build_tool_call(_single_question_args())
+
+    decision = await rail.resolve_interrupt(ctx=None, tool_call=tool_call, user_input={"answers": {}})
+
+    assert isinstance(decision, RejectResult)
+    assert "did not provide an answer" in decision.tool_result
+
+
+@pytest.mark.asyncio
+async def test_unmatched_field_dict_resolves_as_skip():
+    """A well-formed dict yielding no answers resolves as skip (no re-prompt)."""
     rail = AskUserRail()
     tool_call = _build_tool_call(_single_question_args())
     user_input = {"invalid_field": "value"}
 
     decision = await rail.resolve_interrupt(ctx=None, tool_call=tool_call, user_input=user_input)
+
+    assert isinstance(decision, RejectResult)
+
+
+@pytest.mark.asyncio
+async def test_unparseable_user_input_type_returns_interrupt():
+    """A truly unparseable input type still re-prompts (preserved branch)."""
+    rail = AskUserRail()
+    tool_call = _build_tool_call(_single_question_args())
+
+    decision = await rail.resolve_interrupt(ctx=None, tool_call=tool_call, user_input=123)
 
     assert isinstance(decision, InterruptResult)
 

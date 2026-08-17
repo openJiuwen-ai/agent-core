@@ -566,12 +566,20 @@ class TeamRuntimeManager:
         if backend is None and not isinstance(payload, GodViewMessage):
             return DeliverResult.failure("no_team_backend")
 
+        async def _reset_finalized_debate() -> None:
+            from openjiuwen.agent_teams.debate import DebateRunState
+
+            debate_state = getattr(backend, "debate_state", None)
+            if isinstance(debate_state, DebateRunState):
+                await debate_state.reset_finalized_leader_round()
+
         if isinstance(payload, GodViewMessage):
             # GodView is the explicit "talk straight to the leader's
             # DeepAgent" channel — no mention parsing here. Routing
             # decisions (``@<member>`` / ``# body`` / ``$<avatar>``)
             # live in ``parse_interact_str`` on the str-input boundary
             # and surface as concrete payload types of their own.
+            await _reset_finalized_debate()
             return await UserInbox.deliver_to_leader(agent.deliver_input, payload.body)
         if isinstance(payload, OperatorMessage):
             inbox = UserInbox(backend.message_manager)
@@ -580,6 +588,7 @@ class TeamRuntimeManager:
                 # so they subscribe to the event bus before the
                 # MessageEvent is published.
                 await agent.auto_start_all()
+                await _reset_finalized_debate()
                 result = await inbox.broadcast(payload.body)
                 return result
             # Start the targeted member before delivering the message
@@ -587,6 +596,8 @@ class TeamRuntimeManager:
             # is published. Startup failure does not prevent message
             # persistence — the message stays in DB for later consumption.
             await agent.auto_start_member(payload.target)
+            if payload.target == getattr(backend, "leader_member_name", None):
+                await _reset_finalized_debate()
             result = await inbox.direct(payload.target, payload.body)
             return result
         if isinstance(payload, HumanAgentMessage):
@@ -812,6 +823,97 @@ class TeamRuntimeManager:
                 team_logger.warning("Failed to remove team directory {}: {}", team_dir, exc)
 
         return deleted
+
+    async def reset_session(
+        self,
+        team_name: str,
+        session_id: str,
+        *,
+        force: bool = True,
+    ) -> bool:
+        """Session-scoped reset for an interrupted team turn: clear ONLY the
+        unfinished task board, KEEP the checkpoint (team memory: spec/context/
+        allocator), the deliberation history (``team_message_<hash>``), the
+        session worktrees, ``team_info`` row and member roster.
+
+        Mirrors the normal-completion path: ``stop_team``/``finalize`` never
+        release the checkpoint or drop tables, so the next ``chat.send`` on the
+        same session_id sees ``session_exists=True`` -> ``team_in_session=True``
+        -> ``COLD_RECOVER`` (``dispatch.py``) -> ``recover_from_session`` restores
+        the leader with full team memory + LLM history. With the task board
+        cleared, ``_nudge_idle_agent`` / ``stale_task`` find no incomplete tasks
+        -> members idle, wait for the leader's new plan. So interrupt+new-query
+        behaves like normal-completion+new-query (history preserved, members
+        idle, leader re-plans), just without the unfinished tasks.
+
+        Strict subset of ``delete_team`` scoped to a single ``session_id``:
+        reuses force-stop, checkpoint existence-filter (idempotent early
+        return), release-info resolution, shared-db teardown and external CLI
+        backend cleanup; then clears ONLY task rows (keeps the table structure
+        + ``team_message_<hash>`` / ``message_read_status_<hash>``); SKIPS
+        ``checkpointer.release`` (keeps the bucket -> COLD_RECOVER, not
+        NEW_TEAM_IN_SESSION), SKIPS ``db.team.delete_team`` (keeps team_info +
+        roster), SKIPS ``team_home`` rmtree and ``remove_session_worktrees``
+        (keeps the team directory + session worktrees, same as stop_team), and
+        SKIPS the agent_ws_server session_dir/binding teardown.
+        """
+        if await self._pool.has_active(team_name):
+            entry = await self._pool.get(team_name)
+            if entry is not None and force:
+                team_logger.info(
+                    "reset_session(force=True) stopping active runtime team={} session={}",
+                    team_name,
+                    entry.current_session_id,
+                )
+                await self.stop_team(
+                    team_name=team_name,
+                    session_id=entry.current_session_id,
+                )
+
+        checkpointer = CheckpointerFactory.get_checkpointer()
+        if not await checkpointer.session_exists(session_id):
+            team_logger.info(
+                "reset_session: session has no checkpoint team={} session={} checkpointer={}",
+                team_name,
+                session_id,
+                type(checkpointer).__name__,
+            )
+            return True
+
+        release_info = await self._resolve_any_team_session_release_info([session_id])
+        if release_info is None:
+            raise RuntimeError(
+                "Cannot resolve team session release info for session: "
+                f"{session_id}, aborting reset_session"
+            )
+        db_config = release_info.db_config
+
+        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+
+        db = get_shared_db(db_config)
+        await db.initialize()
+        from openjiuwen.agent_teams.external.cli_agent.session_cleanup import cleanup_external_cli_backend_sessions
+
+        await cleanup_external_cli_backend_sessions(
+            session_id=session_id,
+            team_names=[team_name],
+            db=db,
+        )
+        # Clear ONLY the unfinished task board (rows), preserving the table
+        # structure + team_message_<hash> deliberation history + read-status.
+        # No checkpointer.release: keep the bucket so the next chat.send routes
+        # through COLD_RECOVER (recover_from_session) with full team memory,
+        # not NEW_TEAM_IN_SESSION (spec.build, fresh, no history).
+        cleared = await db.clear_session_task_board_by_id(session_id)
+
+        team_logger.info(
+            "reset_session: cleared task board rows (deleted {}) team={} session={} "
+            "(checkpoint + team_message history + worktrees preserved -> COLD_RECOVER)",
+            cleared,
+            team_name,
+            session_id,
+        )
+        return True
 
     async def release_session(
         self,

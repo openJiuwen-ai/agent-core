@@ -455,6 +455,27 @@ class MemberDao:
             )
             return False
 
+    async def reset_member_execution_status(
+        self,
+        member_name: str,
+        team_name: str,
+        execution_status: str,
+    ) -> bool:
+        """Unconditionally reset execution status after runtime teardown."""
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(TeamMember)
+                .where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                )
+                .values(execution_status=execution_status)
+            )
+            if result.rowcount == 1:
+                await session.commit()
+                return True
+            return False
+
     async def update_member_worktree(
         self,
         member_name: str,

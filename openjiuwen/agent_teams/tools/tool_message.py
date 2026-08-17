@@ -7,8 +7,9 @@ from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
+from openjiuwen.agent_teams.debate import _DEBATE_META_ARG, normalize_debate_meta
 from openjiuwen.agent_teams.tools.locales import Translator
-from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.agent_teams.tools.message_manager import DirectMessageOptions, TeamMessageManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
 from openjiuwen.core.common.logging import team_logger
@@ -77,9 +78,12 @@ class _SendMessageBase(TeamTool, ABC):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        to_raw = inputs.get("to")
-        content = inputs.get("content", "").strip()
-        summary = inputs.get("summary", "").strip()
+        debate_meta = inputs.pop(_DEBATE_META_ARG, None)
+        effective_inputs = dict(inputs)
+        coordination_meta = normalize_debate_meta(debate_meta)
+        to_raw = effective_inputs.get("to")
+        content = effective_inputs.get("content", "").strip()
+        summary = effective_inputs.get("summary", "").strip()
 
         if not content:
             return ToolOutput(success=False, error="'content' is required")
@@ -88,13 +92,19 @@ class _SendMessageBase(TeamTool, ABC):
             return oversize
 
         try:
-            return await self._dispatch(to_raw, content, summary)
+            return await self._dispatch(to_raw, content, summary, coordination_meta)
         except Exception as e:
             team_logger.error(f"send_message failed: {e}")
             return ToolOutput(success=False, error=f"Internal error: {e}")
 
     @abstractmethod
-    async def _dispatch(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+    async def _dispatch(
+        self,
+        to_raw: Any,
+        content: str,
+        summary: str,
+        coordination_meta: dict[str, str] | None,
+    ) -> ToolOutput:
         """Route the request to a delivery primitive based on ``to``."""
         ...
 
@@ -127,9 +137,17 @@ class _SendMessageBase(TeamTool, ABC):
             ),
         )
 
-    async def _broadcast(self, content: str, summary: str) -> ToolOutput:
+    async def _broadcast(
+        self,
+        content: str,
+        summary: str,
+        coordination_meta: dict[str, str] | None,
+    ) -> ToolOutput:
         await self._auto_start_members()
-        msg_id = await self.message_manager.broadcast_message(content=content)
+        msg_id = await self.message_manager.broadcast_message(
+            content=content,
+            coordination_meta=coordination_meta,
+        )
         if not msg_id:
             return ToolOutput(success=False, error="Failed to broadcast message")
         return ToolOutput(
@@ -141,7 +159,13 @@ class _SendMessageBase(TeamTool, ABC):
             },
         )
 
-    async def _send(self, to: str, content: str, summary: str) -> ToolOutput:
+    async def _send(
+        self,
+        to: str,
+        content: str,
+        summary: str,
+        coordination_meta: dict[str, str] | None,
+    ) -> ToolOutput:
         if to == USER_PSEUDO_MEMBER_NAME and self._team and self._team.is_leader:
             return ToolOutput(success=False, error=self.t("send_message", "error_leader_to_user"))
         # "user" is the pseudo-member representing the human caller; skip
@@ -150,7 +174,11 @@ class _SendMessageBase(TeamTool, ABC):
             if not await self._team.member_exists(to):
                 return ToolOutput(success=False, error=f"Member '{to}' not found")
         await self._auto_start_members()
-        msg_id = await self.message_manager.send_message(content=content, to_member_name=to)
+        msg_id = await self.message_manager.send_message(
+            content=content,
+            to_member_name=to,
+            options=DirectMessageOptions(coordination_meta=coordination_meta),
+        )
         if not msg_id:
             return ToolOutput(success=False, error=f"Failed to send message to '{to}'")
         return ToolOutput(
@@ -168,6 +196,7 @@ class _SendMessageBase(TeamTool, ABC):
         targets: list[str],
         content: str,
         summary: str,
+        coordination_meta: dict[str, str] | None,
     ) -> ToolOutput:
         """Send identical content to multiple members as independent point-to-point messages.
 
@@ -227,7 +256,11 @@ class _SendMessageBase(TeamTool, ABC):
 
         delivered: list[str] = []
         if valid:
-            ids = await self.message_manager.multicast_message(content=content, to_member_names=valid)
+            ids = await self.message_manager.multicast_message(
+                content=content,
+                to_member_names=valid,
+                coordination_meta=coordination_meta,
+            )
             if ids:
                 delivered = valid
             else:
@@ -301,6 +334,8 @@ class SendMessageTool(_SendMessageBase):
         t: Translator,
         team: TeamBackend | None = None,
         on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
+        *,
+        enable_final_report: bool = False,
     ):
         super().__init__(
             message_manager,
@@ -316,18 +351,35 @@ class SendMessageTool(_SendMessageBase):
                 "description": t("send_message", "to"),
             },
         )
+        if enable_final_report:
+            self.card.input_params["properties"]["final_report"] = {
+                "type": "boolean",
+                "description": t("send_message", "final_report"),
+                "default": False,
+            }
 
-    async def _dispatch(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+    async def _dispatch(
+        self,
+        to_raw: Any,
+        content: str,
+        summary: str,
+        coordination_meta: dict[str, str] | None,
+    ) -> ToolOutput:
         """Route the request based on the runtime type of ``to``."""
         if isinstance(to_raw, list):
-            return await self._multicast(to_raw, content, summary)
+            return await self._multicast(
+                to_raw,
+                content,
+                summary,
+                coordination_meta,
+            )
         if isinstance(to_raw, str):
             to = to_raw.strip()
             if not to:
                 return ToolOutput(success=False, error="'to' is required")
             if to == "*":
-                return await self._broadcast(content, summary)
-            return await self._send(to, content, summary)
+                return await self._broadcast(content, summary, coordination_meta)
+            return await self._send(to, content, summary, coordination_meta)
         return ToolOutput(
             success=False,
             error="'to' must be a string or an array of strings",
@@ -370,7 +422,13 @@ class ReportToLeaderTool(_SendMessageBase):
             },
         )
 
-    async def _dispatch(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+    async def _dispatch(
+        self,
+        to_raw: Any,
+        content: str,
+        summary: str,
+        coordination_meta: dict[str, str] | None,
+    ) -> ToolOutput:
         """Resolve the role word and deliver; reject anything else.
 
         The enum already tells the host LLM what is reachable. This check is
@@ -381,7 +439,12 @@ class ReportToLeaderTool(_SendMessageBase):
             return ToolOutput(success=False, error="'to' must be a string")
         to = to_raw.strip()
         if to == USER_PSEUDO_MEMBER_NAME:
-            return await self._send(USER_PSEUDO_MEMBER_NAME, content, summary)
+            return await self._send(
+                USER_PSEUDO_MEMBER_NAME,
+                content,
+                summary,
+                coordination_meta,
+            )
         if to == LEADER_ROLE_RECIPIENT:
             leader = (await self._team.resolve_leader_member_name()).strip() if self._team else ""
             if not leader:
@@ -389,7 +452,7 @@ class ReportToLeaderTool(_SendMessageBase):
                     success=False,
                     error="cannot resolve the team leader to deliver to; the team has no leader on record",
                 )
-            return await self._send(leader, content, summary)
+            return await self._send(leader, content, summary, coordination_meta)
         return ToolOutput(
             success=False,
             error=(

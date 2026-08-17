@@ -366,6 +366,12 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
+    "send_message.final_report": (
+        "Set true only for the final debate report using the Leader's actual member_name "
+        "from the roster as a string recipient; do not treat 'leader' as a role alias "
+        "(it is valid only when it is the actual member_name), and do not use an array or "
+        "broadcast; keep false for ordinary messages"
+    ),
     "send_message.error_leader_to_user": (
         "Leader cannot send_message to 'user'. Reply to the user directly in your assistant output instead."
     ),

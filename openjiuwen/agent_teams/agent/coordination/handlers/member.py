@@ -14,7 +14,7 @@ only.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.coordination.event_bus import CoordinationEvent, InnerEventType
@@ -23,7 +23,7 @@ from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
-from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 
@@ -168,6 +168,18 @@ class MemberHandler(BaseCoordinationHandler):
         payload = event.payload
         target_id = payload.get("member_name", "")
         event_type = event.event_type
+        debate_state = getattr(self._infra.team_backend, "debate_state", None)
+        if debate_state is not None and target_id:
+            member_failed = (
+                event_type == TeamEvent.MEMBER_STATUS_CHANGED
+                and payload.get("new_status") == MemberStatus.ERROR.value
+            )
+            execution_failed = (
+                event_type == TeamEvent.MEMBER_EXECUTION_CHANGED
+                and payload.get("new_status") == ExecutionStatus.FAILED.value
+            )
+            if member_failed or execution_failed:
+                await debate_state.mark_failed(target_id)
         if event_type == TeamEvent.MEMBER_SPAWNED:
             text = t("dispatcher.member_online", target_id=target_id)
         elif event_type == TeamEvent.MEMBER_RESTARTED:

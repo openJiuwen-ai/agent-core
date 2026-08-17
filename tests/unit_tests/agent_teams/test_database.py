@@ -4,7 +4,9 @@
 """Unit tests for TeamDatabase module"""
 
 import asyncio
+import concurrent.futures
 import json
+import threading
 import warnings
 
 import pytest
@@ -317,6 +319,115 @@ class TestTeamDatabaseInit:
             assert "meta" in columns
             assert row["meta"] is None
             assert row["content"] == "hello"
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
+    def test_message_migration_adds_coordination_meta_column(self):
+        """Legacy messages gain a separate nullable coordination column."""
+        from openjiuwen.agent_teams.tools.database.engine import (
+            _ensure_message_coordination_meta_column,
+        )
+
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_message_predebate (
+                        message_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        from_member_name TEXT NOT NULL,
+                        to_member_name TEXT,
+                        content TEXT NOT NULL,
+                        timestamp BIGINT NOT NULL,
+                        broadcast BOOLEAN NOT NULL,
+                        protocol TEXT NOT NULL DEFAULT 'plain',
+                        is_read BOOLEAN,
+                        meta TEXT
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_message_predebate "
+                    "(message_id, team_name, from_member_name, content, timestamp, broadcast) "
+                    "VALUES ('m1', 'team', 'leader', 'hello', 1, 0)"
+                )
+
+                _ensure_message_coordination_meta_column(conn)
+
+                columns = {
+                    col["name"]
+                    for col in inspect(conn).get_columns("team_message_predebate")
+                }
+                row = conn.exec_driver_sql(
+                    "SELECT meta, coordination_meta FROM team_message_predebate"
+                ).mappings().one()
+
+            assert "coordination_meta" in columns
+            assert row["coordination_meta"] is None
+            assert row["meta"] is None
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
+    def test_message_coordination_meta_migration_is_concurrent_safe(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Concurrent legacy-table upgrades both complete successfully."""
+        from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+        database_path = tmp_path / "team.db"
+        engine = create_engine(f"sqlite:///{database_path}")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "CREATE TABLE team_message_concurrent (message_id TEXT PRIMARY KEY)"
+            )
+
+        barrier = threading.Barrier(2)
+        local = threading.local()
+        original_inspect = engine_module.inspect
+
+        class _BarrierInspector:
+            def __init__(self, inspector):
+                self._inspector = inspector
+
+            def get_table_names(self):
+                return self._inspector.get_table_names()
+
+            def get_columns(self, table_name):
+                columns = self._inspector.get_columns(table_name)
+                calls = getattr(local, "calls", 0)
+                local.calls = calls + 1
+                if calls == 0:
+                    barrier.wait(timeout=5)
+                return columns
+
+        monkeypatch.setattr(
+            engine_module,
+            "inspect",
+            lambda conn: _BarrierInspector(original_inspect(conn)),
+        )
+
+        def migrate():
+            with engine.begin() as conn:
+                engine_module._ensure_message_coordination_meta_column(conn)
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(migrate) for _ in range(2)]
+                for future in futures:
+                    future.result(timeout=10)
+
+            columns = {
+                column["name"]
+                for column in original_inspect(engine).get_columns(
+                    "team_message_concurrent"
+                )
+            }
+            assert "coordination_meta" in columns
         finally:
             engine.dispose()
 
