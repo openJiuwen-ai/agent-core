@@ -543,6 +543,31 @@ class SwarmflowTool(AsyncTool):
                 )
             )
             raise asyncio.CancelledError() from exc
+        except asyncio.CancelledError:
+            # The controller's pause/stop third step cancels the top-level task
+            # (``async_tool_runtime.cancel``), so when the in-flight agent is
+            # mid-LLM-call and never reaches an abort checkpoint the engine
+            # raises CancelledError instead of WorkflowAborted. Emit the same
+            # status event from the AbortSignal reason so the Monitor still flips
+            # the card. External (non-controller) cancels leave the signal unset
+            # and stay silent — the bare ``raise`` re-raises unchanged.
+            if abort_event.is_set():
+                if abort_event.reason == "stop":
+                    _publish(
+                        WorkflowProgressEvent(
+                            kind=ProgressKind.WORKFLOW_STOPPED,
+                            message="workflow stopped",
+                        )
+                    )
+                    raise BackendError(self._format_stopped(run_id=run_id))
+                # pause (default reason): silent cancel, controller relaunches on resume.
+                _publish(
+                    WorkflowProgressEvent(
+                        kind=ProgressKind.WORKFLOW_PAUSED,
+                        message="workflow paused",
+                    )
+                )
+            raise
         finally:
             if controller is not None:
                 controller.deregister(run_id)
