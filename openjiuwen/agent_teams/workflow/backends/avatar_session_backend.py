@@ -863,23 +863,53 @@ class AvatarSessionManager:
     async def _classify_intent(self, raw: str, prompt: str) -> dict | None:
         """One-shot TinyAgent classification: is this reply 'edit & rerun' or 'continue'?
 
-        Reuses the leader's own model via the manager's model_resolver (same precedent
-        as SwarmflowTool's ``model = self._parent_agent.model``). Ephemeral: async with
-        auto-dispose. Returns None on any failure (degrades to existing formatting path).
+        Reuses the leader's own model. Two resolution paths, first match wins:
+        ``leader_model_name`` + ``model_resolver`` (name → ``TeamModelConfig``), or
+        the ``worker_base_spec.model`` already resolved on the base spec (the path
+        ``TeamWorkerBackend._sessions()`` actually takes — it never threads a name
+        through). Ephemeral: async with auto-dispose. Returns None on any failure
+        (degrades to existing formatting path).
         """
-        from openjiuwen.agent_teams.tiny_agent import create_tiny_agent
+        from openjiuwen.agent_teams.tiny_agent import TinyAgent, create_tiny_agent
+        from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+        from openjiuwen.harness.prompts import PromptMode
+
         model_name = self._leader_model_name
-        if not model_name or self._model_resolver is None:
-            return None
         try:
-            async with create_tiny_agent(
+            if model_name and self._model_resolver is not None:
+                async with create_tiny_agent(
+                    system_prompt=_INTENT_CLASSIFY_PROMPT,
+                    model_name=model_name,
+                    model_resolver=self._model_resolver,
+                    default_schema=_INTENT_SCHEMA,
+                    language=self._language,
+                    max_iterations=3,
+                ) as classifier:
+                    return await classifier.run(
+                        f"问题:{prompt}\n\n回复:{raw}",
+                        schema=_INTENT_SCHEMA,
+                    )
+            base_model = self._worker_base_spec.model if self._worker_base_spec else None
+            if base_model is None:
+                return None
+            # Build a TinyAgent straight from the already-resolved TeamModelConfig,
+            # skipping the name → resolver hop entirely.
+            spec = DeepAgentSpec(
+                card=AgentCard(id="intent-classifier", name="intent-classifier", description="tiny agent"),
                 system_prompt=_INTENT_CLASSIFY_PROMPT,
-                model_name=model_name,
-                model_resolver=self._model_resolver,
-                default_schema=_INTENT_SCHEMA,
-                language=self._language,
+                model=base_model,
+                tools=None,
+                auto_create_workspace=False,
                 max_iterations=3,
-            ) as classifier:
+                enable_security_rail=False,
+                language=self._language,
+                enable_read_image_multimodal=False,
+                prompt_mode=PromptMode.NONE.value,
+                enable_sys_operation=False,
+            )
+            classifier = TinyAgent(spec, default_schema=_INTENT_SCHEMA, language=self._language)
+            async with classifier:
                 return await classifier.run(
                     f"问题:{prompt}\n\n回复:{raw}",
                     schema=_INTENT_SCHEMA,
