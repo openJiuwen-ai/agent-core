@@ -20,7 +20,13 @@ from openjiuwen.harness.subagent_runtime.errors import (
     raise_subagent_not_found,
 )
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
-from openjiuwen.harness.subagent_runtime.models import SubagentActivity, SubagentStatus
+from openjiuwen.harness.subagent_runtime.models import (
+    SubagentActivity,
+    SubagentMessage,
+    SubagentStatus,
+    UserInputOp,
+)
+from openjiuwen.harness.subagent_runtime.transcript import TranscriptProjector
 
 
 async def _close_session_quietly(session: Any) -> None:
@@ -46,14 +52,17 @@ class SubagentSessionManager:
         *,
         status_change_handler: Callable[[str, SubagentStatus], Awaitable[None]] | None = None,
         activity_handler: Callable[[SubagentActivity], None] | None = None,
+        transcript_handler: Callable[[SubagentMessage], Awaitable[None]] | None = None,
     ) -> None:
         self._parent_agent = parent_agent
         self._config = config
         self._running_semaphore = running_semaphore
         self._status_change_handler = status_change_handler
         self._activity_handler = activity_handler
+        self._transcript_handler = transcript_handler
         self._instances: dict[str, SubagentInstance] = {}
         self._projectors: dict[str, ActivityProjector] = {}
+        self._transcript_projectors: dict[str, TranscriptProjector] = {}
 
     def _build_turn_hooks(
         self,
@@ -125,18 +134,38 @@ class SubagentSessionManager:
 
         projector = ActivityProjector(subagent_id=subagent_id, config=self._config)
         self._projectors[subagent_id] = projector
+        transcript_projector = TranscriptProjector(
+            subagent_id=subagent_id,
+            parent_session_id=parent_session_id,
+        )
+        self._transcript_projectors[subagent_id] = transcript_projector
         instance_holder: dict[str, SubagentInstance] = {}
 
-        async def on_chunk(chunk: Any) -> None:
-            if self._activity_handler is None:
+        async def on_turn_stream_start(op: UserInputOp) -> None:
+            if self._transcript_handler is None:
                 return
+            message = transcript_projector.begin_turn(op.task_id, op.query)
+            await self._transcript_handler(message)
+
+        async def on_turn_stream_end(op: UserInputOp, aggregator: Any) -> None:
+            if self._transcript_handler is None:
+                return
+            message = transcript_projector.end_turn(op.task_id, aggregator)
+            await self._transcript_handler(message)
+
+        async def on_chunk(chunk: Any) -> None:
             instance = instance_holder.get("instance")
             if instance is None:
                 return
             task_id = instance.current_task_id or ""
-            activity = projector.project(chunk, task_id=task_id)
-            if activity is not None:
-                self._activity_handler(activity)
+            if self._activity_handler is not None:
+                activity = projector.project(chunk, task_id=task_id)
+                if activity is not None:
+                    self._activity_handler(activity)
+            if self._transcript_handler is not None:
+                message = transcript_projector.project(chunk, task_id=task_id)
+                if message is not None:
+                    await self._transcript_handler(message)
 
         try:
             instance = SubagentInstance(
@@ -153,7 +182,11 @@ class SubagentSessionManager:
                 on_turn_start=on_turn_start,
                 on_turn_finished=on_turn_finished,
                 on_status_changed=on_status_changed,
-                on_chunk=on_chunk if self._activity_handler is not None else None,
+                on_chunk=on_chunk if (
+                    self._activity_handler is not None or self._transcript_handler is not None
+                ) else None,
+                on_turn_stream_start=on_turn_stream_start if self._transcript_handler else None,
+                on_turn_stream_end=on_turn_stream_end if self._transcript_handler else None,
             )
             instance_holder["instance"] = instance
             await instance.start_worker()
@@ -182,6 +215,7 @@ class SubagentSessionManager:
         if instance is None:
             return None
         self._projectors.pop(subagent_id, None)
+        self._transcript_projectors.pop(subagent_id, None)
         await instance.shutdown(reason)
         return instance
 

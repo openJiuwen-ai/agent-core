@@ -77,11 +77,12 @@ class ActivityProjector:
         if task_id and task_id != self._current_task_id:
             self.reset_for_turn(task_id)
 
-        if self._truncated:
+        chunk_type, payload = _parse_chunk(chunk)
+        if self._truncated and chunk_type == "llm_reasoning":
             return None
 
         max_per_turn = self._config.activity_queue_size
-        if self._turn_count >= max_per_turn:
+        if not self._truncated and self._turn_count >= max_per_turn:
             self._truncated = True
             return self._make(
                 kind="truncated",
@@ -90,7 +91,6 @@ class ActivityProjector:
                 dropped=self._turn_count - max_per_turn + 1,
             )
 
-        chunk_type, payload = _parse_chunk(chunk)
         if chunk_type == "tool_call":
             return self._emit(self._project_tool_call(payload, task_id))
         if chunk_type == "tool_result":

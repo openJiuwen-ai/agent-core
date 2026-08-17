@@ -502,6 +502,7 @@ async def test_worker_terminal_emits_without_wait() -> None:
             payloads = [
                 call.args[0].payload["subagent_updated"]
                 for call in session.write_stream.await_args_list
+                if "subagent_updated" in call.args[0].payload
             ]
             terminal_payloads = [
                 item for item in payloads if item.get("status") in ("idle", "closed")

@@ -116,7 +116,7 @@ def test_turn_limit_emits_truncated_once() -> None:
     assert first is not None and first.kind == "tool_call"
     assert second is not None and second.kind == "tool_call"
     assert third is not None and third.kind == "truncated"
-    assert fourth is None
+    assert fourth is not None and fourth.kind == "tool_call"
 
 
 def test_new_task_id_resets_turn_state() -> None:

@@ -17,8 +17,9 @@ class SubagentRuntimeConfig:
     enable_lru_eviction: bool = True
     enable_activity_stream: bool = True
     activity_queue_size: int = 256
-    activity_text_max_len: int = 200
+    activity_text_max_len: int = 2000
     activity_throttle_ms: float = 500.0
+    enable_transcript_stream: bool = True
 
 
 # Align with turn_timeout_s (600s): parent wait should cover a full subagent turn.

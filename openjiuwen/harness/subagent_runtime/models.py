@@ -297,6 +297,69 @@ class SubagentActivity:
 
 
 @dataclass(frozen=True)
+class SubagentMessage:
+    """Full-fidelity subagent transcript event for durable history."""
+
+    subagent_id: str
+    parent_session_id: str
+    task_id: str
+    seq: int
+    role: str
+    event_type: str
+    content: str
+    reasoning_content: str | None = None
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+    success: bool | None = None
+    extra: dict[str, Any] | None = None
+    at_ms: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "subagent_id": self.subagent_id,
+            "parent_session_id": self.parent_session_id,
+            "task_id": self.task_id,
+            "seq": self.seq,
+            "role": self.role,
+            "event_type": self.event_type,
+            "content": self.content,
+            "at_ms": self.at_ms,
+        }
+        if self.reasoning_content:
+            payload["reasoning_content"] = self.reasoning_content
+        if self.tool_name is not None:
+            payload["tool_name"] = self.tool_name
+        if self.tool_call_id is not None:
+            payload["tool_call_id"] = self.tool_call_id
+        if self.success is not None:
+            payload["success"] = self.success
+        if isinstance(self.extra, dict) and self.extra:
+            payload["extra"] = self.extra
+        return payload
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> SubagentMessage:
+        success_raw = raw.get("success")
+        success = success_raw if isinstance(success_raw, bool) else None
+        extra = raw.get("extra")
+        return cls(
+            subagent_id=str(raw.get("subagent_id") or ""),
+            parent_session_id=str(raw.get("parent_session_id") or ""),
+            task_id=str(raw.get("task_id") or ""),
+            seq=int(raw.get("seq") or 0),
+            role=str(raw.get("role") or "assistant"),
+            event_type=str(raw.get("event_type") or ""),
+            content=str(raw.get("content") or ""),
+            reasoning_content=_optional_str(raw.get("reasoning_content")),
+            tool_name=_optional_str(raw.get("tool_name")),
+            tool_call_id=_optional_str(raw.get("tool_call_id")),
+            success=success,
+            extra=extra if isinstance(extra, dict) else None,
+            at_ms=float(raw.get("at_ms") or 0.0),
+        )
+
+
+@dataclass(frozen=True)
 class SubagentSnapshot:
     """Read-only parent-session view of subagents and qa history."""
 

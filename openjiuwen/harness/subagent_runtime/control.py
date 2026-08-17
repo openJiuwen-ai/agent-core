@@ -24,6 +24,7 @@ from openjiuwen.harness.subagent_runtime.errors import build_subagent_runtime_er
 from openjiuwen.harness.subagent_runtime.ids import build_subagent_id, new_task_id
 from openjiuwen.harness.subagent_runtime.models import (
     SubagentActivity,
+    SubagentMessage,
     SubagentTurn,
     ResumeResult,
     SpawnResult,
@@ -59,6 +60,7 @@ from openjiuwen.harness.subagent_runtime.status_events import (
     map_status_to_view,
     resolve_turn_outcome,
 )
+from openjiuwen.harness.subagent_runtime.transcript_events import TranscriptEmitter
 
 _TASK_DESCRIPTION_MAX_LEN = 2000
 
@@ -129,15 +131,21 @@ class SubagentControl:
         self._pending_activities: dict[tuple[str, str], list[SubagentActivity]] = {}
         self._hydrated = False
         self._activity_emitter: ActivityEmitter | None = None
+        self._transcript_emitter: TranscriptEmitter | None = None
         if self._config.enable_activity_stream and self._parent_session is not None:
             self._activity_emitter = ActivityEmitter(self._parent_session, config=self._config)
             self._activity_emitter.start()
+        if self._config.enable_transcript_stream and self._parent_session is not None:
+            self._transcript_emitter = TranscriptEmitter(self._parent_session, config=self._config)
         self._manager = SubagentSessionManager(
             parent_agent,
             self._config,
             self._semaphore,
             status_change_handler=self._handle_instance_status_changed,
             activity_handler=self._handle_activity if self._config.enable_activity_stream else None,
+            transcript_handler=(
+                self._handle_transcript_message if self._config.enable_transcript_stream else None
+            ),
         )
 
     async def spawn(
@@ -815,6 +823,10 @@ class SubagentControl:
         bucket.append(activity)
         self._activity_seq[sid] = max(self._activity_seq.get(sid, 0), activity.seq)
 
+    async def _handle_transcript_message(self, message: SubagentMessage) -> None:
+        if self._transcript_emitter is not None:
+            await self._transcript_emitter.emit(message)
+
     def _latest_answered_turn(self, subagent_id: str) -> SubagentTurn | None:
         turns = self._turns.get(subagent_id) or []
         for turn in reversed(turns):
@@ -991,6 +1003,7 @@ class SubagentControl:
             self._touch_metadata_timestamps(metadata, status=status)
             self._append_turn(subagent_id, metadata, instance, status)
         await self.emit_status_update(subagent_id)
+        self.flush()
 
     def _resolve_final(
         self,

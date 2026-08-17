@@ -57,6 +57,8 @@ class SubagentInstance:
         on_turn_start: Callable[[], None] | None = None,
         on_turn_finished: Callable[[bool], Awaitable[None]] | None = None,
         on_status_changed: Callable[[SubagentStatus], Awaitable[None]] | None = None,
+        on_turn_stream_start: Callable[[UserInputOp], Awaitable[None]] | None = None,
+        on_turn_stream_end: Callable[[UserInputOp, TurnOutputAggregator], Awaitable[None]] | None = None,
     ) -> None:
         self.subagent_id = subagent_id
         self.subagent_type = subagent_type
@@ -77,6 +79,8 @@ class SubagentInstance:
         self._on_turn_start = on_turn_start
         self._on_turn_finished = on_turn_finished
         self._on_status_changed = on_status_changed
+        self._on_turn_stream_start = on_turn_stream_start
+        self._on_turn_stream_end = on_turn_stream_end
 
         self._ops: asyncio.Queue[SubagentOp] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
@@ -216,6 +220,8 @@ class SubagentInstance:
             await prepare_subagent_task_resources(self._agent)
             if self._on_turn_start is not None:
                 self._on_turn_start()
+            if self._on_turn_stream_start is not None:
+                await self._on_turn_stream_start(op)
             inputs = self._build_stream_inputs(op)
             gen = self._agent.stream(inputs, session=session)
             async with contextlib.aclosing(gen):
@@ -224,6 +230,8 @@ class SubagentInstance:
                     if self._on_chunk is not None:
                         await self._on_chunk(chunk)
             await self._settle_turn(op, aggregator)
+            if self._on_turn_stream_end is not None:
+                await self._on_turn_stream_end(op, aggregator)
             succeeded = (
                 not aggregator.is_error()
                 and self.status.current().kind is SubagentStatusKind.COMPLETED

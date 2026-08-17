@@ -12,6 +12,7 @@ class TurnOutputAggregator:
 
     def __init__(self) -> None:
         self._parts: list[str] = []
+        self._reasoning_parts: list[str] = []
         self._answer: str | None = None
         self._result_type: str | None = None
 
@@ -30,6 +31,12 @@ class TurnOutputAggregator:
                 self._parts.append(content)
             return
 
+        if chunk_type == "llm_reasoning":
+            content = payload.get("content")
+            if isinstance(content, str):
+                self._reasoning_parts.append(content)
+            return
+
         if chunk_type == "answer":
             self._result_type = payload.get("result_type") or self._result_type
             output = payload.get("output")
@@ -44,6 +51,9 @@ class TurnOutputAggregator:
         if self._answer is not None:
             return self._answer
         return "".join(self._parts)
+
+    def reasoning_text(self) -> str:
+        return "".join(self._reasoning_parts)
 
     def is_error(self) -> bool:
         return self._result_type == "error"
