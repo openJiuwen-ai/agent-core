@@ -46,6 +46,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.core.session.tracer.span import TraceAgentSpan
+from openjiuwen.core.common.background_tasks import BackgroundTask
 from openjiuwen.harness.rails.evolution.contracts import EvolutionSnapshot
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
@@ -1528,8 +1529,60 @@ class TestEvolutionRailAsyncMode(IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(events), 1)
 
     async def test_cleanup_background_tasks(self):
-        """cleanup_background_tasks clears the task set."""
+        """cleanup_background_tasks drops completed tasks from the registry."""
         rail = EvolutionRail(trajectory_store=self.store)
         rail._bg_tasks = set()
         await rail.cleanup_background_tasks()
         self.assertEqual(len(rail._bg_tasks), 0)
+
+    async def test_cleanup_background_tasks_waits_without_cancelling(self):
+        """Terminal cleanup must let post-terminal work finish instead of killing it."""
+        cancelled = False
+
+        async def slow_work():
+            nonlocal cancelled
+            try:
+                await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+
+        rail = EvolutionRail(trajectory_store=self.store)
+        bg_task = BackgroundTask.from_asyncio_task(
+            asyncio.create_task(slow_work()),
+            group="evolution",
+        )
+        rail._bg_tasks = {bg_task}
+
+        await rail.cleanup_background_tasks()
+
+        self.assertFalse(cancelled)
+        self.assertTrue(bg_task.done())
+        self.assertEqual(len(rail._bg_tasks), 0)
+
+    async def test_cleanup_background_tasks_timeout_does_not_cancel(self):
+        """A wait timeout must not abort the background evolution task."""
+        cancelled = False
+
+        async def hang():
+            nonlocal cancelled
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+
+        rail = EvolutionRail(trajectory_store=self.store)
+        bg_task = BackgroundTask.from_asyncio_task(
+            asyncio.create_task(hang()),
+            group="evolution",
+        )
+        rail._bg_tasks = {bg_task}
+
+        try:
+            await rail.cleanup_background_tasks(timeout=0.05)
+            self.assertFalse(cancelled)
+            self.assertFalse(bg_task.done())
+            self.assertIn(bg_task, rail._bg_tasks)
+        finally:
+            await bg_task.cancel(reason="test_teardown")

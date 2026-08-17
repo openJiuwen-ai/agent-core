@@ -1076,25 +1076,25 @@ class EvolutionRail(DeepAgentRail):
             )
         )
 
-    async def cleanup_background_tasks(self) -> None:
-        """Wait for background evolution tasks, then clear the registry.
+    async def cleanup_background_tasks(self, timeout: Optional[float] = None) -> None:
+        """Wait for background evolution tasks, then drop completed ones.
 
-        Host watchers call this when they see terminal progress (cancelled/noop/done).
-        Rails may still be finishing evaluate at that moment, so prefer waiting over
-        immediate cancel. Only force-cancel after a wait timeout.
+        Host watchers call this after seeing terminal host events. Rails may
+        still be finishing post-terminal work (for example share upload after
+        ``auto_approved``), so this method waits and never force-cancels.
+        Use ``cancel_pending_evolution`` for idle-timeout abort or teardown.
+
+        Args:
+            timeout: Maximum seconds to wait. ``None`` uses
+                ``_get_evolution_total_timeout_secs()`` when the rail defines
+                one; otherwise waits until all tasks finish. Timed-out tasks
+                stay registered so a later cancel/wait can still observe them.
         """
-        pending = [task for task in self._bg_tasks if not task.done()]
-        self._bg_tasks.clear()
-        for task in pending:
-            try:
-                await asyncio.wait_for(task.wait(), timeout=120.0)
-            except TimeoutError:
-                logger.warning(
-                    "[EvolutionRail] background task still running after wait timeout; cancelling"
-                )
-                await task.cancel(reason="evolution_rail_wait_timeout")
-            except Exception as exc:
-                logger.warning("[EvolutionRail] background task wait failed: %s", exc)
+        wait_timeout = timeout
+        if wait_timeout is None:
+            wait_timeout = self._get_evolution_total_timeout_secs()
+        await self.wait_for_pending_evolution(timeout=wait_timeout)
+        self._bg_tasks = {task for task in self._bg_tasks if not task.done()}
 
     @property
     def has_pending_evolution(self) -> bool:
@@ -1102,21 +1102,24 @@ class EvolutionRail(DeepAgentRail):
         return any(not task.done() for task in self._bg_tasks)
 
     async def wait_for_pending_evolution(self, timeout: Optional[float] = None) -> None:
-        """Await outstanding background evolution tasks (compat with PR #2012 API)."""
+        """Await outstanding background evolution tasks (compat with PR #2012 API).
+
+        A timeout only stops waiting; it does not cancel the evolution tasks.
+        Use ``cancel_pending_evolution`` when the host is aborting.
+        """
         pending = [task for task in self._bg_tasks if not task.done()]
         if not pending:
             return
-        gather_coro = asyncio.gather(*(task.wait() for task in pending), return_exceptions=True)
-        if timeout is None:
-            await gather_coro
-            return
-        try:
-            await asyncio.wait_for(gather_coro, timeout=timeout)
-        except TimeoutError:
+        waiters = [asyncio.ensure_future(asyncio.shield(task.wait())) for task in pending]
+        _done, not_done = await asyncio.wait(waiters, timeout=timeout)
+        if timeout is not None and not_done:
             logger.warning(
                 "[EvolutionRail] wait_for_pending_evolution timed out after %.1fs",
                 timeout,
             )
+            for waiter in not_done:
+                waiter.cancel()
+            await asyncio.gather(*not_done, return_exceptions=True)
 
     async def cancel_pending_evolution(self, timeout: Optional[float] = None) -> None:
         """Cancel and await outstanding background evolution tasks.
