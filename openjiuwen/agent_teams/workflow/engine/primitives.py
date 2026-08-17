@@ -203,19 +203,29 @@ def _check_abort(rt) -> None:
 
 
 def _check_budget(rt) -> None:
-    """Raise ``BudgetExhausted`` when the run has burned its token ceiling.
+    """Raise ``BudgetExhausted`` when either ledger has hit its ceiling.
 
-    The run's hard ceiling, checked once per ``agent()`` / session ``send()``,
-    at the entry gate only: a call already paid for must reach its journal
-    record, or a resume would rerun (and re-pay for) it.
+    Two ceilings, checked once per ``agent()`` / session ``send()``, at the
+    entry gate only: a call already paid for must reach its journal record, or
+    a resume would rerun (and re-pay for) it.
+
+    Order-sensitive: the per-run (workflow) ceiling is checked first, so a run
+    out of its own workflow budget is never let through just because the shared
+    session budget still has headroom.
 
     This gate alone cannot hold the line — one agent's own loop can burn the
     whole budget long before it returns here. It is the backend's rails that
     stop an agent mid-loop; this stops the *next* one from starting.
     """
+    if rt.workflow_budget.exhausted:
+        raise BudgetExhausted(
+            f"workflow token budget exhausted: {rt.workflow_budget.spent}/{rt.workflow_budget.total}",
+            scope="workflow", spent=rt.workflow_budget.spent, total=rt.workflow_budget.total,
+        )
     if rt.budget.exhausted:
         raise BudgetExhausted(
-            f"token budget exhausted: {rt.budget.spent}/{rt.budget.total}"
+            f"session token budget exhausted: {rt.budget.spent}/{rt.budget.total}",
+            scope="session", spent=rt.budget.spent, total=rt.budget.total,
         )
 
 
@@ -253,15 +263,36 @@ def _deepest_branch_i(path: tuple) -> int | None:
     return i
 
 
-def _budget_snapshot(ledger) -> dict:
-    """Freeze a ``BudgetLedger`` into the wire shape ``{total, spent, remaining, scope, exhausted}``."""
+def _budget_snapshot(ledger, scope: str = "session") -> dict:
+    """Freeze a ``BudgetLedger`` into the wire shape ``{total, spent, remaining, scope, exhausted}``.
+
+    ``scope`` is ``"session"`` for the team-wide ledger (``rt.budget``) or
+    ``"workflow"`` for the per-run ledger (``rt.workflow_budget``). Kept as a
+    parameter so emit sites can tag which ledger a snapshot came from; the
+    snapshot is a point-in-time observation under concurrency, not a strong
+    consistency guarantee.
+    """
     return {
         "total": ledger.total,
         "spent": ledger.spent,
         "remaining": ledger.remaining(),
-        "scope": "leader",
+        "scope": scope,
         "exhausted": ledger.exhausted,
     }
+
+
+def _wf_budget_snapshot(rt) -> dict | None:
+    """Snapshot the per-run ledger, or ``None`` when it has no ceiling set.
+
+    A script that does not declare ``workflow_token_limit`` gets an unbounded
+    per-run ledger (``total=None``), for which a snapshot carries no useful
+    ``spent/total`` ceiling — the frontend then falls back to the raw per-run
+    ``token_count`` display.
+    """
+    wb = rt.workflow_budget
+    if wb.total is None:
+        return None
+    return _budget_snapshot(wb, scope="workflow")
 
 
 def _resolved_nested_phase(explicit: str | None = None) -> str | None:
@@ -327,6 +358,7 @@ def _emit_agent_completed(
             agent_id=agent_id,
             tokens=tokens,
             budget=budget_snapshot,
+            workflow_budget=_wf_budget_snapshot(rt),
             nested_phase=_resolved_nested_phase(nested_phase),
         )
     )
@@ -346,6 +378,7 @@ def _emit_agent_failed(
             agent_id=agent_id,
             tokens=tokens,
             budget=budget_snapshot,
+            workflow_budget=_wf_budget_snapshot(rt),
             nested_phase=_resolved_nested_phase(nested_phase),
         )
     )

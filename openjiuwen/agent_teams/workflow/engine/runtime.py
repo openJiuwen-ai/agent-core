@@ -43,9 +43,17 @@ class Runtime:
     strict: bool = False
     spawn_limit: int = 1000
     budget: BudgetLedger = field(default_factory=BudgetLedger)
-    """The run's token ledger, shared by reference with the backend (which
-    reports real usage into it). Default: an unbounded ledger. The engine only
-    reads it — at the ``agent()`` / ``send()`` budget gates and via ``budget.*``."""
+    """The **session-wide** (team/leader) token ledger, shared by reference with
+    the backend (which reports real usage into it). Monotonic across runs — never
+    resets. Default: an unbounded ledger. The engine only reads it — at the
+    ``agent()`` / ``send()`` budget gates and via ``budget.*``."""
+    workflow_budget: BudgetLedger = field(default_factory=BudgetLedger)
+    """The **per-run** token ledger, shared by reference with the backend like
+    ``budget`` but reset to ``spent=0`` on each new ``swarmflow`` invocation.
+    Its ``total`` is the script-declared ``workflow_token_limit`` (a per-run
+    ceiling independent of the session budget). The engine reads it at the
+    per-run ``_check_budget`` gate (``scope="workflow"``). Hitting it is
+    retryable by revising the workflow, unlike the session ceiling."""
     cap_override: int | None = None  # force the concurrency cap (tests)
     abort_event: asyncio.Event | None = field(default=None, repr=False)
     """External cooperative pause signal. When set, the ``agent()`` /
