@@ -261,6 +261,18 @@ async def build_cli_runtime(
         else:
             base_env = {}
         env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
+        team_logger.info(
+            "[external-cli] preparing claude member {} cwd={} cli_path_configured={} inject_mcp={} "
+            "mcp_server_name={} mcp_server_command={} team_join_env_present={} ssh_transport_configured={}",
+            ctx.member_name,
+            cwd,
+            cli_path is not None,
+            inject_mcp,
+            mcp_server_name,
+            mcp_server_command,
+            "OPENJIUWEN_TEAM_JOIN" in env,
+            ssh_transport is not None,
+        )
         return build_claude_runtime(
             member_name=ctx.member_name or "",
             cwd=cwd,
@@ -290,6 +302,18 @@ async def build_cli_runtime(
                 reason="ssh transport is not yet supported for Codex SDK members",
             )
         env = {**dict(os.environ), **(extra_env or {}), **descriptor.to_env()}
+        team_logger.info(
+            "[external-cli] preparing codex member {} cwd={} cli_path_configured={} codex_bin_configured={} "
+            "inject_mcp={} mcp_server_name={} mcp_server_command={} team_join_env_present={}",
+            ctx.member_name,
+            cwd,
+            cli_path is not None,
+            codex_bin is not None,
+            inject_mcp,
+            mcp_server_name,
+            mcp_server_command,
+            "OPENJIUWEN_TEAM_JOIN" in env,
+        )
         if add_dirs:
             team_logger.debug(
                 "[external-cli] codex member {} uses cwd {}; extra add_dirs are not supported by the Codex SDK",
