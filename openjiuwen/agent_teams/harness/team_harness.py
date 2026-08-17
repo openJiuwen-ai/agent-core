@@ -497,6 +497,38 @@ class TeamHarness:
             self._native.background_task_controller = controller
 
     # ------------------------------------------------------------------
+    # Runtime model switch
+    # ------------------------------------------------------------------
+
+    def apply_model_config(self, model_config: "TeamModelConfig") -> None:
+        """Apply a new model configuration for current and future run cycles.
+
+        Updates both the stored DeepAgentSpec (survives start/stop rebuild)
+        and the live NativeHarness (immediate effect on next LLM call).
+        """
+        self._agent_spec.model = model_config
+        if self._native is not None:
+            deep_config = self._native.deep_config
+            if deep_config is not None:
+                # DeepAgentConfig is a @dataclass (not Pydantic BaseModel), so no
+                # model_copy; use dataclasses.replace. model_config is a
+                # TeamModelConfig spec — build() materializes a live Model instance
+                # matching DeepAgentConfig.model: Optional[Model].
+                import dataclasses
+                try:
+                    built_model = model_config.build()
+                except Exception:
+                    built_model = None
+                updated = dataclasses.replace(deep_config, model=built_model)
+                self._native.configure(updated)
+        logger.info(
+            "[TeamHarness] model config applied: member=%s model_name=%s",
+            self._member_name,
+            model_config.model_request_config.model_name
+            if model_config.model_request_config else None,
+        )
+
+    # ------------------------------------------------------------------
     # Internal access
     # ------------------------------------------------------------------
 
