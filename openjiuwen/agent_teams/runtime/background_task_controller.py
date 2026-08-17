@@ -47,8 +47,11 @@ class BackgroundTaskController:
         self._active[handle.run_id] = handle
 
     def deregister(self, run_id: str) -> None:
+        # Only drop the active handle. A paused run lives in _paused awaiting
+        # resume; deregister (called from run_background's finally on unwind)
+        # must NOT clear it, or resume(run_id) would report not_found and the
+        # leader would start a fresh run instead of resuming the paused prefix.
         self._active.pop(run_id, None)
-        self._paused.pop(run_id, None)
 
     async def _abort_one(self, h: SwarmflowRunHandle, reason: str) -> None:
         h.abort_event.set(reason)
