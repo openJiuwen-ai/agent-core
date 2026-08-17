@@ -119,3 +119,45 @@ async def test_classify_intent_real_invocation_returns_structured_dict():
     ):
         result = await mgr._classify_intent("改脚本", "问")
     assert result == {"intent": "edit_rerun", "edit_instructions": "改 X"}
+
+
+@pytest.mark.asyncio
+async def test_classify_intent_via_worker_base_spec_model_not_none():
+    """Regression: the real TeamWorkerBackend._sessions() path has no leader_model_name
+    (it is never threaded through), so _classify_intent must fall back to
+    worker_base_spec.model instead of early-returning None.
+
+    Before the fix, leader_model_name was always None on this path, so intent
+    classification was silently skipped for every human reply. This test constructs
+    AvatarSessionManager exactly the way _sessions() does (worker_base_spec with a
+    resolved model, no leader_model_name) and asserts _classify_intent actually runs.
+    """
+    from openjiuwen.agent_teams.schema.deep_agent_spec import (
+        DeepAgentSpec,
+        TeamModelConfig,
+    )
+    from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+
+    model_config = TeamModelConfig(
+        model_client_config=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="http://test",
+            verify_ssl=False,
+        ),
+        model_request_config=ModelRequestConfig(model_name="test-model"),
+    )
+    base_spec = DeepAgentSpec(model=model_config, tools=[])
+    # Simulate the real TeamWorkerBackend._sessions() path: no leader_model_name.
+    mgr = AvatarSessionManager(
+        worker_base_spec=base_spec,
+        team_name="t",
+        run_id="wf_1",
+    )
+    fake = _FakeTinyAgent({"intent": "continue"})
+    with patch(
+        "openjiuwen.agent_teams.tiny_agent.TinyAgent",
+        return_value=fake,
+    ):
+        result = await mgr._classify_intent("正常回复", "问")
+    assert result == {"intent": "continue"}
