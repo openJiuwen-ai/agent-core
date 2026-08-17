@@ -500,7 +500,7 @@ def _resolve_short_references(
         except (OSError, UnicodeError) as exc:
             raise _pipeline_error("candidate Markdown could not be read for source reference resolution") from exc
 
-        def replace(match: re.Match[str]) -> str:
+        def replace(match: re.Match[str], *, current_page: Path = page) -> str:
             token = match.group(0)
             source_id = alias_targets.get(token)
             if source_id is None:
@@ -512,7 +512,7 @@ def _resolve_short_references(
             try:
                 relative_target = os.path.relpath(
                     source_path,
-                    start=(final_context_root / page.relative_to(context_root)).parent,
+                    start=(final_context_root / current_page.relative_to(context_root)).parent,
                 ).replace("\\", "/")
             except ValueError as exc:
                 raise _pipeline_error("candidate source reference cannot be made relative") from exc
