@@ -150,6 +150,85 @@ def test_run_background_pause_publishes_workflow_paused_event():
     assert paused and paused[0].payload["text"] == "workflow paused"
 
 
+def test_run_background_cancel_with_abort_pause_publishes_workflow_paused():
+    """Controller cancel path: CancelledError + abort_event(pause) -> WORKFLOW_PAUSED.
+
+    ``BackgroundTaskController._abort_one`` cancels the top-level task as its
+    third step, so when the in-flight agent is mid-LLM-call (never reaching an
+    abort checkpoint) the engine raises ``asyncio.CancelledError`` instead of
+    ``WorkflowAborted``. The abort signal is still set with the pause reason, so
+    the handler must publish the same WORKFLOW_PAUSED event the WorkflowAborted
+    branch publishes.
+    """
+    tool = _make_tool(messager=_CapturingMessager())
+
+    def _raise_cancelled(script_path, abort_event=None, **kwargs):
+        abort_event.set("pause")
+        raise asyncio.CancelledError()
+
+    with patch(
+        "openjiuwen.agent_teams.workflow.runner.run_swarmflow",
+        side_effect=_raise_cancelled,
+    ):
+        _run_abort_and_drain(
+            tool, "task-cancel-pause", _inputs("wf_1"), expect=asyncio.CancelledError
+        )
+    assert ProgressKind.WORKFLOW_PAUSED in _published_kinds(tool)
+    paused = [
+        m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_PAUSED
+    ]
+    assert paused and paused[0].payload["text"] == "workflow paused"
+
+
+def test_run_background_cancel_with_abort_stop_publishes_stopped_and_backend_error():
+    """Controller cancel path: CancelledError + abort_event(stop) -> WORKFLOW_STOPPED + BackendError.
+
+    stop is terminal, so unlike pause it must surface a BackendError carrying the
+    stopped message (so the async-tool runtime injects it into the leader),
+    matching the ``except WorkflowAborted`` stop branch.
+    """
+    tool = _make_tool(messager=_CapturingMessager())
+
+    def _raise_cancelled(script_path, abort_event=None, **kwargs):
+        abort_event.set("stop")
+        raise asyncio.CancelledError()
+
+    with patch(
+        "openjiuwen.agent_teams.workflow.runner.run_swarmflow",
+        side_effect=_raise_cancelled,
+    ):
+        _run_abort_and_drain(tool, "task-cancel-stop", _inputs("wf_1"), expect=BackendError)
+    assert ProgressKind.WORKFLOW_STOPPED in _published_kinds(tool)
+    stopped = [
+        m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_STOPPED
+    ]
+    assert stopped and stopped[0].payload["text"] == "workflow stopped"
+
+
+def test_run_background_external_cancel_publishes_nothing_and_reraises():
+    """External (non-controller) cancel: abort_event unset -> silent CancelledError, no events."""
+    tool = _make_tool(messager=_CapturingMessager())
+
+    def _raise_cancelled(script_path, **kwargs):
+        raise asyncio.CancelledError("external-cancel")
+
+    with patch(
+        "openjiuwen.agent_teams.workflow.runner.run_swarmflow",
+        side_effect=_raise_cancelled,
+    ):
+        loop = asyncio.new_event_loop()
+        try:
+            with pytest.raises(asyncio.CancelledError) as excinfo:
+                loop.run_until_complete(tool.run_background("task-ext-cancel", _inputs("wf_1")))
+            loop.run_until_complete(asyncio.sleep(0))  # drain any publish task
+        finally:
+            loop.close()
+    # The same CancelledError propagates unchanged (not replaced), and the
+    # external cancel stays silent — no status events leak to the Monitor.
+    assert excinfo.value.args == ("external-cancel",)
+    assert _published_kinds(tool) == []
+
+
 def _make_tool(messager=None) -> SwarmflowTool:
     # 用最小构造绕过完整 leader；仅设置 run_background 触及的属性
     tool = object.__new__(SwarmflowTool)
