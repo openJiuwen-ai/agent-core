@@ -47,8 +47,8 @@ from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.response import ToolCallInterruptRequest
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.factory import create_deep_agent
-from openjiuwen.harness.security.core import PermissionEngine
-from openjiuwen.harness.security.factory import build_permission_interrupt_rail
+from openjiuwen.harness.security.engine.core import PermissionEngine
+from openjiuwen.harness.security.engine.factory import build_permission_interrupt_rail
 from openjiuwen.harness.security.host import ToolPermissionHost
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.security import SecurityRail
@@ -65,6 +65,7 @@ def example_permissions_dict() -> dict:
             "write_file": "deny",
         },
         "defaults": {"*": "allow"},
+        "file_guard": {"enabled": False},
         "rules": [],
         "approval_overrides": [],
     }

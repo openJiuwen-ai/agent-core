@@ -13,7 +13,7 @@ import copy
 from typing import Any
 
 from openjiuwen.harness.security.models import PermissionLevel
-from openjiuwen.harness.security.tiered_policy import _parse_level, strictest
+from openjiuwen.harness.security.toolguard.tiered_policy import _parse_level, strictest
 
 
 def narrow_permissions(

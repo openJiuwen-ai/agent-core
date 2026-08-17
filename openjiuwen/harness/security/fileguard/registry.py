@@ -9,6 +9,16 @@ from typing import Literal
 
 FileAction = Literal["read", "write", "exec"]
 
+WRITE_PATH_TOOLS = frozenset({
+    "write_file", "edit_file", "write_text_file", "write", "search_replace",
+})
+
+PATH_AWARE_COMMANDS = frozenset({
+    "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
+    "ls", "dir", "type", "del", "rd", "copy", "move", "md",
+    "head", "tail", "more", "less", "vim", "nano", "gedit", "notepad",
+})
+
 
 @dataclass(frozen=True)
 class FileToolSpec:
@@ -55,6 +65,7 @@ def _bootstrap_builtin_specs() -> None:
         FileToolSpec("glob", "pattern", "read"),
         FileToolSpec("list_dir", "path", "read"),
         FileToolSpec("list_files", "path", "read"),
+        FileToolSpec("send_file_to_user", "abs_file_path_list", "read"),
     ]
     for s in builtins:
         register_file_tool(s)

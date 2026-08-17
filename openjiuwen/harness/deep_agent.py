@@ -74,7 +74,7 @@ from openjiuwen.harness.schema.state import (
     _SESSION_STATE_KEY,
     DeepAgentState,
 )
-from openjiuwen.harness.security.factory import build_permission_interrupt_rail
+from openjiuwen.harness.security.engine.factory import build_permission_interrupt_rail
 from openjiuwen.harness.task_loop.loop_coordinator import (
     LoopCoordinator,
 )
@@ -663,7 +663,8 @@ class DeepAgent(BaseAgent):
         if config.enable_task_loop:
             self._pending_rails.append(TaskCompletionRail())
 
-        if isinstance(config.permissions, dict) and config.permissions.get("enabled"):
+        # Host must pass baked permissions; enabled false → no rail.
+        if isinstance(config.permissions, dict):
             ws_root = None
             if config.workspace is not None:
                 ws_root = Path(config.workspace.root_path).resolve()

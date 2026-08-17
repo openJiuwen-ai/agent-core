@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.harness.security.core import PermissionEngine
-from openjiuwen.harness.security.file_guard import (
+from openjiuwen.harness.security.engine import PermissionEngine
+from openjiuwen.harness.security.fileguard.file_guard import (
     FileGuardChecker,
     normalize_path_guard_config,
 )

@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.harness.security.checker import ExternalDirectoryChecker
-from openjiuwen.harness.security.core import PermissionEngine
+from openjiuwen.harness.security.engine.checker import ExternalDirectoryChecker
+from openjiuwen.harness.security.engine import PermissionEngine
 from openjiuwen.harness.security.models import PermissionLevel
 
 

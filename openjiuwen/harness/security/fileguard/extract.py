@@ -3,7 +3,7 @@
 """Native L1 path extraction：registry 通道 + shell（分段 / redirect / 解释器）。
 
 源自 enterprise ``permissions/files/extract.py``，依赖改为 agent-core
-``openjiuwen.harness.security.shell_ast``。本期不迁 L3 ``command_intent``。
+``openjiuwen.harness.security.toolguard.shell_ast``。本期不迁 L3 ``command_intent``。
 """
 
 from __future__ import annotations
@@ -14,35 +14,30 @@ import re
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-from openjiuwen.harness.security.files.registry import (
+from openjiuwen.harness.security.fileguard.registry import (
+    FileAction,
     FileToolSpec,
+    PATH_AWARE_COMMANDS,
+    WRITE_PATH_TOOLS,
     lookup_file_tool_specs,
 )
-from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
-from openjiuwen.harness.security.tiered_policy import _PATH_TOOLS, _iter_path_strings
+from openjiuwen.harness.security.toolguard.shell_ast import parse_shell_for_permission
+from openjiuwen.harness.security.toolguard.tiered_policy import (
+    _PATH_TOOLS,
+    _iter_path_strings,
+    expand_path_arg_values,
+)
 
 logger = logging.getLogger(__name__)
 
-FileAction = Literal["read", "write", "exec"]
-
 _CHAIN_SPLIT_RE = re.compile(r"\s+(?:&&|\|\|)\s+")
-
-_PATH_AWARE_COMMANDS = frozenset({
-    "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
-    "ls", "dir", "type", "del", "rd", "copy", "move", "md",
-    "head", "tail", "more", "less", "vim", "nano", "gedit", "notepad",
-})
 
 _INTERPRETER_BASENAMES = frozenset({
     "python", "python3", "pythonw", "py",
     "node", "nodejs", "bash", "sh", "dash", "zsh", "fish",
     "pwsh", "powershell",
-})
-
-_WRITE_PATH_TOOLS = frozenset({
-    "write_file", "edit_file", "write_text_file", "write", "search_replace",
 })
 
 _NT_CMD_SWITCH_BODY = re.compile(r"^[A-Za-z]{1,2}(?::[^\s/\\]+)?$")
@@ -121,7 +116,7 @@ def _path_aware_one_segment(
     if not tokens:
         return [], None
     cmd0 = _basename_lower(tokens[0])
-    if cmd0 not in _PATH_AWARE_COMMANDS:
+    if cmd0 not in PATH_AWARE_COMMANDS:
         return [], None
     base = cwd.resolve()
     path_tokens: list[tuple[Path, int]] = []
@@ -269,7 +264,7 @@ def extract_accesses_native(
     """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex``。"""
     out: list[tuple[Path, FileAction, str]] = []
 
-    if tool_name in ("mcp_exec_command", "bash", "create_terminal"):
+    if tool_name in ("mcp_exec_command", "bash", "create_terminal", "powershell"):
         workdir = tool_args.get("workdir", "")
         try:
             workdir_resolved = (workspace / str(workdir)).resolve() if workdir else workspace
@@ -292,17 +287,15 @@ def extract_accesses_native(
     specs = _specs_for_tool(tool_name)
     if specs:
         for spec in specs:
-            raw = tool_args.get(spec.arg_name)
-            if not isinstance(raw, str) or not raw.strip():
-                continue
-            rp = _resolve_path_str(raw, workspace)
-            if rp is None:
-                continue
-            out.append((rp, spec.action, "tool_arg"))
+            for raw in expand_path_arg_values(tool_args.get(spec.arg_name)):
+                rp = _resolve_path_str(raw, workspace)
+                if rp is None:
+                    continue
+                out.append((rp, spec.action, "tool_arg"))
         return out
 
     if tool_name in _PATH_TOOLS:
-        action: FileAction = "write" if tool_name in _WRITE_PATH_TOOLS else "read"
+        action: FileAction = "write" if tool_name in WRITE_PATH_TOOLS else "read"
         for s in _iter_path_strings(tool_name, tool_args):
             rp = _resolve_path_str(s, workspace)
             if rp is None:

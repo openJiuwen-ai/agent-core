@@ -9,26 +9,18 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
-from openjiuwen.harness.security.shell_ast import (
+from openjiuwen.harness.security.toolguard.catalog import (
+    PATH_ARG_KEYS,
+    PATH_TOOLS,
+    SHELL_TOOLS,
+)
+from openjiuwen.harness.security.toolguard.shell_ast import (
     ShellAstParseResult,
     ShellSubcommand,
     parse_shell_for_permission,
 )
 
 logger = logging.getLogger(__name__)
-
-_SHELL_SUGGESTION_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
-_PATH_SUGGESTION_TOOLS = frozenset({
-    "read_file", "write_file", "edit_file",
-    "read_text_file", "write_text_file",
-    "write", "read",
-    "glob_file_search", "glob", "list_dir", "list_files",
-    "grep", "search_replace",
-})
-_PATH_SUGGESTION_KEYS = (
-    "path", "file_path", "target_file", "file", "old_path", "new_path",
-    "source_path", "dest_path", "directory", "dir",
-)
 
 
 @dataclass(frozen=True)
@@ -46,7 +38,7 @@ def build_permission_suggestions(
         tool_args: dict[str, Any],
         shell_ast_result: ShellAstParseResult | None = None,
 ) -> list[PermissionSuggestion]:
-    if tool_name in _SHELL_SUGGESTION_TOOLS:
+    if tool_name in SHELL_TOOLS:
         command = str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
         if not command:
             return []
@@ -55,7 +47,7 @@ def build_permission_suggestions(
             command,
             shell_ast_result=shell_ast_result,
         )
-    if tool_name in _PATH_SUGGESTION_TOOLS:
+    if tool_name in PATH_TOOLS:
         suggestion = _build_path_permission_suggestion(tool_name, tool_args)
         return [suggestion] if suggestion is not None else []
     return []
@@ -86,17 +78,19 @@ def build_shell_permission_suggestions(
     )):
         return []
 
-    if shell_ast_result.kind == "simple" and len(shell_ast_result.subcommands) > 1:
-        suggestions: list[PermissionSuggestion] = []
+    # && / || / ; 等复合结构：不提供可持久化 suggestion（与评估保守策略一致）。
+    if flags.has_compound_operators:
+        return []
+
+    # 管道 / 多段 simple：按子命令分段 suggestion（与 shell_subcommands 评估、
+    # approval_overrides 落盘、auto_confirm key 一致）。
+    if shell_ast_result.kind == "simple" and len(shell_ast_result.subcommands) >= 1:
+        out: list[PermissionSuggestion] = []
         for subcommand in shell_ast_result.subcommands:
             suggestion = _build_single_shell_suggestion(tool_name, subcommand.text)
             if suggestion is not None:
-                suggestions.append(suggestion)
-        return _dedupe_suggestions(suggestions)
-
-    if shell_ast_result.kind == "simple" and len(shell_ast_result.subcommands) == 1:
-        suggestion = _build_single_shell_suggestion(tool_name, shell_ast_result.subcommands[0].text)
-        return [suggestion] if suggestion is not None else []
+                out.append(suggestion)
+        return _dedupe_suggestions(out)
 
     suggestion = _build_single_shell_suggestion(tool_name, command)
     return [suggestion] if suggestion is not None else []
@@ -170,13 +164,15 @@ def _build_path_permission_suggestion(
         tool_name: str,
         tool_args: dict[str, Any],
 ) -> PermissionSuggestion | None:
-    for key in _PATH_SUGGESTION_KEYS:
-        value = tool_args.get(key)
-        if isinstance(value, str) and value.strip():
+    from openjiuwen.harness.security.toolguard.tiered_policy import expand_path_arg_values
+
+    for key in PATH_ARG_KEYS:
+        values = expand_path_arg_values(tool_args.get(key))
+        if values:
             return PermissionSuggestion(
                 tools=(tool_name,),
                 match_type="path",
-                pattern=value.strip(),
+                pattern=values[0],
                 scope="exact",
                 reason="exact_path",
             )
@@ -198,7 +194,7 @@ def _build_path_permission_suggestion(
 
 
 def _value_looks_like_path(key: str, text: str) -> bool:
-    if key in _PATH_SUGGESTION_KEYS:
+    if key in PATH_ARG_KEYS:
         return True
     if "/" in text or "\\" in text:
         return True

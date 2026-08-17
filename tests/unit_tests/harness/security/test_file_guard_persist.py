@@ -7,11 +7,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from openjiuwen.harness.security.file_guard import (
+from openjiuwen.harness.security.fileguard.file_guard import (
     FileGuardChecker,
     normalize_path_guard_config,
 )
-from openjiuwen.harness.security.patterns import (
+from openjiuwen.harness.security.toolguard.patterns import (
     merge_external_directory_allow_into_permissions,
     merge_file_guard_access_allows,
     merge_file_guard_path_rule,
@@ -93,6 +93,13 @@ def test_merge_file_guard_access_allows_read_keeps_exact_dir(tmp_path: Path) -> 
         isinstance(p, dict) and str(p.get("path", "")).rstrip("/") == parent
         for p in paths
     )
+    added = merged.get("_file_guard_paths_added") or []
+    assert any(
+        isinstance(p, dict)
+        and str(p.get("path", "")).rstrip("/") == target.rstrip("/")
+        and p.get("read") == "allow"
+        for p in added
+    )
 
 
 def test_merge_file_guard_access_allows_write_escalates_axes(tmp_path: Path) -> None:
@@ -173,7 +180,7 @@ def test_persist_cli_trusted_directory_writes_file_guard(tmp_path: Path) -> None
     effective = normalize_path_guard_config(
         engine_cfg, workspace_root=tmp_path / "ws", trusted_dirs=[],
     )
-    from openjiuwen.harness.security.file_guard import FileGuardChecker
+    from openjiuwen.harness.security.fileguard.file_guard import FileGuardChecker
 
     checker = FileGuardChecker(effective)
     assert checker.evaluate(

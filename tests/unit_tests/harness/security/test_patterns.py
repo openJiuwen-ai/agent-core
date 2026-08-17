@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from openjiuwen.harness.security.patterns import match_wildcard
+from openjiuwen.harness.security.toolguard.patterns import match_wildcard
 
 
 def test_match_wildcard_rejects_trailing_newline() -> None:

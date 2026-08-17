@@ -2,8 +2,8 @@
 
 """权限相关检查器。
 
-工具级 allow/ask/deny 由 :func:`openjiuwen.harness.security.tiered_policy.evaluate_tiered_policy`
-统一评估；路径防护由 :mod:`openjiuwen.harness.security.file_guard` 承担。
+工具级 allow/ask/deny 由 :func:`openjiuwen.harness.security.toolguard.tiered_policy.evaluate_tiered_policy`
+统一评估；路径防护由 :mod:`openjiuwen.harness.security.fileguard.file_guard` 承担。
 
 :class:`ExternalDirectoryChecker` 保留为 deprecated 薄封装，内部转调 FileGuard Legacy 投影。
 """
@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.harness.security.file_guard import build_file_guard_checker
+from openjiuwen.harness.security.fileguard.file_guard import build_file_guard_checker
 from openjiuwen.harness.security.models import PermissionResult
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ _COMMAND_EXEC_TOOLS = frozenset({"mcp_exec_command"})
 class ExternalDirectoryChecker:
     """Deprecated：检查 workspace 外路径；内部转调 :class:`~file_guard.FileGuardChecker`。
 
-    新代码请直接使用 :func:`openjiuwen.harness.security.file_guard.build_file_guard_checker`
+    新代码请直接使用 :func:`openjiuwen.harness.security.fileguard.file_guard.build_file_guard_checker`
     或 :class:`~file_guard.FileGuardChecker`。
     """
 

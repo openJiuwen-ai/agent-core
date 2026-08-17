@@ -9,9 +9,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from openjiuwen.harness.security.core import PermissionEngine
-from openjiuwen.harness.security.models import PermissionsSection
+from openjiuwen.core.common.logging import logger
+from openjiuwen.harness.security.engine.core import PermissionEngine
 from openjiuwen.harness.security.host import ToolPermissionHost
+from openjiuwen.harness.security.models import PermissionsSection
 
 if TYPE_CHECKING:
     from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
@@ -25,11 +26,23 @@ def build_permission_interrupt_rail(
     engine: PermissionEngine | None = None,
     host: ToolPermissionHost | None = None,
     workspace_root: Path | None = None,
+    user_permissions: dict[str, Any] | None = None,
+    session_permissions: dict[str, Any] | None = None,
 ) -> "PermissionInterruptRail | None":
-    """若 ``permissions.enabled`` 为真则创建护栏，否则返回 ``None``。"""
+    """Build a rail from **already-baked** permissions. Does not compose product modes.
+
+    ``enabled: false`` → no rail. Overlay kwargs are ignored (Host must merge first).
+    """
     from openjiuwen.harness.rails.security import PermissionInterruptRail
 
-    if not isinstance(permissions, dict) or not permissions.get("enabled", False):
+    if not isinstance(permissions, dict):
+        return None
+    if user_permissions or session_permissions:
+        logger.warning(
+            "[PermissionEngine] permission.factory.overlays_ignored "
+            "pass baked permissions from the host"
+        )
+    if not permissions.get("enabled", False):
         return None
 
     h = host or ToolPermissionHost()
