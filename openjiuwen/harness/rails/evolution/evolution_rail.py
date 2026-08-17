@@ -37,6 +37,7 @@ from openjiuwen.agent_evolving.trajectory import (
     trajectory_meta,
     trajectory_from_steps,
     trajectory_session_id,
+    trajectory_steps,
 )
 from openjiuwen.agent_evolving.trajectory.semconv import (
     LEGACY_STEP_META,
@@ -516,7 +517,13 @@ class EvolutionRail(DeepAgentRail):
         """
         trace_trajectory = self._build_trace_trajectory(ctx, finalize=finalize) if ctx is not None else None
         if trace_trajectory is not None:
-            return self._merge_builder_otlp_attributes(trace_trajectory)
+            # Prefer OTLP only when it includes LLM steps. Tool-only OTLP spans
+            # would drop user turns that EvolutionRail's builder still holds.
+            otlp_steps = trajectory_steps(trace_trajectory)
+            otlp_has_llm = any(step.kind == "llm" for step in otlp_steps)
+            builder_step_count = len(self._builder.steps) if self._builder is not None else 0
+            if otlp_has_llm or builder_step_count == 0:
+                return self._merge_builder_otlp_attributes(trace_trajectory)
         if self._builder is None:
             return None
         meta = dict(self._builder.meta)
