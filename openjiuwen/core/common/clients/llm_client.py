@@ -7,6 +7,7 @@ from openjiuwen.core.common.clients.connector_pool import get_connector_pool_man
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.clients.connector_pool import ConnectorPool, ConnectorPoolConfig
+from openjiuwen.core.common.clients.tcp_keepalive import get_default_tcp_keepalive_socket_options
 from openjiuwen.core.common.utils.header_utils import sanitize_headers
 
 if TYPE_CHECKING:
@@ -81,6 +82,8 @@ class HttpXConnectorPool(ConnectorPool):
             'proxy': httpx.Proxy(config.proxy) if config.proxy else None,
             **config.extend_params
         }
+        if 'socket_options' not in pool_kwargs:
+            pool_kwargs['socket_options'] = get_default_tcp_keepalive_socket_options()
         # Remove None values to avoid passing invalid arguments
         pool_kwargs = {k: v for k, v in pool_kwargs.items() if v is not None}
         if config.need_async:
