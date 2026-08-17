@@ -1087,7 +1087,12 @@ class CodexSpanBridge:
             tool_name = str(record.get("tool_name") or "")
             item_type = str(record.get("item_type") or "")
             explicit_display_name = str(record.get("display_name") or "")
-            display_name = explicit_display_name or tool_name.rsplit(".", maxsplit=1)[-1] or item_type or "unknown"
+            display_name = (
+                explicit_display_name
+                or tool_name.rsplit(".", maxsplit=1)[-1]
+                or item_type
+                or "unknown"
+            )
             observation_tool_name = explicit_display_name or tool_name
             start_ns = int(record.get("start_ns") or now_ns)
             end_ns = max(start_ns, int(record.get("end_ns") or now_ns))

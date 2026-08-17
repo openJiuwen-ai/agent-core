@@ -704,7 +704,8 @@ class AgentConfigurator:
             if swarmflow_worker_base_spec is not None:
                 swarmflow_worker_base_spec = swarmflow_worker_base_spec.model_copy(
                     update={
-                        "rails": list(swarmflow_worker_base_spec.rails or []) + [observability_rail_spec],
+                        "rails": list(swarmflow_worker_base_spec.rails or [])
+                                 + [observability_rail_spec],
                     },
                 )
 

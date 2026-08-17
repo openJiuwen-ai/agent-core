@@ -583,7 +583,9 @@ class CoordinationKernel:
                     and self._scheduler.is_active
                     and str(event.event_type).startswith("task_")
                 ):
-                    await self._event_bus.enqueue(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+                    await self._event_bus.enqueue(
+                        InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN)
+                    )
                 return
             await self._event_bus.enqueue(event)
 
