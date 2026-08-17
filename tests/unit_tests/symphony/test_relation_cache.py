@@ -222,6 +222,49 @@ async def test_internal_matcher_reuses_cache_and_preserves_order(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_internal_matcher_reports_global_candidate_progress_across_cache_windows(tmp_path: Path) -> None:
+    fingerprints = [_fingerprint(item) for item in ("a", "b", "c", "d", "e", "f")]
+    candidates = [
+        _candidate("a", "b"),
+        _candidate("a", "c"),
+        _candidate("a", "d"),
+        _candidate("a", "e"),
+        _candidate("a", "f"),
+    ]
+    registry = SkillRegistry(skills={item.id: item for item in fingerprints})
+    path = tmp_path / "relation_matches.json"
+    await OntologyMatcher(
+        _CountingLLM(),
+        fingerprints=fingerprints,
+        cache_path=path,
+        batch_size=1,
+        max_workers=2,
+        require_consensus=False,
+    ).match(registry, candidates[:1])
+    progress: list[tuple[str, dict]] = []
+    matcher = OntologyMatcher(
+        _CountingLLM(),
+        fingerprints=fingerprints,
+        cache_path=path,
+        batch_size=1,
+        max_workers=2,
+        require_consensus=False,
+        progress=lambda event, _current, _total, details: progress.append((event, details)),
+    )
+
+    await matcher.match(registry, candidates)
+
+    completed = [
+        details["completed_candidate_count"]
+        for event, details in progress
+        if event in {"matching_start", "batch_done", "matching_done"}
+    ]
+    assert completed == [1, 2, 3, 3, 3, 4, 5, 5]
+    assert all(details["total_candidate_count"] == 5 for _event, details in progress)
+    assert all(details["reused_candidate_count"] == 1 for _event, details in progress)
+
+
+@pytest.mark.asyncio
 async def test_internal_matcher_limits_concurrent_llm_requests() -> None:
     class _ConcurrentLLM(_CountingLLM):
         def __init__(self) -> None:

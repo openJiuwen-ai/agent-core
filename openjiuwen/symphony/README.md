@@ -351,6 +351,7 @@ plan = await service.plan(
 - `read()` 返回映射兼容的 `CapabilityGraph`；传入 `version` 可读取指定的不可变版本。
 - `plan()` 返回映射兼容的 `OrchestrationPlan`。
 - `progress` 接收 `OrchestrationProgress`；该类型保持字典兼容。旧参数名 `progress_callback` 仍可使用。
+- `graph.resolve.progress` 保留当前匹配窗口的 `current/total`，并通过 `completed_candidate_count`、`total_candidate_count` 和 `reused_candidate_count` 提供跨窗口的全局候选关系进度；缓存复用的候选关系计入已完成数量。
 - `model=None` 时仍可查询状态和读取已发布图；构建或规划会明确报错。
 
 ### 图产物生命周期
