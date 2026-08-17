@@ -39,7 +39,7 @@ from openjiuwen.symphony.orchestration.model import (
 from openjiuwen.symphony.shared.fingerprint import FingerprintLike
 
 MATCHER_VERSION = "Symphony-ontology-matcher-v2"
-DEFAULT_PROMPT_VERSION = "Orchestration-graph-match-v3"
+DEFAULT_PROMPT_VERSION = "Orchestration-graph-match-v2"
 MATCH_SCHEMA_VERSION = "Symphony-ontology-match-schema-v1"
 
 

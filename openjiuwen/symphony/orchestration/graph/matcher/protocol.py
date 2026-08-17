@@ -559,9 +559,6 @@ def _protocol_diagnostic(code: str, message: str) -> GraphDiagnostic:
 
 SYSTEM_PROMPT = """Validate whether each candidate Skill output can feed the target input.
 
-Prioritize low latency. Decide directly from supplied fields with the minimum internal reasoning
-necessary. Do not perform or output step-by-step analysis or chain-of-thought.
-
 Return JSON only:
 {"matches":[{"id":"c1","direction":"forward|reverse","confidence":0.0,"reason":"optional short reason"}]}
 

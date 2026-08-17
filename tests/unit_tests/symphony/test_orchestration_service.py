@@ -593,7 +593,7 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
         "model": None,
         "backend": None,
         "temperature": None,
-        "prompt_version": "Orchestration-graph-match-v3",
+        "prompt_version": "Orchestration-graph-match-v2",
         "batch_size": 1,
         "max_workers": 3,
         "require_consensus": False,

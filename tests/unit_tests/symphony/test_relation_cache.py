@@ -114,25 +114,6 @@ class _CountingLLM:
         )
 
 
-@pytest.mark.asyncio
-async def test_internal_matcher_requests_minimal_reasoning_and_disables_thinking() -> None:
-    fingerprints = [_fingerprint(item) for item in ("a", "b")]
-    candidate = _candidate("a", "b")
-    llm = _CountingLLM()
-    matcher = OntologyMatcher(
-        llm,
-        fingerprints=fingerprints,
-        require_consensus=False,
-    )
-
-    await matcher.match(SkillRegistry(skills={item.id: item for item in fingerprints}), [candidate])
-
-    system_prompt = llm.calls[0]["messages"][0]["content"]
-    assert "Prioritize low latency" in system_prompt
-    assert "minimum internal reasoning" in system_prompt
-    assert llm.calls[0]["kwargs"]["extra_body"] == {"thinking": {"type": "disabled"}}
-
-
 def _matcher(
     llm: _CountingLLM,
     path: Path,
