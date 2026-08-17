@@ -57,6 +57,38 @@ def _silent(_message: str) -> None:
     return None
 
 
+def _resolve_workflow_budget(loaded) -> BudgetLedger:
+    """Build the per-run ledger from the script's ``META.workflow_token_limit``.
+
+    The per-run ceiling is declared by the workflow script itself — the session
+    budget is the team-wide total, while each workflow knows its own cost. A
+    missing/invalid limit yields an unbounded ledger (``spent`` still counts for
+    display, but no per-run ceiling is enforced) — this keeps hand-written
+    scripts that do not declare a limit backwards-compatible (equivalent to the
+    single-layer behaviour), while the generator enforces the field on new
+    scripts.
+    """
+    meta = loaded.meta if isinstance(loaded.meta, dict) else {}
+    limit = meta.get("workflow_token_limit")
+    if isinstance(limit, int) and limit > 0:
+        return BudgetLedger(total=limit)
+    return BudgetLedger()
+
+
+def _bind_workflow_budget(backend: AgentBackend, workflow_budget: BudgetLedger) -> None:
+    """Hand the per-run ledger to the backend if it accepts one.
+
+    ``AgentBackend.bind_budget`` binds the session-wide ledger; the per-run
+    ledger is plumbed through a separate hook so a backend that does not
+    override ``bind_workflow_budget`` (older implementations) simply ignores it.
+    The engine's own ``_check_budget`` gate still reads ``rt.workflow_budget``
+    directly, so enforcement does not depend on backend support.
+    """
+    fn = getattr(backend, "bind_workflow_budget", None)
+    if callable(fn):
+        fn(workflow_budget)
+
+
 async def _exec_loaded(loaded, rt: Runtime) -> Any:
     # Install the engine as the active provider so the public facade primitives
     # forward here for the lifetime of this run.
@@ -122,6 +154,7 @@ async def run_workflow(
     cap: int | None = None,
     agent_gate: AgentAdmission | None = None,
     budget: BudgetLedger | None = None,
+    workflow_budget: BudgetLedger | None = None,
     abort_event: AbortSignal | None = None,
 ) -> Any:
     # The ``swarmflow`` name a script imports the primitives under is registered
@@ -154,12 +187,15 @@ async def run_workflow(
         strict=strict,
         cap_override=cap,
         budget=budget if budget is not None else BudgetLedger(),
+        workflow_budget=workflow_budget if workflow_budget is not None else _resolve_workflow_budget(loaded),
         abort_event=abort_event,
         agent_gate=agent_gate,
     )
     # Hand the ledger to the backend: it is the only layer that sees what a call
-    # really costs, so it does the accounting and the engine only reads.
+    # really costs, so it does the accounting and the engine only reads. The
+    # per-run ledger is bound too so the rail bills both (session-wide + per-run).
     rt.backend.bind_budget(rt.budget)
+    _bind_workflow_budget(rt.backend, rt.workflow_budget)
     try:
         result = await _exec_loaded(loaded, rt)
     finally:

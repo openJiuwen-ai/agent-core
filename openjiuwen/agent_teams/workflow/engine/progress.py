@@ -118,6 +118,7 @@ class WorkflowProgressEvent:
     answer: str | None = None
     tokens: int | None = None
     budget: dict | None = None
+    workflow_budget: dict | None = None
     phase_type: str | None = None
     nested_phase: str | None = None
     parent_phase: str | None = None

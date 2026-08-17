@@ -475,6 +475,7 @@ class SwarmflowTool(AsyncTool):
                 answer=progress.answer,
                 tokens=progress.tokens,
                 budget=progress.budget,
+                workflow_budget=progress.workflow_budget,
                 phase_type=progress.phase_type,
                 nested_phase=progress.nested_phase,
                 parent_phase=progress.parent_phase,
@@ -516,9 +517,48 @@ class SwarmflowTool(AsyncTool):
         except BudgetExhausted as exc:
             # Terminal, unlike a pause: re-raise as an ordinary exception so the
             # async-tool runtime injects a failure the leader can read and act on
-            # (a BaseException would kill the task silently). Not resumable —
-            # relaunching would only hit the same gate.
-            raise BackendError(str(exc)) from exc
+            # (a BaseException would kill the task silently). Two distinct
+            # ceilings produce two different leader-facing messages:
+            #   scope="workflow" — per-run ceiling. This ceiling is set by the
+            #     user and must NOT be changed; the leader must redesign the
+            #     workflow to consume fewer tokens. The new run's ledger resets.
+            #   scope="session"  — team-wide ceiling, not retryable (relaunching
+            #     hits the same gate; the session ceiling must be raised).
+            scope = getattr(exc, "scope", "session")
+            detail = str(exc)
+            if scope == "workflow":
+                if self._language == "cn":
+                    msg = (
+                        f"{detail}。本次工作流 token 额度已达单次上限（与会话总额独立）。"
+                        f"该上限由用户设定，不可修改；必须重新设计工作流以降低 token 消耗"
+                        f"（简化流程、减少 agent、更换更省 token 的模型等），"
+                        f"新 run 的 token 额度会重置。请重新设计工作流后再重试 swarmflow。"
+                    )
+                else:
+                    msg = (
+                        f"{detail}. This run hit its per-run token ceiling "
+                        f"(independent of the session budget). This ceiling is set by "
+                        f"the user and must NOT be changed; you must redesign the "
+                        f"workflow to consume fewer tokens (simplify / fewer agents / "
+                        f"cheaper model) and relaunch — the new run's ceiling resets. "
+                        f"Redesign the workflow before retrying swarmflow."
+                    )
+            else:
+                if self._language == "cn":
+                    msg = (
+                        f"{detail}。该预算为团队共享总额（会话级），当前已耗尽。"
+                        f"在未上调预算上限前，重启或新建工作流均会立即再次撞顶，"
+                        f"请先上调预算上限再重试 swarmflow。"
+                    )
+                else:
+                    msg = (
+                        f"{detail}. This is the team's shared (session-wide) token "
+                        f"ceiling and is currently exhausted. Until the ceiling is "
+                        f"raised, relaunching or starting a new workflow will hit "
+                        f"the same gate immediately — raise the ceiling before "
+                        f"retrying swarmflow."
+                    )
+            raise BackendError(msg) from exc
         except WorkflowAborted as exc:
             if exc.reason == "early_return":
                 msg = self._format_early_return(exc.reply, exc.edit_hints, run_id=run_id)

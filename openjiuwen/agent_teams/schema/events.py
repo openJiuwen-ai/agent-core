@@ -466,6 +466,9 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     budget: Optional[dict] = Field(
         default=None, description="Leader shared-pool snapshot {total,spent,remaining,scope,exhausted}."
     )
+    workflow_budget: Optional[dict] = Field(
+        default=None, description="Per-run ledger snapshot (same shape as budget, scope=workflow); None when the script declares no workflow_token_limit."
+    )
     phase_type: Optional[str] = Field(default=None, description='"child" for nested-workflow child phase declarations.')
     nested_phase: Optional[str] = Field(
         default=None, description="Display name (▸ name #N) inside a sub-workflow; prefer over phase for card matching."
