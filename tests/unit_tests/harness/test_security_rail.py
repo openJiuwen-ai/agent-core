@@ -79,6 +79,7 @@ from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.identity import build_identity_section
 from openjiuwen.harness.prompts.sections.safety import build_safety_section
+from openjiuwen.harness.prompts.sections.system_authority import build_system_authority_section
 from openjiuwen.harness.rails.security_rail import SecurityRail
 
 
@@ -189,3 +190,56 @@ async def test_before_model_call_uses_updated_builder_language() -> None:
     section = builder.get_section(SectionName.SAFETY)
     assert section is not None
     assert "# Safety" in section.render("en")
+
+
+def test_uninit_removes_system_authority_section() -> None:
+    builder = SystemPromptBuilder()
+    builder.add_section(build_system_authority_section())
+    rail = SecurityRail()
+    agent = _make_agent(builder)
+    rail.init(agent)
+
+    assert builder.get_section(SectionName.SYSTEM_AUTHORITY) is not None
+
+    rail.uninit(agent)
+
+    assert builder.get_section(SectionName.SYSTEM_AUTHORITY) is None
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_injects_system_authority_section() -> None:
+    builder = SystemPromptBuilder(language="en")
+    builder.add_section(build_identity_section(language="en"))
+    rail = SecurityRail()
+    agent = _make_agent(builder)
+    rail.init(agent)
+    ctx = AgentCallbackContext(agent=agent, inputs=None, session=None)
+
+    await rail.before_model_call(ctx)
+
+    section = builder.get_section(SectionName.SYSTEM_AUTHORITY)
+    assert section is not None
+    assert "# System Prompt Authority" in section.render("en")
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_injects_both_safety_and_authority() -> None:
+    builder = SystemPromptBuilder(language="cn")
+    builder.add_section(build_identity_section(language="cn"))
+    rail = SecurityRail()
+    agent = _make_agent(builder)
+    rail.init(agent)
+    ctx = AgentCallbackContext(agent=agent, inputs=None, session=None)
+
+    await rail.before_model_call(ctx)
+
+    assert builder.get_section(SectionName.SAFETY) is not None
+    assert builder.get_section(SectionName.SYSTEM_AUTHORITY) is not None
+
+
+def test_authority_priority_lower_than_identity() -> None:
+    """system_authority (priority=5) must precede IDENTITY (priority=10)."""
+    authority = build_system_authority_section()
+    identity = build_identity_section()
+
+    assert authority.priority < identity.priority
