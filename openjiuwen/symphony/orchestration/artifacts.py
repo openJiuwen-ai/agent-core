@@ -10,10 +10,15 @@ from pathlib import Path
 from typing import Any, Sequence
 from uuid import uuid4
 
+from filelock import FileLock
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.symphony.orchestration.contracts import GraphArtifactStatus, GraphBuildResult
 
 SCHEMA_VERSION = "1.0"
 SUPPORTED_SCHEMA_MAJOR = 1
+MUTATION_REQUESTS_SCHEMA = "Symphony-graph-mutation-requests-v1"
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,7 @@ class GraphArtifacts:
 class GraphArtifactStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
+        self._publish_lock = FileLock(str(self.root / ".publish.lock"), timeout=30)
 
     def status(
         self,
@@ -68,30 +74,122 @@ class GraphArtifactStore:
         _validate_schema(payload)
         return payload
 
-    def stage(self, payload: dict[str, Any], *, version: str) -> GraphBuildResult:
+    def current_version(self) -> str | None:
+        """Return the currently active immutable graph version, if any."""
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self._publish_lock:
+            return self._current_version_unlocked()
+
+    def stage(
+        self,
+        payload: dict[str, Any],
+        *,
+        version: str,
+        reuse_existing: bool = False,
+    ) -> GraphBuildResult:
         """Materialize an immutable version without switching ``current.json``."""
 
         self.root.mkdir(parents=True, exist_ok=True)
-        runs = self.root / ".build_runs"
-        versions = self.root / "versions"
-        runs.mkdir(parents=True, exist_ok=True)
-        versions.mkdir(parents=True, exist_ok=True)
-        run_dir = runs / f"{version}-{uuid4().hex}"
-        run_dir.mkdir()
-        _write_json_atomic(run_dir / "graph.json", payload)
-        version_dir = versions / version
-        if version_dir.exists():
-            raise FileExistsError(f"Symphony graph version already exists: {version}")
-        os.replace(run_dir, version_dir)
-        return GraphBuildResult(
-            version=version,
-            graph_path=version_dir / "graph.json",
-            generated_at=str(payload["generated_at"]),
-        )
+        with self._publish_lock:
+            runs = self.root / ".build_runs"
+            versions = self.root / "versions"
+            runs.mkdir(parents=True, exist_ok=True)
+            versions.mkdir(parents=True, exist_ok=True)
+            version_dir = versions / version
+            if version_dir.exists():
+                if not reuse_existing:
+                    raise FileExistsError(f"Symphony graph version already exists: {version}")
+                existing = _read_json(version_dir / "graph.json")
+                if not _same_staged_mutation(existing, payload):
+                    raise_error(
+                        StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
+                        reason=f"graph version {version} already exists with different content",
+                        details={"mutation_code": "request_id_conflict", "version": version},
+                    )
+                return GraphBuildResult(
+                    version=version,
+                    graph_path=version_dir / "graph.json",
+                    generated_at=str(existing["generated_at"]),
+                )
+            run_dir = runs / f"{version}-{uuid4().hex}"
+            run_dir.mkdir()
+            _write_json_atomic(run_dir / "graph.json", payload)
+            os.replace(run_dir, version_dir)
+            return GraphBuildResult(
+                version=version,
+                graph_path=version_dir / "graph.json",
+                generated_at=str(payload["generated_at"]),
+            )
 
     def activate(self, artifact: GraphBuildResult) -> GraphBuildResult:
         """Atomically make a fully staged version current."""
 
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self._publish_lock:
+            return self._activate_unlocked(artifact)
+
+    def activate_if_current(
+        self,
+        artifact: GraphBuildResult,
+        *,
+        expected_version: str | None,
+    ) -> GraphBuildResult:
+        """Activate only when no other builder has published since the caller started."""
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self._publish_lock:
+            current_version = self._current_version_unlocked()
+            if current_version != expected_version:
+                raise_error(
+                    StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
+                    reason="graph version changed before publish",
+                    details={
+                        "mutation_code": "stale_graph_version",
+                        "expected_graph_version": expected_version,
+                        "current_graph_version": current_version,
+                    },
+                )
+            return self._activate_unlocked(artifact)
+
+    def read_mutation_request(self, request_id: str) -> dict[str, Any] | None:
+        """Read a previously published mutation result by idempotency key."""
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self._publish_lock:
+            records = self._read_mutation_requests()
+            record = records.get(request_id)
+            return dict(record) if isinstance(record, dict) else None
+
+    def record_mutation_request(
+        self,
+        request_id: str,
+        *,
+        request_digest: str,
+        result: dict[str, Any],
+    ) -> None:
+        """Atomically persist one successful mutation idempotency record."""
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self._publish_lock:
+            records = self._read_mutation_requests()
+            existing = records.get(request_id)
+            if isinstance(existing, dict) and existing.get("request_digest") != request_digest:
+                raise_error(
+                    StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
+                    reason="request_id already refers to a different graph mutation",
+                    details={"mutation_code": "request_id_conflict", "request_id": request_id},
+                )
+            records[request_id] = {
+                "request_digest": request_digest,
+                "result": result,
+            }
+            _write_json_atomic(
+                self.root / "mutation_requests.json",
+                {"schema_version": MUTATION_REQUESTS_SCHEMA, "records": records},
+            )
+
+    def _activate_unlocked(self, artifact: GraphBuildResult) -> GraphBuildResult:
         if not artifact.graph_path.is_file():
             raise FileNotFoundError(f"Missing staged Symphony graph artifact: {artifact.graph_path}")
         current = {
@@ -102,6 +200,33 @@ class GraphArtifactStore:
         }
         _write_json_atomic(self.root / "current.json", current)
         return artifact
+
+    def _current_version_unlocked(self) -> str | None:
+        try:
+            current = self._read_current()
+        except FileNotFoundError:
+            return None
+        return str(current.get("version") or "") or None
+
+    def _read_mutation_requests(self) -> dict[str, Any]:
+        path = self.root / "mutation_requests.json"
+        if not path.is_file():
+            return {}
+        try:
+            payload = _read_json(path)
+        except (OSError, ValueError) as exc:
+            raise_error(
+                StatusCode.COMPONENT_SYMPHONY_ARTIFACT_READ_CALL_FAILED,
+                cause=exc,
+                reason="graph mutation idempotency index is unreadable",
+            )
+        if payload.get("schema_version") != MUTATION_REQUESTS_SCHEMA:
+            raise_error(
+                StatusCode.COMPONENT_SYMPHONY_BUILD_STATE_INVALID,
+                reason="graph mutation idempotency index schema is unsupported",
+            )
+        records = payload.get("records")
+        return dict(records) if isinstance(records, dict) else {}
 
     def publish(self, payload: dict[str, Any], *, version: str) -> GraphBuildResult:
         """Synchronous compatibility helper for callers without cancellation."""
@@ -201,3 +326,14 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _same_staged_mutation(existing: dict[str, Any], requested: dict[str, Any]) -> bool:
+    existing_mutation = existing.get("mutation")
+    requested_mutation = requested.get("mutation")
+    return (
+        isinstance(existing_mutation, dict)
+        and isinstance(requested_mutation, dict)
+        and existing_mutation.get("request_id") == requested_mutation.get("request_id")
+        and existing_mutation.get("request_digest") == requested_mutation.get("request_digest")
+    )

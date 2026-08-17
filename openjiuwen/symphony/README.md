@@ -353,6 +353,29 @@ plan = await service.plan(
 - `progress` 接收 `OrchestrationProgress`；该类型保持字典兼容。旧参数名 `progress_callback` 仍可使用。
 - `model=None` 时仍可查询状态和读取已发布图；构建或规划会明确报错。
 
+Skill 安装、卸载或审核通过的自演进提交可以使用三个批量接口同步静态图谱。调用方应先持久化整批
+Skill 变更，再让 `AtomicCapabilityProvider.inventory_snapshot()` 返回变更后的完整 fingerprint 清单和
+`SourceSnapshot`：
+
+```python
+from openjiuwen.symphony import SkillGraphAdd
+
+current = service.status(expected_snapshot=service.read()["source_snapshot"])
+result = await service.add_skills(
+    [SkillGraphAdd(fingerprint=item) for item in new_fingerprints],
+    request_id="install-batch-42",
+    expected_graph_version=str(current.version),
+    source_snapshot=target_snapshot,
+)
+```
+
+`add_skills()`、`update_skills()` 和 `delete_skills()` 均以整批为事务，只发布一个不可变图版本。
+`expected_graph_version` 防止并发覆盖，update/delete 的 `expected_content_hash` 防止覆盖较新的 Skill，
+`request_id` 支持响应丢失后的幂等重试。服务会核对 provider 的真实变更集，复用未变化关系的 matcher
+缓存，并以与全量构建相同的 registry、候选生成、图物化和 lookup 流程生成目标版本；任一校验、matcher
+或发布步骤失败时，`current.json` 仍指向完整旧版本。自演进模块可只依赖 `SkillGraphUpdater` 协议，无需
+读取图谱目录或了解 matcher 实现。
+
 ### 图产物生命周期
 
 图产物目录结构为：
@@ -362,6 +385,8 @@ graph_artifact_root/
 ├── cache/
 │   └── relation_matches.json
 ├── current.json
+├── mutation_requests.json
+├── .publish.lock
 ├── versions/
 │   └── <version>/
 │       └── graph.json
@@ -375,6 +400,8 @@ graph_artifact_root/
 - `force=False` 且 source snapshot 未变化时复用当前产物；能力清单变化后状态会标记为不新鲜。
 - `force=False` 时可复用 `cache/relation_matches.json` 中身份匹配的关系判断；`force=True` 完全绕过该缓存。缓存不属于已发布的版本化图产物。
 - 同一服务实例的构建互斥，避免并发发布互相覆盖。
+- 全量构建和批量变更在发布时共享进程锁与版本 CAS；批量请求的幂等结果保存在
+  `mutation_requests.json`，每个已发布 `graph.json` 也保留对应 mutation 摘要以支持中断恢复。
 
 ### 图构建配置
 
