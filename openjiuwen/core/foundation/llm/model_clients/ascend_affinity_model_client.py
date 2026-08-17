@@ -56,6 +56,26 @@ class AscendAffinityModelClient(BaseModelClient):
     def supports_kv_cache_affinity(self) -> bool:
         return True
 
+    def _chat_completions_url(self) -> str:
+        """Build a chat-completions URL from either a host or a /v1 base URL."""
+        api_base = str(self.model_client_config.api_base or "").rstrip("/")
+        if api_base.endswith("/chat/completions"):
+            return api_base
+        if api_base.endswith("/v1"):
+            return f"{api_base}/chat/completions"
+        return f"{api_base}/v1/chat/completions"
+
+    def _http_headers(self, *, stream: bool) -> dict[str, str]:
+        """Build transport headers while keeping authentication optional."""
+        headers = {"Content-Type": "application/json"}
+        if stream:
+            headers["Accept"] = "text/event-stream"
+
+        api_key = str(self.model_client_config.api_key or "").strip()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return headers
+
     @staticmethod
     def _raise_config_error(message: str):
         raise build_error(
@@ -175,8 +195,7 @@ class AscendAffinityModelClient(BaseModelClient):
         explicitly:
 
         - ``True``: execute a pure KV-cache management request;
-        - ``False``: reserved for a dedicated inference-then-management API,
-          such as a future ``invoke_then_evict_kvc`` implementation.
+        - ``False``: execute normal inference first, then apply ``edits``.
 
         The client deliberately provides no default for this distinction.
         Current ``evict_kvc``, ``offload_kvc``, and ``prefetch_kvc`` methods
@@ -456,6 +475,11 @@ class AscendAffinityModelClient(BaseModelClient):
             )
             return assistant_message
         except Exception as exc:
+            error_detail = (
+                f"{type(exc).__name__}: {exc}"
+                if str(exc)
+                else type(exc).__name__
+            )
             await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
@@ -471,11 +495,14 @@ class AscendAffinityModelClient(BaseModelClient):
                 messages=params.get("messages"),
                 tools=params.get("tools"),
                 is_stream=False,
-                exception=str(exc),
+                exception=error_detail,
             )
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
-                error_msg=f"AscendAffinity API async invoke error: {str(exc)}"
+                error_msg=(
+                    "AscendAffinity API async invoke error: "
+                    f"{error_detail}"
+                ),
             ) from exc
 
     async def stream(
@@ -551,6 +578,11 @@ class AscendAffinityModelClient(BaseModelClient):
                 tool_calls=final_message.tool_calls if final_message else None,
             )
         except Exception as exc:
+            error_detail = (
+                f"{type(exc).__name__}: {exc}"
+                if str(exc)
+                else type(exc).__name__
+            )
             await trigger(
                 LLMCallEvents.LLM_CALL_ERROR,
                 model_name=params.get("model"),
@@ -566,11 +598,14 @@ class AscendAffinityModelClient(BaseModelClient):
                 messages=params.get("messages"),
                 tools=params.get("tools"),
                 is_stream=True,
-                exception=str(exc),
+                exception=error_detail,
             )
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
-                error_msg=f"AscendAffinity API async stream error: {str(exc)}"
+                error_msg=(
+                    "AscendAffinity API async stream error: "
+                    f"{error_detail}"
+                ),
             ) from exc
 
     async def _make_ascend_affinity_request(
@@ -599,8 +634,8 @@ class AscendAffinityModelClient(BaseModelClient):
             max_attempts: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Send raw JSON over aiohttp with bounded exponential-backoff retries."""
-        url = f"{self.model_client_config.api_base.rstrip('/')}/v1/chat/completions"
-        headers = {"Content-Type": "application/json"}
+        url = self._chat_completions_url()
+        headers = self._http_headers(stream=False)
         last_error = None
 
         attempts = (
@@ -649,20 +684,79 @@ class AscendAffinityModelClient(BaseModelClient):
             timeout: Optional[float] = None,
     ) -> AsyncIterator[AssistantMessageChunk]:
         """Yield parsed chunks from an SSE-style chat-completions response."""
-        url = f"{self.model_client_config.api_base.rstrip('/')}/v1/chat/completions"
-        headers = {"Content-Type": "application/json"}
+        url = self._chat_completions_url()
+        headers = self._http_headers(stream=True)
         async with self._create_session(timeout=timeout) as http_session:
             async with http_session.post(url, headers=headers, json=params) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     raise Exception(f"API returned error {response.status}: {error_text}")
-                async for line in response.content:
-                    line_str = line.decode("utf-8").strip()
-                    if not line_str:
-                        continue
-                    chunk = self._parse_stream_chunk(line_str)
-                    if chunk:
-                        yield chunk
+                has_model_output = False
+                content_type = str(response.headers.get("Content-Type", "")).lower()
+                observed_lines = 0
+                parsed_chunks = 0
+                finish_reasons: set[str] = set()
+                raw_samples: list[str] = []
+
+                def remember(line: str) -> None:
+                    nonlocal observed_lines
+                    observed_lines += 1
+                    # Keep only a few response fragments and never record the
+                    # request prompt, so diagnostic errors remain bounded.
+                    if len(raw_samples) < 4:
+                        raw_samples.append(line[:300])
+
+                def observe(chunk: AssistantMessageChunk) -> None:
+                    nonlocal has_model_output, parsed_chunks
+                    parsed_chunks += 1
+                    has_model_output = has_model_output or bool(
+                        chunk.content
+                        or chunk.reasoning_content
+                        or chunk.tool_calls
+                    )
+                    if chunk.finish_reason and chunk.finish_reason != "null":
+                        finish_reasons.add(str(chunk.finish_reason))
+
+                if "text/event-stream" in content_type:
+                    async for line in response.content:
+                        line_str = line.decode("utf-8").strip()
+                        if not line_str:
+                            continue
+                        remember(line_str)
+                        chunk = self._parse_stream_chunk(line_str)
+                        if chunk:
+                            observe(chunk)
+                            yield chunk
+                else:
+                    # Handle services that downgrade stream=true to regular
+                    # JSON and gateways that return SSE with a wrong
+                    # Content-Type.
+                    raw = await response.text()
+                    stripped = raw.strip()
+                    candidates = (
+                        [stripped]
+                        if stripped.startswith("{")
+                        else stripped.splitlines()
+                    )
+                    for line_str in candidates:
+                        if not line_str:
+                            continue
+                        remember(line_str)
+                        chunk = self._parse_stream_chunk(line_str)
+                        if chunk:
+                            observe(chunk)
+                            yield chunk
+
+                if not has_model_output:
+                    raise ValueError(
+                        "AscendAffinity stream completed without content, "
+                        "reasoning_content, or tool_calls; "
+                        f"content_type={content_type or '<missing>'!r}, "
+                        f"observed_lines={observed_lines}, "
+                        f"parsed_chunks={parsed_chunks}, "
+                        f"finish_reasons={sorted(finish_reasons)!r}, "
+                        f"raw_samples={raw_samples!r}"
+                    )
 
     async def _parse_response(
             self,
@@ -707,7 +801,11 @@ class AscendAffinityModelClient(BaseModelClient):
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
-            finish_reason="tool_calls" if tool_calls else "stop",
+            finish_reason=(
+                "tool_calls"
+                if tool_calls
+                else choice.get("finish_reason") or "stop"
+            ),
             reasoning_content=reasoning_content,
             parser_content=parser_content,
         )
@@ -757,9 +855,17 @@ class AscendAffinityModelClient(BaseModelClient):
             )
 
     def _parse_stream_chunk(self, line: str) -> Optional[AssistantMessageChunk]:
-        if not line.startswith("data: "):
+        # The SSE specification permits no space after ``data:``; deployed
+        # gateways use both forms.
+        if line.startswith("data:"):
+            data_str = line[5:].lstrip()
+        elif line.lstrip().startswith("{"):
+            # Some OpenAI-compatible services return one compact JSON
+            # ChatCompletion even when stream=true. Support that downgrade in
+            # the streaming path.
+            data_str = line.strip()
+        else:
             return None
-        data_str = line[6:]
         if data_str.strip() == "[DONE]":
             return None
         try:
@@ -776,6 +882,23 @@ class AscendAffinityModelClient(BaseModelClient):
             )
             return None
 
+        # Some inference services serialize an OpenAI error again inside the
+        # SSE message string, for example:
+        # data: {"message":"{\"error\":{...}}"}.
+        # This is not an empty stream. Surface the upstream error directly
+        # (commonly a context-length error) instead of misdiagnosing parsing.
+        if not chunk_data.get("choices") and isinstance(chunk_data.get("message"), str):
+            raw_message = chunk_data["message"]
+            error_message = raw_message
+            try:
+                nested = json.loads(raw_message)
+                nested_error = nested.get("error") if isinstance(nested, dict) else None
+                if isinstance(nested_error, dict):
+                    error_message = str(nested_error.get("message") or nested_error)
+            except json.JSONDecodeError:
+                pass
+            raise ValueError(f"AscendAffinity upstream stream error: {error_message}")
+
         choices = chunk_data.get("choices") or []
         usage_metadata = self._build_usage_metadata(chunk_data.get("usage"))
         if not choices:
@@ -788,9 +911,29 @@ class AscendAffinityModelClient(BaseModelClient):
             return None
 
         choice = choices[0]
-        delta = choice.get("delta", {})
+        delta = choice.get("delta") or {}
+        message = choice.get("message") or {}
+
+        # Prefer the standard OpenAI/vLLM delta format. Also support SSE
+        # gateways that place one token in
+        # message.token_text/reasoning_token_text. Use
+        # message.content/reasoning_content as the final non-delta fallback.
+        content = (
+            delta.get("content")
+            or message.get("token_text")
+            or message.get("content")
+            or ""
+        )
+        reasoning_content = (
+            delta.get("reasoning_content")
+            or delta.get("reasoning")
+            or message.get("reasoning_token_text")
+            or message.get("reasoning_content")
+            or message.get("reasoning")
+        )
+        raw_tool_calls = delta.get("tool_calls") or message.get("tool_calls") or []
         tool_calls = []
-        for tc_delta in delta.get("tool_calls") or []:
+        for tc_delta in raw_tool_calls:
             function = tc_delta.get("function", {})
             tool_calls.append(ToolCall(
                 id=tc_delta.get("id", "") or "",
@@ -800,16 +943,23 @@ class AscendAffinityModelClient(BaseModelClient):
                 index=tc_delta.get("index", 0),
             ))
 
-        content = delta.get("content", None) or ""
-        reasoning_content = delta.get("reasoning_content", None)
-        if not any((content, reasoning_content, tool_calls, usage_metadata)):
+        finish_reason = choice.get("finish_reason") or "null"
+        if not any(
+            (
+                content,
+                reasoning_content,
+                tool_calls,
+                usage_metadata,
+                finish_reason != "null",
+            )
+        ):
             return None
         return AssistantMessageChunk(
             content=content,
             reasoning_content=reasoning_content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
-            finish_reason=choice.get("finish_reason") or "null",
+            finish_reason=finish_reason,
         )
 
     def _sanitize_tool_calls(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
