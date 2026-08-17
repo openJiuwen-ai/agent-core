@@ -321,6 +321,9 @@ class WorkflowTaskExecutor(TaskExecutor):
         component_id = self._extract_component_ids(interaction_data)
         interaction_value = self._extract_interaction_value(interaction_data)
 
+        if task.input_required_fields is None:
+            task.input_required_fields = {"id": component_id}
+
         state["interrupted_tasks"][state_key] = {
             "task": task.model_dump(),
             "component_id": component_id,
