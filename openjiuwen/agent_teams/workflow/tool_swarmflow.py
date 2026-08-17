@@ -518,14 +518,15 @@ class SwarmflowTool(AsyncTool):
             if exc.reason == "early_return":
                 msg = self._format_early_return(exc.reply, exc.edit_hints, run_id=run_id)
                 # Early-return is terminal for the run (it never completes or
-                # resumes), so publish WORKFLOW_FAILED BEFORE surfacing the
-                # leader-facing message — otherwise the Monitor, which flips the
-                # workflow card only on progress events, would leave it running
-                # forever. Carries the edit-hints as the error text.
+                # resumes). It is the same control-state as stop — the user
+                # actively ended the run to edit the script and re-run — so
+                # publish WORKFLOW_STOPPED (not FAILED) BEFORE surfacing the
+                # leader-facing message, so the Monitor flips the card to stopped
+                # instead of leaving it running.
                 _publish(
                     WorkflowProgressEvent(
-                        kind=ProgressKind.WORKFLOW_FAILED,
-                        message=exc.edit_hints or "user requested a script edit and re-run",
+                        kind=ProgressKind.WORKFLOW_STOPPED,
+                        message="workflow stopped for script edit",
                     )
                 )
                 raise BackendError(msg) from exc
