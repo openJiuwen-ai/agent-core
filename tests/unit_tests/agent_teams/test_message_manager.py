@@ -22,7 +22,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamMessageBase,
 )
-from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.agent_teams.tools.message_manager import DirectMessageOptions, TeamMessageManager
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -126,8 +126,10 @@ class TestSendMessage:
         message_id = await team_messaging.send_message(
             content="Final report",
             to_member_name="member2",
-            meta={"template": "handoff"},
-            coordination_meta=coordination_meta,
+            options=DirectMessageOptions(
+                meta={"template": "handoff"},
+                coordination_meta=coordination_meta,
+            ),
         )
 
         message = await team_messaging.db.message.get_message(message_id)

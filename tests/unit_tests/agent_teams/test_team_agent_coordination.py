@@ -319,6 +319,13 @@ def _debate_message(
     )
 
 
+async def _dispatch(agent: TeamAgent, event: EventMessage) -> None:
+    """Activate the configured runtime boundary before dispatching an event."""
+    dispatcher = agent._coordination.dispatcher
+    await dispatcher.activate_and_flush()
+    await dispatcher.dispatch(event)
+
+
 def _debate_message_handler(
     role: TeamRole,
 ) -> tuple[DebateRunState, SimpleNamespace, SimpleNamespace, TeamInfra, MessageHandler]:
@@ -768,7 +775,7 @@ async def test_tool_approval_event_resumes_interrupt():
             auto_confirm=True,
         )
     )
-    await agent._coordination.dispatcher.dispatch(event)
+    await _dispatch(agent, event)
 
     agent.resume_interrupt.assert_awaited_once()
     interactive_input = agent.resume_interrupt.await_args.args[0]
@@ -800,7 +807,7 @@ async def test_idle_human_agent_tears_down_on_self_shutdown():
             force=False,
         )
     )
-    await agent._coordination.dispatcher.dispatch(event)
+    await _dispatch(agent, event)
 
     agent.shutdown_self.assert_awaited_once()
 
@@ -827,7 +834,7 @@ async def test_busy_human_agent_not_interrupted_on_self_shutdown():
             force=False,
         )
     )
-    await agent._coordination.dispatcher.dispatch(event)
+    await _dispatch(agent, event)
 
     agent.shutdown_self.assert_not_awaited()
 
@@ -858,7 +865,7 @@ async def test_shutdown_member_never_wakes_an_already_shutdown_harness():
             force=False,
         )
     )
-    await agent._coordination.dispatcher.dispatch(event)
+    await _dispatch(agent, event)
 
     agent.shutdown_self.assert_not_awaited()
     agent.deliver_input.assert_not_awaited()
@@ -879,7 +886,7 @@ async def test_forced_shutdown_collapses_busy_human_agent():
             force=True,
         )
     )
-    await agent._coordination.dispatcher.dispatch(event)
+    await _dispatch(agent, event)
 
     agent.shutdown_self.assert_awaited_once()
 
@@ -902,7 +909,7 @@ async def test_human_agent_ignores_other_member_shutdown():
             force=False,
         )
     )
-    await agent._coordination.dispatcher.dispatch(event)
+    await _dispatch(agent, event)
 
     agent.shutdown_self.assert_not_awaited()
 
@@ -946,7 +953,7 @@ async def test_human_agent_dispatch_delivers_message_broadcast_and_task_claimed(
     for model in models:
         trigger.reset_mock()
         event = EventMessage.from_event(model)
-        await agent._coordination.dispatcher.dispatch(event)
+        await _dispatch(agent, event)
         trigger.assert_awaited_once()
         assert trigger.await_args.args[0] == event.event_type
 
@@ -972,7 +979,7 @@ async def test_human_agent_dispatch_mutes_task_board_survey_events():
             status="pending",
         )
     )
-    await agent._coordination.dispatcher.dispatch(event)
+    await _dispatch(agent, event)
 
     trigger.assert_not_awaited()
 
@@ -1588,7 +1595,7 @@ async def test_dispatch_routes_targeted_task_events_to_handlers():
     for event_model, marker in cases:
         agent = _make_leader()
         agent.deliver_input = AsyncMock()
-        await agent._coordination.dispatcher.dispatch(EventMessage.from_event(event_model))
+        await _dispatch(agent, EventMessage.from_event(event_model))
         agent.deliver_input.assert_awaited_once()
         assert marker in agent.deliver_input.await_args.args[0]
 
@@ -2363,7 +2370,7 @@ async def test_team_cleaned_event_shuts_down_teammate():
     agent.shutdown_self = AsyncMock()
 
     event = EventMessage.from_event(TeamCleanedEvent(team_name="test-team"))
-    await agent._coordination.dispatcher.dispatch(event)
+    await _dispatch(agent, event)
 
     agent.shutdown_self.assert_awaited_once()
 
@@ -2381,7 +2388,7 @@ async def test_team_cleaned_event_ignored_by_leader():
     agent.shutdown_self = AsyncMock()
 
     event = EventMessage.from_event(TeamCleanedEvent(team_name="test-team"))
-    await agent._coordination.dispatcher.dispatch(event)
+    await _dispatch(agent, event)
 
     agent.shutdown_self.assert_not_called()
 

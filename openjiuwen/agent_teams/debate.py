@@ -211,13 +211,9 @@ class DebateRunState:
         self,
     ) -> tuple[str, str, LeaderWakeup] | None:
         self._expire_terminal_grace_locked()
-        if (
-            self.finalized
-            or self.finalizing
-            or not self.round_id
-            or self.pending_invitation_calls
-            or self._leader_wakeup is None
-        ):
+        if self.finalized or self.finalizing or not self.round_id:
+            return None
+        if self.pending_invitation_calls or self._leader_wakeup is None:
             return None
         terminal = set(self.reports) | self.failed_participants | self.unreported_participants
         if not self.expected_participants.issubset(terminal):
@@ -316,7 +312,8 @@ class DebateRunState:
                 sections.append("收束宽限期内未汇报的成员：" + "、".join(unreported))
             return "\n".join(sections)
         sections = [
-            "The team debate has converged. Synthesize the following final reports for the user exactly once; do not invite members again."
+            "The team debate has converged. Synthesize the following final reports for the user exactly once; "
+            "do not invite members again."
         ]
         if reports:
             sections.extend(["Final member reports:", *reports])

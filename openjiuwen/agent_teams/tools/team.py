@@ -60,7 +60,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamMember,
 )
-from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.agent_teams.tools.message_manager import DirectMessageOptions, TeamMessageManager
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -609,7 +609,7 @@ class TeamBackend:
         await self.message_manager.send_message(
             content=approval_payload,
             to_member_name=member_name,
-            protocol="json",
+            options=DirectMessageOptions(protocol="json"),
         )
 
         try:

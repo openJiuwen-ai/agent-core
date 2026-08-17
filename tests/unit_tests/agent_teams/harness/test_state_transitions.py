@@ -194,15 +194,14 @@ async def test_debate_cap_rail_persists_across_idle_mailbox_rounds() -> None:
         backend.leader_member_name = "leader"
         backend.task_manager.list_tasks = AsyncMock(return_value=[])
         backend.resolve_leader_member_name = AsyncMock(return_value="leader")
-        messages = MagicMock()
-        messages.send_message = AsyncMock(return_value="notice-1")
+        backend.list_members = AsyncMock(return_value=[])
         rail = DebateRoundCapRail(
             max_debate_rounds=2,
             team_backend=backend,
-            message_manager=messages,
             member_name="member",
             language="en",
         )
+        await rail._debate.activate_participant("round-1")
         harness = NativeHarness(make_spec(rails=[rail]))
         fake = await start_harness(harness, emit_tools=True)
         fake.tool_calls_by_invocation = [
@@ -257,6 +256,5 @@ async def test_debate_cap_rail_persists_across_idle_mailbox_rounds() -> None:
         assert rail._count == 2
         assert fake.tool_contexts[2].extra["_skip_tool"] is True
         assert fake.tool_contexts[3].extra.get("_skip_tool") is None
-        messages.send_message.assert_awaited_once()
     finally:
         await Runner.stop()

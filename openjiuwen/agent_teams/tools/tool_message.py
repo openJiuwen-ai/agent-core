@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable
 from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
 from openjiuwen.agent_teams.debate import _DEBATE_META_ARG, normalize_debate_meta
 from openjiuwen.agent_teams.tools.locales import Translator
-from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.agent_teams.tools.message_manager import DirectMessageOptions, TeamMessageManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
 from openjiuwen.core.common.logging import team_logger
@@ -177,7 +177,7 @@ class _SendMessageBase(TeamTool, ABC):
         msg_id = await self.message_manager.send_message(
             content=content,
             to_member_name=to,
-            coordination_meta=coordination_meta,
+            options=DirectMessageOptions(coordination_meta=coordination_meta),
         )
         if not msg_id:
             return ToolOutput(success=False, error=f"Failed to send message to '{to}'")
