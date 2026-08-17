@@ -101,13 +101,14 @@ async def invoke_text_with_retry_and_prompt(
                 timeout_secs = min(policy.attempt_timeout_secs, remaining_budget)
                 current_prompt = retry_prompt if use_retry_prompt and retry_prompt is not None else prompt
                 try:
-                    response = await llm.invoke(
-                        model=model,
-                        messages=[{"role": "user", "content": current_prompt}],
-                        temperature=temperature,
-                        timeout=timeout_secs,
-                        **kwargs,
-                    )
+                    async with asyncio.timeout(timeout_secs):
+                        response = await llm.invoke(
+                            model=model,
+                            messages=[{"role": "user", "content": current_prompt}],
+                            temperature=temperature,
+                            timeout=timeout_secs,
+                            **kwargs,
+                        )
                 except Exception as exc:
                     last_error = exc
                     logger.warning(
@@ -121,11 +122,9 @@ async def invoke_text_with_retry_and_prompt(
                         _is_timeout_like(exc),
                         exc,
                     )
-                    if (
-                        retry_prompt is not None
-                        and attempt < policy.max_attempts
-                        and _is_timeout_like(exc)
-                    ):
+                    remaining_after = policy.total_budget_secs - (time.monotonic() - started_at)
+                    has_retry_budget = remaining_after > 0 and attempt < policy.max_attempts
+                    if has_retry_budget and retry_prompt is not None and _is_timeout_like(exc):
                         use_retry_prompt = True
                         logger.info(
                             "[llm_resilience] attempt %d/%d timed out; retrying with shorter prompt",
@@ -134,6 +133,15 @@ async def invoke_text_with_retry_and_prompt(
                         )
                         await _sleep_before_retry(policy, started_at, attempt)
                         continue
+                    if _is_timeout_like(exc) and remaining_after <= 0:
+                        _raise_llm_resilience_error(
+                            StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR,
+                            reason="total_budget_exceeded",
+                            attempts=attempt,
+                            last_error=exc,
+                            last_response=last_response,
+                            cause=exc,
+                        )
                     _raise_llm_resilience_error(
                         StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR,
                         reason="invoke_failed",
