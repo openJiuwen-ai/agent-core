@@ -61,6 +61,45 @@ def test_run_background_early_return_injects_backend_error():
     assert "focus Y" in msg
 
 
+def test_run_background_early_return_publishes_workflow_failed_event():
+    """reason=early_return publishes WORKFLOW_FAILED (edit-hints text) before BackendError.
+
+    Without this the Monitor — which updates workflow status only from progress
+    events — never sees a terminal event, so the early-returned workflow card
+    stays "running" forever.
+    """
+    tool = _make_tool(messager=_CapturingMessager())
+    with patch(
+        "openjiuwen.agent_teams.workflow.runner.run_swarmflow",
+        side_effect=WorkflowAborted(reason="early_return", reply="改 X", edit_hints="focus Y"),
+    ):
+        _run_abort_and_drain(
+            tool, "task-early-pub", _inputs("wf_1"), expect=BackendError
+        )
+    assert ProgressKind.WORKFLOW_FAILED in _published_kinds(tool)
+    failed = [
+        m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_FAILED
+    ]
+    assert failed and failed[0].payload["text"] == "focus Y"
+
+
+def test_run_background_early_return_no_hints_publishes_fallback_message():
+    """reason=early_return without edit_hints falls back to a summary message."""
+    tool = _make_tool(messager=_CapturingMessager())
+    with patch(
+        "openjiuwen.agent_teams.workflow.runner.run_swarmflow",
+        side_effect=WorkflowAborted(reason="early_return", reply="改 X"),
+    ):
+        _run_abort_and_drain(
+            tool, "task-early-pub2", _inputs("wf_1"), expect=BackendError
+        )
+    assert ProgressKind.WORKFLOW_FAILED in _published_kinds(tool)
+    failed = [
+        m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_FAILED
+    ]
+    assert failed and failed[0].payload["text"] == "user requested a script edit and re-run"
+
+
 def test_run_background_stop_injects_backend_error():
     """reason=stop surfaces as BackendError carrying the stopped message."""
     tool = _make_tool()
