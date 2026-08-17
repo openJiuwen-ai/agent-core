@@ -11,7 +11,6 @@ from typing import Any, Mapping, Optional
 
 import httpx
 
-
 _FILENAME_RE = re.compile(r'filename="?([^";]+)"?')
 
 

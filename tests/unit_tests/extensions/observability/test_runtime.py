@@ -90,6 +90,31 @@ def test_exporter_runs_before_additional_processor() -> None:
         runtime.shutdown()
 
 
+def test_initialize_attaches_override_exporter_to_existing_provider() -> None:
+    runtime = ObservabilityRuntime()
+    first_exporter = InMemorySpanExporter()
+    second_exporter = InMemorySpanExporter()
+    try:
+        runtime.initialize(
+            _config("late-exporter-test"),
+            span_exporter_override=first_exporter,
+        )
+        with runtime.get_tracer("late-exporter-test").start_as_current_span("before"):
+            pass
+
+        runtime.initialize(
+            _config("late-exporter-test"),
+            span_exporter_override=second_exporter,
+        )
+        with runtime.get_tracer("late-exporter-test").start_as_current_span("after"):
+            pass
+
+        assert [span.name for span in first_exporter.get_finished_spans()] == ["before", "after"]
+        assert [span.name for span in second_exporter.get_finished_spans()] == ["after"]
+    finally:
+        runtime.shutdown()
+
+
 def test_processors_are_identity_deduped_and_retained() -> None:
     runtime = ObservabilityRuntime()
     exporter = InMemorySpanExporter()

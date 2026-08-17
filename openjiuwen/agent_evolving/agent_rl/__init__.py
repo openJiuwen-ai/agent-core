@@ -63,7 +63,7 @@ def __getattr__(name):
         from openjiuwen.agent_evolving.agent_rl.rl_rail import RLRail
         return RLRail
     if name == "RLOnlineRail":
-        from openjiuwen.agent_evolving.agent_rl.online.rail import RLOnlineRail
+        from openjiuwen.agent_evolving.agent_rl.online.backends.rl.rail import RLOnlineRail
         return RLOnlineRail
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

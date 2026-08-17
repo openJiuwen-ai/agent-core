@@ -3,19 +3,23 @@
 
 """Trajectory ingestion and storage helpers for the online-RL gateway."""
 
-from .sample_recorder import SampleRecorder
-from .judge_dispatcher import JudgeDispatcher
-from .pending_judge_store import PendingJudgeStore
-from .persistence import GatewayTrajectoryRuntime
-from .rail_ingest import RailBatchIngestor
-from .sample_payloads import build_sample, coerce_logprobs
+from importlib import import_module
 
-__all__ = [
-    "GatewayTrajectoryRuntime",
-    "SampleRecorder",
-    "JudgeDispatcher",
-    "PendingJudgeStore",
-    "RailBatchIngestor",
-    "build_sample",
-    "coerce_logprobs",
-]
+_EXPORTS = {
+    "SampleRecorder": "openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.sample_recorder",
+    "JudgeDispatcher": "openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.judge_dispatcher",
+    "PendingJudgeStore": "openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.pending_judge_store",
+    "GatewayTrajectoryRuntime": "openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.persistence",
+    "RailBatchIngestor": "openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.rail_ingest",
+    "build_sample": "openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.sample_payloads",
+    "coerce_logprobs": "openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.sample_payloads",
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = import_module(_EXPORTS[name])
+    return getattr(module, name)

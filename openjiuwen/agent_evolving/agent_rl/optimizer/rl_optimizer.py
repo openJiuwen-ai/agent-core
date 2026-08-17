@@ -386,7 +386,7 @@ class OnlineRLOptimizer(BaseRLOptimizer):
                 "Redis URL not configured. Call setup_redis() first."
             )
 
-        from openjiuwen.agent_evolving.agent_rl.online.scheduler.online_training_scheduler import (
+        from openjiuwen.agent_evolving.agent_rl.online.core.scheduler import (
             OnlineTrainingScheduler,
         )
         from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
