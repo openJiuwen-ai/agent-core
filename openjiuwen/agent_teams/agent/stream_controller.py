@@ -106,6 +106,7 @@ class StreamController:
         execution_updater: Callable[[ExecutionStatus], Any],
         wake_mailbox_callback: Optional[Callable[[], Any]] = None,
         request_completion_poll_callback: Optional[Callable[[], Awaitable[None]]] = None,
+        member_startup_reconciler: Optional[Callable[[], Awaitable[None]]] = None,
         task_board_probe: Optional[Callable[[], Awaitable[bool]]] = None,
     ):
         self._get_blueprint = blueprint_getter
@@ -118,6 +119,12 @@ class StreamController:
         # The leader wires it to enqueue a POLL_TASK so team completion is
         # re-evaluated immediately; teammates pass None.
         self._request_completion_poll = request_completion_poll_callback
+        # Also fired at round-chain end, just before the completion poll: the
+        # leader checks whether the board holds work nobody was ever started
+        # for. Its own round having just ended is the sharpest moment to ask —
+        # whatever this round meant to set up is now fully expressed. Teammates
+        # pass None; they own no roster.
+        self._reconcile_member_startup = member_startup_reconciler
         # Second condition of the team-idle marker: "is the task board at
         # rest?". Asked once, only after the roster has held still for the
         # whole debounce window — a member view alone cannot tell a finished
@@ -370,6 +377,12 @@ class StreamController:
             self.close_stream()
             return
         await self._wake_mailbox_if_interrupt_cleared()
+        # Order matters, for the same reason stale-sweep runs before the
+        # completion check on POLL_TASK: starting members can put the team
+        # back in motion, and a completion verdict taken before that would
+        # call a team done at the exact moment its members were coming up.
+        if self._reconcile_member_startup is not None:
+            await self._reconcile_member_startup()
         if self._request_completion_poll is not None:
             await self._request_completion_poll()
 
