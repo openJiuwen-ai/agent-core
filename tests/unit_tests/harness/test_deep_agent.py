@@ -21,6 +21,7 @@ from openjiuwen.core.foundation.llm import (
     UsageMetadata,
     UserMessage,
 )
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard, ToolExposure
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.runner import Runner
@@ -1464,6 +1465,9 @@ def test_create_subagent_keeps_auto_probe_for_distinct_browser_model(tmp_path) -
 
 def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
     workspace_root = tmp_path / "parent_workspace"
+    kv_cache_affinity_config = KVCacheAffinityConfig(
+        enable_kv_cache_affinity=True
+    )
     subagent_config = SubAgentConfig(
         agent_card=AgentCard(name="reviewer", description="reviewer"),
         system_prompt="Review strictly.",
@@ -1482,6 +1486,8 @@ def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
         card=AgentCard(name="parent", description="parent"),
         system_prompt="parent prompt",
         workspace=Workspace(root_path=str(workspace_root)),
+        enable_read_image_multimodal=False,
+        kv_cache_affinity_config=kv_cache_affinity_config,
         restrict_to_work_dir=False,
         subagents=[subagent_config],
     )
@@ -1502,7 +1508,39 @@ def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
     assert call_kwargs["restrict_to_work_dir"] is True
     assert call_kwargs["prompt_mode"] == "concise"
     assert call_kwargs["language"] == "en"
+    assert call_kwargs["enable_read_image_multimodal"] is False
+    assert (
+        call_kwargs["kv_cache_affinity_config"]
+        is kv_cache_affinity_config
+    )
     assert call_kwargs["sandbox"] is True
+
+
+def test_create_subagent_can_override_parent_image_multimodal_setting(tmp_path) -> None:
+    subagent_config = SubAgentConfig(
+        agent_card=AgentCard(name="vision-reviewer", description="reviewer"),
+        system_prompt="Inspect images.",
+        factory_name=CODE_AGENT_FACTORY_NAME,
+        enable_read_image_multimodal=True,
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        enable_read_image_multimodal=False,
+        subagents=[subagent_config],
+    )
+
+    with patch(
+        "openjiuwen.harness.subagents.code_agent.create_code_agent",
+        return_value=object(),
+    ) as mock_create_code_agent:
+        parent.create_subagent("vision-reviewer", "sub_session_id")
+
+    assert (
+        mock_create_code_agent.call_args.kwargs["enable_read_image_multimodal"]
+        is True
+    )
 
 
 def test_create_subagent_keeps_parent_work_dir_restriction_when_stricter(tmp_path) -> None:

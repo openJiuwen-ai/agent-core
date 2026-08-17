@@ -1332,6 +1332,22 @@ class DeepAgent(BaseAgent):
                 if spec.prompt_mode is not None
                 else self._deep_config.prompt_mode
             ),
+            # Preserve the parent's explicit decision by default.  A child
+            # using a model with different image capabilities may override it.
+            "enable_read_image_multimodal": (
+                spec.enable_read_image_multimodal
+                if spec.enable_read_image_multimodal is not None
+                else self._deep_config.enable_read_image_multimodal
+            ),
+            # A dynamically created subagent runs under its own conversation
+            # ID, but it remains part of the parent's KVC-affinity lifecycle.
+            # Without inheriting this config the child ReActAgent never
+            # installs the affinity hooks, so its normal model requests omit
+            # agent_hint even though TaskTool supplies conversation_id and
+            # parent_session_id.
+            "kv_cache_affinity_config": (
+                self._deep_config.kv_cache_affinity_config
+            ),
             "subagents": None,
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
@@ -1348,13 +1364,23 @@ class DeepAgent(BaseAgent):
                 )
 
                 factory_kwargs = dict(spec.factory_kwargs or {})
+                # Browser models may be independent from the parent model and
+                # therefore retain their factory's automatic image-capability
+                # probe.  Do not forward the generic inherited value twice.
+                browser_create_kwargs = dict(create_kwargs)
+                browser_create_kwargs.pop("enable_read_image_multimodal", None)
                 browser_model = create_kwargs["model"]
                 browser_parent_model = getattr(
                     browser_model,
                     "_browser_agent_parent_model",
                     None,
                 )
-                if (
+                if spec.enable_read_image_multimodal is not None:
+                    factory_kwargs.setdefault(
+                        "enable_read_image_multimodal",
+                        spec.enable_read_image_multimodal,
+                    )
+                elif (
                     browser_model is self._deep_config.model
                     or browser_parent_model is self._deep_config.model
                 ):
@@ -1371,7 +1397,7 @@ class DeepAgent(BaseAgent):
                     factory_kwargs["browser_capabilities"] = list(browser_capabilities)
                 return self._bind_inherited_artifact_root(
                     create_browser_agent(
-                        **create_kwargs,
+                        **browser_create_kwargs,
                         **factory_kwargs,
                     )
                 )

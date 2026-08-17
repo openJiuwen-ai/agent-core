@@ -296,6 +296,9 @@ class SubAgentConfig:
     sys_operation: Optional[SysOperation] = None
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
+    # None inherits the parent DeepAgent setting.  Set explicitly when the
+    # subagent uses a model with different native image capabilities.
+    enable_read_image_multimodal: Optional[bool] = None
     enable_task_loop: bool = False
     max_iterations: Optional[int] = None
     factory_name: Optional[str] = None
