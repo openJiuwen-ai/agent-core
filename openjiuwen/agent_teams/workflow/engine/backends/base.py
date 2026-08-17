@@ -55,14 +55,25 @@ class AgentBackend(abc.ABC):
 
     def __init__(self) -> None:
         self._budget = BudgetLedger()
+        self._workflow_budget: BudgetLedger | None = None
 
     @property
     def budget(self) -> BudgetLedger:
-        """The run's token ledger — unbounded until ``run_workflow`` binds one."""
+        """The run's session-wide token ledger — unbounded until ``run_workflow`` binds one."""
         return self._budget
 
+    @property
+    def workflow_budget(self) -> BudgetLedger | None:
+        """The run's per-run token ledger (resets each ``swarmflow`` invocation).
+
+        ``None`` for backends that do not participate in per-run accounting
+        (older implementations); the engine's own ``_check_budget`` gate still
+        reads ``rt.workflow_budget`` directly regardless of this binding.
+        """
+        return self._workflow_budget
+
     def bind_budget(self, budget: BudgetLedger) -> None:
-        """Adopt the run's ledger; called once by ``run_workflow`` before the run.
+        """Adopt the run's session-wide ledger; called once by ``run_workflow`` before the run.
 
         **The backend is the ledger's only writer.** It is the only layer that
         knows what a call really cost: one ``agent()`` is a whole agent loop, so
@@ -75,6 +86,17 @@ class AgentBackend(abc.ABC):
         the backend attaches to the agents it spawns); call ``super()`` first.
         """
         self._budget = budget
+
+    def bind_workflow_budget(self, workflow_budget: BudgetLedger) -> None:
+        """Adopt the run's per-run ledger (companion to :meth:`bind_budget`).
+
+        Bound by ``run_workflow`` alongside the session ledger. The per-run
+        ledger resets to ``spent=0`` on each new ``swarmflow`` invocation and
+        caps a single run independently of the session budget. Backends fan it
+        out into the same rails that bill the session ledger (so every model
+        call is reported to both); overriding is only needed to fan out further.
+        """
+        self._workflow_budget = workflow_budget
 
     @abc.abstractmethod
     async def run(

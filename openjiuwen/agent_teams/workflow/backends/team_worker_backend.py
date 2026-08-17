@@ -168,7 +168,7 @@ class TeamWorkerBackend(AgentBackend):
         # One rail per call: it bills this worker's model calls to the run's
         # shared ledger (and cuts the worker short once that ledger is dry),
         # while its own tally is what this ``agent()`` call reports as its cost.
-        budget_rail = SwarmflowBudgetRail(self.budget)
+        budget_rail = SwarmflowBudgetRail(self.budget, workflow_budget=self.workflow_budget)
         try:
             await self._worktrees.ensure(member_name, opts)
             if schema_json is not None:
@@ -240,6 +240,7 @@ class TeamWorkerBackend(AgentBackend):
                 build_context=self._build_context,
                 t=self._t,
                 budget=self.budget,
+                workflow_budget=self.workflow_budget,
                 messager=self._messager,
                 session_id=self._session_id,
                 run_id=self._run_id,
