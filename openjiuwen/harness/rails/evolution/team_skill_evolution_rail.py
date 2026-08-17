@@ -231,6 +231,28 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
             team_id,
         )
 
+    def _prepare_evolution_review_scope(
+        self,
+        *,
+        source: str,
+        subject: dict[str, Any],
+        session_id: str,
+        member_id: str | None = None,
+        team_id: str | None = None,
+        user_intent: str = "",
+    ):
+        """Prepare review against the Team identity captured by the active root."""
+        del member_id, team_id
+        _, root_team_id = self._team_span_identity()
+        return super()._prepare_evolution_review_scope(
+            source=source,
+            subject=subject,
+            session_id=session_id,
+            member_id=None,
+            team_id=root_team_id,
+            user_intent=user_intent,
+        )
+
     def configure_review_feedback_evolution(
         self,
         *,

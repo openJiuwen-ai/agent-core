@@ -42,6 +42,7 @@ from openjiuwen.agent_evolving.signal import (
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
@@ -82,6 +83,16 @@ def _team_skill_rail(*args, **kwargs):
 
 def _team_review_runtime() -> EvolutionReviewRuntime:
     return EvolutionReviewRuntime()
+
+
+def _prepare_review_tool(rail: TeamSkillRail):
+    from openjiuwen.agent_evolving.tools.skill import PrepareSkillEvolutionReviewTool
+
+    return PrepareSkillEvolutionReviewTool(
+        prepare_scope=rail._prepare_evolution_review_scope,
+        language="cn",
+        agent_id="test-leader",
+    )
 
 
 def test_team_completion_followup_prompts_are_short_and_reference_standing_rules():
@@ -1087,31 +1098,83 @@ def test_team_experience_tracker_is_initialized():
 
 
 @pytest.mark.asyncio
-async def test_prepare_evolution_review_scope_reads_team_clean_window():
-    tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
-    try:
-        rail = _team_skill_rail(
-            skills_dir=str(tmp),
-            llm=MockLLM(),
-            model="mock-model",
-            async_evolution=False,
+async def test_prepare_tool_uses_root_team_name_over_default_session_team_id(tmp_path):
+    rail = _team_skill_rail(
+        skills_dir=str(tmp_path),
+        llm=MockLLM(),
+        model="mock-model",
+        async_evolution=False,
+    )
+    _install_hook_trajectory(rail)
+    session = AgentTeamSession(session_id="test-session")
+    await rail.before_invoke(
+        _MockCtx(
+            inputs=InvokeInputs(query="round 1", conversation_id="test-session"),
+            session=session,
         )
-        _install_hook_trajectory(rail)
-        await rail.before_invoke(_MockCtx(inputs=InvokeInputs(query="round 1", conversation_id="test-session")))
+    )
+    tool = _prepare_review_tool(rail)
 
-        rail._prepare_evolution_review_scope(
-            source="explicit_command",
-            subject={"kind": "swarm-skill", "name": "team-skill-a"},
-            session_id="test-session",
-        )
+    result = await tool.invoke(
+        {
+            "subject": {"kind": "skill", "name": "xlsx"},
+            "user_confirmed": True,
+            "user_intent": "制作表格之前确认需求",
+        },
+        session=session,
+    )
 
-        rail.get_trajectory.assert_called_once_with(
-            session_id="test-session",
-            member_id=None,
-            team_id="test-team",
+    assert session.get_team_id() == "agent_team"
+    assert result.success is True
+    rail.get_trajectory.assert_called_once_with(
+        session_id="test-session",
+        member_id=None,
+        team_id="test-team",
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_tool_rejects_session_team_when_root_team_changed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    import openjiuwen.harness.rails.evolution.evolution_rail as evolution_rail_module
+    from openjiuwen.extensions.observability import semconv
+
+    rail = _team_skill_rail(
+        skills_dir=str(tmp_path),
+        llm=MockLLM(),
+        model="mock-model",
+        async_evolution=False,
+    )
+    _install_hook_trajectory(rail)
+    session = AgentTeamSession(session_id="test-session", team_id="test-team")
+    await rail.before_invoke(
+        _MockCtx(
+            inputs=InvokeInputs(query="round 1", conversation_id="test-session"),
+            session=session,
         )
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    )
+    root = SimpleNamespace(
+        context=SimpleNamespace(trace_id=2),
+        attributes={semconv.AT_TEAM_NAME: "other-team"},
+        is_recording=lambda: True,
+    )
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: root)
+    tool = _prepare_review_tool(rail)
+
+    result = await tool.invoke(
+        {
+            "subject": {"kind": "skill", "name": "xlsx"},
+            "user_confirmed": True,
+            "user_intent": "制作表格之前确认需求",
+        },
+        session=session,
+    )
+
+    assert result.success is False
+    assert result.error == "review session does not match the active trajectory scope"
+    rail.get_trajectory.assert_not_called()
 
 
 @pytest.mark.asyncio
