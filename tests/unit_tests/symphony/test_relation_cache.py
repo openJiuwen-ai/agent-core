@@ -5,9 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import openjiuwen.symphony.orchestration.graph.matcher.cache as cache_module
 from filelock import FileLock
 
+import openjiuwen.symphony.orchestration.graph.matcher.cache as cache_module
+import openjiuwen.symphony.orchestration.graph.matcher.ontology as matcher_module
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.symphony import (
     ArtifactSpec,
@@ -16,14 +17,13 @@ from openjiuwen.symphony import (
     OrchestrationService,
     ParameterSpec,
 )
+from openjiuwen.symphony.orchestration.graph.matcher.cache import RelationCacheStats, RelationMatchCache
+from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
 from openjiuwen.symphony.orchestration.graph.models import (
     LLMMatch,
     RelationCandidate,
     SkillRegistry,
 )
-from openjiuwen.symphony.orchestration.graph.matcher.cache import RelationCacheStats, RelationMatchCache
-import openjiuwen.symphony.orchestration.graph.matcher.ontology as matcher_module
-from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
 from openjiuwen.symphony.shared.fingerprint import coerce_fingerprint
 
 
@@ -112,6 +112,25 @@ class _CountingLLM:
                 }
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_internal_matcher_requests_minimal_reasoning_and_disables_thinking() -> None:
+    fingerprints = [_fingerprint(item) for item in ("a", "b")]
+    candidate = _candidate("a", "b")
+    llm = _CountingLLM()
+    matcher = OntologyMatcher(
+        llm,
+        fingerprints=fingerprints,
+        require_consensus=False,
+    )
+
+    await matcher.match(SkillRegistry(skills={item.id: item for item in fingerprints}), [candidate])
+
+    system_prompt = llm.calls[0]["messages"][0]["content"]
+    assert "Prioritize low latency" in system_prompt
+    assert "minimum internal reasoning" in system_prompt
+    assert llm.calls[0]["kwargs"]["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
 def _matcher(

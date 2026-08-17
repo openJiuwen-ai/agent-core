@@ -132,15 +132,14 @@ class OrchestrationService:
                 progress_dispatcher.enqueue(stage, **details)
 
             def matcher_progress(event: str, current: int, total: int, details: dict[str, Any]) -> None:
-                candidate_progress = {
-                    key: details[key]
-                    for key in (
-                        "completed_candidate_count",
-                        "total_candidate_count",
-                        "reused_candidate_count",
-                    )
-                    if key in details
-                }
+                candidate_progress = {}
+                for key in (
+                    "completed_candidate_count",
+                    "total_candidate_count",
+                    "reused_candidate_count",
+                ):
+                    if key in details:
+                        candidate_progress[key] = details[key]
                 graph_progress(
                     "graph.resolve.progress",
                     matcher_event=event,

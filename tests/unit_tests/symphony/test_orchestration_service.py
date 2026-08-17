@@ -9,8 +9,8 @@ import pytest
 
 from openjiuwen.symphony import (
     ArtifactSpec,
-    CapabilityGraph,
     CapabilityFingerprint,
+    CapabilityGraph,
     GraphArtifactStatus,
     GraphBuildResult,
     OrchestrationConfig,
@@ -20,11 +20,11 @@ from openjiuwen.symphony import (
     ParameterSpec,
     SymphonyRuntime,
 )
-from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
-from openjiuwen.symphony.orchestration.graph.models import GraphDiagnostic, LLMMatch
 from openjiuwen.symphony.orchestration.artifacts import load_graph_artifacts
 from openjiuwen.symphony.orchestration.execution_graph import build_execution_graph
+from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
 from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
+from openjiuwen.symphony.orchestration.graph.models import GraphDiagnostic, LLMMatch
 
 
 def test_public_artifact_contract_uses_graph_terminology() -> None:
@@ -593,7 +593,7 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
         "model": None,
         "backend": None,
         "temperature": None,
-        "prompt_version": "Orchestration-graph-match-v2",
+        "prompt_version": "Orchestration-graph-match-v3",
         "batch_size": 1,
         "max_workers": 3,
         "require_consensus": False,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
-from openjiuwen.symphony.shared.fingerprint import FingerprintLike
 from openjiuwen.symphony.orchestration.graph.models import (
     ALLOWED_RELATION_TYPES,
     GraphDiagnostic,
@@ -12,6 +11,7 @@ from openjiuwen.symphony.orchestration.graph.models import (
     RelationCandidate,
     SkillRegistry,
 )
+from openjiuwen.symphony.shared.fingerprint import FingerprintLike
 
 DEFAULT_THRESHOLDS = {
     "can_feed": 0.7,
@@ -558,6 +558,9 @@ def _protocol_diagnostic(code: str, message: str) -> GraphDiagnostic:
 
 
 SYSTEM_PROMPT = """Validate whether each candidate Skill output can feed the target input.
+
+Prioritize low latency. Decide directly from supplied fields with the minimum internal reasoning
+necessary. Do not perform or output step-by-step analysis or chain-of-thought.
 
 Return JSON only:
 {"matches":[{"id":"c1","direction":"forward|reverse","confidence":0.0,"reason":"optional short reason"}]}
