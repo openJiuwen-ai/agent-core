@@ -152,3 +152,65 @@ class TestInvokeTextWithRetry:
         assert exc_info.value.details["attempts"] == 1
         assert llm.invoke.await_count == 1
         assert elapsed < 0.04
+
+    @pytest.mark.asyncio
+    async def test_cancels_hung_invoke_and_retries_with_shorter_prompt(self):
+        async def hang_then_succeed(*, messages, **_: object) -> SimpleNamespace:
+            content = messages[0]["content"]
+            if content == "full prompt":
+                await asyncio.sleep(10)
+                return SimpleNamespace(content="too late")
+            return SimpleNamespace(content='{"ok": true}')
+
+        llm = Mock()
+        llm.invoke = AsyncMock(side_effect=hang_then_succeed)
+
+        started_at = time.monotonic()
+        result = await invoke_text_with_retry(
+            llm=llm,
+            model="test-model",
+            prompt="full prompt",
+            retry_prompt="short prompt",
+            policy=LLMInvokePolicy(
+                attempt_timeout_secs=0.05,
+                total_budget_secs=0.3,
+                max_attempts=2,
+                backoff_base_secs=0,
+            ),
+        )
+        elapsed = time.monotonic() - started_at
+
+        assert result == '{"ok": true}'
+        assert llm.invoke.await_count == 2
+        assert llm.invoke.await_args_list[0].kwargs["messages"][0]["content"] == "full prompt"
+        assert llm.invoke.await_args_list[1].kwargs["messages"][0]["content"] == "short prompt"
+        assert elapsed < 0.25
+
+    @pytest.mark.asyncio
+    async def test_hung_retry_also_times_out_then_raises(self):
+        async def always_hang(**_: object) -> SimpleNamespace:
+            await asyncio.sleep(10)
+            return SimpleNamespace(content="too late")
+
+        llm = Mock()
+        llm.invoke = AsyncMock(side_effect=always_hang)
+
+        started_at = time.monotonic()
+        with pytest.raises(BaseError) as exc_info:
+            await invoke_text_with_retry(
+                llm=llm,
+                model="test-model",
+                prompt="full prompt",
+                retry_prompt="short prompt",
+                policy=LLMInvokePolicy(
+                    attempt_timeout_secs=0.05,
+                    total_budget_secs=0.3,
+                    max_attempts=2,
+                    backoff_base_secs=0,
+                ),
+            )
+        elapsed = time.monotonic() - started_at
+
+        assert exc_info.value.status == StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR
+        assert llm.invoke.await_count == 2
+        assert elapsed < 0.25

@@ -36,6 +36,8 @@ from openjiuwen.agent_evolving.trajectory import (
     trajectory_from_steps,
 )
 from openjiuwen.agent_evolving.types import ApplyResult
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import SystemMessage
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -1594,6 +1596,50 @@ async def test_run_evolution_emits_cancelled_when_attributed_signals_generate_no
     ]
     assert outcomes
     assert outcomes[-1].payload["evolution_meta"]["status"] == "no_evolution_no_records"
+    assert outcomes[-1].payload["evolution_meta"]["skill_name"] == "skill-a"
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_emits_cancelled_when_generation_failed(tmp_path):
+    rail = _make_rail(tmp_path, auto_save=False)
+    messages = [{"role": "user", "content": "please review whether this skill learned anything"}]
+    trajectory = _trajectory_with_messages(messages)
+    signal = _make_signal("skill-a", excerpt="review this conversation")
+    detector = Mock()
+    detector.bind_llm.return_value = detector
+    detector.detect_trajectory_signals.return_value = [signal]
+    detector.detect_user_intent = AsyncMock(return_value=[])
+    detector.collect_skills_from_messages.return_value = []
+
+    rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
+    rail._online_updater.bind = Mock()
+    rail._online_updater.process = AsyncMock(
+        side_effect=BaseError(
+            StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR,
+            error_msg="total_budget_exceeded",
+        )
+    )
+
+    with patch(
+        "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
+        return_value=detector,
+    ):
+        await rail.run_evolution(trajectory, AgentCallbackContext(agent=None, inputs=None, session=None))
+
+    drained_events = await rail.drain_pending_host_events()
+    events = _progress_events(drained_events)
+    stages = [event.payload["evolution_meta"]["stage"] for event in events]
+    assert "signals_attributed" in stages
+    assert "optimizing" in stages
+    assert stages[-1] == "cancelled"
+    assert events[-1].payload["evolution_meta"]["skill_name"] == "skill-a"
+    assert "generation failed for 'skill-a'" in events[-1].payload["content"]
+    assert "produced no reusable evolution records" not in events[-1].payload["content"]
+    outcomes = [
+        event for event in drained_events if event.payload.get("evolution_meta", {}).get("event_kind") == "outcome"
+    ]
+    assert outcomes
+    assert outcomes[-1].payload["evolution_meta"]["status"] == "generation_failed"
     assert outcomes[-1].payload["evolution_meta"]["skill_name"] == "skill-a"
 
 
