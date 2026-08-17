@@ -49,6 +49,7 @@ class Fingerprint:
     inputs: list[ParameterSpec] = field(default_factory=list)
     outputs: list[ArtifactSpec] = field(default_factory=list)
     static_data: dict[str, Any] = field(default_factory=dict)
+    content_hash: str = ""
 
     @property
     def capability_id(self) -> str:
@@ -68,6 +69,7 @@ class Fingerprint:
             "inputs": [item.to_dict() for item in self.inputs],
             "outputs": [item.to_dict() for item in self.outputs],
             "static_data": self.static_data,
+            "content_hash": self.content_hash,
         }
 
     def to_internal_dict(self) -> dict[str, Any]:
@@ -116,6 +118,7 @@ class Fingerprint:
                 for item in payload.get("outputs", [])
             ],
             static_data=dict(payload.get("static_data") or {}),
+            content_hash=str(payload.get("content_hash") or ""),
         )
 
 
@@ -141,7 +144,9 @@ def coerce_fingerprint(value: object) -> Fingerprint:
         return value
     if isinstance(value, CapabilityFingerprint):
         validated = CapabilityFingerprint.model_validate(value)
-        return Fingerprint.from_dict(validated.to_dict())
+        payload = validated.to_dict()
+        payload["content_hash"] = validated.content_hash
+        return Fingerprint.from_dict(payload)
     if isinstance(value, dict):
         return Fingerprint.from_dict(value)
     to_dict = getattr(value, "to_dict", None)

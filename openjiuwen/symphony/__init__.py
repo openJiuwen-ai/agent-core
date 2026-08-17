@@ -11,6 +11,7 @@ from openjiuwen.symphony.evaluation import EvaluationContext, EvaluationSuite, E
 from openjiuwen.symphony.interfaces import (
     AtomicCapabilityProvider,
     CapabilityProvider,
+    SkillGraphUpdater,
     SymphonyLLM,
 )
 from openjiuwen.symphony.models import (
@@ -36,11 +37,16 @@ from openjiuwen.symphony.orchestration import (
     CapabilityGraph,
     GraphArtifactStatus,
     GraphBuildResult,
+    GraphMutationDelta,
+    GraphMutationResult,
     OrchestrationConfig,
     OrchestrationPlan,
     OrchestrationProgress,
     OrchestrationService,
     PrepareArtifactHook,
+    SkillGraphAdd,
+    SkillGraphDelete,
+    SkillGraphUpdate,
 )
 from openjiuwen.symphony.runtime import SymphonyRuntime
 from openjiuwen.symphony.shared import ArtifactSpec, Fingerprint, ParameterSpec
@@ -92,6 +98,8 @@ __all__ = [
     "FingerprintSettings",
     "GraphArtifactStatus",
     "GraphBuildResult",
+    "GraphMutationDelta",
+    "GraphMutationResult",
     "IONameVocabulary",
     "ImprovementSuggestion",
     "MetricResult",
@@ -108,6 +116,10 @@ __all__ = [
     "ScanResult",
     "SemanticProfile",
     "SkillFolderScanner",
+    "SkillGraphAdd",
+    "SkillGraphDelete",
+    "SkillGraphUpdate",
+    "SkillGraphUpdater",
     "SkillManifestParser",
     "SourceSnapshot",
     "SuggestionPriority",
