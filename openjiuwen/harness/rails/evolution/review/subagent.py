@@ -160,7 +160,7 @@ def build_evolution_review_agent_config(
         enable_task_loop=False,
         max_iterations=max_iterations,
         restrict_to_work_dir=True,
-        factory_kwargs={"enable_read_image_multimodal": False},
+        enable_read_image_multimodal=False,
     )
     _set_review_agent_binding(
         config,

@@ -79,7 +79,7 @@ def test_build_evolution_review_agent_config_disables_image_modality_probe():
         model=None,
     )
 
-    assert config.factory_kwargs["enable_read_image_multimodal"] is False
+    assert config.enable_read_image_multimodal is False
 
 
 def test_build_evolution_review_agent_prompt_supports_cn_and_en():
