@@ -11,6 +11,11 @@ T = TypeVar("T")
 
 KV_CACHE_AFFINITY_SESSION_ID_ENV = "kv_cache_affinity_session_id"
 KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV = "kv_cache_affinity_parent_session_id"
+# Internal marker for a request-scoped tail message that should be evicted
+# after inference. BaseModelClient does not serialize BaseMessage.metadata.
+KV_CACHE_EPHEMERAL_TAIL_METADATA = (
+    "_openjiuwen_kv_cache_ephemeral_tail"
+)
 
 
 @dataclass(frozen=True, slots=True)

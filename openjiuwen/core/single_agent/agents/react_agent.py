@@ -1022,6 +1022,7 @@ class ReActAgent(BaseAgent):
             session=session,
             session_id=session_id,
             parent_session_id=parent_session_id,
+            context_window=context_window,
         )
 
         if self._config.llm_return_token_ids:

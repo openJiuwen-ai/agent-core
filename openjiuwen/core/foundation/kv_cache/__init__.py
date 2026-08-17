@@ -13,6 +13,7 @@ from openjiuwen.core.foundation.kv_cache.kv_cache_config import (
 from openjiuwen.core.foundation.kv_cache.kv_cache_metadata import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
     KV_CACHE_AFFINITY_SESSION_ID_ENV,
+    KV_CACHE_EPHEMERAL_TAIL_METADATA,
     KVCacheIdentity,
     first_changed_index,
     message_range_kwargs,
@@ -39,6 +40,7 @@ __all__ = [
     "KVCacheIdentity",
     "KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV",
     "KV_CACHE_AFFINITY_SESSION_ID_ENV",
+    "KV_CACHE_EPHEMERAL_TAIL_METADATA",
     "cancel_pending_session_kv_cache_signals",
     "dispatch_session_kv_cache_signal",
     "evict_session_kv_cache",
