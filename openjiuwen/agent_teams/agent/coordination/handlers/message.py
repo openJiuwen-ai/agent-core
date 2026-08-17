@@ -395,7 +395,7 @@ class MessageHandler(BaseCoordinationHandler):
             return TeamRole.HUMAN_AGENT
         if backend.is_bridge_agent(member_name):
             return TeamRole.BRIDGE_AGENT
-        if backend.is_external_cli_agent(member_name):
+        if await backend.is_external_cli_agent(member_name):
             return TeamRole.EXTERNAL_CLI
         # The leader uses the team's leader_member_name from team_spec.
         team_spec = self._blueprint.team_spec

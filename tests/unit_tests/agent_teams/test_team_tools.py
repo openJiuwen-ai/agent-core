@@ -583,7 +583,7 @@ class TestSpawnTools:
         assert result.success is True, result.error
         assert result.data["role_type"] == "external_cli"
         assert result.data["cli_agent"] == "claude"
-        assert team.is_external_cli_agent("claude-1")
+        assert await team.is_external_cli_agent("claude-1")
 
 
 class TestSpawnToolCapabilityGate:
