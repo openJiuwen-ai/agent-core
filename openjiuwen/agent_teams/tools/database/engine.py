@@ -858,3 +858,51 @@ async def drop_session_tables_by_id(engine: AsyncEngine, session_id: str) -> lis
     if dropped:
         team_logger.info("Dropped session tables for session %s: %s", session_id, dropped)
     return dropped
+
+
+def _clear_table_rows(sync_conn, table_name: str) -> int:
+    """Delete all rows from one dynamic table, preserving its structure.
+
+    Used to clear a session's task board (unfinished tasks) without dropping
+    the table or touching the deliberation-message / read-status tables.
+    """
+    quoted_name = table_name.replace('"', '""')
+    result = sync_conn.exec_driver_sql(f'DELETE FROM "{quoted_name}"')
+    return int(result.rowcount or 0)
+
+
+async def clear_session_task_board_by_id(engine: AsyncEngine, session_id: str) -> int:
+    """Clear the unfinished-task rows for a session, KEEPING the table
+    structures and the deliberation history.
+
+    Deletes every row from ``team_task_<suffix>`` (the task board) — the FK
+    ``ondelete=CASCADE`` on ``team_task_dependency_<suffix>`` (models.py) auto
+    -removes dependency rows — and from ``team_review_vote_<suffix>`` (no FK,
+    orphaned verify-gate votes). Leaves ``team_message_<suffix>`` (member
+    deliberation history) and ``message_read_status_<suffix>`` (read
+    high-water) intact so COLD_RECOVER still sees the conversation history.
+
+    Rows-only (no DROP): COLD_RECOVER's ``recover_from_session`` does not
+    recreate tables, so dropping would leave a missing task table; deleting
+    rows keeps the structure so the leader can dispatch fresh tasks into the
+    same (now-empty) table.
+    """
+    if engine is None or not session_id:
+        return 0
+
+    suffix = _sanitize_session_id_for_table(session_id)
+    deleted = 0
+    # review_vote has no FK to task; clear it first, then team_task (cascades
+    # team_task_dependency rows via FK ondelete=CASCADE).
+    async with engine.begin() as conn:
+        table_names = await conn.run_sync(_get_table_names)
+        for prefix in ("team_review_vote_", "team_task_"):
+            table = f"{prefix}{suffix}"
+            if table in table_names:
+                deleted += await conn.run_sync(_clear_table_rows, table)
+
+    if deleted:
+        team_logger.info(
+            "Cleared task board rows for session %s (deleted %s)", session_id, deleted
+        )
+    return deleted
