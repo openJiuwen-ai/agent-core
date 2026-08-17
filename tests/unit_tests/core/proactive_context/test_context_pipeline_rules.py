@@ -268,14 +268,14 @@ async def test_batch_processing_never_creates_a_temporary_processing_directory(
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
     service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
     run_root = tmp_path / "workspace" / "sandboxes" / "local" / "run-no-processing-tmp"
-    original_process = service._process_with_fallback
+    original_process = service._process_deterministic
 
     async def inspect_processing(batch: FetchBatch, *unexpected: object) -> dict[str, object]:
         assert unexpected == ()
         assert not (run_root / "tmp").exists()
         return await original_process(batch)
 
-    monkeypatch.setattr(service, "_process_with_fallback", inspect_processing)
+    monkeypatch.setattr(service, "_process_deterministic", inspect_processing)
     await service.start()
     completion = asyncio.get_running_loop().create_future()
     try:
@@ -834,7 +834,7 @@ async def test_cancelled_stop_fails_active_and_queued_completions(
         await asyncio.Event().wait()
         return {}
 
-    monkeypatch.setattr(service, "_process_rules", block_processing)
+    monkeypatch.setattr(service, "_process_deterministic", block_processing)
     await service.start()
 
     active = asyncio.get_running_loop().create_future()

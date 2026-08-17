@@ -14,11 +14,8 @@ from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.proactive_context.config import PCSConfig
 from openjiuwen.core.proactive_context.context_pipeline import (
     ContextPipelineService,
-    _agent_content,
     _bounded_validation_errors,
     _load_agent_json,
-    _parse_processing_output,
-    _parse_processing_model_result,
     _prepare_agent_candidate,
     _profile_fallback_allowed,
     _validate_agent_candidate,
@@ -69,16 +66,6 @@ def _batch(
         ],
         materialized_source_path=materialized_source_path,
         materialized_revision=materialized_revision,
-    )
-
-
-def _processed_output(markdown: str = "Processed text.") -> str:
-    return json.dumps(
-        {
-            "summaries": [
-                {"item_index": 0, "markdown": markdown},
-            ],
-        }
     )
 
 
@@ -239,78 +226,65 @@ class _FakeDirectModel:
 
 
 @pytest.mark.asyncio
-async def test_processing_balanced_uses_one_compact_indexed_summary_call_for_twenty_upserts(
+@pytest.mark.parametrize("profile", ["rules", "balanced", "agent"])
+async def test_processing_is_deterministic_for_every_total_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    profile: str,
 ) -> None:
-    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
-    batch = _processing_batch(20)
-    compact_output = json.dumps(
-        {"summaries": [{"item_index": index, "markdown": f"Summary {index}."} for index in range(20)]}
-    )
-    _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = [compact_output]
-    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+    service = ContextPipelineService(home=tmp_path, config=_config(profile), input_queue=asyncio.Queue())
+    batch = _processing_batch(2, include_delete=True)
 
-    result = await service._process_balanced(batch)
+    class UnexpectedProcessingModel:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+            raise AssertionError("Processing must not construct a Model")
 
-    model = _FakeDirectModel.instances[0]
-    assert len(model.calls) == 1
-    prompt = str(getattr(model.calls[0][0][0], "content", ""))
-    assert '"summaries"' in prompt
-    assert "item_index" in prompt
-    assert "at most 450 characters" in prompt
-    assert '"blocks": "list' not in prompt
-    assert '"deleted_ids": "list' not in prompt
+    async def unexpected_processing_agent(**kwargs: object) -> str:
+        del kwargs
+        raise AssertionError("Processing must not call DeepAgent")
+
+    monkeypatch.setattr(context_pipeline, "Model", UnexpectedProcessingModel)
+    monkeypatch.setattr(context_pipeline, "run_pcs_agent", unexpected_processing_agent)
+
+    result = await service._process_deterministic(batch)
+
+    assert result["actual_profile"] == "deterministic"
     documents = result["documents"]
     assert isinstance(documents, list)
-    assert [document["logical_id"] for document in documents] == [f"notes/{index}" for index in range(20)]
-    assert [document["revision_id"] for document in documents] == [f"rev-{index}" for index in range(20)]
-    assert [document["title"] for document in documents] == [f"Note {index}" for index in range(20)]
-    assert result["deleted_ids"] == []
+    assert [document["logical_id"] for document in documents] == ["notes/0", "notes/1"]
+    assert [document["revision_id"] for document in documents] == ["rev-0", "rev-1"]
+    assert [document["title"] for document in documents] == ["Note 0", "Note 1"]
+    assert [document["markdown"] for document in documents] == ["Source content 0.\n", "Source content 1.\n"]
+    assert all(document["actual_profile"] == "deterministic" for document in documents)
+    assert result["deleted_ids"] == ["notes/deleted"]
     blocks = result["blocks"]
     assert isinstance(blocks, list)
-    assert len(blocks) == 20
-    assert all(block["logical_id"] == f"notes/{index}" for index, block in enumerate(blocks))
-
-
-def test_processing_compact_output_derives_deletes_and_rejects_oversized_summary() -> None:
-    batch = _processing_batch(1, include_delete=True)
-    result = _parse_processing_output(
-        json.dumps({"summaries": [{"item_index": 0, "markdown": "Useful summary."}]}),
-        batch=batch,
-    )
-    assert result["deleted_ids"] == ["notes/deleted"]
-    assert result["documents"][0]["logical_id"] == "notes/0"
-    assert result["documents"][0]["metadata"] == {"index": 0}
-
-    with pytest.raises(Exception):
-        _parse_processing_output(
-            json.dumps({"summaries": [{"item_index": 0, "markdown": "x" * 451}]}),
-            batch=batch,
-        )
+    assert [block["logical_id"] for block in blocks] == ["notes/0", "notes/1"]
+    assert [block["text"] for block in blocks] == ["Source content 0.", "Source content 1."]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("total_profile", "expected_processing_model_calls", "expected_filesystem_model_calls", "expected_agent_calls"),
+    ("total_profile", "expected_filesystem_model_calls", "expected_agent_calls"),
     [
-        ("rules", 0, 0, 0),
-        ("balanced", 1, 1, 0),
-        ("agent", 1, 0, 1),
+        ("rules", 0, 0),
+        ("balanced", 1, 0),
+        ("agent", 0, 1),
     ],
 )
 async def test_total_profile_maps_processing_and_filesystem_stages_independently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     total_profile: str,
-    expected_processing_model_calls: int,
     expected_filesystem_model_calls: int,
     expected_agent_calls: int,
 ) -> None:
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=4)
     service = ContextPipelineService(home=tmp_path, config=_config(total_profile), input_queue=queue)
     agent_prompts: list[str] = []
+    published_profiles: list[str] = []
+    original_publish = service._publish_processed
 
     async def agent_spy(*, messages: list[object], sandbox_path: Path, **kwargs: object) -> str:
         del kwargs
@@ -328,11 +302,19 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
     _FakeDirectModel.instances.clear()
     _FakeDirectModel.outputs = {
         "rules": [],
-        "balanced": [_processed_output(), filesystem_output],
-        "agent": [_processed_output()],
+        "balanced": [filesystem_output],
+        "agent": [],
     }[total_profile]
+
+    async def publish_spy(**kwargs: object) -> None:
+        processed = kwargs["processed"]
+        assert isinstance(processed, dict)
+        published_profiles.append(str(processed["actual_profile"]))
+        await original_publish(**kwargs)  # type: ignore[arg-type]
+
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
     monkeypatch.setattr(context_pipeline, "run_pcs_agent", agent_spy)
+    monkeypatch.setattr(service, "_publish_processed", publish_spy)
 
     await service.start()
     await _submit_run(queue, _batch())
@@ -341,7 +323,7 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
     model_prompts = [
         str(getattr(messages[0], "content", "")) for model in _FakeDirectModel.instances for messages, _ in model.calls
     ]
-    assert sum("This is the Processing stage" in prompt for prompt in model_prompts) == expected_processing_model_calls
+    assert all("This is the Processing stage" not in prompt for prompt in model_prompts)
     assert sum("Return JSON for the current Filesystem candidate" in prompt for prompt in model_prompts) == (
         expected_filesystem_model_calls
     )
@@ -351,6 +333,7 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
         )
         _assert_new_wiki_prompt(balanced_prompt)
     assert len(agent_prompts) == expected_agent_calls
+    assert published_profiles == [total_profile]
     assert all("existing context/description.md" in prompt for prompt in agent_prompts)
     assert all("This is a small run: read every bounded source_preview" in prompt for prompt in agent_prompts)
     assert all(
@@ -370,7 +353,7 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
 
 
 @pytest.mark.asyncio
-async def test_total_agent_filesystem_still_starts_agent_after_processing_falls_to_rules(
+async def test_total_agent_filesystem_starts_after_deterministic_processing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -391,7 +374,7 @@ async def test_total_agent_filesystem_still_starts_agent_after_processing_falls_
         return "done"
 
     _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = ["bad-1", "bad-2", "bad-3"]
+    _FakeDirectModel.outputs = []
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
     monkeypatch.setattr(context_pipeline, "run_pcs_agent", filesystem_agent_spy)
 
@@ -399,7 +382,7 @@ async def test_total_agent_filesystem_still_starts_agent_after_processing_falls_
     await _submit_run(queue, _batch())
     await service.stop(timeout_seconds=1)
 
-    assert len(_FakeDirectModel.instances[0].calls) == 3
+    assert _FakeDirectModel.instances == []
     assert len(agent_prompts) == 1
     _assert_new_wiki_prompt(agent_prompts[0])
     assert not (tmp_path / "workspace" / "source-proofs").exists()
@@ -589,7 +572,7 @@ async def test_agent_run_without_manifest_publishes_only_aggregate_and_source_me
         return "done"
 
     _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = [_processed_output()]
+    _FakeDirectModel.outputs = []
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
     monkeypatch.setattr(context_pipeline, "run_pcs_agent", agent_without_manifest)
 
@@ -1081,6 +1064,59 @@ def test_run_finish_rewrites_preview_and_writes_complete_briefing_without_trunca
     for relative_path in source["artifacts"].values():
         assert isinstance(relative_path, str)
         assert sandbox.joinpath(relative_path).is_file()
+
+
+@pytest.mark.asyncio
+async def test_deterministic_briefing_extracts_outline_first_paragraph_and_counts(tmp_path: Path) -> None:
+    service = ContextPipelineService(home=tmp_path / "home", config=_config("rules"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "home" / "workspace" / "sandboxes" / "local" / "run-briefing"
+    sandbox.mkdir(parents=True)
+    content = (
+        "---\n"
+        "kind: note\n"
+        "---\n"
+        "# 主标题\n\n"
+        "第一个有效正文段落包含关键事实。\n"
+        "同一段的下一行。\n\n"
+        "## 细节\n\n"
+        "第二个段落。\n"
+    )
+    batch = _batch(content=content, raw_snapshot="raw text")
+    record_paths = service._write_batch_records(sandbox, batch)
+    processed = await service._process_deterministic(batch)
+    service._write_processed_batch(
+        sandbox,
+        batch,
+        processed,
+        record_paths,
+        {"notes/one": "[[ref:0]]"},
+    )
+
+    service._prepare_run_finish_io(
+        sandbox,
+        {
+            "sandbox": sandbox,
+            "batch_ids": ["batch-1"],
+            "provider": "local_files",
+            "source_alias_by_id": {"src_test": "[[ref:0]]"},
+            "source_id_by_logical_id": {"notes/one": "src_test"},
+        },
+    )
+
+    briefing = json.loads((sandbox / "inputs" / "briefing.json").read_text(encoding="utf-8"))
+    source = briefing["sources"][0]
+    assert source["headings"] == [
+        {"level": 1, "text": "主标题"},
+        {"level": 2, "text": "细节"},
+    ]
+    assert source["summary"] == "第一个有效正文段落包含关键事实。 同一段的下一行。"
+    assert len(source["summary"]) <= 450
+    assert source["content_chars"] == len(context_pipeline._normalize_markdown(content))
+    assert source["raw_snapshot_type"] == "text"
+    briefing_markdown = (sandbox / "inputs" / "briefing.md").read_text(encoding="utf-8")
+    assert "- content_chars:" in briefing_markdown
+    assert "- raw_snapshot_type: `text`" in briefing_markdown
+    assert "- outline: `H1 主标题 | H2 细节`" in briefing_markdown
 
 
 @pytest.mark.asyncio
@@ -1698,12 +1734,6 @@ def test_agent_json_parser_accepts_fenced_and_double_encoded_json() -> None:
     assert _load_agent_json(json.dumps(json.dumps(expected)), error_message="invalid") == expected
 
 
-def test_agent_content_is_bounded_only_for_model_input() -> None:
-    value = _agent_content("x" * 8_010)
-    assert len(value) == 8_000 + len("\n[content truncated by PCS for this Agent call]")
-    assert value.endswith("[content truncated by PCS for this Agent call]")
-
-
 def test_balanced_validation_details_redact_unix_unc_and_url_secrets() -> None:
     error = build_error(
         StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR,
@@ -1720,37 +1750,6 @@ def test_balanced_validation_details_redact_unix_unc_and_url_secrets() -> None:
     assert "hidden" not in rendered
     assert "/tmp/private.txt" not in rendered
     assert "\\\\server\\share\\private.txt" not in rendered
-
-
-def test_balanced_result_parser_does_not_swallow_publish_errors(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    error = build_error(StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR, error_msg="disk failure")
-
-    def fail_result(_result: object) -> str:
-        raise error
-
-    monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline._model_result_text", fail_result)
-    with pytest.raises(Exception) as raised:
-        _parse_processing_model_result("ignored", batch=_batch())
-    assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR
-
-
-def test_balanced_processing_rejects_unknown_item_index() -> None:
-    with pytest.raises(Exception):
-        _parse_processing_output(
-            json.dumps({"summaries": [{"item_index": 1, "markdown": "First paragraph."}]}),
-            batch=_batch(),
-        )
-
-
-def test_balanced_processing_derives_blocks_when_model_omits_them() -> None:
-    result = _parse_processing_output(
-        json.dumps({"summaries": [{"item_index": 0, "markdown": "First paragraph."}]}),
-        batch=_batch(),
-    )
-    assert len(result["blocks"]) == 1
-    assert result["blocks"][0]["logical_id"] == "notes/one"
 
 
 def test_parse_balanced_pages_materializes_normalized_markdown(tmp_path: Path) -> None:
@@ -1782,7 +1781,7 @@ async def test_balanced_agent_failure_falls_back_to_rules(tmp_path: Path, monkey
 
 
 @pytest.mark.asyncio
-async def test_processing_rules_downgrade_does_not_prevent_filesystem_agent_attempt(
+async def test_deterministic_processing_does_not_prevent_filesystem_agent_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=4)
@@ -1795,14 +1794,14 @@ async def test_processing_rules_downgrade_does_not_prevent_filesystem_agent_atte
 
     monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.run_pcs_agent", fail_agent)
     _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = ["bad-1", "bad-2", "bad-3"]
+    _FakeDirectModel.outputs = ["bad-1"]
     monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.Model", _FakeDirectModel)
     await service.start()
     await _submit_run(queue, _batch())
 
     assert not (tmp_path / "workspace" / "source-proofs").exists()
     assert profiles == ["agent"]
-    assert len(_FakeDirectModel.instances[0].calls) == 3
+    assert len(_FakeDirectModel.instances[0].calls) == 1
     await service.stop(timeout_seconds=1)
 
 
@@ -1833,9 +1832,9 @@ async def test_agent_success_validates_pages_and_does_not_serialize_raw_snapshot
         source_content = next((sandbox_path / "inputs" / "records").rglob("content.md"))
         assert source_content.read_text(encoding="utf-8") == "First paragraph."
         processed_document = next((sandbox_path / "inputs" / "processed").rglob("context-document.md"))
-        assert processed_document.read_text(encoding="utf-8").strip() == "[[ref:0]]\n\nProcessed text."
+        assert processed_document.read_text(encoding="utf-8").strip() == "[[ref:0]]\n\nFirst paragraph."
         blocks = next((sandbox_path / "inputs" / "processed").rglob("blocks.jsonl"))
-        assert '"text": "Processed text."' in blocks.read_text(encoding="utf-8")
+        assert '"text": "First paragraph."' in blocks.read_text(encoding="utf-8")
         (sandbox_path / "tmp" / "filesystem-notes.md").write_text("scratch", encoding="utf-8")
         page = sandbox_path / "context" / "topics" / "agent.md"
         page.parent.mkdir(parents=True, exist_ok=True)
@@ -1855,7 +1854,7 @@ async def test_agent_success_validates_pages_and_does_not_serialize_raw_snapshot
 
     monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.run_pcs_agent", successful_agent)
     _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = [_processed_output()]
+    _FakeDirectModel.outputs = []
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
     await service.start()
     await _submit_run(
@@ -2192,7 +2191,6 @@ async def test_source_ref_alias_survives_balanced_repair_and_clean_redo(
     service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=queue)
     _FakeDirectModel.instances.clear()
     _FakeDirectModel.outputs = [
-        _processed_output("Processed text."),
         "bad-1",
         "bad-2",
         json.dumps(
@@ -2207,8 +2205,8 @@ async def test_source_ref_alias_survives_balanced_repair_and_clean_redo(
     try:
         await _submit_run(queue, _batch())
 
-        assert len(_FakeDirectModel.instances) == 2
-        calls = _FakeDirectModel.instances[1].calls
+        assert len(_FakeDirectModel.instances) == 1
+        calls = _FakeDirectModel.instances[0].calls
         assert len(calls) == 3
         for messages, _kwargs in calls:
             prompt = "\n".join(str(getattr(message, "content", "")) for message in messages)
@@ -2701,7 +2699,7 @@ async def test_agent_publication_keeps_multiple_changed_pages(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_filesystem_fallback_downshifts_after_processing_balanced_success(
+async def test_filesystem_fallback_downshifts_after_deterministic_processing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=4)
@@ -2718,7 +2716,6 @@ async def test_filesystem_fallback_downshifts_after_processing_balanced_success(
     monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.run_pcs_agent", mixed_agent)
     _FakeDirectModel.instances.clear()
     _FakeDirectModel.outputs = [
-        _processed_output(),
         json.dumps(
             {
                 "pages": {"topics/balanced.md": "# Balanced\n\nBalanced filesystem result. [[ref:0]]"},
@@ -2752,7 +2749,7 @@ async def test_filesystem_agent_without_page_output_falls_back_before_publish(
 
     monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.run_pcs_agent", long_path_agent)
     _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = [_processed_output(), "not-json"]
+    _FakeDirectModel.outputs = ["not-json"]
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
     await service.start()
     await _submit_run(queue, _batch())
@@ -2783,7 +2780,7 @@ async def test_filesystem_agent_rejects_undeclared_context_files(
 
     monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.run_pcs_agent", unsafe_agent)
     _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = [_processed_output(), "not-json"]
+    _FakeDirectModel.outputs = ["not-json"]
     monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.Model", _FakeDirectModel)
     await service.start()
     await _submit_run(queue, _batch())
@@ -2818,7 +2815,7 @@ async def test_agent_reads_materialized_candidate_copy_inside_read_only_sandbox(
 
     monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.run_pcs_agent", successful_agent)
     _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = [_processed_output()]
+    _FakeDirectModel.outputs = []
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
     await service.start()
     await _submit_run(
@@ -2945,7 +2942,7 @@ async def test_non_model_agent_error_does_not_fallback(tmp_path: Path, monkeypat
 
     monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.run_pcs_agent", fail_path)
     _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = [_processed_output()]
+    _FakeDirectModel.outputs = []
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
     await service.start()
     with pytest.raises(Exception):
@@ -3006,201 +3003,50 @@ async def test_filesystem_non_model_agent_statuses_do_not_fallback(
 
 
 @pytest.mark.asyncio
-async def test_total_agent_processing_uses_balanced_model_with_two_repairs_and_no_deep_agent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
-    agent_calls = 0
-
-    async def agent_spy(**kwargs: object) -> str:
-        nonlocal agent_calls
-        del kwargs
-        agent_calls += 1
-        return "unexpected"
-
-    monkeypatch.setattr(context_pipeline, "run_pcs_agent", agent_spy)
-    _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = ["bad-1", "bad-2", AssistantMessage(content=_processed_output("final"))]
-    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
-
-    result = await service._process_with_fallback(_batch())
-
-    assert result["actual_profile"] == "balanced"
-    assert agent_calls == 0
-    model = _FakeDirectModel.instances[0]
-    assert len(model.calls) == 3
-    assert len(model.calls[0][0]) == 1
-    assert len(model.calls[1][0]) == 3
-    assert model.calls[1][0][0] is model.calls[0][0][0]
-    assert isinstance(model.calls[1][0][1], AssistantMessage)
-    assert model.calls[1][0][1].content == "bad-1"
-    assert len(model.calls[2][0]) == 1
-    assert "bad-2" not in str(getattr(model.calls[2][0][0], "content", ""))
-
-
-@pytest.mark.asyncio
-async def test_total_agent_processing_three_balanced_failures_enter_rules_without_deep_agent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
-    agent_calls = 0
-
-    async def agent_spy(**kwargs: object) -> str:
-        nonlocal agent_calls
-        del kwargs
-        agent_calls += 1
-        return "unexpected"
-
-    monkeypatch.setattr(context_pipeline, "run_pcs_agent", agent_spy)
-    _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = ["bad-1", "bad-2", "bad-3"]
-    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
-
-    result = await service._process_with_fallback(_batch())
-
-    assert result["actual_profile"] == "rules"
-    assert agent_calls == 0
-    assert len(_FakeDirectModel.instances) == 1
-    assert len(_FakeDirectModel.instances[0].calls) == 3
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("failure_source", "model_error", "expected_status"),
-    [
-        ("model", OSError("disk unavailable"), StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR),
-        ("model", PermissionError("permission denied"), StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR),
-        (
-            "adapter",
-            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
-            StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR,
-        ),
-    ],
-    ids=("os-error", "permission-error", "unicode-decode-error"),
-)
-async def test_processing_adapter_io_or_encoding_error_fails_without_repair_fallback_or_publish(
+async def test_deterministic_processing_error_fails_without_model_fallback_or_publish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    failure_source: str,
-    model_error: Exception,
-    expected_status: StatusCode,
 ) -> None:
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=4)
     service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=queue)
-    _FakeDirectModel.instances.clear()
-    first_output: object = model_error if failure_source == "model" else _processed_output("adapter input")
-    _FakeDirectModel.outputs = [first_output, _processed_output("must not be used")]
-    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
-    if failure_source == "adapter":
+    model_constructions = 0
 
-        def fail_adapter(*args: object, **kwargs: object) -> object:
-            del args, kwargs
-            raise model_error
+    class UnexpectedProcessingModel:
+        def __init__(self, **kwargs: object) -> None:
+            nonlocal model_constructions
+            del kwargs
+            model_constructions += 1
 
-        monkeypatch.setattr(context_pipeline, "_parse_processing_model_result", fail_adapter)
+        async def invoke(self, messages: list[object], **kwargs: object) -> object:
+            del messages, kwargs
+            raise RuntimeError("Processing must not invoke a model")
+
+    def fail_normalization(content: str) -> str:
+        del content
+        raise ValueError("deterministic normalization failed")
+
+    monkeypatch.setattr(context_pipeline, "Model", UnexpectedProcessingModel)
+    monkeypatch.setattr(context_pipeline, "_normalize_markdown", fail_normalization)
     await service.start()
     completion = asyncio.get_running_loop().create_future()
     try:
-        await queue.put(("batch", "local", "run-processing-io-error", _batch(), completion))
+        await queue.put(("batch", "local", "run-processing-error", _batch(), completion))
         with pytest.raises(Exception) as raised:
             await asyncio.wait_for(asyncio.shield(completion), timeout=2)
 
-        assert getattr(raised.value, "status", None) == expected_status
-        assert isinstance(raised.value.__cause__, type(model_error))
-        assert len(_FakeDirectModel.instances) == 1
-        assert len(_FakeDirectModel.instances[0].calls) == 1
-        assert _FakeDirectModel.outputs == [_processed_output("must not be used")]
+        assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR
+        assert isinstance(raised.value.__cause__, ValueError)
+        assert model_constructions == 0
         assert not (tmp_path / "workspace" / "context" / "description.md").exists()
-        assert not (tmp_path / "state" / "cursors" / "local.json").exists()
-        assert not (tmp_path / "workspace" / "sandboxes" / "local" / "run-processing-io-error").exists()
+        assert not (tmp_path / "workspace" / "sandboxes" / "local" / "run-processing-error").exists()
     finally:
         if not completion.done():
             completion.cancel()
         await service.stop(timeout_seconds=1)
 
 
-def test_plain_value_error_remains_eligible_for_model_output_repair() -> None:
-    assert _profile_fallback_allowed(ValueError("processing model output is invalid"))
-
-
-@pytest.mark.asyncio
-async def test_processing_balanced_repairs_model_call_failure_before_clean_redo(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
-    _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = [
-        RuntimeError("temporary model call failure"),
-        "bad-output",
-        AssistantMessage(content=_processed_output("final")),
-    ]
-    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
-
-    result = await service._process_with_fallback(_batch())
-
-    assert result["actual_profile"] == "balanced"
-    calls = _FakeDirectModel.instances[0].calls
-    assert len(calls) == 3
-    assert len(calls[1][0]) == 2
-    assert "temporary model call failure" in str(getattr(calls[1][0][-1], "content", ""))
-    assert len(calls[2][0]) == 1
-
-
-@pytest.mark.asyncio
-async def test_balanced_primary_repairs_same_history_then_clean_redo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=asyncio.Queue())
-    _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = ["bad-1", "bad-2", AssistantMessage(content=_processed_output("final"))]
-    monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.Model", _FakeDirectModel)
-
-    result = await service._process_with_fallback(_batch())
-
-    assert result["actual_profile"] == "balanced"
-    model = _FakeDirectModel.instances[0]
-    assert len(model.calls) == 3
-    first_messages = model.calls[0][0]
-    second_messages = model.calls[1][0]
-    third_messages = model.calls[2][0]
-    assert len(first_messages) == 1
-    assert len(second_messages) == 3
-    assert len(third_messages) == 1
-    assert second_messages[0] is first_messages[0]
-    assert isinstance(second_messages[1], AssistantMessage)
-    assert second_messages[1].content == "bad-1"
-    assert "validation" in str(getattr(second_messages[-1], "content", "")).lower()
-    assert "bad-2" not in str(getattr(third_messages[0], "content", ""))
-    assert "processing model output" in str(getattr(third_messages[0], "content", ""))
-
-
-@pytest.mark.asyncio
-async def test_balanced_three_failures_enter_rules_after_last_repair(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=asyncio.Queue())
-    _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = ["bad-1", "bad-2", "bad-3"]
-    monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.Model", _FakeDirectModel)
-
-    result = await service._process_with_fallback(_batch())
-
-    assert result["actual_profile"] == "rules"
-    assert len(_FakeDirectModel.instances[0].calls) == 3
-
-
-@pytest.mark.asyncio
-async def test_processing_missing_model_configuration_is_not_fallback(tmp_path: Path) -> None:
-    service = ContextPipelineService(home=tmp_path, config=_config("rules"), input_queue=asyncio.Queue())
-    sandbox = tmp_path / "sandbox"
-    sandbox.mkdir()
-
-    with pytest.raises(Exception) as raised:
-        await service._process_balanced(_batch())
-
-    assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID
-    assert not _profile_fallback_allowed(raised.value)
+def test_plain_value_error_remains_eligible_for_filesystem_model_output_repair() -> None:
+    assert _profile_fallback_allowed(ValueError("filesystem model output is invalid"))
 
 
 def test_short_references_resolve_at_each_context_depth(tmp_path: Path) -> None:

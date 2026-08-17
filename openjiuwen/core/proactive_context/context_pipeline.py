@@ -2,7 +2,7 @@
 
 The queue is intentionally non-durable, while complete source and Processing
 artifacts live in one temporary directory for the whole fetch run.  Each batch
-finishes after Processing is safely written; one explicit finish event performs
+finishes after deterministic Processing is safely written; one explicit finish event performs
 the sole Filesystem compilation and publication for that run.
 """
 
@@ -34,6 +34,7 @@ _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]\r\n]*\]\(([^)\r\n]+)\)")
 _MARKDOWN_LINK_TOKEN = re.compile(r"\[[^\]\r\n]*\]\(([^)\r\n]+)\)")
 _MARKDOWN_INLINE_LINK = re.compile(r"!?\[([^\]\r\n]+)\]\([^)\r\n]+\)")
+_MARKDOWN_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)\s*#*\s*$")
 _SHORT_REFERENCE = re.compile(r"\[\[ref:(0|[1-9][0-9]*)\]\]")
 _SOURCE_METADATA_ID = re.compile(r"src_[0-9a-f]{32}")
 _URI_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
@@ -42,17 +43,17 @@ _MAX_DESCRIPTION_CHARS = 12_000
 _MAX_AGENT_CONTEXT_FILES = 10_000
 _MAX_AGENT_CONTEXT_FILE_BYTES = 2 * 1024 * 1024
 _MAX_AGENT_CONTEXT_PATH_CHARS = 1_024
-_MAX_AGENT_ITEM_CONTENT_CHARS = 8_000
 _LARGE_RUN_DOCUMENT_COUNT = 10
 _LARGE_RUN_TOTAL_DOCUMENT_CHARS = 60_000
 _LARGE_RUN_MAX_DOCUMENT_CHARS = 40_000
 _SMALL_RUN_PREVIEW_CHARS = 12_000
 _LARGE_RUN_PREVIEW_CHARS = 2_800
 _BRIEFING_SUMMARY_CHARS = 450
+_BRIEFING_HEADING_LIMIT = 8
+_BRIEFING_HEADING_CHARS = 160
 _INITIAL_PROMPT_DOCUMENT_LIMIT = 12
 _SMALL_PROMPT_SUMMARY_CHARS = 700
 _LARGE_PROMPT_SUMMARY_CHARS = 320
-_PROCESSING_SUMMARY_CHARS = 450
 _MAX_MODEL_OUTPUT_CHARS = 2_000_000
 _MAX_VALIDATION_ERROR_CHARS = 512
 _MAX_VALIDATION_DETAILS_CHARS = 7_000
@@ -334,6 +335,55 @@ def _normalize_markdown(content: str) -> str:
     normalized = content.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
     normalized = "\n".join(line.rstrip() for line in normalized.splitlines())
     return normalized.strip() + "\n"
+
+
+def _deterministic_briefing_preview(content: str) -> dict[str, object]:
+    """Extract a bounded outline and first meaningful paragraph without a model."""
+
+    normalized = _normalize_markdown(content)
+    lines = normalized.splitlines()
+    headings: list[dict[str, object]] = []
+    paragraph: list[str] = []
+    fallback_lines: list[str] = []
+    paragraph_complete = False
+    in_frontmatter = bool(lines and lines[0].strip() == "---")
+    in_fence = False
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if in_frontmatter:
+            if index and stripped in {"---", "..."}:
+                in_frontmatter = False
+            continue
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        heading = _MARKDOWN_HEADING.fullmatch(line)
+        if heading is not None:
+            if len(headings) < _BRIEFING_HEADING_LIMIT:
+                text = heading.group(2).strip().replace("`", "'")[:_BRIEFING_HEADING_CHARS]
+                headings.append({"level": len(heading.group(1)), "text": text})
+            if paragraph:
+                paragraph_complete = True
+            continue
+        if not stripped or stripped in {"---", "***", "___"}:
+            if paragraph:
+                paragraph_complete = True
+            continue
+        fallback_lines.append(stripped)
+        if not paragraph_complete:
+            paragraph.append(stripped)
+
+    summary = " ".join(paragraph)
+    if not summary:
+        summary = " ".join(fallback_lines) or normalized.strip()
+    return {
+        "headings": headings,
+        "summary": summary[:_BRIEFING_SUMMARY_CHARS].rstrip(),
+        "content_chars": len(normalized),
+    }
 
 
 def _title_for(item: RawChangeItem) -> str:
@@ -887,7 +937,6 @@ class ContextPipelineService:
                 "sandbox": sandbox,
                 "batch_ids": [],
                 "batch_count": 0,
-                "processing_profiles": [],
                 "provider": self._provider_for_service(service_id),
                 "source_alias_by_id": {},
                 "source_id_by_logical_id": {},
@@ -931,7 +980,7 @@ class ContextPipelineService:
                 state=state,
             )
             record_paths = await _cancel_safe_to_thread(self._write_batch_records, sandbox_value, batch)
-            processed = await self._process_with_fallback(batch)
+            processed = await self._process_deterministic(batch)
             await _cancel_safe_to_thread(
                 self._write_processed_batch,
                 sandbox_value,
@@ -940,11 +989,6 @@ class ContextPipelineService:
                 record_paths,
                 source_refs,
             )
-            profile = str(processed.get("actual_profile", "rules"))
-            profiles = state.get("processing_profiles")
-            if not isinstance(profiles, list):
-                raise _pipeline_error("run profile state is invalid")
-            profiles.append(profile)
             batch_ids.append(safe_batch)
             state["batch_count"] = len(batch_ids)
         except asyncio.CancelledError:
@@ -981,12 +1025,6 @@ class ContextPipelineService:
         state["status"] = "finishing"
         try:
             processed = await _cancel_safe_to_thread(self._prepare_run_finish_io, sandbox, dict(state))
-            profiles = state.get("processing_profiles")
-            if not isinstance(profiles, list) or not profiles:
-                raise _pipeline_error("run profile state is invalid")
-            processing_profile = str(profiles[0])
-            for profile in profiles[1:]:
-                processing_profile = _lowest_profile(processing_profile, str(profile))
             batch = FetchBatch(
                 batch_id="finish-run",
                 items=(),
@@ -1022,7 +1060,7 @@ class ContextPipelineService:
                 deleted_source_ids=deleted_source_ids,
                 service_id=service_id,
             )
-            actual_profile = _run_actual_profile(processing_profile, filesystem_profile)
+            actual_profile = filesystem_profile
             processed["actual_profile"] = actual_profile
             documents_value = processed.get("documents", [])
             if isinstance(documents_value, list):
@@ -1151,7 +1189,7 @@ class ContextPipelineService:
                 "title": str(document.get("title", logical_id)),
                 "original_ref": _agent_reference(str(document.get("original_ref", ""))),
                 "metadata": _agent_metadata(document.get("metadata", {})),
-                "actual_profile": str(document.get("actual_profile", processed.get("actual_profile", "rules"))),
+                "actual_profile": str(document.get("actual_profile", processed.get("actual_profile", "deterministic"))),
                 "raw_snapshot_path": raw_path,
                 "source_record_path": record_root_value,
             }
@@ -1252,7 +1290,7 @@ class ContextPipelineService:
                         "original_ref": str(record.get("original_ref", "")),
                         "metadata": dict(metadata_value) if isinstance(metadata_value, Mapping) else {},
                         "raw_snapshot": raw_snapshot,
-                        "actual_profile": str(record.get("actual_profile", "rules")),
+                        "actual_profile": str(record.get("actual_profile", "deterministic")),
                     }
                     if not document["logical_id"] or not document["revision_id"] or not document["original_ref"]:
                         raise _pipeline_error("processed record identifiers are invalid")
@@ -1274,7 +1312,7 @@ class ContextPipelineService:
             "documents": documents,
             "blocks": blocks,
             "deleted_ids": deleted_ids,
-            "actual_profile": "rules",
+            "actual_profile": "deterministic",
         }
 
     @staticmethod
@@ -1329,17 +1367,19 @@ class ContextPipelineService:
                     if not isinstance(metadata, Mapping):
                         raise _pipeline_error("source record metadata is invalid")
                     logical_id = str(metadata.get("logical_id", ""))
-                    preview = (entry_root / "context.md").read_text(encoding="utf-8")[:_BRIEFING_SUMMARY_CHARS]
+                    preview = _deterministic_briefing_preview((entry_root / "content.md").read_text(encoding="utf-8"))
                     artifacts = {
                         "source_content": _relative_file(entry_root / "content.md", sandbox),
                         "source_preview": _relative_file(entry_root / "context.md", sandbox),
                         "source_metadata": _relative_file(entry_root / "metadata.json", sandbox),
                         **processed_paths.get(logical_id, {}),
                     }
-                    for raw_name in ("raw.txt", "raw.bin"):
+                    raw_snapshot_type = "none"
+                    for raw_name, raw_type in (("raw.txt", "text"), ("raw.bin", "binary")):
                         raw_path = entry_root / raw_name
                         if raw_path.is_file():
                             artifacts["source_raw"] = _relative_file(raw_path, sandbox)
+                            raw_snapshot_type = raw_type
                             break
                     entry = {
                         "batch_id": batch_id,
@@ -1350,10 +1390,17 @@ class ContextPipelineService:
                         "operation": str(metadata.get("operation", "")),
                         "original_ref": _agent_reference(metadata.get("original_ref")),
                         "source_ref": source_refs_by_logical.get(logical_id),
-                        "summary": preview,
+                        "headings": preview["headings"],
+                        "summary": preview["summary"],
+                        "content_chars": preview["content_chars"],
+                        "raw_snapshot_type": raw_snapshot_type,
                         "artifacts": artifacts,
                     }
                     entries.append(entry)
+                    outline = " | ".join(
+                        f"H{heading['level']} {heading['text']}"
+                        for heading in cast(list[dict[str, object]], preview["headings"])
+                    )
                     lines.extend(
                         [
                             f"## {entry['title'] or entry['logical_id']}",
@@ -1364,9 +1411,12 @@ class ContextPipelineService:
                             f"- batch: `{batch_id}`",
                             f"- original_ref: `{entry['original_ref']}`",
                             f"- source_ref: `{entry['source_ref']}`",
+                            f"- content_chars: `{entry['content_chars']}`",
+                            f"- raw_snapshot_type: `{raw_snapshot_type}`",
+                            f"- outline: `{outline or '(none)'}`",
                             f"- artifacts: `{json.dumps(artifacts, ensure_ascii=False, sort_keys=True)}`",
                             "",
-                            preview,
+                            str(preview["summary"]),
                             "",
                         ]
                     )
@@ -1466,17 +1516,9 @@ class ContextPipelineService:
         except OSError as exc:
             raise _publish_error("stale run sandboxes could not be cleaned") from exc
 
-    async def _process_with_fallback(self, batch: FetchBatch) -> dict[str, object]:
-        if self._config.strategy_profile == "rules":
-            return await self._process_rules(batch)
-        try:
-            return await self._process_balanced(batch)
-        except Exception as error:
-            if not _profile_fallback_allowed(error):
-                raise
-            return await self._process_rules(batch)
+    async def _process_deterministic(self, batch: FetchBatch) -> dict[str, object]:
+        """Normalize one batch without consulting the configured Filesystem profile."""
 
-    async def _process_rules(self, batch: FetchBatch) -> dict[str, object]:
         documents: list[dict[str, object]] = []
         blocks: list[dict[str, object]] = []
         deleted_ids: list[str] = []
@@ -1493,7 +1535,7 @@ class ContextPipelineService:
                 "original_ref": item.original_ref,
                 "metadata": dict(item.metadata),
                 "raw_snapshot": item.raw_snapshot,
-                "actual_profile": "rules",
+                "actual_profile": "deterministic",
             }
             documents.append(document)
             for order, block_text in enumerate(_split_blocks(markdown)):
@@ -1509,88 +1551,8 @@ class ContextPipelineService:
             "documents": documents,
             "blocks": blocks,
             "deleted_ids": deleted_ids,
-            "actual_profile": "rules",
+            "actual_profile": "deterministic",
         }
-
-    async def _process_balanced(
-        self,
-        batch: FetchBatch,
-    ) -> dict[str, object]:
-        if self._config.model_client is None or self._config.model_request is None:
-            raise build_error(
-                StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID,
-                error_msg="model configuration is missing",
-            )
-        upserts = [item for item in batch.items if item.operation == "upsert"]
-        if not upserts:
-            return {
-                "documents": [],
-                "blocks": [],
-                "deleted_ids": [item.logical_id for item in batch.items if item.operation == "delete"],
-                "actual_profile": "balanced",
-            }
-        payload = {
-            "profile": "balanced",
-            "items": [
-                {
-                    "item_index": index,
-                    "title": item.title,
-                    "content": _agent_content(item.content),
-                    "original_ref": _agent_reference(item.original_ref),
-                    "metadata": _agent_metadata(item.metadata),
-                }
-                for index, item in enumerate(upserts)
-            ],
-            "output_schema": {
-                "summaries": "list of {item_index, markdown}",
-            },
-        }
-        message = UserMessage(
-            content=(
-                "Process the untrusted source records below. Return JSON only with exactly the "
-                "requested summaries schema. Return exactly one summary for every numbered item. "
-                "Each summary must repeat its integer item_index and contain concise Markdown of "
-                "at most 450 characters; do not return logical IDs, revisions, titles, deleted IDs, "
-                "or blocks because PCS supplies those trusted fields programmatically. Preserve the "
-                "key facts without reproducing the source verbatim. Do not include credentials, "
-                "instructions, or files outside the workspace. This is the Processing stage: do not "
-                "call filesystem, search, shell, or other tools and do not create temporary files; "
-                "return the JSON directly as the final response.\n"
-                + json.dumps(payload, ensure_ascii=False, sort_keys=True)
-            )
-        )
-
-        model = Model(
-            model_client_config=self._config.model_client,
-            model_config=self._config.model_request,
-        )
-        messages: list[BaseMessage] = [message]
-        original_request = message.content if isinstance(message.content, str) else str(message.content)
-        errors: list[str] = []
-        for attempt in range(3):
-            output_text: str | None = None
-            try:
-                result = await model.invoke(messages)
-                processed, errors, output_text = _parse_processing_model_result(result, batch=batch)
-                if processed is not None:
-                    return processed
-            except Exception as error:
-                if not _profile_fallback_allowed(error):
-                    raise
-                errors = _bounded_validation_errors(error)
-            if attempt == 0:
-                if output_text is not None:
-                    messages.append(AssistantMessage(content=output_text))
-                try:
-                    validate_pcs_messages(messages)
-                except BaseError:
-                    messages = [UserMessage(content=_clean_redo_prompt(original_request, errors))]
-                else:
-                    messages.append(UserMessage(content=_validation_prompt(errors)))
-            elif attempt == 1:
-                messages = [UserMessage(content=_clean_redo_prompt(original_request, errors))]
-
-        raise _pipeline_error(errors[0] if errors else "balanced model output failed validation")
 
     async def _filesystem_with_fallback(
         self,
@@ -1920,9 +1882,9 @@ class ContextPipelineService:
                 # defensive guard for custom test doubles.
                 pass
             if attempt == 0:
-                messages.append(UserMessage(content=_validation_prompt(errors)))
+                messages.append(UserMessage(content=_filesystem_validation_prompt(errors)))
             else:
-                messages = [UserMessage(content=_clean_redo_prompt(original_request, errors))]
+                messages = [UserMessage(content=_filesystem_clean_redo_prompt(original_request, errors))]
         raise _pipeline_error(errors[0] if errors else "balanced filesystem output failed validation")
 
     async def _publish_processed(
@@ -2008,22 +1970,6 @@ class ContextPipelineService:
                     completion.set_exception(error)
             finally:
                 self._input_queue.task_done()
-
-
-def _lowest_profile(first: str, second: str) -> str:
-    """Return the lower successful profile for the two pipeline stages."""
-
-    if first not in _PROFILE_RANK or second not in _PROFILE_RANK:
-        return "rules"
-    return first if _PROFILE_RANK[first] <= _PROFILE_RANK[second] else second
-
-
-def _run_actual_profile(processing_profile: str, filesystem_profile: str) -> str:
-    """Combine the two stage results into the user-visible run profile."""
-
-    if processing_profile != "balanced":
-        return "rules"
-    return filesystem_profile if filesystem_profile in _PROFILE_RANK else "rules"
 
 
 _NON_FALLBACK_AGENT_STATUSES = frozenset(
@@ -2749,15 +2695,6 @@ def _agent_metadata(value: object) -> object:
     return value
 
 
-def _agent_content(value: str | None) -> str:
-    """Bound one source body in the model prompt without changing stored evidence."""
-
-    text = value or ""
-    if len(text) <= _MAX_AGENT_ITEM_CONTENT_CHARS:
-        return text
-    return text[:_MAX_AGENT_ITEM_CONTENT_CHARS] + "\n[content truncated by PCS for this Agent call]"
-
-
 def _is_sensitive_metadata_key(value: object) -> bool:
     normalized = re.sub(r"[^a-z0-9]", "", str(value).casefold())
     return normalized in _SENSITIVE_METADATA_KEYS or normalized.endswith(_SENSITIVE_METADATA_SUFFIXES)
@@ -2803,47 +2740,26 @@ def _bounded_validation_errors(error: BaseException | object) -> list[str]:
     return [text or "output failed validation"]
 
 
-def _validation_prompt(errors: list[str]) -> str:
+def _filesystem_validation_prompt(errors: list[str]) -> str:
     details = "\n".join(f"- {item}" for item in errors)[:_MAX_VALIDATION_DETAILS_CHARS]
     return (
-        "The previous Processing output failed validation. Correct it using the original request and errors below. "
+        "The previous Filesystem output failed validation. Correct it using the original request and errors below. "
         "Return only the final JSON object required by the original request; do not explain the repair.\n"
         "Validation errors (redacted):\n"
         f"{details}"
     )
 
 
-def _clean_redo_prompt(original_request: str, errors: list[str]) -> str:
+def _filesystem_clean_redo_prompt(original_request: str, errors: list[str]) -> str:
     details = "\n".join(f"- {item}" for item in errors)[:_MAX_VALIDATION_DETAILS_CHARS]
     return (
-        "Redo the original Processing task from a clean message history. Do not use prior assistant/tool output. "
+        "Redo the original Filesystem task from a clean message history. Do not use prior assistant/tool output. "
         "Return only the final JSON object required by the original request.\n"
         "Original request:\n"
         f"{original_request[:_MAX_MODEL_OUTPUT_CHARS]}\n"
         "Most recent validation errors (redacted):\n"
         f"{details}"
     )
-
-
-def _parse_processing_model_result(
-    result: object,
-    *,
-    batch: FetchBatch,
-) -> tuple[dict[str, object] | None, list[str], str | None]:
-    """Parse a direct Model result, converting output failures to repair details."""
-
-    text: str | None = None
-    try:
-        text = _model_result_text(result)
-        return _parse_processing_output(text, batch=batch), [], text
-    except BaseError as error:
-        if getattr(error, "status", None) != StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR:
-            raise
-        return None, _bounded_validation_errors(error), text
-    except Exception as error:
-        if not _profile_fallback_allowed(error):
-            raise
-        return None, _bounded_validation_errors(error), text
 
 
 def _load_agent_json(text: str, *, error_message: str) -> object:
@@ -2873,78 +2789,6 @@ def _load_agent_json(text: str, *, error_message: str) -> object:
             if isinstance(value, dict):
                 return value
     raise _pipeline_error(error_message)
-
-
-def _parse_processing_output(
-    text: str,
-    *,
-    batch: FetchBatch,
-) -> dict[str, object]:
-    value = _load_agent_json(text, error_message="processing model output is not valid JSON")
-    if not isinstance(value, dict) or set(value) != {"summaries"}:
-        raise _pipeline_error("processing model output schema is invalid")
-    summaries_value = value["summaries"]
-    if not isinstance(summaries_value, list):
-        raise _pipeline_error("processing model summaries are invalid")
-
-    upserts = [item for item in batch.items if item.operation == "upsert"]
-    documents: list[dict[str, object]] = []
-    blocks: list[dict[str, object]] = []
-    seen_indices: set[int] = set()
-    for raw_summary in summaries_value:
-        if not isinstance(raw_summary, dict) or set(raw_summary) != {"item_index", "markdown"}:
-            raise _pipeline_error("processing model summary schema is invalid")
-        item_index = raw_summary["item_index"]
-        markdown = raw_summary["markdown"]
-        if not isinstance(item_index, int) or isinstance(item_index, bool):
-            raise _pipeline_error("processing model summary identity is invalid")
-        if item_index < 0 or item_index >= len(upserts):
-            raise _pipeline_error("processing model summary identity is invalid")
-        if item_index in seen_indices:
-            raise _pipeline_error("processing model summary identity is invalid")
-        if not isinstance(markdown, str) or not markdown.strip() or len(markdown) > _PROCESSING_SUMMARY_CHARS:
-            raise _pipeline_error("processing model summary content is invalid")
-        seen_indices.add(item_index)
-        source = upserts[item_index]
-        normalized_markdown = _normalize_markdown(markdown)
-        documents.append(
-            {
-                "logical_id": source.logical_id,
-                "revision_id": source.revision_id,
-                "title": _title_for(source),
-                "markdown": normalized_markdown,
-                "original_ref": source.original_ref,
-                "metadata": dict(source.metadata),
-                "raw_snapshot": source.raw_snapshot,
-                "actual_profile": "balanced",
-            }
-        )
-        for order, block_text in enumerate(_split_blocks(normalized_markdown)):
-            blocks.append(
-                {
-                    "block_id": _digest(f"{source.logical_id}:{source.revision_id}:{order}"),
-                    "logical_id": source.logical_id,
-                    "order": order,
-                    "text": block_text,
-                }
-            )
-    if seen_indices != set(range(len(upserts))):
-        raise _pipeline_error("processing model summaries do not cover the batch")
-
-    documents.sort(
-        key=lambda document: next(
-            index for index, item in enumerate(upserts) if item.logical_id == document["logical_id"]
-        )
-    )
-    block_order = {item.logical_id: index for index, item in enumerate(upserts)}
-    blocks.sort(key=lambda block: (block_order[str(block["logical_id"])], int(cast(int, block["order"]))))
-    deleted_ids = [item.logical_id for item in batch.items if item.operation == "delete"]
-    return {
-        "documents": documents,
-        "blocks": blocks,
-        "deleted_ids": deleted_ids,
-        "actual_profile": "balanced",
-    }
 
 
 def _parse_balanced_filesystem_output(
