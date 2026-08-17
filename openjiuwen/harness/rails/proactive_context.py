@@ -24,8 +24,8 @@ if TYPE_CHECKING:
 
 _SECTION = "proactive_context"
 _SOURCE = "pcs_context_rail"
-_MAX_DESCRIPTION_CHARS = 12000
-_TRUNCATION_NOTICE = "内容已截断，请按路径继续读取"
+_MAX_DESCRIPTION_CHARS = 3000
+_TRUNCATION_NOTICE = "本次仅载入前 3000 个字符；根说明文件更大，请按 description_path 继续读取。"
 
 
 def _warn(operation: str, exc: BaseException | None = None) -> None:
@@ -80,7 +80,7 @@ def _messages_are_contiguous(messages: list[Any]) -> bool:
     return not pending_ids
 
 
-def _read_description(path: Path) -> str | None:
+def _read_description(path: Path) -> tuple[str, int] | None:
     """Read a regular UTF-8 description file, retaining one extra char for truncation detection."""
 
     path_stat = path.stat()
@@ -90,14 +90,21 @@ def _read_description(path: Path) -> str | None:
         content = file.read(_MAX_DESCRIPTION_CHARS + 1)
     if not content.strip():
         return None
-    return content
+    return content, path_stat.st_size
 
 
-def _render_content(context_root: Path, description_path: Path, description: str) -> str:
+def _render_content(
+    context_root: Path,
+    description_path: Path,
+    description: str,
+    *,
+    description_size_bytes: int,
+) -> str:
     """Render the fixed, non-user-request attachment wrapper."""
 
     truncated = len(description) > _MAX_DESCRIPTION_CHARS
     body = description[:_MAX_DESCRIPTION_CHARS] if truncated else description
+    sources_description_path = context_root / "sources" / "description.md"
     if truncated:
         body = f"{body}\n\n[{_TRUNCATION_NOTICE}]"
     return (
@@ -105,6 +112,8 @@ def _render_content(context_root: Path, description_path: Path, description: str
         "这是当前模型调用的临时运行时附件，不是新的用户请求；仅在与当前任务相关时使用。\n\n"
         f"- context_root: `{context_root}`\n"
         f"- description_path: `{description_path}`\n"
+        f"- description_size_bytes: `{description_size_bytes}`\n"
+        f"- sources_description_path: `{sources_description_path}`\n"
         "- filesystem access: 从顶层 description.md 开始，按其中相对链接继续读取。\n\n"
         "## 当前上下文说明\n\n"
         f"{body}"
@@ -177,14 +186,20 @@ class PCSContextRail(DeepAgentRail):
             return
 
         try:
-            description = await asyncio.to_thread(_read_description, self._description_path)
+            description_result = await asyncio.to_thread(_read_description, self._description_path)
         except Exception as exc:
             _warn("read description", exc)
             return
-        if description is None:
+        if description_result is None:
             return
+        description, description_size_bytes = description_result
 
-        content = _render_content(self._context_root, self._description_path, description)
+        content = _render_content(
+            self._context_root,
+            self._description_path,
+            description,
+            description_size_bytes=description_size_bytes,
+        )
         try:
             await writer.add_section(
                 section=_SECTION,

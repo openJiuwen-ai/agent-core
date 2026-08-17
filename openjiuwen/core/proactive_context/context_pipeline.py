@@ -23,8 +23,8 @@ from typing import Callable, Iterable, Mapping, Sequence, TypeVar, cast
 from urllib.parse import urlsplit, urlunsplit
 
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, Model, UserMessage
-from openjiuwen.core.proactive_context.agent_support import run_pcs_agent, validate_pcs_messages
+from openjiuwen.core.foundation.llm import AssistantMessage, Model, UserMessage
+from openjiuwen.core.proactive_context.agent_support import run_pcs_agent
 from openjiuwen.core.proactive_context.config import PCSConfig
 from openjiuwen.core.proactive_context.models import FetchBatch, RawChangeItem
 from openjiuwen.core.proactive_context.source_metadata import read_source_metadata, upsert_source_metadata
@@ -38,8 +38,15 @@ _MARKDOWN_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)\s*#*\s*$")
 _SHORT_REFERENCE = re.compile(r"\[\[ref:(0|[1-9][0-9]*)\]\]")
 _SOURCE_METADATA_ID = re.compile(r"src_[0-9a-f]{32}")
 _URI_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
+_PCS_MANAGED_MARKER = re.compile(r"<!--\s*pcs:[a-z0-9-]+:(?:start|end)\s*-->")
+_ROOT_NAVIGATION_START = "<!-- pcs:navigation:start -->"
+_ROOT_NAVIGATION_END = "<!-- pcs:navigation:end -->"
+_SOURCE_LINKS_START = "<!-- pcs:source-links:start -->"
+_SOURCE_LINKS_END = "<!-- pcs:source-links:end -->"
+_TOPIC_LINKS_START = "<!-- pcs:topic-links:start -->"
+_TOPIC_LINKS_END = "<!-- pcs:topic-links:end -->"
+_MANAGED_TOPIC_MARKER = "<!-- pcs:managed-topic -->"
 _MAX_BLOCK_CHARS = 4_000
-_MAX_DESCRIPTION_CHARS = 12_000
 _MAX_AGENT_CONTEXT_FILES = 10_000
 _MAX_AGENT_CONTEXT_FILE_BYTES = 2 * 1024 * 1024
 _MAX_AGENT_CONTEXT_PATH_CHARS = 1_024
@@ -51,13 +58,35 @@ _LARGE_RUN_PREVIEW_CHARS = 2_800
 _BRIEFING_SUMMARY_CHARS = 450
 _BRIEFING_HEADING_LIMIT = 8
 _BRIEFING_HEADING_CHARS = 160
+_BALANCED_GROUP_SIZE = 5
+_BALANCED_DIRECTORY_LIMIT = 5
+_BALANCED_DIRECTORY_PREVIEW_CHARS = 240
+_BALANCED_NEW_TOPIC_TITLE_CHARS = 80
 _INITIAL_PROMPT_DOCUMENT_LIMIT = 12
 _SMALL_PROMPT_SUMMARY_CHARS = 700
 _LARGE_PROMPT_SUMMARY_CHARS = 320
 _MAX_MODEL_OUTPUT_CHARS = 2_000_000
 _MAX_VALIDATION_ERROR_CHARS = 512
-_MAX_VALIDATION_DETAILS_CHARS = 7_000
 _PROFILE_RANK = {"rules": 0, "balanced": 1, "agent": 2}
+_GENERIC_TOPIC_NAMES = frozenset(
+    {
+        "context",
+        "docs",
+        "documents",
+        "information",
+        "notes",
+        "sources",
+        "topics",
+        "内容",
+        "文档",
+        "文档资料",
+        "材料",
+        "知识",
+        "资料",
+        "资料文档",
+        "主题",
+    }
+)
 _FILESYSTEM_WIKI_INSTRUCTIONS = (
     "Source references: copy only [[ref:N]] tokens already present in the supplied Processing Markdown; never "
     "invent a number or write a permanent source ID, source URL, or source metadata path. Place each copied token "
@@ -404,71 +433,526 @@ def _remove_rules_pages_for_deleted_ids(
         _remove_tree_entry(service_root / f"{_digest(logical_id)}.md")
 
 
-def _render_description(context_root: Path) -> str:
+def _managed_block_bounds(markdown: str, *, start: str, end: str) -> tuple[int, int] | None:
+    starts = [match.start() for match in re.finditer(re.escape(start), markdown)]
+    ends = [match.start() for match in re.finditer(re.escape(end), markdown)]
+    if not starts and not ends:
+        return None
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise _pipeline_error("managed Markdown block markers are malformed")
+    block_end = ends[0] + len(end)
+    nested = _PCS_MANAGED_MARKER.findall(markdown[starts[0] : block_end])
+    if nested != [start, end]:
+        raise _pipeline_error("managed Markdown block markers are nested")
+    return starts[0], block_end
+
+
+def _replace_managed_block(
+    markdown: str,
+    *,
+    start: str,
+    end: str,
+    body: str | None,
+    default_heading: str,
+) -> str:
+    """Replace one valid PCS block or insert it after the first H1."""
+
+    bounds = _managed_block_bounds(markdown, start=start, end=end)
+    block = None if body is None else f"{start}\n{body.rstrip()}\n{end}"
+    if bounds is not None:
+        begin, finish = bounds
+        return markdown[:begin] + (block or "") + markdown[finish:]
+    if block is None:
+        return markdown
+    if not markdown:
+        markdown = f"# {default_heading}\n"
+    heading = re.search(r"(?m)^# [^\r\n]+(?:\r?\n|$)", markdown)
+    if heading is None:
+        raise _pipeline_error("managed Markdown file has no top-level heading")
+    return markdown[: heading.end()] + "\n" + block + "\n" + markdown[heading.end() :]
+
+
+def _markdown_heading(markdown: str, *, fallback: str) -> str:
+    heading = next((line[2:].strip() for line in markdown.splitlines() if line.startswith("# ")), "")
+    return heading or fallback
+
+
+def _markdown_label(value: str) -> str:
+    normalized = value.replace("[", "(").replace("]", ")").replace("\r", " ").replace("\n", " ").strip()
+    return normalized[:512] or "来源"
+
+
+def _relative_markdown_target(path: Path, *, from_directory: Path) -> str:
+    return os.path.relpath(path, start=from_directory).replace("\\", "/")
+
+
+def _render_sources_navigation(context_root: Path) -> None:
+    """Render only the program-owned sources -> service -> page hierarchy."""
+
+    sources_root = context_root / "sources"
+    service_rows: list[str] = []
+    if sources_root.is_dir():
+        for service_root in sorted(path for path in sources_root.iterdir() if path.is_dir()):
+            pages = sorted(
+                path for path in service_root.glob("*.md") if path.name != "description.md" and path.is_file()
+            )
+            description_path = service_root / "description.md"
+            if not pages:
+                if description_path.exists() or description_path.is_symlink():
+                    _remove_tree_entry(description_path)
+                continue
+            page_rows: list[str] = []
+            for page in pages:
+                text = page.read_text(encoding="utf-8")
+                title = _markdown_label(_markdown_heading(text, fallback=page.stem))
+                page_rows.append(f"- [{title}]({_markdown_link_target(page.name)})")
+            service_markdown = f"# {service_root.name} 来源\n\n## 来源页\n\n" + "\n".join(page_rows) + "\n"
+            _atomic_write(description_path, service_markdown.encode("utf-8"))
+            service_rows.append(
+                f"- [{_markdown_label(service_root.name)}]"
+                f"({_markdown_link_target((Path(service_root.name) / 'description.md').as_posix())})"
+            )
+    sources_description = sources_root / "description.md"
+    if service_rows:
+        sources_markdown = "# 来源导航\n\n## 服务\n\n" + "\n".join(service_rows) + "\n"
+        _atomic_write(sources_description, sources_markdown.encode("utf-8"))
+    elif sources_description.exists() or sources_description.is_symlink():
+        _remove_tree_entry(sources_description)
+
+
+def _render_root_navigation(
+    context_root: Path,
+    *,
+    fallback_references: Sequence[str] = (),
+) -> None:
+    description_path = context_root / "description.md"
+    try:
+        current = description_path.read_text(encoding="utf-8") if description_path.is_file() else ""
+    except (OSError, UnicodeError) as exc:
+        raise _publish_error("root description could not be read") from exc
     rows: list[str] = []
-    for child in sorted(path for path in context_root.iterdir() if path.is_dir()):
-        child_description = child / "description.md"
-        if child_description.is_file():
-            rows.append(f"- [{child.name}]({_markdown_link_target((Path(child.name) / 'description.md').as_posix())})")
-    for page in sorted(context_root.rglob("*.md")):
-        if _is_program_description(page.relative_to(context_root)):
+    if (context_root / "sources" / "description.md").is_file():
+        rows.append("- [按来源查看增量](sources/description.md)")
+    if (context_root / "topics" / "description.md").is_file():
+        rows.append("- [按主题查看内容](topics/description.md)")
+    body = "## PCS 导航\n\n" + "\n".join(rows) if rows else None
+    updated = _replace_managed_block(
+        current,
+        start=_ROOT_NAVIGATION_START,
+        end=_ROOT_NAVIGATION_END,
+        body=body,
+        default_heading="Proactive Context",
+    )
+    if not rows and updated.strip() in {"", "# Proactive Context"}:
+        updated = "# Proactive Context\n\nNo context documents are currently published.\n"
+        if fallback_references:
+            updated += "\n本次 Context 状态涉及 " + "、".join(fallback_references) + "。\n"
+    _atomic_write(description_path, updated.encode("utf-8"))
+
+
+def _managed_local_links(
+    description_path: Path,
+    *,
+    context_root: Path,
+    start: str,
+    end: str,
+    heading: str,
+) -> dict[str, str]:
+    markdown = description_path.read_text(encoding="utf-8")
+    bounds = _managed_block_bounds(markdown, start=start, end=end)
+    if bounds is None:
+        return {}
+    begin, finish = bounds
+    block = markdown[begin + len(start) : finish - len(end)]
+    result: dict[str, str] = {}
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped == heading:
             continue
-        relative = page.relative_to(context_root).as_posix()
-        text = page.read_text(encoding="utf-8")
-        body = text.split("---\n", 2)[-1]
-        heading = next((line[2:].strip() for line in body.splitlines() if line.startswith("# ")), relative)
-        excerpt = " ".join(line.strip() for line in body.splitlines() if line.strip() and not line.startswith("#"))
-        # The excerpt is plain preview text.  Keeping a source Markdown target
-        # here would make it look like a program-generated Context navigation
-        # link and could turn an unavailable source-relative link into a false
-        # publication failure.
-        excerpt = _MARKDOWN_INLINE_LINK.sub(r"\1", excerpt)
-        excerpt = excerpt[:240]
-        rows.append(f"- [{heading}]({_markdown_link_target(relative)})" + (f": {excerpt}" if excerpt else ""))
-    if not rows:
-        return "# Proactive Context\n\nNo context documents are currently published.\n"
-    description = "# Proactive Context\n\n## Current context\n\n" + "\n".join(rows) + "\n"
-    return description[:_MAX_DESCRIPTION_CHARS].rstrip() + "\n"
+        match = re.fullmatch(r"- \[([^\]\r\n]+)\]\(([^\r\n]+)\)", stripped)
+        if match is None:
+            raise _pipeline_error("managed local link block is malformed")
+        destination = _markdown_destination(match.group(2))
+        if destination is None or _URI_SCHEME.match(destination):
+            raise _pipeline_error("managed local link target is invalid")
+        target = (description_path.parent / destination.replace("/", os.sep)).resolve()
+        try:
+            target.relative_to(context_root.resolve())
+        except ValueError as exc:
+            raise _pipeline_error("managed local link escaped Context") from exc
+        if target.is_file():
+            result[_relative_markdown_target(target, from_directory=description_path.parent)] = match.group(1)
+    return result
 
 
-def _render_nested_description(directory: Path, active_directories: set[Path]) -> str:
-    rows: list[str] = []
-    for child in sorted(path for path in active_directories if path.parent == directory):
-        rows.append(f"- [{child.name}]({_markdown_link_target((Path(child.name) / 'description.md').as_posix())})")
-    for page in sorted(directory.glob("*.md")):
-        if page.name == "description.md":
-            continue
-        text = page.read_text(encoding="utf-8")
-        heading = next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), page.name)
-        rows.append(f"- [{heading}]({_markdown_link_target(page.name)})")
-    title = directory.name
-    return f"# {title} Context\n\n## Documents\n\n" + "\n".join(rows) + "\n"
+def _append_managed_source_link(
+    description_path: Path,
+    *,
+    context_root: Path,
+    source_page: Path,
+    title: str,
+) -> None:
+    links = _managed_local_links(
+        description_path,
+        context_root=context_root,
+        start=_SOURCE_LINKS_START,
+        end=_SOURCE_LINKS_END,
+        heading="## PCS 来源关联",
+    )
+    target = _relative_markdown_target(source_page, from_directory=description_path.parent)
+    links[target] = _markdown_label(title)
+    rows = [f"- [{links[path]}]({_markdown_link_target(path)})" for path in sorted(links)]
+    markdown = description_path.read_text(encoding="utf-8")
+    updated = _replace_managed_block(
+        markdown,
+        start=_SOURCE_LINKS_START,
+        end=_SOURCE_LINKS_END,
+        body="## PCS 来源关联\n\n" + "\n".join(rows),
+        default_heading=description_path.parent.name,
+    )
+    _atomic_write(description_path, updated.encode("utf-8"))
 
 
-def _render_all_descriptions(context_root: Path, *, fallback_references: Sequence[str] = ()) -> None:
-    """Render a complete deterministic directory-navigation layer."""
+def _append_managed_topic_link(
+    context_root: Path,
+    *,
+    topic_directory: Path,
+    title: str,
+) -> None:
+    topics_root = context_root / "topics"
+    description_path = topics_root / "description.md"
+    if not description_path.is_file():
+        _atomic_write(description_path, "# 主题导航\n".encode("utf-8"))
+    links = _managed_local_links(
+        description_path,
+        context_root=context_root,
+        start=_TOPIC_LINKS_START,
+        end=_TOPIC_LINKS_END,
+        heading="## PCS 受控主题",
+    )
+    target_path = topic_directory / "description.md"
+    target = _relative_markdown_target(target_path, from_directory=description_path.parent)
+    links[target] = _markdown_label(title)
+    rows = [f"- [{links[path]}]({_markdown_link_target(path)})" for path in sorted(links)]
+    markdown = description_path.read_text(encoding="utf-8")
+    updated = _replace_managed_block(
+        markdown,
+        start=_TOPIC_LINKS_START,
+        end=_TOPIC_LINKS_END,
+        body="## PCS 受控主题\n\n" + "\n".join(rows),
+        default_heading="主题导航",
+    )
+    _atomic_write(description_path, updated.encode("utf-8"))
 
-    ordinary_pages = [
-        page for page in context_root.rglob("*.md") if not _is_program_description(page.relative_to(context_root))
-    ]
-    active_directories: set[Path] = set()
-    for page in ordinary_pages:
-        directory = page.parent
-        while directory != context_root:
-            active_directories.add(directory)
-            directory = directory.parent
-    for description in list(context_root.rglob("description.md")):
-        if description.parent != context_root and description.parent not in active_directories:
-            _remove_tree_entry(description)
-    for directory in sorted(active_directories, key=lambda path: len(path.parts), reverse=True):
-        _atomic_write(
-            directory / "description.md",
-            _render_nested_description(directory, active_directories).encode("utf-8"),
+
+def _normalized_topic_term(value: str) -> str | None:
+    term = re.sub(r"[`*_#]", "", value).strip()
+    compact = re.sub(r"\s+", "", term)
+    if len(compact) < 4 or term.casefold() in _GENERIC_TOPIC_NAMES:
+        return None
+    return term
+
+
+def _topic_term_matches_title(term: str, title: str) -> bool:
+    if re.search(r"[\u3400-\u9fff]", term):
+        return term.casefold() in title.casefold()
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])",
+            title,
+            flags=re.IGNORECASE,
         )
-    root_markdown = _render_description(context_root)
-    if not ordinary_pages and fallback_references:
-        root_markdown = root_markdown.rstrip() + "\n\n本次 Context 状态涉及 " + "、".join(fallback_references) + "。\n"
-    _atomic_write(context_root / "description.md", root_markdown.encode("utf-8"))
+        is not None
+    )
+
+
+def _unique_rules_topic_description(context_root: Path, *, title: str) -> Path | None:
+    matches: set[Path] = set()
+    for description in sorted(context_root.rglob("description.md")):
+        relative = description.relative_to(context_root)
+        if description.parent == context_root or (relative.parts and relative.parts[0] == "sources"):
+            continue
+        text = description.read_text(encoding="utf-8")
+        values = (description.parent.name, _markdown_heading(text, fallback=""))
+        if any(
+            term is not None and _topic_term_matches_title(term, title)
+            for term in (_normalized_topic_term(value) for value in values)
+        ):
+            matches.add(description)
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _rules_source_page(
+    document: Mapping[str, object],
+    *,
+    summary_override: str | None = None,
+) -> str:
+    title = _markdown_label(str(document.get("title") or document.get("logical_id") or "来源"))
+    markdown = str(document.get("markdown", "")).rstrip()
+    summary_input = _SHORT_REFERENCE.sub("", markdown).strip()
+    preview = _deterministic_briefing_preview(summary_input)
+    summary = summary_override or str(preview["summary"]).strip() or "（没有可用的确定性预览。）"
+    return f"# {title}\n\n## 摘要\n\n{summary}\n\n## 正文\n\n{markdown}\n"
+
+
+def _apply_rules_increment(
+    context_root: Path,
+    *,
+    service_id: str,
+    processed: Mapping[str, object],
+    fallback_references: Sequence[str] = (),
+) -> set[str]:
+    """Apply one conservative deterministic increment to a copied Context."""
+
+    _assert_no_symlinks(context_root)
+    _remove_rules_pages_for_deleted_ids(
+        context_root,
+        service_id=service_id,
+        deleted_ids=_processed_deleted_ids(processed),
+    )
+    service_root = context_root / "sources" / _safe_segment(service_id, name="service_id")
+    changed_paths: set[str] = set()
+    for document in _processed_documents(processed):
+        logical_id = str(document["logical_id"])
+        page = service_root / f"{_digest(logical_id)}.md"
+        _atomic_write(page, _rules_source_page(document).encode("utf-8"))
+        changed_paths.add(page.relative_to(context_root).as_posix())
+        target_description = _unique_rules_topic_description(context_root, title=str(document.get("title", "")))
+        if target_description is not None:
+            _append_managed_source_link(
+                target_description,
+                context_root=context_root,
+                source_page=page,
+                title=str(document.get("title", logical_id)),
+            )
+            changed_paths.add(target_description.relative_to(context_root).as_posix())
+    _render_sources_navigation(context_root)
+    _render_root_navigation(context_root, fallback_references=fallback_references)
+    changed_paths.add("description.md")
+    return changed_paths
+
+
+def _balanced_semantic_preview(markdown: str) -> str:
+    without_comments = re.sub(r"<!--.*?-->", " ", markdown, flags=re.DOTALL)
+    without_links = _MARKDOWN_INLINE_LINK.sub(r"\1", without_comments)
+    preview = _deterministic_briefing_preview(without_links)
+    return str(preview["summary"]).strip()[:_BALANCED_DIRECTORY_PREVIEW_CHARS]
+
+
+def _balanced_tokens(value: str) -> set[str]:
+    tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9]{2,}", value)
+        if token.casefold() not in _GENERIC_TOPIC_NAMES
+    }
+    for run in re.findall(r"[\u3400-\u9fff]{2,}", value):
+        tokens.add(run)
+        for width in (2, 3, 4):
+            tokens.update(run[index : index + width] for index in range(max(0, len(run) - width + 1)))
+    return tokens
+
+
+def _balanced_directory_candidates(
+    context_root: Path,
+    document: Mapping[str, object],
+) -> tuple[list[dict[str, str]], dict[str, Path]]:
+    """Return at most five opaque semantic candidates and an in-memory path map."""
+
+    title = str(document.get("title") or "")[:512]
+    source_preview = _balanced_semantic_preview(_SHORT_REFERENCE.sub("", str(document.get("markdown", ""))))
+    source_text = f"{title}\n{source_preview}"
+    source_tokens = _balanced_tokens(source_text)
+    scored: list[tuple[int, str, str, str, Path]] = []
+    for description in sorted(context_root.rglob("description.md")):
+        if description.is_symlink() or not description.is_file() or description.parent == context_root:
+            continue
+        relative = description.relative_to(context_root)
+        if relative.parts and relative.parts[0] == "sources":
+            continue
+        markdown = description.read_text(encoding="utf-8")
+        candidate_title = _markdown_label(_markdown_heading(markdown, fallback=description.parent.name))[:160]
+        preview = _balanced_semantic_preview(markdown)
+        score = 0
+        for term_value in (description.parent.name, candidate_title):
+            term = _normalized_topic_term(term_value)
+            if term is not None and _topic_term_matches_title(term, source_text):
+                score += 100
+        score += 10 * len(source_tokens.intersection(_balanced_tokens(f"{candidate_title}\n{preview}")))
+        if score <= 0:
+            continue
+        scored.append((score, relative.parent.as_posix().casefold(), candidate_title, preview, description.parent))
+    selected = sorted(scored, key=lambda value: (-value[0], value[1]))[:_BALANCED_DIRECTORY_LIMIT]
+    public: list[dict[str, str]] = []
+    targets: dict[str, Path] = {}
+    for index, (_, _, candidate_title, preview, path) in enumerate(selected, start=1):
+        candidate_id = f"directory_{index}"
+        public.append({"id": candidate_id, "title": candidate_title, "preview": preview})
+        targets[candidate_id] = path
+    return public, targets
+
+
+def _balanced_summary_is_safe(summary: str) -> bool:
+    if not summary or len(summary) > _BRIEFING_SUMMARY_CHARS or "\x00" in summary:
+        return False
+    if _MARKDOWN_LINK_TOKEN.search(summary) or _SHORT_REFERENCE.search(summary):
+        return False
+    if "<!--" in summary or re.search(r"(?m)^\s*#{1,6}\s", summary):
+        return False
+    if re.search(r"(?:^|\s)(?:[A-Za-z]:[\\/]|\.\.?[\\/]|/[A-Za-z0-9_.-])", summary):
+        return False
+    return True
+
+
+def _balanced_new_topic_title_is_safe(title: str) -> bool:
+    return bool(
+        title
+        and len(title) <= _BALANCED_NEW_TOPIC_TITLE_CHARS
+        and "\x00" not in title
+        and "\n" not in title
+        and "\r" not in title
+        and "/" not in title
+        and "\\" not in title
+        and "<!--" not in title
+        and _MARKDOWN_LINK_TOKEN.search(title) is None
+    )
+
+
+def _parse_balanced_enrichments(
+    text: str,
+    *,
+    allowed_targets: Mapping[int, set[str]],
+) -> dict[int, dict[str, str | None]]:
+    """Accept valid balanced items independently; top-level failures return no enrichment."""
+
+    try:
+        value = _load_agent_json(text, error_message="balanced enrichment output is not valid JSON")
+    except BaseError:
+        return {}
+    if not isinstance(value, Mapping) or set(value) != {"items"} or not isinstance(value.get("items"), list):
+        return {}
+    items = cast(list[object], value["items"])
+    counts: dict[int, int] = {}
+    for item in items:
+        if isinstance(item, Mapping):
+            raw_index = item.get("item_index")
+            if isinstance(raw_index, int) and not isinstance(raw_index, bool):
+                counts[raw_index] = counts.get(raw_index, 0) + 1
+    accepted: dict[int, dict[str, str | None]] = {}
+    expected_fields = {"item_index", "summary", "target", "new_topic_title"}
+    for item in items:
+        if not isinstance(item, Mapping) or set(item) != expected_fields:
+            continue
+        item_index = item.get("item_index")
+        if (
+            not isinstance(item_index, int)
+            or isinstance(item_index, bool)
+            or counts.get(item_index) != 1
+            or item_index not in allowed_targets
+        ):
+            continue
+        summary_value = item.get("summary")
+        target = item.get("target")
+        if not isinstance(summary_value, str) or not isinstance(target, str):
+            continue
+        summary = summary_value.strip()
+        if not _balanced_summary_is_safe(summary) or target not in allowed_targets[item_index]:
+            continue
+        topic_value = item.get("new_topic_title")
+        if target == "new_topic":
+            if not isinstance(topic_value, str):
+                continue
+            new_topic_title: str | None = topic_value.strip()
+            if not _balanced_new_topic_title_is_safe(new_topic_title):
+                continue
+        else:
+            if topic_value is not None:
+                continue
+            new_topic_title = None
+        accepted[item_index] = {
+            "summary": summary,
+            "target": target,
+            "new_topic_title": new_topic_title,
+        }
+    return accepted
+
+
+def _safe_balanced_topic_slug(title: str) -> str:
+    ascii_words = re.findall(r"[A-Za-z0-9]+", title.casefold())
+    slug = "-".join(ascii_words)[:48].strip("-")
+    return slug or f"topic-{_digest(title)[:12]}"
+
+
+def _balanced_topic_directory(context_root: Path, *, title: str) -> Path:
+    topics_root = context_root / "topics"
+    base = _safe_balanced_topic_slug(title)
+    suffixes = ("", *(_digest(title)[:length] for length in (8, 12, 16, 32)))
+    for suffix in suffixes:
+        name = base if not suffix else f"{base}-{suffix}"
+        target = topics_root / name
+        description = target / "description.md"
+        if not target.exists():
+            _atomic_write(
+                description,
+                f"# {_markdown_label(title)}\n\n{_MANAGED_TOPIC_MARKER}\n".encode("utf-8"),
+            )
+            return target
+        if target.is_dir() and description.is_file():
+            markdown = description.read_text(encoding="utf-8")
+            if _MANAGED_TOPIC_MARKER in markdown:
+                return target
+    raise _pipeline_error("balanced topic path conflicts with existing Context")
+
+
+def _apply_balanced_enrichment(
+    context_root: Path,
+    *,
+    service_id: str,
+    document: Mapping[str, object],
+    enrichment: Mapping[str, str | None],
+    target_paths: Mapping[str, Path],
+) -> set[str]:
+    logical_id = str(document["logical_id"])
+    source_page = context_root / "sources" / _safe_segment(service_id, name="service_id") / f"{_digest(logical_id)}.md"
+    summary = enrichment.get("summary")
+    target = enrichment.get("target")
+    if not isinstance(summary, str) or not isinstance(target, str) or not source_page.is_file():
+        raise _pipeline_error("balanced enrichment target is invalid")
+    _atomic_write(source_page, _rules_source_page(document, summary_override=summary).encode("utf-8"))
+    changed = {source_page.relative_to(context_root).as_posix()}
+    if target.startswith("directory_"):
+        target_directory = target_paths.get(target)
+        if target_directory is None:
+            raise _pipeline_error("balanced directory target is invalid")
+        description = target_directory / "description.md"
+        _append_managed_source_link(
+            description,
+            context_root=context_root,
+            source_page=source_page,
+            title=str(document.get("title", logical_id)),
+        )
+        changed.add(description.relative_to(context_root).as_posix())
+    elif target == "new_topic":
+        topic_title = enrichment.get("new_topic_title")
+        if not isinstance(topic_title, str):
+            raise _pipeline_error("balanced topic title is invalid")
+        topic_directory = _balanced_topic_directory(context_root, title=topic_title)
+        topic_description = topic_directory / "description.md"
+        _append_managed_source_link(
+            topic_description,
+            context_root=context_root,
+            source_page=source_page,
+            title=str(document.get("title", logical_id)),
+        )
+        _append_managed_topic_link(context_root, topic_directory=topic_directory, title=topic_title)
+        changed.update(
+            {
+                topic_description.relative_to(context_root).as_posix(),
+                "topics/description.md",
+            }
+        )
+    elif target != "sources":
+        raise _pipeline_error("balanced enrichment target is unsupported")
+    return changed
 
 
 def _markdown_link_target(relative: str) -> str:
@@ -1565,28 +2049,47 @@ class ContextPipelineService:
         service_id: str | None = None,
     ) -> str:
         requested = self._config.strategy_profile
-        if requested == "rules":
-            return "rules"
-        if self._config.model_client is None or self._config.model_request is None:
+        effective_service_id = service_id or "local"
+
+        def prepare_rules_candidate() -> tuple[dict[str, tuple[int, str]], set[str]]:
+            _reset_filesystem_sandbox(sandbox)
+            baseline = _snapshot_managed_files(self._context_root)
+            _prepare_agent_candidate(self._context_root, sandbox)
+            changed = _apply_rules_increment(
+                sandbox / "context",
+                service_id=effective_service_id,
+                processed=processed,
+                fallback_references=tuple(alias_targets or ()),
+            )
+            processed["_agent_changed_context_paths"] = changed
+            processed["_filesystem_candidate_prepared"] = True
+            processed["_filesystem_candidate_profile"] = "rules"
+            processed["_balanced_accepted_count"] = 0
+            return baseline, changed
+
+        if requested == "rules" or self._config.model_client is None or self._config.model_request is None:
+            prepare_rules_candidate()
             return "rules"
         profiles = [
             candidate
             for candidate in ("agent", "balanced", "rules")
             if _PROFILE_RANK[candidate] <= _PROFILE_RANK[requested]
         ]
-        materialized_path = _materialize_candidate_source(
-            batch.materialized_source_path,
-            sandbox=sandbox,
-            home=self._home,
+        materialized_path = (
+            _materialize_candidate_source(
+                batch.materialized_source_path,
+                sandbox=sandbox,
+                home=self._home,
+            )
+            if requested == "agent"
+            else None
         )
         materialized_baseline = (
             _snapshot_managed_files(sandbox / "materialized-source") if materialized_path is not None else None
         )
         for candidate in profiles:
             if candidate == "rules":
-                # Failed Agent/Balanced candidates must never leak into the
-                # deterministic Rules publication path.
-                _reset_filesystem_sandbox(sandbox)
+                prepare_rules_candidate()
                 return "rules"
             try:
                 _reset_filesystem_sandbox(sandbox)
@@ -1595,14 +2098,21 @@ class ContextPipelineService:
                     self._context_root,
                     sandbox,
                 )
-                if service_id is not None:
+                if candidate == "agent":
                     _remove_rules_pages_for_deleted_ids(
                         sandbox / "context",
-                        service_id=service_id,
+                        service_id=effective_service_id,
                         deleted_ids=_processed_deleted_ids(processed),
                     )
-                (sandbox / "tmp").mkdir(parents=True, exist_ok=True)
-                payload: dict[str, object]
+                    (sandbox / "tmp").mkdir(parents=True, exist_ok=True)
+                else:
+                    _apply_rules_increment(
+                        sandbox / "context",
+                        service_id=effective_service_id,
+                        processed=processed,
+                        fallback_references=tuple(alias_targets or ()),
+                    )
+                payload: dict[str, object] = {}
                 inputs_baseline: Mapping[str, tuple[int, str]] | None = None
                 if candidate == "agent":
                     if (sandbox / "inputs").is_dir():
@@ -1621,22 +2131,12 @@ class ContextPipelineService:
                         "context_root": "context",
                         "temporary_root": "tmp",
                     }
-                else:
-                    large_run = bool(processed.get("_large_run", _is_large_run(processed)))
-                    payload = {
-                        "profile": candidate,
-                        "large_run": large_run,
-                        "documents": _agent_documents_payload(processed, large_run=large_run),
-                        "source_count": len(_processed_documents(processed)),
-                        "briefing_path": "inputs/briefing.md",
-                        "deleted_count": len(_processed_deleted_ids(processed)),
-                        "context_root": "context",
-                    }
-                if materialized_path is not None:
+                if candidate == "agent" and materialized_path is not None:
                     payload["materialized_source_path"] = materialized_path
                     payload["materialized_revision"] = batch.materialized_revision
 
                 changed_paths: set[str]
+                balanced_accepted_count = 0
                 if candidate == "agent":
                     # The Agent owns the candidate filesystem.  It writes
                     # Markdown/descriptions; the return value is only a
@@ -1731,18 +2231,14 @@ class ContextPipelineService:
                 else:
                     if candidate != "balanced":
                         raise _pipeline_error("unsupported Filesystem profile")
-                    changed_paths = await self._filesystem_balanced_model_attempt(
+                    changed_paths, balanced_accepted_count = await self._filesystem_balanced_model_attempt(
                         processed=processed,
                         sandbox=sandbox,
-                        batch=batch,
-                        service_id=service_id,
+                        service_id=effective_service_id,
                         context_baseline=context_baseline,
-                        materialized_baseline=materialized_baseline,
-                        materialized_path=materialized_path,
-                        payload=payload,
                         alias_targets=alias_targets,
-                        deleted_source_ids=deleted_source_ids,
                     )
+                    processed["_balanced_accepted_count"] = balanced_accepted_count
 
                 _validate_agent_candidate(
                     sandbox / "context",
@@ -1774,8 +2270,12 @@ class ContextPipelineService:
                     )
                 processed["_agent_changed_context_paths"] = changed_paths
                 processed["_agent_candidate_prepared"] = True
-                processed["_filesystem_candidate_profile"] = candidate
-                return candidate
+                processed["_filesystem_candidate_prepared"] = True
+                final_candidate = "balanced" if candidate == "balanced" and balanced_accepted_count > 0 else candidate
+                if candidate == "balanced" and balanced_accepted_count == 0:
+                    final_candidate = "rules"
+                processed["_filesystem_candidate_profile"] = final_candidate
+                return final_candidate
             except (OSError, UnicodeError) as error:
                 raise _publish_error("filesystem candidate could not be prepared") from error
             except Exception as error:
@@ -1789,103 +2289,81 @@ class ContextPipelineService:
         *,
         processed: dict[str, object],
         sandbox: Path,
-        batch: FetchBatch,
         service_id: str | None,
         context_baseline: Mapping[str, tuple[int, str]],
-        materialized_baseline: Mapping[str, tuple[int, str]] | None,
-        materialized_path: str | None,
-        payload: Mapping[str, object],
         alias_targets: Mapping[str, str] | None,
-        deleted_source_ids: set[str] | None,
-    ) -> set[str]:
-        """Run the direct balanced Filesystem model with bounded retries."""
+    ) -> tuple[set[str], int]:
+        """Enrich one Rules candidate with one model call per five upserts."""
 
         if self._config.model_client is None or self._config.model_request is None:
             raise build_error(
                 StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID,
                 error_msg="model configuration is missing",
             )
+        documents = _processed_documents(processed)
+        if not documents:
+            return _changed_context_paths(sandbox / "context", context_baseline), 0
         model = Model(
             model_client_config=self._config.model_client,
             model_config=self._config.model_request,
         )
-        original_message = UserMessage(
-            content=(
-                "Return JSON for the current Filesystem candidate with exactly one top-level field: pages, mapping "
-                "each relative Markdown path to its complete body. Do not use description.md as a business page, "
-                "parent or absolute paths, frontmatter, credentials, or non-Markdown output. "
-                + _FILESYSTEM_WIKI_INSTRUCTIONS
-                + "deleted_count is informational; PCS applies deletions programmatically, so do not request or "
-                "reproduce the deleted logical IDs.\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        context_root = sandbox / "context"
+        effective_service_id = service_id or "local"
+        accepted_count = 0
+        for start in range(0, len(documents), _BALANCED_GROUP_SIZE):
+            group = documents[start : start + _BALANCED_GROUP_SIZE]
+            payload_items: list[dict[str, object]] = []
+            target_paths_by_index: dict[int, dict[str, Path]] = {}
+            allowed_targets: dict[int, set[str]] = {}
+            documents_by_index: dict[int, Mapping[str, object]] = {}
+            for offset, document in enumerate(group):
+                item_index = start + offset
+                public_candidates, target_paths = _balanced_directory_candidates(context_root, document)
+                preview = _balanced_semantic_preview(_SHORT_REFERENCE.sub("", str(document.get("markdown", ""))))
+                payload_items.append(
+                    {
+                        "item_index": item_index,
+                        "title": _markdown_label(str(document.get("title") or "")),
+                        "preview": preview,
+                        "candidates": public_candidates,
+                    }
+                )
+                target_paths_by_index[item_index] = target_paths
+                allowed_targets[item_index] = {"sources", "new_topic", *target_paths}
+                documents_by_index[item_index] = document
+            request_payload = {"items": payload_items}
+            message = UserMessage(
+                content=(
+                    "Return JSON with exactly one top-level items array. For each supplied item, return exactly "
+                    "item_index, summary, target, and new_topic_title. summary must be plain Simplified Chinese "
+                    "text of at most 450 characters. target must be one supplied directory ID, sources, or "
+                    "new_topic; use a short new_topic_title only for new_topic. Do not return paths, Markdown "
+                    "links, citations, HTML comments, files, or complete pages.\n"
+                    + json.dumps(request_payload, ensure_ascii=False, sort_keys=True)
+                )
             )
-        )
-        messages: list[BaseMessage] = [original_message]
-        original_request = str(original_message.content)
-        max_attempts = 3 if self._config.strategy_profile == "balanced" else 1
-        errors: list[str] = []
-        for attempt in range(max_attempts):
-            output_text: str | None = None
-            if attempt:
-                _reset_filesystem_sandbox(sandbox)
-                _prepare_agent_candidate(self._context_root, sandbox)
-            if service_id is not None:
-                _remove_rules_pages_for_deleted_ids(
-                    sandbox / "context",
-                    service_id=service_id,
-                    deleted_ids=_processed_deleted_ids(processed),
-                )
             try:
-                result = await model.invoke(messages)
+                result = await model.invoke([message])
                 output_text = _model_result_text(result)
-                changed_paths = _parse_balanced_filesystem_output(output_text, sandbox)
-                _validate_agent_candidate(
-                    sandbox / "context",
-                    baseline=context_baseline,
-                    changed_paths=changed_paths,
-                    baseline_root=self._context_root,
-                    source_root=self._source_meta_root,
-                    deleted_source_ids=deleted_source_ids,
-                    materialized_baseline=materialized_baseline,
-                    require_description=False,
-                )
-                if alias_targets is not None:
-                    _render_all_descriptions(
-                        sandbox / "context",
-                        fallback_references=tuple(alias_targets),
-                    )
-                    _validate_reference_graph(
-                        sandbox / "context",
-                        final_context_root=self._context_root,
-                        source_root=self._source_meta_root,
-                        alias_targets=alias_targets,
-                        repairable=True,
-                    )
-                return changed_paths
-            except (OSError, UnicodeError) as error:
-                raise _publish_error("balanced filesystem candidate could not be inspected") from error
-            except BaseError as error:
-                if getattr(error, "status", None) not in {
-                    StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR,
-                }:
-                    raise
-                errors = _bounded_validation_errors(error)
-            except Exception as error:
-                errors = _bounded_validation_errors(error)
-            if attempt + 1 >= max_attempts:
+            except asyncio.CancelledError:
+                raise
+            except Exception:
                 break
-            if output_text is not None:
-                messages.append(AssistantMessage(content=output_text))
-            try:
-                validate_pcs_messages(messages)
-            except BaseError:
-                # A direct Model has no tool groups, so this is only a
-                # defensive guard for custom test doubles.
-                pass
-            if attempt == 0:
-                messages.append(UserMessage(content=_filesystem_validation_prompt(errors)))
-            else:
-                messages = [UserMessage(content=_filesystem_clean_redo_prompt(original_request, errors))]
-        raise _pipeline_error(errors[0] if errors else "balanced filesystem output failed validation")
+            accepted = _parse_balanced_enrichments(output_text, allowed_targets=allowed_targets)
+            for item_index in sorted(accepted):
+                _apply_balanced_enrichment(
+                    context_root,
+                    service_id=effective_service_id,
+                    document=documents_by_index[item_index],
+                    enrichment=accepted[item_index],
+                    target_paths=target_paths_by_index[item_index],
+                )
+                accepted_count += 1
+        _render_root_navigation(
+            context_root,
+            fallback_references=tuple(alias_targets or ()),
+        )
+        return _changed_context_paths(context_root, context_baseline), accepted_count
 
     async def _publish_processed(
         self,
@@ -1901,9 +2379,10 @@ class ContextPipelineService:
         async with self._publish_lock:
             _assert_path_chain_no_symlinks(self._home / "workspace")
             candidate_context = sandbox / "context"
-            filesystem_profile = processed.get("_filesystem_candidate_profile")
-            model_candidate = filesystem_profile in {"agent", "balanced"}
-            if not model_candidate:
+            candidate_prepared = bool(
+                processed.get("_filesystem_candidate_prepared") or processed.get("_agent_candidate_prepared")
+            )
+            if not candidate_prepared:
                 _copy_tree(self._context_root, candidate_context)
             candidate_context.mkdir(parents=True, exist_ok=True)
             _assert_no_symlinks(candidate_context)
@@ -1916,18 +2395,11 @@ class ContextPipelineService:
                 service_id=service_id,
                 deleted_ids=deleted_ids,
             )
-            documents_value = processed.get("documents", [])
-            documents_values = documents_value if isinstance(documents_value, list) else []
-            documents = [value for value in documents_values if isinstance(value, Mapping)]
-            if not model_candidate:
-                service_root = candidate_context / "sources" / _safe_segment(service_id, name="service_id")
-                for document in documents:
-                    logical_id = str(document["logical_id"])
-                    page = service_root / f"{_digest(logical_id)}.md"
-                    markdown = f"# {str(document['title'])}\n\n{str(document['markdown']).rstrip()}\n"
-                    _atomic_write(page, markdown.encode("utf-8"))
-                _render_all_descriptions(
+            if not candidate_prepared:
+                _apply_rules_increment(
                     candidate_context,
+                    service_id=service_id,
+                    processed=processed,
                     fallback_references=tuple(alias_targets or ()),
                 )
             _validate_candidate(candidate_context)
@@ -2740,28 +3212,6 @@ def _bounded_validation_errors(error: BaseException | object) -> list[str]:
     return [text or "output failed validation"]
 
 
-def _filesystem_validation_prompt(errors: list[str]) -> str:
-    details = "\n".join(f"- {item}" for item in errors)[:_MAX_VALIDATION_DETAILS_CHARS]
-    return (
-        "The previous Filesystem output failed validation. Correct it using the original request and errors below. "
-        "Return only the final JSON object required by the original request; do not explain the repair.\n"
-        "Validation errors (redacted):\n"
-        f"{details}"
-    )
-
-
-def _filesystem_clean_redo_prompt(original_request: str, errors: list[str]) -> str:
-    details = "\n".join(f"- {item}" for item in errors)[:_MAX_VALIDATION_DETAILS_CHARS]
-    return (
-        "Redo the original Filesystem task from a clean message history. Do not use prior assistant/tool output. "
-        "Return only the final JSON object required by the original request.\n"
-        "Original request:\n"
-        f"{original_request[:_MAX_MODEL_OUTPUT_CHARS]}\n"
-        "Most recent validation errors (redacted):\n"
-        f"{details}"
-    )
-
-
 def _load_agent_json(text: str, *, error_message: str) -> object:
     """Decode a model JSON object while tolerating harmless presentation wrappers."""
 
@@ -2789,40 +3239,6 @@ def _load_agent_json(text: str, *, error_message: str) -> object:
             if isinstance(value, dict):
                 return value
     raise _pipeline_error(error_message)
-
-
-def _parse_balanced_filesystem_output(
-    text: str,
-    sandbox: Path,
-) -> set[str]:
-    """Parse the direct balanced model's structured page response."""
-
-    value = _load_agent_json(text, error_message="balanced filesystem output is not valid JSON")
-    if not isinstance(value, dict) or set(value) != {"pages"} or not isinstance(value["pages"], dict):
-        raise _pipeline_error("balanced filesystem output schema is invalid")
-    pages = value["pages"]
-    context_root = sandbox / "context"
-    _assert_no_symlinks(context_root)
-    changed_paths: set[str] = set()
-    for path_value, content in pages.items():
-        if not isinstance(path_value, str) or not path_value.casefold().endswith(".md"):
-            raise _pipeline_error("balanced page path is invalid")
-        if not isinstance(content, str):
-            raise _pipeline_error("balanced page schema is invalid")
-        try:
-            relative = _validated_relative_path(path_value, name="balanced page path")
-        except BaseError as exc:
-            raise _pipeline_error("balanced page path is invalid") from exc
-        if _is_program_description(relative) or relative.parts[0] == "context":
-            raise _pipeline_error("balanced page path is reserved")
-        if len(content) > _MAX_AGENT_CONTEXT_FILE_BYTES:
-            raise _pipeline_error("balanced page exceeds the safety limit")
-        normalized = relative.as_posix()
-        if normalized in changed_paths:
-            raise _pipeline_error("balanced page paths are duplicated")
-        _atomic_write(context_root / relative, _normalize_markdown(content).encode("utf-8"))
-        changed_paths.add(normalized)
-    return changed_paths
 
 
 def _validate_candidate(context_root: Path) -> None:

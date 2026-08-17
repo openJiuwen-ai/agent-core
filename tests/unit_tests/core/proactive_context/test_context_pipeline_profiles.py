@@ -10,7 +10,6 @@ import pytest
 
 import openjiuwen.core.proactive_context.context_pipeline as context_pipeline
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.proactive_context.config import PCSConfig
 from openjiuwen.core.proactive_context.context_pipeline import (
     ContextPipelineService,
@@ -296,7 +295,14 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
 
     filesystem_output = json.dumps(
         {
-            "pages": {"topics/balanced.md": "# Balanced\n\nBalanced filesystem result. [[ref:0]]"},
+            "items": [
+                {
+                    "item_index": 0,
+                    "summary": "Balanced filesystem summary.",
+                    "target": "sources",
+                    "new_topic_title": None,
+                }
+            ],
         }
     )
     _FakeDirectModel.instances.clear()
@@ -324,14 +330,18 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
         str(getattr(messages[0], "content", "")) for model in _FakeDirectModel.instances for messages, _ in model.calls
     ]
     assert all("This is the Processing stage" not in prompt for prompt in model_prompts)
-    assert sum("Return JSON for the current Filesystem candidate" in prompt for prompt in model_prompts) == (
+    assert sum("Return JSON with exactly one top-level items array" in prompt for prompt in model_prompts) == (
         expected_filesystem_model_calls
     )
     if total_profile == "balanced":
         balanced_prompt = next(
-            prompt for prompt in model_prompts if "Return JSON for the current Filesystem candidate" in prompt
+            prompt for prompt in model_prompts if "Return JSON with exactly one top-level items array" in prompt
         )
-        _assert_new_wiki_prompt(balanced_prompt)
+        balanced_payload = json.loads(balanced_prompt.split("\n", 1)[1])
+        assert set(balanced_payload) == {"items"}
+        assert len(balanced_payload["items"]) == 1
+        assert set(balanced_payload["items"][0]) == {"item_index", "title", "preview", "candidates"}
+        assert "pages" not in balanced_payload
     assert len(agent_prompts) == expected_agent_calls
     assert published_profiles == [total_profile]
     assert all("existing context/description.md" in prompt for prompt in agent_prompts)
@@ -423,39 +433,392 @@ def test_agent_sandbox_rejects_removed_manifest_contract(tmp_path: Path) -> None
     assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR
 
 
-def test_balanced_filesystem_accepts_pages_only(tmp_path: Path) -> None:
-    sandbox = tmp_path / "sandbox"
-    (sandbox / "context").mkdir(parents=True)
+def test_balanced_directory_candidates_are_local_bounded_and_opaque(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    for index in range(100):
+        description = context_root / "topics" / f"topic-{index:03d}" / "description.md"
+        description.parent.mkdir(parents=True)
+        description.write_text(
+            f"# Topic {index:03d}\n\nSemantic preview {index:03d}. " + ("x" * 2_000),
+            encoding="utf-8",
+        )
 
-    changed = context_pipeline._parse_balanced_filesystem_output(
-        json.dumps({"pages": {"topics/page.md": "# Page\n\nMentions it. [[ref:0]]"}}),
-        sandbox,
+    public_candidates, target_paths = context_pipeline._balanced_directory_candidates(
+        context_root,
+        {
+            "title": "Topic 042 release notes",
+            "markdown": "Topic 042 contains a focused update.",
+        },
     )
 
-    assert changed == {"topics/page.md"}
-    assert (sandbox / "context" / "topics" / "page.md").read_text(encoding="utf-8") == (
-        "# Page\n\nMentions it. [[ref:0]]\n"
+    assert 1 <= len(public_candidates) <= 5
+    assert [candidate["id"] for candidate in public_candidates] == [
+        f"directory_{index}" for index in range(1, len(public_candidates) + 1)
+    ]
+    assert public_candidates[0]["title"] == "Topic 042"
+    assert all(set(candidate) == {"id", "title", "preview"} for candidate in public_candidates)
+    assert all(len(candidate["preview"]) <= 240 for candidate in public_candidates)
+    serialized = json.dumps(public_candidates, ensure_ascii=False)
+    assert str(context_root) not in serialized
+    assert "topic-042" not in serialized
+    assert set(target_paths) == {candidate["id"] for candidate in public_candidates}
+    assert target_paths["directory_1"] == context_root / "topics" / "topic-042"
+
+
+def test_balanced_enrichment_parser_accepts_items_independently() -> None:
+    allowed_targets = {index: {"sources", "new_topic", "directory_1"} for index in range(8)}
+    payload = {
+        "items": [
+            {
+                "item_index": 0,
+                "summary": "合法目录摘要。",
+                "target": "directory_1",
+                "new_topic_title": None,
+            },
+            {
+                "item_index": 1,
+                "summary": "合法来源摘要。",
+                "target": "sources",
+                "new_topic_title": None,
+            },
+            {
+                "item_index": 2,
+                "summary": "合法新主题摘要。",
+                "target": "new_topic",
+                "new_topic_title": "主动上下文",
+            },
+            {
+                "item_index": 3,
+                "summary": "带额外字段。",
+                "target": "sources",
+                "new_topic_title": None,
+                "extra": True,
+            },
+            {
+                "item_index": 4,
+                "summary": "[非法链接](https://example.test)",
+                "target": "sources",
+                "new_topic_title": None,
+            },
+            {
+                "item_index": 5,
+                "summary": "非法候选。",
+                "target": "directory_5",
+                "new_topic_title": None,
+            },
+            {
+                "item_index": 6,
+                "summary": "重复一。",
+                "target": "sources",
+                "new_topic_title": None,
+            },
+            {
+                "item_index": 6,
+                "summary": "重复二。",
+                "target": "sources",
+                "new_topic_title": None,
+            },
+        ]
+    }
+
+    accepted = context_pipeline._parse_balanced_enrichments(
+        json.dumps(payload, ensure_ascii=False),
+        allowed_targets=allowed_targets,
     )
+
+    assert set(accepted) == {0, 1, 2}
+    assert accepted[0] == {
+        "summary": "合法目录摘要。",
+        "target": "directory_1",
+        "new_topic_title": None,
+    }
+    assert accepted[2]["new_topic_title"] == "主动上下文"
 
 
 @pytest.mark.parametrize(
-    "payload",
+    "text",
     [
-        {"provenance": {}, "pages": {}},
-        {"pages": {}, "extra": True},
-        {"pages": {"description.md": "# Reserved"}},
-        {"pages": {"topics/description.md": "# Reserved"}},
-        {"pages": {"../outside.md": "# Outside"}},
-        {"pages": {"topics/page.md": 1}},
+        "not-json",
+        json.dumps([]),
+        json.dumps("invalid"),
+        json.dumps({"items": [], "extra": True}),
+        json.dumps({"items": {}}),
     ],
 )
-def test_balanced_filesystem_rejects_non_page_contract(payload: dict[str, object], tmp_path: Path) -> None:
-    sandbox = tmp_path / "sandbox"
-    (sandbox / "context").mkdir(parents=True)
+def test_balanced_enrichment_parser_returns_no_items_for_invalid_top_level(text: str) -> None:
+    assert context_pipeline._parse_balanced_enrichments(text, allowed_targets={0: {"sources"}}) == {}
 
-    with pytest.raises(Exception) as raised:
-        context_pipeline._parse_balanced_filesystem_output(json.dumps(payload), sandbox)
-    assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("item_count", "expected_calls", "expected_profile"),
+    [
+        (0, 0, "rules"),
+        (1, 1, "balanced"),
+        (5, 1, "balanced"),
+        (6, 2, "balanced"),
+        (10, 2, "balanced"),
+        (20, 4, "balanced"),
+    ],
+)
+async def test_balanced_groups_at_most_five_upserts_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    item_count: int,
+    expected_calls: int,
+    expected_profile: str,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    documents = [
+        {
+            "logical_id": f"notes/{index}",
+            "revision_id": f"rev-{index}",
+            "title": f"Note {index}",
+            "markdown": f"Source content {index}.\n",
+        }
+        for index in range(item_count)
+    ]
+    outputs: list[str] = []
+    for start in range(0, item_count, 5):
+        outputs.append(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "item_index": index,
+                            "summary": f"LLM summary {index}.",
+                            "target": "sources",
+                            "new_topic_title": None,
+                        }
+                        for index in range(start, min(start + 5, item_count))
+                    ]
+                }
+            )
+        )
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = outputs
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+
+    result = await service._filesystem_with_fallback(
+        processed={"documents": documents, "blocks": [], "deleted_ids": []},
+        sandbox=sandbox,
+        batch=_processing_batch(item_count),
+        service_id="local",
+    )
+
+    calls = [call for instance in _FakeDirectModel.instances for call in instance.calls]
+    assert result == expected_profile
+    assert len(calls) == expected_calls
+    for messages, kwargs in calls:
+        assert kwargs == {}
+        assert len(messages) == 1
+        content = str(getattr(messages[0], "content", ""))
+        assert "complete body" not in content
+        assert '"pages"' not in content
+        payload = json.loads(content.split("\n", 1)[1])
+        assert 1 <= len(payload["items"]) <= 5
+        assert all(len(item["candidates"]) <= 5 for item in payload["items"])
+        assert all("path" not in candidate for item in payload["items"] for candidate in item["candidates"])
+    if item_count:
+        source_text = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (sandbox / "context" / "sources" / "local").glob("*.md")
+            if path.name != "description.md"
+        )
+        for index in range(item_count):
+            assert f"LLM summary {index}." in source_text
+
+
+@pytest.mark.asyncio
+async def test_balanced_applies_existing_directory_and_controlled_new_topic_without_rewriting_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = tmp_path / "workspace" / "context"
+    existing = context_root / "topics" / "openjiuwen"
+    existing.mkdir(parents=True)
+    root_body = "根语义正文保持不变。"
+    topics_body = "主题导航正文保持不变。"
+    existing_body = "OpenJiuWen 目录正文保持不变。"
+    (context_root / "description.md").write_text(
+        f"# Agent 门户\n\n- [主题](topics/description.md)\n\n{root_body}\n",
+        encoding="utf-8",
+    )
+    (context_root / "topics" / "description.md").write_text(
+        f"# Topics\n\n- [OpenJiuWen](openjiuwen/description.md)\n\n{topics_body}\n",
+        encoding="utf-8",
+    )
+    existing_description = existing / "description.md"
+    existing_description.write_text(f"# OpenJiuWen\n\n{existing_body}\n", encoding="utf-8")
+    documents = [
+        {
+            "logical_id": "notes/openjiuwen",
+            "revision_id": "rev-0",
+            "title": "OpenJiuWen Rail 接入",
+            "markdown": "Rail integration details.\n",
+        },
+        {
+            "logical_id": "notes/proactive",
+            "revision_id": "rev-1",
+            "title": "主动上下文设计",
+            "markdown": "Proactive context design.\n",
+        },
+    ]
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "OpenJiuWen Rail 的有界摘要。",
+                        "target": "directory_1",
+                        "new_topic_title": None,
+                    },
+                    {
+                        "item_index": 1,
+                        "summary": "主动上下文的有界摘要。",
+                        "target": "new_topic",
+                        "new_topic_title": "主动上下文",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+    service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+
+    result = await service._filesystem_with_fallback(
+        processed={"documents": documents, "blocks": [], "deleted_ids": []},
+        sandbox=sandbox,
+        batch=_processing_batch(2),
+        service_id="local",
+    )
+
+    candidate = sandbox / "context"
+    assert result == "balanced"
+    assert root_body in (candidate / "description.md").read_text(encoding="utf-8")
+    assert topics_body in (candidate / "topics" / "description.md").read_text(encoding="utf-8")
+    existing_text = (candidate / "topics" / "openjiuwen" / "description.md").read_text(encoding="utf-8")
+    assert existing_body in existing_text
+    assert existing_text.count("<!-- pcs:source-links:start -->") == 1
+    controlled_topics = [
+        path for path in (candidate / "topics").iterdir() if path.is_dir() and path.name != "openjiuwen"
+    ]
+    assert len(controlled_topics) == 1
+    controlled_description = (controlled_topics[0] / "description.md").read_text(encoding="utf-8")
+    assert "<!-- pcs:managed-topic -->" in controlled_description
+    assert "<!-- pcs:source-links:start -->" in controlled_description
+    topics_text = (candidate / "topics" / "description.md").read_text(encoding="utf-8")
+    assert "<!-- pcs:topic-links:start -->" in topics_text
+    assert controlled_topics[0].name in topics_text
+
+
+@pytest.mark.asyncio
+async def test_balanced_invalid_items_fall_back_individually_and_model_error_stops_later_groups(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    documents = [
+        {
+            "logical_id": f"notes/{index}",
+            "revision_id": f"rev-{index}",
+            "title": f"Note {index}",
+            "markdown": f"Deterministic content {index}.\n",
+        }
+        for index in range(7)
+    ]
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "唯一被采用的摘要。",
+                        "target": "sources",
+                        "new_topic_title": None,
+                    },
+                    {
+                        "item_index": 1,
+                        "summary": "[非法链接](https://example.test)",
+                        "target": "sources",
+                        "new_topic_title": None,
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        RuntimeError("model unavailable"),
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+
+    result = await service._filesystem_with_fallback(
+        processed={"documents": documents, "blocks": [], "deleted_ids": []},
+        sandbox=sandbox,
+        batch=_processing_batch(7),
+        service_id="local",
+    )
+
+    assert result == "balanced"
+    assert len(_FakeDirectModel.instances[0].calls) == 2
+    pages = {
+        path.read_text(encoding="utf-8")
+        for path in (sandbox / "context" / "sources" / "local").glob("*.md")
+        if path.name != "description.md"
+    }
+    assert len(pages) == 7
+    assert any("唯一被采用的摘要。" in page for page in pages)
+    assert any("Deterministic content 1." in page and "非法链接" not in page for page in pages)
+    assert all("model unavailable" not in page for page in pages)
+
+
+@pytest.mark.asyncio
+async def test_balanced_zero_accepted_items_returns_publishable_rules_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    processed = {
+        "documents": [
+            {
+                "logical_id": "notes/one",
+                "revision_id": "rev-1",
+                "title": "One",
+                "markdown": "Deterministic fallback.\n",
+            }
+        ],
+        "blocks": [],
+        "deleted_ids": [],
+    }
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = ["not-json"]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+
+    result = await service._filesystem_with_fallback(
+        processed=processed,
+        sandbox=sandbox,
+        batch=_processing_batch(1),
+        service_id="local",
+    )
+
+    assert result == "rules"
+    assert processed["_filesystem_candidate_prepared"] is True
+    assert processed["_balanced_accepted_count"] == 0
+    source_page = next(
+        path for path in (sandbox / "context" / "sources" / "local").glob("*.md") if path.name != "description.md"
+    )
+    assert "Deterministic fallback." in source_page.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -621,7 +984,14 @@ async def test_filesystem_agent_noop_for_non_empty_run_is_repairable_and_falls_b
     _FakeDirectModel.outputs = [
         json.dumps(
             {
-                "pages": {"topics/balanced.md": "# Balanced\n\nBalanced filesystem page. [[ref:0]]"},
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "Balanced filesystem summary.",
+                        "target": "sources",
+                        "new_topic_title": None,
+                    }
+                ],
             }
         )
     ]
@@ -652,7 +1022,8 @@ async def test_filesystem_agent_noop_for_non_empty_run_is_repairable_and_falls_b
     assert result == "balanced"
     assert len(validation_errors) == 1
     assert validation_errors[0].endswith("agent did not add or update any Context knowledge page")
-    assert (sandbox / "context" / "topics" / "balanced.md").is_file()
+    source_page = sandbox / "context" / "sources" / "local" / f"{context_pipeline._digest('notes/one')}.md"
+    assert "Balanced filesystem summary." in source_page.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -1274,21 +1645,31 @@ async def test_filesystem_production_prompt_bounds_deleted_ids_documents_and_tit
     monkeypatch.setattr(context_pipeline, "run_pcs_agent", agent_capture)
     monkeypatch.setattr(context_pipeline, "Model", FailingModel)
 
-    with pytest.raises(Exception) as raised:
-        await service._filesystem_with_fallback(
-            processed=processed,
-            sandbox=sandbox,
-            batch=FetchBatch(batch_id="finish-run", items=[]),
+    if profile == "agent":
+        with pytest.raises(Exception) as raised:
+            await service._filesystem_with_fallback(
+                processed=processed,
+                sandbox=sandbox,
+                batch=FetchBatch(batch_id="finish-run", items=[]),
+            )
+        assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID
+    else:
+        assert (
+            await service._filesystem_with_fallback(
+                processed=processed,
+                sandbox=sandbox,
+                batch=FetchBatch(batch_id="finish-run", items=[]),
+            )
+            == "rules"
         )
 
-    assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID
     assert len(prompts) == 1
     prompt = prompts[0]
     payload = json.loads(prompt.split("\n", 1)[1])
-    prompt_documents = payload["document_previews"] if profile == "agent" else payload["documents"]
-    assert payload["deleted_count"] == len(deleted_ids)
-    assert "deleted_ids" not in payload
     if profile == "agent":
+        prompt_documents = payload["document_previews"]
+        assert payload["deleted_count"] == len(deleted_ids)
+        assert "deleted_ids" not in payload
         assert payload["deleted_input_root"] == "inputs/deleted"
         assert "This is a large run: use the complete briefing first" in prompt
         assert "Do not eagerly read every source_preview or source_content" in prompt
@@ -1301,11 +1682,20 @@ async def test_filesystem_production_prompt_bounds_deleted_ids_documents_and_tit
         assert "Do not leave links to planned pages that you did not create" in prompt
         assert "perform one lightweight check of the internal Context links" in prompt
         assert "exactly one top-level # heading outside fenced code blocks" in prompt
+        assert len(prompt_documents) == 12
+        assert all(len(str(document["title"])) <= 512 for document in prompt_documents)
+        assert all("markdown" not in document and "blocks" not in document for document in prompt_documents)
     else:
+        assert set(payload) == {"items"}
+        prompt_documents = payload["items"]
+        assert len(prompt_documents) == 5
+        assert all(set(document) == {"item_index", "title", "preview", "candidates"} for document in prompt_documents)
+        assert all(len(str(document["title"])) <= 512 for document in prompt_documents)
+        assert all(len(str(document["preview"])) <= 240 for document in prompt_documents)
+        assert all(len(document["candidates"]) <= 5 for document in prompt_documents)
+        assert "deleted_count" not in payload
+        assert "deleted_ids" not in payload
         assert "deleted_input_root" not in payload
-    assert len(prompt_documents) == 12
-    assert all(len(str(document["title"])) <= 512 for document in prompt_documents)
-    assert all("markdown" not in document and "blocks" not in document for document in prompt_documents)
     assert deleted_ids[0] not in prompt and deleted_ids[-1] not in prompt
     assert len(prompt) < 30_000
     assert json.loads(deleted_path.read_text(encoding="utf-8")) == deleted_ids
@@ -1679,37 +2069,6 @@ def test_candidate_allows_absolute_link_in_ordinary_page(tmp_path: Path) -> None
     context_pipeline._validate_description_navigation(context)
 
 
-def test_rendered_root_description_does_not_turn_page_links_into_navigation(tmp_path: Path) -> None:
-    context = tmp_path / "context"
-    page = context / "topics" / "page.md"
-    page.parent.mkdir(parents=True)
-    page.write_text(
-        "# Topic\n\nThe source preserves [an unavailable relative link](missing.md).\n",
-        encoding="utf-8",
-    )
-
-    rendered = context_pipeline._render_description(context)
-    (context / "description.md").write_text(rendered, encoding="utf-8")
-
-    assert "[Topic](topics/page.md)" in rendered
-    assert "[an unavailable relative link](missing.md)" not in rendered
-    assert "an unavailable relative link" in rendered
-    context_pipeline._validate_description_navigation(context)
-
-
-def test_rendered_root_description_supports_page_paths_with_spaces(tmp_path: Path) -> None:
-    context = tmp_path / "context"
-    page = context / "SkillForge Agent Skills.md"
-    page.parent.mkdir(parents=True)
-    page.write_text("# SkillForge Agent Skills\n\nSummary.\n", encoding="utf-8")
-
-    rendered = context_pipeline._render_description(context)
-    (context / "description.md").write_text(rendered, encoding="utf-8")
-
-    assert "(<SkillForge Agent Skills.md>)" in rendered
-    context_pipeline._validate_description_navigation(context)
-
-
 @pytest.mark.parametrize("target", ["missing.md", "../../outside.md"])
 def test_description_navigation_must_resolve_inside_context(tmp_path: Path, target: str) -> None:
     context = tmp_path / "context"
@@ -1750,18 +2109,6 @@ def test_balanced_validation_details_redact_unix_unc_and_url_secrets() -> None:
     assert "hidden" not in rendered
     assert "/tmp/private.txt" not in rendered
     assert "\\\\server\\share\\private.txt" not in rendered
-
-
-def test_parse_balanced_pages_materializes_normalized_markdown(tmp_path: Path) -> None:
-    sandbox = tmp_path / "sandbox"
-    (sandbox / "context").mkdir(parents=True)
-    assert context_pipeline._parse_balanced_filesystem_output(
-        json.dumps({"pages": {"sources/topic/page.md": "# Agent\n\nAgent page body."}}),
-        sandbox,
-    ) == {"sources/topic/page.md"}
-    assert (sandbox / "context" / "sources" / "topic" / "page.md").read_text(encoding="utf-8") == (
-        "# Agent\n\nAgent page body.\n"
-    )
 
 
 @pytest.mark.asyncio
@@ -1954,7 +2301,14 @@ async def test_filesystem_agent_content_validation_can_fallback_to_balanced(
     _FakeDirectModel.outputs = [
         json.dumps(
             {
-                "pages": {"topics/balanced.md": "# Balanced\n\nBalanced filesystem page. [[ref:0]]"},
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "Balanced filesystem summary.",
+                        "target": "sources",
+                        "new_topic_title": None,
+                    }
+                ],
             }
         )
     ]
@@ -1997,7 +2351,7 @@ async def test_filesystem_rules_fallback_discards_failed_candidate(
         rogue.write_text("failed Agent candidate", encoding="utf-8")
         raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg="invalid output")
 
-    async def failed_balanced(**kwargs: object) -> dict[str, list[str]]:
+    async def failed_balanced(**kwargs: object) -> tuple[set[str], int]:
         del kwargs
         rogue = sandbox / "context" / "balanced-rogue.md"
         rogue.parent.mkdir(parents=True, exist_ok=True)
@@ -2014,8 +2368,12 @@ async def test_filesystem_rules_fallback_discards_failed_candidate(
     )
 
     assert result == "rules"
-    assert [entry.name for entry in sandbox.iterdir()] == ["inputs"]
-    assert not (sandbox / "context").exists()
+    assert sorted(entry.name for entry in sandbox.iterdir()) == ["context", "inputs"]
+    assert not (sandbox / "context" / "rogue.md").exists()
+    assert not (sandbox / "context" / "balanced-rogue.md").exists()
+    source_page = sandbox / "context" / "sources" / "local" / f"{context_pipeline._digest('notes/one')}.md"
+    assert source_page.is_file()
+    assert processed["_filesystem_candidate_prepared"] is True
 
 
 @pytest.mark.asyncio
@@ -2074,19 +2432,23 @@ async def test_filesystem_agent_missing_markdown_link_does_not_force_fallback(
 
 
 @pytest.mark.asyncio
-async def test_balanced_filesystem_retries_same_history_then_clean_redo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_balanced_invalid_output_does_not_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=asyncio.Queue())
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
     _FakeDirectModel.instances.clear()
     _FakeDirectModel.outputs = [
         "bad-1",
-        "bad-2",
         json.dumps(
             {
-                "pages": {"topics/final.md": "# Final\n\nFinal filesystem page. [[ref:0]]"},
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "This output must remain unused.",
+                        "target": "sources",
+                        "new_topic_title": None,
+                    }
+                ],
             }
         ),
     ]
@@ -2109,19 +2471,15 @@ async def test_balanced_filesystem_retries_same_history_then_clean_redo(
         sandbox=sandbox,
         batch=_batch(),
     )
-    assert result == "balanced"
+    assert result == "rules"
     calls = _FakeDirectModel.instances[0].calls
-    assert len(calls) == 3
+    assert len(calls) == 1
     assert len(calls[0][0]) == 1
-    assert len(calls[1][0]) == 3
-    assert calls[1][0][0] is calls[0][0][0]
-    assert isinstance(calls[1][0][1], AssistantMessage)
-    assert len(calls[2][0]) == 1
-    assert "bad-2" not in str(getattr(calls[2][0][0], "content", ""))
+    assert len(_FakeDirectModel.outputs) == 1
 
 
 @pytest.mark.asyncio
-async def test_balanced_repair_does_not_restore_a_rules_page_deleted_in_the_run(
+async def test_balanced_delete_only_uses_rules_without_model_and_does_not_restore_page(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2130,23 +2488,25 @@ async def test_balanced_repair_does_not_restore_a_rules_page_deleted_in_the_run(
     source_root = tmp_path / "workspace" / "source-meta"
     source_id = _write_atomic_source(source_root)
     page_relative = f"sources/local/{context_pipeline._digest('notes/one')}.md"
-    page = context_root / page_relative
-    page.parent.mkdir(parents=True)
-    page.write_text(
-        "# One\n\n"
-        + _source_link(
-            page_relative=page_relative,
-            final_context_root=context_root,
-            source_root=source_root,
-            source_id=source_id,
-        )
-        + "\n",
-        encoding="utf-8",
+    context_pipeline._apply_rules_increment(
+        context_root,
+        service_id="local",
+        processed={
+            "documents": [
+                {
+                    "logical_id": "notes/one",
+                    "revision_id": "rev-1",
+                    "title": "One",
+                    "markdown": "Old processed body. [[ref:0]]\n",
+                }
+            ],
+            "deleted_ids": [],
+        },
+        fallback_references=("[[ref:0]]",),
     )
-    context_pipeline._render_all_descriptions(context_root)
 
     _FakeDirectModel.instances.clear()
-    _FakeDirectModel.outputs = ["not-json", json.dumps({"pages": {}})]
+    _FakeDirectModel.outputs = []
     monkeypatch.setattr("openjiuwen.core.proactive_context.context_pipeline.Model", _FakeDirectModel)
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
@@ -2167,7 +2527,7 @@ async def test_balanced_repair_does_not_restore_a_rules_page_deleted_in_the_run(
             deleted_source_ids={source_id},
             service_id="local",
         )
-        == "balanced"
+        == "rules"
     )
     await service._publish_processed(
         service_id="local",
@@ -2180,10 +2540,11 @@ async def test_balanced_repair_does_not_restore_a_rules_page_deleted_in_the_run(
 
     assert not (context_root / page_relative).exists()
     assert page_relative not in (context_root / "description.md").read_text(encoding="utf-8")
+    assert _FakeDirectModel.instances == []
 
 
 @pytest.mark.asyncio
-async def test_source_ref_alias_survives_balanced_repair_and_clean_redo(
+async def test_source_ref_alias_survives_balanced_enrichment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2191,11 +2552,16 @@ async def test_source_ref_alias_survives_balanced_repair_and_clean_redo(
     service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=queue)
     _FakeDirectModel.instances.clear()
     _FakeDirectModel.outputs = [
-        "bad-1",
-        "bad-2",
         json.dumps(
             {
-                "pages": {"topics/final.md": "# Final\n\nFinal filesystem page. [[ref:0]]"},
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "Balanced source summary.",
+                        "target": "sources",
+                        "new_topic_title": None,
+                    }
+                ],
             }
         ),
     ]
@@ -2207,19 +2573,28 @@ async def test_source_ref_alias_survives_balanced_repair_and_clean_redo(
 
         assert len(_FakeDirectModel.instances) == 1
         calls = _FakeDirectModel.instances[0].calls
-        assert len(calls) == 3
+        assert len(calls) == 1
         for messages, _kwargs in calls:
             prompt = "\n".join(str(getattr(message, "content", "")) for message in messages)
-            assert "[[ref:0]]" in prompt
+            assert "[[ref:0]]" not in prompt
             assert "src_" not in prompt
             assert "source-meta" not in prompt
+        source_page = next(
+            path
+            for path in (tmp_path / "workspace" / "context" / "sources" / "local").glob("*.md")
+            if path.name != "description.md"
+        )
+        source_text = source_page.read_text(encoding="utf-8")
+        assert "Balanced source summary." in source_text
+        assert "[[ref:" not in source_text
+        assert "source-meta/src_" in source_text
         assert service._run_states == {}
     finally:
         await service.stop(timeout_seconds=1)
 
 
 @pytest.mark.asyncio
-async def test_balanced_filesystem_disk_error_is_non_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_balanced_model_error_publishes_rules_candidate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=asyncio.Queue())
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
@@ -2239,14 +2614,17 @@ async def test_balanced_filesystem_disk_error_is_non_fallback(tmp_path: Path, mo
         "deleted_ids": [],
         "actual_profile": "balanced",
     }
-    with pytest.raises(Exception) as raised:
+    assert (
         await service._filesystem_with_fallback(
             processed=processed,
             sandbox=sandbox,
             batch=_batch(),
         )
-    assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR
+        == "rules"
+    )
     assert len(_FakeDirectModel.instances[0].calls) == 1
+    source_page = sandbox / "context" / "sources" / "local" / f"{context_pipeline._digest('notes/one')}.md"
+    assert "Processed text." in source_page.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -2718,7 +3096,14 @@ async def test_filesystem_fallback_downshifts_after_deterministic_processing(
     _FakeDirectModel.outputs = [
         json.dumps(
             {
-                "pages": {"topics/balanced.md": "# Balanced\n\nBalanced filesystem result. [[ref:0]]"},
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "Balanced filesystem result.",
+                        "target": "sources",
+                        "new_topic_title": None,
+                    }
+                ],
             }
         ),
     ]
@@ -2728,9 +3113,12 @@ async def test_filesystem_fallback_downshifts_after_deterministic_processing(
 
     assert not (tmp_path / "workspace" / "source-proofs").exists()
     assert profiles == ["agent"]
-    assert "Balanced filesystem result." in (tmp_path / "workspace" / "context" / "topics" / "balanced.md").read_text(
-        encoding="utf-8"
+    source_page = next(
+        path
+        for path in (tmp_path / "workspace" / "context" / "sources" / "local").glob("*.md")
+        if path.name != "description.md"
     )
+    assert "Balanced filesystem result." in source_page.read_text(encoding="utf-8")
     await service.stop(timeout_seconds=1)
 
 
@@ -2855,7 +3243,7 @@ def test_filesystem_reset_preserves_run_inputs_and_materialized_source(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_materialized_source_is_copied_once_across_agent_repair_and_balanced_fallback(
+async def test_materialized_source_is_copied_once_and_not_exposed_to_balanced_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2901,13 +3289,15 @@ async def test_materialized_source_is_copied_once_across_agent_repair_and_balanc
             validate_result("invalid", sandbox_path)
         raise RuntimeError("model output remained invalid")
 
-    async def balanced_success(**kwargs: object) -> dict[str, list[str]]:
-        candidate_file = sandbox / "materialized-source" / "README.md"
-        observed_contents.append(candidate_file.read_bytes())
-        page = sandbox / "context" / "topics" / "balanced.md"
-        page.parent.mkdir(parents=True, exist_ok=True)
-        page.write_text("Balanced filesystem result.", encoding="utf-8")
-        return {"topics/balanced.md": ["notes/one"]}
+    async def balanced_success(**kwargs: object) -> tuple[set[str], int]:
+        assert "batch" not in kwargs
+        assert "materialized_baseline" not in kwargs
+        assert "materialized_path" not in kwargs
+        assert "payload" not in kwargs
+        assert "deleted_source_ids" not in kwargs
+        baseline = kwargs["context_baseline"]
+        assert isinstance(baseline, dict)
+        return context_pipeline._changed_context_paths(sandbox / "context", baseline), 1
 
     monkeypatch.setattr(context_pipeline, "_materialize_candidate_source", materialize_once)
     monkeypatch.setattr(context_pipeline, "run_pcs_agent", fail_agent_with_two_validations)
@@ -2921,7 +3311,7 @@ async def test_materialized_source_is_copied_once_across_agent_repair_and_balanc
 
     assert profile == "balanced"
     assert copy_calls == 1
-    assert observed_contents == [b"candidate source"] * 3
+    assert observed_contents == [b"candidate source"] * 2
     assert (sandbox / "materialized-source" / "README.md").read_bytes() == b"candidate source"
 
 

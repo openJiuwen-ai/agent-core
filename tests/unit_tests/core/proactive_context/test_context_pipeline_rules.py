@@ -13,7 +13,11 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.proactive_context.config import PCSConfig
 from openjiuwen.core.proactive_context.context_pipeline import ContextPipelineService
 from openjiuwen.core.proactive_context.models import FetchBatch, RawChangeItem
-from openjiuwen.core.proactive_context.source_metadata import read_source_metadata, source_id_for_locator
+from openjiuwen.core.proactive_context.source_metadata import (
+    read_source_metadata,
+    source_id_for_locator,
+    upsert_source_metadata,
+)
 
 
 def _config() -> PCSConfig:
@@ -55,6 +59,23 @@ def _item(
         "metadata": {"kind": "note"},
         "raw_snapshot": "raw source" if operation == "upsert" else None,
     }
+
+
+def _seed_atomic_source(tmp_path: Path, *, suffix: str = "existing") -> str:
+    item = RawChangeItem(
+        **_item(
+            f"existing/{suffix}",
+            original_ref=f"https://example.test/existing/{suffix}",
+            title=f"Existing {suffix}",
+        )
+    )
+    return upsert_source_metadata(
+        tmp_path / "workspace" / "source-meta",
+        item,
+        provider="local_files",
+        service_id="existing",
+        observed_at="2026-08-17T00:00:00+00:00",
+    )
 
 
 async def _put_event(
@@ -867,3 +888,176 @@ async def test_stop_drains_queued_completions_with_exception(tmp_path: Path) -> 
     await service.stop(timeout_seconds=1)
     assert completion.done()
     assert completion.exception() is not None
+
+
+@pytest.mark.asyncio
+async def test_rules_preserves_existing_context_and_builds_layered_source_navigation(tmp_path: Path) -> None:
+    context_root = tmp_path / "workspace" / "context"
+    topic_root = context_root / "topics" / "existing"
+    topic_root.mkdir(parents=True)
+    root_body = "这是 Agent 保留的根语义正文。"
+    topic_body = "这是 Agent 保留的目录语义正文。"
+    source_id = _seed_atomic_source(tmp_path)
+    ordinary_body = f"# 已有主题页\n\n不得被 Rules 改写。\n\n[既有来源](../../../source-meta/{source_id}.md)\n"
+    (context_root / "description.md").write_text(
+        (f"# Agent 门户\n\n- [既有主题](topics/description.md)\n\n{root_body}\n"),
+        encoding="utf-8",
+    )
+    (context_root / "topics" / "description.md").write_text(
+        ("# Topics\n\n- [已有主题](existing/description.md)\n"),
+        encoding="utf-8",
+    )
+    original_topic_description = f"# 已有主题\n\n- [已有主题页](existing.md)\n\n{topic_body}\n"
+    (topic_root / "description.md").write_text(
+        original_topic_description,
+        encoding="utf-8",
+    )
+    ordinary_page = topic_root / "existing.md"
+    ordinary_page.write_text(ordinary_body, encoding="utf-8")
+
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+    await service.start()
+    try:
+        await _submit_run(queue, "local", "run-layered", _batch(_item(title="普通新增")))
+
+        root_text = (context_root / "description.md").read_text(encoding="utf-8")
+        assert root_text.count("<!-- pcs:navigation:start -->") == 1
+        assert root_text.count("<!-- pcs:navigation:end -->") == 1
+        assert root_text.index("<!-- pcs:navigation:start -->") < root_text.index(root_body)
+        assert "sources/description.md" in root_text
+        assert "sources/local/description.md" not in root_text
+        assert root_body in root_text
+
+        sources_description = (context_root / "sources" / "description.md").read_text(encoding="utf-8")
+        assert "local/description.md" in sources_description
+        assert "sources/local/" not in sources_description
+
+        service_root = context_root / "sources" / "local"
+        source_pages = [path for path in service_root.glob("*.md") if path.name != "description.md"]
+        assert len(source_pages) == 1
+        service_description = (service_root / "description.md").read_text(encoding="utf-8")
+        assert source_pages[0].name in service_description
+        assert "existing.md" not in service_description
+        source_text = source_pages[0].read_text(encoding="utf-8")
+        assert "## 摘要" in source_text
+        assert "## 正文" in source_text
+
+        assert (topic_root / "description.md").read_text(encoding="utf-8") == original_topic_description
+        assert ordinary_page.read_text(encoding="utf-8") == ordinary_body
+    finally:
+        await service.stop(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_rules_adds_managed_link_only_for_unique_high_confidence_topic(tmp_path: Path) -> None:
+    context_root = tmp_path / "workspace" / "context"
+    topic_root = context_root / "topics" / "openjiuwen"
+    topic_root.mkdir(parents=True)
+    (context_root / "description.md").write_text(
+        "# Agent 门户\n\n- [主题](topics/description.md)\n\n根正文。\n",
+        encoding="utf-8",
+    )
+    (context_root / "topics" / "description.md").write_text(
+        "# Topics\n\n- [OpenJiuWen](openjiuwen/description.md)\n",
+        encoding="utf-8",
+    )
+    topic_description = topic_root / "description.md"
+    topic_description.write_text("# OpenJiuWen\n\nAgent 目录正文。\n", encoding="utf-8")
+
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+    await service.start()
+    try:
+        await _submit_run(
+            queue,
+            "local",
+            "run-topic",
+            _batch(_item(title="OpenJiuWen Rail 接入说明")),
+        )
+
+        text = topic_description.read_text(encoding="utf-8")
+        source_page = next(
+            path for path in (context_root / "sources" / "local").glob("*.md") if path.name != "description.md"
+        )
+        assert "Agent 目录正文。" in text
+        assert text.count("<!-- pcs:source-links:start -->") == 1
+        assert text.count("<!-- pcs:source-links:end -->") == 1
+        assert source_page.name in text
+    finally:
+        await service.stop(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_rules_does_not_place_ambiguous_or_generic_topic(tmp_path: Path) -> None:
+    context_root = tmp_path / "workspace" / "context"
+    (context_root / "description.md").parent.mkdir(parents=True)
+    source_id = _seed_atomic_source(tmp_path, suffix="ambiguous")
+    (context_root / "description.md").write_text(
+        ("# Agent 门户\n\n- [主题](topics/description.md)\n根正文。\n"),
+        encoding="utf-8",
+    )
+    descriptions: list[Path] = []
+    original_descriptions: dict[Path, str] = {}
+    for directory_name, heading in (("first", "OpenJiuWen"), ("second", "OpenJiuWen"), ("docs", "资料")):
+        description = context_root / "topics" / directory_name / "description.md"
+        description.parent.mkdir(parents=True)
+        page = description.parent / "existing.md"
+        page.write_text(
+            f"# {directory_name}\n\n既有页面。\n\n[既有来源](../../../source-meta/{source_id}.md)\n",
+            encoding="utf-8",
+        )
+        original = f"# {heading}\n\n- [既有页面](existing.md)\n\n{directory_name} 正文。\n"
+        description.write_text(original, encoding="utf-8")
+        descriptions.append(description)
+        original_descriptions[description] = original
+    (context_root / "topics" / "description.md").write_text(
+        (
+            "# Topics\n\n"
+            + "".join(f"- [{path.parent.name}]({path.parent.name}/description.md)\n" for path in descriptions)
+        ),
+        encoding="utf-8",
+    )
+
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+    await service.start()
+    try:
+        await _submit_run(
+            queue,
+            "local",
+            "run-ambiguous",
+            _batch(_item(title="OpenJiuWen 资料更新")),
+        )
+
+        for description in descriptions:
+            text = description.read_text(encoding="utf-8")
+            assert "<!-- pcs:source-links:start -->" not in text
+            assert text == original_descriptions[description]
+    finally:
+        await service.stop(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_rules_rejects_malformed_managed_navigation_markers(tmp_path: Path) -> None:
+    description = tmp_path / "workspace" / "context" / "description.md"
+    description.parent.mkdir(parents=True)
+    description.write_text(
+        "# Agent 门户\n\n<!-- pcs:navigation:start -->\n未闭合区块。\n",
+        encoding="utf-8",
+    )
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+    await service.start()
+    completion = asyncio.get_running_loop().create_future()
+    try:
+        await queue.put(("batch", "local", "run-malformed", _batch(_item()), completion))
+        await asyncio.wait_for(asyncio.shield(completion), timeout=2)
+        finish = asyncio.get_running_loop().create_future()
+        await queue.put(("finish", "local", "run-malformed", None, finish))
+        with pytest.raises(BaseError):
+            await asyncio.wait_for(asyncio.shield(finish), timeout=2)
+    finally:
+        if not completion.done():
+            completion.cancel()
+        await service.stop(timeout_seconds=1)
