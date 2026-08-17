@@ -206,8 +206,13 @@ def test_pause_and_resume_are_noops_when_nothing_registered():
     assert asyncio.run(ctl.resume()) is False
 
 
-def test_deregister_by_run_id_drops_from_active_and_paused():
-    """deregister is keyed by run_id and drops the run from either map."""
+def test_deregister_by_run_id_drops_active_but_keeps_paused():
+    """deregister drops the active handle but leaves a paused run in _paused.
+
+    A paused run must survive run_background's finally-time deregister, or
+    resume(run_id) would report not_found and the leader would start a fresh
+    run instead of resuming the paused prefix.
+    """
     ctl = BackgroundTaskController()
     ctl.register(_rec_handle("w1", [])[0])
     assert "w1" in ctl._active
@@ -218,4 +223,4 @@ def test_deregister_by_run_id_drops_from_active_and_paused():
     asyncio.run(ctl.pause("w2"))
     assert "w2" in ctl._paused
     ctl.deregister("w2")
-    assert "w2" not in ctl._paused
+    assert "w2" in ctl._paused
