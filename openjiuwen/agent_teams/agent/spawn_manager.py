@@ -367,16 +367,20 @@ class SpawnManager:
         model_ref = get_member_model_ref(teammate)
         member_model = None
         team_spec = self._configurator.team_spec
-        # Resolve the member's model_name. The DB ``model_ref`` is written once
-        # at first spawn and never auto-refreshes with spec updates, so a
-        # model switch made via the live ``predefined_members[*].model_name``
-        # (e.g. relay-claw "继续执行" carrying a new model_name, re-injected
-        # into the spec by ``recover_from_session``) must take precedence:
-        # when the spec's per-member ``model_name`` diverges from the stale
-        # DB ref, trust the spec — that is the user's most recent intent.
+        # ``predefined_members`` lives on ``TeamAgentSpec`` (not ``TeamSpec``),
+        # so read it from the configurator's ``spec``. The DB ``model_ref`` is
+        # written once at first spawn and never auto-refreshes with spec
+        # updates, so a model switch made via the live
+        # ``predefined_members[*].model_name`` (e.g. relay-claw "继续执行"
+        # carrying a new model_name, re-injected into the spec by
+        # ``recover_from_session`` or the RESUME_FROM_PAUSE reinjection in
+        # ``TeamRuntimeManager._apply_action``) must take precedence: when
+        # the spec's per-member ``model_name`` diverges from the stale DB
+        # ref, trust the spec — that is the user's most recent intent.
+        agent_spec = self._configurator.spec
         spec_model_name = None
-        if team_spec is not None:
-            for pm in getattr(team_spec, 'predefined_members', None) or []:
+        if agent_spec is not None:
+            for pm in getattr(agent_spec, 'predefined_members', None) or []:
                 if getattr(pm, 'member_name', None) == member_name:
                     spec_model_name = getattr(pm, 'model_name', None)
                     break

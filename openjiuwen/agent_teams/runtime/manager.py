@@ -1029,10 +1029,37 @@ class TeamRuntimeManager:
         if kind is RunActionKind.RESUME_FROM_PAUSE:
             if pool_entry is None:
                 raise RuntimeError(f"{kind.value} requires an active pool entry")
+            agent = pool_entry.agent
+            # Reinject model-related fields from the live runtime spec so a
+            # model switch (e.g. relay-claw "继续执行" carrying a new
+            # model_name) propagates to the re-spawned teammates. The
+            # paused leader's in-memory ``ctx.team_spec`` and ``spec`` hold
+            # the pool / predefined_members from before the pause, so
+            # ``build_context_from_db`` would otherwise resolve each teammate
+            # against the stale pool and the teammate re-spawns on the old
+            # model. ``_apply_resolved_model_to_team`` (called by the
+            # platform adapter before activate) only hot-reloads the leader's
+            # harness via ``apply_model_config``; it does not touch
+            # ``ctx.team_spec``, so the reinjection here is required for the
+            # teammate cold-spawn path.
+            live_spec = spec
+            if live_spec is not None and getattr(agent, "team_spec", None) is not None:
+                agent_spec = getattr(agent, "spec", None)
+                if agent_spec is not None:
+                    agent_spec.model_pool = list(live_spec.model_pool)
+                    agent_spec.model_pool_strategy = live_spec.model_pool_strategy
+                    for role_key, live_agent_spec in live_spec.agents.items():
+                        tgt = agent_spec.agents.get(role_key)
+                        if tgt is not None and live_agent_spec.model is not None:
+                            tgt.model = live_agent_spec.model
+                    agent_spec.predefined_members = list(live_spec.predefined_members)
+                ts = agent.team_spec
+                ts.model_pool = list(live_spec.model_pool)
+                ts.model_pool_strategy = live_spec.model_pool_strategy
             await self._pre_run_with_inputs(team_session, inputs)
             pool_entry.state = RuntimeState.RUNNING
             await pool_entry.interact_gate.reset()
-            return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
+            return TeamRuntimeActivation(agent=agent, session=team_session, action=action)
 
         # Cold paths — no pool entry. ``activate`` has already torn down
         # any stale entry from a different session before reaching here.
