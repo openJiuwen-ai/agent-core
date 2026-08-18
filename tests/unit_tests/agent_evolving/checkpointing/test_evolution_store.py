@@ -159,6 +159,29 @@ class TestEvolutionStoreLogCRUD:
         assert evo_log.summary == "本技能聚焦超时重试与备用切换。"
         llm.invoke.assert_awaited_once()
 
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_append_suggest_record_writes_suggestions_ledger(tmp_path: Path):
+        root = tmp_path / "skills"
+        prepare_skill(root, "weather")
+        store = EvolutionStore(str(root))
+        record = make_record(
+            "ev_uv",
+            summary="用户问出行建议时要综合给建议",
+        )
+        record.review_status = "suggest"
+
+        await store.append_record("weather", record, update_skill_md=False)
+
+        ledger_path = tmp_path / "evolution-suggestions-ledger.json"
+        data = json.loads(ledger_path.read_text(encoding="utf-8"))
+        assert data["skills"][0]["skillName"] == "weather"
+        assert data["skills"][0]["generated"][0] == {
+            "id": "ev_uv",
+            "summary": "用户问出行建议时要综合给建议",
+            "timestamp": record.timestamp,
+        }
+
 
 class TestEvolutionStoreVersionBump:
     @staticmethod

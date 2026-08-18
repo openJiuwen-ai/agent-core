@@ -1090,6 +1090,102 @@ async def test_run_evolution_action_auto_persists_even_if_auto_save_false(
 
 
 @pytest.mark.asyncio
+async def test_run_evolution_suggest_records_trigger_and_success(tmp_path, monkeypatch):
+    rail = _make_rail(tmp_path, auto_save=True)
+    signals = [_make_signal("weather")]
+    records = [_make_record("weather")]
+    rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
+    rail._evolution_store.list_skill_names = Mock(return_value=["weather"])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    _patch_detected_signals(monkeypatch, signals)
+    rail._generate_experience_for_skill = AsyncMock(return_value=records)
+    rail._evolution_store.append_record = AsyncMock()
+    rail._record_suggest_evolution_counts = Mock()
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.skill_evolution_rail.resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "suggest",
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    await rail.run_evolution(None, ctx)
+
+    rail._record_suggest_evolution_counts.assert_any_call("weather", triggered=True)
+    rail._record_suggest_evolution_counts.assert_any_call(
+        "weather", experience_succeeded=True
+    )
+    assert rail._record_suggest_evolution_counts.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_suggest_no_records_only_counts_trigger(tmp_path, monkeypatch):
+    rail = _make_rail(tmp_path, auto_save=True)
+    signals = [_make_signal("weather")]
+    rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
+    rail._evolution_store.list_skill_names = Mock(return_value=["weather"])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    _patch_detected_signals(monkeypatch, signals)
+    rail._generate_experience_for_skill = AsyncMock(return_value=[])
+    rail._evolution_store.append_record = AsyncMock()
+    rail._record_suggest_evolution_counts = Mock()
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.skill_evolution_rail.resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "suggest",
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    await rail.run_evolution(None, ctx)
+
+    rail._record_suggest_evolution_counts.assert_called_once_with("weather", triggered=True)
+    rail._evolution_store.append_record.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_auto_does_not_record_counts(tmp_path, monkeypatch):
+    rail = _make_rail(tmp_path, auto_save=False)
+    signals = [_make_signal("weather")]
+    records = [_make_record("weather")]
+    rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
+    rail._evolution_store.list_skill_names = Mock(return_value=["weather"])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    _patch_detected_signals(monkeypatch, signals)
+    rail._generate_experience_for_skill = AsyncMock(return_value=records)
+    rail._evolution_store.append_record = AsyncMock()
+    rail._record_suggest_evolution_counts = Mock()
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.skill_evolution_rail.resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "auto",
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    await rail.run_evolution(None, ctx)
+
+    rail._record_suggest_evolution_counts.assert_not_called()
+    rail._evolution_store.append_record.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_off_does_not_record_counts(tmp_path, monkeypatch):
+    rail = _make_rail(tmp_path, auto_save=True)
+    signals = [_make_signal("weather")]
+    rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
+    rail._evolution_store.list_skill_names = Mock(return_value=["weather"])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    _patch_detected_signals(monkeypatch, signals)
+    rail._generate_experience_for_skill = AsyncMock(return_value=[_make_record("weather")])
+    rail._evolution_store.append_record = AsyncMock()
+    rail._record_suggest_evolution_counts = Mock()
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.skill_evolution_rail.resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "off",
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    await rail.run_evolution(None, ctx)
+
+    rail._record_suggest_evolution_counts.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_run_evolution_filters_empty_skill_name_and_swallow_exceptions(tmp_path, monkeypatch):
     rail = _make_rail(tmp_path, auto_save=True)
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])

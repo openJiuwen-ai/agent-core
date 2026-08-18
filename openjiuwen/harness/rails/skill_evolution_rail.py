@@ -407,6 +407,35 @@ class SkillEvolutionRail(EvolutionRail):
                 resolved.append(item)
         return resolved or None
 
+    def _record_suggest_evolution_counts(
+        self,
+        skill_name: str,
+        *,
+        triggered: bool = False,
+        experience_succeeded: bool = False,
+    ) -> None:
+        """Persist Suggest-mode trigger / success counts; never block evolution."""
+        try:
+            from openjiuwen.agent_evolving.checkpointing.evolution_suggestions_ledger import (
+                record_evolution_counts,
+            )
+
+            record_evolution_counts(
+                skill_name,
+                triggered=triggered,
+                experience_succeeded=experience_succeeded,
+                skills_dirs=self._resolve_skills_dirs_for_self_evolution(),
+            )
+        except Exception as ledger_exc:
+            logger.warning(
+                "[SkillEvolutionRail] suggestions ledger counts write failed "
+                "skill=%s triggered=%s succeeded=%s err=%s",
+                skill_name,
+                triggered,
+                experience_succeeded,
+                ledger_exc,
+            )
+
     def set_sys_operation(self, sys_operation: SysOperation) -> None:
         """Set sys_operation for both EvolutionRail and EvolutionStore."""
         super().set_sys_operation(sys_operation)
@@ -819,6 +848,8 @@ class SkillEvolutionRail(EvolutionRail):
                         skill_name,
                     )
                     continue
+                if action == "suggest":
+                    self._record_suggest_evolution_counts(skill_name, triggered=True)
                 # Persist to evolutions.json for both suggest and auto; never touch SKILL.md here.
                 records = await self._generate_experience_for_skill(
                     skill_name,
@@ -826,6 +857,11 @@ class SkillEvolutionRail(EvolutionRail):
                     parsed_messages,
                 )
                 if records:
+                    if action == "suggest":
+                        self._record_suggest_evolution_counts(
+                            skill_name,
+                            experience_succeeded=True,
+                        )
                     for record in records:
                         record.review_status = action
                         await self._evolution_store.append_record(
