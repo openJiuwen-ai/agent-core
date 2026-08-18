@@ -196,9 +196,9 @@ class SwarmflowTool(AsyncTool):
     @staticmethod
     def _format_stopped(*, run_id: str) -> str:
         return (
-            f"[swarmflow {run_id}] workflow stopped.\n"
-            "The session is still usable. Continue the conversation, or re-launch swarmflow "
-            "with the same script_path (cache-hits on the completed agent prefix)."
+            f"[swarmflow {run_id}] workflow stopped by the user.\n"
+            "Do NOT re-run the script. Acknowledge the stop and wait for the user's "
+            "next instruction."
         )
 
     def _lint_rerun(self, *, old_source: str, new_source: str) -> None:
