@@ -37,7 +37,6 @@
 | [TrainingDiagnostics](./offline/store.md) | Stage-wise training pipeline diagnostics in develop mode (`metrics_tracker`). |
 | [BackendProxy](./proxy.md) | Reverse proxy providing a stable backend inference URL. |
 | [RLRail](./offline/runtime.md) | `EvolutionRail` subclass for RL trajectory collection. |
-| [TrajectoryCollector](./offline/runtime.md) | Agent trajectory collection wrapper. |
 | [RuntimeExecutor](./offline/runtime.md) | Self-contained single-task executor. |
 | [ParallelRuntimeExecutor](./offline/runtime.md) | Parallel rollout execution engine. |
 | [AgentFactory](./offline/runtime.md) | Factory creating a **DeepAgent** per RL task (see `offline/runtime.md`). |
@@ -63,6 +62,7 @@
 
 | FUNCTION | DESCRIPTION |
 |----------|-------------|
+| [run_agent_and_collect_trajectory](./offline/runtime.md) | Run one Agent with a temporary `RLRail` and return its canonical trajectory. |
 | [build_agent_factory](./offline/runtime.md) | Build default AgentFactory from runtime config and tools. |
 | [register_reward](./reward.md) | Decorator for registering reward functions by name. |
 | [get_ppo_ray_runtime_env](./optimizer.md) | Returns default runtime env config for PPO/GRPO Ray workers. |

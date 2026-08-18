@@ -440,8 +440,8 @@ async def test_before_model_call_heartbeat_uses_lightweight_context(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_before_model_call_keeps_user_in_system_and_skips_daily_memory(tmp_path: Path):
-    """USER.md should be system context; daily memory should not be injected."""
+async def test_before_model_call_keeps_user_out_of_system_and_skips_daily_memory(tmp_path: Path):
+    """USER.md remains on disk but is not system context; daily memory is not injected."""
     sys_operation = _make_sys_operation(tmp_path)
     date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
     await sys_operation.fs().write_file(f"{tmp_path}/USER.md", "# User Profile\nreal body")
@@ -458,9 +458,10 @@ async def test_before_model_call_keeps_user_in_system_and_skips_daily_memory(tmp
     await rail.before_model_call(ctx)
 
     builder = agent.system_prompt_builder
-    user_section = builder.get_section("context.user")
-    assert user_section is not None
-    assert "# User Profile" in user_section.render("cn")
+    assert not builder.has_section("context.user")
+    stored_user = await sys_operation.fs().read_file(f"{tmp_path}/USER.md")
+    assert stored_user.code == 0
+    assert "# User Profile" in stored_user.data.content
     assert not builder.has_section("context.daily_memory")
     assert await _attachment(agent, "session.sess1.context.daily_memory") is None
 

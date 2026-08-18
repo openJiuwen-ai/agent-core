@@ -339,6 +339,7 @@ _DISPATCH_MODES: frozenset[str] = frozenset({"autonomous", "scheduled"})
 _DISPATCH_ROLE_SLUGS: dict[TeamRole, str] = {
     TeamRole.LEADER: "leader",
     TeamRole.TEAMMATE: "teammate",
+    TeamRole.EXTERNAL_CLI: "teammate",
 }
 
 
@@ -520,7 +521,7 @@ def _hitt_template_name(role: TeamRole, expose_human_agents_to_teammates: bool) 
     """
     if role == TeamRole.LEADER:
         return "hitt_leader"
-    if role == TeamRole.TEAMMATE:
+    if role == TeamRole.TEAMMATE or role == TeamRole.EXTERNAL_CLI:
         return "hitt_teammate" if expose_human_agents_to_teammates else "hitt_teammate_anonymous"
     if role == TeamRole.HUMAN_AGENT:
         return "hitt_human_agent"

@@ -51,8 +51,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.inbound_render import render_event, render_team_context
+from openjiuwen.agent_teams.inbound_render import (
+    render_event,
+    render_team_context,
+    render_team_context_with_identity,
+)
 from openjiuwen.agent_teams.prompts.messages import (
+    build_identity_conversion,
     build_identity_text,
     build_roster_delta_text,
     build_roster_snapshot_text,
@@ -99,6 +104,9 @@ class TeamContextTracker:
         expose_human_agents_to_teammates: Team switch letting teammates see the
             ``[human]`` tag (leaders and human agents always see it).
         language: Rendering language ('cn' or 'en').
+        fork_source: When this member was forked from another (spawned with
+            ``fork="..."``), the source member's name. ``None`` for a normal
+            spawn. Rendered into the identity body as a conversion notice.
     """
 
     def __init__(
@@ -114,6 +122,7 @@ class TeamContextTracker:
         team_workspace_path: str | None = None,
         expose_human_agents_to_teammates: bool = False,
         language: str = "cn",
+        fork_source: str | None = None,
     ) -> None:
         self._team_backend = team_backend
         self._member_name = member_name
@@ -125,6 +134,17 @@ class TeamContextTracker:
         self._team_workspace_path = team_workspace_path
         self._mark_humans = role in (TeamRole.LEADER, TeamRole.HUMAN_AGENT) or expose_human_agents_to_teammates
         self._language = language
+        self._fork_source = fork_source
+        # ``enable_fork`` decides whether the identity body carries the
+        # conversion capability statement AND whether the block is wrapped in a
+        # nested ``<identity>`` element. When off, the render path must stay
+        # byte-identical to the pre-fork one (``render_team_context``) so
+        # non-fork teams keep their KV prefix and prompt bytes untouched.
+        # ``getattr`` keeps backends without the fork surface (test fakes,
+        # external runtimes) on the off path.
+        self._fork_capable = bool(
+            team_backend and getattr(team_backend, "fork_enabled", lambda: False)()
+        )
         # Baseline computed by the last pending_text call, held until the caller
         # confirms delivery. None means there is nothing awaiting a commit.
         self._uncommitted: dict[str, Any] | None = None
@@ -155,15 +175,37 @@ class TeamContextTracker:
         # Identity and team info are both standing facts about the team, so when
         # they surface together they belong in one <team-context> rather than two
         # adjacent ones saying the same kind of thing.
-        standing: list[str] = []
         identity_body = await self._identity_body(baseline, updated)
-        if identity_body:
-            standing.append(identity_body)
         info_body = await self._team_info_body(baseline, updated)
-        if info_body:
-            standing.append(info_body)
-        if standing:
-            blocks.append(render_team_context(body="\n".join(standing)))
+        if identity_body or info_body:
+            if self._fork_capable and identity_body:
+                # Fork-enabled teams get a nested <identity> element (with an
+                # optional <identity-conversion> child) so the current identity
+                # is distinguishable from an inherited, earlier one. Only when
+                # the identity body itself is present: a team-info-only update
+                # (identity already emitted) must not render an empty
+                # <identity>, so it falls through to the plain path below.
+                blocks.append(
+                    render_team_context_with_identity(
+                        identity_body=identity_body,
+                        identity_conversion=(
+                            build_identity_conversion(
+                                source=self._fork_source,
+                                member_name=self._member_name,
+                                language=self._language,
+                            )
+                            if self._fork_source
+                            else None
+                        ),
+                        info_body=info_body,
+                    )
+                )
+            else:
+                # Byte-identical to the pre-fork path: non-fork teams, and
+                # fork-enabled teams on a team-info-only update, keep their KV
+                # prefix and prompt bytes untouched.
+                standing = [part for part in (identity_body, info_body) if part]
+                blocks.append(render_team_context(body="\n".join(standing)))
 
         roster_block = await self._roster_block(baseline, updated)
         if roster_block:
@@ -228,6 +270,7 @@ class TeamContextTracker:
             member_workspace_path=self._member_workspace_path,
             member_prompt=self._member_prompt,
             language=self._language,
+            fork_capable=self._fork_capable,
         )
 
     async def _team_info_body(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:

@@ -12,8 +12,8 @@ from typing import Any, ContextManager
 from opentelemetry import context as otel_context
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode, set_span_in_context
 
-from openjiuwen.agent_teams.observability.redaction import redact_completion, redact_prompt
-from openjiuwen.agent_teams.observability.semconv import (
+from openjiuwen.extensions.observability.redaction import redact_completion, redact_prompt
+from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_AGENT_INPUT,
     AT_AGENT_NAME,
@@ -70,12 +70,14 @@ class ClaudeSpanBridge:
         member_agent_id: str | None = None,
         team_name: str | None = None,
         session_id: str | None = None,
+        role: str | None = None,
     ) -> None:
         """Store the stable member context used on emitted spans."""
         self._member_name = member_name
         self._member_agent_id = member_agent_id or member_name
         self._team_name = team_name or ""
         self._session_id = session_id or ""
+        self._role = role or ""
         self._turn_index = 0
         self._turn_span: Span | None = None
         self._config: Any | None = None
@@ -91,6 +93,7 @@ class ClaudeSpanBridge:
         member_agent_id: str | None = None,
         team_name: str | None = None,
         session_id: str | None = None,
+        role: str | None = None,
     ) -> ClaudeSpanBridge | NoopClaudeSpanBridge:
         """Build a bridge only when agent team observability is initialized."""
         try:
@@ -104,6 +107,7 @@ class ClaudeSpanBridge:
             member_agent_id=member_agent_id,
             team_name=team_name,
             session_id=session_id,
+            role=role,
         )
 
     def start_turn(self, *, prompt: str) -> None:
@@ -126,7 +130,7 @@ class ClaudeSpanBridge:
         span.set_attribute(AT_AGENT_INPUT, safe_prompt)
         span.set_attribute(AT_AGENT_ID, self._member_agent_id)
         span.set_attribute(AT_AGENT_NAME, self._member_name)
-        span.set_attribute(AT_AGENT_ROLE, "teammate")
+        span.set_attribute(AT_AGENT_ROLE, self._role or self._member_name)
         span.set_attribute(AT_MEMBER_ID, self._member_name)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
         span.set_attribute("agentteam.backend", "claude")
@@ -315,7 +319,7 @@ class ClaudeSpanBridge:
         if turn_span is None or not turn_span.is_recording():
             return nullcontext()
         try:
-            from openjiuwen.agent_teams.observability.span_context import (
+            from openjiuwen.extensions.observability.span_context import (
                 get_current_agent_span,
                 set_current_agent_span,
             )

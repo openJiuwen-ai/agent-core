@@ -16,6 +16,7 @@ from openjiuwen.agent_teams.inbound_render import (
     render_controller_input,
     render_event,
     render_inbound,
+    render_team_context_with_identity,
     snapshot_kind_of,
 )
 from tests.test_logger import logger
@@ -282,3 +283,58 @@ def test_snapshot_kinds_stay_narrow():
     occurrence is dropped, so widening this set is a correctness decision.
     """
     assert SNAPSHOT_EVENT_KINDS == frozenset({"task-board"})
+
+
+@pytest.mark.level0
+def test_team_context_with_identity_nests_identity_and_conversion():
+    rendered = render_team_context_with_identity(
+        identity_body="你的 member_name: dev1",
+        identity_conversion="你继承了 reader",
+        info_body="# 团队信息",
+    )
+    assert rendered.startswith("<team-context>")
+    assert rendered.endswith("</team-context>")
+    assert "<identity>\n你的 member_name: dev1" in rendered
+    assert "<identity-conversion>\n你继承了 reader\n</identity-conversion>" in rendered
+    assert "# 团队信息" in rendered
+    # <identity-conversion> must be a CHILD of <identity>, i.e. it closes
+    # before </identity> closes. A sibling would break the documented
+    # contract (inbound_tags / S_09 13b).
+    assert rendered.index("<identity-conversion>") < rendered.index("</identity>")
+    assert rendered.index("</identity-conversion>") < rendered.index("</identity>")
+    # team info stays a sibling of <identity>.
+    assert rendered.index("# 团队信息") > rendered.index("</identity>")
+    assert rendered.index("# 团队信息") < rendered.index("</team-context>")
+
+
+@pytest.mark.level0
+def test_team_context_with_identity_omits_conversion_when_absent():
+    rendered = render_team_context_with_identity(identity_body="你的 member_name: dev1")
+    assert "<identity-conversion>" not in rendered
+    assert "<identity>\n你的 member_name: dev1" in rendered
+
+
+@pytest.mark.level1
+def test_team_context_with_identity_escapes_only_leaf_bodies():
+    """Structure tags survive; only the innermost bodies are XML-escaped."""
+    rendered = render_team_context_with_identity(
+        identity_body="a < b",
+        identity_conversion="x & y",
+        info_body="z",
+    )
+    assert "<identity>" in rendered
+    assert "</identity>" in rendered
+    assert "a &lt; b" in rendered
+    assert "x &amp; y" in rendered
+    # The nested structure tags themselves must NOT be escaped.
+    assert "&lt;identity-conversion&gt;" not in rendered
+
+
+@pytest.mark.level1
+def test_team_context_with_identity_info_sibling_when_present_only():
+    with_info = render_team_context_with_identity(
+        identity_body="id", info_body="info",
+    )
+    without_info = render_team_context_with_identity(identity_body="id")
+    assert "info" in with_info
+    assert "info" not in without_info

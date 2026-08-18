@@ -72,6 +72,33 @@ async def test_completion_timeout_only_logs_slow_round(caplog: pytest.LogCapture
 
 
 @pytest.mark.asyncio
+async def test_none_completion_timeout_disables_slow_round_logger(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """None keeps NativeHarness rounds unlimited without spawning a warning timer."""
+    await Runner.start()
+    try:
+        caplog.set_level("WARNING")
+        harness = NativeHarness(make_spec(completion_timeout=None))
+        fake = await start_harness(harness, sleep_seconds=0.02, answer_output="done")
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("unlimited")
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            await harness.stop()
+            await consumer
+
+        assert fake.cancelled_count == 0
+        assert answer_outputs(collected) == ["done"]
+        assert "slow round" not in caplog.text
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
 async def test_followup_runs_in_fifo_order_after_first_round() -> None:
     """send(immediate=False) while RUNNING buffers; the next round picks it up."""
     await Runner.start()

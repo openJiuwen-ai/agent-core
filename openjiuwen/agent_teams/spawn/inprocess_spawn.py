@@ -75,7 +75,7 @@ async def inprocess_spawn(
     team_agent.share_checkpoints_with(teammate)
     if teammate.team_backend is not None:
         teammate.team_backend.set_store_checkpoint_fn(
-            lambda name, count: team_agent.set_checkpoint(name, count)
+            team_agent.set_checkpoint
         )
 
     # Fork context injection: seed the teammate's context engine with the
@@ -94,13 +94,15 @@ async def inprocess_spawn(
             "[fork] %d messages injected into %s",
             len(fork_from.messages), ctx.member_name,
         )
-        # Compaction: compress older messages before the split point.
+        # Compaction: compress the side opposite ``compact_direction`` at the
+        # split point.
         if fork_from.compact_split is not None:
             from openjiuwen.agent_teams.fork_compact import compact_context
 
             await compact_context(
                 native, split_at=fork_from.compact_split,
                 session_id=session_id,
+                direction=fork_from.compact_direction,
             )
     else:
         team_logger.debug(

@@ -53,6 +53,7 @@ class StdioClient(McpClient):
             return True
         except Exception as e:
             logger.error(f"Stdio connection failed: {e}")
+            self._last_connect_error = e
             await self.disconnect()
             return False
 

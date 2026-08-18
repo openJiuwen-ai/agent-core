@@ -461,6 +461,7 @@ class _FakeTeamBackend:
         self._team_mtime = team_mtime
         self._members_mtime = members_mtime
         self._hitt_enabled = hitt_enabled
+        self._fork_enabled = False
         self._self_member_name = self_member_name
 
         self.team_mtime_calls = 0
@@ -494,7 +495,14 @@ class _FakeTeamBackend:
         """The rail probes this at init to gate the static HITT contract."""
         return self._hitt_enabled
 
+    def fork_enabled(self) -> bool:
+        """Whether the team's fork capability is on (gates the identity block)."""
+        return self._fork_enabled
+
     # -- Mutators used by tests ----------------------------------------------
+
+    def set_fork_enabled(self, enabled: bool) -> None:
+        self._fork_enabled = enabled
 
     def set_team(self, team: _StubTeam | None, mtime: int) -> None:
         self._team = team
@@ -962,6 +970,89 @@ class TestTeamPolicyRailTeamContext:
         for name in (TeamSectionName.BOOTSTRAP, TeamSectionName.EXTRA):
             assert not builder.has_section(name)
 
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_off_keeps_identity_output_byte_identical(self):
+        """enable_fork=False must not change the identity render path at all."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        # Pre-fork reference: same member, fork capability off by default.
+        rail = _leader_rail(backend)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "work")
+        assert "<team-context>" in message.content
+        assert "<identity>" not in message.content
+        assert "身份转换能力" not in message.content
+        assert "你的 member_name: leader1" in message.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_on_wraps_identity_and_skips_conversion_for_plain_spawn(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        backend.set_fork_enabled(True)
+        rail = _leader_rail(backend, fork_source=None)
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "work")
+        assert "<team-context>" in message.content
+        assert "<identity>" in message.content
+        assert "身份转换能力" in message.content
+        # Plain spawn (no fork_source): capability statement present, but no
+        # conversion notice.
+        assert "<identity-conversion>" not in message.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_source_renders_conversion_notice_in_identity(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        backend.set_fork_enabled(True)
+        rail = _leader_rail(backend, fork_source="reader")
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        ctx = _StubContext()
+        message = await _admit(rail, ctx, "work")
+        assert "<identity-conversion>" in message.content
+        assert "reader" in message.content
+        assert "不再适用" in message.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_fork_on_team_info_only_update_renders_no_empty_identity(self):
+        """A team-info change after identity was emitted must not create an
+        empty <identity> block (or a duplicated conversion notice)."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        backend.set_fork_enabled(True)
+        rail = _leader_rail(backend, fork_source="reader")
+        rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+        ctx = _StubContext()
+
+        first = await _admit(rail, ctx, "work")
+        assert "<identity>" in first.content
+        assert "<identity-conversion>" in first.content
+
+        # Identity is already emitted; only the team row changes.
+        backend.set_team(_StubTeam("Beta-renamed", "Test"), mtime=99)
+        second = await _admit(rail, ctx, "next")
+        assert "Beta-renamed" in second.content
+        assert "<identity>" not in second.content
+        assert "<identity-conversion>" not in second.content
+
+
 
 class TestTeamPolicyRailHitt:
     """HITT contract is a static builder section gated on ``hitt_enabled``; the
@@ -1119,6 +1210,14 @@ class TestTagNoticeInclusion:
         prompt = build_team_member_system_prompt(role=TeamRole.LEADER, member_name="l", language="cn")
         assert "team-inbound" in prompt
         assert "prompt-attachment" not in prompt
+
+    @pytest.mark.level1
+    def test_external_cli_prompt_includes_task_dispatch_section(self):
+        # EXTERNAL_CLI shares the teammate dispatch template (claim/complete);
+        # _DISPATCH_ROLE_SLUGS must list it or the section vanishes and the
+        # member loses its task-intake instructions.
+        prompt = build_team_member_system_prompt(role=TeamRole.EXTERNAL_CLI, member_name="cli-1", language="cn")
+        assert "# 任务下发与获取" in prompt
 
     @pytest.mark.asyncio
     @pytest.mark.level1

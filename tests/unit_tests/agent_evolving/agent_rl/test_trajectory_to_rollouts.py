@@ -6,7 +6,7 @@ import json
 from openjiuwen.agent_evolving.agent_rl.schemas import trajectory_to_rollouts
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
-from openjiuwen.agent_teams.observability import semconv
+from openjiuwen.extensions.observability import semconv
 
 
 def test_trajectory_to_rollouts_converts_assistant_message_response():

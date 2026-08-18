@@ -22,6 +22,7 @@ from openjiuwen.agent_evolving.sharing import (
     StagingResult,
 )
 from openjiuwen.agent_evolving.signal import EvolutionSignal
+from openjiuwen.agent_evolving.trajectory.messages import tool_call_name
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -545,7 +546,7 @@ class SkillEvolutionSharingMixin:
             elif role == "assistant":
                 for tc in msg.get("tool_calls", []) or []:
                     tc_id = tc.get("id", "")
-                    tc_name = tc.get("name", "")
+                    tc_name = str(tool_call_name(tc) or "")
                     if tc_id and tc_name:
                         tool_call_id_to_name[tc_id] = tc_name
                     if tc_name:

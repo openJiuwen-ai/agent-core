@@ -18,11 +18,48 @@ from openjiuwen.agent_evolving.signal.review_feedback import (
     attribution_to_evolution_signal,
 )
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
-from openjiuwen.agent_evolving.trajectory import (
-    ToolCallDetail,
-    TrajectoryStep,
-    trajectory_from_steps,
-)
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.extensions.observability import semconv
+
+
+def _tool_trajectory(
+    execution_id: str,
+    calls: list[tuple[str, dict[str, Any], Any]],
+    *,
+    session_id: str = "session-1",
+) -> Trajectory:
+    spans = []
+    for index, (tool_name, tool_input, tool_output) in enumerate(calls):
+        spans.append(
+            {
+                "traceId": execution_id,
+                "spanId": f"tool-{index}",
+                "name": f"tool.{tool_name}",
+                "attributes": attributes_from_map(
+                    {
+                        semconv.GEN_AI_TOOL_NAME: tool_name,
+                        semconv.GEN_AI_TOOL_INPUT: tool_input,
+                        semconv.GEN_AI_TOOL_OUTPUT: tool_output,
+                    }
+                ),
+            }
+        )
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map(
+                            {TRAJECTORY_ID: execution_id, SESSION_ID: session_id}
+                        )
+                    },
+                    "scopeSpans": [{"scope": {}, "spans": spans}],
+                }
+            ]
+        }
+    )
 
 
 class _FakeLLM:
@@ -226,20 +263,16 @@ async def test_context_builder_only_accepts_concrete_skill_read(tmp_path) -> Non
     skill_dir = tmp_path / "xlsx"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("# XLSX\nValidate output.\n", encoding="utf-8")
-    trajectory = trajectory_from_steps(
-        execution_id="exec-1",
-        session_id="session-1",
-        source="online",
-        steps=[
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="read_file",
-                    call_args={"path": str(skill_dir / "SKILL.md")},
-                    call_result="# XLSX",
-                ),
+    trajectory = _tool_trajectory(
+        "exec-1",
+        [
+            (
+                "read_file",
+                {"path": str(skill_dir / "SKILL.md")},
+                "# XLSX",
             )
         ],
+        session_id="session-1",
     )
 
     context = await ReviewFeedbackContextBuilder(store=EvolutionStore(str(tmp_path))).build(
@@ -259,14 +292,9 @@ async def test_context_builder_does_not_treat_installed_skill_as_read(tmp_path) 
     skill_dir = tmp_path / "xlsx"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("# XLSX\n", encoding="utf-8")
-    trajectory = trajectory_from_steps(
-        execution_id="exec-2",
-        steps=[
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(tool_name="read_file", call_args={"path": "README.md"}),
-            )
-        ],
+    trajectory = _tool_trajectory(
+        "exec-2",
+        [("read_file", {"path": "README.md"}, None)],
     )
 
     context = await ReviewFeedbackContextBuilder(store=EvolutionStore(str(tmp_path))).build(
@@ -282,25 +310,11 @@ async def test_context_builder_accepts_only_skill_tool_as_named_skill_read(tmp_p
     skill_dir = tmp_path / "xlsx"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("# XLSX\n", encoding="utf-8")
-    trajectory = trajectory_from_steps(
-        execution_id="trace-skill-tools",
-        steps=[
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="evolve_skill_experiences",
-                    call_args={"skill_name": "xlsx"},
-                    call_result="saved",
-                ),
-            ),
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="tools.skill_tool",
-                    call_args={"skill_name": "xlsx"},
-                    call_result="# XLSX",
-                ),
-            ),
+    trajectory = _tool_trajectory(
+        "trace-skill-tools",
+        [
+            ("evolve_skill_experiences", {"skill_name": "xlsx"}, "saved"),
+            ("tools.skill_tool", {"skill_name": "xlsx"}, "# XLSX"),
         ],
     )
 
@@ -316,18 +330,9 @@ async def test_context_builder_rejects_other_skill_named_tools_as_read(tmp_path)
     skill_dir = tmp_path / "xlsx"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("# XLSX\n", encoding="utf-8")
-    trajectory = trajectory_from_steps(
-        execution_id="trace-non-reader-skill-tool",
-        steps=[
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="evolve_skill_experiences",
-                    call_args={"skill_name": "xlsx"},
-                    call_result="saved",
-                ),
-            )
-        ],
+    trajectory = _tool_trajectory(
+        "trace-non-reader-skill-tool",
+        [("evolve_skill_experiences", {"skill_name": "xlsx"}, "saved")],
     )
 
     context = await ReviewFeedbackContextBuilder(store=EvolutionStore(str(tmp_path))).build(
@@ -342,16 +347,13 @@ async def test_context_builder_rejects_write_to_skill_md_as_read_evidence(tmp_pa
     skill_dir = tmp_path / "xlsx"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("# xlsx\n", encoding="utf-8")
-    trajectory = trajectory_from_steps(
-        execution_id="trace-write",
-        steps=[
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="write_file",
-                    call_args={"path": str(skill_dir / "SKILL.md"), "content": "replacement"},
-                    call_result="ok",
-                ),
+    trajectory = _tool_trajectory(
+        "trace-write",
+        [
+            (
+                "write_file",
+                {"path": str(skill_dir / "SKILL.md"), "content": "replacement"},
+                "ok",
             )
         ],
     )
@@ -366,16 +368,13 @@ async def test_context_builder_accepts_explicit_shell_read_of_skill_md(tmp_path)
     skill_dir = tmp_path / "xlsx"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("# xlsx\n", encoding="utf-8")
-    trajectory = trajectory_from_steps(
-        execution_id="trace-shell-read",
-        steps=[
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="exec_command",
-                    call_args={"command": f"sed -n '1,80p' '{skill_dir / 'SKILL.md'}'"},
-                    call_result="# xlsx",
-                ),
+    trajectory = _tool_trajectory(
+        "trace-shell-read",
+        [
+            (
+                "exec_command",
+                {"command": f"sed -n '1,80p' '{skill_dir / 'SKILL.md'}'"},
+                "# xlsx",
             )
         ],
     )

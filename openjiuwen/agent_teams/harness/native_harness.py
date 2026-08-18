@@ -168,7 +168,7 @@ class NativeHarness(DeepAgent):
         self._extra_rails: list[AgentRail] = list(extra_rails) if extra_rails else []
         self._session: Session | None = None
         self._owns_session: bool = False
-        self._slow_round_log_after_seconds: float = parts.config.completion_timeout
+        self._slow_round_log_after_seconds: float | None = parts.config.completion_timeout
         self._st = HarnessInternalState()
         self._control: asyncio.Queue = asyncio.Queue()
         # Harness-private event bus; consumers subscribe via
@@ -1249,9 +1249,13 @@ class NativeHarness(DeepAgent):
         """
         error: BaseException | None = None
         result: dict | None = None
-        slow_log_task = asyncio.create_task(
-            self._log_slow_round_until_done(active),
-            name=f"native_harness_slow_round_log[{active.round_id}]",
+        slow_log_task = (
+            asyncio.create_task(
+                self._log_slow_round_until_done(active),
+                name=f"native_harness_slow_round_log[{active.round_id}]",
+            )
+            if self._slow_round_log_after_seconds is not None
+            else None
         )
         # Per-round BEFORE/AFTER_INVOKE lifecycle. The supervisor drives outer
         # rounds directly (bypassing DeepAgent.invoke), so the invoke-level
@@ -1298,7 +1302,8 @@ class NativeHarness(DeepAgent):
             logger.exception("[NativeHarness] round_id=%s crashed", active.round_id)
             error = exc
         finally:
-            await self._cancel_slow_log_task(slow_log_task)
+            if slow_log_task is not None:
+                await self._cancel_slow_log_task(slow_log_task)
             await self._control.put(
                 _CmdRoundFinished(
                     round_id=active.round_id,
@@ -1323,7 +1328,10 @@ class NativeHarness(DeepAgent):
         """Log non-terminal slow-round warnings until the round task finishes."""
         loop = asyncio.get_running_loop()
         started_at = loop.time()
-        await asyncio.sleep(self._slow_round_log_after_seconds)
+        threshold = self._slow_round_log_after_seconds
+        if threshold is None:
+            return
+        await asyncio.sleep(threshold)
         while True:
             elapsed = loop.time() - started_at
             logger.warning(
@@ -1351,12 +1359,13 @@ class NativeHarness(DeepAgent):
         """Hard-cancel a round: stop the scheduler task, then the wait task.
 
         The real LLM/tool work runs inside the TaskScheduler's own task under
-        ``active.task_id`` (``submit_round`` returns before it completes). So we
-        MUST cancel that scheduler task first (which fires ``executor.cancel`` →
-        ``coordinator.request_abort`` + cancels the exec task → ``invoke``'s
-        CancelledError handler clears the current round). Only then cancel the
-        supervisor's ``_run_round`` task that is blocked on
-        ``wait_round_completion``.
+        ``active.task_id`` (``submit_round`` waits only until the input handler
+        registers the task, then returns; the work itself keeps running in the
+        scheduler task). So we MUST cancel that scheduler task first (which
+        fires ``executor.cancel`` → ``coordinator.request_abort`` + cancels the
+        exec task → ``invoke``'s CancelledError handler clears the current
+        round). Only then cancel the supervisor's ``_run_round`` task that is
+        blocked on ``wait_round_completion``.
 
         Args:
             active: The round to cancel.

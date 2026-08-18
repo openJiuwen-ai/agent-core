@@ -5,8 +5,8 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-08-06 |
-| 范围 | `agent_teams/agent/scheduling/scheduler.py`（失败轮次与团队终态 callback）；`agent_evolving/signal/review_feedback.py`（归因与安全策略）；`agent_evolving/trajectory/registry.py`（成员独立轨迹）；`harness/rails/evolution/skill_evolution_rail.py`（外部信号入口）；`harness/rails/skills/team_skill_create_rail.py`（重复模式创建审批入口） |
-| 测试基线 | 相关单测 222 passed（review feedback、trajectory registry、scheduler、SkillEvolutionRail、TeamSkillCreateRail） |
+| 范围 | `agent_teams/agent/scheduling/scheduler.py`（失败轮次与团队终态 callback）；`agent_teams/agent/scheduling/review_feedback_evolution.py`（两级协调）；`agent_evolving/signal/review_feedback.py`（归因与安全策略）；`agent_evolving/trajectory/registry.py`（成员独立轨迹）；`harness/rails/evolution/`（成员隔离与标准审批事件）；`harness/rails/skills/team_skill_create_rail.py`（重复模式创建审批入口） |
+| 测试基线 | 相关单测 330 passed（review feedback、trajectory registry、scheduler、协调器、成员/普通/团队 Skill Rail、TeamSkillCreateRail） |
 
 ## 背景
 
@@ -17,30 +17,35 @@ feedback 过去只回到任务执行者，无法成为 Skill 演进证据。平�
 2. 轨迹没有读过任何 `SKILL.md` 时，凭安装列表随便挑一个 Skill 修改。
 3. 直接从 scheduler 写 `evolutions.json`，让调度层同时理解 LLM、Skill 存储和审批协议。
 
-本特性不在 Core 内规定某一种成员/全局目录布局，而是补齐五个可组合的边界：scheduler 输出审核
-feedback、平台读取成员独立轨迹、独立归因器产生安全 action、普通 Skill Rail 接受已归因信号、
-Team Skill 创建 Rail 接受重复模式证据。JiuwenSwarm 等宿主可以在这些边界上实现“成员自动沉淀、
-团队终态汇总审批”，Core 仍保持平台无关。
+本特性把与产品无关的两级演进完整放进 Core：scheduler 只把审核事实交给已挂载的团队演进 Rail；
+团队 Rail 持有协调器，读取成员独立轨迹、执行安全归因、在成员私有副本自动沉淀，并在团队终态按
+全局 Skill 汇总。普通全局 Skill 更新与新建 Skill 都继续生成标准 Rail host event。JiuwenSwarm 等
+宿主只负责目录和模型等构造参数，以及复用既有事件传输和审批入口。
 
 ## 数据流与状态
 
 ```text
 review round failed
-  -> TeamScheduler review_feedback_handler(payload)
-  -> host loads assignee trajectory
+  -> TeamScheduler finds mounted TeamSkillEvolutionRail
+  -> rail.handle_review_feedback(payload)
+  -> coordinator loads assignee trajectory
   -> ReviewFeedbackContextBuilder
   -> ReviewFeedbackAttributor
        -> evolve_existing_skill
+            -> copy global Skill to member workspace
+            -> MemberSkillEvolutionRail auto-saves member experience
        -> suggest_new_skill
        -> record_task_failure
        -> skip_unattributed
 
 all tasks terminal
   -> wait for outstanding task callbacks
-  -> review_feedback_handler.on_team_completed(payload)
-  -> host aggregates observations
-  -> existing Skill: SkillEvolutionRail.evolve_from_external_signals(...)
-  -> repeated missing capability: TeamSkillCreateRail.propose_from_external_evidence(...)
+  -> rail.finalize_review_feedback(payload)
+  -> coordinator aggregates observations
+  -> existing Skill: internal regular SkillEvolutionRail
+  -> repeated missing capability: mounted TeamSkillCreateRail
+  -> child host events relay to mounted TeamSkillEvolutionRail
+  -> existing team approval transport and endpoint
 ```
 
 `TeamScheduler` 新增三组进程内状态：
@@ -55,9 +60,10 @@ all tasks terminal
 
 ### 1. Scheduler 只发布事实，不理解演进
 
-宿主通过 `BuildContext.extras["review_feedback_handler"]` 注入可调用对象。每个失败轮次 settle 后，
-scheduler 以后台任务调用 handler；看板全部终态时先等待当前 callback，再调用可选的
-`handler.on_team_completed(...)`。callback 异常只记录日志，不改变任务状态，也不阻塞返工。
+每个失败轮次 settle 后，scheduler 从 host harness 中查找已声明式挂载且开启该能力的
+`TeamSkillEvolutionRail`，以后台任务调用 `handle_review_feedback(...)`；看板全部终态时先等待当前
+callback，再调用 `finalize_review_feedback(...)`。callback 异常只记录日志，不改变任务状态，也不
+阻塞返工。scheduler 不通过 `BuildContext.extras` 注入业务 handler，也不自行构造 Rail。
 
 payload 只含调度器已经拥有的事实：team/session/task、review round、任务标题和正文、assignee、
 聚合 reviewer feedback。它不携带 Skill 名、轨迹或演进结论。
@@ -89,13 +95,27 @@ payload 只含调度器已经拥有的事实：team/session/task、review round�
 只读取 assignee 的最新 snapshot。`get_trajectory(...)` 继续服务团队级聚合，二者不互相替代。
 这样成员 Skill 的归因不会被 leader 或其他成员的 Skill 调用污染。
 
+成员演进使用 Core 的 copy-on-write 工作区规则：只有安全归因为 `evolve_existing_skill` 时，才把
+全局 Skill 复制到 assignee 私有 `skills/<skill_name>/`，随后由 `MemberSkillEvolutionRail` 复用普通
+外部信号管线并自动保存。全局原件在这一阶段不变。
+
 ### 5. 新建 Skill 只进入审批，不直接创建
 
 `TeamSkillCreateRail.propose_from_external_evidence(...)` 要求非空稳定 key、可复用指导和至少两条去重
-证据；同一 key 在一个 Rail 生命周期内只提议一次。它只生成结构化审批 host event。用户接受后，
-`resolve_external_proposal(...)` 返回受约束的创建 prompt，由宿主继续交给已有 creator 能力执行。
+证据；同一 key 在一个 Rail 生命周期内只提议一次。它生成与团队演进相同 schema、相同 request-id
+命名空间的结构化审批 host event。用户接受后，`resolve_external_proposal(...)` 返回受约束的创建
+prompt；挂载的 `TeamSkillEvolutionRail` 保存 continuation，宿主的既有团队审批入口将它交给已有
+creator 能力执行。
 
 Core 不定义“两个模式是否相同”的算法；宿主必须先完成同类分组，不能用两个无关失败凑重复次数。
+
+### 6. 审批仍走已挂载团队 Rail 的旧通道
+
+协调器内部使用成员 Rail、普通全局 Skill Rail 和已挂载的新建 Skill Rail，但这些子 Rail 不成为新的
+宿主生命周期对象。全局更新和新建候选的 host events 都回流到父 `TeamSkillEvolutionRail`；父 Rail
+镜像 pending request 并把接受/拒绝委派给真正拥有记录的子 Rail。这样宿主仍只需原来的团队事件
+watcher、请求 owner 查找和团队审批端点，不需要 Reviewer Feedback 专用 sidecar、WebSocket 协议或
+前端卡片类型。
 
 ## 拒绝的方案
 
@@ -111,6 +131,9 @@ Core 不定义“两个模式是否相同”的算法；宿主必须先完成同
   并发门禁；所有持久化继续归 `EvolutionStore`。
 - **同步等待每次归因后再通知成员返工**：拒绝。演进是旁路能力，不能增加任务状态机关键路径延迟；
   团队终态只在汇总前等待已启动 callback 收敛。
+- **在 JiuwenSwarm 注入 Reviewer Feedback handler 和全局 sidecar Rail**：拒绝。它复制了 Core 已有
+  Rail 生命周期、pending request 和审批路由，导致业务策略散落到产品层；改为由挂载的团队 Rail
+  持有 Core 协调器并转发标准 host event。
 
 ## 验证
 
@@ -119,13 +142,13 @@ Core 不定义“两个模式是否相同”的算法；宿主必须先完成同
 - scheduler：失败 settle 后 callback、同轮去重、异常隔离、团队终态等待 task callback 后汇总。
 - `SkillEvolutionRail`：外部信号绕过关闭的被动触发、单 Skill 约束、禁用/不存在目标、审批参数透传。
 - `TeamSkillCreateRail`：重复证据校验、proposal 去重、审批事件、接受/拒绝解析。
-- 相关测试集合：222 passed。
+- `TeamSkillEvolutionRail`：协调器生命周期、子 Rail 事件回流、全局更新审批委派、新建 Skill
+  continuation 与部分审批保持 pending。
+- 相关测试集合：330 passed。
 
 ## 已知遗留
 
-- Core 只提供边界，不持有成员 copy-on-write 目录、全局 observation 聚合或前端卡片投递；这些属于
-  JiuwenSwarm 等宿主实现。
 - `ReviewFeedbackAttributor` 当前一次调用失败即 fail closed，不自动重试；安全上不会误改 Skill，
   但该条 feedback 不会演进，需要宿主通过日志和指标观测。
-- 重复模式的同类匹配属于宿主策略。Core 只校验重复数量，无法判断两条文本是否语义等价。
+- 重复模式目前按归因结果的稳定 target/key 分组；跨表达的语义聚类仍可继续增强。
 - 外部创建 proposal 是 Rail 进程内 pending 状态；跨进程重启后的审批恢复尚未定义。

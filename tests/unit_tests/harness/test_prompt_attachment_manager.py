@@ -7,6 +7,7 @@ import pytest
 
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.foundation.kv_cache import KV_CACHE_EPHEMERAL_TAIL_METADATA
 from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY,
@@ -15,8 +16,6 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentManager,
     PromptAttachmentUpdate,
 )
-
-
 @pytest.mark.asyncio
 async def test_prompt_attachment_manager_collect_render_inject_and_update():
     manager = PromptAttachmentManager()
@@ -287,6 +286,10 @@ def test_prompt_attachment_manager_appends_attachment_message_after_multimodal_u
     assert injected[-2].content == original[-1].content
     assert isinstance(injected[-1], UserMessage)
     assert injected[-1].content == "<system-reminder>attached</system-reminder>"
+    assert (
+        injected[-1].metadata[KV_CACHE_EPHEMERAL_TAIL_METADATA]
+        is True
+    )
 
 
 def test_prompt_attachment_manager_appends_attachment_message_after_image_only_user_message():

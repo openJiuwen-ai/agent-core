@@ -1,6 +1,6 @@
 # Coordination Protocol
 
-`agent_teams.agent.coordination` 子系统的设计规约：事件总线 + 分发器 + 7 个场景 handler + kernel 装配。本文描述"系统当前是什么样"。
+`agent_teams.agent.coordination` 子系统的设计规约：事件总线 + 分发器 + 8 个场景 handler + kernel 装配。本文描述"系统当前是什么样"。
 
 ## 元信息
 
@@ -8,7 +8,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-08-05 |
+| 最近一次修订日期 | 2026-08-11 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md`、`F_65_runtime-idle-clock-stall-nudge.md`、`F_74_leader-member-activity-and-team-idle.md` |
 
 ## 范围 / 边界
@@ -16,9 +16,9 @@
 **这个规约管：**
 
 - `EventBus` 的事件入队、唤醒回调绑定时机、生命周期与 poll 暂停/恢复语义。
-- `EventDispatcher` 的粗筛触发规则（`agent_ready` / inner-vs-transport / 角色级 whitelist）以及 7 个固定 handler（+ opt-in `ReliabilityHandler`）的注册顺序与 fan-out 顺序。
+- `EventDispatcher` 的粗筛触发规则（`agent_ready` / inner-vs-transport / 角色级 whitelist）以及 8 个固定 handler（+ opt-in `ReliabilityHandler`）的注册顺序与 fan-out 顺序。
 - `BaseCoordinationHandler` 的注入面（5 类窄依赖）、`EVENT_METHOD_MAP` 协议与 `get_callbacks()` 语义。
-- `AgentLifecycleHandler` / `MemberHandler` / `MessageHandler` / `TaskBoardHandler` / `StaleTaskHandler` / `TeamCompletionHandler` / `WorkflowHandler` 各自监听的 event_key、共享状态、关键方法。**各 handler 的分支级策略逻辑（五个决策维度、投递方式判据、跨 handler 分工契约）落在 `agent/coordination/handlers/AGENTS.md`，本规约只定契约与不变量。**
+- `AgentLifecycleHandler` / `MemberHandler` / `MessageHandler` / `TaskBoardHandler` / `StaleTaskHandler` / `TeamCompletionHandler` / `WorkflowHandler` / `CheckpointHandler` 各自监听的 event_key、共享状态、关键方法。**各 handler 的分支级策略逻辑（五个决策维度、投递方式判据、跨 handler 分工契约）落在 `agent/coordination/handlers/AGENTS.md`，本规约只定契约与不变量。**
 - `CoordinationKernel` 的构造装配序、内部 lifecycle state machine（`idle → running → paused → stopped`，pause/stop 幂等）、`start` / `pause` / `stop` / `finalize_round` 路径与 `SessionManager` 的三方法状态机协作。
 - 三类窄 protocol（`AgentRoundController` / `TeamLifecycleController` / `PollController`）在 host ↔ handler 之间的契约。
 - 异常语义：`AsyncCallbackFramework.trigger` 吞 `Exception`、放行 `AbortError`。
@@ -40,7 +40,7 @@
 3. **每个 `BaseCoordinationHandler` 子类必须声明 `EVENT_METHOD_MAP: ClassVar[dict[str, str]]`**，并提供同名 `async` 方法；`get_callbacks()` 输出的 `event_key → bound method` 是 framework 注册的唯一来源。
 4. **handler 不持有原始 host 引用**。`BaseCoordinationHandler.__init__` 把 host 同时绑成 `self._round`（`AgentRoundController`）与 `self._lifecycle`（`TeamLifecycleController`），子类只准通过这两个窄字段 + `self._poll` / `self._blueprint` / `self._infra` 访问外部状态。
 5. **`EventDispatcher` 不做 event_type → handler 路由**。`dispatch()` 只承担"是否该 trigger"的粗筛，具体 event_key → callback 由 `AsyncCallbackFramework` 解决；同一 event_key 上的多个 handler 走稳定排序的 fan-out。
-6. **fan-out 顺序由 `EventDispatcher.__init__` 元组顺序决定**：`(lifecycle, member, message, task_board, stale_task, team_completion, workflow[, reliability])` 即 framework 注册顺序；同 priority（默认 0）下 Python `list.sort` 稳定，因此 `MEMBER_SHUTDOWN` 上 `MemberHandler.on_member_event` 永远先于 `MessageHandler.on_member_shutdown_drain`，`POLL_TASK` 上 stale-task handler 的 `on_poll_task` 永远先于 `TeamCompletionHandler.on_poll_task`（此序是正确性必需：stale 清扫可能 `deliver_input` 让 leader 转 busy，完成判定必须看到该变化）。第三处共享 event_key 是 `TASK_PLAN_RESPONSE`（`AgentLifecycleHandler.on_task_plan_response` → `TaskBoardHandler.on_task_plan_decision`），二者靠 payload 的 `tool_call_id` 是否存在互斥：有则前者 `resume_interrupt` 恢复 plan 闸中断、后者早退，无则后者 `deliver_input` 投递裁决通知。task_board / stale_task 的**类**按构造参数 `dispatch_mode` 查字面量表选定（F_62：`TaskBoardHandler` / `StaleTaskHandler` 为自主模式，`ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler` 为调度模式，未知值 KeyError）——模式是静态 spec 配置，选择只发生在构造期，handler 方法内无模式分支。
+6. **fan-out 顺序由 `EventDispatcher.__init__` 元组顺序决定**：`(lifecycle, member, message, task_board, stale_task, team_completion, workflow, checkpoint[, reliability])` 即 framework 注册顺序；同 priority（默认 0）下 Python `list.sort` 稳定，因此 `MEMBER_SHUTDOWN` 上 `MemberHandler.on_member_event` 永远先于 `MessageHandler.on_member_shutdown_drain`，`POLL_TASK` 上 stale-task handler 的 `on_poll_task` 永远先于 `TeamCompletionHandler.on_poll_task`（此序是正确性必需：stale 清扫可能 `deliver_input` 让 leader 转 busy，完成判定必须看到该变化）。第三处共享 event_key 是 `TASK_PLAN_RESPONSE`（`AgentLifecycleHandler.on_task_plan_response` → `TaskBoardHandler.on_task_plan_decision`），二者靠 payload 的 `tool_call_id` 是否存在互斥：有则前者 `resume_interrupt` 恢复 plan 闸中断、后者早退，无则后者 `deliver_input` 投递裁决通知。`CHECKPOINT_CREATED` 是 `CheckpointHandler` 的专属 event_key（无 fan-out 重叠），其注册位置不敏感。task_board / stale_task 的**类**按构造参数 `dispatch_mode` 查字面量表选定（F_62：`TaskBoardHandler` / `StaleTaskHandler` 为自主模式，`ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler` 为调度模式，未知值 KeyError）——模式是静态 spec 配置，选择只发生在构造期，handler 方法内无模式分支。
 7. **handler 之间不直接互调**。跨域响应必须通过让两个 handler 各自注册同一个 `event_key`、走 framework fan-out 实现。
 8. **`AsyncCallbackFramework.trigger` 的异常语义是吞 + 续跑**：普通 `Exception` 被框架 log + continue，仅 `AbortError` 上抛。handler 必须自己用 `team_logger.error("...", exc_info=True)` 记录关键失败，**禁止依赖 framework swallow 当作隐式错误处理**。
 9. **stale-claim nudge 是 self-only**（F_53）：每个成员在 `POLL_TASK` 上只扫自己名下的任务并喂自己的 loop（`deliver_input(use_steer=False)`，body 只带 task_id + title + 当前处境），leader 不跨进程催他人。**扫描面是"活跃优先、待开工兜底"**（F_69）：持有 `{PLANNING, IN_PROGRESS}` 活跃任务时扫活跃集；一个活跃任务都没有时，才回落到名下 `updated_at` 最早的**一个** `PENDING(assignee=self)`——待开工是 fallback 而非活跃集的增补，因为 `claim_task` 的一活跃限额使排队中的指派本就开不了工（催了只会换来拒绝），且这一路正是无人认领的定向指派唯一的兜底（`TASK_CLAIMED` 是一次性瞬时事件，leader 的 stale-PENDING 自催只管**无** assignee 的）。自催连续 `_STALE_CLAIM_ESCALATE_STREAK`（3）个窗口无效时，由**停滞成员自己** `send_message` 上报 leader（成员→leader，与 F_53 砍掉的 leader→成员方向相反，故不违反其设计），leader 据此问询 / 改派 / 换人（F_65）。因此不再有跨 handler 共享的 throttle——`_last_stale_nudge` / `_last_pending_nudge` / `_stale_claim_streak` / `_escalated_claims` 都是 `StaleTaskHandler` 私有，各自节流本进程内同一 task 的重复 nudge。
@@ -263,6 +263,7 @@ class BaseCoordinationHandler:
 | `TaskBoardHandler` | `InnerEventType.INITIAL_POLL_TASK` + `TeamEvent.TASK_CLAIMED` / `TASK_REVOKED` / `TASK_CANCELLED` / `TASK_UPDATED` + 4 个 board `TASK_*`：`CREATED` / `COMPLETED` / `UNBLOCKED` / `RELEASED` | 无 | `on_initial_task_poll`（F_69，成员起来后的一次性板巡视 → `_nudge_idle_agent`；空片静默，调度子类覆写为 no-op）；`on_task_claimed`：targeted 自身 → `deliver_input`；非自身 → 走 `on_task_board_event` 兜底（防 idle leader 错过 board 变更；teammate 在下一句的过滤下被挡掉，实际只 nudge leader）。`on_task_board_event` → `_nudge_idle_agent`：**leader 每个 board 事件都巡视全部未完成任务；teammate 只被 `_TEAMMATE_NUDGE_EVENTS`（`CREATED` / `UNBLOCKED` / `RELEASED`——会扩大 claimable 池的三类）唤醒，且只渲染 claimable（pending+未指派）任务，别人 in-flight 的 claimed 任务不喂给 teammate**；`resume_polls` 对每个事件都触发（过滤只砍 nudge、不停 poll）。leader 全部任务终结时按 lifecycle 喂 all-done prompt。`TASK_RELEASED` 由 `TeamTaskManager.reset`（成员清理 / leader 改指派）发布，把被释放回 pending 的任务重新播给 idle teammate。`on_task_revoked` / `on_task_cancelled` / `on_task_updated`（F_54 / F_56）：任务被从某成员手里动了（改派 / 取消 / 改内容）时，`TeamTaskManager` 发对应事件并带 `member_name`（受影响成员），精准投给该成员 → self 分支 `deliver_input(use_steer=True)`（撤回=改派走了，停手；取消=任务没了，停手；变更=view_task 重看后继续、任务仍归你）。改派经 `TeamTaskManager.reassign` 的 DAO 原子 CAS 交换 assignee（任务全程 CLAIMED），**不发 `TASK_RELEASED`**（F_56，消除对空闲 teammate 的 spurious 唤醒 + reset→assign 抢占窗口）；`on_task_revoked` 非自身忽略，`on_task_cancelled` / `on_task_updated` 非自身 fall-through 到 `on_task_board_event`（leader 巡视兜底，与 `on_task_claimed` 一致） |
 | `StaleTaskHandler` | `InnerEventType.POLL_TASK` | `_last_stale_nudge` / `_last_pending_nudge: dict[str, float]` + `_stale_claim_streak: dict[str, int]` + `_escalated_claims: set[str]`（均私有） | `on_poll_task` → `_check_stale_claimed_tasks` + `_check_stale_pending_tasks`；两者的停滞时长都取自 `self._round.idle_seconds()`（不变量 20，**非** `task.updated_at`），阈值取自 spec 的 `stale_claim_idle_timeout` / `stale_pending_idle_timeout`（各默认 600s）。stale claim（**self-only**）：本成员 idle 超阈值且 `_own_stalled_tasks` 非空 → `_self_nudge_idle_claim` → `deliver_input(use_steer=False)`，body 只带 task_id + title + **任务当前处境** + idle 分钟（处境入 body 使一条文案同时覆盖"未开工待认领"与"已开工待推进"，handler 内不为此分支）。`_own_stalled_tasks` = 持有的 `{PLANNING, IN_PROGRESS}` 任务（**排除 `IN_REVIEW`**——author 等 reviewer 裁决是正常 idle），**无任何活跃任务时**回落到名下最早的一个 `PENDING(assignee=self)`（F_69，见不变量 9）；连续 `_STALE_CLAIM_ESCALATE_STREAK`(3) 个窗口自催无效 → `_escalate_stale_claim` 由该成员 `send_message` 上报 leader（每任务只报一次，记账随任务离开 owned-active 集 GC）。stale pending（仅 leader）：leader 自己 idle 超阈值 **且** 存在**无 assignee** 的 PENDING **且** roster 中至少一个非 leader 成员 READY（全员忙 = 正常排队，不催）→ 自喂 minimal prompt（id+title、非 steer）、由 LLM 决定如何分派。见 F_53 / F_65 |
 | `TeamCompletionHandler` | `InnerEventType.POLL_TASK` / `TeamEvent.TASK_LIST_DRAINED` / `TeamEvent.TEAM_COMPLETED` | `_team_completed_emitted: bool` + `_completion_callbacks: list`（私有） | `on_poll_task`：leader 且 idle 时评估 `TeamBackend.is_team_completed()`（任务全终态 + 成员全 settled + 尚未 `SHUTDOWN` 成员无任何未读消息，含广播），按上升沿发 `TEAM_COMPLETED`、下降沿重新武装；**persistent 团队额外调 `self._lifecycle.conclude_completed_round(...)` 结束 leader 流触发 auto-pause（temporary 不调，靠 clean_team 收尾）**。`rearm()`：清上升沿幂等标志，`kernel.start`（冷启动 / resume / recover）每次调一次，使每个 run cycle 独立判定完成。`on_task_list_drained`：记日志 + fire `_completion_callbacks`（`TeamAgent` 在 deepagent 建好后经 `register_completion_callback` 把 `TeamSkillRail.notify_team_completed` 注册进来，注册表非空即 gate）。`on_team_completed`：消费记日志。`POLL_TASK` 与 `StaleTaskHandler` 共享 event_key，注册靠后 → fan-out 在其之后 |
+| `CheckpointHandler` | `TeamEvent.CHECKPOINT_CREATED` | 无 | `on_checkpoint_created`（leader-only）：把成员打的命名 checkpoint 渲染成 `<team-event kind="checkpoint">` + `<team-note kind="announcement-only">`（`i18n.checkpoint.created_note` 明示"不需要回复"），`deliver_input(use_steer=False)` 追加进 leader 上下文——**事件而非 send_message** 是刻意选择：成员消息带 reply-hint 会诱导 leader 回复、污染上下文；框架事件是公告、不提示回复。非 leader 直接 no-op。`CHECKPOINT_CREATED` 是专属 event_key，无 fan-out 重叠，注册位置不敏感 |
 
 ### CoordinationKernel
 
@@ -428,7 +429,7 @@ TeamCompletionHandler.EVENT_METHOD_MAP = {
 }
 ```
 
-`MEMBER_SHUTDOWN` 同时被 `MemberHandler` 和 `MessageHandler` 注册、`POLL_TASK` 同时被 stale-task handler 和 `TeamCompletionHandler` 注册——这是合规的 fan-out 用法，不是冲突。注册顺序 `(lifecycle, member, message, task_board, stale_task, team_completion, workflow)` 决定了 `member.on_member_event` 先跑、`message.on_member_shutdown_drain` 后跑，以及 `stale_task.on_poll_task` 先跑、`team_completion.on_poll_task` 后跑。
+`MEMBER_SHUTDOWN` 同时被 `MemberHandler` 和 `MessageHandler` 注册、`POLL_TASK` 同时被 stale-task handler 和 `TeamCompletionHandler` 注册——这是合规的 fan-out 用法，不是冲突。注册顺序 `(lifecycle, member, message, task_board, stale_task, team_completion, workflow, checkpoint)` 决定了 `member.on_member_event` 先跑、`message.on_member_shutdown_drain` 后跑，以及 `stale_task.on_poll_task` 先跑、`team_completion.on_poll_task` 后跑。
 
 ### handler 实例字段
 

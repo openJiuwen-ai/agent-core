@@ -1,10 +1,15 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import pytest
+
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import (
     ModelClientConfig,
     ModelRequestConfig,
+    UserMessage,
 )
+from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     ModelParamRule,
     OpenAIModelClient,
@@ -248,6 +253,201 @@ class TestApplyModelSpecificParams:
         assert "extra_body" not in params
 
 
+def test_deepseek_endpoint_profile_adds_reasoning_content_to_assistant_messages():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="deepseek",
+        api_key="sk-test-key",
+        api_base="https://api.deepseek.com/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="deepseek-chat"), client_config)
+
+    params = client._build_request_params(
+        messages=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+
+    assert params["messages"][1]["reasoning_content"] == ""
+
+
+def test_openai_none_auth_uses_placeholder_sdk_key():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="ollama",
+        api_base="http://localhost:11434/v1",
+        auth_mode=LLMAuthMode.NoneAuth,
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="qwen2.5:7b"), client_config)
+
+    assert client._resolved_api_key() == "EMPTY"
+
+
+def test_dashscope_profile_converts_text_and_reference_images_for_generation():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="dashscope",
+        api_key="sk-test-key",
+        api_base="https://dashscope.aliyuncs.com",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="wan2.6-image"), client_config)
+
+    content = client._dashscope_image_content([
+        UserMessage(content=[
+            {"text": "turn this into watercolor"},
+            {"image": "https://example.test/source.png"},
+            {"image_url": {"url": "https://example.test/ref.png"}},
+        ])
+    ])
+
+    assert content == [
+        {"text": "turn this into watercolor"},
+        {"image": "https://example.test/source.png"},
+        {"image": "https://example.test/ref.png"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [{"text": "prompt", "extra": "ignored"}],
+        [{"text": "prompt"}, {"image": "https://example.test/a.png", "extra": "ignored"}],
+        [{"text": "prompt"}, {"image_url": {"url": ""}}],
+        [{"text": "prompt"}, {"type": "image", "image": "https://example.test/a.png"}],
+    ],
+)
+def test_dashscope_profile_rejects_invalid_image_generation_content(content):
+    with pytest.raises(BaseError):
+        OpenAIModelClient._dashscope_image_content([UserMessage(content=content)])
+
+
+@pytest.mark.parametrize(
+    ("voice", "language_type"),
+    [
+        ("UnknownVoice", "Auto"),
+        ("Cherry", "UnknownLanguage"),
+    ],
+)
+def test_dashscope_profile_rejects_invalid_speech_params(voice, language_type):
+    with pytest.raises(BaseError):
+        OpenAIModelClient._validate_dashscope_speech_params(
+            voice=voice,
+            language_type=language_type,
+        )
+
+
+@pytest.mark.parametrize(
+    ("img_url", "size", "resolution"),
+    [
+        ("https://example.test/a.png", "1280*720", None),
+        (None, None, "720P"),
+    ],
+)
+def test_dashscope_profile_rejects_mismatched_video_size_params(img_url, size, resolution):
+    with pytest.raises(BaseError):
+        OpenAIModelClient._validate_dashscope_video_params(
+            img_url=img_url,
+            size=size,
+            resolution=resolution,
+        )
+
+
+def test_openrouter_profile_adds_prompt_cache_markers_on_openai_client():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="openrouter",
+        api_key="sk-test-key",
+        api_base="https://openrouter.ai/api/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="anthropic/claude-sonnet-4"), client_config)
+
+    params = client._build_request_params(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[{"type": "function", "function": {"name": "search", "parameters": {}}}],
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+
+    assert params["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert params["tools"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_kv_release_fields_move_to_extra_body_for_openai_sdk():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="sk-test-key",
+        api_base="https://example.test/v1",
+        extensions={"kv_cache": {"mode": "release"}},
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="qwen"), client_config)
+
+    params = client._build_request_params(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+        session_id="session-1",
+        enable_cache_sharing=True,
+    )
+    client._move_openai_extra_body_extensions(params)
+
+    assert params["extra_body"]["cache_salt"] == "session-1"
+    assert params["extra_body"]["cache_sharing"] is True
+    assert "cache_salt" not in params
+
+
+def test_kv_affinity_agent_hint_moves_to_extra_body_for_openai_sdk():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_base="https://example.test/v1",
+        auth_mode=LLMAuthMode.CustomHeaders,
+        extensions={"kv_cache": {"mode": "affinity"}},
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="qwen"), client_config)
+
+    params = client._build_request_params(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+        session_id="child",
+        parent_session_id="parent",
+    )
+    client._move_openai_extra_body_extensions(params)
+
+    assert params["extra_body"]["agent_hint"] == {
+        "session_id": "child",
+        "parent_session_id": "parent",
+    }
+    assert "agent_hint" not in params
+
+
 class _Delta:
     """Lightweight stand-in for an OpenAI SDK delta/message object."""
 
@@ -284,6 +484,10 @@ class TestExtractReasoningContent:
     def test_no_reasoning_fields_returns_none(self):
         delta = _Delta()
         assert OpenAIModelClient._extract_reasoning_content(delta) is None
+
+    def test_falls_back_to_reasoning_token_text(self):
+        delta = _Delta(reasoning_token_text="gateway think")
+        assert OpenAIModelClient._extract_reasoning_content(delta) == "gateway think"
 
     def test_reasoning_details_text_empty_falls_back(self):
         delta = _Delta(reasoning_details=[{"text": ""}], reasoning_content="fallback")

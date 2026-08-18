@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
-from openjiuwen.symphony.shared.fingerprint import FingerprintLike
 from openjiuwen.symphony.orchestration.graph.models import (
     ALLOWED_RELATION_TYPES,
     GraphDiagnostic,
@@ -12,6 +11,7 @@ from openjiuwen.symphony.orchestration.graph.models import (
     RelationCandidate,
     SkillRegistry,
 )
+from openjiuwen.symphony.shared.fingerprint import FingerprintLike
 
 DEFAULT_THRESHOLDS = {
     "can_feed": 0.7,

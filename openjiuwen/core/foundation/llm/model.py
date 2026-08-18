@@ -20,7 +20,6 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
     VideoGenerationResponse
 )
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import InferenceAffinityModelClient
 from openjiuwen.core.runner.callback import trigger
 
 
@@ -279,6 +278,9 @@ class Model:
 
     def supports_kv_cache_release(self) -> bool:
         """Whether underlying client supports KV cache release."""
+        supports_fn = getattr(self._client, "supports_kv_cache_release", None)
+        if callable(supports_fn):
+            return bool(supports_fn())
         return callable(getattr(self._client, "release", None))
 
     def supports_kv_cache_affinity(self) -> bool:
@@ -303,15 +305,13 @@ class Model:
           - session_id: use session.get_session_id() if provided
           - enable_cache_sharing: follow enable_kv_cache_release
         """
-        if not isinstance(self._client, InferenceAffinityModelClient):
+        build_fn = getattr(self._client, "build_kv_cache_invoke_kwargs", None)
+        if not callable(build_fn):
             return {}
-
-        extra: dict = {}
-        if session is not None and hasattr(session, "get_session_id"):
-            extra["session_id"] = session.get_session_id()
-        if enable_kv_cache_release:
-            extra["enable_cache_sharing"] = True
-        return extra
+        return build_fn(
+            session=session,
+            enable_kv_cache_release=enable_kv_cache_release,
+        )
 
     def build_kv_cache_affinity_invoke_kwargs(
             self,

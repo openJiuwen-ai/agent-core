@@ -96,9 +96,10 @@ customizer 后处理）。
 | `team_permission_rail.py` | `TeamPermissionRail` + `TeamApprovalOrchestrator`：team-mode permission guardrail；继承 `PermissionInterruptRail`，leader-mediated ASK resolution + session-scoped auto-confirm（`_persist_allow_always=False`）。`enable_permissions=True` 时替代 `TeamToolApprovalRail` |
 | `tool_approval_rail.py` | `TeamToolApprovalRail`：teammate 调工具时通过消息向 leader 申请审批的中断 rail（`enable_permissions=False` 时使用） |
 | `team_tool_rail.py` / `team_plan_mode_rail.py` | `TeamToolRail`（协同工具注册）/ `TeamPlanModeRail`（plan mode 提示叠加） |
-| `elements.py` | 7 个 team rail 的 `@harness_element` 工厂 + `ConstructionInput`（`team.tool`/`team.policy`/`team.workspace`/`team.tool_approval`/`team.permission`/`team.plan_mode`/`team.reliability`） |
+| `team_skill_use_rail.py` | `TeamSkillUseRail(SkillUseRail)` + `create_team_skill_use_rail`：Skill 实体唯一存放于 `paths.global_skills_dir()`，成员/团队各自只有一份 `skills-visibility.json`。**只覆写两个方法**——`_filter_skills`（先按声明重算 allow/deny 再调 `super()`）与 `_build_skills_snapshot_signature`（把合成后的授权本身并进签名，否则授权变了库里没动、提示词不刷新），另加 `get_skills_for_session` 复查（session 基线是持久化状态）。**单 agent 的 `harness/rails/skills/skill_use_rail.py` 一字未改**：team 行为靠继承 + `agent_configurator` 把 `skills=[]`/`enable_skill_discovery=False` 写进 `build_spec` 关掉通用 rail。见 F_79 |
+| `elements.py` | 7 个 team rail 的 `@harness_element` 工厂 + `ConstructionInput`（`core.team.tool`/`core.team.policy`/`core.team.workspace`/`core.team.tool_approval`/`core.team.plan_mode`/`core.team.reliability`/`core.team.skill_use`）+ `core.observability`。**没有 `core.team.permission`**——`TeamPermissionRail` 由平台（jiuwenswarm）自己挂，`enable_permissions=True` 时替代 `TeamToolApprovalRail`，agent_teams 下不声明它 |
 | `team_context.py` | `TeamHandleKey` + accessor + `inject_team_handles`：team live handle 经 `BuildContext.extras` 的 key 常量 + 类型化读取。rail 不缓存——需跨重建存活的状态（如 `reliability_components`）作为复用对象注入，由每轮新建的 rail 包装 |
-| `builtin_elements.py` | openjiuwen 内置 rail/tool（`task_planning`/`skill_use`/`web_search` 等）的 `@harness_element` 声明——取代已删的 class registry |
+| `builtin_elements.py` | openjiuwen 内置 `core.*` rail/tool（`core.task_planning`/`core.skill_use`/`core.web_search` 等）名字常量的**薄再导出**——声明的真身已上移到 `harness/manifest/builtin_elements.py`，本文件只为保持既有 import 路径（对象 `is`-一致） |
 | `registration.py` | `ensure_harness_elements_registered()`：import elements → `register_from_catalog()`，spec build 路径的统一注册入口 |
 
 ### schema/ — 数据模型分层
@@ -175,7 +176,7 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 - **注册**：四个 `spawn_*` 工具与 `build_team` 的 predefined 成员都只落到 `TeamBackend.spawn_member`——**只写 DB 行（`UNSTARTED`），不启动任何东西**（该方法 docstring 即契约："does NOT start the member"）。
 - **拉起**：只有一条链 —— `TeamAgent.auto_start_member` / `auto_start_all` → `TeamBackend.startup_member` / `startup` → `MemberStatus.UNSTARTED→STARTING` 的 CAS guard（`try_transition_member_status`）→ `_spawn_and_publish` → `_on_teammate_created` → `SpawnManager.spawn_teammate`。
 
-拉起漏斗有三个触发点，全是"消息 / 任务要投给一个还没起来的成员"：leader `send_message` 的 `_auto_start_members`、interact dispatch（`@member` / `@all` / operator 消息）、调度器投递（F_62）。CAS 是这条链上唯一的并发闸——**不要在 spawn 工具里顺手把 agent 拉起来**，那会绕过它。模式由 `TeamAgentSpec.spawn_mode` 决定。
+拉起漏斗有四个触发点，前三个是"消息 / 任务要投给一个还没起来的成员"：leader `send_message` 的 `_auto_start_members`、interact dispatch（`@member` / `@all` / operator 消息）、调度器投递（F_62）；第四个是 leader round-idle 对账兜底（`TeamAgent._reconcile_member_startup`，看板有非终态任务时才动），覆盖"这一轮谁都没走漏斗、成员却还停在 UNSTARTED"的窗口。CAS 是这条链上唯一的并发闸——**不要在 spawn 工具里顺手把 agent 拉起来**，那会绕过它。模式由 `TeamAgentSpec.spawn_mode` 决定。
 
 启动模式：
 - `spawn_mode="process"` → `Runner.spawn_agent` 走子进程（跨平台，默认）。

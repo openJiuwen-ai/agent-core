@@ -1,6 +1,6 @@
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-07-31
+最近一次修订日期：2026-08-13
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -39,6 +39,11 @@ TeamHarness/StreamController）的决策见 [[F_28_native-harness-team-adoption]
 
 `abort` 与 `pause` 是**两个正交动词**：abort 丢弃当前 round（下次 `send` 起全新 round），
 pause 停在干净边界并保留 round（`resume` 原地续）。
+
+`DeepAgentSpec.completion_timeout` 在 NativeHarness 中是非终止性的慢轮次告警阈值：正数到期后
+周期记录 warning，但不取消 scheduler task；`None` 表示不限时且不启动告警 task。普通
+DeepAgent 的同名配置仍是单轮硬超时；超时时 task-loop 负责取消对应 scheduler task 并返回
+标准 `result_type="error"` 结果，避免输出层把裸 `{"error": ...}` 序列化为空回答。
 
 `MemberRuntime` 额外声明：`subscribe(*, on_state=None, on_round=None)`（单一订阅入口，
 两回调 keyword-only 且可选，只注册非 None 的，kwargs 按回调声明参数 narrow）、

@@ -314,9 +314,10 @@ class TeamBackend:
         # so everything below stays dormant when fork is off.
         self._enable_fork: bool = enable_fork
         self._pending_forks: dict[str, dict] = {}    # member_name → {fork, since, source}
-        self._checkpoints: dict[str, int] = {}       # name → message_count
+        self._checkpoints: dict[str, dict] = {}      # name → {count, description, created_by}
         self._snapshot_length: Callable[[], int] | None = None
-        self._store_checkpoint_fn: Callable[[str, int], None] | None = None
+        self._store_checkpoint_fn: Callable[..., dict | None] | None = None
+        self._checkpoint_list_fn: Callable[[], dict] | None = None
 
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
 
@@ -350,8 +351,16 @@ class TeamBackend:
         self._snapshot_length = fn
 
     def set_store_checkpoint_fn(self, fn) -> None:
-        """Register the callback for persisting a named checkpoint."""
+        """Register the callback for persisting a named checkpoint.
+
+        ``fn(name, count, *, description, created_by)`` — the record fields
+        are passed through so the authoritative namespace can store them.
+        """
         self._store_checkpoint_fn = fn
+
+    def set_checkpoint_list_fn(self, fn) -> None:
+        """Register the callback returning the authoritative checkpoint mapping."""
+        self._checkpoint_list_fn = fn
 
     def mark_fork_on_spawn(
         self,
@@ -359,18 +368,18 @@ class TeamBackend:
         fork_value,
         *,
         fork_source: str | None = None,
-        compact: bool = False,
+        fork_mode: str = "before",
     ) -> None:
         self._pending_forks[member] = {
             "fork": fork_value,
             "since": None,
             "source": fork_source,
-            "compact": compact,
+            "fork_mode": fork_mode,
         }
         team_logger.debug(
             "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s "
-            "compact=%s team_name=%s pending_keys=%s",
-            member, fork_value, fork_source, compact,
+            "fork_mode=%s team_name=%s pending_keys=%s",
+            member, fork_value, fork_source, fork_mode,
             self.team_name, list(self._pending_forks.keys()),
         )
 
@@ -398,20 +407,88 @@ class TeamBackend:
         )
         return 0
 
-    def store_checkpoint(self, name: str, count: int) -> None:
+    def store_checkpoint(
+        self,
+        name: str,
+        count: int,
+        *,
+        description: str = "",
+        created_by: str | None = None,
+    ) -> dict | None:
+        """Store a named checkpoint, or return the conflicting record.
+
+        Checkpoint names are team-globally unique. Returns ``None`` on
+        success; on a name conflict the existing record (with its
+        ``created_by`` / ``description``) is returned so the caller can build
+        an actionable error message.
+        """
         team_logger.debug(
             "[fork] store_checkpoint: member=%s name=%s count=%d "
             "has_store_fn=%s",
             self.member_name, name, count,
             self._store_checkpoint_fn is not None,
         )
+        created_by = created_by or self.member_name
         if self._store_checkpoint_fn is not None:
-            self._store_checkpoint_fn(name, count)
-        else:
-            self._checkpoints[name] = count
+            return self._store_checkpoint_fn(name, count, description=description, created_by=created_by)
+        existing = self._checkpoints.get(name)
+        if existing is not None:
+            return existing
+        self._checkpoints[name] = {
+            "count": count,
+            "description": description or "",
+            "created_by": created_by,
+        }
+        return None
 
-    def get_checkpoints(self) -> dict[str, int]:
-        return dict(self._checkpoints)
+    def get_checkpoints(self) -> dict[str, dict]:
+        return {name: dict(record) for name, record in self._checkpoints.items()}
+
+    def list_checkpoints(self) -> dict[str, dict]:
+        """Return the authoritative checkpoint mapping for this team.
+
+        Prefers the callback-wired namespace (the leader's in-memory dict,
+        which in-process members write into); falls back to the local dict
+        when no callback is wired.
+        """
+        if self._checkpoint_list_fn is not None:
+            return {name: dict(record) for name, record in self._checkpoint_list_fn().items()}
+        return self.get_checkpoints()
+
+    async def publish_checkpoint_created(
+        self,
+        name: str,
+        count: int,
+        description: str = "",
+    ) -> None:
+        """Publish a ``CHECKPOINT_CREATED`` event so the leader can announce
+        the snapshot name as a framework note.
+
+        The event replaces a ``send_message`` notification: it carries only
+        structured fields (name / count / creator / description) and is
+        rendered on the leader side as a ``<team-event kind="checkpoint">``
+        with an ``announcement-only`` note — no reply is prompted.
+        """
+        from openjiuwen.agent_teams.schema.events import CheckpointCreatedEvent
+
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(
+                    CheckpointCreatedEvent(
+                        team_name=self.team_name,
+                        member_name=self.member_name,
+                        name=name,
+                        message_count=count,
+                        description=description,
+                    ),
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort, never break the tool call
+            team_logger.warning(
+                "[checkpoint] failed to publish checkpoint_created event '%s': %s",
+                name, exc,
+            )
 
     # ------------------------------------------------------------------
 
@@ -1952,9 +2029,31 @@ class TeamBackend:
                 restored[member.member_name] = cli_agent
         self._external_cli_specs.update(restored)
 
-    def is_external_cli_agent(self, member_name: str) -> bool:
-        """Return whether ``member_name`` is driven by an external CLI."""
-        return member_name in self._external_cli_specs
+    async def is_external_cli_agent(self, member_name: str) -> bool:
+        """Whether ``member_name`` is driven by an external CLI.
+
+        Queries ``member_options.cli_agent`` from DB on every call — no
+        in-memory cache, so the answer is always current regardless of when
+        the member was spawned or whether
+        :meth:`restore_external_cli_specs_from_db` has run yet. Mirrors
+        :meth:`is_human_agent`: a role probe used outside the hot spawn
+        path must read the persistent truth, because the in-memory
+        ``_external_cli_specs`` is only repopulated by
+        ``restore_external_cli_specs_from_db`` inside ``recover_team``; a
+        caller reaching this before that restore (fresh build, post-
+        ``clean_team`` rebuild, or any path that skips recover) would
+        otherwise get a stale ``False`` for a real external-CLI member.
+        """
+        if not member_name:
+            return False
+        if self.db is None:
+            return False
+        from openjiuwen.agent_teams.tools.member_options import get_member_cli_agent
+
+        row = await self.db.member.get_member(member_name, self.team_name)
+        if row is None:
+            return False
+        return bool(get_member_cli_agent(row))
 
     def get_external_cli_agent(self, member_name: str) -> Optional[str]:
         """Return the cli_agent backend name for a member, or ``None``."""
@@ -2040,7 +2139,7 @@ class TeamBackend:
             status=MemberStatus.UNSTARTED,
             execution_status=ExecutionStatus.IDLE,
             mode=self.teammate_mode,
-            role=TeamRole.TEAMMATE,
+            role=TeamRole.EXTERNAL_CLI,
             cli_agent=cli_agent,
         )
         if not result.ok:

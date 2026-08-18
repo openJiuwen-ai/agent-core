@@ -300,18 +300,13 @@ class TeamScheduler:
         return True
 
     def _dispatch_review_feedback(self, task: Any, feedback: str) -> None:
-        """Notify an optional platform handler after a failed round settles.
-
-        The scheduler owns review aggregation but intentionally knows nothing
-        about LLMs, trajectories, Skills, or persistence. Platforms may attach
-        an async ``review_feedback_handler`` through ``BuildContext.extras``.
-        """
+        """Notify the mounted Core team-evolution Rail after a failed round."""
 
         normalized_feedback = str(feedback or "").strip()
         if not normalized_feedback:
             return
-        extras = getattr(self._build_context, "extras", None)
-        handler = extras.get("review_feedback_handler") if isinstance(extras, dict) else None
+        rail = self._review_feedback_rail()
+        handler = getattr(rail, "handle_review_feedback", None)
         if not callable(handler):
             return
 
@@ -330,32 +325,32 @@ class TeamScheduler:
             "feedback": normalized_feedback,
         }
         background = asyncio.create_task(
-            self._invoke_review_feedback_handler(handler, payload),
+            self._invoke_review_feedback_rail(handler, payload),
             name=f"review-feedback-{task.task_id}-{task.review_round}",
         )
         self._review_feedback_tasks.add(background)
         background.add_done_callback(self._review_feedback_tasks.discard)
 
     @staticmethod
-    async def _invoke_review_feedback_handler(handler: Any, payload: dict[str, Any]) -> None:
+    async def _invoke_review_feedback_rail(handler: Any, payload: dict[str, Any]) -> None:
         try:
             result = handler(payload)
             if hasattr(result, "__await__"):
                 await result
         except Exception:
             team_logger.error(
-                "[scheduler] review feedback handler failed: task=%s round=%s",
+                "[scheduler] review feedback Rail failed: task=%s round=%s",
                 payload.get("task_id"),
                 payload.get("review_round"),
                 exc_info=True,
             )
 
     async def _dispatch_team_review_feedback(self) -> None:
-        """Finalize the optional feedback-evolution hook after the board drains.
+        """Finalize reviewer-feedback evolution after the board drains.
 
         Per-task feedback callbacks run in the background so they never delay
-        task handoff.  The terminal callback waits for those jobs before asking
-        the platform handler to aggregate them, which prevents the last task's
+        task handoff. The terminal callback waits for those jobs before asking
+        the mounted Rail to aggregate them, which prevents the last task's
         feedback from racing the team-level evolution pass.
         """
         if self._team_review_feedback_dispatched:
@@ -366,9 +361,8 @@ class TeamScheduler:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
-        extras = getattr(self._build_context, "extras", None)
-        handler = extras.get("review_feedback_handler") if isinstance(extras, dict) else None
-        callback = getattr(handler, "on_team_completed", None)
+        rail = self._review_feedback_rail()
+        callback = getattr(rail, "finalize_review_feedback", None)
         if not callable(callback):
             return
         payload = {
@@ -381,10 +375,36 @@ class TeamScheduler:
                 await result
         except Exception:
             team_logger.error(
-                "[scheduler] team review feedback handler failed: team=%s",
+                "[scheduler] team review feedback Rail failed: team=%s",
                 payload["team_id"],
                 exc_info=True,
             )
+
+    def _review_feedback_rail(self) -> Any | None:
+        """Resolve the mounted team Rail using the normal harness lifecycle."""
+        harness = getattr(self._host, "harness", None)
+        find_rails = getattr(harness, "find_rails", None)
+        if not callable(find_rails):
+            return None
+
+        from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillEvolutionRail
+
+        team_rails = find_rails(TeamSkillEvolutionRail)
+        rail = next(
+            (
+                candidate
+                for candidate in team_rails
+                if getattr(candidate, "review_feedback_evolution_enabled", False)
+            ),
+            None,
+        )
+        if rail is None:
+            return None
+        creation_rails = find_rails(TeamSkillCreateRail)
+        rail.bind_review_feedback_skill_create_rail(
+            next(iter(creation_rails), None),
+        )
+        return rail
 
     async def _handle_undecided(self, task, tally: dict, now_ms: int) -> None:
         """Stall handling for an open round: soft re-nudge, then escalation."""

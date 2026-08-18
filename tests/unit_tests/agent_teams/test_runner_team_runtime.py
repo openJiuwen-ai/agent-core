@@ -1155,11 +1155,21 @@ def test_team_agent_recover_from_session_restores_checkpoints():
             },
         },
     )
-    merge_team_checkpoints(session, team_name, {"code-ready": 5, "refactor-done": 12})
+    merge_team_checkpoints(
+        session,
+        team_name,
+        {
+            "code-ready": {"count": 5, "description": "base done", "created_by": "dev-1"},
+            "refactor-done": {"count": 12},
+        },
+    )
 
     agent = TeamAgent.recover_from_session(session, team_name)
 
-    assert agent._named_checkpoints == {"code-ready": 5, "refactor-done": 12}
+    assert agent._named_checkpoints == {
+        "code-ready": {"count": 5, "description": "base done", "created_by": "dev-1"},
+        "refactor-done": {"count": 12, "description": "", "created_by": ""},
+    }
 
 
 @pytest.mark.asyncio
@@ -1198,14 +1208,16 @@ async def test_checkpoints_survive_reload(isolated_checkpointer):
             },
         },
     )
-    merge_team_checkpoints(session, team_name, {"code-ready": 5})
+    merge_team_checkpoints(session, team_name, {"code-ready": {"count": 5}})
     await session.flush_checkpoint()
 
     restored = create_agent_team_session(session_id=session_id, team_id=team_name)
     await restored.pre_run()
     agent = TeamAgent.recover_from_session(restored, team_name)
 
-    assert agent._named_checkpoints == {"code-ready": 5}
+    assert agent._named_checkpoints == {
+        "code-ready": {"count": 5, "description": "", "created_by": ""}
+    }
     await isolated_checkpointer.release(session_id)
 
 
@@ -1231,11 +1243,13 @@ def test_persist_leader_config_preserves_checkpoints():
 
     recovery = RecoveryManager(configurator=configurator, spawn_manager=MagicMock())
 
-    merge_team_checkpoints(session, team_name, {"code-ready": 5})
+    merge_team_checkpoints(session, team_name, {"code-ready": {"count": 5}})
     recovery.persist_leader_config(session)
 
     bucket = read_team_namespace(session, team_name)
-    assert bucket["checkpoints"] == {"code-ready": 5}
+    assert bucket["checkpoints"] == {
+        "code-ready": {"count": 5, "description": "", "created_by": ""}
+    }
     assert bucket["spec"] == {"team_name": team_name}
 
 

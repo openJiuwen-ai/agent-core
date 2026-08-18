@@ -35,6 +35,13 @@ STRINGS: dict[str, str] = {
     # checkpoint._desc lives in descs/cn/member/checkpoint.md
     "checkpoint.name": "快照名（语义化 slug，如 code-ready）。后续 fork 通过此名引用",
     "checkpoint.description": "可选描述，说明为何在此打快照",
+    "checkpoint.duplicate": (
+        "⚠️ 快照保存失败：快照名 '{name}' 已被 {created_by} 占用（{description}）。"
+        "你本次的快照**没有建立**，后续 fork 拿不到你的上下文。"
+        "请用一个新的名字（例如 '{name}-v2'，或在名字末尾加序号/业务后缀）"
+        "**立即再次调用 checkpoint** 完成保存——不要用纯文本说明代替实际调用。"
+        "仅当你原本就是要继承那个已存在的快照、而不是保存自己的新快照时，才不需要重新调用。"
+    ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/cn/team/clean_team.md
     # ===== spawn_teammate ======================================================
@@ -81,9 +88,12 @@ STRINGS: dict[str, str] = {
         "上下文来源成员名。不填默认从 leader 取。填某 teammate 名（如 'understander'）"
         "则从该成员取上下文。该成员必须已通过 spawn_teammate 拉起来，且为 in-process 模式"
     ),
-    "spawn_teammate.compact": (
-        "启用上下文压缩。checkpoint 之前的旧消息压缩为摘要，"
-        "checkpoint 之后的分析全量保留。仅配合 checkpoint fork 使用"
+    "spawn_teammate.fork_mode": (
+        "保留 checkpoint 的哪一侧。可选值：'full'（源成员全部上下文，fork=true 时的默认）、"
+        "'before'（checkpoint 之前的消息，命名 fork 时的默认）、"
+        "'after'（从 checkpoint 起的消息）、"
+        "'keep_before_compact_after'（保留前、把后压缩为摘要）、"
+        "'keep_after_compact_before'（保留后、把前压缩为摘要）。仅配合命名 checkpoint fork 使用"
     ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/cn/member/spawn_human_agent.md

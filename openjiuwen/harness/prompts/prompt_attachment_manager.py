@@ -16,6 +16,9 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
+from openjiuwen.core.foundation.kv_cache import (
+    KV_CACHE_EPHEMERAL_TAIL_METADATA,
+)
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 from openjiuwen.harness.prompts.sections.prompt_attachments import (
     get_prompt_attachment_guidance,
@@ -546,7 +549,13 @@ class PromptAttachmentManager:
                 break
             tail_start -= 1
 
-        attachment_message = UserMessage(content=rendered_prompt_attachments)
+        # An attachment is request-scoped and not persisted in conversation
+        # history.  Preserve the marker even when upstream requires the
+        # attachment to be inserted before browser-state tail messages.
+        attachment_message = UserMessage(
+            content=rendered_prompt_attachments,
+            metadata={KV_CACHE_EPHEMERAL_TAIL_METADATA: True},
+        )
         return [*messages[:tail_start], attachment_message, *messages[tail_start:]]
 
     def make_window_mutator(self, session_id: str) -> WindowMutator:

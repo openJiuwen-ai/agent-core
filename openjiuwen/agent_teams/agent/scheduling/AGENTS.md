@@ -6,7 +6,8 @@ leader 侧的调度分发 runtime，与 `coordination/`（唤醒层）平齐：c
 
 | 文件 | 职责 |
 |---|---|
-| `scheduler.py` | `TeamScheduler`：事件粗筛 + 双幂等扫描（开工 / 验票）+ `SchedulerHost` 窄协议 + 可选 reviewer feedback 宿主 callback（F_73） |
+| `scheduler.py` | `TeamScheduler`：事件粗筛 + 双幂等扫描（开工 / 验票）+ `SchedulerHost` 窄协议 + 已挂载 `TeamSkillEvolutionRail` 的 reviewer feedback 旁路（F_73） |
+| `review_feedback_evolution.py` | `ReviewFeedbackEvolutionCoordinator`：与产品无关的 Feedback 归因、成员演进、全局汇总与新 Skill 候选路由；由 `TeamSkillEvolutionRail` 持有，子 Rail 事件回流到父 Rail 的标准 host-event 队列 |
 | `verdict.py` | 纯函数投票判定（`settle_review_tally`：二元票池（verifier+challenger）一票否决 + 检视者分数池平均≥0.85）——策略可整体替换，不碰票据存储与状态机 |
 | `render.py` | 两类收件人两套机制：**成员**交接只组投递载荷 `meta_*`（`{template, refs, params}`，`content=""`），文案在 `prompts/<lang>/scheduler_*.md`、投递时渲染（F_63）；**leader** 摘要/升级走 `deliver_input` 直投，仍是 `i18n.py` 的 `scheduler.leader_*` 一行短串 |
 
@@ -20,10 +21,10 @@ leader 侧的调度分发 runtime，与 `coordination/`（唤醒层）平齐：c
 6. **轮数升级与停摆升级共用一条注入路径**，按 `(task_id, review_round)` 去重；升级后任务留 `IN_REVIEW`，决定性迟票仍可正常 settle（不再重复升级）。
 7. **leader 自发事件的可见性靠 `SCHEDULER_SCAN` 回声**：kernel 的 `_filter_self` 丢弃 self 事件时，若调度器激活且是 `task_*` 事件，改投一个 `SCHEDULER_SCAN` inner 事件——coordination 无 handler 监听它，调度器把它当纯扫描提示。
 8. **异常语义与 coordination 对齐**：`on_event` 吞普通异常（log + 下次触发重试），绝不让 bus loop 挂掉。
-9. **review feedback 是可选旁路**（F_73）：失败轮次 settle 后通过
-   `BuildContext.extras["review_feedback_handler"]` 后台派发聚合 feedback，不阻塞返工；全部任务终态时
-   先等待已启动 callback，再调用可选 `handler.on_team_completed`。callback 按 `(task_id,
-   review_round)` 进程内去重、异常只记录。scheduler 不理解 LLM、轨迹、Skill 归因、审批或持久化。
+9. **review feedback 是可选旁路**（F_73）：失败轮次 settle 后，scheduler 从 host harness 查找已挂载且
+   开启该能力的 `TeamSkillEvolutionRail`，后台调用其窄入口，不阻塞返工；全部任务终态时先等待已启动
+   callback，再调用同一 Rail 的终态汇总入口。callback 按 `(task_id, review_round)` 进程内去重、
+   异常只记录。scheduler 不理解 LLM、轨迹、Skill 归因、审批或持久化，也不自行构造 Rail。
 
 ## 生命周期（kernel 接线）
 

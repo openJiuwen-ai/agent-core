@@ -293,6 +293,16 @@ symlink、junction 或其他 reparse point，并排除凭据、版本控制和�
 
 每个 metric 保留 `status`、可选 `[0, 1]` score、reason、脱敏 evidence、failure 和 suggestion。
 默认不生成跨指标 composite score，也不固化准入阈值；没有目标值的时延只输出 raw observation。
+同一窗口内部分 evaluator 或 LLM 解析异常时，`EvaluationSuite` 只使用 `score is not None` 的可用评分样本
+计算均值和 pass/fail，异常样本不进入分母，但 `error_count` 与对应诊断仍会保留；只有所有样本都无法评分且
+存在异常时，聚合结果才为 `error`。没有评分且没有异常时，仍按原有 `observed`/`not_applicable` 规则返回。
+
+LLM judge 接受裸 JSON，或完整包裹整个响应的 Markdown 三反引号代码块；代码块语言标签可以省略或使用
+`json`、`arduino` 等任意标签，但块内仍须为标准 JSON 对象。外围说明文字、多个代码块、JSON5、单引号、
+尾逗号和不完整 JSON 不会被本地启发式修复。JSON 解析或 `score`/`reason` 字段校验失败时，evaluator 会将
+安全的具体校验原因与脱敏、限长的原始坏输出回传给同一个 LLM，并固定重做一次；重试成功后按正常评分返回，
+重试仍失败才返回 `error`。首次调用的网络、超时、限流或鉴权异常不会在 Evaluation 层再次重试，以免与模型
+传输层重试叠加。原始坏输出和完整异常文本不会写入最终评估结果。
 
 ### 指纹产物生命周期
 
@@ -341,6 +351,7 @@ plan = await service.plan(
 - `read()` 返回映射兼容的 `CapabilityGraph`；传入 `version` 可读取指定的不可变版本。
 - `plan()` 返回映射兼容的 `OrchestrationPlan`。
 - `progress` 接收 `OrchestrationProgress`；该类型保持字典兼容。旧参数名 `progress_callback` 仍可使用。
+- `graph.resolve.progress` 保留当前匹配窗口的 `current/total`，并通过 `completed_candidate_count`、`total_candidate_count` 和 `reused_candidate_count` 提供跨窗口的全局候选关系进度；缓存复用的候选关系计入已完成数量。
 - `model=None` 时仍可查询状态和读取已发布图；构建或规划会明确报错。
 
 ### 图产物生命周期

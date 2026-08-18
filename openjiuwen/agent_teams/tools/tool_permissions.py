@@ -19,6 +19,7 @@ LEADER_ONLY_TOOLS: set[str] = {
     "shutdown_member",    # Shutdown a team member
     "approve_plan",       # Approve or reject a member's plan
     "approve_tool",       # Approve or reject a teammate tool call
+    "list_checkpoints",   # List named checkpoints available for fork inheritance
     "create_task",        # Create tasks (batch / with deps)
     "update_task",        # Update task content / cancel tasks
     "swarmflow",          # Run a swarmflow orchestration script (gated by enable_swarmflow)

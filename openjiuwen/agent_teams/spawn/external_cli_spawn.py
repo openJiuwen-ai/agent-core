@@ -241,6 +241,7 @@ async def external_cli_spawn(
             cwd=cwd,
             add_dirs=add_dirs,
             command_override=tuple(cli_cfg.command) if cli_cfg.command else None,
+            cli_path=cli_cfg.cli_path,
             codex_bin=cli_cfg.codex_bin,
             inject_mcp=cli_cfg.inject_mcp,
             mcp_default_tools_approval_mode=cli_cfg.mcp_default_tools_approval_mode,
@@ -320,7 +321,7 @@ async def external_cli_spawn(
             team_logger.info("[external-cli] member {} cancelled", member_name)
             raise
         except Exception:
-            team_logger.error("[external-cli] member {} crashed", member_name, exc_info=True)
+            team_logger.exception("[external-cli] member {} crashed", member_name)
             raise
         finally:
             await runtime.stop()

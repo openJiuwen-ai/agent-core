@@ -10,7 +10,6 @@ from typing import Any, Literal, Optional, Protocol, runtime_checkable
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
 from openjiuwen.agent_evolving.experience.types import PendingChange
-from openjiuwen.agent_evolving.trajectory import Trajectory
 from openjiuwen.core.session.stream import OutputSchema
 
 EvolutionEventKind = Literal["approval", "progress", "outcome"]
@@ -45,33 +44,6 @@ class EvolutionHostEventMeta:
             if value is not None:
                 payload[field_name] = value
         return payload
-
-
-@dataclass(frozen=True)
-class EvolutionSnapshot:
-    """Async evolution snapshot captured while callback context is still alive."""
-
-    trajectory: Trajectory
-    messages: list[dict]
-    skill_name: Optional[str] = None
-
-    def to_legacy_dict(self) -> dict[str, Any]:
-        """Return the existing dict shape consumed by rail hooks and tests."""
-        snapshot: dict[str, Any] = {
-            "trajectory": self.trajectory,
-            "messages": self.messages,
-        }
-        if self.skill_name is not None:
-            snapshot["skill_name"] = self.skill_name
-        return snapshot
-
-    @classmethod
-    def from_legacy_dict(cls, snapshot: dict[str, Any]) -> "EvolutionSnapshot":
-        return cls(
-            trajectory=snapshot["trajectory"],
-            messages=list(snapshot.get("messages", [])),
-            skill_name=snapshot.get("skill_name"),
-        )
 
 
 @dataclass(frozen=True)
@@ -130,7 +102,6 @@ __all__ = [
     "ApprovalManagerProtocol",
     "EvolutionHostEventMeta",
     "EvolutionRequestResult",
-    "EvolutionSnapshot",
     "PendingApprovalSnapshotStore",
     "SimplifyRequestResult",
 ]

@@ -78,7 +78,7 @@ class TeamAgent(BaseAgent):
         super().__init__(card)
         self._configurator = AgentConfigurator(card)
         self._state = TeamAgentState()
-        self._named_checkpoints: dict[str, int] = {}  # name → message_count
+        self._named_checkpoints: dict[str, dict] = {}  # name → {count, description, created_by}
 
         self._spawn_manager = SpawnManager(
             state=self._state,
@@ -102,6 +102,7 @@ class TeamAgent(BaseAgent):
             execution_updater=self._update_execution,
             wake_mailbox_callback=self._wake_mailbox_if_interrupt_cleared,
             request_completion_poll_callback=self._request_completion_poll,
+            member_startup_reconciler=self._reconcile_member_startup,
             task_board_probe=self.is_task_board_settled,
         )
         self._coordination = CoordinationKernel(self)
@@ -571,6 +572,7 @@ class TeamAgent(BaseAgent):
             team_backend = self._configurator.team_backend
             if team_backend is not None:
                 team_backend.set_store_checkpoint_fn(self.set_checkpoint)
+                team_backend.set_checkpoint_list_fn(lambda: self._named_checkpoints)
 
     def _setup_agent(
         self,
@@ -1062,6 +1064,37 @@ class TeamAgent(BaseAgent):
             InnerEventMessage(event_type=InnerEventType.POLL_TASK),
         )
 
+    async def _reconcile_member_startup(self) -> None:
+        """Start members the board has work for but nobody ever launched.
+
+        Runs on the leader's round-idle edge: whatever the round intended is
+        now fully expressed, so a roster still parked at UNSTARTED while the
+        board holds open work is a gap the code closes rather than one the
+        model has to notice. Registration and startup are deliberately
+        separate (``spawn_teammate`` only writes a DB row), which leaves
+        exactly this window open when nothing on the round happened to walk
+        the startup funnel.
+
+        Leader-only: nobody else owns a roster. The board is probed first
+        because a team with no open task has nothing to be started *for* —
+        a leader may well register members ahead of the work. That probe is
+        one aggregate COUNT, and ``auto_start_all`` is a no-op once the
+        UNSTARTED set is empty, so a settled team pays almost nothing per
+        round. Best-effort throughout: this runs on a teardown-adjacent edge,
+        and a failure here must not stop the completion poll behind it.
+        """
+        if self.role != TeamRole.LEADER:
+            return
+        if await self.is_task_board_settled():
+            return
+        started = await self.auto_start_all()
+        if started:
+            team_logger.info(
+                "[{}] round-idle reconcile started members: {}",
+                self._member_name() or "?",
+                started,
+            )
+
     def _member_name(self) -> Optional[str]:
         return self._configurator.member_name
 
@@ -1152,45 +1185,95 @@ class TeamAgent(BaseAgent):
                     )
                     if native is not None:
                         fork_value = fork_info["fork"]
-                        compact = fork_info.get("compact", False)
                         is_named = (
                             isinstance(fork_value, str)
                             and fork_value not in ("true", "false")
                         )
-                        ckpt_idx = self._named_checkpoints.get(fork_value) if is_named else None
+                        # Default mode: live fork → full; named fork → before
+                        # (preserves the legacy truncation behaviour).
+                        fork_mode = fork_info.get("fork_mode") or (
+                            "full" if not is_named else "before"
+                        )
+                        ckpt_record = self._named_checkpoints.get(fork_value) if is_named else None
+                        ckpt_idx = ckpt_record["count"] if ckpt_record else None
 
-                        if compact:
-                            if not is_named:
+                        # Creator/fork_source mismatch: the recorded count is only
+                        # meaningful for its creator's context. Only applies when
+                        # the mode actually consumes the checkpoint index.
+                        mode_uses_ckpt = fork_mode in (
+                            "before", "after",
+                            "keep_before_compact_after", "keep_after_compact_before",
+                        )
+                        if is_named and mode_uses_ckpt and ckpt_record is not None:
+                            source_name = fork_info.get("source") or self._member_name()
+                            creator = ckpt_record.get("created_by") or ""
+                            if creator and creator != source_name:
                                 team_logger.warning(
-                                    "[fork] compact=true ignored for member=%s: "
-                                    "requires a named checkpoint fork", teammate_id,
+                                    "[fork] checkpoint '%s' created by '%s' but "
+                                    "fork_source='%s'; the index belongs to another "
+                                    "member and may not fit this source's context",
+                                    fork_value, creator, source_name,
                                 )
-                                compact = False
-                            elif ckpt_idx is None:
+                                # The recorded count is only meaningful for its
+                                # creator's context. Falling back to full keeps the
+                                # behaviour consistent with the leader notification.
+                                ckpt_idx = None
+                                from openjiuwen.agent_teams.i18n import t
+                                await self._notify_fork_name_not_found(
+                                    teammate_id, fork_value,
+                                    detail=t(
+                                        "checkpoint.fork_source_mismatch",
+                                        creator=creator,
+                                        source=source_name,
+                                    ),
+                                )
+
+                        # Build the fork context by mode. Compact modes capture
+                        # the full source and let ``compact_context`` trim it,
+                        # so the split index still matches the injected context.
+                        fork_ctx = ForkContext.from_agent(native)
+                        if not is_named:
+                            # Live fork: the only meaningful mode is full.
+                            if fork_mode != "full":
+                                team_logger.warning(
+                                    "[fork] fork_mode=%s ignored for live fork "
+                                    "member=%s; using full context",
+                                    fork_mode, teammate_id,
+                                )
+                        elif fork_mode == "full":
+                            # Named fork with full mode: ignore the checkpoint index.
+                            pass
+                        elif ckpt_idx is None:
+                            if ckpt_record is None:
+                                # Genuinely unknown name: warn + notify. A
+                                # creator/fork_source mismatch also lands here
+                                # (ckpt_idx cleared above) but has already been
+                                # warned and notified with the detail.
                                 team_logger.warning(
                                     "[fork] checkpoint '%s' not found for "
                                     "member=%s; falling back to full context",
                                     fork_value, teammate_id,
                                 )
-                                compact = False
-
-                        # Default is a live fork (fork="true"/True): full
-                        # injection. Named branches override the capture below.
-                        fork_ctx = ForkContext.from_agent(native)
-                        if compact:
-                            if ckpt_idx is not None and 0 <= ckpt_idx < len(fork_ctx.messages):
-                                fork_ctx.compact_split = ckpt_idx
-                            else:
-                                fork_ctx.compact_split = len(fork_ctx.messages)
-                        elif is_named and ckpt_idx is None:
-                            team_logger.warning(
-                                "[fork] checkpoint '%s' not found for "
-                                "member=%s; falling back to full context",
-                                fork_value, teammate_id,
-                            )
-                        elif is_named:
+                                await self._notify_fork_name_not_found(teammate_id, fork_value)
+                        elif fork_mode == "before":
                             fork_ctx = ForkContext.from_agent(
                                 native, checkpoint=ckpt_idx,
+                            )
+                        elif fork_mode == "after":
+                            fork_ctx = ForkContext.from_agent(
+                                native, checkpoint=ckpt_idx, keep="after",
+                            )
+                        elif fork_mode == "keep_before_compact_after":
+                            fork_ctx = ForkContext.from_agent(native)
+                            fork_ctx.compact_split = ckpt_idx
+                            fork_ctx.compact_direction = "after"
+                        elif fork_mode == "keep_after_compact_before":
+                            fork_ctx = ForkContext.from_agent(native)
+                            fork_ctx.compact_split = ckpt_idx
+                        else:
+                            team_logger.warning(
+                                "[fork] unknown fork_mode '%s' for member=%s; "
+                                "using full context", fork_mode, teammate_id,
                             )
                         team_logger.debug(
                             "[fork] ForkContext created: msgs=%d empty=%s",
@@ -1198,8 +1281,8 @@ class TeamAgent(BaseAgent):
                         )
                         team_logger.info(
                             "[fork] %s into %s (msgs=%d)%s",
-                            "compacted fork" if compact else
-                            "checkpoint fork" if is_named else "live fork",
+                            "compacted fork" if fork_ctx.compact_split is not None else
+                            "checkpoint fork" if is_named and fork_mode != "full" else "live fork",
                             teammate_id,
                             len(fork_ctx.messages),
                             f" split_at={fork_ctx.compact_split}" if fork_ctx.compact_split is not None else "",
@@ -1215,6 +1298,13 @@ class TeamAgent(BaseAgent):
         ctx = await self._spawn_manager.build_context_from_db(teammate_id)
         if ctx is None:
             return
+        # Record who this member inherited its context from, so the target's
+        # identity block can carry a conversion notice (rendered by
+        # ``TeamContextTracker``). Only meaningful when fork inheritance
+        # actually delivered messages — an empty fork context (capture yielded
+        # nothing) means nothing was inherited, so no notice.
+        if fork_ctx is not None and not fork_ctx.is_empty():
+            ctx.fork_source = fork_info.get("source") or self._member_name()
         # No first-start message: a member's DB ``prompt`` is its private
         # system-prompt addendum (carried on ``ctx.member_prompt``), not a
         # startup instruction. Members come up subscribed-only and receive
@@ -1248,21 +1338,76 @@ class TeamAgent(BaseAgent):
         )
         return None
 
+    async def _notify_fork_name_not_found(
+        self,
+        member: str,
+        fork_name: str,
+        *,
+        detail: str = "",
+    ) -> None:
+        """Surface a wrong fork checkpoint name to the leader.
+
+        The spawn still proceeds with a full-context fallback, but the
+        leader is told which name was requested and which names actually
+        exist, so a naming mismatch (missing name, or a name whose creator
+        does not match ``fork_source``) is no longer silent.
+        """
+        from openjiuwen.agent_teams.i18n import t
+
+        available = ", ".join(sorted(self._named_checkpoints)) or "（无）"
+        try:
+            await self.message_manager.send_message(
+                content=t(
+                    "checkpoint.fork_not_found",
+                    fork=fork_name,
+                    member=member,
+                    available=available,
+                    detail=detail,
+                ),
+                to_member_name=self._member_name(),
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort, never block the spawn
+            team_logger.warning(
+                "[fork] failed to notify leader about missing checkpoint '%s': %s",
+                fork_name, exc,
+            )
+
     def share_checkpoints_with(self, other: "TeamAgent") -> None:
         """Share the leader's checkpoint namespace with another agent."""
         other.set_checkpoints_from(self._named_checkpoints)
 
-    def set_checkpoint(self, name: str, count: int) -> None:
+    def set_checkpoint(
+        self,
+        name: str,
+        count: int,
+        *,
+        description: str = "",
+        created_by: str | None = None,
+    ) -> dict | None:
         """Store a named checkpoint.
 
-        The leader also mirrors the full mapping into the session's
-        per-team namespace so it survives process restart. Persistence is
-        deferred to the run cycle's ``post_run`` (no explicit flush),
-        matching allocator / lifecycle / pending_resume semantics.
+        Checkpoint names are **team-globally unique**: a name that already
+        exists — regardless of who created it — is rejected and the existing
+        record is returned (``None`` on success). The leader also mirrors the
+        full mapping into the session's per-team namespace so it survives
+        process restart. Persistence is deferred to the run cycle's
+        ``post_run`` (no explicit flush), matching allocator / lifecycle /
+        pending_resume semantics.
+
+        Returns:
+            ``None`` when stored; the existing record on a name conflict.
         """
-        self._named_checkpoints[name] = count
+        existing = self._named_checkpoints.get(name)
+        if existing is not None:
+            return existing
+        self._named_checkpoints[name] = {
+            "count": count,
+            "description": description or "",
+            "created_by": created_by or "",
+        }
         if self.role == TeamRole.LEADER:
             self._merge_checkpoints_into_session()
+        return None
 
     def _merge_checkpoints_into_session(self) -> None:
         """Mirror the current checkpoint mapping into the bound team session.
@@ -1285,7 +1430,7 @@ class TeamAgent(BaseAgent):
                 exc,
             )
 
-    def set_checkpoints_from(self, source: dict[str, int]) -> None:
+    def set_checkpoints_from(self, source: dict[str, dict]) -> None:
         """Replace this agent's checkpoint namespace with *source*."""
         self._named_checkpoints = source
 

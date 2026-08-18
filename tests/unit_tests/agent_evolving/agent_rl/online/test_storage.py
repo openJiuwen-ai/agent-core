@@ -2,112 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections import defaultdict
 from typing import Any
 
 import pytest
 
+from tests.unit_tests.agent_evolving.agent_rl.online.support import InMemoryRedis
 
-class _FakePipeline:
-    def __init__(self, redis: "_FakeRedis") -> None:
-        self._redis = redis
-        self._ops: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
-
-    def __getattr__(self, name: str):
-        def _record(*args, **kwargs):
-            self._ops.append((name, args, kwargs))
-            return self
-        return _record
-
-    async def execute(self):
-        out = []
-        for name, args, kwargs in self._ops:
-            fn = getattr(self._redis, name)
-            out.append(await fn(*args, **kwargs))
-        self._ops.clear()
-        return out
-
-
-class _FakeRedis:
-    def __init__(self) -> None:
-        self._hashes: dict[str, dict[str, Any]] = defaultdict(dict)
-        self._sets: dict[str, set[Any]] = defaultdict(set)
-        self._zsets: dict[str, dict[Any, float]] = defaultdict(dict)
-
-    def pipeline(self):
-        return _FakePipeline(self)
-
-    def register_script(self, _lua: str):
-        async def _script(*, keys, args):
-            pending_key, training_key = keys
-            limit = int(args[0])
-            now_score = float(args[1])
-            new_status = args[2]
-            traj_prefix = args[3]
-            ordered = sorted(self._zsets[pending_key].items(), key=lambda item: item[1])[:limit]
-            ids = [sample_id for sample_id, _ in ordered]
-            for sample_id in ids:
-                self._zsets[pending_key].pop(sample_id, None)
-                self._zsets[training_key][sample_id] = now_score
-                self._hashes[f"{traj_prefix}{sample_id}"]["status"] = new_status
-            return ids
-        return _script
-
-    async def hset(self, key: str, field: str | None = None, value: Any = None, mapping: dict[str, Any] | None = None):
-        if mapping is not None:
-            self._hashes[key].update(mapping)
-        else:
-            self._hashes[key][field] = value
-        return 1
-
-    async def hget(self, key: str, field: str):
-        return self._hashes[key].get(field)
-
-    async def hmget(self, key: str, fields: list[str]):
-        return [self._hashes[key].get(field) for field in fields]
-
-    async def zadd(self, key: str, mapping: dict[Any, float]):
-        self._zsets[key].update(mapping)
-        return len(mapping)
-
-    async def zcard(self, key: str):
-        return len(self._zsets[key])
-
-    async def zrange(self, key: str, start: int, end: int):
-        members = [member for member, _ in sorted(self._zsets[key].items(), key=lambda item: item[1])]
-        if end == -1:
-            end = len(members) - 1
-        return members[start:end + 1]
-
-    async def zrem(self, key: str, *members: Any):
-        removed = 0
-        for member in members:
-            if member in self._zsets[key]:
-                self._zsets[key].pop(member, None)
-                removed += 1
-        return removed
-
-    async def sadd(self, key: str, *members: Any):
-        for member in members:
-            self._sets[key].add(member)
-        return len(members)
-
-    async def srem(self, key: str, *members: Any):
-        removed = 0
-        for member in members:
-            if member in self._sets[key]:
-                self._sets[key].remove(member)
-                removed += 1
-        return removed
-
-    async def smembers(self, key: str):
-        return set(self._sets[key])
-
-    async def delete(self, key: str):
-        existed = key in self._hashes
-        self._hashes.pop(key, None)
-        return int(existed)
+_FakeRedis = InMemoryRedis
 
 
 def _sample(sample_id: str, *, user_id: str = "online") -> dict[str, Any]:
@@ -129,7 +30,7 @@ def _sample(sample_id: str, *, user_id: str = "online") -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_inmemory_trajectory_store_status_flow():
-    from openjiuwen.agent_evolving.agent_rl.storage.trajectory_store import InMemoryTrajectoryStore
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rl.store import InMemoryTrajectoryStore
 
     store = InMemoryTrajectoryStore()
     await store.save_sample(_sample("s1"))
@@ -151,7 +52,7 @@ async def test_inmemory_trajectory_store_status_flow():
 
 @pytest.mark.asyncio
 async def test_redis_trajectory_store_status_flow():
-    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rl.redis_store import RedisTrajectoryStore
 
     store = RedisTrajectoryStore(_FakeRedis())
     await store.save_sample(_sample("s1"))
@@ -172,8 +73,36 @@ async def test_redis_trajectory_store_status_flow():
 
 
 @pytest.mark.asyncio
+async def test_redis_sft_store_uses_processed_status_for_raw():
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.redis_store import RedisSFTStore
+
+    store = RedisSFTStore(_FakeRedis())
+    await store.save_raw({
+        "raw_id": "r1",
+        "user_id": "u1",
+        "session_id": "sess-1",
+        "created_at": "2026-01-01T00:00:00+00:00",
+    }, user_id="u1")
+
+    raw = await store.fetch_raw_and_mark_processing("u1", 1)
+    assert raw[0]["_store_status"] == "processing"
+
+    stats = await store.stats()
+    assert stats["processing_raw"] == 1
+    assert stats["processed_raw"] == 0
+    assert stats["trained_samples"] == 0
+
+    await store.mark_raw_processed(["r1"])
+
+    stats = await store.stats()
+    assert stats["processing_raw"] == 0
+    assert stats["processed_raw"] == 1
+    assert stats["trained_samples"] == 0
+
+
+@pytest.mark.asyncio
 async def test_redis_trajectory_store_save_sample_replaces_old_status_index():
-    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rl.redis_store import RedisTrajectoryStore
 
     redis = _FakeRedis()
     store = RedisTrajectoryStore(redis)
@@ -189,14 +118,14 @@ async def test_redis_trajectory_store_save_sample_replaces_old_status_index():
 
 @pytest.mark.asyncio
 async def test_redis_trajectory_store_update_status_tolerates_missing_payload():
-    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rl.redis_store import RedisTrajectoryStore
 
     redis = _FakeRedis()
     store = RedisTrajectoryStore(redis)
     await store.save_sample(_sample("s1"))
     await store.fetch_and_mark_training("online", 1)
 
-    redis._hashes["rl:traj:s1"]["sample_json"] = None
+    await redis.hdel("rl:traj:s1", "sample_json")
     await store.mark_trained(["s1"])
 
     stats = await store.stats()
@@ -207,7 +136,7 @@ async def test_redis_trajectory_store_update_status_tolerates_missing_payload():
 
 @pytest.mark.asyncio
 async def test_redis_trajectory_store_management_crud():
-    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+    from openjiuwen.agent_evolving.agent_rl.online.backends.rl.redis_store import RedisTrajectoryStore
 
     store = RedisTrajectoryStore(_FakeRedis())
     await store.save_sample({**_sample("s1", user_id="u1"), "task_id": "coding", "source": "api"})

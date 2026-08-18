@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/team_workspace/` |
-| 最近一次修订日期 | 2026-07-28 |
-| 关联 feature | `F_69_cwd-workspace-project-root-separation.md` |
+| 最近一次修订日期 | 2026-08-12 |
+| 关联 feature | `F_69_cwd-workspace-project-root-separation.md` · `F_79_team-scoped-skill-library-and-visibility.md` |
 
 ## 范围 / 边界
 
@@ -21,19 +21,21 @@
 - 该目录的版本（git auto-commit、history 查询、distributed pull / push）。
 - 该目录下文件的写锁（in-memory，按文件路径粒度，带 timeout）。
 - 通过事件总线发布 workspace 级事件（artifact 更新、冲突、lock 请求/响应）。
+- 该目录根下的**团队 Skill 可见性声明** `skills-visibility.json`（只播种，不做合成——合成归 `agent_teams/skill/visibility.py`）。
 
 ### 不管什么
 
 - **不管代码隔离**。每个成员各自的 git worktree 由 `WorktreeManager`（`openjiuwen.harness.tools.worktree`）独立负责；workspace 是产物协同区，worktree 是源码工作树，二者磁盘路径不相交。
 - **不管文件 I/O 实现**。`read_file` / `write_file` / `glob` 等读写动作走标准 SysOperation 工具，命中 `.team/` 前缀时被 `TeamWorkspaceRail` 拦截、加上锁与版本策略。manager 自身不做内容读写。
 - **不管成员私有 workspace**。成员私有目录是 `team_home(team_name)/workspaces/{member}_workspace/` 或 `independent_member_workspace(member)`，由 `agent_configurator.setup_agent` 处理；workspace manager 只把团队共享区**挂载**进成员 workspace。
+- **不管 Skill 实体**。Skill 实体唯一存放于 `paths.global_skills_dir()`，团队共享工作区**没有** `skills/` 节点。本子系统只负责在 workspace 根播种团队那份可见性声明文件；声明的语义、合成与授权归 `agent_teams/skill/visibility.py` 与 `rails/team_skill_use_rail.py`（见 [[F_79]]）。
 - **不管多 team 全局协调**。一份 `TeamWorkspaceManager` 只服务一个 team_name；跨 team 的状态在 runtime pool 层。
 
 ## 不变量
 
 1. **Workspace 与 worktree 路径不相交**。Workspace 路径由 `paths.team_home(team_name) / "team-workspace"` 派生（或 config 显式指定 `root_path`）；worktree 路径由 `WorktreeManager.config` 决定。两者不能互相覆盖也不能互为子目录。`.team` 符号链接挂在**成员 workspace** 里（`mount_into_workspace`）——worktree 隔离只移动 cwd、不移动 workspace（[[F_69]]），所以挂载点跟着 workspace 走。`mount_into_worktree` 目前无调用方。
 2. **`paths.py` 是路径布局唯一真相源**。Workspace 的默认根、artifact 子目录、挂载点都从 `team_home(team_name)` 推出；`agent_configurator.create_workspace_manager` 不绕开 `team_home`。Config 的 `root_path` 是用户覆盖入口，不是新增散落硬编码的理由。
-3. **挂载点统一为 `.team/{team_name}/`**。成员 workspace 通过 `mount_into_workspace(workspace_root)` 在 `workspace_root/.team/{team_name}` 上建符号链接。`TeamWorkspaceRail` 与 prompts 中宣告的挂载路径必须严格一致；rail 解析 `.team/` 前缀时既兼容 hub 布局（`.team/{team_name}/...`）也兼容 legacy 布局（`.team/...`），但**新代码只生成 hub 布局**。
+3. **挂载点统一为 `.team/{team_name}/`，且它保留**。成员 workspace 通过 `mount_into_workspace(workspace_root)` 在 `workspace_root/.team/{team_name}` 上建符号链接。`TeamWorkspaceRail` 与 prompts 中宣告的挂载路径必须严格一致；rail 解析 `.team/` 前缀时既兼容 hub 布局（`.team/{team_name}/...`）也兼容 legacy 布局（`.team/...`），但**新代码只生成 hub 布局**。**挂载点服务的是团队产物协同，不服务 Skill**——[[F_79]] 拆掉的是 `skills/` 视图目录，不是这个挂载点；不要因为"团队不再分发 Skill"就把 `.team` 一起删掉。同理 `_mount_directory` 的 symlink → junction → copytree 三级降级保留：受限运行时下**产物**仍必须到达 agent。
 4. **Windows 兜底用 junction，不静默忽略**。`os.symlink` 在 Windows 因权限失败时退到 `mklink /J`；junction 创建失败抛 `OSError`，不允许 catch-all 当成功处理。
 5. **文件锁是单一权威，按文件路径粒度**。LOCAL 模式：`TeamWorkspaceManager._locks` 是唯一权威。DISTRIBUTED 模式：leader 节点是唯一权威，远端通过 `WorkspaceLockRequestEvent` 走 messager 请求 leader 决议。同一文件不存在两个并发持锁人。
 6. **过期锁自动回收，可重入刷新**。`WorkspaceFileLock.is_expired()` 由 `acquired_at + timeout_seconds` 与当前时间判定。`acquire_lock` 遇到他人过期锁直接覆盖；遇到自己持的锁刷新时间，不算冲突。
@@ -41,6 +43,8 @@
 8. **`version_control=False` 时所有 git 路径全是 no-op**。`auto_commit` 返回 `None`、`get_history` 返回 `[]`、`pull` 返回 `False`、`push` 返回 `True`（无事可做即成功）。disabled 状态下 manager 仍要保证目录与 artifact_dirs 创建到位。
 9. **`mode` 与 `messager` 是两个维度，不允许耦合误判**。`WorkspaceMode.DISTRIBUTED` 由 config 显式声明（或 blueprint 根据 `remote_url` 推断后注入）；leader/follower 关系由 `leader_id == node_id` 决定。这两个维度解耦——LOCAL + 单机多进程也合法（leader 持锁，远端经 messager 请求）。
 10. **冲突策略不变更已写文件的语义**。`ConflictStrategy` 决定**写之前**怎么裁决，不决定写之后怎么修复——`LOCK` 拒写、`MERGE` 让 git rebase 处理、`LAST_WRITE_WINS` 不检查。事件 `WORKSPACE_CONFLICT` 是观察口，不是回滚手段。
+11. **团队共享工作区不存 Skill 实体，只存一份可见性声明**。workspace 根下有且只有 `skills-visibility.json`（`paths.SKILL_VISIBILITY_FILENAME`，路径 `paths.team_skill_visibility_path(team_name)`）；**不得**再出现 `skills/` 目录、软链视图或 Skill 副本。`initialize()` 通过 `_seed_team_skill_visibility()` 播种它：allow 为空（继承全库）、`bootstrapped_from="team_workspace:initialize"`、rank `AUTHORITY_SEED`，且**永不覆盖已存文档**，所以运维改过的授权能扛住每一次重启。播种失败只记 warning——声明缺失读回来是"无限制"，比拒绝启动 workspace 好。**这是团队级声明的唯一播种者**：嵌入方（如 jiuwenswarm 的团队装配、团队生命周期管理器）只准解析路径并透传，不得再写这份文件。多个写者只在"人人都播空 allow"时才碰巧无害，任何一处改播非空 allow，结果就退化成按调用顺序决定。要预置授权就改这里，或走 `skill/visibility.py` 的显式授权接口（`AUTHORITY_EXPLICIT`）。
+12. **声明文件是 workspace 管理的权威状态，不参与 mount 合并**。`_merge_existing_mount_contents` 把陈旧挂载目录里的**用户产物**合并回权威 workspace，但 `_MOUNT_MERGE_SKIP_NAMES`（`skills-visibility.json` 及其锁 sidecar）恒被跳过：一份滞留在旧挂载目录里的 allow-list 若被提升为团队授权，等于让一个被遗忘的名单静默决定全队可见范围。
 
 ## 接口契约
 
@@ -100,7 +104,7 @@ def mount_into_workspace(self, workspace_root: str) -> None
 def mount_into_worktree(self, worktree_path: str) -> None
 ```
 
-- `initialize`：建目录、建 artifact 子目录、建 `skills/`；`version_control=True` 时按 mode 决定 `git init` 或 `git clone`，已存在 `.git` 时跳过。
+- `initialize`：建目录、建 artifact 子目录、播种团队 Skill 可见性声明 `skills-visibility.json`（`_seed_team_skill_visibility`，不建 `skills/` 目录——见不变量 11）；`version_control=True` 时按 mode 决定 `git init` 或 `git clone`，已存在 `.git` 时跳过。
 - `mount_into_workspace`：在成员 workspace 下建 `.team/{team_name}` 符号链接。
 - `mount_into_worktree`：在 worktree 下建 `.team` 符号链接，并把 `.agent/` `.team/` 追加到 `.gitignore`。
 
@@ -191,6 +195,7 @@ class WorkspaceMetaTool(TeamTool):
 | 字段 | 持有者 | 创建时机 | 释放时机 |
 |---|---|---|---|
 | `workspace_path` 目录 + artifact_dirs | 文件系统 | `agent_configurator.create_workspace_manager` 阶段 `os.makedirs`，`initialize()` 再补 artifact_dirs | 由 `TeamBackend.clean_team` 走 `paths` 统一路径清理 |
+| `skills-visibility.json`（团队声明） | 文件系统（workspace 根） | `initialize()` 调 `_seed_team_skill_visibility()` 播种，已存在则原样保留 | 随 workspace 目录清理；运行期由 `skill/visibility.py` 的授权接口改写，manager 不再碰 |
 | `_locks: dict[str, WorkspaceFileLock]` | manager 实例 | 构造时空 dict | 进程结束 / manager GC；按 timeout 自动过期 |
 | `_lock_mutex: asyncio.Lock` | manager 实例 | 构造时 | 同上 |
 | `_pending_lock_requests` | manager 实例（远端节点） | `_remote_acquire/release_lock` 发请求时填 future | 收到对应 `WorkspaceLockResponseEvent` 时 set_result |
@@ -206,18 +211,25 @@ class WorkspaceMetaTool(TeamTool):
 
 ```
 team_home(team_name)/                     # paths.team_home
-├── team-workspace/                       # ← 默认 workspace_path
+├── team-workspace/                       # ← 默认 workspace_path，= paths.team_workspace_dir
 │   ├── .git/                             # version_control=True 时
 │   ├── artifacts/{code,docs,reports}/    # config.artifact_dirs
 │   ├── trajectories/
-│   ├── skills/
+│   ├── skills-visibility.json            # paths.team_skill_visibility_path（团队可见性声明，非 Skill 实体）
 │   └── team-memory/                      # paths.team_memory_dir
 └── workspaces/                           # 成员 workspace 容器（不归本子系统）
-    └── {member}_workspace/
+    └── {member}_workspace/               # paths.team_member_workspace_dir
+        ├── skills-visibility.json        # paths.member_skill_visibility_path（成员可见性声明）
         └── .team/{team_name} → ../../team-workspace
 ```
 
-成员若在独立 workspace 模式（`stable_base=True`），`independent_member_workspace(member)` 通过符号链接被纳入 `team_home(team_name)/workspaces/{member}_workspace`；`.team` 挂载点不变。
+Skill 实体不在上面这棵树里，它在 `paths.global_skills_dir()`（默认
+`{openjiuwen_home}/workspace/skills`，宿主可用 `configure_global_skills_dir()` 改指）。
+团队与成员各自那份 `skills-visibility.json` 只声明"看得见库里的哪些 Skill"，
+两份文档由 `skill/visibility.py::compose_skill_visibility` 合成后喂给
+`rails/team_skill_use_rail.py::TeamSkillUseRail`。见 [[F_79]]。
+
+成员若在独立 workspace 模式（`stable_base=True`），`independent_member_workspace(member)` 通过符号链接被纳入 `team_home(team_name)/workspaces/{member}_workspace`；`.team` 挂载点不变。符号链接建不出来时（受限运行时）成员留在自己的独立 workspace 里跑，声明文件跟着它走——`workspace_layout.ensure_team_member_workspace_link` 已不再整份 copytree 成员 workspace（[[F_79]] D6）。
 
 ## 与其它 spec 的关系
 
@@ -227,3 +239,4 @@ team_home(team_name)/                     # paths.team_home
 - **S_08 team-tools-contract**：`WorkspaceMetaTool` 是团队工具的一员，ToolCard id `team.workspace_meta` 遵循 `team.{name}` 前缀约定；其描述文本走 `tools/locales/descs/<lang>/workspace/workspace_meta.md`，不在代码里写长文案。
 - **Worktree 子系统（`harness.tools.worktree`）**：路径不相交是不变量 1。`mount_into_worktree` 是 worktree → workspace 的单向挂载入口，不存在反向 mount；worktree 改动不通过 workspace 的 git 历史走，二者各自独立。
 - **事件总线（`schema/events.py`）**：所有 workspace 事件类型在统一 `TeamEvent` 枚举与 `_EVENT_TYPE_MAP` 中登记。新增 workspace 事件必须先扩 schema，再扩 manager / rail——不允许本子系统私造事件。
+- **Team Skill 层（`agent_teams/skill/` + `rails/team_skill_use_rail.py`）**：本子系统只**播种**团队那份 `skills-visibility.json`（不变量 11）并把它挡在 mount 合并之外（不变量 12）。文档语义、合成规则、authority 排名、`core.team.skill_use` 的装配全在 Skill 层，见 [[F_79]]。分界线是：workspace 管"这个文件在磁盘上怎么活"，Skill 层管"这个文件说了什么"。

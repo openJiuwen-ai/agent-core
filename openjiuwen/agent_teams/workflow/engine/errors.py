@@ -27,7 +27,19 @@ class SchemaError(WorkflowError):
 
 
 class BackendError(WorkflowError):
-    """The agent backend raised while producing a result."""
+    """The agent backend raised while producing a result.
+
+    Carries the tokens the failed call actually burned (``budget_rail``.
+    ``call_tokens``), so a failed/budget-exhausted agent's consumption is not
+    silently dropped from the AGENT_FAILED event and the UI's "Run tokens"
+    stays consistent with "Team budget" (the shared ledger that already
+    counted those tokens). ``None`` when the backend could not attribute
+    tokens (e.g. the failure happened before any model call).
+    """
+
+    def __init__(self, message: str, *, tokens: int | None = None) -> None:
+        super().__init__(message)
+        self.tokens = tokens
 
 
 class WorkflowAborted(BaseException):

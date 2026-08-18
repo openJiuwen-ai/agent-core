@@ -14,6 +14,7 @@ from openjiuwen.harness.rails.evolution import (
     EvolutionInterruptRail,
     EvolutionRail,
     EvolutionTriggerPoint,
+    MemberSkillEvolutionRail,
     SkillEvolutionRail,
     SummarizeTrajectoriesInput,
     TeamSkillEvolutionRail,
@@ -23,7 +24,10 @@ from openjiuwen.harness.rails.evolution import (
     TrajectoryRail,
 )
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
-from openjiuwen.harness.rails.llm_retry_rail import LLMRetryRail
+from openjiuwen.harness.rails.model_anomaly_detection_rail import (
+    ModelAnomalyDetectionRail,
+    ToolLoopCompactConfig,
+)
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload, AskUserRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
@@ -78,10 +82,12 @@ __all__ = [
     "EvolutionTriggerPoint",
     "ExternalMemoryRail",
     "HeartbeatRail",
-    "LLMRetryRail",
+    "ModelAnomalyDetectionRail",
+    "ToolLoopCompactConfig",
     "LspRail",
     "McpRail",
     "MemoryRail",
+    "MemberSkillEvolutionRail",
     "PermissionInterruptRail",
     "ProgressiveToolRail",
     "SafetyPromptRail",

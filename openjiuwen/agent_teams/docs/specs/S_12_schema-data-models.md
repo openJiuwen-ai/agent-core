@@ -14,8 +14,8 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-08-11 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）。其余条目见 `docs/features/` |
+| 最近一次修订日期 | 2026-08-12 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）、`F_79_team-scoped-skill-library-and-visibility.md`（team 成员的 `skills` / `enable_skill_discovery` 落 build_spec 前被清空）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -97,8 +97,9 @@ Spec 上：
 
 `_ensure_builtin_infra_registered()` 是延迟登记，幂等：第一次调用注入内置
 `inprocess` / `pyzmq` / `sqlite` / `postgresql` / `mysql` / `memory`，后续
-no-op。`RailSpec` 和 `BuiltinToolSpec` 走同样模式（`_RAIL_TYPE_REGISTRY` /
-`_TOOL_TYPE_REGISTRY`），由 `_ensure_builtin_*_registered` 延迟填充。
+no-op。`RailSpec` 和 `BuiltinToolSpec` 走同样模式，但注册表已换成 provider 形态
+（`_RAIL_PROVIDER_REGISTRY` / `_TOOL_PROVIDER_REGISTRY`，见 [[F_32]]），由
+`ensure_builtin_elements_registered()` 延迟填充。
 
 ### I-5 `model_pool` 与 `model_router` 互斥
 
@@ -349,7 +350,7 @@ session checkpoint 全局状态根上有一个 `teams` namespace：
 | `enable_task_planning` | `bool` | `False` |
 | `restrict_to_sandbox` | `bool` | `False` |
 | `auto_create_workspace` | `bool` | `True` |
-| `completion_timeout` | `float` | `600.0` |
+| `completion_timeout` | `Optional[float]` | `600.0`（NativeHarness 的慢轮次告警阈值；`None` 禁用告警） |
 | `progressive_tool` | `Optional[ProgressiveToolSpec]` | `None` |
 | `approval_required_tools` | `Optional[list[str]]` | `None` |
 
@@ -389,14 +390,22 @@ tool / rail / sys_operation 与 `DeepAgentSpec.build()` 同模式。
 | `type` | `str`（注册表 key） |
 | `params` | `dict[str, Any]` |
 
-`build(*, language, workspace=None) -> AgentRail`：从 `_RAIL_TYPE_REGISTRY`
-解析；构造时若 `language` 在 `__init__` 签名里则自动注入；`type=="skill_use"`
-且未传 `skills_dir` 时从 workspace 的 `skills` 节点解析 + 默认 CLI 目录
-（`~/.openjiuwen/workspace/skills`、`~/.claude/skills`）。
+`build(*, language, workspace=None, context=None) -> AgentRail`：先
+`ensure_builtin_elements_registered()`，再从 `_RAIL_PROVIDER_REGISTRY` 取 provider
+（class registry `_RAIL_TYPE_REGISTRY` 已删，见 [[F_32]]）；`context=None` 时合成一个
+只带 `language` + `workspace` 的最小 `BuildContext`。`type=="core.skill_use"` 且未传
+`skills_dir` 时由 provider 从 workspace 的 `skills` 节点解析 + 默认 CLI 目录
+（`~/.openjiuwen/workspace/skills`、`~/.claude/skills`）——**这是单 agent / subagent
+路径**，[[F_79]] 未改动它。
 
-注册：`register_rail_type(name, cls)`。内置：`task_planning` / `skill_use` /
-`subagent` / `filesystem` + 可选 `context_engineering` / `token_tracking` /
-`tool_tracking` / `ask_user` / `confirm_interrupt`（importable 时登记）。
+注册：`@harness_element` 声明（`harness/manifest/builtin_elements.py`）。内置 `core.*`
+rail 见该模块；team 侧另有 `agent_teams/rails/elements.py` 声明的 7 个 `core.team.*`。
+
+**team 成员例外**：`AgentConfigurator` 在写 `build_spec` 时把 `skills` 置空、
+`enable_skill_discovery` 置 `False`，使通用 `core.skill_use` 的自动挂载条件不成立，
+改挂 `core.team.skill_use`（`TeamSkillUseRail`）。`agent_spec.skills` 不丢弃——它作为
+成员 `skills-visibility.json` 的 seed allow-list 进 team rail 的 params。见 [[F_79]]
+与 [[S_13]]。
 
 #### `BuiltinToolSpec`
 
@@ -833,7 +842,7 @@ state["teams"][team_name] = {
     "context": ...,               # TeamRuntimeContext.model_dump()
     "model_allocator_state": ...  # allocator 的 round-robin 游标 / 已分配 model_id 等
     "lifecycle": ...,             # TeamLifecycle 字符串
-    "checkpoints": ...,           # {name: message_count} 命名 fork 快照
+    "checkpoints": ...,           # {name: {count, description, created_by}} 命名 fork 快照
 }
 ```
 

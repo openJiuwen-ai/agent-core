@@ -133,7 +133,7 @@ class SpawnTeammateTool(_SpawnToolBase):
     #: Fork properties and the description slot that documents them. Schema
     #: and prose are gated together — the model must never read about an
     #: argument it has no way to pass.
-    _FORK_PARAMS = ("fork", "fork_source", "compact")
+    _FORK_PARAMS = ("fork", "fork_source", "fork_mode")
     _FORK_SLOT = "fork_usage"
 
     def __init__(
@@ -204,9 +204,16 @@ class SpawnTeammateTool(_SpawnToolBase):
                     "type": "string",
                     "description": t("spawn_teammate", "fork_source"),
                 },
-                "compact": {
-                    "type": "boolean",
-                    "description": t("spawn_teammate", "compact"),
+                "fork_mode": {
+                    "type": "string",
+                    "enum": [
+                        "full",
+                        "before",
+                        "after",
+                        "keep_before_compact_after",
+                        "keep_after_compact_before",
+                    ],
+                    "description": t("spawn_teammate", "fork_mode"),
                 },
             })
         self.card.input_params = {
@@ -266,7 +273,7 @@ class SpawnTeammateTool(_SpawnToolBase):
                 member_name,
                 fork_value,
                 fork_source=inputs.get("fork_source"),
-                compact=inputs.get("compact", False),
+                fork_mode=inputs.get("fork_mode") or "",
             )
         return self._from_result(
             result,
@@ -296,6 +303,7 @@ class CheckpointTool(TeamTool):
             )
         )
         self.team = team
+        self.t = t
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -317,7 +325,29 @@ class CheckpointTool(TeamTool):
             )
         name = inputs["name"]
         count = self.team.snapshot_context_length()
-        self.team.store_checkpoint(name, count)
+        description = inputs.get("description") or ""
+        conflict = self.team.store_checkpoint(
+            name,
+            count,
+            description=description,
+            created_by=self.team.member_name,
+        )
+        if conflict is not None:
+            return ToolOutput(
+                success=False,
+                error=self.t(
+                    "checkpoint", "duplicate",
+                    name=name,
+                    created_by=conflict.get("created_by") or "?",
+                    description=conflict.get("description") or "",
+                ),
+            )
+        # Notify the leader as a framework event (not a member message): the
+        # name reaches the leader's context as an announcement-only note, so
+        # the leader is never prompted to reply. The leader's own checkpoints
+        # need no self-notification.
+        if not self.team.is_leader:
+            await self.team.publish_checkpoint_created(name, count, description)
         return ToolOutput(
             success=True,
             data={"name": name, "message_count": count},
@@ -328,6 +358,54 @@ class CheckpointTool(TeamTool):
             return output.error or "Failed to save checkpoint"
         d = output.data
         return f"Checkpoint '{d['name']}' saved at message {d['message_count']}"
+
+
+class ListCheckpointsTool(TeamTool):
+    """List all named checkpoints available for fork inheritance."""
+
+    def __init__(self, team: TeamBackend, t: Translator):
+        super().__init__(
+            ToolCard(
+                id="team.list_checkpoints",
+                name="list_checkpoints",
+                description=t("list_checkpoints"),
+            )
+        )
+        self.team = team
+        self.card.input_params = {"type": "object", "properties": {}, "required": []}
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        checkpoints = self.team.list_checkpoints()
+        items = [
+            {
+                "name": name,
+                "message_count": record.get("count"),
+                "description": record.get("description", ""),
+                "created_by": record.get("created_by", ""),
+            }
+            for name, record in sorted(checkpoints.items())
+        ]
+        return ToolOutput(
+            success=True,
+            data={"checkpoints": items, "count": len(items)},
+        )
+
+    def map_result(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to list checkpoints"
+        checkpoints = output.data["checkpoints"]
+        if not checkpoints:
+            return "No checkpoints"
+        lines = []
+        for item in checkpoints:
+            line = (
+                f"name={item['name']} message_count={item['message_count']} "
+                f"created_by={item['created_by']}"
+            )
+            if item.get("description"):
+                line += f' description="{item["description"]}"'
+            lines.append(line)
+        return "\n".join(lines)
 
 
 class SpawnHumanAgentTool(_SpawnToolBase):

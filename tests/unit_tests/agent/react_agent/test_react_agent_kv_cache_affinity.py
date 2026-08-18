@@ -10,7 +10,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.core.context_engine.base import ContextWindow, ContextWindowChange
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.foundation.kv_cache import (
+    KV_CACHE_EPHEMERAL_TAIL_METADATA,
+    KVCacheAffinityConfig,
+)
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, SystemMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -106,6 +109,13 @@ def _msg(role: str, content: str) -> BaseMessage:
     return UserMessage(content=content)
 
 
+def _attachment(content: str = "attachment") -> UserMessage:
+    return UserMessage(
+        content=content,
+        metadata={KV_CACHE_EPHEMERAL_TAIL_METADATA: True},
+    )
+
+
 def _tool(name: str) -> ToolInfo:
     return ToolInfo(
         name=name,
@@ -170,6 +180,93 @@ async def test_affinity_invoke_adds_session_agent_hint_kwargs() -> None:
     assert result.content == "ok"
     assert llm.invoke_kwargs["session_id"] == "sess_affinity"
     assert llm.invoke_kwargs["parent_session_id"] == "sess_affinity"
+
+
+@pytest.mark.asyncio
+async def test_attachment_tail_is_evicted_after_normal_inference() -> None:
+    session = Session(session_id="sess_affinity")
+    context = _FakeContext(
+        window=_window([_msg("user", "q1"), _attachment()]),
+        change=None,
+    )
+    llm = _FakeAffinityLLM()
+    agent = _agent()
+    agent.set_llm(llm)
+
+    result = await agent._railed_model_call(_ctx(agent, session, context))
+
+    assert result.content == "ok"
+    assert llm.evict_calls == []
+    assert llm.invoke_kwargs["kv_action"] == "evict"
+    assert llm.invoke_kwargs["target"] == "messages"
+    assert llm.invoke_kwargs["manage_request"] is False
+    # system + user + attachment; the range is half-open.
+    assert llm.invoke_kwargs["msg_start"] == 2
+    assert llm.invoke_kwargs["msg_end"] == 3
+
+
+@pytest.mark.asyncio
+async def test_displaced_attachment_tail_does_not_send_duplicate_pure_management() -> None:
+    session = Session(session_id="sess_affinity")
+    old_messages = [
+        _msg("system", "system"),
+        _msg("user", "q1"),
+        _attachment("old attachment"),
+    ]
+    new_window = _window([
+        _msg("user", "q1"),
+        _msg("assistant", "a1"),
+        _msg("user", "q2"),
+        _attachment("new attachment"),
+    ])
+    context = _FakeContext(
+        window=new_window,
+        change=ContextWindowChange(
+            old_messages=old_messages,
+            old_tools=[],
+            msg_start=2,
+            msg_end=3,
+        ),
+    )
+    llm = _FakeAffinityLLM()
+    agent = _agent()
+    agent.set_llm(llm)
+
+    await agent._railed_model_call(_ctx(agent, session, context))
+
+    assert llm.evict_calls == []
+    assert llm.invoke_kwargs["manage_request"] is False
+    assert llm.invoke_kwargs["msg_start"] == len(new_window.get_messages()) - 1
+    assert llm.invoke_kwargs["msg_end"] == len(new_window.get_messages())
+
+
+@pytest.mark.asyncio
+async def test_real_body_change_still_sends_pure_management_before_tail_evict() -> None:
+    session = Session(session_id="sess_affinity")
+    old_messages = [
+        _msg("system", "system"),
+        _msg("user", "old q"),
+        _attachment(),
+    ]
+    context = _FakeContext(
+        window=_window([_msg("user", "new q"), _attachment()]),
+        change=ContextWindowChange(
+            old_messages=old_messages,
+            old_tools=[],
+            msg_start=1,
+            msg_end=3,
+        ),
+    )
+    llm = _FakeAffinityLLM()
+    agent = _agent()
+    agent.set_llm(llm)
+
+    await agent._railed_model_call(_ctx(agent, session, context))
+
+    assert len(llm.evict_calls) == 1
+    assert llm.evict_calls[0]["msg_start"] == 1
+    assert llm.evict_calls[0]["msg_end"] == 3
+    assert llm.invoke_kwargs["manage_request"] is False
 
 
 @pytest.mark.asyncio
@@ -336,6 +433,39 @@ async def test_affinity_disabled_does_not_detect_or_evict_or_add_agent_hint_kwar
     assert llm.evict_calls == []
     assert "session_id" not in llm.invoke_kwargs
     assert "parent_session_id" not in llm.invoke_kwargs
+
+
+@pytest.mark.asyncio
+async def test_affinity_disabled_attachment_does_not_enable_kvc_behavior() -> None:
+    session = Session(session_id="sess_disabled")
+    context = _FakeContext(
+        window=_window([_msg("user", "query"), _attachment()]),
+        change=ContextWindowChange(
+            old_messages=[_msg("user", "old"), _attachment("old attachment")],
+            old_tools=[],
+            msg_start=0,
+            msg_end=2,
+        ),
+    )
+    llm = _FakeAffinityLLM()
+    agent = _agent(enable_affinity=False)
+    agent.set_llm(llm)
+
+    result = await agent._railed_model_call(_ctx(agent, session, context))
+
+    assert result.content == "ok"
+    assert context.detected_windows == []
+    assert llm.evict_calls == []
+    for key in (
+        "session_id",
+        "parent_session_id",
+        "kv_action",
+        "target",
+        "manage_request",
+        "msg_start",
+        "msg_end",
+    ):
+        assert key not in llm.invoke_kwargs
 
 
 @pytest.mark.asyncio

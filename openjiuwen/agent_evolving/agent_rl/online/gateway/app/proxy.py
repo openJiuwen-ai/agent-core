@@ -28,6 +28,8 @@ def main() -> None:
     parser.add_argument("--judge-model", default="")
     parser.add_argument("--record-dir", default="records")
     parser.add_argument("--lora-repo-root", default="")
+    parser.add_argument("--anthropic-max-completion-tokens", type=int, default=0)
+    parser.add_argument("--tool-parser-name", default="")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -40,6 +42,8 @@ def main() -> None:
         judge_model=args.judge_model,
         record_dir=args.record_dir,
         lora_repo_root=args.lora_repo_root,
+        anthropic_max_completion_tokens=args.anthropic_max_completion_tokens,
+        tool_parser_name=args.tool_parser_name,
         log_level=args.log_level,
     )
     app = build_app_from_config(config)

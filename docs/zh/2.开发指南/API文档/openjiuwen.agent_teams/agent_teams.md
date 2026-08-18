@@ -97,7 +97,7 @@ build() -> TeamAgent
 * **enable_task_planning**(bool, 可选): 启用任务规划护栏。默认值：`False`。
 * **restrict_to_sandbox**(bool, 可选): 限制文件操作到沙箱目录。默认值：`False`。
 * **auto_create_workspace**(bool, 可选): 自动创建工作空间目录。默认值：`True`。
-* **completion_timeout**(float, 可选): 完成超时时间（秒）。默认值：`600.0`。
+* **completion_timeout**(Optional[float], 可选): 慢轮次告警阈值（秒）。默认值：`600.0`；`None` 表示禁用告警。
 * **progressive_tool**(ProgressiveToolSpec, 可选): 渐进式工具加载配置。默认值：`None`。
 * **approval_required_tools**(list[str], 可选): 需要 Leader 审批的工具名称（仅队友）。默认值：`None`。
 

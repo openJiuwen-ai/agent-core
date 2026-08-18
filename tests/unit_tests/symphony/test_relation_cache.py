@@ -5,9 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import openjiuwen.symphony.orchestration.graph.matcher.cache as cache_module
 from filelock import FileLock
 
+import openjiuwen.symphony.orchestration.graph.matcher.cache as cache_module
+import openjiuwen.symphony.orchestration.graph.matcher.ontology as matcher_module
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
 from openjiuwen.symphony import (
     ArtifactSpec,
@@ -16,14 +17,13 @@ from openjiuwen.symphony import (
     OrchestrationService,
     ParameterSpec,
 )
+from openjiuwen.symphony.orchestration.graph.matcher.cache import RelationCacheStats, RelationMatchCache
+from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
 from openjiuwen.symphony.orchestration.graph.models import (
     LLMMatch,
     RelationCandidate,
     SkillRegistry,
 )
-from openjiuwen.symphony.orchestration.graph.matcher.cache import RelationCacheStats, RelationMatchCache
-import openjiuwen.symphony.orchestration.graph.matcher.ontology as matcher_module
-from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
 from openjiuwen.symphony.shared.fingerprint import coerce_fingerprint
 
 
@@ -219,6 +219,49 @@ async def test_internal_matcher_reuses_cache_and_preserves_order(tmp_path: Path)
     assert len(first_llm.calls) == 1
     assert second_llm.calls == []
     assert second.manifest_metadata()["relation_cache"]["reused_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_internal_matcher_reports_global_candidate_progress_across_cache_windows(tmp_path: Path) -> None:
+    fingerprints = [_fingerprint(item) for item in ("a", "b", "c", "d", "e", "f")]
+    candidates = [
+        _candidate("a", "b"),
+        _candidate("a", "c"),
+        _candidate("a", "d"),
+        _candidate("a", "e"),
+        _candidate("a", "f"),
+    ]
+    registry = SkillRegistry(skills={item.id: item for item in fingerprints})
+    path = tmp_path / "relation_matches.json"
+    await OntologyMatcher(
+        _CountingLLM(),
+        fingerprints=fingerprints,
+        cache_path=path,
+        batch_size=1,
+        max_workers=2,
+        require_consensus=False,
+    ).match(registry, candidates[:1])
+    progress: list[tuple[str, dict]] = []
+    matcher = OntologyMatcher(
+        _CountingLLM(),
+        fingerprints=fingerprints,
+        cache_path=path,
+        batch_size=1,
+        max_workers=2,
+        require_consensus=False,
+        progress=lambda event, _current, _total, details: progress.append((event, details)),
+    )
+
+    await matcher.match(registry, candidates)
+
+    completed = [
+        details["completed_candidate_count"]
+        for event, details in progress
+        if event in {"matching_start", "batch_done", "matching_done"}
+    ]
+    assert completed == [1, 2, 3, 3, 3, 4, 5, 5]
+    assert all(details["total_candidate_count"] == 5 for _event, details in progress)
+    assert all(details["reused_candidate_count"] == 1 for _event, details in progress)
 
 
 @pytest.mark.asyncio

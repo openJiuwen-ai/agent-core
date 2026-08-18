@@ -298,7 +298,7 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
                         "collaboration": {
                             "name": "Collaboration",
                             "description": "Collaboration capabilities.",
-                            "leaf_ids": [leaf.id for leaf in leaves],
+                            "leaf_refs": ["l0001", "l0002", "l0003"],
                         }
                     }
                 },
@@ -336,7 +336,7 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
         leaves = [TreeNode(id="left", name="Left"), TreeNode(id="right", name="Right")]
         responses = iter(
             [
-                {"groups": {"candidate": {"name": "Candidate", "leaf_ids": ["left", "right"]}}},
+                {"groups": {"candidate": {"name": "Candidate", "leaf_refs": ["l0001", "l0002"]}}},
                 {"decisions": []},
                 {"decisions": []},
             ]
@@ -354,17 +354,174 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
         leaves = [TreeNode(id="left", name="Left"), TreeNode(id="right", name="Right")]
         responses = iter(
             [
-                {"groups": {"candidate": {"leaf_ids": ["left"]}}},
-                {"groups": {"candidate": {"leaf_ids": ["left"]}}},
+                {"groups": {"candidate": {"leaf_refs": ["l0001"]}}},
+                {"matches": {}},
+                {"matches": {}},
             ]
         )
         builder._call_llm_json = lambda prompt, **kwargs: next(responses)
 
-        with self.assertRaisesRegex(ValueError, "omitted 1 leaf ids"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "completion for scope 'parent' with 2 leaves.*target mismatch.*l0002",
+        ):
             getattr(builder, "_discover_equivalence_candidates")(
                 TreeNode(id="parent", name="Parent"),
                 leaves,
                 verbose=False,
+            )
+
+    def test_equivalence_candidates_correct_unknown_leaf_name_with_short_refs(self) -> None:
+        builder = self._builder()
+        leaves = [TreeNode(id="wechat-tools", name="Weixin"), TreeNode(id="slack-tools", name="Slack")]
+        responses = iter(
+            [
+                {"groups": {"candidate": {"leaf_refs": ["weixin"]}}},
+                {"groups": {"candidate": {"leaf_refs": ["l0001", "l0002"]}}},
+            ]
+        )
+        prompts: list[str] = []
+
+        def call_llm_json(prompt: str, **kwargs) -> dict:
+            del kwargs
+            prompts.append(prompt)
+            return next(responses)
+
+        builder._call_llm_json = call_llm_json
+
+        groups = getattr(builder, "_discover_equivalence_candidates")(
+            TreeNode(id="parent", name="Parent"),
+            leaves,
+            verbose=False,
+        )
+
+        self.assertEqual(groups["candidate"]["leaf_ids"], ["slack-tools", "wechat-tools"])
+        self.assertNotIn("leaf_refs", groups["candidate"])
+        self.assertNotIn("sample_skill_ids", prompts[0])
+        self.assertNotIn("slack-tools", prompts[0])
+        self.assertNotIn("wechat-tools", prompts[0])
+        self.assertIn("Use only these leaf refs: l0001, l0002", prompts[1])
+
+    def test_equivalence_candidates_complete_missing_refs_after_correction_in_large_scope(self) -> None:
+        builder = self._builder()
+        leaves = [TreeNode(id=f"skill-{index:04d}", name=f"Skill {index}") for index in range(1, 155)]
+        missing_refs = {"l0093", "l0094", "l0095", "l0096", "l0110"}
+        candidate_groups: dict[str, dict] = {}
+        covered_refs = [f"l{index:04d}" for index in range(1, 155) if f"l{index:04d}" not in missing_refs]
+        for index in range(0, len(covered_refs), 25):
+            candidate_groups[f"candidate-{index // 25 + 1}"] = {"leaf_refs": covered_refs[index : index + 25]}
+        completion = {ref: ["l0001"] for ref in sorted(missing_refs)}
+        invalid_completion = {**completion, "l0093": ["l0093"]}
+        responses = iter(
+            [
+                {"groups": {"candidate": {"leaf_refs": ["weixin"]}}},
+                {"groups": candidate_groups},
+                {"matches": invalid_completion},
+                {"matches": completion},
+            ]
+        )
+        prompts: list[str] = []
+
+        def call_llm_json(prompt: str, **kwargs) -> dict:
+            prompts.append(prompt)
+            if len(prompts) > 1:
+                self.assertTrue(kwargs.get("is_retry"))
+            return next(responses)
+
+        builder._call_llm_json = call_llm_json
+
+        groups = getattr(builder, "_discover_equivalence_candidates")(
+            TreeNode(id="developmentassistant", name="Development Assistant"),
+            leaves,
+            verbose=False,
+        )
+
+        covered_ids = {leaf_id for group in groups.values() for leaf_id in group["leaf_ids"]}
+        self.assertEqual(covered_ids, {leaf.id for leaf in leaves})
+        for ref in missing_refs:
+            skill_id = f"skill-{int(ref[1:]):04d}"
+            completed_group = next(group for group in groups.values() if skill_id in group["leaf_ids"])
+            self.assertIn("skill-0001", completed_group["leaf_ids"])
+            self.assertNotIn("skill-0025", completed_group["leaf_ids"])
+        self.assertEqual(len(prompts), 4)
+        self.assertIn("Use only these leaf refs", prompts[1])
+        self.assertIn("Targeted completion pass", prompts[2])
+        self.assertIn("l0093, l0094, l0095, l0096, l0110", prompts[2])
+        self.assertIn("include the target itself", prompts[3])
+
+    def test_equivalence_candidate_completion_restores_pairs_without_cross_group_clique(self) -> None:
+        builder = self._builder()
+        leaves = [TreeNode(id=leaf_id, name=leaf_id.upper()) for leaf_id in "abcde"]
+        responses = iter(
+            [
+                {
+                    "groups": {
+                        "left": {"leaf_refs": ["l0001", "l0002"]},
+                        "right": {"leaf_refs": ["l0003", "l0004"]},
+                    }
+                },
+                {"matches": {"l0005": ["l0001", "l0003"]}},
+            ]
+        )
+        builder._call_llm_json = lambda prompt, **kwargs: next(responses)
+
+        groups = getattr(builder, "_discover_equivalence_candidates")(
+            TreeNode(id="parent", name="Parent"),
+            leaves,
+            verbose=False,
+        )
+
+        pairs = getattr(builder, "_candidate_pairs_from_groups")({leaf.id: leaf for leaf in leaves}, groups)
+
+        self.assertEqual(
+            pairs,
+            [("a", "b"), ("a", "e"), ("c", "d"), ("c", "e")],
+        )
+
+    def test_equivalence_candidate_completion_fails_after_second_self_match(self) -> None:
+        builder = self._builder()
+        leaves = [TreeNode(id="left", name="Left"), TreeNode(id="right", name="Right")]
+        responses = iter(
+            [
+                {"groups": {"candidate": {"leaf_refs": ["l0001"]}}},
+                {"matches": {"l0002": ["l0002"]}},
+                {"matches": {"l0002": ["l0002"]}},
+            ]
+        )
+        builder._call_llm_json = lambda prompt, **kwargs: next(responses)
+
+        with self.assertRaisesRegex(ValueError, "include the target itself"):
+            getattr(builder, "_discover_equivalence_candidates")(
+                TreeNode(id="parent", name="Parent"),
+                leaves,
+                verbose=False,
+            )
+
+    def test_equivalence_candidate_completion_rejects_unknown_refs(self) -> None:
+        builder = self._builder()
+        leaves = [TreeNode(id="left", name="Left"), TreeNode(id="right", name="Right")]
+        responses = iter(
+            [
+                {"groups": {"candidate": {"leaf_refs": ["l0001"]}}},
+                {"matches": {"l0002": ["weixin"]}},
+                {"matches": {"l0002": ["weixin"]}},
+            ]
+        )
+        builder._call_llm_json = lambda prompt, **kwargs: next(responses)
+
+        with self.assertRaisesRegex(ValueError, "unknown refs.*weixin"):
+            getattr(builder, "_discover_equivalence_candidates")(
+                TreeNode(id="parent", name="Parent"),
+                leaves,
+                verbose=False,
+            )
+
+    def test_equivalence_candidate_completion_rejects_duplicate_normalized_targets(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate normalized target refs"):
+            getattr(TreeBuilder, "_validate_candidate_completion")(
+                {"matches": {"l0002": [], " l0002 ": []}},
+                {"l0002"},
+                {"l0001", "l0002"},
             )
 
     def test_pairwise_components_do_not_bridge_an_explicit_negative_pair(self) -> None:

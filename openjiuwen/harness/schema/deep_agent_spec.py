@@ -200,9 +200,6 @@ class ProgressiveToolSpec(BaseModel):
     """
 
     enabled: bool = True
-    always_visible_tools: list[str] = []
-    default_visible_tools: list[str] = []
-    max_loaded_tools: int = 12
 
 
 class SysOperationSpec(BaseModel):
@@ -471,7 +468,7 @@ class DeepAgentSpec(BaseModel):
     enable_task_planning: bool = False
     restrict_to_sandbox: bool = False
     auto_create_workspace: bool = True
-    completion_timeout: float = 600.0
+    completion_timeout: float | None = 600.0
     progressive_tool: Optional[ProgressiveToolSpec] = None
     approval_required_tools: Optional[list[str]] = None
     context_engine_config: Optional[Any] = None
@@ -610,6 +607,7 @@ class DeepAgentSpec(BaseModel):
             completion_timeout=self.completion_timeout,
             context_engine_config=self.context_engine_config,
             kv_cache_affinity_config=self.kv_cache_affinity_config,
+            trajectory_span_processor=getattr(build_ctx, "trajectory_span_processor", None),
             **self._progressive_tool_kwargs(),
         )
 
@@ -638,9 +636,6 @@ class DeepAgentSpec(BaseModel):
         pt = self.progressive_tool
         return {
             "progressive_tool_enabled": pt.enabled,
-            "progressive_tool_always_visible_tools": pt.always_visible_tools,
-            "progressive_tool_default_visible_tools": pt.default_visible_tools,
-            "progressive_tool_max_loaded_tools": pt.max_loaded_tools,
         }
 
 

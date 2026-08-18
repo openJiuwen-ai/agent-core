@@ -42,6 +42,7 @@ def build_sample(
     response_ids: list[int],
     response_logprobs: list[float],
     tool_calls: list[dict[str, Any]],
+    response_token_mask: Optional[list[int]] = None,
     request_extras: Optional[dict[str, Any]] = None,
     sample_id: Optional[str] = None,
     created_at: Optional[str] = None,
@@ -71,7 +72,8 @@ def build_sample(
         "trajectory": {
             "input_ids": input_ids,
             "attention_mask": [1] * len(input_ids),
-            "response_mask": [0] * len(prompt_ids) + [1] * len(response_ids),
+            "response_mask": [0] * len(prompt_ids)
+            + (response_token_mask if response_token_mask is not None else [1] * len(response_ids)),
             "prompt_text": prompt_text,
             "prompt_ids": prompt_ids,
             "response_text": response_text,

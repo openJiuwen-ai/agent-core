@@ -11,6 +11,7 @@ import pytest
 
 from openjiuwen.core.foundation.kv_cache import (
     cancel_pending_session_kv_cache_signals,
+    context_compressor_cache_identity,
     dispatch_session_kv_cache_signal,
     evict_session_kv_cache,
     message_range_kwargs,
@@ -40,6 +41,29 @@ def test_team_member_cache_identity_uses_card_id_scope():
         team_member_cache_identity("team-sid", "team-a", "coder")
         == "team:team-sid:team:team-a:member:coder"
     )
+
+
+@pytest.mark.parametrize(
+    ("compressor_type", "suffix"),
+    [
+        ("RoundLevelCompressor", "round-level"),
+        ("CurrentRoundCompressor", "current-round"),
+        ("DialogueCompressor", "dialogue"),
+    ],
+)
+def test_context_compressor_cache_identity_is_a_stable_child(
+    compressor_type,
+    suffix,
+):
+    identity = context_compressor_cache_identity("session-a", compressor_type)
+
+    assert identity.cache_id == f"session-a:compressor:{suffix}"
+    assert identity.parent_cache_id == "session-a"
+
+
+def test_context_compressor_cache_identity_rejects_unknown_type():
+    with pytest.raises(ValueError, match="unsupported context compressor"):
+        context_compressor_cache_identity("session-a", "UnknownCompressor")
 
 
 @pytest.mark.asyncio

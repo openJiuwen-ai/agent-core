@@ -4,15 +4,28 @@ from types import SimpleNamespace
 
 import pytest
 
-from openjiuwen.agent_evolving.trajectory import LLMCallDetail, TrajectoryStep, trajectory_from_steps
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ModelCallInputs
+from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.agent_evolving.trajectory.schema import (
+    RL_COMPLETION_TOKEN_IDS,
+    RL_LOGPROBS,
+    RL_PROMPT_TOKEN_IDS,
+    SESSION_ID,
+    TRAJECTORY_ID,
+    TRAJECTORY_SOURCE,
+)
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans, span_attributes
+from openjiuwen.extensions.observability import semconv
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
+from openjiuwen.harness.rails.evolution import PreparedEvolutionInput
 
 
 class _CollectingUploader:
     def __init__(self) -> None:
         self.batches = []
 
-    async def enqueue(self, batch):
+    async def enqueue(self, batch) -> None:
         self.batches.append(batch)
 
 
@@ -70,15 +83,58 @@ class _DirectReactAgent:
         self._config = _Config()
 
 
-@pytest.mark.asyncio
-async def test_rl_online_rail_before_invoke_enables_token_capture():
-    from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
+def _span(span_id: int, *, prompt: str = "hi", response: str = "hello") -> dict:
+    return {
+        "traceId": "trace-1",
+        "spanId": str(span_id),
+        "name": "llm.call",
+        "startTimeUnixNano": str(span_id),
+        "endTimeUnixNano": str(span_id + 1),
+        "attributes": attributes_from_map(
+            {
+                semconv.GEN_AI_REQUEST_MODEL: "m1",
+                f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+                f"{semconv.GEN_AI_PROMPT}.0.content": prompt,
+                f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+                f"{semconv.GEN_AI_COMPLETION}.0.content": response,
+            }
+        ),
+    }
 
+
+def _trajectory(*spans: dict) -> Trajectory:
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map(
+                            {
+                                TRAJECTORY_ID: "traj-1",
+                                SESSION_ID: "s1",
+                                TRAJECTORY_SOURCE: "rl_online",
+                            }
+                        )
+                    },
+                    "scopeSpans": [{"scope": {"name": "test"}, "spans": list(spans)}],
+                }
+            ]
+        }
+    )
+
+
+def _prepared(trajectory: Trajectory) -> PreparedEvolutionInput:
+    return PreparedEvolutionInput(trajectory=trajectory, messages=())
+
+
+@pytest.mark.asyncio
+async def test_rl_online_rail_before_invoke_enables_token_capture() -> None:
     rail = RLOnlineRail(
         session_id="s1",
         gateway_endpoint="http://gateway.local",
         tenant_id="user-1",
         uploader=_CollectingUploader(),
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
     ctx = AgentCallbackContext(agent=_Agent(), inputs=None)
 
@@ -108,6 +164,7 @@ async def test_rl_online_rail_supports_direct_react_agent_config():
             "version": "v2",
             "path": "/tmp/lora/v2",
         }),
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
     agent = _DirectReactAgent()
     ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs())
@@ -144,6 +201,7 @@ async def test_rl_online_rail_uses_latest_lora_model_for_one_call():
         lora_default_policy="latest_by_user",
         gateway_api_key="gw-token",
         lora_gateway_client=lora_client,
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
     agent = _Agent()
     ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs())
@@ -179,6 +237,7 @@ async def test_rl_online_rail_skips_lora_when_gateway_has_no_effective_adapter()
             "enabled": False,
             "reason": "latest_lora_not_found",
         }),
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
     agent = _Agent()
     ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs())
@@ -199,6 +258,7 @@ async def test_rl_online_rail_lora_fallback_disabled_by_default():
         tenant_id="user-1",
         uploader=_CollectingUploader(),
         lora_repo=_FakeLoRARepo(SimpleNamespace(version="v2", path="/tmp/lora/v2")),
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
     agent = _Agent()
     ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs())
@@ -218,139 +278,78 @@ async def test_rl_online_rail_background_evolution_uploads_batch():
         gateway_endpoint="http://gateway.local",
         tenant_id="user-1",
         uploader=uploader,
-    )
-    trajectory = trajectory_from_steps(
-        execution_id="traj-1",
-        session_id="s1",
-        steps=[
-            TrajectoryStep(
-                kind="llm",
-                detail=LLMCallDetail(
-                    model="m1",
-                    messages=[{"role": "user", "content": "hi"}],
-                    response={"role": "assistant", "content": "hello"},
-                ),
-            )
-        ],
-        source="rl_online",
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
 
-    await rail._safe_run_evolution({"trajectory": trajectory})
+    await rail.run_evolution(_prepared(_trajectory(_span(1))))
 
     assert len(uploader.batches) == 1
     assert uploader.batches[0].tenant_id == "user-1"
     assert uploader.batches[0].samples[0].response_text == "hello"
+    assert uploader.batches[0].trajectory_meta.extra[TRAJECTORY_SOURCE] == "rl_online"
 
 
 @pytest.mark.asyncio
-async def test_rl_online_rail_keeps_one_invoke_per_uploaded_batch():
-    from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
+async def test_rl_online_rail_enriches_provider_nested_token_fields_immutably() -> None:
+    rail = RLOnlineRail(
+        session_id="s1",
+        gateway_endpoint="http://gateway.local",
+        tenant_id="user-1",
+        uploader=_CollectingUploader(),
+        trajectory_span_processor=TrajectorySpanProcessor(),
+    )
+    source = _trajectory(_span(1))
+    response = {
+        "choices": [
+            {
+                "prompt_token_ids": [1, 2, 3],
+                "token_ids": [4, 5],
+                "logprobs": [-0.4, -0.5],
+            }
+        ]
+    }
 
+    enriched = rail._enrich_latest_llm(source, response)
+
+    attrs = span_attributes(next(iter(iter_spans(enriched))))
+    assert attrs[RL_PROMPT_TOKEN_IDS] == [1, 2, 3]
+    assert attrs[RL_COMPLETION_TOKEN_IDS] == [4, 5]
+    assert attrs[RL_LOGPROBS] == [-0.4, -0.5]
+    assert RL_PROMPT_TOKEN_IDS not in span_attributes(next(iter(iter_spans(source))))
+
+
+@pytest.mark.asyncio
+async def test_rl_online_rail_uploads_each_prepared_trajectory() -> None:
     uploader = _CollectingUploader()
     rail = RLOnlineRail(
         session_id="s1",
         gateway_endpoint="http://gateway.local",
         tenant_id="user-1",
         uploader=uploader,
-        async_evolution=False,
+        session_done_on_invoke_end=False,
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
 
-    first_invoke = InvokeInputs(query="q1", conversation_id="same-session")
-    await rail.before_invoke(AgentCallbackContext(agent=_Agent(), inputs=first_invoke))
-    await rail.after_model_call(AgentCallbackContext(
-        agent=_Agent(),
-        inputs=ModelCallInputs(
-            messages=[{"role": "user", "content": "q1"}],
-            response={"role": "assistant", "content": "a1"},
-        ),
-    ))
-    await rail.after_invoke(AgentCallbackContext(agent=_Agent(), inputs=first_invoke))
-
-    second_invoke = InvokeInputs(query="q2", conversation_id="same-session")
-    await rail.before_invoke(AgentCallbackContext(agent=_Agent(), inputs=second_invoke))
-    await rail.after_model_call(AgentCallbackContext(
-        agent=_Agent(),
-        inputs=ModelCallInputs(
-            messages=[{"role": "user", "content": "q2"}],
-            response={"role": "assistant", "content": "a2"},
-        ),
-    ))
-    await rail.after_invoke(AgentCallbackContext(agent=_Agent(), inputs=second_invoke))
+    await rail.run_evolution(_prepared(_trajectory(_span(1, prompt="q1", response="a1"))))
+    await rail.run_evolution(_prepared(_trajectory(_span(2, prompt="q2", response="a2"))))
 
     assert len(uploader.batches) == 2
-    assert [len(batch.samples) for batch in uploader.batches] == [1, 1]
-    assert uploader.batches[1].samples[0].response_text == "a2"
+    assert [batch.samples[0].response_text for batch in uploader.batches] == ["a1", "a2"]
 
 
 @pytest.mark.asyncio
-async def test_rl_online_rail_uploads_extracted_token_fields():
-    from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
-
+async def test_rl_online_rail_keeps_full_prepared_trajectory() -> None:
     uploader = _CollectingUploader()
     rail = RLOnlineRail(
         session_id="s1",
         gateway_endpoint="http://gateway.local",
         tenant_id="user-1",
         uploader=uploader,
-        async_evolution=False,
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
+    trajectory = _trajectory(*(_span(index, prompt=f"q{index}", response=f"a{index}") for index in range(201)))
 
-    invoke = InvokeInputs(query="q", conversation_id="same-session")
-    await rail.before_invoke(AgentCallbackContext(agent=_Agent(), inputs=invoke))
-    await rail.after_model_call(AgentCallbackContext(
-        agent=_Agent(),
-        inputs=ModelCallInputs(
-            messages=[{"role": "user", "content": "q"}],
-            response={
-                "role": "assistant",
-                "content": "a",
-                "choices": [
-                    {
-                        "prompt_token_ids": [1, 2, 3],
-                        "token_ids": [4, 5],
-                        "logprobs": [-0.4, -0.5],
-                    }
-                ],
-            },
-        ),
-    ))
-    await rail.after_invoke(AgentCallbackContext(agent=_Agent(), inputs=invoke))
-
-    assert len(uploader.batches) == 1
-    sample = uploader.batches[0].samples[0]
-    assert sample.prompt_ids == [1, 2, 3]
-    assert sample.response_tokens == [4, 5]
-    assert sample.logprobs == [-0.4, -0.5]
-    assert sample.meta["turn_id"] == 0
-    assert sample.meta["source"] == "rl_online"
-    assert sample.meta["tenant_id"] == "user-1"
-
-
-@pytest.mark.asyncio
-async def test_rl_online_rail_uploads_full_single_invoke_batch():
-    from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
-
-    uploader = _CollectingUploader()
-    rail = RLOnlineRail(
-        session_id="s1",
-        gateway_endpoint="http://gateway.local",
-        tenant_id="user-1",
-        uploader=uploader,
-        async_evolution=False,
-    )
-
-    invoke = InvokeInputs(query="q", conversation_id="same-session")
-    await rail.before_invoke(AgentCallbackContext(agent=_Agent(), inputs=invoke))
-    for index in range(201):
-        await rail.after_model_call(AgentCallbackContext(
-            agent=_Agent(),
-            inputs=ModelCallInputs(
-                messages=[{"role": "user", "content": f"q{index}"}],
-                response={"role": "assistant", "content": f"a{index}"},
-            ),
-        ))
-    await rail.after_invoke(AgentCallbackContext(agent=_Agent(), inputs=invoke))
+    await rail.run_evolution(_prepared(trajectory))
 
     assert len(uploader.batches) == 1
     assert len(uploader.batches[0].samples) == 201
-    assert uploader.batches[0].samples[0].response_text == "a0"

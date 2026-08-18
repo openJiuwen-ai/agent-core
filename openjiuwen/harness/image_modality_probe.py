@@ -55,6 +55,7 @@ _IMAGE_INPUT_UNSUPPORTED_ERROR_PATTERNS = (
     "image_url is not supported",
     "images are not supported",
     "multimodal input is not supported",
+    "not a multimodal model",
     "not support image input",
     "unsupported image",
     "vision is not supported",

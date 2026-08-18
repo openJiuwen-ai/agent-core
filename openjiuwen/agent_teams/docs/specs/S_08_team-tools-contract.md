@@ -128,7 +128,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     后端的能力门是工具显式校验，不是隐藏断言。
     **门控的粒度可以细到属性**：`spawn_teammate` 永远注册，但上下文继承
     （F_75）是可选能力——`fork_enabled()`（即 `TeamAgentSpec.enable_fork`）
-    为 False 时它的 `fork` / `fork_source` / `compact` 三个属性不进 schema，
+    为 False 时它的 `fork` / `fork_source` / `fork_mode` 三个属性不进 schema，
     `checkpoint` 工具整个不注册。**schema、描述、工具注册三者必须由同一个
     信号门控**：描述里的 `{{fork_usage}}` 槽与这些属性同生同灭（不变量 6），
     否则 leader 会围绕一个它填不了的参数反复权衡——读得到、用不了的提示词
@@ -419,7 +419,7 @@ openjiuwen/agent_teams/tools/locales/
 
 | 集合常量 | 成员 |
 |---|---|
-| `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_teammate`, `spawn_human_agent`, `spawn_bridge_agent`, `spawn_external_cli`, `shutdown_member`, `approve_plan`, `approve_tool`, `create_task`, `update_task`, `swarmflow`, `async_tasks_list`, `async_task_output`, `async_task_cancel` |
+| `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_teammate`, `spawn_human_agent`, `spawn_bridge_agent`, `spawn_external_cli`, `shutdown_member`, `approve_plan`, `approve_tool`, `list_checkpoints`（gate `fork_enabled()`，同 `checkpoint`）, `create_task`, `update_task`, `swarmflow`, `async_tasks_list`, `async_task_output`, `async_task_cancel` |
 | `MEMBER_ONLY_TOOLS` | `claim_task`, `submit_plan` |
 | `MEMBER_ONLY_TOOLS_SCHEDULED` | `member_complete_task`, `submit_plan` |
 | `SHARED_TOOLS` | `view_task`, `send_message`, `checkpoint`（gate `fork_enabled()`），`workspace_meta`（后者是死条目——不在 `all_tools`，由 `TeamToolRail.init` 单独 append） |

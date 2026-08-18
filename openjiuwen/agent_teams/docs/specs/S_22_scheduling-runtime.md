@@ -57,12 +57,12 @@
     `IN_REVIEW`、阈值 `_STALE_CLAIM_SECONDS`=10min），使自主基类切换不波及本模式。代价是
     同款缺陷仍在：成员 idle 跨长 pause 后 resume，其活跃任务会被 `now - updated_at` 误判为
     stale。迁移到 idle 时钟是 `F_65_runtime-idle-clock-stall-nudge.md` 记录的已知遗留。
-16. **review feedback callback 是可选旁路，不是调度判定的一部分**（F_73）：宿主只可通过
-    `BuildContext.extras["review_feedback_handler"]` 注入；每个失败 settle 后按
-    `(task_id, review_round)` 至多派发一次后台 callback，异常只记录、不改变任务状态。团队看板
-    全部终态时，scheduler 先等待当前 callback 收敛，再至多调用一次可选
-    `handler.on_team_completed(...)`。scheduler 不读取轨迹、不归因 Skill、不调用 LLM，也不写
-    演进存储。
+16. **review feedback callback 是可选旁路，不是调度判定的一部分**（F_73）：scheduler 只从
+    host harness 查找已声明式挂载且启用该能力的 `TeamSkillEvolutionRail`；每个失败 settle 后按
+    `(task_id, review_round)` 至多后台调用一次 `rail.handle_review_feedback(...)`，异常只记录、不改变
+    任务状态。团队看板全部终态时，scheduler 先等待当前 callback 收敛，再至多调用一次
+    `rail.finalize_review_feedback(...)`。scheduler 不读取轨迹、不归因 Skill、不调用 LLM、不写演进
+    存储，也不负责 Rail 的构造和审批传输。
 
 ## 接口契约
 
@@ -89,12 +89,16 @@ class TeamScheduler:
     async def on_event(self, event: CoordinationEvent) -> None: ...
 ```
 
-可选宿主 callback 使用 duck-typed 契约，不进入 `SchedulerHost`：
+可选 Rail 入口使用 duck-typed 契约，不进入 `SchedulerHost`：
 
 ```python
-handler = build_context.extras.get("review_feedback_handler")
+rail = next(
+    candidate
+    for candidate in host.harness.find_rails(TeamSkillEvolutionRail)
+    if candidate.review_feedback_evolution_enabled
+)
 
-await handler({
+await rail.handle_review_feedback({
     "team_id": str,
     "session_id": str,
     "task_id": str,
@@ -105,14 +109,14 @@ await handler({
     "feedback": str,
 })
 
-await handler.on_team_completed({
+await rail.finalize_review_feedback({
     "team_id": str,
     "session_id": str,
 })
 ```
 
-`handler` 或 `on_team_completed` 不存在时等价于未启用。task callback 可以是同步 callable，也可以
-返回 awaitable；`on_team_completed` 同理。callback 不得依赖 scheduler 重试提供 exactly-once
+未挂载或未启用对应 Rail 时等价于未启用。task callback 由 scheduler 作为后台任务执行；终态入口
+等待已启动 callback 后执行。callback 不得依赖 scheduler 重试提供 exactly-once
 语义：去重状态只在当前 scheduler 进程内有效。
 
 kernel 侧：

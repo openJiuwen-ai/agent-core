@@ -37,6 +37,7 @@ configure_skill_evolution(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     auto_save=False,
     language="cn",
 )
@@ -52,6 +53,7 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     auto_save=False,
 )
@@ -111,7 +113,7 @@ class SkillEvolutionRail(
     review_runtime: EvolutionReviewRuntime,
     subject_kind: str = "skill",
     language: str = "cn",
-    trajectory_store: Optional[TrajectoryStore] = None,
+    trajectory_span_processor: TrajectorySpanProcessor,
     eval_interval: int = 5,
     evolution_total_timeout_secs: float = 600.0,
     generate_records_llm_policy: LLMInvokePolicy = ...,
@@ -139,7 +141,7 @@ class SkillEvolutionRail(
 * **review_runtime** (EvolutionReviewRuntime): Shared active-review state for review subagent bindings.
 * **subject_kind** (str): Subject kind used by this rail (`"skill"` or `"swarm-skill"` normalized).
 * **language** (str): Prompt language, commonly `"cn"` or `"en"`.
-* **trajectory_store** (TrajectoryStore, optional): Store for captured execution trajectories.
+* **trajectory_span_processor** (TrajectorySpanProcessor): Shared processor already registered with the runtime's OpenTelemetry provider.
 * **eval_interval** (int): Number of presentations between experience scoring checks. Must be at least 1.
 * **evolution_total_timeout_secs** (float): Background evolution timeout budget.
 * **generate_records_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for record generation.
@@ -246,7 +248,7 @@ When `async_evolution=True`, the rail snapshots callback data before the backgro
 
 ### evolution_store -> EvolutionStore
 
-Evolution store for skill data. This is distinct from `trajectory_store`.
+Evolution store for Skill experience data. Execution trajectory capture remains in the injected processor and the Rail's clean window.
 
 ### store -> EvolutionStore
 
@@ -326,6 +328,7 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     auto_save=False,
 )

@@ -9,7 +9,7 @@ import dataclasses
 import os
 import sys
 import uuid
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager, suppress
 import warnings
 from pathlib import Path
 from typing import (
@@ -182,8 +182,42 @@ _DEEP_EVENTS = frozenset(
 
 _SUB_AGENTS_DIR = "sub_agents"
 
+# Tools that remain visible to the model when progressive tool loading is
+# enabled.  The registration switch still decides whether a tool exists at
+# all; this list only controls exposure for tools that are registered.
+_DEFAULT_DIRECT_TOOL_NAMES = frozenset(
+    {
+        "tool_search",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "grep",
+        "bash",
+        "task_tool",
+        "ask_user",
+        "todo_create",
+        "todo_list",
+        "todo_get",
+        "todo_modify",
+        "skill_tool",
+        "memory_search",
+        "memory_get",
+        "paid_search",
+        "fetch_webpage",
+        "write_memory",
+        "edit_memory",
+        "read_memory",
+        "ltm_search",
+        "ltm_search_summary",
+        "send_file_to_user",
+    }
+)
+
 
 _ROUND_BOUNDARY = object()
+
+FreshInputContextFactory = Callable[[], AbstractAsyncContextManager[None]]
 
 
 def _render_identity_prompt(prompt_builder: SystemPromptBuilder, language: str) -> str:
@@ -248,6 +282,7 @@ class DeepAgent(BaseAgent):
         self._interaction_send_lock = asyncio.Lock()
         self._interaction_wakeup = asyncio.Event()
         self._interaction_started = False
+        self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
         self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
         self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
         super().__init__(card)
@@ -255,6 +290,19 @@ class DeepAgent(BaseAgent):
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
         """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
+
+    def set_fresh_input_context_factory(
+        self,
+        factory: Optional[FreshInputContextFactory],
+    ) -> None:
+        """Set or clear the host context entered around fresh input enqueue.
+
+        The context runs while the interaction send and control locks are held.
+        It must not re-enter interaction or goal-control APIs that acquire them.
+        """
+        if factory is not None and not callable(factory):
+            raise TypeError("fresh input context factory must be callable")
+        self._fresh_input_context_factory = factory
 
     def register_task_resource_cleanup(
         self,
@@ -364,6 +412,14 @@ class DeepAgent(BaseAgent):
     def _initial_configure(self, config: DeepAgentConfig) -> None:
         """First-time setup: persist config, create the inner ReActAgent, and queue rails."""
         self._deep_config = config
+        # Exposure is an agent-level registration policy.  Configure it before
+        # the factory adds ``config.tools`` and before rails can register their
+        # own tools; the AbilityManager then resolves each card exactly once at
+        # registration time.
+        self.ability_manager.set_tool_exposure_policy(
+            config.progressive_tool_enabled,
+            direct_tool_names=_DEFAULT_DIRECT_TOOL_NAMES,
+        )
         if config.card is not None:
             self.card = config.card
             self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
@@ -375,6 +431,10 @@ class DeepAgent(BaseAgent):
         """Hot-reconfigure an already-running agent without restarting it."""
         previous_config = self._deep_config
         self._deep_config = config
+        self.ability_manager.set_tool_exposure_policy(
+            config.progressive_tool_enabled,
+            direct_tool_names=_DEFAULT_DIRECT_TOOL_NAMES,
+        )
         if config.card is not None:
             self.card = config.card
             self.ability_manager.set_owner_id(self._resolve_tool_owner_id(config))
@@ -619,6 +679,30 @@ class DeepAgent(BaseAgent):
             )
             if prail is not None:
                 self._pending_rails.append(prail)
+
+        self._queue_online_training_rail_from_env()
+
+    def _queue_online_training_rail_from_env(self) -> None:
+        """Queue the env-selected online training Rail when enabled by the host process."""
+
+        rail = self._build_online_training_rail_from_env()
+        if rail is None:
+            return
+        self._pending_rails.append(rail)
+        logger.info("[DeepAgent] %s added from environment", type(rail).__name__)
+
+    def _build_online_training_rail_from_env(self) -> AgentRail | None:
+        """Build the env-selected online training Rail without duplicating existing rails."""
+
+        try:
+            from openjiuwen.agent_evolving.agent_rl.online.core.rail_factory import (
+                build_online_training_rail_from_env,
+            )
+        except Exception as exc:
+            logger.warning("[DeepAgent] online training rail factory unavailable: %s", exc)
+            return None
+
+        return build_online_training_rail_from_env(self.configured_rails())
 
     def set_react_agent(
         self,
@@ -1057,7 +1141,10 @@ class DeepAgent(BaseAgent):
             # Reused subagent instances skip full init; still refresh cwd so
             # create_subagent does not have to mutate the parent's ContextVar.
             self._apply_inherited_artifact_cwd()
+            await self._register_online_training_rail_from_env_if_needed()
             return
+
+        self._queue_online_training_rail_from_env()
 
         # Initialize ContextVar CWD in the current asyncio Task context.
         # Each agent sets its own CWD unconditionally — ContextVar copies
@@ -1089,7 +1176,7 @@ class DeepAgent(BaseAgent):
             await self.init_workspace()
 
         await self._resolve_read_image_multimodal()
-        
+
         self._sync_prompt_builder_references()
 
         # Unregister stale rails left over from a previous configure() cycle.
@@ -1107,7 +1194,12 @@ class DeepAgent(BaseAgent):
         # sort is stable, so rails sharing a priority keep the order the
         # caller listed them in.
         rail_init_timings: List[tuple] = []
-        for rail_inst in sorted(self._pending_rails, key=lambda r: r.priority, reverse=True):
+        initialized_rails = sorted(
+            self._pending_rails,
+            key=lambda r: r.priority,
+            reverse=True,
+        )
+        for rail_inst in initialized_rails:
             if isinstance(rail_inst, TaskCompletionRail):
                 self._task_completion_rail = rail_inst
             if isinstance(rail_inst, DeepAgentRail):
@@ -1117,10 +1209,34 @@ class DeepAgent(BaseAgent):
                 (type(rail_inst).__name__, init_rail(rail_inst, self))
             )
             await self._register_rail_selective(rail_inst)
+
+        # ProgressiveToolRail owns the BM25 catalog. Build its initial
+        # snapshot only after every pending startup rail has registered its
+        # tools. Tools registered later are handled by the deferred-tool
+        # registry-version check on the next tool_search call.
+        seen_rails: set[int] = set()
+        for rail_inst in self._registered_rails:
+            if id(rail_inst) in seen_rails:
+                continue
+            seen_rails.add(id(rail_inst))
+            if isinstance(rail_inst, ProgressiveToolRail):
+                await rail_inst.finalize_startup_async(self)
         log_rail_init_breakdown(rail_init_timings)
         self._pending_rails.clear()
         self._sync_prompt_builder_references()
         self._initialized = True
+
+    async def _register_online_training_rail_from_env_if_needed(self) -> None:
+        """Register the env-selected online Rail if env became available after configure()."""
+
+        if not self._initialized:
+            return
+
+        rail = self._build_online_training_rail_from_env()
+        if rail is None:
+            return
+        await self.register_rail(rail)
+        logger.info("[DeepAgent] %s registered from environment", type(rail).__name__)
 
     def _needs_workspace_init(self) -> bool:
         """Check if workspace initialization is needed."""
@@ -1271,6 +1387,22 @@ class DeepAgent(BaseAgent):
                 if spec.prompt_mode is not None
                 else self._deep_config.prompt_mode
             ),
+            # Preserve the parent's explicit decision by default.  A child
+            # using a model with different image capabilities may override it.
+            "enable_read_image_multimodal": (
+                spec.enable_read_image_multimodal
+                if spec.enable_read_image_multimodal is not None
+                else self._deep_config.enable_read_image_multimodal
+            ),
+            # A dynamically created subagent runs under its own conversation
+            # ID, but it remains part of the parent's KVC-affinity lifecycle.
+            # Without inheriting this config the child ReActAgent never
+            # installs the affinity hooks, so its normal model requests omit
+            # agent_hint even though TaskTool supplies conversation_id and
+            # parent_session_id.
+            "kv_cache_affinity_config": (
+                self._deep_config.kv_cache_affinity_config
+            ),
             "subagents": None,
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
@@ -1287,13 +1419,23 @@ class DeepAgent(BaseAgent):
                 )
 
                 factory_kwargs = dict(spec.factory_kwargs or {})
+                # Browser models may be independent from the parent model and
+                # therefore retain their factory's automatic image-capability
+                # probe.  Do not forward the generic inherited value twice.
+                browser_create_kwargs = dict(create_kwargs)
+                browser_create_kwargs.pop("enable_read_image_multimodal", None)
                 browser_model = create_kwargs["model"]
                 browser_parent_model = getattr(
                     browser_model,
                     "_browser_agent_parent_model",
                     None,
                 )
-                if (
+                if spec.enable_read_image_multimodal is not None:
+                    factory_kwargs.setdefault(
+                        "enable_read_image_multimodal",
+                        spec.enable_read_image_multimodal,
+                    )
+                elif (
                     browser_model is self._deep_config.model
                     or browser_parent_model is self._deep_config.model
                 ):
@@ -1310,7 +1452,7 @@ class DeepAgent(BaseAgent):
                     factory_kwargs["browser_capabilities"] = list(browser_capabilities)
                 return self._bind_inherited_artifact_root(
                     create_browser_agent(
-                        **create_kwargs,
+                        **browser_create_kwargs,
                         **factory_kwargs,
                     )
                 )
@@ -2944,8 +3086,16 @@ class DeepAgent(BaseAgent):
         Hosts should pass the product ``Session`` they own.  When ``session`` is
         omitted, a fresh agent session is created with id ``\"default\"`` (useful
         for unit tests and simple embeddings).
+
+        Lifecycle callbacks awaited while the start lock is held must not
+        re-enter ``start()`` or ``stop()`` on this agent.
         """
         async with self._interaction_start_lock:
+            if self._interaction_started:
+                self._ensure_interaction_running()
+            elif not self._try_transition_interaction_phase(InteractionPhase.IDLE):
+                raise RuntimeError("interaction_terminated")
+
             if session is None:
                 from openjiuwen.core.session.agent import create_agent_session
 
@@ -2989,7 +3139,6 @@ class DeepAgent(BaseAgent):
                 emit_event=self._emit_interaction_event,
                 notify_work=self._notify_work,
             )
-            self._interaction_phase = InteractionPhase.IDLE
             self._interaction_started = True
             self._interaction_forwarder_task = asyncio.create_task(
                 self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
@@ -3007,12 +3156,18 @@ class DeepAgent(BaseAgent):
             logger.info("[DeepAgent] Started for session %s", sid)
 
     async def stop(self) -> None:
-        """Terminate the interaction loop and wake any attached output consumer."""
+        """Serialize teardown with start and terminate this interaction runtime."""
+        async with self._interaction_start_lock:
+            await self._stop_interaction_locked()
+
+    async def _stop_interaction_locked(self) -> None:
+        """Teardown helper; awaited callbacks must not re-enter start or stop."""
+        self._fresh_input_context_factory = None
+        self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
         if not self._interaction_started:
             return
-        self._interaction_phase = InteractionPhase.TERMINATED
-        await self._interaction_output.shutdown()
         self._event_manager.discard_all_work()
+        await self._interaction_output.shutdown()
         await self._cancel_active_round(reason="stop")
 
         for task in (self._interaction_supervisor_task, self._interaction_forwarder_task):
@@ -3043,6 +3198,8 @@ class DeepAgent(BaseAgent):
                 await controller.stop()
 
         self._interaction_started = False
+        self._event_manager.discard_all_work()
+        self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
         self._active_interaction_round = None
         self._interaction_round_task = None
 
@@ -3055,12 +3212,14 @@ class DeepAgent(BaseAgent):
         call does not obtain the lease, so an already-attached reader continues
         to receive goal progress (session switch / concurrent attach_goal).
         """
-        if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
-            raise RuntimeError("interaction_terminated")
+        self._ensure_interaction_running()
 
         async with self._interaction_send_lock:
+            self._ensure_interaction_running()
             async with self._interaction_control_lock:
+                self._ensure_interaction_running()
                 stream = await self._attach_output_locked()
+                self._ensure_interaction_running()
                 if self.goal_manager is not None:
                     record = self._load_goal_record_locked()
                     if record is not None and record.status is GoalStatus.ACTIVE:
@@ -3076,11 +3235,29 @@ class DeepAgent(BaseAgent):
         attach and let the existing consumer receive output.  Dispatch modes
         do not apply to ``InteractiveInput`` recovery requests.
         """
-        if not self._interaction_started or self._interaction_phase is InteractionPhase.TERMINATED:
-            raise RuntimeError("interaction_terminated")
+        self._ensure_interaction_running()
 
         async with self._interaction_send_lock:
+            self._ensure_interaction_running()
             await self._send_user(request)
+
+    def _ensure_interaction_running(self) -> None:
+        if not self._is_interaction_running():
+            raise RuntimeError("interaction_terminated")
+
+    def _is_interaction_running(self) -> bool:
+        return self._interaction_started and self._interaction_phase is not InteractionPhase.TERMINATED
+
+    def _try_transition_interaction_phase(self, target: InteractionPhase) -> bool:
+        if not isinstance(target, InteractionPhase):
+            raise TypeError("interaction phase target must be InteractionPhase")
+        if (
+            self._interaction_phase is InteractionPhase.TERMINATED
+            and target is not InteractionPhase.TERMINATED
+        ):
+            return False
+        self._interaction_phase = target
+        return True
 
     async def _send_user(self, request: SendInputRequest) -> None:
         inputs = request.inputs
@@ -3100,6 +3277,7 @@ class DeepAgent(BaseAgent):
             )
 
         async with self._interaction_control_lock:
+            self._ensure_interaction_running()
             if is_resume_input:
                 self._event_manager.push_user(
                     RoundWorkItem.user(
@@ -3143,10 +3321,52 @@ class DeepAgent(BaseAgent):
 
             # Fresh user turn.  Output lease ownership stays with the host via
             # ``attach_output``; send_input never steals or creates a stream.
+            context_factory = self._fresh_input_context_factory
+            if context_factory is None:
+                self._event_manager.push_user(
+                    RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
+                )
+                self._notify_work()
+            else:
+                await self._enqueue_fresh_input_in_context(
+                    context_factory,
+                    request_id=request.request_id,
+                    inputs=inputs,
+                )
+
+    async def _enqueue_fresh_input_in_context(
+        self,
+        context_factory: FreshInputContextFactory,
+        *,
+        request_id: Optional[str],
+        inputs: Dict[str, Any],
+    ) -> None:
+        """Enter host readiness without allowing exit to hide dispatch failure."""
+        context = context_factory()
+        await context.__aenter__()
+        try:
+            self._ensure_interaction_running()
             self._event_manager.push_user(
-                RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
+                RoundWorkItem.user(request_id=request_id, inputs=inputs)
             )
             self._notify_work()
+        except BaseException as primary_error:
+            primary_traceback = primary_error.__traceback__
+            try:
+                await context.__aexit__(
+                    type(primary_error),
+                    primary_error,
+                    primary_traceback,
+                )
+            except BaseException as exit_error:
+                # Dispatch failure is authoritative, including when context
+                # cleanup is cancelled. Preserve cleanup only as the cause.
+                logger.exception(
+                    "[DeepAgent] fresh input context exit failed after dispatch error"
+                )
+                raise primary_error.with_traceback(primary_traceback) from exit_error
+            raise
+        await context.__aexit__(None, None, None)
 
     async def _attach_output_locked(self) -> Optional[InteractionOutputStream]:
         lease = await self._interaction_output.attach()
@@ -3296,20 +3516,26 @@ class DeepAgent(BaseAgent):
 
     async def _supervisor_loop(self) -> None:
         try:
-            while self._interaction_started and self._interaction_phase is not InteractionPhase.TERMINATED:
+            while self._is_interaction_running():
                 if not self._interaction_output.has_consumer():
-                    self._interaction_phase = InteractionPhase.IDLE
+                    if not self._try_transition_interaction_phase(InteractionPhase.IDLE):
+                        return
                     self._interaction_wakeup.clear()
                     await self._interaction_wakeup.wait()
                     continue
 
                 work = self._event_manager.next_work()
                 if work is None:
+                    if not self._is_interaction_running():
+                        return
                     await self._promote_loop_follow_ups()
                     work = self._event_manager.next_work()
                 if work is None:
                     await self._close_idle_output_if_finished()
-                    self._interaction_phase = InteractionPhase.IDLE
+                    if not self._is_interaction_running():
+                        return
+                    if not self._try_transition_interaction_phase(InteractionPhase.IDLE):
+                        return
                     self._interaction_wakeup.clear()
                     if self._event_manager.has_pending_work():
                         continue
@@ -3327,7 +3553,7 @@ class DeepAgent(BaseAgent):
             logger.debug("[DeepAgent] supervisor cancelled")
         except Exception:
             logger.exception("[DeepAgent] supervisor failed")
-            self._interaction_phase = InteractionPhase.IDLE
+            self._try_transition_interaction_phase(InteractionPhase.IDLE)
 
     async def _promote_loop_follow_ups(self) -> None:
         controller = self.loop_controller
@@ -3346,6 +3572,8 @@ class DeepAgent(BaseAgent):
     async def _close_idle_output_if_finished(self) -> None:
         """End an ordinary response stream after its final queued round."""
         async with self._interaction_control_lock:
+            if not self._is_interaction_running():
+                return
             if self._should_keep_interaction_open_locked():
                 return
             await self._interaction_output.finish_current()
@@ -3406,13 +3634,16 @@ class DeepAgent(BaseAgent):
             return False
 
     async def _execute_round(self, work: RoundWorkItem) -> None:
+        if not self._is_interaction_running():
+            return
+        if not self._try_transition_interaction_phase(InteractionPhase.RUNNING):
+            return
         session = self._interaction_session
         task_id = uuid.uuid4().hex
         forwarded = asyncio.Event()
         self._interaction_round_forwarded = forwarded
         self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
         self._event_manager.mark_started(work)
-        self._interaction_phase = InteractionPhase.RUNNING
         try:
             if session is None or not self._interaction_output.has_consumer():
                 return
@@ -3429,6 +3660,8 @@ class DeepAgent(BaseAgent):
             outcome: RoundOutcome = await self.run_one_round(
                 work, task_id, session
             )
+            if not self._is_interaction_running():
+                return
             if outcome.next_work is not None:
                 self._event_manager.push_user(outcome.next_work)
                 self._notify_work()
@@ -3456,8 +3689,7 @@ class DeepAgent(BaseAgent):
                 if not emitted:
                     forwarded.set()
             self._active_interaction_round = None
-            if self._interaction_phase is InteractionPhase.RUNNING:
-                self._interaction_phase = InteractionPhase.IDLE
+            self._try_transition_interaction_phase(InteractionPhase.IDLE)
 
     def _load_goal_record_locked(self) -> Optional[GoalRecord]:
         if self.goal_manager is None:

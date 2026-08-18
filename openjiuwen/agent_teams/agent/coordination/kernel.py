@@ -721,7 +721,7 @@ class CoordinationKernel:
 
     async def wake_mailbox_if_interrupt_cleared(self) -> None:
         host = self._host
-        if host.role != TeamRole.TEAMMATE:
+        if not host.role.is_coordinated_member:
             return
         if host.has_pending_interrupt():
             return

@@ -4,6 +4,7 @@
 """LLM request forwarder for upstream chat completions."""
 
 from __future__ import annotations
+
 import logging
 import time
 from typing import Any
@@ -44,8 +45,6 @@ class Forwarder:
         send_body["stream"] = False
         send_body.pop("stream_options", None)
         send_body.setdefault("model", self.model_id)
-        send_body["logprobs"] = True
-        send_body["top_logprobs"] = 1
         return send_body
 
     async def forward(self, body: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:

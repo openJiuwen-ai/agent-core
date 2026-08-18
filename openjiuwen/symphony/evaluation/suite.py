@@ -39,7 +39,7 @@ from openjiuwen.symphony.models import (
 )
 from openjiuwen.symphony.models._message_trace import message_references_fingerprint
 
-_EVALUATION_CACHE_PROTOCOL = "symphony-evaluation-suite-v3"
+_EVALUATION_CACHE_PROTOCOL = "symphony-evaluation-suite-v5"
 _BUILTIN_EVALUATOR_MODULE = "openjiuwen.symphony.evaluation"
 
 
@@ -613,10 +613,33 @@ class EvaluationSuite:
                 if samples:
                     details[latency_type] = latency_statistics(samples)
                     details[latency_type].pop("samples_ms", None)
+        scored = [result for result in results if result.score is not None]
         evidence = self._deduplicate(item for result in results for item in result.evidence)
         failures = self._deduplicate(item for result in results for item in result.failures)
         suggestions = self._deduplicate(item for result in results for item in result.suggestions)
-        if any(result.status == MetricStatus.ERROR for result in results):
+        if scored:
+            score = sum(float(result.score) for result in scored) / len(scored)
+            status = (
+                MetricStatus.PASS if all(result.status == MetricStatus.PASS for result in scored) else MetricStatus.FAIL
+            )
+            reason = "Metric results were aggregated across the supplied window."
+            if counts["error_count"]:
+                reason = (
+                    "Available scored metric results were aggregated; failed evaluations without scores were excluded."
+                )
+            return MetricResult(
+                metric_id=metric_id,
+                capability_id=template.capability_id,
+                capability_type=template.capability_type,
+                score=score,
+                status=status,
+                reason=reason,
+                details=details,
+                evidence=evidence,
+                failures=failures,
+                suggestions=suggestions,
+            )
+        if counts["error_count"]:
             return MetricResult(
                 metric_id=metric_id,
                 capability_id=template.capability_id,
@@ -624,24 +647,6 @@ class EvaluationSuite:
                 score=None,
                 status=MetricStatus.ERROR,
                 reason="At least one metric evaluation failed in the aggregation window.",
-                details=details,
-                evidence=evidence,
-                failures=failures,
-                suggestions=suggestions,
-            )
-        scored = [result for result in results if result.score is not None]
-        if scored:
-            score = sum(float(result.score) for result in scored) / len(scored)
-            status = (
-                MetricStatus.PASS if all(result.status == MetricStatus.PASS for result in scored) else MetricStatus.FAIL
-            )
-            return MetricResult(
-                metric_id=metric_id,
-                capability_id=template.capability_id,
-                capability_type=template.capability_type,
-                score=score,
-                status=status,
-                reason="Metric results were aggregated across the supplied window.",
                 details=details,
                 evidence=evidence,
                 failures=failures,

@@ -8,8 +8,10 @@ from .models import (
     IterationResult,
     PipelineResult,
     AgentContext,
+    AgentRuntimeBinding,
     AgentRunResult,
     ExecResult,
+    ModelProtocol,
 )
 from .config import PipelineConfig
 from .docker_env import DockerEnvironment
@@ -24,8 +26,10 @@ __all__ = [
     "IterationResult",
     "PipelineResult",
     "AgentContext",
+    "AgentRuntimeBinding",
     "AgentRunResult",
     "ExecResult",
+    "ModelProtocol",
     "PipelineConfig",
     "DockerEnvironment",
     "BaseAgentAdapter",

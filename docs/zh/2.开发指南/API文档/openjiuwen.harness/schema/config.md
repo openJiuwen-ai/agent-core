@@ -107,16 +107,13 @@ class DeepAgentConfig:
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
     auto_create_workspace: bool = True
-    completion_timeout: float = 600.0
+    completion_timeout: Optional[float] = 600.0
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None
     audio_model_config: Optional[AudioModelConfig] = None
     rails: Optional[List[AgentRail]] = None
     progressive_tool_enabled: bool = False
-    progressive_tool_always_visible_tools: List[str] = field(default_factory=list)
-    progressive_tool_default_visible_tools: List[str] = field(default_factory=list)
-    progressive_tool_max_loaded_tools: int = 12
 ```
 
 DeepAgent 运行时配置。
@@ -141,16 +138,13 @@ DeepAgent 运行时配置。
 | `backend` | `Optional[Any]` | `None` | 后端协议实例 |
 | `sys_operation` | `Optional[SysOperation]` | `None` | 系统操作实例 |
 | `auto_create_workspace` | `bool` | `True` | 是否自动创建工作区目录 |
-| `completion_timeout` | `float` | `600.0` | 单次任务循环迭代的最大等待秒数 |
+| `completion_timeout` | `Optional[float]` | `600.0` | 单次任务循环迭代的最大等待秒数；`None` 表示不限时 |
 | `language` | `Optional[str]` | `None` | 提示词语言 |
 | `prompt_mode` | `Optional[str]` | `None` | 提示词模式 |
 | `vision_model_config` | `Optional[VisionModelConfig]` | `None` | 视觉模型配置 |
 | `audio_model_config` | `Optional[AudioModelConfig]` | `None` | 音频模型配置 |
 | `rails` | `Optional[List[AgentRail]]` | `None` | 要注册的 Rails 列表 |
 | `progressive_tool_enabled` | `bool` | `False` | 是否启用渐进式工具暴露 |
-| `progressive_tool_always_visible_tools` | `List[str]` | `[]` | 始终可见的工具名称列表 |
-| `progressive_tool_default_visible_tools` | `List[str]` | `[]` | 默认可见的工具名称列表 |
-| `progressive_tool_max_loaded_tools` | `int` | `12` | 最大同时加载工具数 |
 
 ---
 

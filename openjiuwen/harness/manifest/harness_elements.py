@@ -97,27 +97,6 @@ def _parent_model(context: Any) -> Any:
 class ProgressiveToolInput(ConstructionInput):
     """Construction inputs for progressive tool disclosure."""
 
-    planning_tool_names: list[str] | None = param_field(
-        default=None,
-        description="Alias for progressive_tool_default_visible_tools.",
-    )
-    executor_tool_names: list[str] | None = param_field(
-        default=None,
-        description="Alias for progressive_tool_always_visible_tools.",
-    )
-    default_visible_tools: list[str] | None = param_field(
-        default=None,
-        description="Tools visible by default under progressive disclosure.",
-    )
-    always_visible_tools: list[str] | None = param_field(
-        default=None,
-        description="Tools always kept visible.",
-    )
-    max_loaded_tools: int | None = param_field(
-        default=None,
-        description="Maximum number of concurrently loaded tools.",
-    )
-
 
 def _build_progressive_tool_rail(params: dict[str, Any], context: Any) -> ProgressiveToolRail:
     """Build ProgressiveToolRail from extras model + workspace/language."""
@@ -129,16 +108,6 @@ def _build_progressive_tool_rail(params: dict[str, Any], context: Any) -> Progre
         language=getattr(context, "language", None) or "cn",
     )
     config.progressive_tool_enabled = True
-    if p.get("planning_tool_names") is not None:
-        config.progressive_tool_default_visible_tools = list(p["planning_tool_names"])
-    if p.get("executor_tool_names") is not None:
-        config.progressive_tool_always_visible_tools = list(p["executor_tool_names"])
-    if p.get("default_visible_tools") is not None:
-        config.progressive_tool_default_visible_tools = list(p["default_visible_tools"])
-    if p.get("always_visible_tools") is not None:
-        config.progressive_tool_always_visible_tools = list(p["always_visible_tools"])
-    if p.get("max_loaded_tools") is not None:
-        config.progressive_tool_max_loaded_tools = int(p["max_loaded_tools"])
     return ProgressiveToolRail(config)
 
 
@@ -212,6 +181,36 @@ class SkillCreateInput(ConstructionInput):
     auto_trigger: bool = param_field(default=True, description="Whether threshold auto-trigger is on.")
     tool_call_threshold: int = param_field(default=10, description="Tool-call count threshold.")
     tool_diversity_threshold: int = param_field(default=5, description="Tool diversity threshold.")
+    trajectory_span_processor: Any = context_field(
+        attr="trajectory_span_processor",
+        description="Shared observability trajectory processor.",
+    )
+
+    @classmethod
+    def resolve(cls, params: dict[str, Any] | None, context: Any):
+        """Reject removed threshold knobs instead of silently dropping them."""
+        explicit = set(params or {}) & {"tool_call_threshold", "tool_diversity_threshold"}
+        if explicit:
+            names = ", ".join(sorted(explicit))
+            raise TypeError(f"SkillCreateRail does not support: {names}")
+        return super().resolve(params, context)
+
+
+def _build_skill_create_rail(params: dict[str, Any], context: Any) -> SkillCreateRail:
+    """Build SkillCreateRail with the process-shared trajectory processor.
+
+    Class-based manifest adapters only forward spec parameters.  Skill creation
+    also needs a live processor carried by ``BuildContext``, so resolve the
+    source-tagged input model before constructing the rail rather than falling
+    back to a private processor instance.
+    """
+    resolved = SkillCreateInput.resolve(params, context)
+    return SkillCreateRail(
+        resolved.skills_dir,
+        trajectory_span_processor=resolved.trajectory_span_processor,
+        language=resolved.language,
+        auto_trigger=resolved.auto_trigger,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +269,7 @@ harness_element(
     name=SKILL_CREATE,
     description="Skill-creation evolution rail.",
     input_model=SkillCreateInput,
-    builder=SkillCreateRail,
+    builder=_build_skill_create_rail,
 )
 
 

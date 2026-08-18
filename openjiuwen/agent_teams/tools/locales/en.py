@@ -44,6 +44,15 @@ STRINGS: dict[str, str] = {
     # checkpoint._desc lives in descs/en/member/checkpoint.md
     "checkpoint.name": "Semantic snapshot name (e.g. code-ready). Used by later fork calls to reference this snapshot",
     "checkpoint.description": "Optional description of why this checkpoint was taken",
+    "checkpoint.duplicate": (
+        "⚠️ Snapshot save FAILED: the name '{name}' is already taken by "
+        "{created_by} ({description}). Your snapshot was NOT created, so a "
+        "later fork will not inherit your context. Call checkpoint AGAIN with "
+        "a different name (e.g. '{name}-v2', or append a number / business "
+        "suffix) to actually save it — do not substitute a plain-text "
+        "explanation for the call. Only skip re-calling if your goal was to "
+        "inherit that existing snapshot rather than save your own."
+    ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/team/clean_team.md
     # ===== spawn_teammate ======================================================
@@ -101,10 +110,14 @@ STRINGS: dict[str, str] = {
         "Set to a teammate name (e.g. 'understander') to fork from that member. "
         "The source member must already be spawned and running in-process"
     ),
-    "spawn_teammate.compact": (
-        "Compact the inherited context before injection. Messages before "
-        "the checkpoint are compressed into a summary; messages after "
-        "are kept verbatim. Only effective with a named checkpoint fork"
+    "spawn_teammate.fork_mode": (
+        "Which side of the checkpoint to keep. Options: 'full' (the source's "
+        "whole context, default for fork=true), 'before' (messages before the "
+        "checkpoint, default for a named fork), 'after' (messages from the "
+        "checkpoint onward), 'keep_before_compact_after' (keep before, compress "
+        "after into a summary), 'keep_after_compact_before' (keep after verbatim, "
+        "compress before into a summary). Only effective with a named "
+        "checkpoint fork"
     ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/en/member/spawn_human_agent.md

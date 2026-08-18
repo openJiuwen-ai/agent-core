@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 
@@ -31,6 +34,43 @@ class Task:
     skills: list[str] = field(default_factory=list)
 
 
+class ModelProtocol(str, Enum):
+    """Wire protocol used by an Agent to reach the model gateway."""
+
+    OPENAI_CHAT = "openai_chat"
+    ANTHROPIC_MESSAGES = "anthropic_messages"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRuntimeBinding:
+    """Immutable model endpoint and rollout identity for one Agent attempt."""
+
+    attempt_id: str
+    agent_session_id: str
+    protocol: ModelProtocol
+    model_base_url: str
+    api_key: str = field(repr=False)
+    custom_headers: Mapping[str, str] = field(default_factory=dict)
+    requested_model: str = ""
+    policy_version: str = ""
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "attempt_id",
+            "agent_session_id",
+            "model_base_url",
+            "api_key",
+            "requested_model",
+            "policy_version",
+        ):
+            if not str(getattr(self, field_name)).strip():
+                raise ValueError(f"{field_name} is required")
+        if not isinstance(self.protocol, ModelProtocol):
+            object.__setattr__(self, "protocol", ModelProtocol(self.protocol))
+        headers = {str(name).strip(): str(value) for name, value in self.custom_headers.items() if str(name).strip()}
+        object.__setattr__(self, "custom_headers", MappingProxyType(headers))
+
+
 @dataclass
 class AgentContext:
     iteration: int = 1
@@ -41,6 +81,7 @@ class AgentContext:
     n_input_tokens: int = 0
     n_output_tokens: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
+    runtime: AgentRuntimeBinding | None = None
 
 
 @dataclass

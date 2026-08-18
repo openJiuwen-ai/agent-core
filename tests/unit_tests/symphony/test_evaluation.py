@@ -25,6 +25,8 @@ from openjiuwen.symphony.models import (
     CapabilityFingerprint,
     EvaluationCase,
     EvidenceRef,
+    FailureReason,
+    ImprovementSuggestion,
     Latency,
     MetricResult,
     MetricStatus,
@@ -81,6 +83,24 @@ class FakeLLM:
         return self.response
 
 
+class SequentialFakeLLM:
+    """Return one configured response per invocation without changing FakeLLM semantics."""
+
+    def __init__(self, responses: tuple[Any, ...]) -> None:
+        self.responses = responses
+        self.messages: list[Any] = []
+
+    async def invoke(self, messages: Any, **kwargs: Any) -> Any:
+        response_index = len(self.messages)
+        self.messages.append(messages)
+        if response_index >= len(self.responses):
+            raise AssertionError("unexpected evaluation LLM invocation")
+        response = self.responses[response_index]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 def function_call(call_id: str, name: str, arguments: str = "{}") -> dict[str, Any]:
     return {
         "id": call_id,
@@ -93,8 +113,12 @@ def assistant_calls(*calls: dict[str, Any]) -> dict[str, Any]:
     return {"role": "assistant", "content": None, "tool_calls": list(calls)}
 
 
-def prompt_payload(llm: FakeLLM, index: int = 0) -> dict[str, Any]:
-    prompt = llm.messages[index][0]["content"]
+def llm_prompt(llm: FakeLLM | SequentialFakeLLM, index: int = 0) -> str:
+    return llm.messages[index][0]["content"]
+
+
+def prompt_payload(llm: FakeLLM | SequentialFakeLLM, index: int = 0) -> dict[str, Any]:
+    prompt = llm_prompt(llm, index)
     return json.loads(prompt.split("Evaluation data:\n", maxsplit=1)[1])
 
 
@@ -440,6 +464,208 @@ async def test_window_aggregates_success_and_separate_latency_observations() -> 
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "evaluator_type",
+        "responses",
+        "expected_score",
+        "expected_status",
+        "expected_error_count",
+        "expected_call_count",
+    ),
+    [
+        pytest.param(
+            AccuracyEvaluator,
+            (
+                '{"score": 1, "reason": "first judgment passed"}',
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                '{"score": 1, "reason": "last judgment passed"}',
+            ),
+            1.0,
+            MetricStatus.PASS,
+            1,
+            4,
+            id="accuracy-pass-with-one-invalid-response",
+        ),
+        pytest.param(
+            CompletenessEvaluator,
+            (
+                '{"score": 1, "reason": "first judgment passed"}',
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                '{"score": 1, "reason": "last judgment passed"}',
+            ),
+            1.0,
+            MetricStatus.PASS,
+            1,
+            4,
+            id="completeness-pass-with-one-invalid-response",
+        ),
+        pytest.param(
+            AccuracyEvaluator,
+            (
+                '{"score": 1, "reason": "first judgment passed"}',
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                '{"score": 0, "reason": "last judgment failed"}',
+            ),
+            0.5,
+            MetricStatus.FAIL,
+            1,
+            4,
+            id="accuracy-fail-with-one-invalid-response",
+        ),
+        pytest.param(
+            CompletenessEvaluator,
+            (
+                '{"score": 1, "reason": "first judgment passed"}',
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                '{"score": 0, "reason": "last judgment failed"}',
+            ),
+            0.5,
+            MetricStatus.FAIL,
+            1,
+            4,
+            id="completeness-fail-with-one-invalid-response",
+        ),
+        pytest.param(
+            AccuracyEvaluator,
+            (
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+            ),
+            None,
+            MetricStatus.ERROR,
+            3,
+            6,
+            id="accuracy-all-invalid-responses",
+        ),
+        pytest.param(
+            CompletenessEvaluator,
+            (
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+                "invalid-model-response token=partial-window-secret",
+            ),
+            None,
+            MetricStatus.ERROR,
+            3,
+            6,
+            id="completeness-all-invalid-responses",
+        ),
+    ],
+)
+async def test_llm_window_aggregation_uses_scored_samples_and_retains_error_diagnostics(
+    evaluator_type: type[AccuracyEvaluator] | type[CompletenessEvaluator],
+    responses: tuple[str, ...],
+    expected_score: float | None,
+    expected_status: MetricStatus,
+    expected_error_count: int,
+    expected_call_count: int,
+) -> None:
+    evaluator = evaluator_type()
+    llm = SequentialFakeLLM(responses)
+    cases = tuple(
+        case(
+            case_id=f"partial-window-{evaluator.metric_id}-{index}",
+            expected_output=None,
+            output=f"model-judged output {index}",
+            event_time=datetime(2026, 8, 3, index, tzinfo=UTC),
+        )
+        for index in range(3)
+    )
+
+    result = await EvaluationSuite([evaluator], llm=llm, enable_llm=True).evaluate(
+        fingerprint(),
+        cases,
+        metric_ids=(evaluator.metric_id,),
+    )
+    metric = result.metrics[0]
+    serialized = metric.model_dump_json()
+
+    assert len(llm.messages) == expected_call_count
+    assert metric.status == expected_status
+    if expected_score is None:
+        assert metric.score is None
+    else:
+        assert metric.score == pytest.approx(expected_score)
+    assert metric.details["error_count"] == expected_error_count
+    assert metric.evidence
+    assert metric.failures
+    assert metric.suggestions
+    assert {failure.code for failure in metric.failures} >= {"evaluation_llm_failed"}
+    assert "invalid-model-response" not in serialized
+    assert "partial-window-secret" not in serialized
+    prompts = "\n".join(llm_prompt(llm, index) for index in range(len(llm.messages)))
+    assert "partial-window-secret" not in prompts
+    assert "token=<redacted>" in prompts
+
+
+def test_generic_aggregate_uses_scored_samples_and_preserves_error_diagnostics() -> None:
+    error_evidence = EvidenceRef(
+        evidence_type="evaluation_error",
+        reference="evaluator:generic_metric",
+        description="The evaluator failed without exposing its input payload.",
+    )
+    error_failure = FailureReason(
+        code="generic_evaluator_failed",
+        message="The generic evaluator failed.",
+        severity="error",
+        evidence=(error_evidence,),
+    )
+    error_suggestion = ImprovementSuggestion(
+        code="retry_generic_evaluation",
+        message="Retry the generic evaluator.",
+        priority="medium",
+        related_failures=(error_failure.code,),
+    )
+    results = (
+        MetricResult(
+            metric_id="generic_metric",
+            capability_id="weather",
+            capability_type="skill",
+            score=1.0,
+            status=MetricStatus.PASS,
+            reason="The scored result passed.",
+        ),
+        MetricResult(
+            metric_id="generic_metric",
+            capability_id="weather",
+            capability_type="skill",
+            score=None,
+            status=MetricStatus.ERROR,
+            reason="The generic evaluator failed.",
+            evidence=(error_evidence,),
+            failures=(error_failure,),
+            suggestions=(error_suggestion,),
+        ),
+    )
+
+    aggregated = EvaluationSuite.default().aggregate(results)
+    metric = aggregated.metrics[0]
+
+    assert metric.status == MetricStatus.PASS
+    assert metric.score == 1.0
+    assert (
+        metric.reason
+        == "Available scored metric results were aggregated; failed evaluations without scores were excluded."
+    )
+    assert metric.details["error_count"] == 1
+    assert metric.evidence == (error_evidence,)
+    assert metric.failures == (error_failure,)
+    assert metric.suggestions == (error_suggestion,)
+
+
 @pytest.mark.parametrize(
     ("latency", "expected_details"),
     [
@@ -762,9 +988,14 @@ async def test_exact_match_does_not_discard_significant_output_whitespace() -> N
 
 
 @pytest.mark.asyncio
-async def test_llm_failure_is_error_and_does_not_leak_exception_text() -> None:
-    llm = FakeLLM(RuntimeError("token=super-secret-value"))
-    result = await EvaluationSuite.default(llm=llm, enable_llm=True).evaluate(fingerprint())
+@pytest.mark.parametrize("error_type", [RuntimeError, TimeoutError])
+async def test_llm_failure_is_error_and_does_not_leak_exception_text(
+    error_type: type[RuntimeError] | type[TimeoutError],
+) -> None:
+    llm = FakeLLM(error_type("token=super-secret-value"))
+    result = await EvaluationSuite.default(llm=llm, enable_llm=True).evaluate(
+        fingerprint(), metric_ids=("description_quality",)
+    )
 
     metric = metric_map(result)["description_quality"]
     serialized = metric.model_dump_json()
@@ -774,7 +1005,31 @@ async def test_llm_failure_is_error_and_does_not_leak_exception_text() -> None:
     assert metric.evidence
     assert metric.suggestions
     assert "super-secret-value" not in serialized
-    assert "RuntimeError" in metric.reason
+    assert error_type.__name__ in metric.reason
+    assert len(llm.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_parser_failure_is_not_retried_or_exposed() -> None:
+    class BrokenParserContent:
+        def model_dump(self, *, mode: str) -> dict[str, Any]:
+            raise RuntimeError(f"{mode} token=third-party-parser-secret")
+
+    class AssistantMessage:
+        parser_content = BrokenParserContent()
+        content = '{"score": 1, "reason": "unused fallback"}'
+
+    llm = FakeLLM(AssistantMessage())
+    result = await EvaluationSuite.default(llm=llm, enable_llm=True).evaluate(
+        fingerprint(), metric_ids=("description_quality",)
+    )
+
+    metric = metric_map(result)["description_quality"]
+    serialized = metric.model_dump_json()
+    assert metric.status == MetricStatus.ERROR
+    assert metric.score is None
+    assert len(llm.messages) == 1
+    assert "third-party-parser-secret" not in serialized
 
 
 @pytest.mark.asyncio
@@ -813,6 +1068,8 @@ async def test_llm_response_accepts_assistant_message_content_parts() -> None:
     [
         ['```json\n{"score": 0, "reason": "存在事实性错误。"}\n```'],
         '  ```JSON\n{"score": 0, "reason": "存在事实性错误。"}\n```  ',
+        '```arduino\n{"score": 0, "reason": "存在事实性错误。"}\n```',
+        '```\n{"score": 0, "reason": "存在事实性错误。"}\n```',
     ],
 )
 async def test_llm_response_accepts_complete_json_markdown_fence(response: Any) -> None:
@@ -832,7 +1089,6 @@ async def test_llm_response_accepts_complete_json_markdown_fence(response: Any) 
     [
         '```json\n{"score": 0, "reason": "broken"\n```',
         '说明文字\n```json\n{"score": 0, "reason": "valid JSON but surrounded"}\n```',
-        '```\n{"score": 0, "reason": "untagged fence"}\n```',
         ('```json\n{"score": 0, "reason": "first"}\n```\n```json\n{"score": 1, "reason": "second"}\n```'),
     ],
 )
@@ -843,7 +1099,176 @@ async def test_llm_response_rejects_other_markdown_or_malformed_json(response: s
 
     assert metrics[0].status == MetricStatus.ERROR
     assert metrics[0].score is None
-    assert len(llm.messages) == 1
+    assert len(llm.messages) == 2
+    assert len(metrics[0].failures) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("evaluator_type", [AccuracyEvaluator, CompletenessEvaluator])
+async def test_llm_response_contract_failure_is_repaired_once(
+    evaluator_type: type[AccuracyEvaluator] | type[CompletenessEvaluator],
+) -> None:
+    evaluator = evaluator_type()
+    invalid_response = '```json\n{"score": 1, "reason": "first judgment passed"\n```'
+    llm = SequentialFakeLLM(
+        (
+            invalid_response,
+            '{"score": 1, "reason": "repaired judgment passed"}',
+        )
+    )
+
+    metrics = await EvaluationSuite([evaluator], llm=llm, enable_llm=True).evaluate_case(
+        fingerprint(),
+        case(expected_output=None, output="cloudy"),
+        metric_ids=(evaluator.metric_id,),
+    )
+
+    assert metrics[0].status == MetricStatus.PASS
+    assert metrics[0].score == 1.0
+    assert metrics[0].reason == "repaired judgment passed"
+    assert len(llm.messages) == 2
+    retry_prompt = llm_prompt(llm, 1)
+    assert evaluator.rubric in retry_prompt
+    assert "JSONDecodeError: Expecting ',' delimiter" in retry_prompt
+    assert invalid_response in retry_prompt
+    assert "<previous_invalid_output>" in retry_prompt
+    assert "</previous_invalid_output>" in retry_prompt
+    assert "untrusted data" in retry_prompt
+    assert prompt_payload(llm, 1) == prompt_payload(llm, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("evaluator_type", "invalid_response", "expected_error"),
+    [
+        pytest.param(
+            AccuracyEvaluator,
+            {"reason": "score was omitted"},
+            "TypeError: the response score is missing",
+            id="missing-score",
+        ),
+        pytest.param(
+            AccuracyEvaluator,
+            '{"score": "1", "reason": "score was a string"}',
+            "TypeError: the response score is not numeric",
+            id="non-numeric-score",
+        ),
+        pytest.param(
+            AccuracyEvaluator,
+            '{"score": 0.5, "reason": "score was not binary"}',
+            "ValueError: the response score is not binary",
+            id="non-binary-score",
+        ),
+        pytest.param(
+            CompletenessEvaluator,
+            '{"score": null, "reason": "null is not allowed"}',
+            "TypeError: the response score is not numeric",
+            id="null-score-not-allowed",
+        ),
+        pytest.param(
+            AccuracyEvaluator,
+            '{"score": 1, "reason": " "}',
+            "TypeError: the response reason is missing",
+            id="missing-reason",
+        ),
+    ],
+)
+async def test_llm_response_validation_failure_supplies_specific_retry_diagnostic(
+    evaluator_type: type[AccuracyEvaluator] | type[CompletenessEvaluator],
+    invalid_response: Any,
+    expected_error: str,
+) -> None:
+    evaluator = evaluator_type()
+    llm = SequentialFakeLLM((invalid_response, '{"score": 1, "reason": "repaired"}'))
+
+    metrics = await EvaluationSuite([evaluator], llm=llm, enable_llm=True).evaluate_case(
+        fingerprint(),
+        case(expected_output=None, output="cloudy"),
+        metric_ids=(evaluator.metric_id,),
+    )
+
+    assert metrics[0].status == MetricStatus.PASS
+    assert len(llm.messages) == 2
+    retry_prompt = llm_prompt(llm, 1)
+    assert expected_error in retry_prompt
+    if isinstance(invalid_response, str):
+        assert invalid_response in retry_prompt
+    else:
+        assert json.dumps(invalid_response, ensure_ascii=False) in retry_prompt
+
+
+@pytest.mark.asyncio
+async def test_llm_response_retry_redacts_and_limits_previous_output() -> None:
+    invalid_response = "token=retry-secret," + ("x" * 2_100)
+    llm = SequentialFakeLLM(
+        (
+            invalid_response,
+            '{"score": 1, "reason": "repaired without exposing previous output"}',
+        )
+    )
+
+    result = await EvaluationSuite.default(llm=llm, enable_llm=True).evaluate(
+        fingerprint(), metric_ids=("description_quality",)
+    )
+
+    metric = metric_map(result)["description_quality"]
+    retry_prompt = llm_prompt(llm, 1)
+    previous_output = retry_prompt.split("<previous_invalid_output>\n", maxsplit=1)[1].split(
+        "\n</previous_invalid_output>", maxsplit=1
+    )[0]
+    assert metric.status == MetricStatus.PASS
+    assert len(llm.messages) == 2
+    assert len(previous_output) <= 2_000
+    assert "retry-secret" not in retry_prompt
+    assert "token=<redacted>" in previous_output
+    assert "retry-secret" not in metric.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_llm_response_retry_does_not_use_arbitrary_repr() -> None:
+    class UnsafeValue:
+        def __repr__(self) -> str:
+            return "token=unsafe-repr-secret"
+
+    llm = SequentialFakeLLM(
+        (
+            {"reason": UnsafeValue()},
+            '{"score": 1, "reason": "repaired without rendering arbitrary objects"}',
+        )
+    )
+
+    result = await EvaluationSuite.default(llm=llm, enable_llm=True).evaluate(
+        fingerprint(), metric_ids=("description_quality",)
+    )
+
+    metric = metric_map(result)["description_quality"]
+    assert metric.status == MetricStatus.PASS
+    assert len(llm.messages) == 2
+    assert "unsafe-repr-secret" not in llm_prompt(llm, 1)
+    assert "unsafe-repr-secret" not in metric.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_llm_response_retry_call_failure_is_redacted_and_not_retried_again() -> None:
+    llm = SequentialFakeLLM(
+        (
+            '{"score": 1, "reason": "missing closing brace"',
+            TimeoutError("token=retry-timeout-secret"),
+        )
+    )
+
+    result = await EvaluationSuite.default(llm=llm, enable_llm=True).evaluate(
+        fingerprint(), metric_ids=("description_quality",)
+    )
+
+    metric = metric_map(result)["description_quality"]
+    serialized = metric.model_dump_json()
+    assert metric.status == MetricStatus.ERROR
+    assert metric.score is None
+    assert len(llm.messages) == 2
+    assert len(metric.failures) == 1
+    assert "TimeoutError" in metric.reason
+    assert "retry-timeout-secret" not in serialized
 
 
 @pytest.mark.asyncio

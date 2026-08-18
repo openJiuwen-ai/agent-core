@@ -39,9 +39,6 @@ Workspace configuration. When `stable_base` is True, workspace path is anchored 
 Progressive tool exposure configuration.
 
 * **enabled**(bool, optional): Whether enabled. Default: `True`.
-* **always_visible_tools**(list[str], optional): Always-visible tool list. Default: `[]`.
-* **default_visible_tools**(list[str], optional): Default-visible tool list. Default: `[]`.
-* **max_loaded_tools**(int, optional): Maximum loaded tools. Default: `12`.
 
 ## class SysOperationSpec
 

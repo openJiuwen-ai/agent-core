@@ -4,10 +4,9 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Dict
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from os import PathLike
 
 from openjiuwen.core.common.logging import logger
@@ -19,7 +18,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails import (
-    LLMRetryRail,
+    ModelAnomalyDetectionRail,
     SecurityRail,
     SkillUseRail,
     SubagentRail,
@@ -40,26 +39,11 @@ from openjiuwen.harness.schema.config import (
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
+from openjiuwen.harness.skills import collect_disabled_skills
 from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
 
-
-def _collect_disabled_skills_from_state(skills_dirs: list[str]) -> list[str]:
-    """Read skills_state.json from each skills_dir and collect disabled skill names."""
-    disabled: set[str] = set()
-    for skills_dir in skills_dirs:
-        state_path = Path(skills_dir) / "skills_state.json"
-        if not state_path.is_file():
-            continue
-        try:
-            data = json.loads(state_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            logger.warning("Failed to read skills_state.json at %s", state_path)
-            continue
-        skill_configs = data.get("skill_configs", {})
-        for name, cfg in skill_configs.items():
-            if isinstance(cfg, dict) and cfg.get("enabled") is False:
-                disabled.add(name)
-    return sorted(disabled)
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 
 
 def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
@@ -67,7 +51,10 @@ def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
     return card.name == "free_search" and not is_free_search_enabled()
 
 
-def _append_env_online_training_rail(rails: list[AgentRail]) -> list[AgentRail]:
+def _append_env_online_training_rail(
+    rails: list[AgentRail],
+    trajectory_span_processor: TrajectorySpanProcessor | None,
+) -> list[AgentRail]:
     """Append env-configured online training rail without exposing it to hosts.
 
     JiuwenSwarm and other harness hosts only need to set environment variables.
@@ -84,7 +71,10 @@ def _append_env_online_training_rail(rails: list[AgentRail]) -> list[AgentRail]:
 
     if any(isinstance(rail, RLOnlineRail) for rail in rails):
         return rails
-    rail = build_rl_online_rail_from_env()
+    if trajectory_span_processor is None:
+        logger.warning("Online training rail is enabled but no trajectory span processor is available")
+        return rails
+    rail = build_rl_online_rail_from_env(trajectory_span_processor=trajectory_span_processor)
     if rail is None:
         return rails
     return [*rails, rail]
@@ -224,8 +214,9 @@ def resolve_deep_agent_parts(
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
-    enable_llm_retry_rail: bool = True,
+    enable_model_anomaly_detection_rail: bool = True,
     enable_sys_operation: bool = True,
+    trajectory_span_processor: TrajectorySpanProcessor | None = None,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -378,7 +369,7 @@ def resolve_deep_agent_parts(
         # exist — SkillUseRail skips missing directories at refresh time.
         for _team_id, target_path in workspace_obj.list_team_links():
             skills_dirs.append(str(Path(target_path) / "skills"))
-        disabled_skills = _collect_disabled_skills_from_state(skills_dirs)
+        disabled_skills = collect_disabled_skills(skills_dirs)
         # ``include_tools`` registers read_file / code / bash so skills can do
         # file/shell ops. When a SysOperationRail is already mounted it owns
         # those tools (and refresh-binds them to the live sys_operation), so
@@ -399,7 +390,11 @@ def resolve_deep_agent_parts(
 
     default_rails = [
         (SecurityRail, enable_security_rail, lambda: SecurityRail()),
-        (LLMRetryRail, enable_llm_retry_rail, lambda: LLMRetryRail()),
+        (
+            ModelAnomalyDetectionRail,
+            enable_model_anomaly_detection_rail,
+            lambda: ModelAnomalyDetectionRail(),
+        ),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
         (SubagentRail, bool(effective_subagents),
@@ -409,7 +404,7 @@ def resolve_deep_agent_parts(
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):
             all_rails.append(make_rail())
-    all_rails = _append_env_online_training_rail(all_rails)
+    all_rails = _append_env_online_training_rail(all_rails, trajectory_span_processor)
 
     return DeepAgentParts(
         config=config,
@@ -485,7 +480,7 @@ def create_deep_agent(
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
-    enable_llm_retry_rail: bool = True,
+    enable_model_anomaly_detection_rail: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -538,7 +533,8 @@ def create_deep_agent(
         default_mode: Initial agent mode (``AgentMode.NORMAL`` or ``AgentMode.PLAN``).
         enable_security_rail: Enable the default SecurityRail that injects the
             safety prompt section. Explicitly supplied security rails are kept.
-        enable_llm_retry_rail: Enable default LLMRetryRail for stream frame timeout and repeated-output retries.
+        enable_model_anomaly_detection_rail: Enable default ModelAnomalyDetectionRail
+            for stream frame timeout, repeated-output retries, and tool-loop compaction.
         model_selection: Optional model selection config for TaskPlanningRail.
             Dict mapping Model instance to description string. When provided along with
             enable_task_planning, TaskPlanningRail will be configured with model selection,
@@ -578,7 +574,7 @@ def create_deep_agent(
         model_selection=model_selection,
         parallel_tool_calls=parallel_tool_calls,
         enable_security_rail=enable_security_rail,
-        enable_llm_retry_rail=enable_llm_retry_rail,
+        enable_model_anomaly_detection_rail=enable_model_anomaly_detection_rail,
         **config_kwargs,
     )
     agent = DeepAgent(parts.config.card)

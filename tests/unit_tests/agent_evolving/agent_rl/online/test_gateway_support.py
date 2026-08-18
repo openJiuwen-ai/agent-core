@@ -5,131 +5,66 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.agent_evolving.trajectory import LLMCallDetail, TrajectoryStep, trajectory_from_steps
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.extensions.observability import semconv
+from tests.unit_tests.agent_evolving.agent_rl.online.support import InMemoryRedis
 
 
-class _FakeRedisPipeline:
-    def __init__(self, redis) -> None:
-        self._redis = redis
-        self._ops: list[tuple[str, tuple]] = []
+def _canonical_llm_trajectory(
+    execution_id: str,
+    span_attrs: dict[str, object],
+    *,
+    resource_attrs: dict[str, object] | None = None,
+) -> Trajectory:
+    resource = {
+        "openjiuwen.trajectory_id": execution_id,
+        semconv.AT_SESSION_ID: "session-1",
+        "openjiuwen.trajectory.source": "online",
+    }
+    resource.update(resource_attrs or {})
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map(resource)},
+                    "scopeSpans": [
+                        {
+                            "spans": [
+                                {
+                                    "traceId": "trace-test",
+                                    "spanId": "llm-1",
+                                    "name": "llm.call",
+                                    "attributes": attributes_from_map(
+                                        {
+                                            semconv.GEN_AI_REQUEST_MODEL: "m1",
+                                            **span_attrs,
+                                        }
+                                    ),
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+    )
 
-    def delete(self, key: str):
-        self._ops.append(("delete", (key,)))
-        return self
 
-    def zrem(self, key: str, member: str):
-        self._ops.append(("zrem", (key, member)))
-        return self
+@pytest.fixture
+def disable_sample_debug_dump(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Redis pipeline unit tests free of debug-file I/O."""
+    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory import persistence
+    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.sample_recorder import SampleRecorder
 
-    def hset(self, key: str, mapping: dict[str, str]):
-        self._ops.append(("hset", (key, mapping)))
-        return self
+    async def skip_debug_dump(self, sample):
+        del self, sample
 
-    def zadd(self, key: str, mapping: dict[str, float]):
-        self._ops.append(("zadd", (key, mapping)))
-        return self
-
-    def sadd(self, key: str, *members: str):
-        self._ops.append(("sadd", (key, *members)))
-        return self
-
-    def zcard(self, key: str):
-        self._ops.append(("zcard", (key,)))
-        return self
-
-    def hmget(self, key: str, fields: list[str]):
-        self._ops.append(("hmget", (key, fields)))
-        return self
-
-    async def execute(self):
-        out = []
-        for name, args in self._ops:
-            out.append(await getattr(self._redis, name)(*args))
-        return out
+    monkeypatch.setattr(SampleRecorder, "record_sample", skip_debug_dump)
+    monkeypatch.setattr(persistence.os, "makedirs", lambda *args, **kwargs: None)
 
 
-class _FakeRedis:
-    def __init__(self) -> None:
-        self._kv: dict[str, str] = {}
-        self._zsets: dict[str, dict[str, float]] = {}
-        self._hashes: dict[str, dict[str, str]] = {}
-        self._sets: dict[str, set[str]] = {}
-
-    def register_script(self, script: str):
-        del script
-
-        async def _run(*, keys: list[str], args: list[object]):
-            pending_key, training_key = keys
-            limit = max(1, int(args[0]))
-            now_score = float(args[1])
-            new_status = str(args[2])
-            traj_prefix = str(args[3])
-            ids = await self.zrange(pending_key, 0, limit - 1)
-            if not ids:
-                return []
-            for sample_id in ids:
-                await self.zrem(pending_key, sample_id)
-                await self.zadd(training_key, {sample_id: now_score})
-                await self.hset(f"{traj_prefix}{sample_id}", {"status": new_status})
-            return ids
-
-        return _run
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        del ex
-        self._kv[key] = value
-
-    async def zadd(self, key: str, mapping: dict[str, float]) -> None:
-        bucket = self._zsets.setdefault(key, {})
-        bucket.update(mapping)
-
-    async def expire(self, key: str, ttl: int) -> None:
-        del key, ttl
-
-    async def zrange(self, key: str, start: int, end: int) -> list[str]:
-        bucket = self._zsets.get(key, {})
-        members = [member for member, _ in sorted(bucket.items(), key=lambda item: item[1])]
-        if end == -1:
-            end = len(members) - 1
-        return members[start:end + 1]
-
-    async def mget(self, keys: list[str]) -> list[str | None]:
-        return [self._kv.get(key) for key in keys]
-
-    async def get(self, key: str) -> str | None:
-        return self._kv.get(key)
-
-    async def hmget(self, key: str, fields: list[str]) -> list[str | None]:
-        row = self._hashes.get(key, {})
-        return [row.get(field) for field in fields]
-
-    async def hset(self, key: str, mapping: dict[str, str]) -> None:
-        row = self._hashes.setdefault(key, {})
-        row.update(mapping)
-
-    async def zcard(self, key: str) -> int:
-        return len(self._zsets.get(key, {}))
-
-    async def sadd(self, key: str, *members: str) -> None:
-        self._sets.setdefault(key, set()).update(members)
-
-    async def smembers(self, key: str) -> set[str]:
-        return set(self._sets.get(key, set()))
-
-    async def srem(self, key: str, *members: str) -> None:
-        bucket = self._sets.setdefault(key, set())
-        for member in members:
-            bucket.discard(member)
-
-    async def delete(self, key: str) -> None:
-        self._kv.pop(key, None)
-        self._hashes.pop(key, None)
-
-    async def zrem(self, key: str, member: str) -> None:
-        self._zsets.get(key, {}).pop(member, None)
-
-    def pipeline(self) -> _FakeRedisPipeline:
-        return _FakeRedisPipeline(self)
+_FakeRedis = InMemoryRedis
 
 
 class _FakeResponse:
@@ -253,6 +188,7 @@ async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tm
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory import GatewayTrajectoryRuntime
     from openjiuwen.agent_evolving.agent_rl.storage.local_store import (
         LocalPendingJudgeStore,
+        LocalSFTStore,
         LocalTrajectoryStore,
     )
 
@@ -260,6 +196,7 @@ async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tm
     runtime = GatewayTrajectoryRuntime(
         GatewayConfig(port=18080, model_id="dummy-model", record_dir=str(tmp_path)),
         trajectory_store=LocalTrajectoryStore(store_dir),
+        sft_store=LocalSFTStore(store_dir),
         pending_judge_store=LocalPendingJudgeStore(store_dir),
     )
 
@@ -271,31 +208,118 @@ async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tm
     assert json.loads((tmp_path / "samples.jsonl").read_text(encoding="utf-8").strip())["user_id"] == "jiuwenclaw-web"
 
 
+@pytest.mark.asyncio
+async def test_gateway_pending_sample_survives_runtime_recreation(
+    tmp_path: Path,
+    disable_sample_debug_dump: None,
+):
+    del disable_sample_debug_dump
+    from openjiuwen.agent_evolving.agent_rl.online.gateway.config import GatewayConfig
+    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory import GatewayTrajectoryRuntime
+    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.pending_judge_store import PendingJudgeStore
+    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
+
+    class _Judge:
+        async def score(self, **kwargs):
+            del kwargs
+            return {"score": 0.6, "votes": [8], "details": {}}
+
+    redis = _FakeRedis()
+    config = GatewayConfig(port=18080, model_id="model-1", record_dir=str(tmp_path))
+    first_runtime = GatewayTrajectoryRuntime(
+        config,
+        trajectory_store=RedisTrajectoryStore(redis),
+        pending_judge_store=PendingJudgeStore(redis=redis),
+    )
+    await first_runtime.stage_gateway_sample(
+        {
+            "sample_id": "gateway:session-restart:1:0",
+            "user_id": "user-1",
+            "session_id": "session-restart",
+            "trajectory_id": "gateway:session-restart:1",
+            "step_index": 0,
+            "turn_num": 1,
+            "request": {"messages": [{"role": "user", "content": "before restart"}]},
+            "trajectory": {
+                "prompt_ids": [11],
+                "response_ids": [12],
+                "response_logprobs": [-0.3],
+                "response_text": "persisted response",
+            },
+        }
+    )
+
+    recreated_runtime = GatewayTrajectoryRuntime(
+        config,
+        trajectory_store=RedisTrajectoryStore(redis),
+        pending_judge_store=PendingJudgeStore(redis=redis),
+    )
+    recreated_runtime.set_judge_scorer(_Judge())
+    judged = await recreated_runtime.on_gateway_followup(
+        "session-restart",
+        [{"role": "user", "content": "after restart"}],
+    )
+
+    assert judged == 1
+    stored = json.loads(await redis.hget("rl:traj:gateway:session-restart:1:0", "sample_json"))
+    assert stored["trajectory"]["response_ids"] == [12]
+    assert stored["judge"]["score"] == 0.6
+
+
+@pytest.mark.asyncio
+async def test_task_reward_projector_finalizes_pending_sample_once() -> None:
+    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.pending_judge_store import PendingJudgeStore
+    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.task_reward import TaskReward, TaskRewardProjector
+
+    redis = InMemoryRedis()
+    pending = PendingJudgeStore(redis=redis)
+    await pending.put(
+        {
+            "sample_id": "sample-1",
+            "session_id": "session-1",
+            "trajectory_id": "trajectory-1",
+            "step_index": 0,
+        }
+    )
+    recorded = []
+
+    async def record(samples):
+        recorded.extend(samples)
+        return {sample["sample_id"] for sample in samples}
+
+    projector = TaskRewardProjector(redis=redis, pending_store=pending, record_samples_once=record)
+    reward = TaskReward(
+        reward_id="reward-1",
+        attempt_id="attempt-1",
+        task_id="task-1",
+        training_key="train-1",
+        score=1.0,
+        passed=True,
+    )
+
+    assert await projector.project("session-1", reward) == 1
+    assert await projector.project("session-1", reward) == 1
+    assert len(recorded) == 1
+    assert recorded[0]["user_id"] == "train-1"
+    assert recorded[0]["judge"] == {"score": 1.0, "source": "benchmark_verifier", "reward_id": "reward-1"}
+    assert await pending.get_by_session("session-1") == []
+
+
 def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_response():
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
-    trajectory = trajectory_from_steps(
-        execution_id="traj-1",
-        session_id="session-1",
-        steps=[
-            TrajectoryStep(
-                kind="llm",
-                detail=LLMCallDetail(
-                    model="m1",
-                    messages=[{"role": "user", "content": "hello"}],
-                    response={
-                        "role": "assistant",
-                        "content": "pong",
-                        "prompt_token_ids": [1, 2, 3],
-                        "choices": [{
-                            "token_ids": [4, 5],
-                            "logprobs": [-0.1, -0.2],
-                        }],
-                    },
-                ),
-            ),
-        ],
-        source="online",
+    trajectory = _canonical_llm_trajectory(
+        "traj-1",
+        {
+            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
+            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            "provider_response_json": {
+                "prompt_token_ids": [1, 2, 3],
+                "choices": [{"token_ids": [4, 5], "logprobs": [-0.1, -0.2]}],
+            },
+        },
     )
 
     batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory)
@@ -308,38 +332,23 @@ def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_re
 @pytest.mark.asyncio
 async def test_online_trajectory_converter_preserves_trace_plain_meta():
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
-    from openjiuwen.agent_evolving.trajectory import (
-        TrajectoryTraceAgentHandler,
-        TrajectoryTraceStateManager,
-    )
-    from openjiuwen.core.session.tracer.span import TraceAgentSpan
 
-    state_manager = TrajectoryTraceStateManager()
-    handler = TrajectoryTraceAgentHandler(state_manager)
-    trace_id = "trace-meta-converter"
-    state_manager.bind_trace(
-        trace_id,
-        session_id="session-1",
-        source="rl_online",
-        meta={
+    trajectory = _canonical_llm_trajectory(
+        "trace-meta-converter",
+        {
+            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
+            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+        },
+        resource_attrs={
+            "openjiuwen.trajectory.source": "rl_online",
             "tenant_id": "tenant-1",
             "status": "ok",
             "started_at": 123.4,
             "custom": {"label": "keep"},
         },
     )
-    span = TraceAgentSpan(trace_id=trace_id, invoke_id="llm-1")
-    await handler.on_llm_start(
-        span,
-        inputs={"inputs": [{"role": "user", "content": "hello"}]},
-        instance_info={"class_name": "m1"},
-    )
-    await handler.on_llm_end(
-        span,
-        outputs={"outputs": {"role": "assistant", "content": "pong"}},
-    )
-
-    trajectory = state_manager.build_trajectory(trace_id, session_id="session-1", source="rl_online", finalize=True)
     batch = OnlineTrajectoryConverter(tenant_id="tenant-1").convert(trajectory)
 
     assert batch.trajectory_meta.status == "ok"
@@ -352,73 +361,48 @@ def test_online_trajectory_converter_normalizes_streaming_logprobs_for_gateway()
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.rail_ingest import RailBatchIngestor
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
-    trajectory = trajectory_from_steps(
-        execution_id="traj-stream",
-        session_id="session-1",
-        steps=[
-            TrajectoryStep(
-                kind="llm",
-                detail=LLMCallDetail(
-                    model="m1",
-                    messages=[{"role": "user", "content": "hello"}],
-                    response={"role": "assistant", "content": "pong"},
-                ),
-                prompt_token_ids=[1, 2, 3],
-                completion_token_ids=[4, 5],
-                logprobs={"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-            ),
-        ],
-        source="online",
+    trajectory = _canonical_llm_trajectory(
+        "traj-stream",
+        {
+            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
+            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            "evolution.rl.prompt_token_ids": [1, 2, 3],
+            "evolution.rl.completion_token_ids": [4, 5],
+            "evolution.rl.logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+        },
     )
 
     batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory).to_dict()
     normalized = RailBatchIngestor._normalize_rail_sample(batch, batch["samples"][0])
 
+    assert normalized["sample_id"] == f"{normalized['trajectory_id']}:{normalized['step_index']}"
     assert normalized["trajectory"]["prompt_ids"] == [1, 2, 3]
     assert normalized["trajectory"]["response_ids"] == [4, 5]
     assert normalized["trajectory"]["response_logprobs"] == [-0.1, -0.2]
 
 
-def test_online_trajectory_converter_tolerates_message_model_dump_failure():
+def test_online_trajectory_converter_reads_detached_messages():
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
-    class _BrokenMessage:
-        role = "assistant"
-        content = "previous turn"
-
-        def model_dump(self):
-            raise TypeError("MockValSer")
-
-    # OTLP construction JSON-safes message objects; converter must still
-    # accept the resulting string fallback without raising.
-    trajectory = trajectory_from_steps(
-        execution_id="traj-broken-message",
-        session_id="session-1",
-        steps=[
-            TrajectoryStep(
-                kind="llm",
-                detail=LLMCallDetail(
-                    model="m1",
-                    messages=[
-                        {"role": "user", "content": "hello"},
-                        _BrokenMessage(),
-                    ],
-                    response={
-                        "role": "assistant",
-                        "content": "pong",
-                    },
-                ),
-            ),
-        ],
-        source="online",
+    trajectory = _canonical_llm_trajectory(
+        "traj-detached-message",
+        {
+            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
+            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
+            f"{semconv.GEN_AI_PROMPT}.1.role": "assistant",
+            f"{semconv.GEN_AI_PROMPT}.1.content": "previous turn",
+            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+        },
     )
 
     batch = OnlineTrajectoryConverter(tenant_id="user-1").convert(trajectory)
 
     assert len(batch.samples) == 1
     assert batch.samples[0].messages[0] == {"role": "user", "content": "hello"}
-    assert batch.samples[0].messages[1]["role"] == "unknown"
-    assert "BrokenMessage" in batch.samples[0].messages[1]["content"]
+    assert batch.samples[0].messages[1] == {"role": "assistant", "content": "previous turn"}
 
 
 @pytest.mark.asyncio

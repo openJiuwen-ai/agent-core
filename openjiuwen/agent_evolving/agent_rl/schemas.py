@@ -21,7 +21,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     span_attributes,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
-from openjiuwen.agent_evolving.trajectory import _semconv as semconv
+from openjiuwen.extensions.observability import semconv
 
 
 # ---------------------------------------------------------------------------

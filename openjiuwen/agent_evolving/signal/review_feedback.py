@@ -26,14 +26,16 @@ from typing import Any, Protocol
 
 from openjiuwen.agent_evolving.signal.base import EvolutionTarget
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal, make_evolution_signal
-from openjiuwen.agent_evolving.trajectory import Trajectory, trajectory_steps
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.spans import iter_spans, read_llm_exchange, read_tool_call
+from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.core.common.logging import logger
 
 _MAX_FEEDBACK_CHARS = 4_000
 _MAX_TASK_CONTEXT_CHARS = 6_000
 _MAX_TRAJECTORY_CHARS = 8_000
 _MAX_SKILL_CONTENT_CHARS = 6_000
-_MAX_TRAJECTORY_STEPS = 20
+_MAX_TRAJECTORY_SPANS = 20
 REVIEW_FEEDBACK_SIGNAL = "review_feedback"
 REVIEW_FEEDBACK_SOURCE = "scheduler_review_feedback"
 
@@ -526,11 +528,12 @@ def _extract_skill_reads_from_trajectory(
 
     normalized_skills = tuple(dict.fromkeys(str(name).strip() for name in known_skills if str(name).strip()))
     proven: list[str] = []
-    for step in trajectory_steps(trajectory):
-        if step.kind != "tool" or step.detail is None:
+    for span in iter_spans(trajectory):
+        if span_category(span) != "tool":
             continue
-        tool_name = str(getattr(step.detail, "tool_name", "") or "").strip().lower()
-        call_args = getattr(step.detail, "call_args", None)
+        tool_call = read_tool_call(span)
+        tool_name = str(tool_call.get("name") or "").strip().lower()
+        call_args = tool_call.get("input")
         args_text = _stable_text(call_args)
         for skill_name in normalized_skills:
             if skill_name in proven:
@@ -590,16 +593,18 @@ def _trajectory_excerpt(trajectory: Trajectory | None) -> str:
     if trajectory is None:
         return ""
     lines: list[str] = []
-    for step in trajectory_steps(trajectory)[-_MAX_TRAJECTORY_STEPS:]:
-        if step.detail is None:
-            continue
-        if step.kind == "tool":
-            tool_name = str(getattr(step.detail, "tool_name", "") or "")
-            call_args = _stable_text(getattr(step.detail, "call_args", None))[:800]
-            call_result = _stable_text(getattr(step.detail, "call_result", None))[:800]
+    spans = list(iter_spans(trajectory))[-_MAX_TRAJECTORY_SPANS:]
+    for span in spans:
+        category = span_category(span)
+        if category == "tool":
+            tool_call = read_tool_call(span)
+            tool_name = str(tool_call.get("name") or "")
+            call_args = _stable_text(tool_call.get("input"))[:800]
+            call_result = _stable_text(tool_call.get("output"))[:800]
             lines.append(f"[tool] {tool_name} args={call_args} result={call_result}")
-        elif step.kind == "llm":
-            response = _stable_text(getattr(step.detail, "response", None))[:1_000]
+        elif category == "llm":
+            _, completions = read_llm_exchange(span)
+            response = _stable_text(completions[-1] if completions else None)[:1_000]
             if response:
                 lines.append(f"[assistant] {response}")
     return "\n".join(lines)[-_MAX_TRAJECTORY_CHARS:]
@@ -614,7 +619,7 @@ def _stable_text(value: Any) -> str:
         try:
             return json.dumps(value, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
-            pass
+            return str(value)
     return str(value)
 
 

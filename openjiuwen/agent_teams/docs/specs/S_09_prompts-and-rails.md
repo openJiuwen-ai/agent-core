@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-08-11 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md` |
+| 最近一次修订日期 | 2026-08-13 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md`、`F_80_fork-identity-conversion.md` |
 
 ## 范围 / 边界
 
@@ -75,9 +75,12 @@
       - 两条通道共用同一个 tracker，谁先拿到 pending 就谁投递；**已在历史里的消息永远不改写**——改一条旧消息会让它之后的 KV cache 全部作废。
     - **同一次投递里产生的 `<team-context>` 正文合并成一个标签**：身份与团队元数据都是"关于团队的既成事实"，各包一个标签是把同一类东西说两遍。分别在不同调用上产生时自然是两条消息，不合并。
     - **身份 = `member_name` + `display_name` + 私有工作区路径 + 私有工作约定**：判据是"per-member、spawn 时固定、此后恒定"，凡满足的都进这一段正文，不另开通道。`display_name` 必须**读自己那行 member 行**——名册每行都以两个名字标识成员，少了它成员认不出哪一行是自己，而构造期的值只是 spec 默认（leader 的真实标签由 `build_team(leader_display_name=...)` 写入 DB），所以身份通道**等自己那行存在**才发：teammate 在 spawn 时就有行，leader 则在建队后那次调用上拿到。私有工作区路径带一句用途说明（区分于团队共享工作空间、不作为新 skill 的创建目标）——只给路径模型分不清分工。公开 `desc` 仍然不进自己的身份（见不变量 18a）。
+    - **`enable_fork=True` 团队的身份块加 `<identity>` 内壳 + 能力声明（[[F_80]]）**：`TeamContextTracker._fork_capable = team_backend.fork_enabled()`（`getattr` 兜底，无该方法的 backend / 外部 runtime 走 off 路径）。开启时 `build_identity_text(fork_capable=True)` 在正文顶部加恒定能力声明（「你是拥有身份转换能力的成员，当前身份以本块及转换通知为准」），`pending_text` 改调 `inbound_render.render_team_context_with_identity` 把身份包进 `<identity>`。**关闭时输出与改造前逐字一致**（原 `render_team_context` + `fork_capable=False`），非 fork 团队前缀 KV 与模型输入零变化。`<identity>` 内壳在**结构层**渲染、只转义最内层正文——`<team-context>` 正文的 `html.escape` 会吃掉嵌套标签，嵌套必须由渲染函数拼接而非塞进 body。
     - **投递进度基线必须持久化在成员自己的 child `AgentSession`**（state key `team_prompt_context`，字段 `identity_emitted` / `team_info_mtime` / `roster_mtime` / `roster`）。`TeamPolicyRail` **每一轮都会被重建**（round 结束 native 进 TERMINATED，下次 start 重新 `RailSpec.build`），基线留内存等于每轮重发；pause/resume、stop→start 只是更严重的版本。该 state 与成员的对话历史存在同一个 agent-session 桶里，由同一次 `AgentStorage.save` 落盘，故两者不会漂移。
     - **先投递、后 `commit`**：`pending_text()` 只渲染不推进，`commit()` 由调用方在投递成功后调用；反过来写会在投递失败时永久丢掉一条公告。tracker **不持锁**——一个成员的 rail 钩子、CLI `send` 与事件补偿都在同一条协程上。
     - **名册消息必带 `<team-note kind="announcement-only">`**（文案 `i18n.team_context.roster_announcement_note`，嵌在该 `<team-event>` 内部，见不变量 28）：否则成员看到"有人加入"就会礼节性寒暄，白烧一轮 LLM + 一轮邮箱投递并连锁触发对方。
+
+13b. **fork 继承目标的身份块带 `<identity-conversion>` 子块声明当前身份（[[F_80]]）**：fork 源身份块留在继承历史里无法删除（动它即破坏前缀 KV），转换语义只能追加。`_on_teammate_created` 在 fork 上下文非空且 `is_empty()` 为假时把源名写进 `ctx.fork_source`（缺省 = leader 自己的名字），随 spawn payload 跨进程序列化，经 `TeamPolicyInput.fork_source` → `TeamPolicyRail` → `TeamContextTracker` 透传。目标首条身份投递时，`render_team_context_with_identity` 在 `<identity>` 内嵌 `<identity-conversion>`（正文由 `build_identity_conversion` 渲染，声明当前身份并明示更早身份块的私有约定/工作区不再适用），使模型区分"继承来的旧身份"与"当前身份"。**只追加、不改继承段**——KV 命中不变。普通 spawn（`fork_source` 为空）不渲染该子块；`enable_fork=False` 团队整条路径保持原状（不变量 13 的逐字一致约束）。
 
 13a. **被覆盖的快照类输入整条剔除，只剔 teammate 的（[[F_71]]）**：`TeamPolicyRail.on_user_message` 在折入团队状态**之前**先给这批输入做减法——同一批里出现多条同 kind 的快照事件时，只留最后一条。四条硬约束：
     - **只有全量幂等快照才算快照**：`inbound_render.SNAPSHOT_EVENT_KINDS` 当前只有 `task-board`。增量（`roster-change`）与按主体分片的事件（`stale-claim` 带 `task_id`）丢掉早的那条就是丢信息，**不得**加进这个集合。
@@ -304,7 +307,9 @@ def format_member_line(
 ) -> str: ...
 
 def build_identity_text(*, member_name, display_name=None, member_workspace_path=None,
-                        member_prompt=None, language="cn") -> str | None
+                        member_prompt=None, language="cn",
+                        fork_capable=False) -> str | None
+def build_identity_conversion(*, source, member_name, language="cn") -> str
 def build_team_info_text(*, team_info, team_workspace_mount=None,
                          team_workspace_path=None, language="cn") -> str | None
 def build_roster_snapshot_text(*, members, mark_humans=False, language="cn") -> str | None
@@ -315,6 +320,10 @@ def build_roster_delta_text(*, delta, mark_humans=False, language="cn") -> str |
 - 名册元素至少含 `member_name` / `display_name`；`desc` / `role` 可选。**自身排除由
   `TeamBackend.list_members` 负责**（它已经剔除调用者），渲染层不再做二次排除。
 - `diff_roster` 只跟踪 `display_name` / `desc` / `role`——运行时状态一直在变，不是名册成员关系。
+- `build_identity_text(fork_capable=True)` 在正文顶部加身份转换能力声明；默认 `False` 输出与
+  改造前**逐字相同**。`build_identity_conversion` 渲染 `<identity-conversion>` 的正文（源名 +
+  当前名 + 私有约定/工作区不再适用），由 `TeamContextTracker` 在 `fork_source` 非空时传入
+  `render_team_context_with_identity`（见不变量 13 / 13b）。
 
 ### `team_context.py`
 
@@ -338,6 +347,7 @@ class TeamContextTracker:
         team_workspace_path: str | None = None,
         expose_human_agents_to_teammates: bool = False,
         language: str = "cn",
+        fork_source: str | None = None,   # fork 源名；None = 普通 spawn
     ) -> None: ...
 
     async def pending_text(self, session) -> str | None:

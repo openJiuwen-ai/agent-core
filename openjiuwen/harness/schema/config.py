@@ -214,6 +214,7 @@ class DeepAgentConfig:
         completion_timeout: Max seconds to wait for a
             single task-loop iteration to complete.
             Used by the outer loop's wait_completion().
+            None means no limit.
         enable_plan_mode: Whether to enable plan mode.
         permissions: Tool permission policy dict (enabled, tools, rules, …); when
             enabled, DeepAgent mounts PermissionInterruptRail automatically.
@@ -245,7 +246,7 @@ class DeepAgentConfig:
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
     auto_create_workspace: bool = True
-    completion_timeout: float = 600.0
+    completion_timeout: Optional[float] = 600.0
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None
@@ -257,13 +258,6 @@ class DeepAgentConfig:
 
     # Progressive tool exposure config
     progressive_tool_enabled: bool = False
-    progressive_tool_always_visible_tools: List[str] = field(
-        default_factory=list
-    )
-    progressive_tool_default_visible_tools: List[str] = field(
-        default_factory=list
-    )
-    progressive_tool_max_loaded_tools: int = 12
 
     # Plan mode config
     default_mode: AgentMode = AgentMode.NORMAL
@@ -302,6 +296,9 @@ class SubAgentConfig:
     sys_operation: Optional[SysOperation] = None
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
+    # None inherits the parent DeepAgent setting.  Set explicitly when the
+    # subagent uses a model with different native image capabilities.
+    enable_read_image_multimodal: Optional[bool] = None
     enable_task_loop: bool = False
     max_iterations: Optional[int] = None
     factory_name: Optional[str] = None
