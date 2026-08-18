@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import json
 import os
 from abc import (
     ABC,
@@ -312,12 +313,29 @@ class BaseModelClient(ABC):
             if isinstance(msg, AssistantMessage) and msg.tool_calls:
                 tool_calls_list = []
                 for tc in msg.tool_calls:
+                    arguments = tc.arguments
+                    if not isinstance(arguments, str):
+                        # Defensive normalization: providers strictly require a
+                        # JSON string here. Log loudly so the mutating call site
+                        # that produced a non-str value can be identified.
+                        # default=str keeps this crash-proof even when the dict
+                        # carries non-serializable side-channel objects (e.g.
+                        # debate _DebateInvocationMeta not yet popped by the
+                        # tool); the warning preserves visibility either way.
+                        llm_logger.warning(
+                            "[convert_messages] non-str tool arguments coerced: "
+                            "tool=%r call_id=%r arg_type=%s",
+                            tc.name,
+                            tc.id,
+                            type(arguments).__name__,
+                        )
+                        arguments = json.dumps(arguments, ensure_ascii=False, default=str)
                     tool_calls_list.append({
                         "id": tc.id,
                         "type": tc.type,
                         "function": {
                             "name": tc.name,
-                            "arguments": tc.arguments
+                            "arguments": arguments
                         }
                     })
                 msg_dict["tool_calls"] = tool_calls_list
