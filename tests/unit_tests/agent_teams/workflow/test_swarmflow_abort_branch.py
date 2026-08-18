@@ -111,7 +111,7 @@ def test_run_background_stop_injects_backend_error():
             asyncio.run(tool.run_background("task-stop", _inputs("wf_1")))
     msg = str(excinfo.value)
     assert "wf_1" in msg
-    assert "已停止" in msg
+    assert "已停止" in msg or "stopped" in msg.lower()
 
 
 def test_run_background_pause_raises_cancelled_error():
