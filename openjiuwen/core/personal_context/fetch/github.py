@@ -347,13 +347,12 @@ def _validate_cursor(value: object) -> dict[str, object]:
             raise _fetch_error(f"GitHub {key} cursor is invalid")
         latest_ids = section.get("latest_ids")
         history_boundary_ids = section.get("history_boundary_ids")
-        if (
-            not isinstance(latest_ids, list)
-            or not isinstance(history_boundary_ids, list)
-            or len(latest_ids) > 10_000
-            or len(history_boundary_ids) > 10_000
-            or any(not isinstance(item, str) or not item for item in latest_ids)
-            or any(not isinstance(item, str) or not item for item in history_boundary_ids)
+        if not isinstance(latest_ids, list) or not isinstance(history_boundary_ids, list):
+            raise _fetch_error(f"GitHub {key} cursor is invalid")
+        if len(latest_ids) > 10_000 or len(history_boundary_ids) > 10_000:
+            raise _fetch_error(f"GitHub {key} cursor is invalid")
+        if any(not isinstance(item, str) or not item for item in latest_ids) or any(
+            not isinstance(item, str) or not item for item in history_boundary_ids
         ):
             raise _fetch_error(f"GitHub {key} cursor is invalid")
         if not isinstance(section.get("history_complete"), bool):
@@ -644,28 +643,30 @@ class GitHubFetchService(ContextFetchService):
                 stable_id = f"github:{owner}/{repo}:{label}:{identifier}"
                 updated_at = _iso_value(payload, commit=is_commit)
                 payload_ids.append((stable_id, updated_at))
-                if latest_watermark is None or (
+                is_latest = latest_watermark is None or (
                     updated_at is not None
                     and (
                         updated_at > str(latest_watermark)
                         or (updated_at == latest_watermark and stable_id not in latest_ids)
                     )
-                ):
+                )
+                if is_latest:
                     category = "latest"
-                elif history_watermark is None or (
-                    updated_at is not None
-                    and (
-                        updated_at < str(history_watermark)
-                        or (
-                            updated_at == history_watermark
-                            and stable_id not in history_ids
-                            and stable_id not in latest_ids
+                else:
+                    is_history = history_watermark is None or (
+                        updated_at is not None
+                        and (
+                            updated_at < str(history_watermark)
+                            or (
+                                updated_at == history_watermark
+                                and stable_id not in history_ids
+                                and stable_id not in latest_ids
+                            )
                         )
                     )
-                ):
+                    if not is_history:
+                        continue
                     category = "history"
-                else:
-                    continue
                 content = payload.get("body") if resource != "commits" else None
                 if resource == "commits":
                     nested = payload.get("commit")

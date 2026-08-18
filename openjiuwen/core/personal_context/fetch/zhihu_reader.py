@@ -183,7 +183,14 @@ def _column_id(url: str) -> str:
 
 def _read_cursor(cursor: dict[str, object] | None, source_url: str) -> dict[str, object]:
     if cursor is None or cursor == {}:
-        return _cursor_payload(source_url, 0.0, [], None, [], False)
+        return {
+            "source_url": source_url,
+            "latest_timestamp": 0.0,
+            "latest_timestamp_ids": [],
+            "history_before_timestamp": None,
+            "history_boundary_ids": [],
+            "history_complete": False,
+        }
     if not isinstance(cursor, Mapping) or set(cursor) != {
         "source_url",
         "latest_timestamp",
@@ -212,7 +219,14 @@ def _read_cursor(cursor: dict[str, object] | None, source_url: str) -> dict[str,
     history_complete = cursor.get("history_complete")
     if not isinstance(history_complete, bool):
         raise _fetch_error("Zhihu cursor is invalid")
-    return _cursor_payload(source_url, latest, latest_ids, history, boundary_ids, history_complete)
+    return {
+        "source_url": source_url,
+        "latest_timestamp": latest,
+        "latest_timestamp_ids": sorted(set(latest_ids)),
+        "history_before_timestamp": history,
+        "history_boundary_ids": sorted(set(boundary_ids)),
+        "history_complete": history_complete,
+    }
 
 
 def _cursor_ids(value: object) -> list[str]:
@@ -223,24 +237,6 @@ def _cursor_ids(value: object) -> list[str]:
     ):
         raise _fetch_error("Zhihu cursor is invalid")
     return sorted(set(value))
-
-
-def _cursor_payload(
-    source_url: str,
-    latest_timestamp: float,
-    latest_ids: list[str],
-    history_before_timestamp: float | None,
-    history_boundary_ids: list[str],
-    history_complete: bool,
-) -> dict[str, object]:
-    return {
-        "source_url": source_url,
-        "latest_timestamp": latest_timestamp,
-        "latest_timestamp_ids": sorted(set(latest_ids)),
-        "history_before_timestamp": history_before_timestamp,
-        "history_boundary_ids": sorted(set(history_boundary_ids)),
-        "history_complete": history_complete,
-    }
 
 
 def _advance_cursor_state(state: dict[str, object], timestamp: float, article_id: str, category: str) -> None:

@@ -66,7 +66,7 @@ def _runtime_enabled(config_path: Path) -> bool:
         if not isinstance(loaded, dict):
             return False
         enabled = loaded.get("enabled")
-        return type(enabled) is bool and enabled is True
+        return isinstance(enabled, bool) and enabled
     except Exception:
         return False
 

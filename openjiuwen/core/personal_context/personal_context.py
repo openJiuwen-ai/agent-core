@@ -258,10 +258,11 @@ class PersonalContext:
                 task = self._authorization_task
                 challenge = self._authorization_challenge
                 authorization_error = self._authorization_error
-                if task is not None and task.done() and authorization_error is None and not task.cancelled():
-                    with contextlib.suppress(asyncio.CancelledError):
-                        if task.exception() is not None:
-                            authorization_error = _AUTHORIZATION_FAILED
+                if task is not None and task.done():
+                    if authorization_error is None and not task.cancelled():
+                        with contextlib.suppress(asyncio.CancelledError):
+                            if task.exception() is not None:
+                                authorization_error = _AUTHORIZATION_FAILED
                 if task is not None and not task.done():
                     return _authorization_result(
                         required_scopes=required_scopes,
@@ -280,8 +281,6 @@ class PersonalContext:
                     )
                 try:
                     _ready, granted_scopes = await _lark_cli_auth_status(required_scopes)
-                except asyncio.CancelledError:
-                    raise
                 except Exception:
                     authorization_error = _AUTHORIZATION_STATUS_UNAVAILABLE
                     granted_scopes = set()
@@ -319,8 +318,6 @@ class PersonalContext:
                     challenge = None
                 try:
                     _ready, granted_scopes = await _lark_cli_auth_status(required_scopes)
-                except asyncio.CancelledError:
-                    raise
                 except Exception:
                     self._authorization_error = _AUTHORIZATION_STATUS_UNAVAILABLE
                     return _authorization_result(
@@ -341,8 +338,6 @@ class PersonalContext:
                     )
                 try:
                     device_code, verification_url, expires_at = await _lark_cli_begin_authorization(required_scopes)
-                except asyncio.CancelledError:
-                    raise
                 except Exception:
                     self._authorization_error = _AUTHORIZATION_FAILED
                     return _authorization_result(
@@ -379,8 +374,6 @@ class PersonalContext:
         authorization_error: str | None = None
         try:
             await _lark_cli_finish_authorization(device_code, timeout_seconds=timeout_seconds)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             update_error = True
             authorization_error = _AUTHORIZATION_FAILED

@@ -399,10 +399,11 @@ def _changes(
             )
 
     def _sort_key(change: Mapping[str, object]) -> tuple[int, str, str]:
+        relative_path = change.get("relative_path")
         return (
-            -_integer(change["mtime_ns"], name="mtime_ns"),
-            str(change["relative_path"]).casefold(),
-            str(change["relative_path"]),
+            -_integer(change.get("mtime_ns"), name="mtime_ns"),
+            str(relative_path).casefold(),
+            str(relative_path),
         )
 
     new_or_changed.sort(key=_sort_key)

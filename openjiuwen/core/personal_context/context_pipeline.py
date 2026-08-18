@@ -441,7 +441,8 @@ def _managed_block_bounds(markdown: str, *, start: str, end: str) -> tuple[int, 
     if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
         raise _pipeline_error("managed Markdown block markers are malformed")
     block_end = ends[0] + len(end)
-    nested = _PERSONAL_CONTEXT_MANAGED_MARKER.findall(markdown[starts[0] : block_end])
+    block_start = starts[0]
+    nested = _PERSONAL_CONTEXT_MANAGED_MARKER.findall(markdown[block_start:block_end])
     if nested != [start, end]:
         raise _pipeline_error("managed Markdown block markers are nested")
     return starts[0], block_end
@@ -469,7 +470,8 @@ def _replace_managed_block(
     heading = re.search(r"(?m)^# [^\r\n]+(?:\r?\n|$)", markdown)
     if heading is None:
         raise _pipeline_error("managed Markdown file has no top-level heading")
-    return markdown[: heading.end()] + "\n" + block + "\n" + markdown[heading.end() :]
+    heading_end = heading.end()
+    return markdown[:heading_end] + "\n" + block + "\n" + markdown[heading_end:]
 
 
 def _markdown_heading(markdown: str, *, fallback: str) -> str:
@@ -563,7 +565,9 @@ def _managed_local_links(
     if bounds is None:
         return {}
     begin, finish = bounds
-    block = markdown[begin + len(start) : finish - len(end)]
+    block_start = begin + len(start)
+    block_end = finish - len(end)
+    block = markdown[block_start:block_end]
     result: dict[str, str] = {}
     for line in block.splitlines():
         stripped = line.strip()
@@ -748,7 +752,9 @@ def _balanced_tokens(value: str) -> set[str]:
     for run in re.findall(r"[\u3400-\u9fff]{2,}", value):
         tokens.add(run)
         for width in (2, 3, 4):
-            tokens.update(run[index : index + width] for index in range(max(0, len(run) - width + 1)))
+            for index in range(max(0, len(run) - width + 1)):
+                slice_end = index + width
+                tokens.add(run[index:slice_end])
     return tokens
 
 
@@ -843,12 +849,9 @@ def _parse_balanced_enrichments(
         if not isinstance(item, Mapping) or set(item) != expected_fields:
             continue
         item_index = item.get("item_index")
-        if (
-            not isinstance(item_index, int)
-            or isinstance(item_index, bool)
-            or counts.get(item_index) != 1
-            or item_index not in allowed_targets
-        ):
+        if not isinstance(item_index, int) or isinstance(item_index, bool):
+            continue
+        if counts.get(item_index) != 1 or item_index not in allowed_targets:
             continue
         summary_value = item.get("summary")
         target = item.get("target")
@@ -2171,7 +2174,8 @@ class ContextPipelineService:
                             + "Then group sources by topic and keep the result concise without discarding concrete "
                             "technical facts. "
                             + _FILESYSTEM_WIKI_INSTRUCTIONS
-                            + "PersonalContext applies deletions programmatically. Their full list remains under inputs/deleted/; "
+                            + "PersonalContext applies deletions programmatically. Their full list remains under "
+                            "inputs/deleted/; "
                             "read it only when needed for organizing the candidate and do not copy the list into "
                             "your reply. "
                             "inputs/ and materialized-source/ are read-only. Use tmp/ for scratch files; tmp/ is "
@@ -2180,7 +2184,8 @@ class ContextPipelineService:
                             "credentials, absolute paths, "
                             "network content, or files outside the sandbox. You may use only context/, inputs/, "
                             "tmp/, and the optional materialized source copy. This is a "
-                            "disposable PersonalContext sandbox: do not follow generic soft-delete/archive rules, do not "
+                            "disposable PersonalContext sandbox: do not follow generic soft-delete/archive rules, "
+                            "do not "
                             "create .archive, .deleted, recycle-bin, or any other root entry, and delete "
                             "temporary files directly with the allowed tools. The only permitted sandbox-root "
                             "entries are framework-created .agent_history, context, inputs, tmp, "
@@ -2311,7 +2316,8 @@ class ContextPipelineService:
         effective_service_id = service_id or "local"
         accepted_count = 0
         for start in range(0, len(documents), _BALANCED_GROUP_SIZE):
-            group = documents[start : start + _BALANCED_GROUP_SIZE]
+            group_end = start + _BALANCED_GROUP_SIZE
+            group = documents[start:group_end]
             payload_items: list[dict[str, object]] = []
             target_paths_by_index: dict[int, dict[str, Path]] = {}
             allowed_targets: dict[int, set[str]] = {}
@@ -2345,8 +2351,6 @@ class ContextPipelineService:
             try:
                 result = await model.invoke([message])
                 output_text = _model_result_text(result)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 break
             accepted = _parse_balanced_enrichments(output_text, allowed_targets=allowed_targets)

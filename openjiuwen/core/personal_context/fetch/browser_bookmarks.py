@@ -532,14 +532,15 @@ class BrowserBookmarksFetchService(ContextFetchService):
                 if previous_fingerprint is not None and previous_fingerprint != fingerprint:
                     new_or_changed.append(change)
                     continue
-                if previous_fingerprint is None and (
-                    not previous
-                    or latest_known_date is None
-                    or _date_sort_value(bookmark["date_added"]) > latest_known_date
-                ):
-                    new_or_changed.append(change)
-                elif previous_fingerprint is None:
-                    historical.append(change)
+                if previous_fingerprint is None:
+                    if (
+                        not previous
+                        or latest_known_date is None
+                        or _date_sort_value(bookmark["date_added"]) > latest_known_date
+                    ):
+                        new_or_changed.append(change)
+                    else:
+                        historical.append(change)
             for input_index, (logical_id, fingerprint) in enumerate(previous.items(), start=len(current)):
                 if logical_id not in current:
                     new_or_changed.append((input_index, "delete", logical_id, None, fingerprint))
