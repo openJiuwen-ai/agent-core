@@ -85,9 +85,11 @@ def _build_team_context_tracker(
     """Build the tracker feeding team state into this CLI member's messages.
 
     An external CLI has no rail, so the runtime folds the tracker's output into
-    the next message it sends. The workspace paths mirror what an in-process
-    member is told (``agent_configurator``): the agent-relative ``.team`` mount
-    and the shared workspace's absolute path.
+    the next message it sends. Unlike an in-process member, an external CLI has
+    no ``.team/{team}`` mount in its cwd (``setup_agent`` short-circuits before
+    ``mount_into_workspace`` is ever called), so the agent-relative mount string
+    would be a path the member cannot reach. We therefore expose only the
+    shared workspace's absolute path — the member writes there directly.
 
     Args:
         team_backend: The external member's own TeamBackend.
@@ -110,7 +112,7 @@ def _build_team_context_tracker(
         role=ctx.role,
         display_name=ctx.display_name or "",
         member_prompt=ctx.prompt or "",
-        team_workspace_mount=f".team/{team_name}/" if workspace_enabled else None,
+        team_workspace_mount=None,
         team_workspace_path=_team_workspace_path(spec, team_name) if workspace_enabled else None,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         language=language,
