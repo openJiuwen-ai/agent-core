@@ -22,6 +22,7 @@ persisted session id.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from openjiuwen.core.single_agent.rail.base import AgentRail
     from openjiuwen.harness.deep_agent import DeepAgent
     from openjiuwen.harness.schema.config import DeepAgentConfig
+    from openjiuwen.harness.schema.deep_agent_spec import TeamModelConfig
 
 
 class TeamHarness:
@@ -505,20 +507,36 @@ class TeamHarness:
 
         Updates both the stored DeepAgentSpec (survives start/stop rebuild)
         and the live NativeHarness (immediate effect on next LLM call).
+
+        On ``model_config.build()`` failure, logs a warning and keeps the
+        previous ``deep_config.model`` so the next LLM call does not crash
+        on a ``None`` model — the stored ``_agent_spec.model`` is still
+        updated so a subsequent rebuild picks up the new config.
         """
         self._agent_spec.model = model_config
         if self._native is not None:
             deep_config = self._native.deep_config
             if deep_config is not None:
-                # DeepAgentConfig is a @dataclass (not Pydantic BaseModel), so no
-                # model_copy; use dataclasses.replace. model_config is a
-                # TeamModelConfig spec — build() materializes a live Model instance
-                # matching DeepAgentConfig.model: Optional[Model].
-                import dataclasses
+                # DeepAgentConfig is a @dataclass (not Pydantic BaseModel), so
+                # no model_copy; use dataclasses.replace. model_config is a
+                # TeamModelConfig spec — build() materializes a live Model
+                # instance matching DeepAgentConfig.model: Optional[Model].
                 try:
                     built_model = model_config.build()
-                except Exception:
-                    built_model = None
+                except Exception as exc:
+                    # Keep the previous live Model instead of replacing with
+                    # None — a None deep_config.model would crash the next LLM
+                    # call. The stored _agent_spec.model was already updated
+                    # above so a rebuild from spec still picks up the switch.
+                    logger.warning(
+                        "[TeamHarness] model build failed, keep previous model: "
+                        "member=%s model_name=%s error=%s",
+                        self._member_name,
+                        model_config.model_request_config.model_name
+                        if model_config.model_request_config else None,
+                        exc,
+                    )
+                    built_model = deep_config.model
                 updated = dataclasses.replace(deep_config, model=built_model)
                 self._native.configure(updated)
         logger.info(

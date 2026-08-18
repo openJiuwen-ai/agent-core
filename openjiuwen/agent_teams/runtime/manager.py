@@ -1041,21 +1041,23 @@ class TeamRuntimeManager:
             # platform adapter before activate) only hot-reloads the leader's
             # harness via ``apply_model_config``; it does not touch
             # ``ctx.team_spec``, so the reinjection here is required for the
-            # teammate cold-spawn path.
-            live_spec = spec
-            if live_spec is not None and getattr(agent, "team_spec", None) is not None:
+            # teammate cold-spawn path. Also rebuild the ``model_allocator``
+            # so a subsequent ``spawn_member`` tool call allocates from the
+            # new pool instead of the stale one.
+            if spec is not None and getattr(agent, "spec", None) is not None:
+                from openjiuwen.agent_teams.agent.team_agent import (
+                    _reinject_runtime_model_fields,
+                )
+                from openjiuwen.agent_teams.models import build_model_allocator
+
                 agent_spec = getattr(agent, "spec", None)
-                if agent_spec is not None:
-                    agent_spec.model_pool = list(live_spec.model_pool)
-                    agent_spec.model_pool_strategy = live_spec.model_pool_strategy
-                    for role_key, live_agent_spec in live_spec.agents.items():
-                        tgt = agent_spec.agents.get(role_key)
-                        if tgt is not None and live_agent_spec.model is not None:
-                            tgt.model = live_agent_spec.model
-                    agent_spec.predefined_members = list(live_spec.predefined_members)
-                ts = agent.team_spec
-                ts.model_pool = list(live_spec.model_pool)
-                ts.model_pool_strategy = live_spec.model_pool_strategy
+                ts = getattr(agent, "team_spec", None)
+                _reinject_runtime_model_fields(agent_spec, ts, spec)
+                configurator = getattr(agent, "_configurator", None)
+                if configurator is not None and ts is not None:
+                    configurator.model_allocator = build_model_allocator(
+                        agent_spec, ts
+                    )
             await self._pre_run_with_inputs(team_session, inputs)
             pool_entry.state = RuntimeState.RUNNING
             await pool_entry.interact_gate.reset()

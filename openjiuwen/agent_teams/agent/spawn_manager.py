@@ -384,17 +384,21 @@ class SpawnManager:
                 if getattr(pm, 'member_name', None) == member_name:
                     spec_model_name = getattr(pm, 'model_name', None)
                     break
-        # When the spec carries an explicit, diverging model_name, use it
-        # (model_index resets — group[0] under resolve_member_model); else
-        # fall back to the DB ref's sticky (model_name, model_index).
-        if spec_model_name is not None:
+        # Resolution priority — only override the sticky DB ref when the spec
+        # actually diverges. When spec and DB agree on the same model_name, keep
+        # the DB ``model_index`` so a multi-entry same-name pool (e.g. several
+        # api_keys for the same model) does NOT collapse to group[0] on every
+        # restart, which would shift a teammate between endpoints needlessly.
+        db_name = model_ref.model_name if model_ref is not None else None
+        db_index = model_ref.model_index if model_ref is not None else None
+        if spec_model_name is not None and spec_model_name != db_name:
             resolved_name = spec_model_name
             resolved_index = None
-        elif model_ref is not None:
-            resolved_name = model_ref.model_name
-            resolved_index = model_ref.model_index
+        elif db_name is not None:
+            resolved_name = db_name
+            resolved_index = db_index
         else:
-            resolved_name = None
+            resolved_name = spec_model_name
             resolved_index = None
         if resolved_name is not None and team_spec is not None:
             member_model = resolve_member_model(
