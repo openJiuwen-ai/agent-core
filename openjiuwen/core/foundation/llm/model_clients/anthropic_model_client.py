@@ -58,6 +58,12 @@ if TYPE_CHECKING:
     import anthropic
 
 
+# Room left for the answer when ``max_tokens`` has to be raised to hold a
+# thinking budget. The budget is deducted from ``max_tokens``, so a ceiling
+# equal to it would leave nothing to reply with.
+_THINKING_MAX_TOKENS_HEADROOM = 4096
+
+
 # ---------------------------------------------------------------------------
 # Shape converters: openJiuwen BaseMessage list  <->  Anthropic Messages API payload
 # ---------------------------------------------------------------------------
@@ -483,26 +489,56 @@ class AnthropicModelClient(BaseModelClient):
             params["system"] = system_blocks
         if anthropic_tools:
             params["tools"] = anthropic_tools
-        # Anthropic rejects temperature and top_p together (400 invalid_request
-        # for models such as Claude Haiku 4.5). Both carry non-None defaults in
-        # ModelRequestConfig, so we cannot rely on the caller to unset one:
-        # prefer temperature and only forward top_p when temperature is absent.
-        temperature = openai_params.get("temperature")
-        top_p = openai_params.get("top_p")
-        if temperature is not None:
-            params["temperature"] = temperature
-            if top_p is not None:
-                llm_logger.debug(
-                    "Anthropic: dropping top_p because temperature is set "
-                    "(the API forbids specifying both)."
-                )
-        elif top_p is not None and top_p != 1.0:
-            # top_p=1.0 is the default (no nucleus truncation); skip it so we
-            # send the API only meaningful overrides.
-            params["top_p"] = top_p
         if openai_params.get("stop"):
             stop_val = openai_params["stop"]
             params["stop_sequences"] = stop_val if isinstance(stop_val, list) else [stop_val]
+
+        # Extended thinking. ``params`` is rebuilt from an explicit set of keys
+        # above, so anything not named here is dropped however correctly it was
+        # configured upstream -- and a caller that asked for a thinking budget
+        # would get an ordinary answer with no indication the request was
+        # altered.
+        thinking = openai_params.get("thinking")
+        if thinking is not None:
+            params["thinking"] = thinking
+            # The budget is thinking tokens taken *out of* max_tokens, so a
+            # ceiling that cannot hold it *and* leave answer headroom is wrong
+            # twice over: the API rejects budget >= max_tokens outright, and a
+            # budget just under it (8000 against the 8192 default, or budget+1)
+            # is accepted while leaving almost no room for the answer.
+            budget = 0
+            if isinstance(thinking, dict):
+                try:
+                    budget = int(thinking.get("budget_tokens") or 0)
+                except (TypeError, ValueError):
+                    # Only passing the field through; never fail a request over it.
+                    budget = 0
+            if budget > 0 and (
+                int(params["max_tokens"]) - budget < _THINKING_MAX_TOKENS_HEADROOM
+            ):
+                params["max_tokens"] = budget + _THINKING_MAX_TOKENS_HEADROOM
+            # Extended thinking rejects a non-default temperature and any
+            # top_p, so neither is forwarded here. Omission is what every
+            # Messages model accepts, and it is the only spelling that works
+            # given ModelRequestConfig supplies both by default.
+        else:
+            # Anthropic rejects temperature and top_p together (400 invalid_request
+            # for models such as Claude Haiku 4.5). Both carry non-None defaults in
+            # ModelRequestConfig, so we cannot rely on the caller to unset one:
+            # prefer temperature and only forward top_p when temperature is absent.
+            temperature = openai_params.get("temperature")
+            top_p = openai_params.get("top_p")
+            if temperature is not None:
+                params["temperature"] = temperature
+                if top_p is not None:
+                    llm_logger.debug(
+                        "Anthropic: dropping top_p because temperature is set "
+                        "(the API forbids specifying both)."
+                    )
+            elif top_p is not None and top_p != 1.0:
+                # top_p=1.0 is the default (no nucleus truncation); skip it so we
+                # send the API only meaningful overrides.
+                params["top_p"] = top_p
 
         # NOTE: do not set a top-level ``cache_control`` here. Automatic caching
         # anchors the breakpoint on the very last block, which would be the
