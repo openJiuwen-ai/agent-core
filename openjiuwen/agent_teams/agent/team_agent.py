@@ -1208,8 +1208,40 @@ class TeamAgent(BaseAgent):
         if runtime_spec is not None and runtime_spec.memory and runtime_spec.memory.embedding_config:
             if spec.memory:
                 spec.memory.embedding_config = runtime_spec.memory.embedding_config
+        # Reinject model-related fields from the live runtime spec so a
+        # cold-recover triggered with a model switch (e.g. relay-claw "继续执行"
+        # carrying a new model_name) actually applies to the recovered leader
+        # and the re-spawned teammates. The checkpoint holds the spec/context
+        # as of the previous pause/stop, so without this block the leader
+        # would re-spawn on the old model and ``build_context_from_db`` would
+        # resolve each teammate's stale DB ``model_ref`` against the old pool,
+        # leaving every teammate on the previous model.
+        if runtime_spec is not None:
+            spec.model_pool = list(runtime_spec.model_pool)
+            spec.model_pool_strategy = runtime_spec.model_pool_strategy
+            # Per-agent leader model overrides set by the platform adapter
+            # (e.g. ``team_spec.agents['leader'].model`` hot-injection in
+            # ``team_helpers``) must reach the recovered spec so the leader
+            # picks up the new model at ``setup_agent``.
+            for role_key, live_agent_spec in runtime_spec.agents.items():
+                tgt = spec.agents.get(role_key)
+                if tgt is not None and live_agent_spec.model is not None:
+                    tgt.model = live_agent_spec.model
+            # ``predefined_members`` carry the per-member ``model_name`` hint
+            # that ``build_context_from_db`` uses to resolve each teammate's
+            # model against the pool. Without reinjecting them, the stale DB
+            # ``model_ref`` wins on cold-recover and the teammate re-spawns on
+            # the old model.
+            spec.predefined_members = list(runtime_spec.predefined_members)
         spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
+        # Propagate the reinjected pool to ``context.team_spec`` so the
+        # downstream ``resolve_member_model`` call in ``build_context_from_db``
+        # (which reads ``self._configurator.team_spec``, i.e. ``ctx.team_spec``)
+        # resolves against the new pool instead of the checkpoint's stale one.
+        if runtime_spec is not None and context.team_spec is not None:
+            context.team_spec.model_pool = list(runtime_spec.model_pool)
+            context.team_spec.model_pool_strategy = runtime_spec.model_pool_strategy
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
         card_id = f"{team_name}_{context.member_name}" if context.member_name else "leader"
