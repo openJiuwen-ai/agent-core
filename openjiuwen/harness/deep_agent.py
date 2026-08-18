@@ -663,8 +663,7 @@ class DeepAgent(BaseAgent):
         if config.enable_task_loop:
             self._pending_rails.append(TaskCompletionRail())
 
-        # 始终交给 factory：旧 enabled=false 会迁移为 mode=full_access 并挂载权限轨
-        if isinstance(config.permissions, dict):
+        if isinstance(config.permissions, dict) and config.permissions.get("enabled"):
             ws_root = None
             if config.workspace is not None:
                 ws_root = Path(config.workspace.root_path).resolve()
