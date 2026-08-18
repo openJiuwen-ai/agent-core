@@ -466,6 +466,7 @@ async def agent(
 
     cached = rt.journal.get_cached(ks, sig)
     if cached is not None:  # resume hit — no semaphore, no backend
+        rt.log_sink(f"[wf] agent {opts.get('label') or 'agent'!r} key={ks} CACHE_HIT sig={sig[:12]}")
         await rt.journal.use(ks, cached)
         result = _rehydrate(cached, model_cls)
         # Prefer stored raw_text; if absent (old journal), fall back to
@@ -477,6 +478,7 @@ async def agent(
         )
         return result
 
+    rt.log_sink(f"[wf] agent {opts.get('label') or 'agent'!r} key={ks} CACHE_MISS sig={sig[:12]} (live run)")
     _check_abort(rt)  # entry gate: a paused run starts no new agent()
     _check_budget(rt)  # entry gate: a run out of tokens starts no new agent()
 
@@ -785,6 +787,7 @@ class AgentSession:
 
             cached = rt.journal.get_cached(ks, sig)
             if cached is not None:  # resume hit — no backend, no harness, no person
+                rt.log_sink(f"[wf] session {opts.get('label') or 'session'!r} key={ks} CACHE_HIT sig={sig[:12]}")
                 await rt.journal.use(ks, cached)
                 result = _rehydrate(cached, model_cls)
                 self._append_history(prompt, result, model_cls)
@@ -795,6 +798,7 @@ class AgentSession:
                 )
                 return None if notify else result
 
+            rt.log_sink(f"[wf] session {opts.get('label') or 'session'!r} key={ks} CACHE_MISS sig={sig[:12]} (live run, history_len={len(self._history)})")
             _check_abort(rt)  # entry gate: a paused run starts no new turn
             _check_budget(rt)  # entry gate: a run out of tokens starts no new turn
 
@@ -906,6 +910,7 @@ class AgentSession:
             return
         if not self._human:
             rt.spawn_count += 1  # the avatar is this session's one spawned agent
+        rt.log_sink(f"[wf] session {opts.get('label') or 'session'!r} opening backend session (avatar (re)created)")
         self._sid = await rt.backend.open_session(
             kind="human" if self._human else "agent",
             instructions=self._instructions,
