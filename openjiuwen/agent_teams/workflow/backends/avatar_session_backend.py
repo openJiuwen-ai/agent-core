@@ -79,9 +79,10 @@ _DEFAULT_HUMAN_TIMEOUT = 600.0
 # reply a request to edit the script/flow and rerun, or a plain continue? Kept
 # as module constants (like the tiny-agent title/summary presets) — minimal.
 _INTENT_CLASSIFY_PROMPT = (
-    "你判断用户的回复是否表示要修改脚本并重跑。"
-    "如果用户要改脚本/改 prompt/调整流程后重跑，intent=edit_rerun 并记下编辑要点；"
-    "否则 intent=continue。只输出结构化结果。"
+    "Decide whether the user's reply asks to edit the script and re-run. "
+    "If they want to change the script/prompt/workflow and re-run, set "
+    "intent=edit_rerun and note the edit points; otherwise intent=continue. "
+    "Output structured results only."
 )
 
 _INTENT_SCHEMA = {
@@ -574,6 +575,7 @@ class AvatarSessionManager:
         from openjiuwen.harness.prompts import PromptMode
 
         model_name = self._leader_model_name
+        user_prompt = f"Question:\n{prompt}\n\nReply:\n{raw}"
         try:
             if model_name and self._model_resolver is not None:
                 async with create_tiny_agent(
@@ -585,7 +587,7 @@ class AvatarSessionManager:
                     max_iterations=3,
                 ) as classifier:
                     return await classifier.run(
-                        f"问题:{prompt}\n\n回复:{raw}",
+                        user_prompt,
                         schema=_INTENT_SCHEMA,
                     )
             base_model = self._worker_base_spec.model if self._worker_base_spec else None
@@ -609,7 +611,7 @@ class AvatarSessionManager:
             classifier = TinyAgent(spec, default_schema=_INTENT_SCHEMA, language=self._language)
             async with classifier:
                 return await classifier.run(
-                    f"问题:{prompt}\n\n回复:{raw}",
+                    user_prompt,
                     schema=_INTENT_SCHEMA,
                 )
         except Exception:
