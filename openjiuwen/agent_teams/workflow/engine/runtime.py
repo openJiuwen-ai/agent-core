@@ -82,6 +82,14 @@ class Runtime:
     terminal) — the in-flight call does not journal and the run unwinds (a
     resume reruns it). ``None`` disables the checkpoints (default; full
     back-compat)."""
+    persist_workflow_budget: "Callable[[BudgetLedger], None] | None" = field(default=None, repr=False)
+    """Optional sync callback to durably snapshot ``workflow_budget`` to disk
+    (the ``<journal>.budget`` sidecar). Fired by the emit hooks at agent
+    boundaries (best-effort: a soft ceiling tolerates losing the in-flight
+    agent's count) and awaited once at ``finalize`` (durable terminal snapshot).
+    Kept on ``Runtime`` (not ``BudgetLedger``) so the ledger stays
+    business-agnostic — only the engine layer does I/O, mirroring
+    ``progress_sink`` / ``log_sink``."""
 
     # Mutable run state (created/advanced inside the running loop).
     agent_gate: AgentAdmission | None = field(default=None, repr=False)

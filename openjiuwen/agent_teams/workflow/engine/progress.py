@@ -17,7 +17,7 @@ the engine when it emits one.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +119,7 @@ class WorkflowProgressEvent:
     tokens: int | None = None
     budget: dict | None = None
     workflow_budget: dict | None = None
+    budget_exhausted_scope: str | None = None
     phase_type: str | None = None
     nested_phase: str | None = None
     parent_phase: str | None = None
