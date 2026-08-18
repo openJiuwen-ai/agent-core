@@ -366,13 +366,28 @@ class SpawnManager:
 
         model_ref = get_member_model_ref(teammate)
         member_model = None
-        if model_ref is not None:
-            team_spec = self._configurator.team_spec
-            if team_spec is not None:
+        team_spec = self._configurator.team_spec
+        if model_ref is not None and team_spec is not None:
+            member_model = resolve_member_model(
+                team_spec,
+                model_name=model_ref.model_name,
+                model_index=model_ref.model_index,
+            )
+        # 回退：DB model_ref 为空或未命中 pool 时，从 spec 的 predefined_members
+        # 找该 member 的 model_name 再试一次。这样 §3c-2 覆盖 predefined_members
+        # 的 model_name 能影响后续 spawn（DB 行的 model_ref 是首次 spawn 时写的，
+        # 不会随 spec 更新自动刷新）。
+        if member_model is None and team_spec is not None:
+            spec_model_name = None
+            for pm in getattr(team_spec, 'predefined_members', None) or []:
+                if getattr(pm, 'member_name', None) == member_name:
+                    spec_model_name = getattr(pm, 'model_name', None)
+                    break
+            if spec_model_name:
                 member_model = resolve_member_model(
                     team_spec,
-                    model_name=model_ref.model_name,
-                    model_index=model_ref.model_index,
+                    model_name=spec_model_name,
+                    model_index=None,
                 )
 
         ctx = self._configurator.ctx
