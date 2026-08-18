@@ -15,7 +15,6 @@ import logging
 import os
 import re
 import shlex
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -214,15 +213,6 @@ def _compile_workspace_axis_rule(
     )
 
 
-def _trusted_dir_axes(fg: Mapping[str, Any]) -> tuple[str, str, str]:
-    """trusted_dirs 跟随 ``file_guard.workspace`` 轴；缺省保持历史 read/write allow。"""
-    workspace_cfg = fg.get("workspace") if isinstance(fg.get("workspace"), dict) else {}
-    read = str(workspace_cfg.get("read") or "allow").strip().lower() or "allow"
-    write = str(workspace_cfg.get("write") or "allow").strip().lower() or "allow"
-    exec_ = str(workspace_cfg.get("exec") or "ask").strip().lower() or "ask"
-    return read, write, exec_
-
-
 def _explicit_enabled(fg: Mapping[str, Any] | None) -> bool | None:
     if not isinstance(fg, dict) or "enabled" not in fg:
         return None
@@ -413,11 +403,10 @@ def _normalize_native(
     if ws_rule is not None:
         rules.append(ws_rule)
 
-    # 运行时 trusted_dirs：与当前 mode 的 workspace 轴一致（选中工作目录）
-    td_read, td_write, td_exec = _trusted_dir_axes(fg)
+    # 运行时 trusted_dirs → allow 前缀（与 workspace 独立；项目 cwd / /add-dir 热更新）
     for td in trusted_dirs:
         rule = _compile_path_entry(
-            str(td), read=td_read, write=td_write, exec_=td_exec, match="prefix",
+            str(td), read="allow", write="allow", exec_="ask", match="prefix",
         )
         if rule is not None:
             rules.append(rule)
@@ -507,7 +496,7 @@ def extract_paths_legacy(
 ) -> list[Path]:
     """develop 抽取：仅路径字符串，无 R/W/X（供 Legacy 投影锁定现网行为）。"""
     paths: list[Path] = []
-    if tool_name in ("mcp_exec_command", "bash", "create_terminal", "powershell"):
+    if tool_name in ("mcp_exec_command", "bash", "create_terminal"):
         workdir = tool_args.get("workdir", "")
         try:
             workdir_resolved = (workspace / str(workdir)).resolve()
@@ -535,7 +524,7 @@ def extract_paths_legacy(
 def _tool_default_action(tool_name: str) -> FileGuardAction:
     if tool_name in _WRITE_PATH_TOOLS:
         return "write"
-    if tool_name in ("mcp_exec_command", "bash", "create_terminal", "powershell"):
+    if tool_name in ("mcp_exec_command", "bash", "create_terminal"):
         # Legacy 不区分 exec；路径访问按 read 轴（与 ExternalDirectory 无轴一致，用同 defaults）
         return "read"
     return "read"
@@ -563,8 +552,7 @@ def _match_glob(pattern: str, path_posix: str) -> bool:
             out.append(re.escape(pattern[i]))
             i += 1
     try:
-        flags = re.IGNORECASE if sys.platform == "win32" else 0
-        return bool(re.fullmatch("".join(out), path_posix, flags=flags))
+        return bool(re.fullmatch("".join(out), path_posix))
     except re.error:
         return False
 
@@ -701,17 +689,12 @@ class FileGuardChecker:
     ) -> tuple[PermissionLevel, str | None]:
         path_posix = path.as_posix()
         best_prefix: tuple[int, FileGuardPathRule] | None = None
-        scored: list[tuple[PermissionLevel, str]] = []
+        glob_hits: list[PermissionLevel] = []
 
         for rule in self._effective.paths:
             if rule.match == "glob":
                 if _match_glob(rule.path.replace("\\", "/"), path_posix):
-                    scored.append(
-                        (
-                            _level_for_action(rule, action),
-                            f"file_guard:glob:{rule.path}",
-                        )
-                    )
+                    glob_hits.append(_level_for_action(rule, action))
                 continue
             # prefix
             prefix = rule.path.rstrip("/")
@@ -722,23 +705,18 @@ class FileGuardChecker:
                     if best_prefix is None or ln > best_prefix[0]:
                         best_prefix = (ln, rule)
 
+        candidates: list[PermissionLevel] = []
+        rule_id: str | None = None
         if best_prefix is not None:
-            scored.append(
-                (
-                    _level_for_action(best_prefix[1], action),
-                    f"file_guard:prefix:{best_prefix[1].path}",
-                )
-            )
+            candidates.append(_level_for_action(best_prefix[1], action))
+            rule_id = f"file_guard:prefix:{best_prefix[1].path}"
+        candidates.extend(glob_hits)
+        if glob_hits and rule_id is None:
+            rule_id = "file_guard:glob"
 
-        if scored:
-            # deny > ask > allow；同级时优先 glob（敏感路径），避免误报 workspace 前缀
-            level, rule_id = min(
-                scored,
-                key=lambda item: (
-                    _LEVEL_ORDER[item[0]],
-                    0 if item[1].startswith("file_guard:glob:") else 1,
-                ),
-            )
+        if candidates:
+            # deny > ask > allow
+            level = min(candidates, key=lambda lv: _LEVEL_ORDER[lv])
             return level, rule_id
 
         # 未命中 paths → defaults
@@ -775,7 +753,6 @@ _PATH_CLASS_TOOLS = frozenset({
     "write", "read",
     "glob_file_search", "glob", "list_dir", "list_files",
     "grep", "search_replace",
-    "send_file_to_user",
 })
 
 _LOAD_WARNED_RULE_IDS: set[str] = set()
