@@ -44,6 +44,11 @@ from openjiuwen.symphony.orchestration.graph.matcher.ontology import (
 )
 from openjiuwen.symphony.orchestration.language import resolve_orchestration_language
 from openjiuwen.symphony.orchestration.model import ModelResponseObserver
+from openjiuwen.symphony.orchestration.modes import (
+    is_supported,
+    planner_factory,
+    unsupported_mode_error,
+)
 from openjiuwen.symphony.orchestration.planning.beam import BidirectionalBeamPlanner
 from openjiuwen.symphony.orchestration.planning.fast import FastOneShotPlanner
 from openjiuwen.symphony.shared.fingerprint import Fingerprint, coerce_fingerprint
@@ -230,13 +235,25 @@ class OrchestrationService:
             disabled_capability_ids,
         )
         planning_mode = mode or self.config.mode
-        if planning_mode not in {"fast", "beam"}:
-            raise ValueError(f"Unsupported orchestration mode: {planning_mode}")
+        if not is_supported(planning_mode):
+            raise unsupported_mode_error(planning_mode)
         normalized_language = resolve_orchestration_language(language)
         selected, summary = _input_candidate_summary(candidate_ids, artifacts.skills)
         effective_overlay = dynamic_overlay if self.config.dynamic_graph_enabled and dynamic_overlay else {}
         planner: Any
-        if planning_mode == "beam":
+        factory = planner_factory(planning_mode)
+        if factory is not None:
+            planner = factory(
+                artifacts=artifacts,
+                model=self.model,
+                model_response_observer=self.model_response_observer,
+                config=self.config,
+                candidate_skill_ids=selected,
+                progress_callback=_planner_progress_callback(callback),
+                language=normalized_language,
+                dynamic_overlay=effective_overlay,
+            )
+        elif planning_mode == "beam":
             planner = BidirectionalBeamPlanner(
                 artifacts,
                 model=self.model,
