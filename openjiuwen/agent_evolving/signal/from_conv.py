@@ -469,8 +469,13 @@ class ConversationSignalDetector:
             language=self._language,
         )
         if prompt_inputs is None:
+            logger.info("[detect_user_intent] no last user message, skip")
             return []
         conversation_context, last_user_message = prompt_inputs
+        logger.info(
+            "[detect_user_intent] last user message: %s",
+            last_user_message,
+        )
 
         traj_skills = self.collect_skills_from_messages(messages)
         extra = [str(s).strip() for s in (extra_skills or []) if str(s).strip()]

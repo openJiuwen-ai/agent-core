@@ -1117,7 +1117,7 @@ async def test_run_evolution_suggest_records_trigger_and_success(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_suggest_no_records_only_counts_trigger(tmp_path, monkeypatch):
+async def test_run_evolution_suggest_empty_records_counts_success(tmp_path, monkeypatch):
     rail = _make_rail(tmp_path, auto_save=True)
     signals = [_make_signal("weather")]
     rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
@@ -1125,6 +1125,33 @@ async def test_run_evolution_suggest_no_records_only_counts_trigger(tmp_path, mo
     rail._evolution_store.skill_exists = Mock(return_value=True)
     _patch_detected_signals(monkeypatch, signals)
     rail._generate_experience_for_skill = AsyncMock(return_value=[])
+    rail._evolution_store.append_record = AsyncMock()
+    rail._record_suggest_evolution_counts = Mock()
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.skill_evolution_rail.resolve_skill_evolution_action",
+        lambda skill_name, **kwargs: "suggest",
+    )
+    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+
+    await rail.run_evolution(None, ctx)
+
+    rail._record_suggest_evolution_counts.assert_any_call("weather", triggered=True)
+    rail._record_suggest_evolution_counts.assert_any_call(
+        "weather", experience_succeeded=True
+    )
+    assert rail._record_suggest_evolution_counts.call_count == 2
+    rail._evolution_store.append_record.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_suggest_generate_failed_only_counts_trigger(tmp_path, monkeypatch):
+    rail = _make_rail(tmp_path, auto_save=True)
+    signals = [_make_signal("weather")]
+    rail._collect_parsed_messages = AsyncMock(return_value=[{"role": "user", "content": "hello"}])
+    rail._evolution_store.list_skill_names = Mock(return_value=["weather"])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    _patch_detected_signals(monkeypatch, signals)
+    rail._generate_experience_for_skill = AsyncMock(return_value=([], False))
     rail._evolution_store.append_record = AsyncMock()
     rail._record_suggest_evolution_counts = Mock()
     monkeypatch.setattr(
@@ -1347,7 +1374,7 @@ async def test_generate_experience_for_skill_builds_context(tmp_path):
 
     result = await rail._generate_experience_for_skill("skill-a", [signal], [{"role": "user", "content": "x"}])
 
-    assert result == [new_record]
+    assert result == ([new_record], True)
     evo_ctx = rail._evolver.generate_records.await_args.args[0]
     assert evo_ctx.skill_name == "skill-a"
     assert evo_ctx.signals == [signal]
@@ -1366,7 +1393,7 @@ async def test_generate_experience_for_skill_returns_empty_on_evolver_exception(
     rail._evolver.generate_records = AsyncMock(side_effect=RuntimeError("llm fail"))
 
     result = await rail._generate_experience_for_skill("skill-a", [_make_signal("skill-a")], [])
-    assert result == []
+    assert result == ([], False)
 
 
 @pytest.mark.asyncio
