@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from openjiuwen.agent_teams.harness.async_tools import AsyncTool, render_result_text
 from openjiuwen.agent_teams.i18n import STRINGS
@@ -30,6 +30,9 @@ from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
 
 # Resolve an ``agent(model=...)`` name hint to a worker ``TeamModelConfig`` (or
 # None to fall back to the worker base spec's model). Built by the configurator.
@@ -149,12 +152,34 @@ class SwarmflowTool(AsyncTool):
             result=summary,
         )
 
-    def format_failed_injection(self, error: str, *, run_id: str) -> str:
-        """Terminal failure text injected after the background run fails."""
+    def format_failed_injection(
+        self,
+        error: "BudgetExhausted | str",
+        *,
+        run_id: str,
+    ) -> str:
+        """Terminal failure text injected after the background run fails.
+
+        When the run hit a token ceiling, ``error`` is the ``BudgetExhausted``
+        itself (the async-tool runtime passes the exception through so no
+        structured field is lost): the message is generated from its fields
+        — ``scope`` picks the ceiling kind, ``spent``/``total`` the trigger
+        layer's tally, ``top_phases`` the heaviest phases, and
+        ``workflow_spent``/``workflow_total`` the per-run contrast when the
+        *session* layer tripped. Any other failure arrives as a plain ``str``.
+        """
+        from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
+
+        if isinstance(error, BudgetExhausted):
+            return self._local_t(
+                "swarmflow.budget_exhausted",
+                run_id=run_id,
+                **_budget_exhausted_fields(error, self._language),
+            )
         return self._local_t(
             "swarmflow.failed",
             run_id=run_id,
-            error=error,
+            error=str(error),
         )
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
@@ -236,7 +261,7 @@ class SwarmflowTool(AsyncTool):
                 completion_ctx=completion_ctx,
             )
 
-        def _format_failed(error: str) -> str:
+        def _format_failed(error: Any) -> str:
             return self.format_failed_injection(error, run_id=run_id)
 
         try:
@@ -278,7 +303,6 @@ class SwarmflowTool(AsyncTool):
             WorkflowProgressTeamEvent,
         )
         from openjiuwen.agent_teams.workflow.engine.errors import (
-            BackendError,
             BudgetExhausted,
             WorkflowAborted,
         )
@@ -348,6 +372,7 @@ class SwarmflowTool(AsyncTool):
                 tokens=progress.tokens,
                 budget=progress.budget,
                 workflow_budget=progress.workflow_budget,
+                budget_exhausted_scope=progress.budget_exhausted_scope,
                 phase_type=progress.phase_type,
                 nested_phase=progress.nested_phase,
                 parent_phase=progress.parent_phase,
@@ -386,51 +411,17 @@ class SwarmflowTool(AsyncTool):
                 agent_gate=agent_gate,
                 budget=self._budget,
             )
-        except BudgetExhausted as exc:
-            # Terminal, unlike a pause: re-raise as an ordinary exception so the
-            # async-tool runtime injects a failure the leader can read and act on
-            # (a BaseException would kill the task silently). Two distinct
-            # ceilings produce two different leader-facing messages:
-            #   scope="workflow" — per-run ceiling. This ceiling is set by the
-            #     user and must NOT be changed; the leader must redesign the
-            #     workflow to consume fewer tokens. The new run's ledger resets.
-            #   scope="session"  — team-wide ceiling, not retryable (relaunching
-            #     hits the same gate; the session ceiling must be raised).
-            scope = getattr(exc, "scope", "session")
-            detail = str(exc)
-            if scope == "workflow":
-                if self._language == "cn":
-                    msg = (
-                        f"{detail}。本次工作流 token 额度已达单次上限（与会话总额独立）。"
-                        f"该上限由用户设定，不可修改；必须重新设计工作流以降低 token 消耗"
-                        f"（简化流程、减少 agent、更换更省 token 的模型等），"
-                        f"新 run 的 token 额度会重置。请重新设计工作流后再重试 swarmflow。"
-                    )
-                else:
-                    msg = (
-                        f"{detail}. This run hit its per-run token ceiling "
-                        f"(independent of the session budget). This ceiling is set by "
-                        f"the user and must NOT be changed; you must redesign the "
-                        f"workflow to consume fewer tokens (simplify / fewer agents / "
-                        f"cheaper model) and relaunch — the new run's ceiling resets. "
-                        f"Redesign the workflow before retrying swarmflow."
-                    )
-            else:
-                if self._language == "cn":
-                    msg = (
-                        f"{detail}。该预算为团队共享总额（会话级），当前已耗尽。"
-                        f"在未上调预算上限前，重启或新建工作流均会立即再次撞顶，"
-                        f"请先上调预算上限再重试 swarmflow。"
-                    )
-                else:
-                    msg = (
-                        f"{detail}. This is the team's shared (session-wide) token "
-                        f"ceiling and is currently exhausted. Until the ceiling is "
-                        f"raised, relaunching or starting a new workflow will hit "
-                        f"the same gate immediately — raise the ceiling before "
-                        f"retrying swarmflow."
-                    )
-            raise BackendError(msg) from exc
+        except BudgetExhausted:
+            # Re-raise the structured exception unchanged (do NOT downgrade to a
+            # BackendError): it is a BaseException precisely so a script's
+            # ``except Exception`` cannot swallow it, and so the async-tool
+            # runtime's ``except BudgetExhausted`` branch (async_tools.py) can
+            # read ``scope`` / ``spent`` / ``total`` / ``top_phases`` /
+            # ``workflow_spent`` / ``workflow_total`` and render a leader-facing
+            # message from those fields — keeping every piece of data (which
+            # layer tripped, the per-run contrast, the heaviest phases) instead
+            # of collapsing it into one hardcoded string.
+            raise
         except WorkflowAborted as exc:
             # Paused at an abort checkpoint: the WAL holds the completed prefix.
             # Re-raise as CancelledError so the async-tool runtime treats it as a
@@ -478,6 +469,59 @@ class SwarmflowTool(AsyncTool):
     def _local_t(self, key: str, **kwargs: object) -> str:
         raw = STRINGS[self._message_lang()][key]
         return raw.format_map(kwargs) if kwargs else raw
+
+
+def _format_top_phases(top_phases: list[tuple[str, int]] | None) -> str:
+    """Render the top-3 phase list as ``phase(tokens), phase(tokens)`` or empty."""
+    if not top_phases:
+        return ""
+    return ", ".join(f"{name}({tokens})" for name, tokens in top_phases)
+
+
+def _budget_exhausted_fields(exc: "BudgetExhausted", language: str) -> dict:
+    """Render the structured fields of a ``BudgetExhausted`` for the i18n template.
+
+    Pulls every field off the exception (scope / spent / total / top_phases /
+    workflow_spent / workflow_total) and returns the placeholder dict for
+    ``swarmflow.budget_exhausted``. ``guidance`` is the localized two-branch
+    advice text (workflow: redesign; session: raise the ceiling), resolved
+    here against ``language`` so the caller's ``_local_t`` stays a thin lookup.
+    """
+    scope = getattr(exc, "scope", "session") or "session"
+    spent = getattr(exc, "spent", None)
+    total = getattr(exc, "total", None)
+    wf_spent = getattr(exc, "workflow_spent", None)
+    wf_total = getattr(exc, "workflow_total", None)
+    lang = language if language in ("cn", "en") else "cn"
+    guidance_key = (
+        "swarmflow.budget_exhausted.workflow_guidance"
+        if scope == "workflow"
+        else "swarmflow.budget_exhausted.session_guidance"
+    )
+    guidance = STRINGS[lang][guidance_key]
+    # When the session layer tripped, surface the per-run contrast so the
+    # leader sees the run-level tally alongside the session total; when the
+    # workflow layer tripped, spent/total already IS the per-run tally.
+    if scope == "session" and wf_spent is not None and wf_total is not None:
+        workflow_contrast = f"Run 级对照：spent={wf_spent}/{wf_total}。"
+    else:
+        workflow_contrast = ""
+    trigger_layer = "workflow（单次额度）" if scope == "workflow" and lang == "cn" else (
+        "workflow (per-run)" if scope == "workflow" else (
+            "session（会话总额）" if lang == "cn" else "session (shared)"
+        )
+    )
+    return {
+        "detail": str(exc),
+        "spent": spent if spent is not None else "?",
+        "total": total if total is not None else "?",
+        "trigger_layer": trigger_layer,
+        "workflow_contrast": workflow_contrast,
+        "top_phases": _format_top_phases(getattr(exc, "top_phases", None)) or (
+            "（无）" if lang == "cn" else "(none)"
+        ),
+        "guidance": guidance,
+    }
 
 
 __all__ = ["SwarmflowTool", "WorkerModelResolver"]

@@ -202,6 +202,20 @@ def _check_abort(rt) -> None:
         raise WorkflowAborted()
 
 
+def _top_phases(rt) -> list[tuple[str, int]] | None:
+    """Top-3 author phases by per-phase token consumption, or ``None`` when empty.
+
+    Reads the per-run ledger's ``phase_tokens`` tally (accumulated by the emit
+    hooks below), so an exhausted run can tell the leader which phases burned
+    the most tokens — the data the leader needs to redesign a workflow that
+    keeps hitting its ceiling.
+    """
+    acc = rt.workflow_budget.phase_tokens
+    if not acc:
+        return None
+    return sorted(acc.items(), key=lambda kv: kv[1], reverse=True)[:3]
+
+
 def _check_budget(rt) -> None:
     """Raise ``BudgetExhausted`` when either ledger has hit its ceiling.
 
@@ -209,23 +223,30 @@ def _check_budget(rt) -> None:
     entry gate only: a call already paid for must reach its journal record, or
     a resume would rerun (and re-pay for) it.
 
-    Order-sensitive: the per-run (workflow) ceiling is checked first, so a run
-    out of its own workflow budget is never let through just because the shared
-    session budget still has headroom.
+    Order-sensitive — **session first**: when both ledgers are dry, the
+    terminal (not retryable) session reason wins. Relaunching after a session
+    exhaustion hits the same gate immediately, so reporting ``"workflow"``
+    would mislead the leader into "redesign the workflow" when raising the
+    ceiling is the only way forward. A session still holding headroom never
+    masks a per-run (workflow) exhaustion — that check still runs right after.
 
     This gate alone cannot hold the line — one agent's own loop can burn the
     whole budget long before it returns here. It is the backend's rails that
     stop an agent mid-loop; this stops the *next* one from starting.
     """
-    if rt.workflow_budget.exhausted:
-        raise BudgetExhausted(
-            f"workflow token budget exhausted: {rt.workflow_budget.spent}/{rt.workflow_budget.total}",
-            scope="workflow", spent=rt.workflow_budget.spent, total=rt.workflow_budget.total,
-        )
     if rt.budget.exhausted:
         raise BudgetExhausted(
             f"session token budget exhausted: {rt.budget.spent}/{rt.budget.total}",
             scope="session", spent=rt.budget.spent, total=rt.budget.total,
+            workflow_spent=rt.workflow_budget.spent, workflow_total=rt.workflow_budget.total,
+            top_phases=_top_phases(rt),
+        )
+    if rt.workflow_budget.exhausted:
+        raise BudgetExhausted(
+            f"workflow token budget exhausted: {rt.workflow_budget.spent}/{rt.workflow_budget.total}",
+            scope="workflow", spent=rt.workflow_budget.spent, total=rt.workflow_budget.total,
+            workflow_spent=rt.workflow_budget.spent, workflow_total=rt.workflow_budget.total,
+            top_phases=_top_phases(rt),
         )
 
 
@@ -295,6 +316,24 @@ def _wf_budget_snapshot(rt) -> dict | None:
     return _budget_snapshot(wb, scope="workflow")
 
 
+def _persist_workflow_budget(rt) -> None:
+    """Durably snapshot ``workflow_budget`` to the ``<journal>.budget`` sidecar.
+
+    Called by the emit hooks at agent boundaries so a later resume recovers
+    ``spent`` instead of resetting to 0 (the per-run ceiling binds to ``run_id``,
+    and ``_relaunch`` reuses it — see §4.4.5). Only persisted when a ceiling is
+    declared (an unbounded ledger has no ceiling to count toward, so a sidecar
+    is pointless). Synchronous + best-effort: a soft ceiling tolerates a missed
+    write mid-run; the terminal ``finalize`` write is the durable one.
+    """
+    wb = rt.workflow_budget
+    if wb.total is None:
+        return  # unbounded — no ceiling, no sidecar worth keeping
+    fn = rt.persist_workflow_budget
+    if fn is not None:
+        fn(wb)
+
+
 def _resolved_nested_phase(explicit: str | None = None) -> str | None:
     """Return ``explicit`` nested phase, or the per-task display name when inside a sub-workflow."""
     return explicit if explicit is not None else _wf_display_name.get()
@@ -349,6 +388,8 @@ def _emit_agent_completed(
     ``budget_snapshot``: frozen ``_budget_snapshot(rt.budget)`` at emit time.
     ``nested_phase``: defaults to ``_wf_display_name`` when inside a sub-workflow.
     """
+    rt.workflow_budget.add_phase(opts.get("phase") or _current_phase.get() or "?", tokens)
+    _persist_workflow_budget(rt)
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_COMPLETED,
@@ -369,6 +410,8 @@ def _emit_agent_failed(
     tokens: int | None = None, budget_snapshot: dict | None = None,
     nested_phase: str | None = None,
 ) -> None:
+    rt.workflow_budget.add_phase(opts.get("phase") or _current_phase.get() or "?", tokens)
+    _persist_workflow_budget(rt)
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_FAILED,

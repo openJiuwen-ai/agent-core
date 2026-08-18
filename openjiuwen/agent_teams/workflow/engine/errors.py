@@ -76,8 +76,14 @@ class BudgetExhausted(BaseException):
     """
 
     def __init__(self, message: str, *, scope: str = "session",
-                 spent: int | None = None, total: int | None = None) -> None:
+                 spent: int | None = None, total: int | None = None,
+                 top_phases: list[tuple[str, int]] | None = None,
+                 workflow_spent: int | None = None,
+                 workflow_total: int | None = None) -> None:
         super().__init__(message)
         self.scope = scope   # "workflow" | "session"
         self.spent = spent
         self.total = total
+        self.top_phases = top_phases             # top-3 phases by consumption: list[(phase, tokens)]
+        self.workflow_spent = workflow_spent     # workflow-level spent at exhaustion (contrast for session)
+        self.workflow_total = workflow_total     # workflow-level total at exhaustion
