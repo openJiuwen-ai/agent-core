@@ -150,6 +150,39 @@ class TestForkContext:
         assert len(ctx.messages) == 2  # not truncated
 
     @pytest.mark.level0
+    def test_keep_after_keeps_from_checkpoint(self):
+        msgs = _make_messages("user", "assistant", "user", "assistant")
+        ctx = ForkContext.from_agent(_fake_agent(msgs), checkpoint=2, keep="after")
+        assert [m["role"] for m in ctx.messages] == ["user", "assistant"]
+
+    @pytest.mark.level0
+    def test_keep_after_trims_leading_orphan_tool_messages(self):
+        tool_call = ToolCall(id="tc1", type="function", name="checkpoint", arguments="{}")
+        msgs = [
+            UserMessage(content="task"),
+            AssistantMessage(content="1", tool_calls=[tool_call]),
+            ToolMessage(tool_call_id="tc1", content="saved"),
+            UserMessage(content="post-checkpoint"),
+        ]
+        ctx = ForkContext.from_agent(_fake_agent(msgs), checkpoint=2, keep="after")
+        decoded = ctx.to_messages()
+        # The checkpoint call's ToolMessage has no inherited assistant → dropped.
+        assert [getattr(m, "role", None) for m in decoded] == ["user"]
+        assert decoded[0].content == "post-checkpoint"
+
+    @pytest.mark.level1
+    def test_keep_after_out_of_bounds_keeps_full(self):
+        msgs = _make_messages("user", "assistant")
+        ctx = ForkContext.from_agent(_fake_agent(msgs), checkpoint=999, keep="after")
+        assert len(ctx.messages) == 2
+
+    @pytest.mark.level1
+    def test_keep_after_checkpoint_zero_keeps_all(self):
+        msgs = _make_messages("user", "assistant")
+        ctx = ForkContext.from_agent(_fake_agent(msgs), checkpoint=0, keep="after")
+        assert len(ctx.messages) == 2
+
+    @pytest.mark.level0
     def test_system_messages_stripped(self):
         msgs = _make_messages(
             "system", "user", "assistant", "system", "user",
@@ -286,14 +319,14 @@ class TestTeamBackendFork:
     @pytest.mark.level0
     def test_mark_and_consume(self, agent_team):
         agent_team.mark_fork_on_spawn(
-            "dev-1", "base-ready", fork_source="reader", compact=True,
+            "dev-1", "base-ready", fork_source="reader", fork_mode="keep_after_compact_before",
         )
         info = agent_team.consume_fork_on_spawn("dev-1")
         assert info == {
             "fork": "base-ready",
             "since": None,
             "source": "reader",
-            "compact": True,
+            "fork_mode": "keep_after_compact_before",
         }
         # consumed — second lookup is None
         assert agent_team.consume_fork_on_spawn("dev-1") is None
@@ -407,18 +440,18 @@ class TestSpawnTeammateForkParams:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
-    async def test_passes_compact(self, agent_team, tool):
+    async def test_passes_fork_mode(self, agent_team, tool):
         result = await tool.invoke({
             "member_name": "dev-4",
             "display_name": "Dev 4",
             "desc": "helper",
             "fork": "code-ready",
-            "compact": True,
+            "fork_mode": "keep_after_compact_before",
         })
         assert result.success
         info = agent_team.consume_fork_on_spawn("dev-4")
         assert info is not None
-        assert info["compact"] is True
+        assert info["fork_mode"] == "keep_after_compact_before"
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -500,6 +533,45 @@ class TestCompactContext:
         await compact_context(agent, split_at=5)
         ctx = agent.react_agent.context_engine.get_context.return_value
         ctx.set_messages.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_reverse_direction_keeps_head_and_compresses_tail(self):
+        from openjiuwen.agent_teams.fork_compact import compact_context
+
+        agent = self._make_mock_agent(
+            [UserMessage(content=f"m{i}") for i in range(15)]
+        )
+        await compact_context(agent, split_at=5, direction="after")
+
+        ctx = agent.react_agent.context_engine.get_context.return_value
+        compacted = ctx.set_messages.call_args[0][0]
+        assert len(compacted) == 6  # 5 kept head + 1 trailing summary
+        assert isinstance(compacted[-1], UserMessage)
+        assert compacted[0].content == "m0"
+        assert compacted[4].content == "m4"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_reverse_direction_keeps_tool_result_block(self):
+        from openjiuwen.agent_teams.fork_compact import compact_context
+
+        tool_call = ToolCall(id="tc1", type="function", name="checkpoint", arguments="{}")
+        msgs = [
+            UserMessage(content="m0"),
+            AssistantMessage(content="1", tool_calls=[tool_call]),
+            ToolMessage(tool_call_id="tc1", content="saved"),
+            UserMessage(content="m3"),
+        ]
+        agent = self._make_mock_agent(msgs)
+        await compact_context(agent, split_at=2, direction="after")
+
+        ctx = agent.react_agent.context_engine.get_context.return_value
+        compacted = ctx.set_messages.call_args[0][0]
+        # Head extends through the ToolMessage so the assistant call is closed.
+        assert len(compacted) == 4  # m0, assistant, ToolMessage, trailing summary
+        assert isinstance(compacted[2], ToolMessage)
+        assert isinstance(compacted[-1], UserMessage)
 
 
 # ── _on_teammate_created fork resolution (assembly path) ────────────────────
@@ -604,7 +676,7 @@ class TestOnTeammateCreatedFork:
     @pytest.mark.level0
     async def test_live_fork_string_true_injects_full_context(self):
         agent = self._make_agent(
-            {"fork": "true", "since": None, "source": None, "compact": False}
+            {"fork": "true", "since": None, "source": None}
         )
         fork_from = await self._run(agent)
         assert isinstance(fork_from, ForkContext)
@@ -616,7 +688,7 @@ class TestOnTeammateCreatedFork:
     async def test_fork_source_defaults_to_leader_name(self):
         """Omitting fork_source records the leader as the conversion source."""
         agent = self._make_agent(
-            {"fork": "true", "since": None, "source": None, "compact": False}
+            {"fork": "true", "since": None, "source": None}
         )
         await self._run(agent)
         assert self._built_ctx(agent).fork_source == "leader-1"
@@ -625,7 +697,7 @@ class TestOnTeammateCreatedFork:
     @pytest.mark.level1
     async def test_fork_source_records_the_named_source(self):
         agent = self._make_agent(
-            {"fork": "true", "since": None, "source": "reader", "compact": False},
+            {"fork": "true", "since": None, "source": "reader"},
             source="reader",
         )
         await self._run(agent)
@@ -644,7 +716,7 @@ class TestOnTeammateCreatedFork:
     @pytest.mark.level0
     async def test_live_fork_boolean_true_injects_full_context(self):
         agent = self._make_agent(
-            {"fork": True, "since": None, "source": None, "compact": False}
+            {"fork": True, "since": None, "source": None}
         )
         fork_from = await self._run(agent)
         assert isinstance(fork_from, ForkContext)
@@ -654,7 +726,7 @@ class TestOnTeammateCreatedFork:
     @pytest.mark.level0
     async def test_named_fork_truncates_to_checkpoint(self):
         agent = self._make_agent(
-            {"fork": "code-ready", "since": None, "source": None, "compact": False},
+            {"fork": "code-ready", "since": None, "source": None, "fork_mode": "before"},
             checkpoints={"code-ready": {"count": 2}},
         )
         fork_from = await self._run(agent)
@@ -663,10 +735,34 @@ class TestOnTeammateCreatedFork:
         assert fork_from.compact_split is None
 
     @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_after_mode_keeps_messages_from_checkpoint(self):
+        agent = self._make_agent(
+            {"fork": "code-ready", "since": None, "source": None, "fork_mode": "after"},
+            checkpoints={"code-ready": {"count": 2}},
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert len(fork_from.messages) == 2  # messages [2:] of the 4-message source
+        assert fork_from.compact_split is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_keep_before_compact_after_sets_reverse_split(self):
+        agent = self._make_agent(
+            {"fork": "code-ready", "since": None, "source": None, "fork_mode": "keep_before_compact_after"},
+            checkpoints={"code-ready": {"count": 2}},
+        )
+        fork_from = await self._run(agent)
+        assert isinstance(fork_from, ForkContext)
+        assert fork_from.compact_split == 2
+        assert fork_from.compact_direction == "after"
+
+    @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_named_fork_missing_falls_back_to_full(self):
         agent = self._make_agent(
-            {"fork": "no-such", "since": None, "source": None, "compact": False},
+            {"fork": "no-such", "since": None, "source": None},
             checkpoints={},
         )
         fork_from = await self._run(agent)
@@ -677,19 +773,20 @@ class TestOnTeammateCreatedFork:
     @pytest.mark.level0
     async def test_named_fork_with_compact_sets_split(self):
         agent = self._make_agent(
-            {"fork": "code-ready", "since": None, "source": None, "compact": True},
+            {"fork": "code-ready", "since": None, "source": None, "fork_mode": "keep_after_compact_before"},
             checkpoints={"code-ready": {"count": 2}},
         )
         fork_from = await self._run(agent)
         assert isinstance(fork_from, ForkContext)
         assert len(fork_from.messages) == self._MESSAGE_COUNT
         assert fork_from.compact_split == 2
+        assert fork_from.compact_direction == "before"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_compact_without_named_ignored(self):
         agent = self._make_agent(
-            {"fork": "true", "since": None, "source": None, "compact": True},
+            {"fork": "true", "since": None, "source": None, "fork_mode": "keep_after_compact_before"},
         )
         fork_from = await self._run(agent)
         assert isinstance(fork_from, ForkContext)
@@ -706,7 +803,7 @@ class TestOnTeammateCreatedFork:
     @pytest.mark.level1
     async def test_unresolvable_source_skips_fork(self):
         agent = self._make_agent(
-            {"fork": "true", "since": None, "source": "base-designer", "compact": False},
+            {"fork": "true", "since": None, "source": "base-designer"},
         )
         fork_from = await self._run(agent)
         assert fork_from is None
@@ -715,7 +812,7 @@ class TestOnTeammateCreatedFork:
     @pytest.mark.level1
     async def test_resolvable_source_injects_full_context(self):
         agent = self._make_agent(
-            {"fork": "true", "since": None, "source": "shape-base", "compact": False},
+            {"fork": "true", "since": None, "source": "shape-base"},
             source="shape-base",
         )
         fork_from = await self._run(agent)
@@ -726,7 +823,7 @@ class TestOnTeammateCreatedFork:
     @pytest.mark.level1
     async def test_source_equal_leader_uses_own_native(self):
         agent = self._make_agent(
-            {"fork": "true", "since": None, "source": "leader-1", "compact": False},
+            {"fork": "true", "since": None, "source": "leader-1"},
         )
         fork_from = await self._run(agent)
         assert isinstance(fork_from, ForkContext)
@@ -737,7 +834,7 @@ class TestOnTeammateCreatedFork:
     async def test_missing_checkpoint_name_notifies_leader_with_available(self):
         """A wrong fork name is surfaced to the leader, not silently ignored."""
         agent = self._make_agent(
-            {"fork": "no-such", "since": None, "source": None, "compact": False},
+            {"fork": "no-such", "since": None, "source": None},
             checkpoints={"code-ready": {"count": 2}},
         )
         fork_from = await self._run(agent)
@@ -752,7 +849,7 @@ class TestOnTeammateCreatedFork:
     @pytest.mark.level1
     async def test_resolved_checkpoint_name_does_not_notify(self):
         agent = self._make_agent(
-            {"fork": "code-ready", "since": None, "source": None, "compact": False},
+            {"fork": "code-ready", "since": None, "source": None},
             checkpoints={"code-ready": {"count": 2}},
         )
         await self._run(agent)
@@ -764,7 +861,7 @@ class TestOnTeammateCreatedFork:
         """A checkpoint owned by a member other than fork_source is surfaced and
         the fork falls back to full context (the foreign index is not applied)."""
         agent = self._make_agent(
-            {"fork": "code-ready", "since": None, "source": None, "compact": False},
+            {"fork": "code-ready", "since": None, "source": None},
             checkpoints={"code-ready": {"count": 2, "description": "", "created_by": "counter-1"}},
         )
         fork_from = await self._run(agent)
@@ -786,7 +883,7 @@ class TestOnTeammateCreatedFork:
         message delivery.
         """
         agent = self._make_agent(
-            {"fork": "code-ready", "since": None, "source": None, "compact": False},
+            {"fork": "code-ready", "since": None, "source": None},
             checkpoints={"code-ready": {"count": 2}},
         )
 
@@ -1124,7 +1221,7 @@ class TestTeamAgentCheckpointPersistence:
 # about ``fork`` but has no ``fork`` property to fill deliberates over a
 # mechanism it cannot invoke.
 
-_FORK_PROPS = {"fork", "fork_source", "compact"}
+_FORK_PROPS = {"fork", "fork_source", "fork_mode"}
 
 
 @pytest_asyncio.fixture
@@ -1209,7 +1306,7 @@ async def test_checkpoint_invoke_rejected_when_fork_disabled(fork_disabled_team)
     "fork_args",
     [
         {"fork": True},
-        {"fork": "code-ready", "compact": True},
+        {"fork": "code-ready", "fork_mode": "keep_after_compact_before"},
         {"fork_source": "reader"},
     ],
 )
