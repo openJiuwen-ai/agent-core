@@ -2332,11 +2332,19 @@ class ReActAgent(BaseAgent):
         if self.is_agent_session:
             # Agent sessions use stream_iterator for consuming output
             task = asyncio.create_task(stream_process())
-
-            async for result in session.stream_iterator():
-                yield result
-
-            await task
+            try:
+                async for result in session.stream_iterator():
+                    yield result
+                await task
+            finally:
+                # Ensure background task is cancelled when generator exits
+                # (normal completion, CancelledError, or aclose).
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
         else:
             # Workflow sessions: just run stream_process, output goes to session.write_stream()
             # The workflow graph consumes from session.write_stream() via StreamWriterManager
