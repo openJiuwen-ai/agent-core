@@ -161,6 +161,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "已投票 {voted}；未投票 {pending}。任务停在 in_review。"
             "可用 send_message 催促验证者，或 update_task 调整验证者/处置任务。"
         ),
+        "scheduler.leader_escalation_reviewer_protocol": (
+            "[调度器·评审协议故障] 任务 [{task_id}]「{title}」第 {round} 轮中，验证者 {reviewers} "
+            "各完成 {attempts} 次临时评审但均未持久化 verify_task 投票。任务按 fail-closed 原则停在 "
+            "in_review，且系统没有伪造通过票。请检查验证者指令/工具调用，或用 update_task 更换验证者。"
+        ),
         "scheduler.leader_all_done": (
             "[调度器] 任务看板已全部终结（共 {count} 个任务）。请汇总团队执行结果，向用户交付最终结论。"
         ),
@@ -448,6 +453,12 @@ STRINGS: dict[str, dict[str, str]] = {
             "stalled for over {minutes} minute(s): voted {voted}; pending {pending}. The task "
             "stays in_review. Nudge the reviewers via send_message, or adjust reviewers / settle "
             "the task via update_task."
+        ),
+        "scheduler.leader_escalation_reviewer_protocol": (
+            "[Scheduler · Review Protocol Failure] For task [{task_id}] \"{title}\" review round {round}, "
+            "reviewers {reviewers} each completed {attempts} temporary review runs without persisting a "
+            "verify_task vote. The task remains in_review under fail-closed semantics; no pass vote was "
+            "fabricated. Inspect the reviewer instruction/tool call or replace the reviewer with update_task."
         ),
         "scheduler.leader_all_done": (
             "[Scheduler] Every task on the board is terminal ({count} task(s) total). Summarize "
