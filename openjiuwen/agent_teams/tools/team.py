@@ -368,18 +368,18 @@ class TeamBackend:
         fork_value,
         *,
         fork_source: str | None = None,
-        compact: bool = False,
+        fork_mode: str = "before",
     ) -> None:
         self._pending_forks[member] = {
             "fork": fork_value,
             "since": None,
             "source": fork_source,
-            "compact": compact,
+            "fork_mode": fork_mode,
         }
         team_logger.debug(
             "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s "
-            "compact=%s team_name=%s pending_keys=%s",
-            member, fork_value, fork_source, compact,
+            "fork_mode=%s team_name=%s pending_keys=%s",
+            member, fork_value, fork_source, fork_mode,
             self.team_name, list(self._pending_forks.keys()),
         )
 

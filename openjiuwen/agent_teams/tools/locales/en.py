@@ -110,10 +110,14 @@ STRINGS: dict[str, str] = {
         "Set to a teammate name (e.g. 'understander') to fork from that member. "
         "The source member must already be spawned and running in-process"
     ),
-    "spawn_teammate.compact": (
-        "Compact the inherited context before injection. Messages before "
-        "the checkpoint are compressed into a summary; messages after "
-        "are kept verbatim. Only effective with a named checkpoint fork"
+    "spawn_teammate.fork_mode": (
+        "Which side of the checkpoint to keep. Options: 'full' (the source's "
+        "whole context, default for fork=true), 'before' (messages before the "
+        "checkpoint, default for a named fork), 'after' (messages from the "
+        "checkpoint onward), 'keep_before_compact_after' (keep before, compress "
+        "after into a summary), 'keep_after_compact_before' (keep after verbatim, "
+        "compress before into a summary). Only effective with a named "
+        "checkpoint fork"
     ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/en/member/spawn_human_agent.md

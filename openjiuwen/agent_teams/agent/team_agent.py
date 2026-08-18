@@ -1153,15 +1153,26 @@ class TeamAgent(BaseAgent):
                     )
                     if native is not None:
                         fork_value = fork_info["fork"]
-                        compact = fork_info.get("compact", False)
                         is_named = (
                             isinstance(fork_value, str)
                             and fork_value not in ("true", "false")
                         )
+                        # Default mode: live fork → full; named fork → before
+                        # (preserves the legacy truncation behaviour).
+                        fork_mode = fork_info.get("fork_mode") or (
+                            "full" if not is_named else "before"
+                        )
                         ckpt_record = self._named_checkpoints.get(fork_value) if is_named else None
                         ckpt_idx = ckpt_record["count"] if ckpt_record else None
 
-                        if ckpt_record is not None:
+                        # Creator/fork_source mismatch: the recorded count is only
+                        # meaningful for its creator's context. Only applies when
+                        # the mode actually consumes the checkpoint index.
+                        mode_uses_ckpt = fork_mode in (
+                            "before", "after",
+                            "keep_before_compact_after", "keep_after_compact_before",
+                        )
+                        if is_named and mode_uses_ckpt and ckpt_record is not None:
                             source_name = fork_info.get("source") or self._member_name()
                             creator = ckpt_record.get("created_by") or ""
                             if creator and creator != source_name:
@@ -1185,30 +1196,22 @@ class TeamAgent(BaseAgent):
                                     ),
                                 )
 
-                        if compact:
-                            if not is_named:
-                                team_logger.warning(
-                                    "[fork] compact=true ignored for member=%s: "
-                                    "requires a named checkpoint fork", teammate_id,
-                                )
-                                compact = False
-                            elif ckpt_idx is None:
-                                team_logger.warning(
-                                    "[fork] checkpoint '%s' not found for "
-                                    "member=%s; falling back to full context",
-                                    fork_value, teammate_id,
-                                )
-                                compact = False
-
-                        # Default is a live fork (fork="true"/True): full
-                        # injection. Named branches override the capture below.
+                        # Build the fork context by mode. Compact modes capture
+                        # the full source and let ``compact_context`` trim it,
+                        # so the split index still matches the injected context.
                         fork_ctx = ForkContext.from_agent(native)
-                        if compact:
-                            if ckpt_idx is not None and 0 <= ckpt_idx < len(fork_ctx.messages):
-                                fork_ctx.compact_split = ckpt_idx
-                            else:
-                                fork_ctx.compact_split = len(fork_ctx.messages)
-                        elif is_named and ckpt_idx is None:
+                        if not is_named:
+                            # Live fork: the only meaningful mode is full.
+                            if fork_mode != "full":
+                                team_logger.warning(
+                                    "[fork] fork_mode=%s ignored for live fork "
+                                    "member=%s; using full context",
+                                    fork_mode, teammate_id,
+                                )
+                        elif fork_mode == "full":
+                            # Named fork with full mode: ignore the checkpoint index.
+                            pass
+                        elif ckpt_idx is None:
                             if ckpt_record is None:
                                 # Genuinely unknown name: warn + notify. A
                                 # creator/fork_source mismatch also lands here
@@ -1220,9 +1223,25 @@ class TeamAgent(BaseAgent):
                                     fork_value, teammate_id,
                                 )
                                 await self._notify_fork_name_not_found(teammate_id, fork_value)
-                        elif is_named:
+                        elif fork_mode == "before":
                             fork_ctx = ForkContext.from_agent(
                                 native, checkpoint=ckpt_idx,
+                            )
+                        elif fork_mode == "after":
+                            fork_ctx = ForkContext.from_agent(
+                                native, checkpoint=ckpt_idx, keep="after",
+                            )
+                        elif fork_mode == "keep_before_compact_after":
+                            fork_ctx = ForkContext.from_agent(native)
+                            fork_ctx.compact_split = ckpt_idx
+                            fork_ctx.compact_direction = "after"
+                        elif fork_mode == "keep_after_compact_before":
+                            fork_ctx = ForkContext.from_agent(native)
+                            fork_ctx.compact_split = ckpt_idx
+                        else:
+                            team_logger.warning(
+                                "[fork] unknown fork_mode '%s' for member=%s; "
+                                "using full context", fork_mode, teammate_id,
                             )
                         team_logger.debug(
                             "[fork] ForkContext created: msgs=%d empty=%s",
@@ -1230,8 +1249,8 @@ class TeamAgent(BaseAgent):
                         )
                         team_logger.info(
                             "[fork] %s into %s (msgs=%d)%s",
-                            "compacted fork" if compact else
-                            "checkpoint fork" if is_named else "live fork",
+                            "compacted fork" if fork_ctx.compact_split is not None else
+                            "checkpoint fork" if is_named and fork_mode != "full" else "live fork",
                             teammate_id,
                             len(fork_ctx.messages),
                             f" split_at={fork_ctx.compact_split}" if fork_ctx.compact_split is not None else "",

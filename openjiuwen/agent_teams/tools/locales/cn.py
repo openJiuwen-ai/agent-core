@@ -88,9 +88,12 @@ STRINGS: dict[str, str] = {
         "上下文来源成员名。不填默认从 leader 取。填某 teammate 名（如 'understander'）"
         "则从该成员取上下文。该成员必须已通过 spawn_teammate 拉起来，且为 in-process 模式"
     ),
-    "spawn_teammate.compact": (
-        "启用上下文压缩。checkpoint 之前的旧消息压缩为摘要，"
-        "checkpoint 之后的分析全量保留。仅配合 checkpoint fork 使用"
+    "spawn_teammate.fork_mode": (
+        "保留 checkpoint 的哪一侧。可选值：'full'（源成员全部上下文，fork=true 时的默认）、"
+        "'before'（checkpoint 之前的消息，命名 fork 时的默认）、"
+        "'after'（从 checkpoint 起的消息）、"
+        "'keep_before_compact_after'（保留前、把后压缩为摘要）、"
+        "'keep_after_compact_before'（保留后、把前压缩为摘要）。仅配合命名 checkpoint fork 使用"
     ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/cn/member/spawn_human_agent.md
