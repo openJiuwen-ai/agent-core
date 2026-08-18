@@ -144,6 +144,7 @@ async def run_workflow(
     # business-agnostic); the journal path itself comes from the caller (paths.py).
     wal_path = f"{journal_path}.wal" if journal_path else None
     journal = await Journal.load(resume, wal_path=wal_path)
+    log(f"[wf] journal loaded: prior_records={len(journal.prior)} path={resume} wal={wal_path}")
     rt = Runtime(
         backend=backend or MockBackend(),
         journal=journal,
