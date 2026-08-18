@@ -1551,3 +1551,23 @@ async def test_concurrent_upload_download_mixed(sys_op, work_dir):
     assert final_content != "", "Final content empty after mixed upload/download"
     assert final_content.startswith("upload_task_") or final_content == base_content, \
         "Final content corrupted after mixed concurrency"
+
+
+@pytest.mark.asyncio
+async def test_fs_read_office_docx_as_text_rejects_without_utf8_codec_error(sys_op, work_dir):
+    """OOXML/ZIP must not be opened as UTF-8 text (the 199003 codec crash)."""
+    docx_name = "sample.docx"
+    # ZIP local-file header; byte 10 is often a non-UTF-8 continuation like 0x87.
+    payload = b"PK\x03\x04" + b"\x00" * 6 + b"\x87\x00" + b"\x00" * 16
+    with open(os.path.join(work_dir, docx_name), "wb") as fh:
+        fh.write(payload)
+
+    res = await sys_op.fs().read_file(path=docx_name, mode="text", line_range=(1, 2000))
+    assert res.code == StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR.code
+    assert "utf-8" not in (res.message or "").lower() or "Cannot read" in (res.message or "")
+    assert "codec can't decode" not in (res.message or "")
+    assert "Office" in (res.message or "") or "binary" in (res.message or "").lower()
+
+    res_bytes = await sys_op.fs().read_file(path=docx_name, mode="bytes")
+    assert res_bytes.code == StatusCode.SUCCESS.code
+    assert res_bytes.data.content[:4] == b"PK\x03\x04"
