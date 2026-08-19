@@ -8,6 +8,7 @@ import httpx
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.common.clients.tcp_keepalive import get_default_tcp_keepalive_socket_options
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
@@ -119,10 +120,22 @@ class OpenAIModelClient(BaseModelClient):
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
-        http_client = httpx.AsyncClient(
+        # httpx defaults keepalive_expiry to 5s, which drops idle keep-alive
+        # connections between calls spaced >5s apart, forcing a rebuild. Bump to
+        # 60s to keep connections warm across typical inter-request gaps while
+        # staying at/under common upstream/LB idle timeouts (avoids reusing a
+        # server-closed "dead" connection).
+        transport = httpx.AsyncHTTPTransport(
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
-            verify=verify
+            verify=verify,
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=60.0,
+            ),
+            socket_options=get_default_tcp_keepalive_socket_options(),
         )
+        http_client = httpx.AsyncClient(transport=transport)
 
         # Use method-level timeout if provided, otherwise use config timeout
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
