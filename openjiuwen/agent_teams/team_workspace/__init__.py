@@ -9,8 +9,8 @@ Two families of functionality merged in this package:
   ``TeamWorkspaceConfig``, ``WorkspaceFileLock``, ``WorkspaceMode``,
   ``ConflictStrategy``, ``WorkspaceMetaTool``, ``TeamWorkspaceRail``.
 - evolvable workspace (assembly/read):
-  ``WorkspaceAssembler``, ``WorkspaceStore``, ``WorkspaceCache``,
-  ``SessionFileStore``.
+  ``WorkspaceAssembler``, ``WorkspaceStore``, ``WorkspaceCache``.
+  (``SessionFileStore`` is block-B owned — not re-exported on this branch.)
 """
 
 from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
@@ -22,18 +22,12 @@ from openjiuwen.agent_teams.team_workspace.models import (
     WorkspaceMode,
 )
 from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
-from openjiuwen.agent_teams.team_workspace.session_file_store import (
-    FileAddress,
-    SessionFileStore,
-)
 from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
 from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
 
 __all__ = [
     # Evolvable workspace
-    "FileAddress",
-    "SessionFileStore",
     "WorkspaceAssembler",
     "WorkspaceCache",
     "WorkspaceStore",
