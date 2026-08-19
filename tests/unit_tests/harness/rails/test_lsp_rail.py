@@ -17,7 +17,7 @@ except ImportError:
     pytest.skip("Requires 'a2a' module", allow_module_level=True)
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.harness.rails.lsp_rail import LspRail
@@ -60,15 +60,21 @@ def _make_agent(workspace_root="/workspace", language="cn"):
 
 
 @contextmanager
-def _patch_init_deps(agent, *, workspace_root="/workspace"):
+def _patch_init_deps(agent, *, workspace_root="/workspace", suppress_initialization=True):
     """Patch the external dependencies touched by ``LspRail.init()``."""
     mock_tool = MagicMock()
     mock_tool.card = MagicMock(id="lsp-tool-id", name="lsp")
+    initialization_patch = (
+        patch.object(LspRail, "_start_lsp_initialization")
+        if suppress_initialization
+        else nullcontext()
+    )
     with (
         patch("openjiuwen.harness.tools.LspTool") as MockLspTool,
         patch("openjiuwen.core.runner.runner.Runner") as MockRunner,
         patch("openjiuwen.harness.lsp.initialize_lsp", new_callable=AsyncMock),
         patch("openjiuwen.harness.deep_agent.DeepAgent", _FakeDeepAgent),
+        initialization_patch,
     ):
         MockLspTool.return_value = mock_tool
         yield MockLspTool, MockRunner, mock_tool
@@ -98,6 +104,7 @@ class TestLspRailInit:
         assert rail._initialized is False
         assert rail._initialize_options is None
         assert rail._initialization_lock is None
+        assert rail._initialization_task is None
         assert rail._shutdown_task is None
 
     def test_custom_options_stored(self):
@@ -207,15 +214,29 @@ class TestLspRailInitMethod:
         assert rail._initialized is False
 
     @pytest.mark.asyncio
-    async def test_init_does_not_schedule_lsp_initialization_on_running_loop(self):
+    async def test_init_schedules_lsp_initialization_on_running_loop(self):
         rail = LspRail()
         agent = _make_agent()
 
-        with _patch_init_deps(agent), patch("asyncio.run_coroutine_threadsafe") as mock_threadsafe:
+        with (
+            _patch_init_deps(agent, suppress_initialization=False),
+            patch.object(rail, "_ensure_lsp_initialized", new_callable=AsyncMock) as mock_initialize,
+        ):
             rail.init(agent)
+            assert rail._initialization_task is not None
+            mock_initialize.assert_not_awaited()
+            await rail._initialization_task
 
-        mock_threadsafe.assert_not_called()
+        mock_initialize.assert_awaited_once()
         assert rail._initialize_options == InitializeOptions(cwd="/workspace")
+
+    def test_start_lsp_initialization_uses_sync_fallback_without_running_loop(self):
+        rail = LspRail()
+
+        with patch.object(rail, "_ensure_lsp_initialized", new_callable=AsyncMock) as mock_initialize:
+            rail._start_lsp_initialization()
+
+        mock_initialize.assert_awaited_once()
 
 
 # ===========================================================================
@@ -261,7 +282,7 @@ class TestLspRailCwdResolution:
         assert opts.cwd == "/ws"
 
 
-class TestLspRailDeferredInitialization:
+class TestLspRailInitialization:
     @pytest.fixture(autouse=True)
     def _reset_singleton(self):
         from openjiuwen.harness.lsp.core.manager import LSPServerManager
@@ -273,16 +294,12 @@ class TestLspRailDeferredInitialization:
         LSPServerManager._lock = None
 
     @pytest.mark.asyncio
-    async def test_initializes_and_injects_diagnostics_before_first_model_call(self):
-        from openjiuwen.harness.lsp.core.manager import LSPServerManager
+    async def test_before_model_call_injects_diagnostics_without_waiting_for_initialization(self):
         from openjiuwen.harness.lsp.core.diagnostic_registry import LspDiagnosticFile, LspDiagnosticItem
 
         rail = LspRail()
-        agent = _make_agent(workspace_root="/project")
         context = MagicMock()
         context.inputs.messages = []
-        manager_state = {"instance": None}
-        initialized_manager = MagicMock()
         diagnostics = [
             LspDiagnosticFile(
                 uri="file:///project/example.py",
@@ -299,29 +316,14 @@ class TestLspRailDeferredInitialization:
             )
         ]
 
-        async def initialize_lsp(_options):
-            manager_state["instance"] = initialized_manager
-
         with (
-            _patch_init_deps(agent),
-            patch.object(
-                LSPServerManager,
-                "get_instance",
-                side_effect=lambda: manager_state["instance"],
-            ),
-            patch(
-                "openjiuwen.harness.lsp.initialize_lsp",
-                new_callable=AsyncMock,
-                side_effect=initialize_lsp,
-            ) as mock_init,
+            patch.object(rail, "_ensure_lsp_initialized", new_callable=AsyncMock) as mock_initialize,
             patch("openjiuwen.harness.lsp.get_pending_lsp_diagnostics", side_effect=[diagnostics, []]),
         ):
-            rail.init(agent)
-            mock_init.assert_not_awaited()
             await rail.before_model_call(context)
             await rail.before_model_call(context)
 
-        mock_init.assert_awaited_once_with(InitializeOptions(cwd="/project"))
+        mock_initialize.assert_not_awaited()
         assert len(context.inputs.messages) == 1
         assert "undefined variable 'value'" in context.inputs.messages[0].content
 
