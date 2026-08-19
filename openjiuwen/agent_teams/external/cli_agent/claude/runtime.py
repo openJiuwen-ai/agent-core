@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import (
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
 
@@ -260,6 +261,7 @@ def build_claude_runtime(
     add_dirs: tuple[str, ...],
     env: dict[str, str],
     cli_path: str | None = None,
+    external_model_config: ExternalCliModelConfig | None = None,
     inject_mcp: bool,
     mcp_server_name: str,
     mcp_server_command: tuple[str, ...],
@@ -279,6 +281,7 @@ def build_claude_runtime(
         add_dirs=add_dirs,
         env=env,
         cli_path=cli_path,
+        external_model_config=external_model_config,
         system_prompt=system_prompt,
         team_session_id=team_session_id,
         member_name=member_name,

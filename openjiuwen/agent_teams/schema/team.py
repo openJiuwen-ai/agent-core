@@ -250,6 +250,22 @@ class BridgeMemberSpec(TeamMemberSpec):
     """
 
 
+class ExternalCliModelConfig(BaseModel):
+    """Model endpoint configuration for SDK-backed external CLI agents."""
+
+    provider: str | None = Field(default=None, min_length=1)
+    """Logical provider name used by the target CLI runtime."""
+
+    model: str | None = Field(default=None, min_length=1)
+    """Model name passed to the target CLI runtime."""
+
+    api_base: str | None = Field(default=None, min_length=1)
+    """Base URL for the target model API."""
+
+    api_key: str | None = Field(default=None, min_length=1)
+    """API key injected into the target CLI subprocess environment."""
+
+
 class ExternalCliAgentSpec(BaseModel):
     """Static launch config for one kind of external CLI agent.
 
@@ -260,7 +276,7 @@ class ExternalCliAgentSpec(BaseModel):
     name (each member still gets its own subprocess and team-join identity).
     """
 
-    model_config = ConfigDict(protected_namespaces=())
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
     cli_agent: str
     """External agent kind identifier (``"claude"`` / ``"codex"`` /
@@ -342,6 +358,14 @@ class ExternalCliAgentSpec(BaseModel):
     """Extra environment variables for the CLI subprocess, merged over the
     inherited process env (the team-join descriptor is injected separately)."""
 
+    external_model_config: ExternalCliModelConfig | None = Field(default=None, alias="model_config")
+    """Optional model endpoint configuration for SDK-backed external CLI agents.
+
+    The public YAML key is ``model_config``. The Python attribute is named
+    ``external_model_config`` to avoid colliding with Pydantic's class-level
+    ``model_config`` setting.
+    """
+
     ssh_transport: SshTransportConfig | None = None
     """Optional ssh endpoint used to launch this CLI on a remote host.
 
@@ -374,6 +398,8 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("codex_turn_idle_timeout_s is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.codex_turn_idle_retries is not None:
             raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
+        if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
+            raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
         return self
 
 
@@ -506,6 +532,7 @@ __all__ = [
     "BridgeMailboxInjectMode",
     "BridgeMemberSpec",
     "ExternalCliAgentSpec",
+    "ExternalCliModelConfig",
     "MemberOpResult",
     "MemberSpecBase",
     "TeamCompletionSnapshot",

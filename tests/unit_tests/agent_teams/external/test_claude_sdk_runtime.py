@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from types import ModuleType
 from typing import Any
@@ -21,7 +22,7 @@ from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import build_claud
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig, create_messager
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
-from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig, TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.exception.errors import BaseError
@@ -460,6 +461,33 @@ async def test_build_cli_runtime_passes_claude_cli_path(fake_claude_sdk):
         reset_session_id(token)
 
     assert runtime._options.cli_path == "/opt/claude"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_maps_claude_model_config(fake_claude_sdk):
+    token = set_session_id("sess-1")
+    try:
+        runtime = await spawn_mod.build_cli_runtime(
+            _ctx(),
+            external_model_config=ExternalCliModelConfig(
+                provider="anthropic",
+                model="claude-sonnet-test",
+                api_base="https://gateway.example",
+                api_key="sk-test",
+            ),
+            mcp_server_command=("openjiuwen-team-mcp",),
+        )
+    finally:
+        reset_session_id(token)
+
+    assert isinstance(runtime, ClaudeSdkRuntime)
+    options = runtime._options
+    assert options.model == "claude-sonnet-test"
+    assert options.settings is not None
+    flag_settings = json.loads(options.settings)
+    assert flag_settings["env"]["ANTHROPIC_BASE_URL"] == "https://gateway.example"
+    assert flag_settings["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-test"
 
 
 @pytest.mark.asyncio

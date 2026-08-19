@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 
 
 class _FakeCodexConfig:
@@ -193,6 +194,93 @@ def test_build_codex_config_keeps_trace_and_mcp_overrides_together():
     assert 'mcp_servers.team.args=["--stdio"]' in overrides
 
 
+def test_build_codex_config_maps_external_model_config():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={"TEAM": "one"},
+        inject_mcp=False,
+        mcp_server_name="team",
+        mcp_server_command=(),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        external_model_config=ExternalCliModelConfig(
+            provider="my-provider",
+            model="gpt-test",
+            api_base="https://gateway.example/v1",
+            api_key="sk-test",
+        ),
+        sdk=_FAKE_SDK,
+    )
+
+    assert config.kwargs["env"]["TEAM"] == "one"
+    assert config.kwargs["env"]["OPENJIUWEN_CODEX_API_KEY"] == "sk-test"
+    assert 'model_provider="my-provider"' in config.kwargs["config_overrides"]
+    assert 'model_providers.my-provider.name="my-provider"' in config.kwargs["config_overrides"]
+    assert 'model_providers.my-provider.base_url="https://gateway.example/v1"' in config.kwargs["config_overrides"]
+    assert 'model_providers.my-provider.env_key="OPENJIUWEN_CODEX_API_KEY"' in config.kwargs["config_overrides"]
+
+
+def test_build_codex_config_quotes_non_bare_provider_key():
+    """Provider names that are not TOML bare keys fall back to quoted table keys."""
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={},
+        inject_mcp=False,
+        mcp_server_name="team",
+        mcp_server_command=(),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        external_model_config=ExternalCliModelConfig(
+            provider="my provider",
+            model="gpt-test",
+            api_base="https://gateway.example/v1",
+            api_key="sk-test",
+        ),
+        sdk=_FAKE_SDK,
+    )
+
+    overrides = config.kwargs["config_overrides"]
+    assert 'model_provider="my provider"' in overrides
+    assert 'model_providers."my provider".name="my provider"' in overrides
+    assert 'model_providers."my provider".base_url="https://gateway.example/v1"' in overrides
+    assert 'model_providers."my provider".env_key="OPENJIUWEN_CODEX_API_KEY"' in overrides
+
+
+def test_build_codex_config_keeps_model_trace_and_mcp_overrides_together():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
+
+    config = build_codex_config(
+        cwd="/workspace",
+        env={},
+        inject_mcp=True,
+        mcp_server_name="team",
+        mcp_server_command=("team-mcp",),
+        mcp_default_tools_approval_mode=None,
+        member_name="developer",
+        codex_bin=None,
+        external_model_config=ExternalCliModelConfig(
+            provider="my-provider",
+            api_base="https://gateway.example/v1",
+            api_key="sk-test",
+        ),
+        native_otel_trace_endpoint="http://127.0.0.1:4318/v1/traces",
+        sdk=_FAKE_SDK,
+    )
+
+    overrides = config.kwargs["config_overrides"]
+    assert 'model_provider="my-provider"' in overrides
+    assert 'model_providers.my-provider.name="my-provider"' in overrides
+    assert any(item.startswith("otel.trace_exporter=") for item in overrides)
+    assert 'mcp_servers.team.command="team-mcp"' in overrides
+    assert not any(item.startswith("review_model=") for item in overrides)
+
+
 def test_build_codex_thread_options_leave_approval_and_sandbox_unset():
     from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_thread_options
 
@@ -209,6 +297,53 @@ def test_build_codex_thread_options_leave_approval_and_sandbox_unset():
     }
     assert "approval_mode" not in options
     assert "sandbox" not in options
+
+
+def test_build_codex_thread_options_maps_external_model_config():
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_thread_options
+
+    sdk = SimpleNamespace(
+        ApprovalMode=SimpleNamespace(deny_all="deny-all"),
+        Sandbox=SimpleNamespace(full_access="full-access"),
+    )
+    options = build_codex_thread_options(
+        cwd="/workspace",
+        system_prompt=None,
+        external_model_config=ExternalCliModelConfig(
+            provider="my-provider",
+            model="gpt-test",
+        ),
+        sdk=sdk,
+    )
+
+    assert options["model"] == "gpt-test"
+    assert options["model_provider"] == "my-provider"
+    assert options["approval_mode"] == "deny-all"
+    assert options["sandbox"] == "full-access"
+
+
+def test_build_codex_thread_options_bypasses_for_external_model_even_when_unset():
+    """An external model targets a non-OpenAI endpoint where codex-auto-review
+    cannot run, so approval is bypassed regardless of the explicit flag."""
+    from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_thread_options
+
+    sdk = SimpleNamespace(
+        ApprovalMode=SimpleNamespace(deny_all="deny-all"),
+        Sandbox=SimpleNamespace(full_access="full-access"),
+    )
+    options = build_codex_thread_options(
+        cwd="/workspace",
+        system_prompt=None,
+        external_model_config=ExternalCliModelConfig(
+            provider="my-provider",
+            model="gpt-test",
+        ),
+        bypass_approvals_and_sandbox=False,
+        sdk=sdk,
+    )
+
+    assert options["approval_mode"] == "deny-all"
+    assert options["sandbox"] == "full-access"
 
 
 def test_build_codex_thread_options_can_explicitly_bypass_safety_boundaries():
