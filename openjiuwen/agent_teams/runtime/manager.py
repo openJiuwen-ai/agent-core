@@ -906,6 +906,29 @@ class TeamRuntimeManager:
         # not NEW_TEAM_IN_SESSION (spec.build, fresh, no history).
         cleared = await db.clear_session_task_board_by_id(session_id)
 
+        # Also drop the leader's cold-resume marker (pending_resume) from the
+        # team checkpoint bucket. reset_session is the explicit "fresh start"
+        # operator (the host calls it when the new query is NOT a continuation);
+        # the bucket is kept for COLD_RECOVER, so without this the marker
+        # survives and kernel.resume_paused_round resumes the paused round on
+        # the next cold start instead of letting the leader re-plan on the new
+        # query.
+        try:
+            from openjiuwen.agent_teams.runtime.metadata import clear_pending_resume
+
+            resume_session = TeamRuntimeManager._build_session(session_id)
+            await resume_session.pre_run()
+            cleared_resume = clear_pending_resume(resume_session, team_name)
+            if cleared_resume:
+                await resume_session.flush_checkpoint()
+        except Exception as e:  # noqa: BLE001
+            team_logger.warning(
+                "reset_session: failed to clear pending_resume team={} session={}: {}",
+                team_name,
+                session_id,
+                e,
+            )
+
         team_logger.info(
             "reset_session: cleared task board rows (deleted {}) team={} session={} "
             "(checkpoint + team_message history + worktrees preserved -> COLD_RECOVER)",
@@ -967,6 +990,32 @@ class TeamRuntimeManager:
         for team_name in release_info.team_names:
             if not await remove_session_worktrees(team_name, session_id):
                 team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
+
+        # Clear the leader's cold-resume marker for every team on this session.
+        # release_session keeps the checkpoint bucket (no checkpointer.release),
+        # so without this pending_resume survives and a later cold-recover on
+        # the same session_id would resume a stale paused round. Order is
+        # irrelevant here -- drop_session_tables_by_id only touches the team DB
+        # tables, not the checkpointer bucket -- so this runs after the worktree
+        # loop purely for readability (no stop_team-after-clear race to avoid,
+        # unlike reset_session: force stop_team already awaited at :1030-1036,
+        # well before this point).
+        try:
+            from openjiuwen.agent_teams.runtime.metadata import clear_pending_resume
+
+            resume_session = TeamRuntimeManager._build_session(session_id)
+            await resume_session.pre_run()
+            cleared_any = False
+            for team_name in release_info.team_names:
+                cleared_any |= clear_pending_resume(resume_session, team_name)
+            if cleared_any:
+                await resume_session.flush_checkpoint()
+        except Exception as e:  # noqa: BLE001
+            team_logger.warning(
+                "release_session: failed to clear pending_resume session={}: {}",
+                session_id,
+                e,
+            )
 
     @staticmethod
     async def _resolve_any_team_session_release_info(
