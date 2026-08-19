@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
     prepare_subagent_task_resources,
@@ -33,8 +34,12 @@ async def _close_session_quietly(session: Any) -> None:
         result = close_stream()
         if asyncio.iscoroutine(result):
             await result
-    except Exception:
-        return
+    except Exception as exc:
+        logger.debug(
+            "Failed to close subagent session stream quietly: %s",
+            exc,
+            exc_info=True,
+        )
 
 
 class SubagentInstance:
@@ -176,10 +181,17 @@ class SubagentInstance:
                     await self._current_run
             except asyncio.TimeoutError:
                 await self._on_turn_timeout()
-            except asyncio.CancelledError:
-                await self._on_turn_cancelled()
-            except Exception:
-                pass
+            except asyncio.CancelledError as exc:
+                await self._on_turn_cancelled(exc)
+            except Exception as exc:
+                logger.warning(
+                    "[SubagentInstance] turn failed: subagent_id=%s error=%s",
+                    self.subagent_id,
+                    exc,
+                    exc_info=True,
+                )
+                if not self.status.current().is_final():
+                    await self._set_status(SubagentStatus.errored(str(exc)))
             finally:
                 self._current_run = None
 
@@ -189,7 +201,7 @@ class SubagentInstance:
                 SubagentStatus.errored("turn timeout", code="TIMEOUT"),
             )
 
-    async def _on_turn_cancelled(self) -> None:
+    async def _on_turn_cancelled(self, exc: asyncio.CancelledError) -> None:
         if not self.status.current().is_final():
             await self._set_status(SubagentStatus.interrupted())
 
@@ -200,7 +212,7 @@ class SubagentInstance:
         run = self._current_run
         if run is not None and not run.done():
             run.cancel()
-        raise
+        raise exc
 
     def _build_stream_inputs(self, op: UserInputOp) -> dict[str, str]:
         inputs: dict[str, str] = {
@@ -234,10 +246,7 @@ class SubagentInstance:
             if self._on_turn_stream_end is not None:
                 await self._on_turn_stream_end(op, aggregator)
             await self._settle_turn(op, aggregator)
-            succeeded = (
-                not aggregator.is_error()
-                and self.status.current().kind is SubagentStatusKind.COMPLETED
-            )
+            succeeded = not aggregator.is_error() and self.status.current().kind is SubagentStatusKind.COMPLETED
         except BaseError as exc:
             await self._set_status(
                 SubagentStatus.errored(str(exc), code=exc.status.name),

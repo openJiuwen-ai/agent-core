@@ -8,6 +8,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.kv_cache import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
@@ -16,7 +17,6 @@ from openjiuwen.harness.kv_cache.kv_cache_hooks import affinity_enabled
 from openjiuwen.harness.subagent_runtime.activity import ActivityProjector
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.errors import (
-    build_subagent_runtime_error,
     raise_subagent_not_found,
 )
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
@@ -37,8 +37,12 @@ async def _close_session_quietly(session: Any) -> None:
         result = close_stream()
         if asyncio.iscoroutine(result):
             await result
-    except Exception:
-        return
+    except Exception as exc:
+        logger.debug(
+            "Failed to close subagent session stream quietly: %s",
+            exc,
+            exc_info=True,
+        )
 
 
 class SubagentSessionManager:
@@ -169,33 +173,28 @@ class SubagentSessionManager:
                 if message is not None:
                     await self._transcript_handler(message)
 
-        try:
-            instance = SubagentInstance(
-                subagent_id=subagent_id,
-                subagent_type=subagent_type,
-                display_name=display_name,
-                role=role,
-                parent_session_id=parent_session_id,
-                agent=subagent,
-                session_factory=session_factory,
-                running_semaphore=self._running_semaphore,
-                turn_timeout_s=self._config.turn_timeout_s,
-                include_parent_session_id=affinity_enabled(self._parent_agent),
-                on_turn_start=on_turn_start,
-                on_turn_finished=on_turn_finished,
-                on_status_changed=on_status_changed,
-                on_chunk=on_chunk if (
-                    self._activity_handler is not None or self._transcript_handler is not None
-                ) else None,
-                on_turn_stream_start=on_turn_stream_start if self._transcript_handler else None,
-                on_turn_stream_end=on_turn_stream_end if (
-                    self._activity_handler is not None or self._transcript_handler is not None
-                ) else None,
-            )
-            instance_holder["instance"] = instance
-            await instance.start_worker()
-        except Exception:
-            raise
+        instance = SubagentInstance(
+            subagent_id=subagent_id,
+            subagent_type=subagent_type,
+            display_name=display_name,
+            role=role,
+            parent_session_id=parent_session_id,
+            agent=subagent,
+            session_factory=session_factory,
+            running_semaphore=self._running_semaphore,
+            turn_timeout_s=self._config.turn_timeout_s,
+            include_parent_session_id=affinity_enabled(self._parent_agent),
+            on_turn_start=on_turn_start,
+            on_turn_finished=on_turn_finished,
+            on_status_changed=on_status_changed,
+            on_chunk=on_chunk if (self._activity_handler is not None or self._transcript_handler is not None) else None,
+            on_turn_stream_start=on_turn_stream_start if self._transcript_handler else None,
+            on_turn_stream_end=on_turn_stream_end
+            if (self._activity_handler is not None or self._transcript_handler is not None)
+            else None,
+        )
+        instance_holder["instance"] = instance
+        await instance.start_worker()
 
         self._instances[subagent_id] = instance
         return instance

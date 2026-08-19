@@ -11,7 +11,8 @@ from openjiuwen.harness.prompts.sections import SectionName
 if TYPE_CHECKING:
     from openjiuwen.harness.prompts.builder import PromptSection
 
-SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具（subagent_spawn / subagent_wait / subagent_list / subagent_send_input / subagent_close / subagent_resume）
+SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具
+（subagent_spawn / subagent_wait / subagent_list / subagent_send_input / subagent_close / subagent_resume）
 
 ### 何时委派
 
@@ -41,7 +42,8 @@ SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具（subagent_spawn / subag
 - subagent_list 返回 can_send_input / needs_resume，按此决定 send_input 或 resume。
 """
 
-SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools (subagent_spawn / subagent_wait / subagent_list / subagent_send_input / subagent_close / subagent_resume)
+SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools
+(subagent_spawn / subagent_wait / subagent_list / subagent_send_input / subagent_close / subagent_resume)
 
 ### When to delegate
 

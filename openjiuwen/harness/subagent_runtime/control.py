@@ -23,16 +23,17 @@ from openjiuwen.harness.subagent_runtime.config import (
 from openjiuwen.harness.subagent_runtime.errors import build_subagent_runtime_error, raise_subagent_not_found
 from openjiuwen.harness.subagent_runtime.ids import build_subagent_id, new_task_id
 from openjiuwen.harness.subagent_runtime.models import (
-    SubagentActivity,
-    SubagentMessage,
-    SubagentTurn,
     ResumeResult,
     SpawnResult,
+    SubagentActivity,
+    SubagentMessage,
     SubagentMetadata,
+    SubagentMetadataBuildParams,
     SubagentRecord,
     SubagentSnapshot,
     SubagentStatus,
     SubagentStatusKind,
+    SubagentTurn,
     UserInputOp,
     WaitResult,
     resolve_presentation,
@@ -143,9 +144,7 @@ class SubagentControl:
             self._semaphore,
             status_change_handler=self._handle_instance_status_changed,
             activity_handler=self._handle_activity if self._config.enable_activity_stream else None,
-            transcript_handler=(
-                self._handle_transcript_message if self._config.enable_transcript_stream else None
-            ),
+            transcript_handler=(self._handle_transcript_message if self._config.enable_transcript_stream else None),
         )
 
     async def spawn(
@@ -189,14 +188,14 @@ class SubagentControl:
                 browser_capabilities=browser_capabilities,
             )
             reservation.commit(
-                self._build_metadata(
-                    sid,
-                    subagent_type,
-                    task_id,
-                    resolved_name,
-                    resolved_role,
-                    task_description,
-                ),
+                SubagentMetadataBuildParams(
+                    subagent_id=sid,
+                    subagent_type=subagent_type,
+                    task_id=task_id,
+                    display_name=resolved_name,
+                    role=resolved_role,
+                    task_description=task_description,
+                ).to_metadata(parent_session_id=self._parent_session_id),
             )
         except Exception:
             reservation.rollback()
@@ -270,20 +269,22 @@ class SubagentControl:
             statuses.setdefault(sid, self.get_status(sid))
 
         timed_out = any(not status.is_final() for status in statuses.values())
-        results = {
-            sid: instance.last_output
-            for sid in targets
-            if statuses[sid].kind is SubagentStatusKind.COMPLETED
-            and (instance := self._manager.find(sid)) is not None
-            and instance.last_output
-        }
-        output_files = {
-            sid: turn.output_file
-            for sid in targets
-            if statuses[sid].kind is SubagentStatusKind.COMPLETED
-            and (turn := self._latest_answered_turn(sid)) is not None
-            and turn.output_file
-        }
+        results: dict[str, str] = {}
+        for sid in targets:
+            if statuses[sid].kind is not SubagentStatusKind.COMPLETED:
+                continue
+            instance = self._manager.find(sid)
+            if instance is None or not instance.last_output:
+                continue
+            results[sid] = instance.last_output
+        output_files: dict[str, str] = {}
+        for sid in targets:
+            if statuses[sid].kind is not SubagentStatusKind.COMPLETED:
+                continue
+            turn = self._latest_answered_turn(sid)
+            if turn is None or not turn.output_file:
+                continue
+            output_files[sid] = turn.output_file
         return WaitResult(
             statuses=statuses,
             results=results,
@@ -318,7 +319,7 @@ class SubagentControl:
             record = self._closed_records.get(subagent_id)
             if record is None:
                 return None
-            return self._closed_record_to_payload(record)
+            return self._closed_record_to_payload(record, self._parent_session_id)
 
         if metadata is None:
             status = instance.agent_status() if instance is not None else SubagentStatus.not_found()
@@ -338,7 +339,12 @@ class SubagentControl:
 
         status = instance.agent_status() if instance is not None else SubagentStatus.not_found()
         revision = instance.revision() if instance is not None else 0
-        return self._metadata_to_payload(metadata, status=status, revision=revision)
+        return self._metadata_to_payload(
+            metadata,
+            status=status,
+            revision=revision,
+            parent_session_id=self._parent_session_id,
+        )
 
     def describe_live(self) -> list[dict[str, Any]]:
         """Return external status payloads for every live subagent."""
@@ -352,6 +358,7 @@ class SubagentControl:
                     metadata,
                     status=instance.agent_status(),
                     revision=instance.revision(),
+                    parent_session_id=self._parent_session_id,
                 )
             )
         return rows
@@ -493,11 +500,7 @@ class SubagentControl:
             for sid, raw_turns in turns.items():
                 if not isinstance(raw_turns, list):
                     continue
-                items = [
-                    SubagentTurn.from_dict(item)
-                    for item in raw_turns
-                    if isinstance(item, dict)
-                ]
+                items = [SubagentTurn.from_dict(item) for item in raw_turns if isinstance(item, dict)]
                 if not items:
                     continue
                 items.sort(key=lambda item: item.seq)
@@ -509,11 +512,7 @@ class SubagentControl:
             for sid, raw_items in activities.items():
                 if not isinstance(raw_items, list):
                     continue
-                items = [
-                    SubagentActivity.from_dict(item)
-                    for item in raw_items
-                    if isinstance(item, dict)
-                ]
+                items = [SubagentActivity.from_dict(item) for item in raw_items if isinstance(item, dict)]
                 if not items:
                     continue
                 items.sort(key=lambda item: item.seq)
@@ -535,22 +534,16 @@ class SubagentControl:
                 records[sid] = record.to_dict()
 
             for metadata in self._registry.list_live():
-                records[metadata.subagent_id] = self._metadata_to_record(metadata).to_dict()
+                records[metadata.subagent_id] = SubagentControl._metadata_to_record(metadata).to_dict()
 
             for sid, items in self._turns.items():
-                existing = [
-                    SubagentTurn.from_dict(item)
-                    for item in (turns.get(sid) or [])
-                    if isinstance(item, dict)
-                ]
+                existing = [SubagentTurn.from_dict(item) for item in (turns.get(sid) or []) if isinstance(item, dict)]
                 merged = self._merge_turns(existing, items)
                 turns[sid] = [item.to_dict() for item in merged]
 
             for sid, items in self._activities.items():
                 existing = [
-                    SubagentActivity.from_dict(item)
-                    for item in (activities.get(sid) or [])
-                    if isinstance(item, dict)
+                    SubagentActivity.from_dict(item) for item in (activities.get(sid) or []) if isinstance(item, dict)
                 ]
                 merged = self._merge_activities(existing, list(items))
                 activities[sid] = [item.to_dict() for item in merged]
@@ -591,13 +584,14 @@ class SubagentControl:
         for sid, record in self._closed_records.items():
             if sid in seen:
                 continue
-            subagents.append(self._closed_record_to_payload(record))
+            subagents.append(self._closed_record_to_payload(record, self._parent_session_id))
 
         all_turns = self._all_turns_flat()
         all_activities = self._all_activities_flat()
         merged_items = self._merge_snapshot_items(all_turns, all_activities)
         start_index = _cursor_start_index_merged(merged_items, cursor)
-        page_items = merged_items[start_index : start_index + page_size]
+        end_index = start_index + page_size
+        page_items = merged_items[start_index:end_index]
         page_turns = [item[1] for item in page_items if item[0] == "turn"]
         page_activities = [item[1] for item in page_items if item[0] == "activity"]
         next_cursor = None
@@ -635,31 +629,6 @@ class SubagentControl:
                     await self.close(sid, reason="evicted")
                     return self._registry.reserve_slot()
             raise
-
-    def _build_metadata(
-        self,
-        sid: str,
-        subagent_type: str,
-        task_id: str,
-        display_name: str,
-        role: str,
-        task_description: str,
-    ) -> SubagentMetadata:
-        now_mono = time.monotonic()
-        now_ms = time.time() * 1000
-        return SubagentMetadata(
-            subagent_id=sid,
-            subagent_type=subagent_type,
-            display_name=display_name,
-            role=role,
-            parent_session_id=self._parent_session_id,
-            created_at=now_mono,
-            last_used_at=now_mono,
-            current_task_id=task_id,
-            task_description=task_description,
-            created_at_ms=now_ms,
-            updated_at_ms=now_ms,
-        )
 
     def _build_metadata_from_record(
         self,
@@ -703,7 +672,8 @@ class SubagentControl:
         )
         self._trim_closed_records()
 
-    def _metadata_to_record(self, metadata: SubagentMetadata) -> SubagentRecord:
+    @staticmethod
+    def _metadata_to_record(metadata: SubagentMetadata) -> SubagentRecord:
         return SubagentRecord(
             subagent_id=metadata.subagent_id,
             subagent_type=metadata.subagent_type,
@@ -770,9 +740,7 @@ class SubagentControl:
         return ""
 
     def _prepare_turn_activity_gate(self, subagent_id: str, task_id: str) -> None:
-        self._activity_ready = {
-            key for key in self._activity_ready if key[0] != subagent_id
-        }
+        self._activity_ready = {key for key in self._activity_ready if key[0] != subagent_id}
         stale_keys = [key for key in self._pending_activities if key[0] == subagent_id]
         for key in stale_keys:
             del self._pending_activities[key]
@@ -899,14 +867,18 @@ class SubagentControl:
         for record in oldest:
             self._closed_records.pop(record.subagent_id, None)
 
-    def _closed_record_to_payload(self, record: SubagentRecord) -> dict[str, Any]:
+    @staticmethod
+    def _closed_record_to_payload(
+        record: SubagentRecord,
+        parent_session_id: str,
+    ) -> dict[str, Any]:
         close_reason = record.closed_reason or "parent_ended"
         return build_subagent_updated_payload(
             subagent_id=record.subagent_id,
             subagent_type=record.subagent_type,
             display_name=record.display_name,
             role=record.role,
-            parent_session_id=self._parent_session_id,
+            parent_session_id=parent_session_id,
             task_description=record.task_description,
             created_at_ms=record.created_at_ms,
             updated_at_ms=record.updated_at_ms,
@@ -915,19 +887,20 @@ class SubagentControl:
             revision=0,
         )
 
+    @staticmethod
     def _metadata_to_payload(
-        self,
         metadata: SubagentMetadata,
         *,
         status: SubagentStatus,
         revision: int,
+        parent_session_id: str,
     ) -> dict[str, Any]:
         return build_subagent_updated_payload(
             subagent_id=metadata.subagent_id,
             subagent_type=metadata.subagent_type,
             display_name=metadata.display_name,
             role=metadata.role,
-            parent_session_id=metadata.parent_session_id,
+            parent_session_id=parent_session_id,
             task_description=metadata.task_description,
             created_at_ms=metadata.created_at_ms,
             updated_at_ms=metadata.updated_at_ms,
@@ -971,8 +944,8 @@ class SubagentControl:
             return text
         return text[:_TASK_DESCRIPTION_MAX_LEN]
 
+    @staticmethod
     def _touch_metadata_timestamps(
-        self,
         metadata: SubagentMetadata,
         *,
         status: SubagentStatus,

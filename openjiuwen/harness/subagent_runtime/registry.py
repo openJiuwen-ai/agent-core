@@ -23,13 +23,13 @@ class SpawnReservation:
         if not self._active:
             return
         self._registry.register(metadata)
-        self._registry._release_pending()
+        self._registry.release_pending()
         self._active = False
 
     def rollback(self) -> None:
         if not self._active:
             return
-        self._registry._release_pending()
+        self._registry.release_pending()
         self._active = False
 
 
@@ -74,6 +74,6 @@ class SubagentRegistry:
         ordered = sorted(self._table.values(), key=lambda item: item.last_used_at)
         return [item.subagent_id for item in ordered]
 
-    def _release_pending(self) -> None:
+    def release_pending(self) -> None:
         if self._pending > 0:
             self._pending -= 1

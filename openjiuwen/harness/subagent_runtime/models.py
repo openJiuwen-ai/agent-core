@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Union
@@ -100,6 +101,35 @@ class SubagentMetadata:
     created_at_ms: float = 0.0
     updated_at_ms: float = 0.0
     closed_at_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class SubagentMetadataBuildParams:
+    """Inputs for constructing live subagent registry metadata."""
+
+    subagent_id: str
+    subagent_type: str
+    task_id: str
+    display_name: str
+    role: str
+    task_description: str
+
+    def to_metadata(self, *, parent_session_id: str) -> SubagentMetadata:
+        now_mono = time.monotonic()
+        now_ms = time.time() * 1000
+        return SubagentMetadata(
+            subagent_id=self.subagent_id,
+            subagent_type=self.subagent_type,
+            display_name=self.display_name,
+            role=self.role,
+            parent_session_id=parent_session_id,
+            created_at=now_mono,
+            last_used_at=now_mono,
+            current_task_id=self.task_id,
+            task_description=self.task_description,
+            created_at_ms=now_ms,
+            updated_at_ms=now_ms,
+        )
 
 
 def resolve_presentation(
