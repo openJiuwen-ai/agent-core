@@ -4,11 +4,14 @@
 """Message and message-read-status data access object."""
 
 import json
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
 
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database.engine import (
@@ -28,16 +31,124 @@ from openjiuwen.core.common.logging import team_logger
 class MessageDao:
     """Data access object for message and message-read-status tables."""
 
-    def __init__(self, sessions: DbSessions) -> None:
-        """Initialize message DAO with the shared read/write session provider."""
+    def __init__(
+        self,
+        sessions: DbSessions,
+        *,
+        file_store: Optional["SessionFileStore"] = None,
+    ) -> None:
+        """Initialize message DAO with the shared read/write session provider.
+
+        Args:
+            file_store: Optional content store. When set, message
+                bodies are written to session files (DB keeps the ``#file#``
+                placeholder; the path is derived from the row) and
+                dereferenced on read; when ``None`` (default) behaviour is
+                unchanged (inline ``content``).
+        """
         self._sessions = sessions
+        self._file_store = file_store
+
+    @staticmethod
+    def _session_id() -> Optional[str]:
+        from openjiuwen.agent_teams.context import get_session_id
+
+        return get_session_id()
+
+    def _to_stored(self, team_name: str, content: str, *, object_id: str, kind: str, to_member: Optional[str]) -> str:
+        """Persist ``content`` to a session file; return the ``#file#`` placeholder.
+
+        On IO failure the raw text is returned instead, so the caller stores
+        it inline — the non-placeholder value keeps the degradation visible
+        (and read-back correct) without any path stored in the DB. Empty
+        content (templated messages, UC-B6) stays inline — ``""`` is not a
+        placeholder, so no file is created and no read is triggered.
+        """
+        if not content:
+            return content
+        if self._file_store is None:
+            return content
+        session_id = self._session_id()
+        if not session_id:
+            return content
+        from openjiuwen.agent_teams.team_workspace.session_file_store import CONTENT_IN_FILE, FileAddress
+
+        try:
+            self._file_store.put(
+                content,
+                FileAddress(
+                    team_name=team_name,
+                    session_id=session_id,
+                    kind=kind,
+                    object_id=object_id,
+                    to_member=to_member,
+                ),
+            )
+            return CONTENT_IN_FILE
+        except (OSError, ValueError) as exc:
+            team_logger.warning("content spill failed for %s; keeping inline: %s", object_id, exc)
+            return content
+
+    @staticmethod
+    def _is_placeholder(content: str) -> bool:
+        """True when ``content`` marks a body stored in a session file.
+
+        Imported lazily — a module-level import of the team_workspace
+        package from the DAO layer triggers a circular import chain.
+        """
+        from openjiuwen.agent_teams.team_workspace.session_file_store import CONTENT_IN_FILE
+
+        return content == CONTENT_IN_FILE
+
+    def _deref_row(self, row: TeamMessageBase) -> str:
+        """Read a placeholder row's body from its session file.
+
+        The file path is derived from the row's own fields (kind by
+        ``broadcast``, object id = ``message_id``, to-member), so the DB
+        never stores a pointer. Any resolution/IO failure degrades back to
+        the stored value (the placeholder) instead of raising.
+        """
+        session_id = self._session_id()
+        if not session_id:
+            return row.content
+        from openjiuwen.agent_teams.team_workspace.session_file_store import (
+            KIND_BROADCAST,
+            KIND_DIRECT,
+            FileAddress,
+        )
+
+        try:
+            return self._file_store.get(
+                FileAddress(
+                    team_name=row.team_name,
+                    session_id=session_id,
+                    kind=KIND_BROADCAST if row.broadcast else KIND_DIRECT,
+                    object_id=row.message_id,
+                    to_member=row.to_member_name,
+                )
+            )
+        except (ValueError, OSError) as exc:
+            team_logger.warning("content deref failed for %s: %s", row.message_id, exc)
+            return row.content
+
+    def _hydrate_row(self, row: Optional[TeamMessageBase]) -> Optional[TeamMessageBase]:
+        """Dereference a message row's ``content`` in place."""
+        if row is not None and self._is_placeholder(row.content):
+            row.content = self._deref_row(row)
+        return row
+
+    def _hydrate_rows(self, rows: List[TeamMessageBase]) -> List[TeamMessageBase]:
+        for row in rows:
+            if self._is_placeholder(row.content):
+                row.content = self._deref_row(row)
+        return rows
 
     async def get_message(self, message_id: str) -> Optional[TeamMessageBase]:
         """Get message information by ID."""
         message_model = _get_message_model()
         async with self._sessions.read() as session:
             result = await session.execute(select(message_model).where(message_model.message_id == message_id))
-            return result.scalar_one_or_none()
+            return self._hydrate_row(result.scalar_one_or_none())
 
     async def create_message(
         self,
@@ -69,6 +180,19 @@ class MessageDao:
         """
         message_model = _get_message_model()
 
+        from openjiuwen.agent_teams.team_workspace.session_file_store import (
+            KIND_BROADCAST,
+            KIND_DIRECT,
+        )
+
+        stored_content = self._to_stored(
+            team_name,
+            content,
+            object_id=message_id,
+            kind=KIND_BROADCAST if broadcast else KIND_DIRECT,
+            to_member=to_member_name,
+        )
+
         async def _op() -> bool:
             try:
                 async with self._sessions.write() as session:
@@ -77,7 +201,7 @@ class MessageDao:
                         team_name=team_name,
                         from_member_name=from_member_name,
                         to_member_name=to_member_name,
-                        content=content,
+                        content=stored_content,
                         timestamp=get_current_time(),
                         broadcast=broadcast,
                         protocol=protocol,
@@ -131,17 +255,37 @@ class MessageDao:
         message_model = _get_message_model()
         now = get_current_time()
 
+        # Multicast: one session file per row. Every row
+        # must be able to derive its own file path from its own fields
+        # (``message_id`` + ``to_member_name``), so there is no shared file
+        # or shared pointer — the same content is written N times and the DB
+        # keeps the ``#file#`` placeholder on every row. All spills happen
+        # *before* the write transaction: synchronous file IO must not hold
+        # the process-wide SQLite write lock (matches ``create_message``).
+        from openjiuwen.agent_teams.team_workspace.session_file_store import KIND_DIRECT
+
+        stored_contents = [
+            self._to_stored(
+                team_name,
+                content,
+                object_id=message_id,
+                kind=KIND_DIRECT,
+                to_member=to_member_name,
+            )
+            for message_id, to_member_name in recipients
+        ]
+
         async def _op() -> int:
             try:
                 async with self._sessions.write() as session:
-                    for message_id, to_member_name in recipients:
+                    for (message_id, to_member_name), stored_content in zip(recipients, stored_contents):
                         session.add(
                             message_model(
                                 message_id=message_id,
                                 team_name=team_name,
                                 from_member_name=from_member_name,
                                 to_member_name=to_member_name,
-                                content=content,
+                                content=stored_content,
                                 timestamp=now,
                                 broadcast=False,
                                 protocol=protocol,
@@ -160,9 +304,7 @@ class MessageDao:
                 )
                 return 0
 
-        return await retry_on_locked(
-            _op, on_locked_result=0, label=f"create_direct_messages ({len(recipients)})"
-        )
+        return await retry_on_locked(_op, on_locked_result=0, label=f"create_direct_messages ({len(recipients)})")
 
     async def get_messages(
         self,
@@ -190,7 +332,7 @@ class MessageDao:
             result = await session.execute(query)
             rows = result.scalars().all()
 
-            return rows
+            return self._hydrate_rows(rows)
 
     async def get_broadcast_messages(
         self,
@@ -225,9 +367,11 @@ class MessageDao:
             read_status = read_result.scalar_one_or_none()
 
             if not unread_only:
-                return list(rows)
+                return self._hydrate_rows(list(rows))
 
-            return [row for row in rows if read_status is None or row.timestamp > read_status.read_at]
+            return self._hydrate_rows(
+                [row for row in rows if read_status is None or row.timestamp > read_status.read_at]
+            )
 
     async def get_team_messages(self, team_name: str, broadcast: Optional[bool] = None) -> List[TeamMessageBase]:
         """Get all messages for a team (without read status)."""
@@ -241,7 +385,7 @@ class MessageDao:
             query = query.order_by(message_model.timestamp)
             result = await session.execute(query)
             rows = result.scalars().all()
-            return rows
+            return self._hydrate_rows(rows)
 
     async def has_unread_messages(self, team_name: str, *, include_broadcast: bool = True) -> bool:
         """Return True if any team message is still unread by its intended reader.
@@ -438,9 +582,7 @@ class MessageDao:
         async def _op() -> int:
             async with self._sessions.write() as session:
                 # One SELECT for every target row — missing ids simply drop out.
-                result = await session.execute(
-                    select(message_model).where(message_model.message_id.in_(message_ids))
-                )
+                result = await session.execute(select(message_model).where(message_model.message_id.in_(message_ids)))
                 messages = result.scalars().all()
                 if not messages:
                     return 0

@@ -141,10 +141,16 @@ class TeamDatabase:
             # writes through the same lock. Reads go to the reader factory
             # (a separate pool for file-backed SQLite) — see DbSessions.
             sessions = DbSessions(self.session_local, self.read_session_local)
+            # message/task ``content`` spills to session files (DB keeps the
+            # ``#file#`` placeholder, DAOs derive the path from the row and
+            # dereference on read).
+            from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
+
+            file_store = SessionFileStore()
             self.team = TeamDao(sessions)
             self.member = MemberDao(sessions)
-            self.task = TaskDao(sessions)
-            self.message = MessageDao(sessions)
+            self.task = TaskDao(sessions, file_store=file_store)
+            self.message = MessageDao(sessions, file_store=file_store)
 
             self._maybe_start_checkpointer()
 
