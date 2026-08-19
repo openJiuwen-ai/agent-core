@@ -505,15 +505,12 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             await harness.send(content, immediate=True)
 
-    async def resume_interrupt(self, user_input) -> None:
-        if not self._stream_controller.is_valid_interrupt_resume(user_input):
-            team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
-            return
-        # The supervisor serialises the resume: send() either starts the resume
-        # round (idle) or steers it into the active one — no pending queue.
-        harness = self.harness
-        if harness is not None:
-            await harness.send(user_input)
+    async def resume_interrupt(self, user_input) -> str:
+        # Delegate to the stream controller, which owns the interrupt-resume
+        # state (has_pending_interrupt / is_valid_interrupt_resume) and the
+        # queue that holds approvals arriving while the round is busy with a
+        # prior tool in the same turn (see StreamController.resume_interrupt).
+        return await self._stream_controller.resume_interrupt(user_input)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract method: configure
