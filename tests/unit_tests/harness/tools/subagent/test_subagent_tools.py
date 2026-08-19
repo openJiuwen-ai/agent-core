@@ -87,13 +87,20 @@ async def test_subagent_spawn_delegates_to_control() -> None:
         return_value=control,
     ):
         result = await tool.invoke(
-            {"subagent_type": "explore_agent", "task_description": "hello"},
+            {
+                "subagent_type": "explore_agent",
+                "task_description": "hello",
+                "display_name": "Explorer",
+                "role": "researcher",
+            },
             session=session,
         )
 
     control.spawn.assert_awaited_once_with(
         "explore_agent",
         "hello",
+        display_name="Explorer",
+        role="researcher",
         browser_capabilities=None,
     )
     control.emit_status_update.assert_awaited_once_with(
@@ -118,9 +125,41 @@ async def test_subagent_spawn_requires_subagent_type_and_task_description() -> N
         return_value=control,
     ):
         with pytest.raises(Exception, match="subagent_type"):
-            await tool.invoke({"task_description": "hello"}, session=session)
+            await tool.invoke(
+                {
+                    "task_description": "hello",
+                    "display_name": "Explorer",
+                    "role": "researcher",
+                },
+                session=session,
+            )
         with pytest.raises(Exception, match="task_description"):
-            await tool.invoke({"subagent_type": "explore_agent"}, session=session)
+            await tool.invoke(
+                {
+                    "subagent_type": "explore_agent",
+                    "display_name": "Explorer",
+                    "role": "researcher",
+                },
+                session=session,
+            )
+        with pytest.raises(Exception, match="display_name"):
+            await tool.invoke(
+                {
+                    "subagent_type": "explore_agent",
+                    "task_description": "hello",
+                    "role": "researcher",
+                },
+                session=session,
+            )
+        with pytest.raises(Exception, match="role"):
+            await tool.invoke(
+                {
+                    "subagent_type": "explore_agent",
+                    "task_description": "hello",
+                    "display_name": "Explorer",
+                },
+                session=session,
+            )
 
     control.spawn.assert_not_called()
 
@@ -147,6 +186,8 @@ async def test_subagent_spawn_browser_capabilities_validation() -> None:
             {
                 "subagent_type": "explore_agent",
                 "task_description": "hello",
+                "display_name": "Explorer",
+                "role": "researcher",
                 "browser_capabilities": ["navigate"],
             },
             session=session,
@@ -154,6 +195,8 @@ async def test_subagent_spawn_browser_capabilities_validation() -> None:
         control.spawn.assert_awaited_once_with(
             "explore_agent",
             "hello",
+            display_name="Explorer",
+            role="researcher",
             browser_capabilities=None,
         )
 
@@ -162,6 +205,8 @@ async def test_subagent_spawn_browser_capabilities_validation() -> None:
             {
                 "subagent_type": "browser_agent",
                 "task_description": "browse",
+                "display_name": "Browser",
+                "role": "web research",
                 "browser_capabilities": ["navigate"],
             },
             session=session,
@@ -169,6 +214,8 @@ async def test_subagent_spawn_browser_capabilities_validation() -> None:
         control.spawn.assert_awaited_once_with(
             "browser_agent",
             "browse",
+            display_name="Browser",
+            role="web research",
             browser_capabilities=["navigate"],
         )
 
@@ -177,6 +224,8 @@ async def test_subagent_spawn_browser_capabilities_validation() -> None:
                 {
                     "subagent_type": "browser_agent",
                     "task_description": "browse",
+                    "display_name": "Browser",
+                    "role": "web research",
                     "browser_capabilities": [1, 2],
                 },
                 session=session,
@@ -188,7 +237,12 @@ async def test_subagent_spawn_requires_session_kwarg() -> None:
     tool = _spawn_tool()
     with pytest.raises(Exception, match="valid session"):
         await tool.invoke(
-            {"subagent_type": "explore_agent", "task_description": "hello"},
+            {
+                "subagent_type": "explore_agent",
+                "task_description": "hello",
+                "display_name": "Explorer",
+                "role": "researcher",
+            },
         )
 
 

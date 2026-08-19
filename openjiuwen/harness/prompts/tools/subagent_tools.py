@@ -14,6 +14,7 @@ SUBAGENT_SPAWN_DESCRIPTION: Dict[str, str] = {
         "仅当用户或 AGENTS.md/skill 明确要求委派/并行子代理时使用；"
         "深度调研或细读代码库本身不构成 spawn 授权。"
         "spawn 不含最终 output，必须在同一 turn 内调用 subagent_wait。"
+        "调用时必须提供 display_name（UI 展示昵称）和 role（本次子任务角色）。"
         "优先委派可与本地工作并行的侧车子任务，勿把关键路径阻塞项 spawn 后空等。"
         "\n\n可用子代理类型（仅用于选择 subagent_type，不单独构成 spawn 授权）：\n{available_agents}"
     ),
@@ -23,6 +24,7 @@ SUBAGENT_SPAWN_DESCRIPTION: Dict[str, str] = {
         "Use only when the user or AGENTS.md/skill explicitly asks for delegation or parallel sub-agents; "
         "depth, research, or codebase analysis alone is not permission. "
         "spawn does not return output—you must subagent_wait in the same turn. "
+        "Always provide display_name (UI label) and role (this subtask's role). "
         "Prefer parallel sidecar tasks; do not spawn blocking critical-path work and idle-wait."
         "\n\nAvailable agent types (choose subagent_type only; does not authorize spawning alone):\n"
         "{available_agents}"
@@ -110,13 +112,21 @@ def get_subagent_spawn_input_params(language: str = "cn") -> Dict[str, Any]:
                 "type": "string",
                 "description": "First-turn task prompt for the subagent.",
             },
+            "display_name": {
+                "type": "string",
+                "description": "Short human-readable name shown in the UI (e.g. 'API Researcher').",
+            },
+            "role": {
+                "type": "string",
+                "description": "One-line role for this subtask (e.g. 'Review auth module changes').",
+            },
             "browser_capabilities": {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Required for browser_agent only; empty list for core-only tasks.",
             },
         },
-        "required": ["subagent_type", "task_description"],
+        "required": ["subagent_type", "task_description", "display_name", "role"],
     }
 
 

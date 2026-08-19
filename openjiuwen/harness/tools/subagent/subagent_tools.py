@@ -55,6 +55,22 @@ def _require_dict_inputs(inputs: Input) -> dict[str, Any]:
     )
 
 
+_SPAWN_REQUIRED_FIELDS = ("subagent_type", "task_description", "display_name", "role")
+
+
+def _validate_spawn_payload(payload: dict[str, Any]) -> None:
+    missing = [name for name in _SPAWN_REQUIRED_FIELDS if not payload.get(name)]
+    if not missing:
+        return
+    raise build_error(
+        StatusCode.TOOL_SESSION_TOOL_INVOKED,
+        reason=(
+            "'subagent_type', 'task_description', 'display_name', and 'role' "
+            "are required"
+        ),
+    )
+
+
 class SubagentSpawnTool(Tool):
     """Spawn a persistent subagent and enqueue the first turn without blocking."""
 
@@ -74,16 +90,16 @@ class SubagentSpawnTool(Tool):
 
         subagent_type = payload.get("subagent_type")
         task_description = payload.get("task_description")
-        if not subagent_type or not task_description:
-            raise build_error(
-                StatusCode.TOOL_SESSION_TOOL_INVOKED,
-                reason="Both 'subagent_type' and 'task_description' are required",
-            )
+        display_name = payload.get("display_name")
+        role = payload.get("role")
+        _validate_spawn_payload(payload)
 
         browser_capabilities = _parse_browser_capabilities(payload, str(subagent_type))
         result = await control.spawn(
             str(subagent_type),
             str(task_description),
+            display_name=str(display_name),
+            role=str(role),
             browser_capabilities=browser_capabilities,
         )
         await control.emit_status_update(result.subagent_id, session=kwargs.get("session"))

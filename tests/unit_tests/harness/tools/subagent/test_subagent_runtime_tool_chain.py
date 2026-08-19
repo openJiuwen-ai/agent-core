@@ -45,7 +45,12 @@ async def test_spawn_wait_list_tool_chain_uses_real_control() -> None:
     ):
         try:
             spawn_result = await spawn_tool.invoke(
-                {"subagent_type": "explore", "task_description": "run chain"},
+                {
+                    "subagent_type": "explore",
+                    "task_description": "run chain",
+                    "display_name": "Explorer",
+                    "role": "run integration chain",
+                },
                 session=session,
             )
             assert spawn_result.success is True
@@ -122,7 +127,12 @@ async def test_six_tool_lifecycle_chain_uses_real_control() -> None:
 
         try:
             spawn_result = await spawn_tool.invoke(
-                {"subagent_type": "explore", "task_description": "first turn"},
+                {
+                    "subagent_type": "explore",
+                    "task_description": "first turn",
+                    "display_name": "Explorer",
+                    "role": "first lifecycle turn",
+                },
                 session=session,
             )
             subagent_id = spawn_result.data["subagent_id"]
