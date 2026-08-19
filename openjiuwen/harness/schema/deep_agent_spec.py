@@ -447,6 +447,14 @@ class DeepAgentSpec(BaseModel):
     project_root: Optional[str] = None
     """Project identity anchor. Defaults to ``cwd``."""
     skills: Optional[list[str]] = None
+    agent_template_spec: dict[str, Any] | None = None
+    """Serialized ``AgentTemplateSpec`` applied by async harness hosts.
+
+    The value is deliberately plain data so a containing ``TeamAgentSpec``
+    remains JSON-serializable across member spawn and recovery boundaries.
+    ``NativeHarness`` re-validates it as an ``AgentTemplateSpec`` before the
+    member starts running.
+    """
     enable_skill_discovery: bool = False
     sys_operation: Optional[SysOperationSpec] = None
     language: Optional[str] = None

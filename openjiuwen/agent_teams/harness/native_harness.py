@@ -259,14 +259,23 @@ class NativeHarness(DeepAgent):
     # ------------------------------------------------------------------
 
     async def _prepare(self) -> None:
-        """Run ``ensure_initialized`` (async rail init).
+        """Initialize base rails, then apply the serialized AgentTemplate.
 
         Idempotent. ``start`` calls this first; the synchronous config + rail
-        mounting already ran in ``__init__``.
+        mounting already ran in ``__init__``.  The base rails are initialized
+        before the template is hot-loaded because template skills bind onto an
+        existing ``SkillUseRail``.  No model invocation can happen until this
+        method returns, so the member still starts with the complete template.
         """
         if self._prepared:
             return
         await self.ensure_initialized()
+        raw_template = getattr(self._agent_spec, "agent_template_spec", None)
+        if raw_template is not None:
+            from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
+
+            template = AgentTemplateSpec.model_validate(raw_template)
+            await self.load_agent_template_spec(template, context=self._build_context)
         self._prepared = True
 
     async def run_once(self, content: "str | InteractiveInput", *, session: Session | None = None) -> dict[str, Any]:

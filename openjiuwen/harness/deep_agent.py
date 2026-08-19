@@ -139,7 +139,7 @@ from openjiuwen.harness.resources.extension_resolver import (
     resolve_plugin_parts,
 )
 from openjiuwen.harness.schema.build_context import BuildContext
-from openjiuwen.harness.schema.extension_spec import PluginSpec
+from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec, PluginSpec
 from openjiuwen.harness.workspace.workspace import Workspace
 
 # Events bridged to the inner ReActAgent.
@@ -1882,6 +1882,31 @@ class DeepAgent(BaseAgent):
             ctx.extras["_parent_model"] = self.deep_config.model
             parts = resolve_agent_template_parts(spec, ctx)
             return await self._apply_extension_parts(parts, source_uri=str(manifest_path))
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+
+    async def load_agent_template_spec(
+        self,
+        spec: AgentTemplateSpec,
+        *,
+        context: BuildContext | None = None,
+    ) -> LoadRecord:
+        """Hot-load an in-memory ``AgentTemplateSpec``.
+
+        Unlike :meth:`load_agent_template`, no package manifest is read here:
+        every path-bearing field on ``spec`` must already be absolute.  This is
+        the in-memory counterpart to :meth:`load_plugin_spec` and is suitable
+        for a serialized spec carried across a team-member build boundary.
+        """
+        try:
+            ctx = self._new_extension_context(context)
+            ctx.extras["_parent_model"] = self.deep_config.model
+            parts = resolve_agent_template_parts(spec, ctx)
+            return await self._apply_extension_parts(parts, source_uri=None)
         except Exception as exc:
             raise build_error(
                 StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR,
