@@ -1,6 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
@@ -26,6 +28,69 @@ def _make_client() -> OpenAIModelClient:
     )
     request_config = ModelRequestConfig(model="MiniMax-M3")
     return OpenAIModelClient(request_config, client_config)
+
+
+class _Obj:
+    """Small object with explicit attrs; avoids MagicMock's auto-created fields."""
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class _OpenAIStyleError(Exception):
+    def __init__(self, message: str, *, status_code: int | None = None, body: dict | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+
+
+def _response(content: str = "ok") -> _Obj:
+    return _Obj(
+        choices=[
+            _Obj(
+                message=_Obj(content=content),
+                finish_reason="stop",
+            )
+        ],
+        usage=None,
+    )
+
+
+def _stream_chunk(content: str, *, finish_reason: str | None = None) -> _Obj:
+    return _Obj(
+        choices=[
+            _Obj(
+                delta=_Obj(content=content),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=None,
+    )
+
+
+async def _stream_response(*contents: str):
+    for content in contents:
+        yield _stream_chunk(content)
+
+
+def _mock_sdk_client(*side_effects) -> AsyncMock:
+    client = AsyncMock()
+    client.chat.completions.create = AsyncMock(side_effect=list(side_effects))
+    return client
+
+
+def _unsupported_disabled_thinking_error() -> _OpenAIStyleError:
+    return _OpenAIStyleError(
+        "Error code: 400 - {'error': {'code': '1210', "
+        "'message': '该模型始终思考，不支持关闭思考；请使用 low、high 或 max。'}}",
+        status_code=400,
+        body={
+            "error": {
+                "code": "1210",
+                "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。",
+            }
+        },
+    )
 
 
 class TestApplyModelSpecificParams:
@@ -251,6 +316,187 @@ class TestApplyModelSpecificParams:
         client._apply_model_specific_params("minimax-m3", params)
 
         assert "extra_body" not in params
+
+
+class TestDisabledThinkingCompatibility:
+    @staticmethod
+    def _disabled_request_kwargs() -> dict:
+        return {
+            "extra_body": {
+                "routing": "blue",
+                "thinking": {"type": "disabled"},
+            },
+            "enable_thinking": False,
+            "chat_template_kwargs": {
+                "enable_thinking": False,
+                "template": "keep",
+            },
+            "reasoning": {
+                "enabled": False,
+                "budget": 32,
+            },
+            "reasoning_effort": "off",
+        }
+
+    @pytest.mark.asyncio
+    async def test_invoke_retries_without_disabled_thinking_on_1210_and_caches_by_model(self):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(
+            _unsupported_disabled_thinking_error(),
+            _response("fallback"),
+            _response("cached"),
+            _response("other"),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            result = await client.invoke("hello", **self._disabled_request_kwargs())
+            cached_result = await client.invoke("hello again", **self._disabled_request_kwargs())
+            other_result = await client.invoke(
+                "hello other",
+                model="other-model",
+                **self._disabled_request_kwargs(),
+            )
+
+        assert result.content == "fallback"
+        assert cached_result.content == "cached"
+        assert other_result.content == "other"
+        assert sdk_client.chat.completions.create.call_count == 4
+
+        first_call = sdk_client.chat.completions.create.call_args_list[0].kwargs
+        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
+        cached_call = sdk_client.chat.completions.create.call_args_list[2].kwargs
+        other_model_call = sdk_client.chat.completions.create.call_args_list[3].kwargs
+
+        assert first_call["extra_body"] == {
+            "routing": "blue",
+            "thinking": {"type": "disabled"},
+        }
+        assert first_call["enable_thinking"] is False
+        assert first_call["chat_template_kwargs"]["enable_thinking"] is False
+        assert first_call["reasoning"]["enabled"] is False
+        assert first_call["reasoning_effort"] == "off"
+
+        for call in (retry_call, cached_call):
+            assert call["model"] == "MiniMax-M3"
+            assert call["extra_body"] == {"routing": "blue"}
+            assert "enable_thinking" not in call
+            assert call["chat_template_kwargs"] == {"template": "keep"}
+            assert call["reasoning"] == {"budget": 32}
+            assert "reasoning_effort" not in call
+
+        assert other_model_call["model"] == "other-model"
+        assert other_model_call["extra_body"] == {
+            "routing": "blue",
+            "thinking": {"type": "disabled"},
+        }
+        assert other_model_call["enable_thinking"] is False
+
+    @pytest.mark.asyncio
+    async def test_stream_retries_without_disabled_thinking_on_1210(self):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(
+            _unsupported_disabled_thinking_error(),
+            _stream_response("a", "b"),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            chunks = [chunk.content async for chunk in client.stream("hello", **self._disabled_request_kwargs())]
+
+        assert chunks == ["a", "b"]
+        assert sdk_client.chat.completions.create.call_count == 2
+        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
+        assert retry_call["extra_body"] == {"routing": "blue"}
+        assert "enable_thinking" not in retry_call
+        assert retry_call["chat_template_kwargs"] == {"template": "keep"}
+        assert retry_call["reasoning"] == {"budget": 32}
+        assert "reasoning_effort" not in retry_call
+
+    @pytest.mark.asyncio
+    async def test_supported_disabled_thinking_request_is_sent_once_unchanged(self):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(_response("ok"))
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            result = await client.invoke("hello", **self._disabled_request_kwargs())
+
+        assert result.content == "ok"
+        assert sdk_client.chat.completions.create.call_count == 1
+        sent_call = sdk_client.chat.completions.create.call_args.kwargs
+        assert sent_call["extra_body"] == {
+            "routing": "blue",
+            "thinking": {"type": "disabled"},
+        }
+        assert sent_call["enable_thinking"] is False
+        assert sent_call["chat_template_kwargs"]["enable_thinking"] is False
+        assert sent_call["reasoning"]["enabled"] is False
+        assert sent_call["reasoning_effort"] == "off"
+
+    @pytest.mark.parametrize(
+        ("request_kwargs", "error"),
+        [
+            (
+                {"extra_body": {"routing": "blue"}},
+                _unsupported_disabled_thinking_error(),
+            ),
+            (
+                _disabled_request_kwargs.__func__(),
+                _OpenAIStyleError(
+                    "Unauthorized",
+                    status_code=401,
+                    body={"error": {"code": "1210", "message": "不支持关闭思考"}},
+                ),
+            ),
+            (
+                _disabled_request_kwargs.__func__(),
+                _OpenAIStyleError(
+                    "Rate limited",
+                    status_code=429,
+                    body={"error": {"code": "1210", "message": "不支持关闭思考"}},
+                ),
+            ),
+            (
+                _disabled_request_kwargs.__func__(),
+                TimeoutError("timed out"),
+            ),
+            (
+                _disabled_request_kwargs.__func__(),
+                _OpenAIStyleError(
+                    "Server error",
+                    status_code=500,
+                    body={"error": {"code": "1210", "message": "不支持关闭思考"}},
+                ),
+            ),
+            (
+                _disabled_request_kwargs.__func__(),
+                _OpenAIStyleError("Bad request: invalid temperature", status_code=400),
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_non_compatibility_errors_do_not_retry(self, request_kwargs, error):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(error)
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with pytest.raises(BaseError):
+                await client.invoke("hello", **request_kwargs)
+
+        assert sdk_client.chat.completions.create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fallback_failure_is_not_retried_again(self):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(
+            _unsupported_disabled_thinking_error(),
+            _OpenAIStyleError("fallback failed", status_code=400),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with pytest.raises(BaseError) as exc_info:
+                await client.invoke("hello", **self._disabled_request_kwargs())
+
+        assert "fallback failed" in str(exc_info.value)
+        assert sdk_client.chat.completions.create.call_count == 2
 
 
 def test_deepseek_endpoint_profile_adds_reasoning_content_to_assistant_messages():
