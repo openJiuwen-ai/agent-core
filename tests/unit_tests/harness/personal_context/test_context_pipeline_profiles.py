@@ -2081,6 +2081,73 @@ def test_description_navigation_must_resolve_inside_context(tmp_path: Path, targ
     assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR
 
 
+def test_description_navigation_accepts_verified_source_metadata_links(tmp_path: Path) -> None:
+    candidate, final_context_root, source_root, source_id = _reference_graph_roots(tmp_path)
+    root_link = _source_link(
+        page_relative="description.md",
+        final_context_root=final_context_root,
+        source_root=source_root,
+        source_id=source_id,
+    )
+    nested_link = _source_link(
+        page_relative="topics/description.md",
+        final_context_root=final_context_root,
+        source_root=source_root,
+        source_id=source_id,
+    )
+    _write_context_pages(
+        candidate,
+        {
+            "description.md": f"# Context\n\n- [Evidence]({root_link.split('](', 1)[1][:-1]})\n",
+            "topics/description.md": f"# Topics\n\n- [Evidence]({nested_link.split('](', 1)[1][:-1]})\n",
+        },
+    )
+
+    context_pipeline._validate_description_navigation(
+        candidate,
+        final_context_root=final_context_root,
+        source_root=source_root,
+    )
+
+
+def test_agent_candidate_accepts_verified_source_metadata_in_descriptions(tmp_path: Path) -> None:
+    candidate, final_context_root, source_root, source_id = _reference_graph_roots(tmp_path)
+    root_link = _source_link(
+        page_relative="description.md",
+        final_context_root=final_context_root,
+        source_root=source_root,
+        source_id=source_id,
+    )
+    _write_context_pages(candidate, {"description.md": f"# Context\n\n{root_link}\n"})
+
+    _validate_agent_candidate(
+        candidate,
+        baseline=context_pipeline._snapshot_managed_files(candidate),
+        changed_paths=set(),
+        baseline_root=final_context_root,
+        final_context_root=final_context_root,
+        source_root=source_root,
+    )
+
+
+@pytest.mark.parametrize("target", ["../source-meta/src_missing.md", "../other/metadata.md"])
+def test_description_navigation_rejects_unverified_source_metadata_links(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    candidate, final_context_root, source_root, _ = _reference_graph_roots(tmp_path)
+    _write_context_pages(candidate, {"description.md": f"# Context\n\n- [Evidence]({target})\n"})
+
+    with pytest.raises(Exception) as raised:
+        context_pipeline._validate_description_navigation(
+            candidate,
+            final_context_root=final_context_root,
+            source_root=source_root,
+        )
+
+    assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR
+
+
 def test_agent_json_parser_accepts_fenced_and_double_encoded_json() -> None:
     expected = {"pages": {"topics/page.md": "# Page"}}
     assert (

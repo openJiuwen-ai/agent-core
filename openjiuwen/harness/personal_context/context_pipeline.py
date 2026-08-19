@@ -2250,6 +2250,7 @@ class ContextPipelineService:
                     baseline=context_baseline,
                     changed_paths=changed_paths,
                     baseline_root=self._context_root,
+                    final_context_root=self._context_root,
                     source_root=self._source_meta_root,
                     deleted_source_ids=deleted_source_ids,
                     require_description=candidate == "agent",
@@ -2406,7 +2407,11 @@ class ContextPipelineService:
                     processed=processed,
                     fallback_references=tuple(alias_targets or ()),
                 )
-            _validate_candidate(candidate_context)
+            _validate_candidate(
+                candidate_context,
+                final_context_root=self._context_root,
+                source_root=self._source_meta_root,
+            )
             if alias_targets is not None:
                 _resolve_short_references(
                     candidate_context,
@@ -2863,6 +2868,7 @@ def _validate_filesystem_agent_result(
             baseline=context_baseline,
             changed_paths=changed_paths,
             baseline_root=baseline_root,
+            final_context_root=final_context_root,
             source_root=source_root,
             deleted_source_ids=deleted_source_ids,
             materialized_baseline=materialized_baseline,
@@ -2909,6 +2915,7 @@ def _validate_agent_candidate(
     baseline: Mapping[str, tuple[int, str]],
     changed_paths: set[str],
     baseline_root: Path | None = None,
+    final_context_root: Path | None = None,
     source_root: Path | None = None,
     deleted_source_ids: set[str] | None = None,
     materialized_baseline: Mapping[str, tuple[int, str]] | None = None,
@@ -3021,6 +3028,8 @@ def _validate_agent_candidate(
         _validate_unchanged_tree(materialized_root, materialized_baseline, name="materialized-source")
     _validate_description_navigation(
         context_root,
+        final_context_root=final_context_root or baseline_root,
+        source_root=source_root,
         repairable=True,
         allowed_missing=allowed_missing_pages,
     )
@@ -3245,7 +3254,12 @@ def _load_agent_json(text: str, *, error_message: str) -> object:
     raise _pipeline_error(error_message)
 
 
-def _validate_candidate(context_root: Path) -> None:
+def _validate_candidate(
+    context_root: Path,
+    *,
+    final_context_root: Path | None = None,
+    source_root: Path | None = None,
+) -> None:
     _assert_no_symlinks(context_root)
     description = context_root / "description.md"
     try:
@@ -3257,18 +3271,25 @@ def _validate_candidate(context_root: Path) -> None:
     for entry in context_root.rglob("*"):
         if entry.is_file() and entry.suffix.casefold() != ".md":
             raise _publish_error("candidate Context contains a non-Markdown file")
-    _validate_description_navigation(context_root)
+    _validate_description_navigation(
+        context_root,
+        final_context_root=final_context_root,
+        source_root=source_root,
+    )
 
 
 def _validate_description_navigation(
     context_root: Path,
     *,
+    final_context_root: Path | None = None,
+    source_root: Path | None = None,
     repairable: bool = False,
     allowed_missing: set[str] | None = None,
 ) -> None:
-    """Require Context navigation in description.md to resolve safely."""
+    """Require Context navigation and verified source links to resolve safely."""
 
-    resolved_context = context_root.resolve()
+    resolved_final_context = (final_context_root or context_root).resolve()
+    resolved_source_root = source_root.resolve() if source_root is not None else None
     error = _pipeline_error if repairable else _publish_error
     for page in context_root.rglob("description.md"):
         try:
@@ -3293,12 +3314,25 @@ def _validate_description_navigation(
                     target = titled.group(1)
             if target.startswith(("/", "\\")) or re.fullmatch(r"[A-Za-z]:.*", target) is not None:
                 raise error("candidate description navigation leaves Context")
-            target_path = (page.parent / target).resolve()
+            page_relative = page.relative_to(context_root)
+            logical_page = resolved_final_context / page_relative
+            target_path = (logical_page.parent / target).resolve()
             try:
-                relative_target = target_path.relative_to(resolved_context).as_posix()
-            except ValueError as exc:
-                raise error("candidate description navigation leaves Context") from exc
-            if not target_path.exists() and allowed_missing is not None and relative_target in allowed_missing:
+                relative_target = target_path.relative_to(resolved_final_context).as_posix()
+            except ValueError:
+                if (
+                    source_root is None
+                    or resolved_source_root is None
+                    or not target_path.is_relative_to(resolved_source_root)
+                ):
+                    raise error("candidate description navigation leaves Context")
+                source_relative = target_path.relative_to(resolved_source_root)
+                if len(source_relative.parts) != 1 or source_relative.suffix.casefold() != ".md":
+                    raise error("candidate atomic source reference is invalid")
+                _reference_source_path(source_root, source_relative.stem, error=error)
                 continue
-            if not target_path.exists() or target_path.is_symlink():
+            candidate_target = context_root / relative_target
+            if not candidate_target.exists() and allowed_missing is not None and relative_target in allowed_missing:
+                continue
+            if not candidate_target.exists() or candidate_target.is_symlink():
                 raise error("candidate description navigation target is missing")
