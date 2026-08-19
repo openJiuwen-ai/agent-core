@@ -1003,6 +1003,8 @@ class ReActAgent(BaseAgent):
         call_first_token_time = None
         call_last_token_time = None
         call_chunk_count = 0
+        last_contentful_at = call_start_time
+        last_progress_at = call_start_time
         try:
             async for chunk in llm.stream(
                     model=self._config.model_name,
@@ -1030,6 +1032,9 @@ class ReActAgent(BaseAgent):
                     if asyncio.iscoroutine(inspect_result):
                         await inspect_result
 
+                now = time.monotonic()
+                if chunk.reasoning_content or chunk.content:
+                    last_contentful_at = now
                 if chunk.reasoning_content:
                     await session.write_stream(OutputSchema(
                         type="llm_reasoning",
@@ -1044,6 +1049,20 @@ class ReActAgent(BaseAgent):
                         payload={"content": chunk.content, "result_type": "answer"},
                     ))
                     chunk_index += 1
+                elif not (chunk.reasoning_content or chunk.content):
+                    # tool_calls-only chunk (or empty): maybe emit throttled
+                    # progress heartbeat so relay's stall watchdog sees life.
+                    progress = _maybe_toolcall_progress_output(
+                        last_contentful_at=last_contentful_at,
+                        last_progress_at=last_progress_at,
+                        now=now,
+                        chunk_count=call_chunk_count,
+                        index=chunk_index,
+                    )
+                    if progress is not None:
+                        await session.write_stream(progress)
+                        chunk_index += 1
+                        last_progress_at = now
         except Exception as exc:
             if image_input_present and self._is_image_input_unsupported_error(exc):
                 ai_message = self._build_image_input_unsupported_message()
