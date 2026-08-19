@@ -718,31 +718,41 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
     return SqlEngines(write_engine, read_engine, write_session_local, read_session_local)
 
 
-async def create_cur_session_tables(engine: AsyncEngine) -> None:
-    """Create dynamic tables for current session.
-
-    The session_id is obtained from context via get_session_id().
-    """
-    if engine is None:
-        return
-
-    session_id = get_session_id()
-    if not session_id:
-        team_logger.warning("No session_id in context, cannot create session tables")
-        return
-
+async def _ensure_session_tables(session: AsyncSession) -> None:
+    """Create / ensure the per-session dynamic tables on an open session."""
     task_model = _get_task_model()
     dep_model = _get_task_dependency_model()
     message_model = _get_message_model()
     read_status_model = _get_message_read_status_model()
     review_vote_model = _get_review_vote_model()
+    conn = await session.connection()
+    for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
+        await conn.run_sync(model.__table__.create, checkfirst=True)
+    await conn.run_sync(_ensure_message_protocol_column)
+    await conn.run_sync(_ensure_message_meta_column)
+    await conn.run_sync(_ensure_dynamic_table_indexes)
 
-    async with engine.begin() as conn:
-        for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
-            await conn.run_sync(model.__table__.create, checkfirst=True)
-        await conn.run_sync(_ensure_message_protocol_column)
-        await conn.run_sync(_ensure_message_meta_column)
-        await conn.run_sync(_ensure_dynamic_table_indexes)
+
+async def create_cur_session_tables(sessions: DbSessions) -> None:
+    """Create dynamic tables for current session under the process-wide write lock.
+
+    Runs inside ``DbSessions.write()`` so bind-time DDL serialises with every
+    DAO write of this instance. The engine-level variant (``engine.begin()``)
+    bypassed the lock: two teammates binding concurrently could hold BOTH
+    write-pool connections while their DDL parked on the SQLite file lock,
+    exhausting the 2-connection pool (``QueuePool limit of size 2`` teammate
+    crashes).
+
+    The session_id is obtained from context via get_session_id().
+    """
+    session_id = get_session_id()
+    if not session_id:
+        team_logger.warning("No session_id in context, cannot create session tables")
+        return
+
+    async with sessions.write() as session:
+        await _ensure_session_tables(session)
+        await session.commit()
 
     team_logger.info("Session tables ready for session %s", session_id)
 

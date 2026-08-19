@@ -17,7 +17,11 @@ from openjiuwen.agent_teams.schema.status import (
     MemberMode,
     MemberStatus,
 )
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+from openjiuwen.agent_teams.tools.database.engine import (
+    DbSessions,
+    get_current_time,
+    retry_on_locked,
+)
 from openjiuwen.agent_teams.tools.member_options import (
     MemberWorktreeOptions,
     set_member_worktree_options,
@@ -327,23 +331,36 @@ class MemberDao:
         transition was illegal.
         """
         valid_from = _valid_predecessor_values(MemberStatus(status), MEMBER_TRANSITIONS)
-        async with self._sessions.write() as session:
-            result = await session.execute(
-                update(TeamMember)
-                .where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name,
-                    TeamMember.status.in_(valid_from),
-                )
-                .values(status=status)
-            )
-            if result.rowcount == 1:
-                await session.commit()
-                team_logger.debug("Member %s status updated to %s", member_name, status)
-                return True
 
-            await self._log_member_update_rejection(session, member_name, team_name, TeamMember.status, status)
-            return False
+        async def _op() -> bool:
+            async with self._sessions.write() as session:
+                result = await session.execute(
+                    update(TeamMember)
+                    .where(
+                        TeamMember.member_name == member_name,
+                        TeamMember.team_name == team_name,
+                        TeamMember.status.in_(valid_from),
+                    )
+                    .values(status=status)
+                )
+                if result.rowcount == 1:
+                    await session.commit()
+                    team_logger.debug("Member %s status updated to %s", member_name, status)
+                    return True
+
+                await self._log_member_update_rejection(
+                    session, member_name, team_name, TeamMember.status, status
+                )
+                return False
+
+        # Status writes sit on the hot path of every kernel.start / spawn
+        # transition; a transient SQLite file-lock wait or a temporarily
+        # exhausted write pool must retry, not crash the member.
+        return await retry_on_locked(
+            _op,
+            on_locked_result=False,
+            label=f"update_member_status {member_name}",
+        )
 
     async def _log_member_update_rejection(
         self,

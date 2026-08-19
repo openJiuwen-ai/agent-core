@@ -470,3 +470,40 @@ async def test_mark_messages_read_batch(file_db: TeamDatabase) -> None:
     marked = await db.message.mark_messages_read(["d1", "b1", "missing"], "dev")
     assert marked == 2
     assert await db.message.has_unread_messages("t1") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_session_ddl_runs_under_write_lock(
+    file_db: TeamDatabase, monkeypatch
+) -> None:
+    """Bind-time DDL goes through ``DbSessions.write()`` — never ``engine.begin()``.
+
+    Regression guard for the ``QueuePool limit of size 2`` teammate crashes:
+    session-table DDL used to run on ``engine.begin()`` *outside* the write
+    lock, so two teammates binding concurrently could hold BOTH write-pool
+    connections while their DDL parked on the SQLite file lock; the next
+    writer's checkout timed out. Asserted via a spy on the lock route — no
+    real waiting involved.
+    """
+    from contextlib import asynccontextmanager
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    entered: list[bool] = []
+
+    real_write = engine_module.DbSessions.write
+
+    @asynccontextmanager
+    async def spy_write(self):
+        entered.append(True)
+        async with real_write(self) as session:
+            yield session
+
+    monkeypatch.setattr(engine_module.DbSessions, "write", spy_write)
+
+    await file_db.create_cur_session_tables()
+
+    # The DDL must have acquired the process-wide write lock. A regression
+    # back to ``engine.begin()`` never calls ``write()`` and fails here.
+    assert entered == [True]
