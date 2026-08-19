@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping as MappingABC
 from copy import deepcopy
 from dataclasses import dataclass
+import inspect
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import httpx
@@ -1217,21 +1218,36 @@ class OpenAIModelClient(BaseModelClient):
             yield current
             current = current.__cause__ or current.__context__
 
+    @staticmethod
+    def _optional_int(value: Any) -> Optional[int]:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _exception_attr(value: Any, attr: str) -> Any:
+        instance_dict = getattr(value, "__dict__", None)
+        if isinstance(instance_dict, MappingABC) and attr in instance_dict:
+            return instance_dict[attr]
+        try:
+            return inspect.getattr_static(value, attr)
+        except AttributeError:
+            return None
+
     @classmethod
     def _exception_status_code(cls, exc: BaseException) -> Optional[int]:
         for item in cls._iter_exception_chain(exc):
-            candidates = (item, getattr(item, "response", None))
+            candidates = (item, cls._exception_attr(item, "response"))
             for candidate in candidates:
                 if candidate is None:
                     continue
                 for attr in ("status_code", "status"):
-                    value = getattr(candidate, attr, None)
-                    if isinstance(value, bool) or value is None:
-                        continue
-                    try:
-                        return int(value)
-                    except (TypeError, ValueError):
-                        continue
+                    status_code = cls._optional_int(cls._exception_attr(candidate, attr))
+                    if status_code is not None:
+                        return status_code
         return None
 
     @classmethod
@@ -1258,10 +1274,7 @@ class OpenAIModelClient(BaseModelClient):
 
         parts = [str(value)]
         for attr in ("message", "body", "code", "type", "param", "status_code", "response"):
-            try:
-                attr_value = getattr(value, attr, None)
-            except Exception:
-                continue
+            attr_value = cls._exception_attr(value, attr)
             if attr_value is value:
                 continue
             parts.extend(cls._collect_exception_text_parts(attr_value, seen))
