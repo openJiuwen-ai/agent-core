@@ -101,6 +101,75 @@ class TeamSessionReleaseInfo:
     db_config: DatabaseConfig
 
 
+# Per-member abort timeout for reset_session's in-flight round teardown.
+# abort() is a put + await ack with no internal timeout; a member supervisor
+# wedged in a non-cancellable await would otherwise hang the whole reset.
+_RESET_ABORT_TIMEOUT_SECONDS: float = 5.0
+
+
+async def _clear_inprocess_members_inflight(entry: "ActiveTeam") -> None:
+    """Abort each in-process member's in-flight round before ``stop_team``.
+
+    ``force_kill`` (the stop-team teardown path) is a bare ``task.cancel`` that
+    bypasses ``harness.abort``, so without an explicit abort the interrupted
+    round's incomplete ``tool_call`` would survive in the member's checkpoint
+    and be restored by COLD_RECOVER ``pre_run`` -> the member resumes the old
+    task instead of the leader's new dispatch. This runs
+    ``stream_controller.cancel_agent`` (``= harness.abort(immediate=True)``)
+    per in-process member before the ``stop_team`` fallback. The abort drives
+    ``ReActAgent``'s ``CancelledError`` path -> ``_cleanup_context_on_cancel``,
+    which drops the incomplete tool debris (so the member does not re-execute
+    it) while keeping the UserMessage + completed tool pairs + history, then
+    ``_save_contexts_on_cancel`` persists that sanitized state.
+
+    Only in-process members expose ``agent_ref`` (the member TeamAgent);
+    subprocess members (``SpawnedProcessHandle`` without ``agent_ref``) are
+    skipped — cross-process abort is a separate workstream. Best-effort:
+    per-member failures are logged and do not abort the reset (the
+    ``stop_team``/``force_kill`` fallback still runs afterward).
+    """
+    spawn_mgr = getattr(getattr(entry, "agent", None), "spawn_manager", None)
+    handles = getattr(spawn_mgr, "spawned_handles", None) or {}
+    for member_name, handle in list(handles.items()):
+        agent_ref = getattr(handle, "agent_ref", None)
+        if agent_ref is None:
+            team_logger.warning(
+                "reset_session: member {} has no agent_ref (subprocess?), skip in-flight clear",
+                member_name,
+            )
+            continue
+        stream_controller = getattr(agent_ref, "stream_controller", None)
+        if stream_controller is None:
+            team_logger.warning(
+                "reset_session: member {} has no stream_controller, skip in-flight clear",
+                member_name,
+            )
+            continue
+        try:
+            await asyncio.wait_for(
+                stream_controller.cancel_agent(),
+                timeout=_RESET_ABORT_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError as e:
+            team_logger.warning(
+                "reset_session: member {} abort cancelled: {}",
+                member_name,
+                e,
+            )
+        except asyncio.TimeoutError:
+            team_logger.warning(
+                "reset_session: member {} abort timed out after {}s",
+                member_name,
+                _RESET_ABORT_TIMEOUT_SECONDS,
+            )
+        except Exception as e:  # noqa: BLE001 - best-effort, keep resetting other members
+            team_logger.warning(
+                "reset_session: member {} abort failed: {}",
+                member_name,
+                e,
+            )
+
+
 class TeamRuntimeManager:
     """Owns the in-process ``TeamRuntimePool`` and runs the dispatch + side-effect cycle."""
 
@@ -865,6 +934,15 @@ class TeamRuntimeManager:
                     team_name,
                     entry.current_session_id,
                 )
+                # Abort each in-process member's in-flight round BEFORE the
+                # stop_team/force_kill fallback. force_kill is a bare task.cancel
+                # that bypasses harness.abort, so without this the interrupted
+                # round's incomplete tool_call survives in the member's checkpoint
+                # and is restored by COLD_RECOVER pre_run -> the member resumes the
+                # old task instead of the leader's new dispatch. The abort's
+                # _cleanup_context_on_cancel drops the incomplete tool debris and
+                # keeps the UserMessage + completed tool pairs + history.
+                await _clear_inprocess_members_inflight(entry)
                 await self.stop_team(
                     team_name=team_name,
                     session_id=entry.current_session_id,
