@@ -32,6 +32,7 @@ def _resolve_pyright_command() -> tuple[str, list[str]] | None:
             text=True,
             encoding="utf-8",
             errors="replace",
+            timeout=8,
         )
         if result.returncode == 0:
             lines = (result.stdout or "").splitlines()
