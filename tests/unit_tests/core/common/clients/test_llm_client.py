@@ -115,6 +115,8 @@ class TestHttpXConnectorPool:
         assert call_kwargs['max_connections'] == 100
         assert call_kwargs['max_keepalive_connections'] == 20
         assert call_kwargs['keepalive_expiry'] == 60
+        assert 'socket_options' in call_kwargs
+        assert call_kwargs['socket_options']  # non-empty list with SO_KEEPALIVE
         assert 'proxy' not in call_kwargs or call_kwargs['proxy'] is None
 
         # Test conn() method
@@ -122,6 +124,19 @@ class TestHttpXConnectorPool:
 
         # Test close
         await pool.close()
+
+    @pytest.mark.asyncio
+    async def test_extend_params_socket_options_overrides_default(self, mock_async_connection_pool):
+        """Caller-provided socket_options via extend_params must be respected."""
+        mock_pool_class, mock_instance = mock_async_connection_pool
+
+        custom_options = [(999, 998, 1)]
+        config = HttpXConnectorPoolConfig(extend_params={'socket_options': custom_options})
+
+        HttpXConnectorPool(config)
+
+        call_kwargs = mock_pool_class.call_args[1]
+        assert call_kwargs['socket_options'] is custom_options
 
     @pytest.mark.asyncio
     async def test_initialization_with_proxy(self, mock_async_connection_pool):
