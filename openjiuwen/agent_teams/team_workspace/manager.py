@@ -38,6 +38,7 @@ from openjiuwen.agent_teams.team_workspace.models import (
     WorkspaceFileLock,
     WorkspaceMode,
 )
+from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.harness.tools.worktree.git import _run_git, rev_parse
 
@@ -90,7 +91,7 @@ class TeamWorkspaceManager:
         # The resident evolvable-workspace cache, attached once at assembly.
         # Every read-side consumer (rails, backend delegation, worker backend,
         # tiny agent, scheduler) takes the same instance through this property.
-        self._workspace_cache: Any = None
+        self._workspace_cache: WorkspaceCache | None = None
 
         # Local lock state (LOCAL mode, or leader's authority in DISTRIBUTED)
         self._locks: dict[str, WorkspaceFileLock] = {}
@@ -103,7 +104,7 @@ class TeamWorkspaceManager:
         self._pending_lock_requests: dict[str, asyncio.Future[WorkspaceLockResponseEvent]] = {}
 
     @property
-    def workspace_cache(self) -> Any:
+    def workspace_cache(self) -> WorkspaceCache | None:
         """The resident evolvable-workspace cache.
 
         One instance per manager, built explicitly at assembly time
@@ -115,7 +116,7 @@ class TeamWorkspaceManager:
         """
         return self._workspace_cache
 
-    def attach_workspace_cache(self, cache: Any) -> None:
+    def attach_workspace_cache(self, cache: WorkspaceCache) -> None:
         """Attach the assembled evolvable-workspace cache (spawn-time, once)."""
         self._workspace_cache = cache
 
@@ -285,7 +286,6 @@ class TeamWorkspaceManager:
         if result.returncode != 0:
             error_output = result.stderr.strip() or result.stdout.strip()
             raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
-
 
     @staticmethod
     def _is_directory_link(path: str) -> bool:

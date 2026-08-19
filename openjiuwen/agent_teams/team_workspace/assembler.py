@@ -31,7 +31,6 @@ override code default / DB values at load time):
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 
 from openjiuwen.agent_teams.paths import team_workspace_dir
@@ -44,8 +43,7 @@ from openjiuwen.agent_teams.team_workspace.frontmatter import (
 )
 from openjiuwen.agent_teams.team_workspace.layout import WorkspaceLayout
 from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
-
-team_logger = logging.getLogger("agent_teams")
+from openjiuwen.core.common.logging import team_logger
 
 
 class WorkspaceAssembler:

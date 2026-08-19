@@ -46,7 +46,6 @@ sub-classing: the three classes are just dict fields.
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 from typing import Literal
 
@@ -56,9 +55,8 @@ from openjiuwen.agent_teams.team_workspace.frontmatter import (
 )
 from openjiuwen.agent_teams.team_workspace.layout import WorkspaceLayout
 from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
+from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.prompt import PromptTemplate
-
-team_logger = logging.getLogger("agent_teams")
 
 
 class WorkspaceCache:

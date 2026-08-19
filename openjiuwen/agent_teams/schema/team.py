@@ -468,9 +468,6 @@ class TeamSpec(BaseModel):
     evolution_enabled: bool = True
     """Self-evolution coverage switch — mirrors ``TeamAgentSpec.evolution_enabled``
     so spawn-time assembly reads the same switch from the runtime spec."""
-    member_workspace_prefix: bool = True
-    """Dynamic member ``#`` prefix switch — mirrors
-    ``TeamAgentSpec.member_workspace_prefix``."""
 
 
 class TeamRuntimeContext(BaseModel):

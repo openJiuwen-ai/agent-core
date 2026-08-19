@@ -19,12 +19,11 @@ default / DB value, the write side rebuilds the baseline.
 from __future__ import annotations
 
 import hashlib
-import logging
 from pathlib import Path
 
 import yaml
 
-team_logger = logging.getLogger("agent_teams")
+from openjiuwen.core.common.logging import team_logger
 
 _FRONTMATTER_DELIM = "---"
 
@@ -84,16 +83,14 @@ def read_frontmatter(text: str) -> tuple[dict, str]:
     # ``splitlines(keepends=True)`` preserves every byte after the closing
     # delimiter (trailing newline included) — ``splitlines()`` alone would
     # drop a body-final ``\n`` and break the sha256 round-trip.
-    body = "".join(text.splitlines(keepends=True)[end + 1:])
+    body = "".join(text.splitlines(keepends=True)[end + 1 :])
     try:
         meta = yaml.safe_load(meta_text) or {}
     except yaml.YAMLError as exc:
         team_logger.warning("malformed frontmatter YAML: %s", exc)
         raise ValueError(f"malformed frontmatter YAML: {exc}") from exc
     if not isinstance(meta, dict):
-        raise ValueError(
-            f"frontmatter root is not a mapping: {type(meta).__name__}"
-        )
+        raise ValueError(f"frontmatter root is not a mapping: {type(meta).__name__}")
     return meta, body
 
 

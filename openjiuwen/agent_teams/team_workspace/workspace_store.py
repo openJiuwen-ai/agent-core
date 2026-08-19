@@ -23,7 +23,6 @@ Layout:
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 from openjiuwen.agent_teams.paths import team_member_workspace_dir, team_workspace_dir
@@ -35,8 +34,7 @@ from openjiuwen.agent_teams.team_workspace.frontmatter import (
     write_frontmatter,
 )
 from openjiuwen.agent_teams.team_workspace.layout import WorkspaceLayout
-
-team_logger = logging.getLogger("agent_teams")
+from openjiuwen.core.common.logging import team_logger
 
 
 class WorkspaceStore:
@@ -202,9 +200,7 @@ class WorkspaceStore:
         try:
             atomic_write(target, write_frontmatter(meta, body))
         except OSError as exc:
-            team_logger.warning(
-                "workspace write %s failed (DB value stands): %s", target, exc
-            )
+            team_logger.warning("workspace write %s failed (DB value stands): %s", target, exc)
 
     def _may_write(self, path: Path) -> bool:
         """Write-side evolution protection: never clobber an evolved file.
