@@ -30,7 +30,12 @@ class _IdleParentStub:
     def __init__(self) -> None:
         self.deep_config = SimpleNamespace(language="cn")
         self._auto_invoke_scheduled = False
+        self._invoke_active = False
         self.schedule_auto_invoke_on_spawn_done = AsyncMock()
+
+    @property
+    def is_invoke_active(self) -> bool:
+        return self._invoke_active
 
     @property
     def is_auto_invoke_scheduled(self) -> bool:
