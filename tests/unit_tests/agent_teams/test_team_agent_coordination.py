@@ -328,6 +328,49 @@ async def test_concurrent_resume_interrupts_serialize_under_lock():
 
 
 @pytest.mark.asyncio
+async def test_idle_settle_schedules_deferred_drain_delivery():
+    """_on_idle_settled drains a queued approval off the supervisor callback path.
+
+    Reproduces the production trigger: a queued approval plus a committed
+    pending interrupt schedules the drain as a task (not an inline harness.send
+    that would deadlock the supervisor) and delivers it once the task runs.
+    """
+    agent = _make_leader()
+    harness = _wire_harness(agent)
+    sc = agent._stream_controller
+    sc.is_valid_interrupt_resume = MagicMock(return_value=True)
+    sc.has_pending_interrupt = MagicMock(return_value=True)
+
+    approval = _interactive_input("call-2")
+    sc._pending_interrupt_resumes.append(approval)
+    sc._state.team_member = None  # skip the db-backed shutdown guard; drain is the unit under test
+
+    await sc._on_idle_settled()
+    # The drain was scheduled off the on_state callback; let it run.
+    if sc._drain_task is not None:
+        await sc._drain_task
+
+    harness.send.assert_awaited_once_with(approval)
+    assert sc._pending_interrupt_resumes == []
+
+
+@pytest.mark.asyncio
+async def test_idle_settle_drops_orphans_when_no_pending_interrupt():
+    """A queued approval whose ask never re-committed is dropped at IDLE."""
+    agent = _make_leader()
+    harness = _wire_harness(agent)
+    sc = agent._stream_controller
+    sc.has_pending_interrupt = MagicMock(return_value=False)
+
+    sc._pending_interrupt_resumes.append(_interactive_input("call-orphan"))
+    sc._state.team_member = None  # skip the db-backed shutdown guard
+    await sc._on_idle_settled()
+
+    harness.send.assert_not_called()
+    assert sc._pending_interrupt_resumes == []
+
+
+@pytest.mark.asyncio
 async def test_member_status_unchanged_skips_side_effects():
     """Redundant READY → READY transitions should not touch task or message managers."""
     agent = _make_leader()
