@@ -474,7 +474,12 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
         ),
     )
     budget_exhausted_scope: Optional[str] = Field(
-        default=None, description="Which ledger actually triggered the workflow_failed: 'session' or 'workflow'; None on non-budget failures. Frontend uses this (not error-text matching) to decide the exhausted layer."
+        default=None,
+        description=(
+            "Which ledger actually triggered the workflow_failed: 'session' "
+            "or 'workflow'; None on non-budget failures. Frontend uses this "
+            "(not error-text matching) to decide the exhausted layer."
+        ),
     )
     phase_type: Optional[str] = Field(default=None, description='"child" for nested-workflow child phase declarations.')
     nested_phase: Optional[str] = Field(
