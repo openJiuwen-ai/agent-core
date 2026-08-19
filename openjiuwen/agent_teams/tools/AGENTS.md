@@ -47,6 +47,10 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
   阻止 `QueuePool limit ... timed out` 耗尽的东西。写锁是**不可重入**的：当一个公开
   写委托给另一个（`verify_and_fix_task_consistency` →
   `_verify_and_fix_blocked_tasks`）时，只有最内层的 session opener 取锁。
+  **bind-time 动态表 DDL 同样在 `write()` 内执行**（
+  `create_cur_session_tables(sessions)` 收 `DbSessions` 不收 engine）——DDL 与
+  DAO 写同锁串行；经 `engine.begin()` 直连会绕过锁、并发 bind 占满写池（F_83）。
+  DROP 路径（`drop_cur_session_tables`）暂未收编，见 F_83 已知遗留。
 - **PRAGMA（`engine.py` `_attach_sqlite_pragmas`）** —— 文件后端 SQLite 跑
   `journal_mode=WAL`（数据库级，首次连接时设一次）+ `synchronous=NORMAL` +
   `wal_autocheckpoint`（连接级，每次连接都设）。NORMAL 是安全、高吞吐的 WAL 搭配；
