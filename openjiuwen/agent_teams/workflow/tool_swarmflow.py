@@ -425,10 +425,7 @@ class SwarmflowTool(AsyncTool):
             TeamTopic,
             WorkflowProgressTeamEvent,
         )
-        from openjiuwen.agent_teams.workflow.engine.errors import (
-            BudgetExhausted,
-            WorkflowAborted,
-        )
+        from openjiuwen.agent_teams.workflow.engine.errors import WorkflowAborted
         from openjiuwen.agent_teams.workflow.engine.progress import (
             ProgressKind,
             WorkflowProgressEvent,
@@ -539,17 +536,13 @@ class SwarmflowTool(AsyncTool):
                 agent_gate=agent_gate,
                 budget=self._budget,
             )
-        except BudgetExhausted:
-            # Re-raise the structured exception unchanged (do NOT downgrade to a
-            # BackendError): it is a BaseException precisely so a script's
-            # ``except Exception`` cannot swallow it, and so the async-tool
-            # runtime's ``except BudgetExhausted`` branch (async_tools.py) can
-            # read ``scope`` / ``spent`` / ``total`` / ``top_phases`` /
-            # ``workflow_spent`` / ``workflow_total`` and render a leader-facing
-            # message from those fields — keeping every piece of data (which
-            # layer tripped, the per-run contrast, the heaviest phases) instead
-            # of collapsing it into one hardcoded string.
-            raise
+        # BudgetExhausted is a BaseException (not Exception): it deliberately has
+        # no ``except`` here. Catching it only to re-raise is a no-op, and wrapping
+        # it (e.g. into BackendError) would discard the structured fields
+        # (scope / spent / total / top_phases / workflow_spent / workflow_total).
+        # Letting it propagate untouched lets the async-tool runtime's
+        # ``except BudgetExhausted`` branch in async_tools._run render the
+        # leader-facing message from those fields directly.
         except WorkflowAborted as exc:
             if exc.reason == "early_return":
                 msg = self._format_early_return(exc.reply, exc.edit_hints, run_id=run_id)
