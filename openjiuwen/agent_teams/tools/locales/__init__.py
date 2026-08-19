@@ -55,9 +55,12 @@ from __future__ import annotations
 import re
 from functools import cache
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from openjiuwen.core.foundation.prompt import PromptTemplate
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
 Translator = Callable[..., str]
 """``(desc_key, key="_desc", *, omit=None, **kwargs) -> str`` — resolves a locale string."""
@@ -184,7 +187,7 @@ def _render_desc(tmpl: PromptTemplate, desc_key: str, lang: str, omit: frozenset
     return rendered
 
 
-def make_translator(lang: str = "cn") -> Translator:
+def make_translator(lang: str = "cn", cache: "WorkspaceCache | None" = None) -> Translator:
     """Create a language-bound translator closure.
 
     Each call returns an independent closure — safe for concurrent use
@@ -192,6 +195,13 @@ def make_translator(lang: str = "cn") -> Translator:
 
     Args:
         lang: Language code; anything other than ``"en"`` resolves to ``cn``.
+        cache: The team's resident ``WorkspaceCache``. When set, tool
+            descriptions consult the team's evolved ``prompts/tool/`` files
+            first: tool-level md via
+            ``cache.get_tool_md`` (rendered ``{{slot}}`` fragments), param-level
+            via ``cache.get_tool_param``. ``None`` (unit tests /
+            ``evolution_enabled=false`` / single agent) resolves straight from
+            the framework defaults — exactly the pre-evolvable behaviour.
 
     Returns:
         ``t(desc_key, key="_desc", *, omit=None, **kwargs) -> str``. ``kwargs``
@@ -199,6 +209,9 @@ def make_translator(lang: str = "cn") -> Translator:
         messages use this); Markdown ``_desc`` slots are filled from shared
         fragments and take no ``kwargs``. ``omit`` names capability slots to
         collapse to empty (``_desc`` only) — see the module docstring.
+
+    Read order (cache set): tool-level ``cache.get_tool_md`` → descs/ md →
+    STRINGS ``_desc``; param-level ``cache.get_tool_param`` → STRINGS.
     """
     if lang == "en":
         from openjiuwen.agent_teams.tools.locales import en as mod
@@ -207,6 +220,22 @@ def make_translator(lang: str = "cn") -> Translator:
     strings: dict[str, str] = mod.STRINGS
 
     def t(desc_key: str, key: str = "_desc", *, omit: frozenset[str] | None = None, **kwargs: str) -> str:
+        # Consult the team workspace first when a cache is bound.
+        if cache is not None:
+            if key == "_desc":
+                evolved = cache.get_tool_md(desc_key)
+                if evolved is not None:
+                    return _render_desc(
+                        PromptTemplate(name=f"{desc_key}._desc", content=evolved),
+                        desc_key,
+                        lang,
+                        omit or frozenset(),
+                    )
+            else:
+                evolved = cache.get_tool_param(desc_key, key)
+                if evolved is not None:
+                    return evolved.format_map(kwargs) if kwargs else evolved
+        # Framework fallback — the original resolution path.
         if key == "_desc":
             tmpl = _load_desc(desc_key, lang)
             if tmpl is not None:
@@ -218,7 +247,11 @@ def make_translator(lang: str = "cn") -> Translator:
                     f"expected Markdown at {_DESCS_DIR / lang}/<domain>/{desc_key}.md "
                     f"or STRINGS['{dict_key}']"
                 )
+            return strings[dict_key]
         raw = strings[f"{desc_key}.{key}"]
         return raw.format_map(kwargs) if kwargs else raw
 
     return t
+
+
+__all__ = ["Translator", "make_translator"]

@@ -126,11 +126,25 @@ def format_fail_feedback(fail_feedback: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-async def render_review_request_for_harness(task: Any, *, language: str = "cn", reviewer: str = "") -> str:
-    """Render the review request as a plain user prompt for a temp reviewer harness."""
+async def render_review_request_for_harness(
+    task: Any,
+    *,
+    language: str = "cn",
+    reviewer: str = "",
+    loader: "Any" = None,  # TemplateLoader — bound lazily to dodge import cycles
+) -> str:
+    """Render the review request as a plain user prompt for a temp reviewer harness.
+
+    ``loader`` binds the team scheduler's per-team workspace cache so
+    reviewer_* templates read evolved workspace values; ``None`` (default)
+    keeps the framework read-only loader.
+    """
     from openjiuwen.agent_teams.prompts.loader import load_template
 
-    template = load_template(_REVIEW_REQUEST, language)
+    if loader is None:
+        loader = load_template
+
+    template = loader(_REVIEW_REQUEST, language)
     body = template.content
     body = body.replace("{{task.task_id}}", str(getattr(task, "task_id", "")))
     body = body.replace("{{task.title}}", getattr(task, "title", "") or "")

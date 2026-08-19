@@ -128,6 +128,7 @@ class TinyAgent:
         *,
         default_schema: Any = None,
         language: str = "cn",
+        cache: Any = None,
     ) -> None:
         """Initialize a tiny agent from a resolved minimal spec.
 
@@ -136,11 +137,14 @@ class TinyAgent:
             default_schema: Optional schema (dict / pydantic model) used by
                 ``run`` / ``chat`` when the call passes no explicit ``schema``.
             language: Prompt language for the structured-output tool i18n.
+            cache: The team's resident ``WorkspaceCache`` so the
+                structured-output tool description resolves evolved
+                values; ``None`` keeps the framework default.
         """
         self._spec = spec
         self._default_schema = default_schema
         self._language = _normalize_language(language)
-        self._t: Translator = make_translator(self._language)
+        self._t: Translator = make_translator(self._language, cache=cache)
         # Per-call card-id suffix so concurrent run() harnesses never share an
         # owner id (the ability manager qualifies tool ids per owner).
         self._run_seq = itertools.count()
@@ -378,6 +382,7 @@ def create_tiny_agent(
     language: str = "cn",
     max_iterations: int = 6,
     enable_security_rail: bool = False,
+    cache: Any = None,
 ) -> TinyAgent:
     """Create a tiny agent from a system prompt + a resolvable model name.
 
@@ -393,6 +398,7 @@ def create_tiny_agent(
         max_iterations: ReAct iteration ceiling for the underlying harness.
         enable_security_rail: Whether the harness automatically mounts its
             default SecurityRail. Tiny agents disable it by default.
+        cache: The team's resident ``WorkspaceCache``.
 
     Returns:
         A ready-to-use :class:`TinyAgent`.
@@ -426,7 +432,7 @@ def create_tiny_agent(
         # so do not register a sys_operation's tool resources for it either.
         enable_sys_operation=False,
     )
-    return TinyAgent(spec, default_schema=default_schema, language=language)
+    return TinyAgent(spec, default_schema=default_schema, language=language, cache=cache)
 
 
 # ---------------------------------------------------------------------------

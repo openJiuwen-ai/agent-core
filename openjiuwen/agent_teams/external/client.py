@@ -270,7 +270,16 @@ class ExternalTeamClient:
             workspace_path=workspace_path,
             team_name=self.team_name,
         )
-        return WorkspaceMetaTool(self._workspace_manager, make_translator(self._descriptor.language))
+        # the external client owns its own workspace manager (no TeamBackend
+        # object here), so manager-direct access is the one declared
+        # exception to the "read cache off the backend" contract — the
+        # backend is absent in this path. The cache is None until an
+        # assembler attaches one, which keeps the framework default
+        # description.
+        return WorkspaceMetaTool(
+            self._workspace_manager,
+            make_translator(self._descriptor.language, cache=self._workspace_manager.workspace_cache),
+        )
 
     async def __aenter__(self) -> "ExternalTeamClient":
         await self.connect()

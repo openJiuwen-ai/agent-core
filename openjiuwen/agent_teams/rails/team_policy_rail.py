@@ -50,6 +50,7 @@ from openjiuwen.agent_teams.prompts import (
     build_team_extra_section,
     build_team_static_sections,
 )
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.core.common.logging import team_logger
@@ -126,6 +127,7 @@ class TeamPolicyRail(DeepAgentRail):
         swarmflow_enabled: bool = False,
         steer_batch_size: int = 2,
         fork_source: str | None = None,
+        loader: TemplateLoader = load_template,
     ) -> None:
         super().__init__()
         self._language = language
@@ -134,6 +136,12 @@ class TeamPolicyRail(DeepAgentRail):
         self._expose_human_agents_to_teammates = expose_human_agents_to_teammates
         self._steer_batch_size = steer_batch_size
         self.system_prompt_builder = None
+
+        # The loader is bound at construction by the rail factory
+        # (elements.py) from the backend's cache; the default is the
+        # framework read-only loader (unit tests /
+        # no backend). No second fallback here — the factory owns the wiring.
+        self._loader = loader
 
         # All team sections are static and built once. The HITT contract is
         # gated on the (sync) HITT capability flag rather than the live human
@@ -352,6 +360,7 @@ class TeamPolicyRail(DeepAgentRail):
                 language=self._language,
                 hitt_enabled=hitt_enabled,
                 expose_human_agents_to_teammates=self._expose_human_agents_to_teammates,
+                loader=self._loader,
             )
         team_logger.info(
             "[{}] TeamPolicyRail static sections: section_names={}",
@@ -376,6 +385,7 @@ class TeamPolicyRail(DeepAgentRail):
         sections = [build_leader_bootstrap_section(
             swarmflow_enabled=swarmflow_enabled,
             language=self._language,
+            loader=self._loader,
         )]
         extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
         if extra is not None:

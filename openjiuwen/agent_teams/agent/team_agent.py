@@ -180,6 +180,12 @@ class TeamAgent(BaseAgent):
         from openjiuwen.agent_teams.tiny_agent import create_tiny_agent
 
         language = self.blueprint.language if self.blueprint is not None else "cn"
+        # tiny-agent tool descriptions resolve evolved values through the
+        # team backend's cache (it delegates to the workspace manager — the
+        # single source every consumer uses). ``None`` keeps the framework
+        # default.
+        backend = infra.team_backend
+        cache = backend.workspace_cache if backend is not None else None
         agent = create_tiny_agent(
             system_prompt=tiny_spec.system_prompt,
             model_name=tiny_spec.model_name,
@@ -189,6 +195,7 @@ class TeamAgent(BaseAgent):
             language=language,
             max_iterations=tiny_spec.max_iterations,
             enable_security_rail=tiny_spec.enable_security_rail,
+            cache=cache,
         )
         infra.tiny_agents[name] = agent
         return agent
@@ -1375,6 +1382,36 @@ class TeamAgent(BaseAgent):
     def share_checkpoints_with(self, other: "TeamAgent") -> None:
         """Share the leader's checkpoint namespace with another agent."""
         other.set_checkpoints_from(self._named_checkpoints)
+
+    def share_workspace_cache_with(self, other: "TeamAgent") -> None:
+        """Share the team-level workspace manager with an in-process teammate.
+
+        The leader owns one ``TeamWorkspaceManager`` (and its resident
+        ``WorkspaceCache``, built once at assembly). In-process teammates
+        reuse the same manager by reference — mirroring
+        ``share_checkpoints_with`` — so their ``_assemble_member_workspace``
+        reuse check hits the leader's cache and they do **not** build their
+        own. Must run **before** ``teammate.configure(...)``:
+        afterwards the teammate has already created its own manager.
+        """
+        own = self._configurator.infra.workspace_manager
+        if own is not None:
+            other._configurator.infra.workspace_manager = own
+
+    def invalidate_workspace_cache(self) -> None:
+        """Drop resident evolvable-workspace values so the next run re-reads.
+
+        Called from ``RuntimeManager.finalize`` on the pause path (the run
+        boundary). The cache instance survives — it lives on
+        the workspace manager, which the pool entry keeps across a pause —
+        but its dicts are cleared, so the resumed run's first read-side
+        ``get*`` re-reads the md files the evolution party may have edited
+        in between. No file IO here; pure dict clear. No-op when no cache is
+        attached (single-agent / evolution disabled / pre-assembly).
+        """
+        manager = self._configurator.infra.workspace_manager
+        if manager is not None and manager.workspace_cache is not None:
+            manager.workspace_cache.invalidate()
 
     def set_checkpoint(
         self,

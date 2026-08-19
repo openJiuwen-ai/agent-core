@@ -207,6 +207,20 @@ class TeamAgentSpec(BaseModel):
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
+    evolution_enabled: bool = True
+    """Team switch for self-evolution coverage.
+
+    ``True`` (default): workspace files with an evolved value override code
+    defaults / DB values. ``False``: files are never applied — everything
+    falls back to code defaults / DB values.
+    """
+    member_workspace_prefix: bool = True
+    """Dynamic member workspace ``#`` prefix switch.
+
+    ``True`` (default): dynamic member real dirs are ``<team>#<member>``
+    (per-team isolation). ``False``: they share the predefined shape
+    ``<member>``, reserving a dynamic→predefined promotion path.
+    """
     enable_team_plan: bool = False
     """Whether the leader starts in single-agent plan mode for this run.
 
@@ -766,6 +780,8 @@ class TeamAgentSpec(BaseModel):
             model_pool_strategy=team_strategy,
             external_messager_config=external_messager_config,
             workspace=self.workspace.model_dump() if self.workspace is not None else None,
+            evolution_enabled=self.evolution_enabled,
+            member_workspace_prefix=self.member_workspace_prefix,
         )
 
         messager_config = self.transport.build() if self.transport else None

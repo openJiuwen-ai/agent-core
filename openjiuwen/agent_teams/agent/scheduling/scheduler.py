@@ -45,7 +45,7 @@ from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.agent_teams.prompts.loader import load_template
+from openjiuwen.agent_teams.prompts.loader import load_template, make_template_loader
 
 
 if TYPE_CHECKING:
@@ -122,6 +122,19 @@ class TeamScheduler:
         self._review_feedback_dispatched: set[tuple[str, int]] = set()
         self._review_feedback_tasks: set[asyncio.Task[Any]] = set()
         self._team_review_feedback_dispatched = False
+        # A-class loader bound lazily from the team backend's workspace cache:
+        # reviewer_* templates read evolved values.
+        self._template_loader_cache: Any = None
+
+    @property
+    def _template_loader(self) -> Any:
+        """Per-team A-class loader, bound once from ``_infra.team_backend``."""
+        loader = self._template_loader_cache
+        if loader is None:
+            backend = self._infra.team_backend
+            loader = make_template_loader(backend.workspace_cache if backend is not None else None)
+            self._template_loader_cache = loader
+        return loader
 
     @property
     def is_active(self) -> bool:
@@ -488,7 +501,13 @@ class TeamScheduler:
             dispatch_mode=self._blueprint.spec.dispatch_mode,
         )
         language = self._blueprint.language or "cn"
-        tr = make_translator(language)
+        # temp-reviewer tool descriptions resolve evolved values through the
+        # team backend's cache (it delegates to the workspace manager — the
+        # single source every consumer uses). ``None`` keeps the framework
+        # default.
+        backend = self._infra.team_backend
+        cache = backend.workspace_cache if backend is not None else None
+        tr = make_translator(language, cache=cache)
 
         verify_tool = VerifyTaskTool(reviewer_tm, tr, desc_key="verify_task_scheduled")
         view_tool = ViewTaskToolV2(backend, tr)
@@ -530,7 +549,7 @@ class TeamScheduler:
             # Use the review request message as the prompt: template
             # rendered at delivery-time against the current task row.
             review_prompt = await render.render_review_request_for_harness(
-                task, language=language, reviewer=reviewer,
+                task, language=language, reviewer=reviewer, loader=self._template_loader,
             )
             # Retry transient model-call failures up to 3 times.
             # Each attempt builds a fresh harness and disposes the old

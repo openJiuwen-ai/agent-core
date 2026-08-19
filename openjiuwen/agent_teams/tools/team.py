@@ -22,6 +22,8 @@ from typing import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
@@ -199,6 +201,10 @@ class TeamBackend:
         self.member_name = member_name
         self.is_leader = is_leader
         self.leader_member_name = str(leader_member_name or (member_name if is_leader else "")).strip()
+        # B-class overlay: the backend does not hold its own cache —
+        # ``workspace_cache`` delegates to the team workspace manager, which
+        # owns the single resident instance attached at assembly.
+        self._workspace_manager: "TeamWorkspaceManager | None" = None
         # Lazily-resolved leader name for members that were not handed one at
         # construction. The leader is fixed for a team's life, so the DB row is
         # queried once and cached. See ``resolve_leader_member_name``.
@@ -1125,7 +1131,46 @@ class TeamBackend:
         Returns:
             TeamMember info or None
         """
-        return await self.db.member.get_member(member_name, self.team_name)
+        member = await self.db.member.get_member(member_name, self.team_name)
+        return self._overlay_member(member)
+
+    @property
+    def workspace_cache(self) -> "WorkspaceCache | None":
+        """The resident per-team evolvable-workspace cache (A/B/C classes).
+
+        Delegates to the team workspace manager — the manager owns
+        the single resident instance attached at assembly. ``None`` until
+        assembly attaches a cache to the manager. Assembly points (rail
+        factories, tool factory) read it to bind loader closures; the B-class
+        overlay reads it on ``get_member`` / ``list_members`` /
+        ``get_team_info``.
+        """
+        if self._workspace_manager is None:
+            return None
+        return self._workspace_manager.workspace_cache
+
+    def attach_workspace_manager(self, manager: "TeamWorkspaceManager | None") -> None:
+        """Point backend cache reads at the team workspace manager.
+
+        Assembly-time, once: the manager owns the resident ``WorkspaceCache``
+        (single source of truth); the backend only holds the manager
+        reference, so A/B-class reads always see the same instance every other
+        consumer uses. ``display_name`` never rides the overlay — it is not
+        file-evolvable and always falls back to the DB column.
+        """
+        self._workspace_manager = manager
+
+    def _overlay_member(self, member: Optional[TeamMember]) -> Optional[TeamMember]:
+        """Overlay evolved B-class file values onto a member row in place."""
+        if member is None or self.workspace_cache is None:
+            return member
+        desc = self.workspace_cache.get_member_field(member.member_name, "desc")
+        if desc is not None:
+            member.desc = desc
+        prompt = self.workspace_cache.get_member_field(member.member_name, "prompt")
+        if prompt is not None:
+            member.prompt = prompt
+        return member
 
     async def member_exists(self, member_name: str) -> bool:
         """Check whether a member exists without loading its full row.
@@ -1169,7 +1214,7 @@ class TeamBackend:
             List of TeamMember info
         """
         members = await self.db.member.get_team_members(self.team_name)
-        return [member for member in members if member.member_name != self.member_name]
+        return [self._overlay_member(m) for m in members if m.member_name != self.member_name]
 
     async def list_member_roster(self) -> List[MemberRosterEntry]:
         """List the roster (name / display name / status) excluding self.
@@ -1196,7 +1241,15 @@ class TeamBackend:
         Returns:
             Team information
         """
-        return await self.db.team.get_team(self.team_name)
+        team = await self.db.team.get_team(self.team_name)
+        if team is not None and self.workspace_cache is not None:
+            desc = self.workspace_cache.get_team_field("desc")
+            if desc is not None:
+                team.desc = desc
+            prompt = self.workspace_cache.get_team_field("prompt")
+            if prompt is not None:
+                team.prompt = prompt
+        return team
 
     async def is_team_completed(self) -> Optional[TeamCompletionSnapshot]:
         """Evaluate whether the whole team has reached a completed state.
