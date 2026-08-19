@@ -90,7 +90,7 @@ class TeammateWorktreeLifecycle:
     @staticmethod
     def _member_needs_worktree(teammate: Any, role: TeamRole) -> bool:
         """Return whether the DB member should be spawned in a worktree."""
-        if role != TeamRole.TEAMMATE:
+        if not role.is_coordinated_member:
             return False
         worktree = get_member_worktree(teammate)
         if worktree is None or worktree.isolation != "worktree":

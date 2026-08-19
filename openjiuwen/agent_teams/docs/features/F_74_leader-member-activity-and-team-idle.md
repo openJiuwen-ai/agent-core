@@ -88,6 +88,10 @@ task（`_forward_task`）并在 `stop()` 里收尾，registry 又恰好挂在它
 到点后还会**再查一次** `registry.is_idle()` 才发。取消路径已经覆盖了这一点，这一步是
 双保险：marker 永远不可能和 registry 的当前状态矛盾。
 
+> **后续收紧（[[F_77_team-idle-requires-a-settled-task-board]]）**：复查 `is_idle()`
+> 之后还要再过一条任务板条件（无非终态任务，空板算过），两条都成立才发 marker。本节
+> 描述的成员侧语义与去抖机制不变。
+
 ## 静止态是新的一组，不是复用 `MEMBER_SETTLED_STATUSES`
 
 `MEMBER_QUIESCENT_STATUSES` = `{UNSTARTED, READY, PAUSED, STOPPED, SHUTDOWN, ERROR}`，

@@ -124,9 +124,17 @@ class CompressionExecutor:
     def last_response(self) -> Any:
         return self._last_response
 
-    async def invoke(self, request: CompressionRequest) -> CompressionResult:
+    async def invoke(
+        self,
+        request: CompressionRequest,
+        **model_invoke_kwargs: Any,
+    ) -> CompressionResult:
         messages = self.build_messages(request)
-        kwargs: dict[str, Any] = {"messages": messages, "tools": request.tools}
+        kwargs: dict[str, Any] = {
+            "messages": messages,
+            "tools": request.tools,
+            **model_invoke_kwargs,
+        }
         if request.output_parser is not None:
             kwargs["output_parser"] = request.output_parser
         try:

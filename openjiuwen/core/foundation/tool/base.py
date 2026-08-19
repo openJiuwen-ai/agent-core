@@ -7,10 +7,12 @@ from functools import wraps
 from typing import Any, AsyncIterator, Dict, Type
 from typing import TypeVar
 from pydantic import BaseModel, Field
+from pydantic import PrivateAttr
 
 from openjiuwen.core.common import BaseCard
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.tool.exposure import ToolExposure
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 
 Input = TypeVar('Input', contravariant=True)
@@ -18,6 +20,17 @@ Output = TypeVar('Output', contravariant=True)
 
 
 class ToolCard(BaseCard):
+    # Registration policy bookkeeping. These private attributes never enter
+    # the model-facing ToolInfo/schema.
+    _exposure_declared: bool | None = PrivateAttr(default=None)
+
+    exposure: ToolExposure = Field(
+        default=ToolExposure.DIRECT,
+        description=(
+            "Whether the tool is exposed directly to the model or deferred "
+            "until it is discovered by tool_search."
+        ),
+    )
     input_params: Dict[str, Any] | Type[BaseModel] = Field(default_factory=dict)
     properties: Dict[str, Any] = Field(default_factory=dict)
     parallel_safe: bool = Field(
@@ -50,6 +63,14 @@ class ToolCard(BaseCard):
 
     def tool_info(self):
         return ToolInfo(name=self.name, description=self.description, parameters=self.input_params)
+
+    def get_exposure_declared(self) -> bool | None:
+        """Return whether registration already resolved this card's exposure."""
+        return self._exposure_declared
+
+    def set_exposure_declared(self, value: bool | None) -> None:
+        """Record that the registration policy has inspected this card."""
+        self._exposure_declared = value
 
 
 class _ToolMeta(ABCMeta):

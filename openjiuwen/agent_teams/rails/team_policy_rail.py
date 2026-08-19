@@ -10,21 +10,27 @@ team-specific slices line up with the harness sections (safety, tools,
 memory, workspace, ...) by priority.
 
 Section layout owned by this rail (see ``prompts/sections.py`` for
-builders):
+builders). **The leader takes only two of them** — everything else is
+disclosed by the ``build_team`` tool result instead (F_76), because the
+variant of each convention is not settled until that call is made:
 
-  P:11  team_role        - role policy + execution mode (always). The leader
-                           policy carries one capability slot: the
-                           build_team-versus-swarmflow mechanism guide, filled
-                           only when ``swarmflow_enabled`` — the same signal
-                           the tool factory gates the ``swarmflow`` tool on.
+  P:11  team_bootstrap   - LEADER only: identity, the routing guide between
+                           build_team and swarmflow (filled only when
+                           ``swarmflow_enabled`` — the same signal the tool
+                           factory gates the ``swarmflow`` tool on), and the
+                           instruction to form the team first.
+  P:11  team_role        - role policy + execution mode (non-LEADER roles)
   P:12  team_hitt        - HITT collaboration contract (static rules, gated on
                            hitt_enabled). Human members are tagged ``[human]``
                            in the roster message, not listed inline.
   P:12  team_bridge      - bridge-avatar self-contract (BRIDGE_AGENT only)
-  P:13  team_workflow    - leader workflow (LEADER only)
-  P:14  team_lifecycle   - team lifecycle policy (LEADER only)
+  P:13  team_workflow    - leader workflow (disclosure only)
+  P:14  team_lifecycle   - team lifecycle policy (disclosure only)
   P:15  team_dispatch    - autonomous claim vs scheduled assignment
-  P:17  team_extra       - user-supplied base prompt (when set)
+  P:17  team_extra       - user-supplied base prompt (when set). Stays in the
+                           prefix for every role including the leader: it is
+                           the caller's instruction, not team policy, and has
+                           to hold before the team exists.
   P:18  team_inbound_tags - inbound / event / context XML tag notice
 
 Every one of them is static and identical across the members of a team, so
@@ -39,7 +45,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots
-from openjiuwen.agent_teams.prompts import build_team_static_sections
+from openjiuwen.agent_teams.prompts import (
+    build_leader_bootstrap_section,
+    build_team_extra_section,
+    build_team_static_sections,
+)
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.core.common.logging import team_logger
@@ -78,13 +88,16 @@ class TeamPolicyRail(DeepAgentRail):
     served from the cache -- so constant content paid full price forever. Written
     into the conversation once, the same tokens are encoded once.
 
-    ``on_user_message`` carries one more job that is not about team state at
-    all: for a non-leader member it drops the queued task boards a later one has
-    already superseded. Everything the framework queued for a busy member is
-    handed over as one batch, and the board may be in there several times over
-    -- full surveys, all but the newest already wrong. Each is one whole entry
-    in that batch, so they come out as entries; a step later they are one joined
+    Two more jobs are not about team state at all, and both are about the same
+    thing: what a member coming back from a busy stretch is handed in one turn.
+    ``on_user_message`` drops, for a non-leader member, the queued task boards a
+    later one has already superseded -- the board may be in the batch several
+    times over, full surveys, all but the newest already wrong. Each is one
+    whole entry, so they come out as entries; a step later they are one joined
     history message and can no longer be separated.
+    ``before_steering_drain`` handles what cannot be dropped: mailbox messages
+    each say something of their own, so the batch is capped instead, and the
+    surplus stays queued for the model calls that follow.
 
     When ``team_backend`` is ``None`` (e.g. unit tests that only care about
     static content) the state lane degrades to the identity channel alone.
@@ -111,12 +124,15 @@ class TeamPolicyRail(DeepAgentRail):
         team_backend: "TeamBackend | None" = None,
         expose_human_agents_to_teammates: bool = False,
         swarmflow_enabled: bool = False,
+        steer_batch_size: int = 2,
+        fork_source: str | None = None,
     ) -> None:
         super().__init__()
         self._language = language
         self._member_name = member_name
         self._role = role
         self._expose_human_agents_to_teammates = expose_human_agents_to_teammates
+        self._steer_batch_size = steer_batch_size
         self.system_prompt_builder = None
 
         # All team sections are static and built once. The HITT contract is
@@ -151,6 +167,7 @@ class TeamPolicyRail(DeepAgentRail):
             team_workspace_path=team_workspace_path,
             expose_human_agents_to_teammates=expose_human_agents_to_teammates,
             language=language,
+            fork_source=fork_source,
         )
 
     def init(self, agent: Any) -> None:
@@ -204,6 +221,28 @@ class TeamPolicyRail(DeepAgentRail):
             return
         parts.insert(0, text)
         await self._tracker.commit(session)
+
+    async def before_steering_drain(self, ctx: AgentCallbackContext) -> None:
+        """Cap how much of the steering backlog one model call takes.
+
+        The other half of the same problem :meth:`_drop_superseded` addresses,
+        one step earlier. Everything the framework queued for a busy member is
+        handed over at once, and what is queued here is mailbox traffic: one
+        entry per message, none of them superseding any other, all of them
+        having to be read. Dropping is therefore not an option — the only thing
+        that can keep the turn from becoming a wall of fused messages is taking
+        fewer of them, and letting the rest ride the model calls after this one.
+
+        **The leader is exempt**, for the reason it is exempt from the
+        superseded-board pruning: it reads what arrives as a sequence, and a
+        sequence it sees in pieces is a sequence it has to reassemble.
+        """
+        if self._role == TeamRole.LEADER:
+            return
+        inputs = getattr(ctx, "inputs", None)
+        if inputs is None:
+            return
+        inputs.limit = self._steer_batch_size
 
     def _drop_superseded(self, parts: list[str]) -> None:
         """Remove, in place, the queued inputs a later one already supersedes.
@@ -283,28 +322,64 @@ class TeamPolicyRail(DeepAgentRail):
         hitt_enabled: bool,
         swarmflow_enabled: bool,
     ) -> list[PromptSection]:
-        """Construct the never-changing sections once at rail init time."""
-        sections = build_team_static_sections(
-            role=role,
-            member_prompt=member_prompt,
-            member_name=member_name,
-            display_name=display_name,
-            member_workspace_path=member_workspace_path,
-            lifecycle=lifecycle,
-            teammate_mode=teammate_mode,
-            team_mode=team_mode,
-            dispatch_mode=dispatch_mode,
-            base_prompt=base_prompt,
-            language=self._language,
-            hitt_enabled=hitt_enabled,
-            expose_human_agents_to_teammates=self._expose_human_agents_to_teammates,
-            swarmflow_enabled=swarmflow_enabled,
-        )
+        """Construct the never-changing sections once at rail init time.
+
+        The leader takes the progressive-disclosure lane (F_76): its prefix is
+        the bootstrap section plus the user's own extra instructions, and
+        nothing else. Every collaboration convention it needs is disclosed by
+        the ``build_team`` result, which is also the first moment the variant
+        of each one is actually settled. Every other role keeps the full static
+        set — a teammate's conventions are fixed at spawn and it has no
+        ``build_team`` call to hang them off.
+        """
+        if role == TeamRole.LEADER:
+            sections = self._build_leader_sections(
+                base_prompt=base_prompt,
+                swarmflow_enabled=swarmflow_enabled,
+            )
+        else:
+            sections = build_team_static_sections(
+                role=role,
+                member_prompt=member_prompt,
+                member_name=member_name,
+                display_name=display_name,
+                member_workspace_path=member_workspace_path,
+                lifecycle=lifecycle,
+                teammate_mode=teammate_mode,
+                team_mode=team_mode,
+                dispatch_mode=dispatch_mode,
+                base_prompt=base_prompt,
+                language=self._language,
+                hitt_enabled=hitt_enabled,
+                expose_human_agents_to_teammates=self._expose_human_agents_to_teammates,
+            )
         team_logger.info(
             "[{}] TeamPolicyRail static sections: section_names={}",
             member_name or "?",
             [s.name for s in sections],
         )
+        return sections
+
+    def _build_leader_sections(
+        self,
+        *,
+        base_prompt: str | None,
+        swarmflow_enabled: bool,
+    ) -> list[PromptSection]:
+        """Build the leader's prefix: bootstrap, plus the caller's own prompt.
+
+        The extra section stays here rather than moving into the ``build_team``
+        disclosure because it is not team policy: it is what the SDK caller told
+        *this* leader to do, and it has to be in force before the team exists —
+        it may well be the instruction that decides what team to build.
+        """
+        sections = [build_leader_bootstrap_section(
+            swarmflow_enabled=swarmflow_enabled,
+            language=self._language,
+        )]
+        extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
+        if extra is not None:
+            sections.append(extra)
         return sections
 
 

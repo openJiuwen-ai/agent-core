@@ -543,31 +543,64 @@ class ViewTaskToolV2(TeamTool):
 
 
 class UpdateTaskTool(TeamTool):
-    """Update task content or cancel tasks (Leader only)."""
+    """Update task content or cancel tasks (Leader only).
 
-    def __init__(self, agent_team: TeamBackend, t: Translator):
+    The verify gate is a gated capability, exactly like ``spawn_teammate``'s
+    fork properties: under autonomous dispatch the ``reviewer`` /
+    ``max_review_rounds`` properties are absent from the schema *and* the
+    verify-gate section is dropped from the description, both off the one
+    signal. The gate is not cosmetic — that mode has no scheduling runtime to
+    summon reviewers (``TeamScheduler`` is built only for a scheduled-dispatch
+    leader), so a task pushed into ``IN_REVIEW`` there would stall forever and
+    hold its assignee's only active-task slot.
+    """
+
+    #: Verify-gate properties and the description slot documenting them.
+    #: Schema and prose are gated together — the model must never read about
+    #: an argument it has no way to pass.
+    _REVIEW_PARAMS = ("reviewer", "max_review_rounds")
+    _REVIEW_SLOT = "update_task_verify_gate"
+
+    def __init__(self, agent_team: TeamBackend, t: Translator, *, dispatch_mode: str = "autonomous"):
+        """Build the update_task tool.
+
+        Args:
+            agent_team: Backend the tool mutates tasks through.
+            t: Locale-bound translator.
+            dispatch_mode: How tasks reach members. ``"scheduled"`` wires the
+                verify-gate properties and their description section;
+                ``"autonomous"`` drops both as one unit.
+        """
+        review_enabled = dispatch_mode == "scheduled"
         super().__init__(
             ToolCard(
                 id="team.update_task",
                 name="update_task",
-                description=t("update_task"),
+                description=t("update_task", omit=None if review_enabled else frozenset({self._REVIEW_SLOT})),
             )
         )
         self.agent_team = agent_team
         self.task_manager = agent_team.task_manager
         self.t = t
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": t("update_task", "task_id")},
-                "status": {
-                    "type": "string",
-                    "enum": ["cancelled"],
-                    "description": t("update_task", "status"),
-                },
-                "title": {"type": "string", "description": t("update_task", "title")},
-                "content": {"type": "string", "description": t("update_task", "content")},
-                "assignee": {"type": "string", "description": t("update_task", "assignee")},
+        self._review_enabled = review_enabled
+        properties: dict[str, Any] = {
+            "task_id": {"type": "string", "description": t("update_task", "task_id")},
+            "status": {
+                "type": "string",
+                "enum": ["cancelled"],
+                "description": t("update_task", "status"),
+            },
+            "title": {"type": "string", "description": t("update_task", "title")},
+            "content": {"type": "string", "description": t("update_task", "content")},
+            "assignee": {"type": "string", "description": t("update_task", "assignee")},
+            "add_blocked_by": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": t("update_task", "add_blocked_by"),
+            },
+        }
+        if review_enabled:
+            properties.update({
                 # reviewer 结构化对象数组，与 create_task 一致
                 "reviewer": {
                     "type": "array",
@@ -590,12 +623,10 @@ class UpdateTaskTool(TeamTool):
                     "minimum": 1,
                     "description": t("update_task", "max_review_rounds"),
                 },
-                "add_blocked_by": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": t("update_task", "add_blocked_by"),
-                },
-            },
+            })
+        self.card.input_params = {
+            "type": "object",
+            "properties": properties,
             "required": ["task_id"],
         }
 
@@ -626,6 +657,25 @@ class UpdateTaskTool(TeamTool):
         task_id = inputs.get("task_id")
         if not task_id:
             return ToolOutput(success=False, error="'task_id' is required")
+
+        # Second-layer enforcement of the verify-gate gate, for arguments coming
+        # from an MCP client, which calls ``invoke`` directly without validating
+        # against ``input_params``. Rejected loudly rather than stripped: a
+        # silently dropped reviewer reads as "verification is on" to the leader,
+        # and it would go on waiting for a verdict that is never coming.
+        if not self._review_enabled:
+            passed = [key for key in self._REVIEW_PARAMS if inputs.get(key) is not None]
+            if passed:
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        f"Cannot use {', '.join(passed)}: the verify gate does not exist under "
+                        "autonomous dispatch — there is no scheduling runtime to summon reviewers, "
+                        "so the task would stall in 'in_review' forever. Write the acceptance "
+                        "criteria into the task content and review the result yourself, or run the "
+                        "team in scheduled dispatch mode."
+                    ),
+                )
 
         status = inputs.get("status")
         title = inputs.get("title")

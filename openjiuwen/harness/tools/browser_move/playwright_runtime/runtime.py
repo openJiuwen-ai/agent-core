@@ -38,8 +38,12 @@ from .browser_logging import (
 )
 from .browser_tools import ensure_browser_runtime_client_patch
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
+from .probes import (
+    build_browser_state_metadata_js,
+    build_card_probe_js,
+    build_interactive_probe_js,
+)
 from .page_state import BrowserPageState, BrowserTarget
-from .probes import build_card_probe_js, build_interactive_probe_js
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import builtin_site_profiles, get_selector_cache
 from .status_logging import BrowserSubagentStatusLogger, is_browser_subagent_status_log_enabled
@@ -394,9 +398,9 @@ class BrowserAgentRuntime:
                 return False
         return True
 
-    def _register_snapshot_refs(self, value: Any) -> None:
+    def _register_snapshot_refs(self, value: Any, *, replace: bool = False) -> None:
         page_state = self._ensure_page_state()
-        registered = page_state.register_ax_snapshot(value)
+        registered = page_state.replace_ax_snapshot(value) if replace else page_state.register_ax_snapshot(value)
         if registered:
             return
         # Preserve ref-only snapshots that do not follow the normal AX line shape.
@@ -758,6 +762,21 @@ class BrowserAgentRuntime:
             },
         }
 
+    async def _call_playwright_tool(self, tool_name: str, inputs: Dict[str, Any]) -> Any:
+        """Invoke one registered Playwright MCP tool and unwrap its result data."""
+        tool = await self._get_playwright_mcp_tool(tool_name)
+        result = await tool.invoke(inputs)
+
+        success = getattr(result, "success", None)
+        if success is False:
+            error = str(getattr(result, "error", "") or "").strip()
+            raise RuntimeError(error or f"{tool_name} failed")
+
+        data = getattr(result, "data", None)
+        if data is not None:
+            return data
+        return result
+
     async def ensure_runtime_ready(self) -> None:
         _ACTIVE_BROWSER_RUNTIMES.add(self)
         await self._service.ensure_runtime_ready()
@@ -770,6 +789,66 @@ class BrowserAgentRuntime:
         self._code_executor = _direct_code_executor
         self._controller.bind_code_executor(_direct_code_executor)
         self._controller.register_builtin_actions()
+
+    async def capture_browser_state(self) -> Dict[str, Any]:
+        """Capture a fresh, non-cached browser observation for the next model call."""
+        await self.ensure_runtime_ready()
+
+        dom = ""
+        dom_error = None
+        snapshot_captured = False
+        try:
+            raw_snapshot = await self._call_playwright_tool("browser_snapshot", {})
+            raw_snapshot = self._unwrap_mcp_text_result(raw_snapshot)
+            snapshot_captured = True
+            if isinstance(raw_snapshot, str):
+                dom = raw_snapshot
+            elif raw_snapshot is not None:
+                dom = json.dumps(raw_snapshot, ensure_ascii=False)
+        except Exception as exc:
+            dom_error = f"browser_snapshot failed: {exc}"
+            logger.warning(
+                "[BrowserAgentRuntime] current DOM snapshot capture failed: %s",
+                exc,
+                exc_info=True,
+            )
+
+        metadata: Dict[str, Any] = {}
+        metadata_error = None
+        try:
+            raw_metadata = await self._call_playwright_run_code_unsafe(
+                build_browser_state_metadata_js()
+            )
+            raw_metadata = self._unwrap_mcp_text_result(raw_metadata)
+            metadata = extract_json_object(raw_metadata)
+            if not metadata:
+                metadata_error = "Could not parse browser state metadata result JSON"
+            elif metadata.get("ok") is False:
+                metadata_error = str(metadata.get("error") or "browser state metadata capture failed")
+        except Exception as exc:
+            metadata_error = f"browser state metadata capture failed: {exc}"
+            logger.warning(
+                "[BrowserAgentRuntime] current browser metadata capture failed: %s",
+                exc,
+                exc_info=True,
+            )
+
+        self._observe_page_url(metadata.get("url"))
+        self._ensure_page_state().observe(title=metadata.get("title"))
+        if snapshot_captured:
+            self._register_snapshot_refs(dom, replace=True)
+
+        errors = [error for error in (dom_error, metadata_error) if error]
+        return {
+            "ok": not errors,
+            "error": "; ".join(errors) or None,
+            "url": metadata.get("url") or "",
+            "title": metadata.get("title") or "",
+            "tabs": metadata.get("tabs") or [],
+            "page_position": metadata.get("page_position") or {},
+            "dom": dom,
+            "dom_error": dom_error,
+        }
 
     async def acquire_task_resources(self) -> None:
         """Acquire one task reference before invoking a reusable subagent."""

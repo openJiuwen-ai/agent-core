@@ -15,7 +15,11 @@ from openjiuwen.agent_evolving.prompts.sections import (
     build_team_skill_creation_guidance_section,
     build_team_skill_creation_nudge_section,
 )
-from openjiuwen.agent_evolving.trajectory import ToolCallDetail, TrajectoryBuilder, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans, merge_trajectories
+from openjiuwen.extensions.observability import semconv
 from openjiuwen.core.single_agent.rail.base import InvokeInputs
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
@@ -28,25 +32,69 @@ from openjiuwen.harness.rails.skills.team_skill_create_rail import TeamSkillCrea
 def _make_rail(tmp_path, *, auto_trigger=True) -> TeamSkillCreateRail:
     return TeamSkillCreateRail(
         skills_dir=str(tmp_path / "skills"),
+        trajectory_span_processor=TrajectorySpanProcessor(),
         auto_trigger=auto_trigger,
     )
 
 
-def _set_builder_tool_calls(rail, tool_names: list[str]) -> None:
-    builder = TrajectoryBuilder(session_id="test", source="test")
-    _append_builder_tool_calls(builder, tool_names)
-    rail._builder = builder
+def _make_trajectory(session_id: str = "test", spans: list[dict] | None = None) -> Trajectory:
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map(
+                            {
+                                SESSION_ID: session_id,
+                                TRAJECTORY_ID: f"trajectory-{session_id}",
+                            }
+                        ),
+                    },
+                    "scopeSpans": [{"scope": {}, "spans": spans or []}],
+                }
+            ]
+        }
+    )
 
 
-def _append_builder_tool_calls(builder: TrajectoryBuilder, tool_names: list[str]) -> None:
-    for name in tool_names:
-        builder.record_step(
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(tool_name=name, call_args="{}", call_result="ok"),
-                meta={"operator_id": name},
-            )
-        )
+def _tool_span(span_index: int, tool_name: str, *, tool_input: object = "{}") -> dict:
+    return {
+        "traceId": "trace-test",
+        "spanId": f"tool-{span_index}",
+        "name": f"tool.{tool_name}",
+        "attributes": attributes_from_map(
+            {
+                semconv.GEN_AI_TOOL_NAME: tool_name,
+                semconv.GEN_AI_TOOL_INPUT: tool_input,
+                semconv.GEN_AI_TOOL_OUTPUT: "ok",
+            }
+        ),
+    }
+
+
+def _make_trajectory_tool_calls(tool_names: list[str], *, session_id: str = "test") -> Trajectory:
+    spans = [_tool_span(index, name) for index, name in enumerate(tool_names)]
+    return _make_trajectory(session_id=session_id, spans=spans)
+
+
+def _set_trajectory_tool_calls(rail, tool_names: list[str], *, session_id: str = "test") -> Trajectory:
+    trajectory = _make_trajectory_tool_calls(tool_names, session_id=session_id)
+    rail._trajectory = trajectory
+    return trajectory
+
+
+def _append_trajectory_tool_calls(trajectory: Trajectory, tool_names: list[str]) -> Trajectory:
+    start_index = len(list(iter_spans(trajectory)))
+    additions = [_tool_span(start_index + index, name) for index, name in enumerate(tool_names)]
+    return merge_trajectories(trajectory, _make_trajectory(trajectory.session_id or "test", additions))
+
+
+async def _after_task_iteration(rail: TeamSkillCreateRail, ctx) -> None:
+    await rail._on_after_task_iteration(ctx, rail._trajectory)
+
+
+async def _after_invoke(rail: TeamSkillCreateRail, ctx) -> None:
+    await rail._on_after_invoke(ctx, rail._trajectory)
 
 
 def _make_invoke_ctx(agent: MagicMock, conversation_id: str = "test") -> MagicMock:
@@ -110,6 +158,7 @@ class TestTeamSkillCreateRailConstructor:
     def test_custom_min_members(self, tmp_path):
         rail = TeamSkillCreateRail(
             skills_dir=str(tmp_path / "skills"),
+            trajectory_span_processor=TrajectorySpanProcessor(),
             min_team_members_for_create=4,
         )
         assert rail._min_team_members == 4
@@ -118,6 +167,7 @@ class TestTeamSkillCreateRailConstructor:
         with pytest.raises(TypeError, match="trajectory_store"):
             TeamSkillCreateRail(
                 skills_dir=str(tmp_path / "skills"),
+                trajectory_span_processor=TrajectorySpanProcessor(),
                 trajectory_store=MagicMock(),
             )
 
@@ -136,29 +186,29 @@ class TestTeamSkillCreateRailThresholdCheck:
     )
     def test_should_propose_when_supported_spawn_tool_meets_threshold(self, tmp_path, tool_name):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, [tool_name] * 3)
+        _set_trajectory_tool_calls(rail, [tool_name] * 3)
         assert rail._should_propose_new_team_skill() is True
 
     def test_should_not_propose_when_below_threshold(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, ["spawn_member"])
+        _set_trajectory_tool_calls(rail, ["spawn_member"])
         assert rail._should_propose_new_team_skill() is False
 
     @pytest.mark.parametrize("tool_name", ["send_message", "team.send_message", "view_task"])
     def test_non_spawn_tools_do_not_count(self, tmp_path, tool_name):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, [tool_name] * 3)
+        _set_trajectory_tool_calls(rail, [tool_name] * 3)
         assert rail._should_propose_new_team_skill() is False
 
     @pytest.mark.parametrize("tool_name", ["not_spawn_member", "team.spawn_member_extra"])
     def test_spawn_tool_names_require_exact_match(self, tmp_path, tool_name):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, [tool_name] * 3)
+        _set_trajectory_tool_calls(rail, [tool_name] * 3)
         assert rail._should_propose_new_team_skill() is False
 
     def test_should_count_mixed_spawn_calls(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(
+        _set_trajectory_tool_calls(
             rail,
             [
                 "spawn_member",
@@ -248,16 +298,93 @@ class TestTeamSkillCreateRailPrompts:
 
 
 class TestTeamSkillCreateRailFollowUp:
+    @pytest.mark.asyncio
+    async def test_external_repeated_feedback_routes_to_creation_confirmation(self, tmp_path):
+        rail = _make_rail(tmp_path)
+        _set_trajectory_tool_calls(rail, ["spawn_member"] * 2)
+        agent, controller = _agent_with_controller(tmp_path)
+        rail.init(agent)
+
+        routed = await rail.propose_from_external_evidence(
+            proposal_key="release-recovery-checklist",
+            reusable_guidance="Create a reusable release recovery checklist.",
+            evidence=(
+                "task=a: recovery policy was missing",
+                "task=b: recovery policy was missing",
+            ),
+            reason="the same missing workflow failed two task reviews",
+        )
+
+        assert routed is True
+        controller.enqueue_follow_up.assert_not_called()
+        events = await rail.drain_pending_approval_events(wait=False)
+        assert len(events) == 1
+        event = events[0]
+        assert event.type == "chat.ask_user_question"
+        assert event.payload["source"] == "skill_evolution_approval"
+        assert event.payload["approval_schema"] == "openjiuwen.skill_evolution_approval.v1"
+        request_id = event.payload["request_id"]
+        assert request_id.startswith("team_skill_evolve_create_")
+        assert event.payload["evolution_meta"]["approval_kind"] == "create"
+        assert event.payload["evolution_meta"]["rail_kind"] == "team"
+        assert rail.owns_external_proposal(request_id) is True
+        question = event.payload["questions"][0]
+        assert question["header"] == "新建 Skill 审批"
+        assert "拟沉淀的 Skill 内容" in question["question"]
+        assert "Create a reusable release recovery checklist." in question["question"]
+        assert "the same missing workflow failed two task reviews" in question["question"]
+        assert "任务证据" not in question["question"]
+        assert "task=a" not in question["question"]
+        assert "task=b" not in question["question"]
+        assert [option["label"] for option in question["options"]] == ["接收", "拒绝"]
+
+        creation_prompt = rail.resolve_external_proposal(request_id, accepted=True)
+        assert creation_prompt is not None
+        assert "用户已在新建 Skill 审批卡中点击接收" in creation_prompt
+        assert "swarmskill-creator" in creation_prompt
+        assert "task=a" in creation_prompt
+        assert "task=b" in creation_prompt
+        assert rail.owns_external_proposal(request_id) is False
+
+        # The proposal is idempotent and consumes the generic self-check for
+        # the same trajectory window.
+        assert (
+            await rail.propose_from_external_evidence(
+                proposal_key="release-recovery-checklist",
+                reusable_guidance="Create a reusable release recovery checklist.",
+                evidence=("task=a", "task=b"),
+            )
+            is False
+        )
+        await _after_invoke(rail, _make_invoke_ctx(agent))
+        controller.enqueue_follow_up.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_external_feedback_requires_two_evidence_items(self, tmp_path):
+        rail = _make_rail(tmp_path)
+        agent, controller = _agent_with_controller(tmp_path)
+        rail.init(agent)
+
+        assert (
+            await rail.propose_from_external_evidence(
+                proposal_key="one-off",
+                reusable_guidance="Create a one-off Skill.",
+                evidence=("task=a",),
+            )
+            is False
+        )
+        controller.enqueue_follow_up.assert_not_called()
+
     @pytest.mark.parametrize("tool_name", ["spawn_member", "team.spawn_teammate"])
     @pytest.mark.asyncio
     async def test_schedules_follow_up_when_threshold_met_after_completion(self, tmp_path, tool_name):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, [tool_name] * 3)
+        _set_trajectory_tool_calls(rail, [tool_name] * 3)
         agent, controller = _agent_with_controller(tmp_path)
         ctx = _make_invoke_ctx(agent)
 
         assert await rail.notify_team_completed() is True
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         controller.enqueue_follow_up.assert_called_once()
         _assert_team_follow_up_contract(controller.enqueue_follow_up.call_args.args[0])
@@ -265,52 +392,52 @@ class TestTeamSkillCreateRailFollowUp:
     @pytest.mark.asyncio
     async def test_no_follow_up_when_auto_trigger_false(self, tmp_path):
         rail = _make_rail(tmp_path, auto_trigger=False)
-        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+        _set_trajectory_tool_calls(rail, ["spawn_member"] * 3)
         agent, controller = _agent_with_controller(tmp_path)
         ctx = _make_invoke_ctx(agent)
 
         assert await rail.notify_team_completed() is False
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         controller.enqueue_follow_up.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_follow_up_until_team_completed(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+        _set_trajectory_tool_calls(rail, ["spawn_member"] * 3)
         agent, controller = _agent_with_controller(tmp_path)
         ctx = _make_invoke_ctx(agent)
 
-        await rail._on_after_task_iteration(ctx)
-        await rail._on_after_invoke(ctx)
+        await _after_task_iteration(rail, ctx)
+        await _after_invoke(rail, ctx)
 
         controller.enqueue_follow_up.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_completion_mark_does_not_apply_to_new_session(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+        _set_trajectory_tool_calls(rail, ["spawn_member"] * 3)
         agent, controller = _agent_with_controller(tmp_path)
 
         assert await rail.notify_team_completed() is True
 
-        rail._builder = TrajectoryBuilder(session_id="other-session", source="test")
+        rail._trajectory = _make_trajectory(session_id="other-session")
         ctx = _make_invoke_ctx(agent, conversation_id="other-session")
-        await rail._on_after_invoke(ctx)
+        await _after_invoke(rail, ctx)
 
         controller.enqueue_follow_up.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_system_nudge_only_once_per_completed_session(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+        _set_trajectory_tool_calls(rail, ["spawn_member"] * 3)
         agent, controller = _agent_with_controller(tmp_path)
         ctx = _make_invoke_ctx(agent)
 
         assert await rail.notify_team_completed() is True
-        await rail._on_after_invoke(ctx)
+        await _after_invoke(rail, ctx)
         assert await rail.notify_team_completed() is True
-        await rail._on_after_invoke(ctx)
+        await _after_invoke(rail, ctx)
 
         controller.enqueue_follow_up.assert_called_once()
         assert rail._proposed_spawn_counts["test"] == 3
@@ -318,16 +445,16 @@ class TestTeamSkillCreateRailFollowUp:
     @pytest.mark.asyncio
     async def test_system_nudge_can_repeat_in_same_session_after_new_team_run(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, ["spawn_member"] * 2)
+        _set_trajectory_tool_calls(rail, ["spawn_member"] * 2)
         agent, controller = _agent_with_controller(tmp_path)
         ctx = _make_invoke_ctx(agent)
 
         assert await rail.notify_team_completed() is True
-        await rail._on_after_invoke(ctx)
+        await _after_invoke(rail, ctx)
 
-        _append_builder_tool_calls(rail._builder, ["spawn_member"] * 2)
+        rail._trajectory = _append_trajectory_tool_calls(rail._trajectory, ["spawn_member"] * 2)
         assert await rail.notify_team_completed() is True
-        await rail._on_after_invoke(ctx)
+        await _after_invoke(rail, ctx)
 
         assert controller.enqueue_follow_up.call_count == 2
         assert rail._proposed_spawn_counts["test"] == 4
@@ -335,13 +462,13 @@ class TestTeamSkillCreateRailFollowUp:
     @pytest.mark.asyncio
     async def test_no_controller_does_not_consume_completed_team_window(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calls(rail, ["spawn_member"] * 3)
+        _set_trajectory_tool_calls(rail, ["spawn_member"] * 3)
         agent = _make_agent_with_team_skill_creation_capability(tmp_path)
         agent._loop_controller = None
         ctx = _make_invoke_ctx(agent)
 
         assert await rail.notify_team_completed() is True
-        await rail._on_after_invoke(ctx)
+        await _after_invoke(rail, ctx)
 
         assert rail._proposed_spawn_counts == {}
         assert rail._completed_session_id == "test"
@@ -349,7 +476,7 @@ class TestTeamSkillCreateRailFollowUp:
         controller = MagicMock()
         controller.enqueue_follow_up = MagicMock()
         agent._loop_controller = controller
-        await rail._on_after_invoke(ctx)
+        await _after_invoke(rail, ctx)
 
         controller.enqueue_follow_up.assert_called_once()
         _assert_team_follow_up_contract(controller.enqueue_follow_up.call_args.args[0])
@@ -372,23 +499,28 @@ class TestTeamSkillCreateRailFollowUp:
             "# Research Team\n",
             encoding="utf-8",
         )
-        rail = TeamSkillCreateRail(skills_dir=str(skills_dir))
-        _set_builder_tool_calls(rail, ["spawn_member"] * 2)
-        rail._builder.record_step(
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="skill_tool",
-                    call_args={"skill_name": "research-team", "relative_file_path": "SKILL.md"},
-                    call_result="loaded",
-                ),
-                meta={"operator_id": "skill_tool"},
-            )
+        rail = TeamSkillCreateRail(
+            skills_dir=str(skills_dir),
+            trajectory_span_processor=TrajectorySpanProcessor(),
+        )
+        _set_trajectory_tool_calls(rail, ["spawn_member"] * 2)
+        rail._trajectory = merge_trajectories(
+            rail._trajectory,
+            _make_trajectory(
+                "test",
+                [
+                    _tool_span(
+                        2,
+                        "skill_tool",
+                        tool_input={"skill_name": "research-team", "relative_file_path": "SKILL.md"},
+                    )
+                ],
+            ),
         )
         agent, controller = _agent_with_controller(tmp_path)
         ctx = _make_invoke_ctx(agent)
 
         assert await rail.notify_team_completed() is True
-        await rail._on_after_invoke(ctx)
+        await _after_invoke(rail, ctx)
 
         controller.enqueue_follow_up.assert_not_called()

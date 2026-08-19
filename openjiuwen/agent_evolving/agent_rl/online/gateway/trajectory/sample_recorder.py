@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Sequence
 from typing import Any
 
 
@@ -24,14 +26,15 @@ class SampleRecorder:
         self._total_samples = 0
 
     @staticmethod
-    def _append_jsonl(path: str, payload: dict[str, Any]) -> None:
+    def _append_jsonl(path: str, payloads: Sequence[dict[str, Any]]) -> None:
         with open(path, "a", encoding="utf-8") as file_obj:
-            file_obj.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            file_obj.write("".join(json.dumps(payload, ensure_ascii=False) + "\n" for payload in payloads))
 
     async def record_sample(self, sample: dict[str, Any]) -> None:
         """Record one scored sample for observability/debugging."""
         self._total_samples += 1
-        self._append_jsonl(self._sample_file, sample if self._dump_token_ids else _sample_for_log(sample))
+        payload = sample if self._dump_token_ids else _sample_for_log(sample)
+        await asyncio.to_thread(self._append_jsonl, self._sample_file, (payload,))
 
     async def snapshot_stats(self) -> dict[str, int]:
         """Return lightweight sample counters."""

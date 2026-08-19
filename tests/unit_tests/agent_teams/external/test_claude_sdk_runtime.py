@@ -14,6 +14,7 @@ import pytest
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.cli_agent import spawn as spawn_mod
+from openjiuwen.agent_teams.external.cli_agent.claude import runtime as claude_runtime_mod
 from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_session_id
 from openjiuwen.agent_teams.external.cli_agent.claude.runtime import ClaudeSdkRuntime
 from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import build_claude_sdk_mcp_tool_set
@@ -66,6 +67,7 @@ class _FakeOptions:
         self.env = {}
         self.user = None
         self.can_use_tool = None
+        self.stderr = None
         self.hooks = {}
         self.agents = None
         self.session_store_flush = None
@@ -236,10 +238,21 @@ class _BlockingStdout:
         self._ready.set()
 
 
+class _QueuedStderr:
+    def __init__(self, lines: list[bytes] | None = None) -> None:
+        self._lines = list(lines or [])
+
+    async def readline(self) -> bytes:
+        if self._lines:
+            return self._lines.pop(0)
+        return b""
+
+
 class _FakeRemoteProcess:
-    def __init__(self, stdout: _BlockingStdout) -> None:
+    def __init__(self, stdout: _BlockingStdout, stderr: _QueuedStderr | None = None) -> None:
         self.stdin = _FakeStdin()
         self.stdout = stdout
+        self.stderr = stderr or _QueuedStderr()
         self.exit_status = None
         self.terminated = False
         self.wait_count = 0
@@ -260,6 +273,8 @@ class _RecordingAsyncSshConnection:
     def __init__(self) -> None:
         self.command: str | None = None
         self.env: dict[str, str] | None = None
+        self.stderr_lines: list[bytes] = []
+        self.process: _FakeRemoteProcess | None = None
         self.closed = False
 
     async def create_process(
@@ -272,7 +287,8 @@ class _RecordingAsyncSshConnection:
         """Record the remote command and return a fake process."""
         self.command = command
         self.env = env
-        return _FakeRemoteProcess(_BlockingStdout())
+        self.process = _FakeRemoteProcess(_BlockingStdout(), _QueuedStderr(self.stderr_lines))
+        return self.process
 
     def close(self) -> None:
         """Record connection close."""
@@ -326,6 +342,15 @@ class _TurnRecordingSpanBridge:
     def finish_turn(self, *, status: str, error: Any | None = None) -> None:
         """Record one turn finish."""
         self.finished.append((status, error))
+
+
+class _RecordingTeamLogger:
+    def __init__(self) -> None:
+        self.errors: list[tuple[str, tuple[Any, ...]]] = []
+
+    def error(self, message: str, *args: Any) -> None:
+        """Record one error log call."""
+        self.errors.append((message, args))
 
 
 def _ctx(member: str = "claude-1") -> TeamRuntimeContext:
@@ -416,8 +441,40 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
     assert options.env["EXTRA"] == "1"
     assert "OPENJIUWEN_TEAM_JOIN" in options.env
     assert options.mcp_servers is None
+    assert options.cli_path is None
     assert options.session_id == build_claude_session_id(team_session_id="sess-1", member_name="claude-1")
     assert options.resume is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_passes_claude_cli_path(fake_claude_sdk):
+    token = set_session_id("sess-1")
+    try:
+        runtime = await spawn_mod.build_cli_runtime(
+            _ctx(),
+            mcp_server_command=("openjiuwen-team-mcp",),
+            cli_path="/opt/claude",
+        )
+    finally:
+        reset_session_id(token)
+
+    assert runtime._options.cli_path == "/opt/claude"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_claude_rejects_full_command_override(fake_claude_sdk):
+    token = set_session_id("sess-1")
+    try:
+        with pytest.raises(BaseError, match="configure cli_path instead"):
+            await spawn_mod.build_cli_runtime(
+                _ctx(),
+                command_override=("claude", "--print"),
+                mcp_server_command=("openjiuwen-team-mcp",),
+            )
+    finally:
+        reset_session_id(token)
 
 
 @pytest.mark.asyncio
@@ -477,6 +534,43 @@ async def test_claude_sdk_runtime_emits_native_team_chunks(fake_claude_sdk):
         "tool_call_id": "toolu_2",
         "is_team_tool": False,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_runtime_logs_stderr_tail_on_connect_failure(fake_claude_sdk, monkeypatch):
+    class _FailingClient(_FakeClaudeSdk.ClaudeSDKClient):
+        async def connect(self) -> None:
+            self.options.stderr("root is not allowed")
+            self.options.stderr("login required")
+            raise RuntimeError("connect failed")
+
+    fake_claude_sdk.ClaudeSDKClient = _FailingClient
+    logger = _RecordingTeamLogger()
+    monkeypatch.setattr(claude_runtime_mod, "team_logger", logger)
+    runtime = ClaudeSdkRuntime(member_name="claude-1", options=_FakeOptions(), inject_mcp=False)
+
+    with pytest.raises(RuntimeError, match="connect failed"):
+        await runtime.start()
+
+    assert logger.errors == [
+        (
+            "[{}] Claude CLI stderr before connect failure:\n{}",
+            ("claude-1", "root is not allowed\nlogin required"),
+        )
+    ]
+
+
+@pytest.mark.level0
+def test_claude_sdk_runtime_preserves_existing_stderr_callback(fake_claude_sdk):
+    captured: list[str] = []
+    options = _FakeOptions(stderr=captured.append)
+    runtime = ClaudeSdkRuntime(member_name="claude-1", options=options)
+
+    options.stderr("native stderr")
+
+    assert captured == ["native stderr"]
+    assert runtime._stderr_tail.render() == "native stderr"
 
 
 @pytest.mark.asyncio
@@ -863,6 +957,33 @@ async def test_claude_sdk_ssh_read_messages_survives_concurrent_close(fake_claud
     assert process.stdin.eof_written
     assert process.terminated
     assert process.wait_count >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_sdk_ssh_transport_reports_remote_stderr_on_failure(fake_claude_sdk):
+    config = SshTransportConfig(host="127.0.0.1", username="u", password="pw")
+    captured_stderr: list[str] = []
+    options = _FakeOptions(env={"OPENJIUWEN_TEAM_JOIN": "{}"}, stderr=captured_stderr.append)
+    transport = build_claude_sdk_ssh_transport(prompt=[], options=options, config=config)
+    asyncssh_module = sys.modules["asyncssh"]
+    assert isinstance(asyncssh_module, _RecordingAsyncSshModule)
+    asyncssh_module.connection.stderr_lines = [b"remote permission denied\n"]
+
+    await transport.connect()
+    process = asyncssh_module.connection.process
+    assert process is not None
+    process.exit_status = 1
+    process.stdout.unblock()
+    await asyncio.sleep(0)
+
+    with pytest.raises(_FakeClaudeSdk.ProcessError) as exc_info:
+        await _collect_messages(transport.read_messages())
+
+    assert exc_info.value.stderr == "remote permission denied"
+    assert captured_stderr == ["remote permission denied"]
+
+    await transport.close()
 
 
 async def _collect_messages(reader: Any) -> list[dict[str, Any]]:

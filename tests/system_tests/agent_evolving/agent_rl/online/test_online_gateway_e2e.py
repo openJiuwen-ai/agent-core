@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit_tests.agent_evolving.agent_rl.online.support import InMemoryRedis
+
 httpx = pytest.importorskip("httpx")
 pytest.importorskip("fastapi")
 
@@ -21,143 +23,22 @@ GatewayConfig = importlib.import_module(
     "openjiuwen.agent_evolving.agent_rl.online.gateway.config"
 ).GatewayConfig
 RLOnlineRail = importlib.import_module(
-    "openjiuwen.agent_evolving.agent_rl.online.rail.online_rail"
+    "openjiuwen.agent_evolving.agent_rl.online.backends.rl.rail"
 ).RLOnlineRail
 TrajectoryUploader = importlib.import_module(
-    "openjiuwen.agent_evolving.agent_rl.online.rail.uploader"
+    "openjiuwen.agent_evolving.agent_rl.online.core.uploader"
 ).TrajectoryUploader
 trajectory_module = importlib.import_module("openjiuwen.agent_evolving.trajectory")
-LLMCallDetail = trajectory_module.LLMCallDetail
-TrajectoryStep = trajectory_module.TrajectoryStep
-trajectory_from_steps = trajectory_module.trajectory_from_steps
+Trajectory = trajectory_module.Trajectory
+TrajectorySpanProcessor = trajectory_module.TrajectorySpanProcessor
+trajectory_spans = importlib.import_module("openjiuwen.agent_evolving.trajectory.spans")
+trajectory_schema = importlib.import_module("openjiuwen.agent_evolving.trajectory.schema")
+observability_semconv = importlib.import_module("openjiuwen.extensions.observability.semconv")
+PreparedEvolutionInput = importlib.import_module(
+    "openjiuwen.harness.rails.evolution.evolution_rail"
+).PreparedEvolutionInput
 
-
-class _FakeRedisPipeline:
-    def __init__(self, redis: _FakeRedis) -> None:
-        self._redis = redis
-        self._ops: list[tuple[str, tuple]] = []
-
-    def delete(self, key: str):
-        self._ops.append(("delete", (key,)))
-        return self
-
-    def hset(self, key: str, mapping: dict[str, str]):
-        self._ops.append(("hset", (key, mapping)))
-        return self
-
-    def hmget(self, key: str, fields: list[str]):
-        self._ops.append(("hmget", (key, fields)))
-        return self
-
-    def sadd(self, key: str, *members: str):
-        self._ops.append(("sadd", (key, *members)))
-        return self
-
-    def zadd(self, key: str, mapping: dict[str, float]):
-        self._ops.append(("zadd", (key, mapping)))
-        return self
-
-    def zcard(self, key: str):
-        self._ops.append(("zcard", (key,)))
-        return self
-
-    def zrem(self, key: str, member: str):
-        self._ops.append(("zrem", (key, member)))
-        return self
-
-    async def execute(self):
-        out = []
-        for name, args in self._ops:
-            out.append(await getattr(self._redis, name)(*args))
-        return out
-
-
-class _FakeRedis:
-    def __init__(self) -> None:
-        self._kv: dict[str, str] = {}
-        self._zsets: dict[str, dict[str, float]] = {}
-        self._hashes: dict[str, dict[str, str]] = {}
-        self._sets: dict[str, set[str]] = {}
-
-    def register_script(self, script: str):
-        del script
-
-        async def _run(*, keys: list[str], args: list[object]):
-            pending_key, training_key = keys
-            limit = max(1, int(args[0]))
-            now_score = float(args[1])
-            new_status = str(args[2])
-            traj_prefix = str(args[3])
-            ids = await self.zrange(pending_key, 0, limit - 1)
-            for sample_id in ids:
-                await self.zrem(pending_key, sample_id)
-                await self.zadd(training_key, {sample_id: now_score})
-                await self.hset(f"{traj_prefix}{sample_id}", {"status": new_status})
-            return ids
-
-        return _run
-
-    async def delete(self, key: str) -> None:
-        self._kv.pop(key, None)
-        self._hashes.pop(key, None)
-
-    async def expire(self, key: str, ttl: int) -> None:
-        del key, ttl
-
-    async def get(self, key: str) -> str | None:
-        return self._kv.get(key)
-
-    async def hget(self, key: str, field: str) -> str | None:
-        return self._hashes.get(key, {}).get(field)
-
-    async def hmget(self, key: str, fields: list[str]) -> list[str | None]:
-        row = self._hashes.get(key, {})
-        return [row.get(field) for field in fields]
-
-    async def hset(self, key: str, mapping: dict[str, str]) -> None:
-        self._hashes.setdefault(key, {}).update(mapping)
-
-    async def mget(self, keys: list[str]) -> list[str | None]:
-        return [self._kv.get(key) for key in keys]
-
-    def pipeline(self) -> _FakeRedisPipeline:
-        return _FakeRedisPipeline(self)
-
-    async def sadd(self, key: str, *members: str) -> None:
-        self._sets.setdefault(key, set()).update(members)
-
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
-        del ex
-        self._kv[key] = value
-
-    async def smembers(self, key: str) -> set[str]:
-        return set(self._sets.get(key, set()))
-
-    async def srem(self, key: str, *members: str) -> None:
-        bucket = self._sets.setdefault(key, set())
-        for member in members:
-            bucket.discard(member)
-
-    async def zadd(self, key: str, mapping: dict[str, float]) -> None:
-        self._zsets.setdefault(key, {}).update(mapping)
-
-    async def zcard(self, key: str) -> int:
-        return len(self._zsets.get(key, {}))
-
-    async def zrange(self, key: str, start: int, end: int) -> list[str]:
-        members = [
-            member
-            for member, _ in sorted(
-                self._zsets.get(key, {}).items(),
-                key=lambda item: item[1],
-            )
-        ]
-        if end == -1:
-            end = len(members) - 1
-        return members[start:end + 1]
-
-    async def zrem(self, key: str, member: str) -> None:
-        self._zsets.get(key, {}).pop(member, None)
+_FakeRedis = InMemoryRedis
 
 
 @pytest.mark.asyncio
@@ -234,8 +115,6 @@ async def test_online_gateway_proxy_and_rail_upload_e2e(tmp_path: Path):
                 "messages": [{"role": "user", "content": "ping"}],
                 "stream": False,
                 "model": "st-model",
-                "logprobs": True,
-                "top_logprobs": 1,
             }]
 
             uploader = TrajectoryUploader(
@@ -250,27 +129,51 @@ async def test_online_gateway_proxy_and_rail_upload_e2e(tmp_path: Path):
                 gateway_endpoint="http://gateway.local",
                 tenant_id="st-user",
                 uploader=uploader,
+                trajectory_span_processor=TrajectorySpanProcessor(),
             )
-            trajectory = trajectory_from_steps(
-                execution_id="traj-st",
-                session_id="session-st",
-                steps=[
-                    TrajectoryStep(
-                        kind="llm",
-                        detail=LLMCallDetail(
-                            model="st-model",
-                            messages=[{"role": "user", "content": "ping"}],
-                            response={"role": "assistant", "content": "pong", "finish_reason": "stop"},
-                        ),
-                        prompt_token_ids=[101, 102],
-                        completion_token_ids=[201, 202],
-                        logprobs=[-0.1, -0.2],
-                    )
-                ],
-                source="rl_online",
+            trajectory = Trajectory.from_otlp(
+                {
+                    "resourceSpans": [
+                        {
+                            "resource": {
+                                "attributes": trajectory_spans.attributes_from_map(
+                                    {
+                                        trajectory_schema.TRAJECTORY_ID: "traj-st",
+                                        trajectory_schema.SESSION_ID: "session-st",
+                                        trajectory_schema.TRAJECTORY_SOURCE: "rl_online",
+                                    }
+                                )
+                            },
+                            "scopeSpans": [
+                                {
+                                    "scope": {"name": "system-test"},
+                                    "spans": [
+                                        {
+                                            "traceId": "1" * 32,
+                                            "spanId": "2" * 16,
+                                            "name": "llm.call",
+                                            "attributes": trajectory_spans.attributes_from_map(
+                                                {
+                                                    observability_semconv.GEN_AI_REQUEST_MODEL: "st-model",
+                                                    f"{observability_semconv.GEN_AI_PROMPT}.0.role": "user",
+                                                    f"{observability_semconv.GEN_AI_PROMPT}.0.content": "ping",
+                                                    f"{observability_semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+                                                    f"{observability_semconv.GEN_AI_COMPLETION}.0.content": "pong",
+                                                    trajectory_schema.RL_PROMPT_TOKEN_IDS: [101, 102],
+                                                    trajectory_schema.RL_COMPLETION_TOKEN_IDS: [201, 202],
+                                                    trajectory_schema.RL_LOGPROBS: [-0.1, -0.2],
+                                                }
+                                            ),
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
             )
 
-            await rail.run_evolution(trajectory)
+            await rail.run_evolution(PreparedEvolutionInput(trajectory=trajectory, messages=()))
             await uploader.shutdown()
 
             stats_response = await gateway_client.get(
@@ -281,9 +184,9 @@ async def test_online_gateway_proxy_and_rail_upload_e2e(tmp_path: Path):
     assert stats_response.status_code == 200
     assert stats_response.json()["trajectory_store_pending"] == 1
 
-    row = redis._hashes["rl:traj:traj-st:0"]
-    stored_sample = json.loads(row["sample_json"])
-    assert row["user_id"] == "st-user"
+    sample_key = "rl:traj:traj-st:0"
+    stored_sample = json.loads(await redis.hget(sample_key, "sample_json"))
+    assert await redis.hget(sample_key, "user_id") == "st-user"
     assert stored_sample["user_id"] == "st-user"
     assert stored_sample["trajectory"]["prompt_ids"] == [101, 102]
     assert stored_sample["trajectory"]["response_ids"] == [201, 202]

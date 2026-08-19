@@ -7,7 +7,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from openjiuwen.agent_evolving.trajectory import TrajectoryBuilder
+from openjiuwen.agent_evolving.trajectory.messages import (
+    tool_call_id as get_tool_call_id,
+    tool_call_name,
+)
+from openjiuwen.agent_evolving.trajectory.spans import (
+    iter_spans,
+    read_llm_exchange,
+    read_tool_call,
+)
+from openjiuwen.agent_evolving.trajectory.team import span_category
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 
 SKILL_CREATION_SIGNAL_PROMPT_ELIGIBLE = "prompt_eligible"
 SKILL_CREATION_SIGNAL_SKILL_TOOL_COVER = "skill_tool_cover"
@@ -65,25 +75,25 @@ class SkillCreationSignalDetector:
 
     @staticmethod
     def collect_metrics(
-        builder: TrajectoryBuilder | None,
+        trajectory: Trajectory | None,
         *,
         raw_tool_call_watermark: int = 0,
     ) -> SkillCreationWindowMetrics:
         """Collect deterministic effective metrics for skill-creation triggers."""
-        if builder is None:
+        if trajectory is None:
             return SkillCreationWindowMetrics(0, 0, 0, 0, 0, False)
 
-        tool_steps = [step for step in builder.steps if step.kind == "tool" and step.detail]
-        total_raw_tool_calls = len(tool_steps)
+        tool_spans = [span for span in iter_spans(trajectory) if span_category(span) == "tool"]
+        total_raw_tool_calls = len(tool_spans)
         watermark = max(0, raw_tool_call_watermark)
-        window_tool_steps = tool_steps[watermark:]
+        window_tool_spans = tool_spans[watermark:]
 
         effective_call_ids_after_watermark: set[str] = set()
         window_effective_tool_calls = 0
         total_effective_tool_calls = 0
         skill_tool_used_in_window = False
-        for index, step in enumerate(tool_steps):
-            tool_name = getattr(step.detail, "tool_name", "")
+        for index, span in enumerate(tool_spans):
+            tool_name = _span_tool_name(span)
             if index >= watermark and normalize_tool_name(tool_name) == "skill_tool":
                 skill_tool_used_in_window = True
             if not is_effective_task_tool(tool_name):
@@ -91,15 +101,15 @@ class SkillCreationSignalDetector:
             total_effective_tool_calls += 1
             if index >= watermark:
                 window_effective_tool_calls += 1
-                tool_call_id = getattr(step.detail, "tool_call_id", None)
+                tool_call_id = _span_tool_call_id(span)
                 if tool_call_id:
                     effective_call_ids_after_watermark.add(str(tool_call_id))
 
-        total_effective_tool_calling_iterations = count_tool_calling_iterations(builder)
+        total_effective_tool_calling_iterations = count_tool_calling_iterations(trajectory)
         window_effective_tool_calling_iterations = _count_new_effective_tool_calling_iterations(
-            builder,
+            trajectory,
             effective_call_ids_after_watermark,
-            window_tool_steps,
+            window_tool_spans,
         )
 
         return SkillCreationWindowMetrics(
@@ -113,7 +123,7 @@ class SkillCreationSignalDetector:
 
     def detect(
         self,
-        builder: TrajectoryBuilder | None,
+        trajectory: Trajectory | None,
         *,
         raw_tool_call_watermark: int = 0,
         prompted_snapshot: tuple[int, int] | None = None,
@@ -122,12 +132,12 @@ class SkillCreationSignalDetector:
         """Detect Skill creation signals for the current trajectory window.
 
         When metrics is provided, detection uses that snapshot directly and
-        does not rescan the builder or apply raw_tool_call_watermark again.
+        does not rescan the trajectory or apply raw_tool_call_watermark again.
         """
-        if builder is None:
+        if trajectory is None:
             return []
         current_metrics = metrics or self.collect_metrics(
-            builder,
+            trajectory,
             raw_tool_call_watermark=raw_tool_call_watermark,
         )
 
@@ -142,8 +152,7 @@ class SkillCreationSignalDetector:
 
         if prompted_snapshot is None:
             if (
-                current_metrics.window_effective_tool_calling_iterations
-                >= FIRST_PROMPT_TOOL_ITERATION_THRESHOLD
+                current_metrics.window_effective_tool_calling_iterations >= FIRST_PROMPT_TOOL_ITERATION_THRESHOLD
                 or current_metrics.window_effective_tool_calls >= FIRST_PROMPT_TOOL_CALL_THRESHOLD
             ):
                 return [
@@ -161,10 +170,7 @@ class SkillCreationSignalDetector:
             current_metrics.total_effective_tool_calling_iterations - prompted_iterations,
         )
         new_calls = max(0, current_metrics.total_effective_tool_calls - prompted_calls)
-        if (
-            new_iterations >= REPROMPT_TOOL_ITERATION_THRESHOLD
-            or new_calls >= REPROMPT_TOOL_CALL_THRESHOLD
-        ):
+        if new_iterations >= REPROMPT_TOOL_ITERATION_THRESHOLD or new_calls >= REPROMPT_TOOL_CALL_THRESHOLD:
             return [
                 SkillCreationSignal(
                     signal_type=SKILL_CREATION_SIGNAL_PROMPT_ELIGIBLE,
@@ -193,56 +199,78 @@ def is_effective_task_tool(tool_name: str) -> bool:
     return not any(keyword in tool for keyword in _EXCLUDED_TOOL_KEYWORDS)
 
 
-def count_tool_calling_iterations(builder: TrajectoryBuilder | None) -> int:
+def count_tool_calling_iterations(trajectory: Trajectory | None) -> int:
     """Count LLM iterations that requested at least one effective task tool."""
-    if builder is None:
+    if trajectory is None:
         return 0
 
     count = 0
-    for step in builder.steps:
-        if step.kind != "llm" or not step.detail:
+    for span in iter_spans(trajectory):
+        if span_category(span) != "llm":
             continue
-        response = getattr(step.detail, "response", None)
-        if _response_has_effective_tool_calls(response):
+        if _response_has_effective_tool_calls(_span_tool_calls(span)):
             count += 1
     return count
 
 
 def _count_new_effective_tool_calling_iterations(
-    builder: TrajectoryBuilder,
+    trajectory: Trajectory,
     effective_call_ids_after_watermark: set[str],
-    new_tool_steps: list[Any],
+    new_tool_spans: list[Any],
 ) -> int:
-    if not new_tool_steps:
+    if not new_tool_spans:
         return 0
 
     if effective_call_ids_after_watermark:
         count = 0
-        for step in builder.steps:
-            if step.kind != "llm" or not step.detail:
+        for span in iter_spans(trajectory):
+            if span_category(span) != "llm":
                 continue
-            response = getattr(step.detail, "response", None)
-            if _response_has_tool_call_id(response, effective_call_ids_after_watermark):
+            if _response_has_tool_call_id(_span_tool_calls(span), effective_call_ids_after_watermark):
                 count += 1
         return count
 
     # Fallback for trajectories without tool_call_id links: count effective
     # tool steps as distinct iterations rather than mixing raw and effective indexes.
-    return sum(
-        1
-        for step in new_tool_steps
-        if is_effective_task_tool(getattr(step.detail, "tool_name", ""))
-    )
+    return sum(1 for span in new_tool_spans if is_effective_task_tool(_span_tool_name(span)))
+
+
+def _span_tool_name(span: dict[str, Any]) -> str:
+    """Return a canonical tool span's name, with a name-based fallback."""
+
+    tool_name = read_tool_call(span).get("name")
+    if tool_name:
+        return str(tool_name)
+    name = str(span.get("name") or "")
+    return name[5:] if name.startswith("tool.") else name
+
+
+def _span_tool_call_id(span: dict[str, Any]) -> str | None:
+    value = read_tool_call(span).get("id")
+    return str(value) if value is not None and str(value) else None
+
+
+def _span_tool_calls(span: dict[str, Any]) -> list[Any]:
+    """Read only the completion tool calls from one canonical LLM span."""
+
+    _, completions = read_llm_exchange(span)
+    for message in reversed(completions):
+        if isinstance(message, dict) and message.get("tool_calls"):
+            return list(message["tool_calls"])
+    return []
 
 
 def _response_has_effective_tool_calls(response: Any) -> bool:
-    return any(is_effective_task_tool(_tool_call_name(tool_call)) for tool_call in _iter_tool_calls(response))
+    return any(
+        is_effective_task_tool(str(tool_call_name(tool_call) or ""))
+        for tool_call in _iter_tool_calls(response)
+    )
 
 
 def _response_has_tool_call_id(response: Any, tool_call_ids: set[str]) -> bool:
     for tool_call in _iter_tool_calls(response):
-        tool_call_id = _tool_call_id(tool_call)
-        if tool_call_id is not None and str(tool_call_id) in tool_call_ids:
+        call_id = get_tool_call_id(tool_call)
+        if call_id is not None and str(call_id) in tool_call_ids:
             return True
     return False
 
@@ -250,33 +278,11 @@ def _response_has_tool_call_id(response: Any, tool_call_ids: set[str]) -> bool:
 def _iter_tool_calls(response: Any) -> list[Any]:
     if response is None:
         return []
+    if isinstance(response, (list, tuple)):
+        return list(response)
     if isinstance(response, dict):
         return list(response.get("tool_calls") or [])
     return list(getattr(response, "tool_calls", None) or [])
-
-
-def _tool_call_name(tool_call: Any) -> str:
-    if isinstance(tool_call, dict):
-        function = tool_call.get("function")
-        if isinstance(function, dict) and function.get("name"):
-            return str(function.get("name"))
-        return str(tool_call.get("name") or "")
-
-    function = getattr(tool_call, "function", None)
-    function_name = getattr(function, "name", None)
-    if function_name:
-        return str(function_name)
-    return str(getattr(tool_call, "name", "") or "")
-
-
-def _tool_call_id(tool_call: Any) -> str | None:
-    if isinstance(tool_call, dict):
-        value = tool_call.get("id")
-    else:
-        value = getattr(tool_call, "id", None)
-    if value is None:
-        return None
-    return str(value)
 
 
 __all__ = [

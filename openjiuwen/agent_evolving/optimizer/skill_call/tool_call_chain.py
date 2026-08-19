@@ -8,6 +8,8 @@ import json
 import re
 from typing import List
 
+from openjiuwen.agent_evolving.trajectory.messages import tool_call_arguments, tool_call_name
+
 _TOOL_CHAIN_FAILURE_RE = re.compile(
     r"error|exception|traceback|failed|failure|timeout|timed out"
     r"|errno|connectionerror|oserror|valueerror|typeerror"
@@ -74,8 +76,10 @@ def build_tool_call_chain(
                 turn += 1
                 if turn > max_events:
                     break
-                name = tool_call.get("name", "unknown")
-                args = tool_call.get("arguments", "")
+                name = tool_call_name(tool_call) or "unknown"
+                args = tool_call_arguments(tool_call)
+                if args is None:
+                    args = ""
                 if isinstance(args, dict):
                     args_str = json.dumps(args, ensure_ascii=False)
                 else:

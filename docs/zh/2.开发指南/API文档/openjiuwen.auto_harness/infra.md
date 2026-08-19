@@ -648,9 +648,6 @@ class openjiuwen.auto_harness.infra.runtime_manifest.RuntimeHarnessManifest(Base
 * **default_mode**(`Optional[str]`)：默认模式，默认 `None`
 * **permissions**(`Optional[Dict[str, Any]]`)：权限配置，默认 `None`
 * **progressive_tool_enabled**(`Optional[bool]`)：是否启用渐进式工具，默认 `None`
-* **progressive_tool_always_visible_tools**(`List[str]`)：始终可见的工具列表，默认为空列表
-* **progressive_tool_default_visible_tools**(`List[str]`)：默认可见工具列表，默认为空列表
-* **progressive_tool_max_loaded_tools**(`Optional[int]`)：最大加载工具数，默认 `None`
 * **subagents**(`Optional[List[Dict[str, Any]]]`)：子 agent 配置，默认 `None`
 * **context**(`Optional[Dict[str, Any]]`)：上下文配置，默认 `None`
 * **stop_eval_conditions**(`Optional[Dict[str, Any]]`)：停止评估条件，默认 `None`

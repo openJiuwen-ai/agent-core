@@ -21,7 +21,8 @@ from openjiuwen.core.foundation.llm import (
     UsageMetadata,
     UserMessage,
 )
-from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard, ToolExposure
 from openjiuwen.core.foundation.tool.schema import ToolInfo
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.resources_manager.base import Ok
@@ -34,8 +35,9 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentRail,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.harness import Workspace, create_deep_agent
-from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.deep_agent import DeepAgent, _DEFAULT_DIRECT_TOOL_NAMES
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
@@ -311,6 +313,40 @@ def test_configure_set_react_agent_and_is_initialized() -> None:
     assert agent.is_initialized is True
 
     assert agent.loop_coordinator is None
+
+
+def test_progressive_agent_exposes_configured_core_tools_directly() -> None:
+    agent = DeepAgent(AgentCard(name="deep", description="test")).configure(
+        DeepAgentConfig(progressive_tool_enabled=True, enable_task_loop=False)
+    )
+
+    for name in _DEFAULT_DIRECT_TOOL_NAMES:
+        card = ToolCard(id=name, name=name, description=f"{name} tool")
+        assert agent.ability_manager.add(card).added is True
+
+    deferred = ToolCard(id="ordinary_deferred", name="ordinary_deferred")
+    assert agent.ability_manager.add(deferred).added is True
+
+    assert all(
+        agent.ability_manager.get(name).exposure is ToolExposure.DIRECT
+        for name in _DEFAULT_DIRECT_TOOL_NAMES
+    )
+    assert agent.ability_manager.get("ordinary_deferred").exposure is ToolExposure.DEFERRED
+
+
+def test_reconstructed_deep_agents_share_inner_persistence_identity() -> None:
+    persistence_id = "stable-deep-agent"
+    first = DeepAgent(AgentCard(id=persistence_id, name="deep")).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+    second = DeepAgent(AgentCard(id=persistence_id, name="deep")).configure(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+
+    assert first.react_agent is not None
+    assert second.react_agent is not None
+    assert first.react_agent.card.id == persistence_id
+    assert second.react_agent.card.id == persistence_id
 
 
 def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
@@ -1077,6 +1113,7 @@ def test_resolve_deep_agent_parts_adds_rl_online_rail_from_env(monkeypatch) -> N
     parts = resolve_deep_agent_parts(
         model=_create_dummy_model(),
         enable_sys_operation=False,
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
 
     rail_types = [type(rail).__name__ for rail in parts.rails if rail is not None]
@@ -1428,6 +1465,9 @@ def test_create_subagent_keeps_auto_probe_for_distinct_browser_model(tmp_path) -
 
 def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
     workspace_root = tmp_path / "parent_workspace"
+    kv_cache_affinity_config = KVCacheAffinityConfig(
+        enable_kv_cache_affinity=True
+    )
     subagent_config = SubAgentConfig(
         agent_card=AgentCard(name="reviewer", description="reviewer"),
         system_prompt="Review strictly.",
@@ -1446,6 +1486,8 @@ def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
         card=AgentCard(name="parent", description="parent"),
         system_prompt="parent prompt",
         workspace=Workspace(root_path=str(workspace_root)),
+        enable_read_image_multimodal=False,
+        kv_cache_affinity_config=kv_cache_affinity_config,
         restrict_to_work_dir=False,
         subagents=[subagent_config],
     )
@@ -1466,7 +1508,39 @@ def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
     assert call_kwargs["restrict_to_work_dir"] is True
     assert call_kwargs["prompt_mode"] == "concise"
     assert call_kwargs["language"] == "en"
+    assert call_kwargs["enable_read_image_multimodal"] is False
+    assert (
+        call_kwargs["kv_cache_affinity_config"]
+        is kv_cache_affinity_config
+    )
     assert call_kwargs["sandbox"] is True
+
+
+def test_create_subagent_can_override_parent_image_multimodal_setting(tmp_path) -> None:
+    subagent_config = SubAgentConfig(
+        agent_card=AgentCard(name="vision-reviewer", description="reviewer"),
+        system_prompt="Inspect images.",
+        factory_name=CODE_AGENT_FACTORY_NAME,
+        enable_read_image_multimodal=True,
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        enable_read_image_multimodal=False,
+        subagents=[subagent_config],
+    )
+
+    with patch(
+        "openjiuwen.harness.subagents.code_agent.create_code_agent",
+        return_value=object(),
+    ) as mock_create_code_agent:
+        parent.create_subagent("vision-reviewer", "sub_session_id")
+
+    assert (
+        mock_create_code_agent.call_args.kwargs["enable_read_image_multimodal"]
+        is True
+    )
 
 
 def test_create_subagent_keeps_parent_work_dir_restriction_when_stricter(tmp_path) -> None:

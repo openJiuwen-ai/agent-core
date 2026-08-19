@@ -69,6 +69,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
     ModelCallInputs,
+    SteeringDrainInputs,
     UserMessageInputs,
     rail,
 )
@@ -770,6 +771,40 @@ class ReActAgent(BaseAgent):
         body = "\n".join(parts)
         await context.add_messages(UserMessage(content=f"{prefix}{body}"))
 
+    async def _drain_steering_batch(self, ctx: AgentCallbackContext) -> List[str]:
+        """Take the share of the steering backlog this model call absorbs.
+
+        Everything queued used to go into one message. That is right when a
+        couple of instructions piled up, and wrong when a member comes back to
+        a stack of them: they arrive fused into a single turn the model has to
+        act on all at once. So the size of the batch is a policy question, and
+        BEFORE_STEERING_DRAIN asks the rails before the queue is touched --
+        deciding afterwards would mean taking everything and pushing the
+        surplus back behind whatever arrived in the meantime.
+
+        What the rails hold back stays queued, in order. Nothing else is needed
+        to deliver it: the loop already keeps iterating while steering is
+        pending, so the next model call picks up where this one stopped.
+
+        Args:
+            ctx: Callback context; carries the bound queue and the rails.
+
+        Returns:
+            The messages to admit now, oldest first; empty when nothing is
+            queued, which also means no event was fired.
+        """
+        queue = ctx.steering_queue
+        if queue is None or queue.empty():
+            return []
+        previous_inputs = ctx.inputs
+        ctx.inputs = SteeringDrainInputs(pending=queue.qsize())
+        try:
+            await ctx.fire(AgentCallbackEvent.BEFORE_STEERING_DRAIN)
+            limit = ctx.inputs.limit
+        finally:
+            ctx.inputs = previous_inputs
+        return ctx.drain_steering(limit)
+
     def _extract_user_parts(self, ctx: AgentCallbackContext, user_input: Any) -> List[str]:
         """Normalize a round's query into the input list ON_USER_MESSAGE sees.
 
@@ -987,6 +1022,7 @@ class ReActAgent(BaseAgent):
             session=session,
             session_id=session_id,
             parent_session_id=parent_session_id,
+            context_window=context_window,
         )
 
         if self._config.llm_return_token_ids:
@@ -1079,6 +1115,7 @@ class ReActAgent(BaseAgent):
         else:
             ai_message = AssistantMessage(
                 content=accumulated_chunk.content or "",
+                metadata=accumulated_chunk.metadata,
                 tool_calls=accumulated_chunk.tool_calls or [],
                 usage_metadata=accumulated_chunk.usage_metadata,
                 reasoning_content=accumulated_chunk.reasoning_content,
@@ -1981,14 +2018,14 @@ class ReActAgent(BaseAgent):
                             invoke_inputs.result = boundary_finish.result
                             break
 
-                        # Inject pending steering messages
+                        # Inject the steering messages the rails let through
                         # before the next model call.
-                        steering = ctx.drain_steering()
+                        steering = await self._drain_steering_batch(ctx)
                         if steering:
                             await self._admit_user_message(
                                 ctx,
                                 context,
-                                list(steering),
+                                steering,
                                 source="steering",
                                 prefix="[STEERING] ",
                             )
@@ -2012,6 +2049,7 @@ class ReActAgent(BaseAgent):
                         await context.add_messages(
                             AssistantMessage(
                                 content=ai_message.content,
+                                metadata=ai_message.metadata,
                                 tool_calls=ai_message.tool_calls,
                                 reasoning_content=ai_message.reasoning_content,
                                 usage_metadata=ai_message.usage_metadata,

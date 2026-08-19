@@ -5,14 +5,14 @@
 
 Key convention
 --------------
-- ``tool_name._desc``            — ToolCard description (lives in ``descs/cn/<tool>.md``)
+- ``tool_name._desc``            — ToolCard description (lives in ``descs/cn/<domain>/<tool>.md``)
 - ``tool_name.param``            — top-level param description
 - ``tool_name.nested.param``     — nested schema param (e.g. task item)
 """
 
 STRINGS: dict[str, str] = {
     # ===== build_team ==========================================================
-    # build_team._desc lives in descs/cn/build_team.md
+    # build_team._desc lives in descs/cn/team/build_team.md
     "build_team.display_name": "团队的显示名（如「后端平台小队」），仅用于展示，不是标识符",
     "build_team.team_desc": "团队目标、交付范围和全局协作指令。所有成员可见此描述，写清协作目标和约束",
     "build_team.leader_display_name": "Leader 的显示名（纯展示，不作为标识符）",
@@ -26,18 +26,26 @@ STRINGS: dict[str, str] = {
         "用户表达「我要加入团队」时设为 true；明确不需要人类协作时设为 false"
     ),
     "build_team.enable_task_verification": (
-        "本团队实例是否要求任务校验。可选 true / false / 不传（继承 TeamAgentSpec 配置）。"
-        "开启后 teammate 完成任务将进入 IN_REVIEW 等验证者裁决；关闭则直接标记完成。"
-        "reviewer 分配不受此开关影响——无论开关值如何，你都应为关键交付任务指派 reviewer"
+        "本团队实例是否启用验证闸。可选 true / false / 不传（继承 TeamAgentSpec 配置）。"
+        "开启后 teammate 完成配了 reviewer 的任务将进入 IN_REVIEW 等验证者裁决；"
+        "关闭则直接标记完成，且 create_task / update_task 里写的 reviewer 会被忽略。"
+        "用户配置为 false 时本参数不生效，实际生效值见返回结果的 task_verification"
     ),
     # ===== checkpoint ==========================================================
-    # checkpoint._desc lives in descs/cn/checkpoint.md
+    # checkpoint._desc lives in descs/cn/member/checkpoint.md
     "checkpoint.name": "快照名（语义化 slug，如 code-ready）。后续 fork 通过此名引用",
     "checkpoint.description": "可选描述，说明为何在此打快照",
+    "checkpoint.duplicate": (
+        "⚠️ 快照保存失败：快照名 '{name}' 已被 {created_by} 占用（{description}）。"
+        "你本次的快照**没有建立**，后续 fork 拿不到你的上下文。"
+        "请用一个新的名字（例如 '{name}-v2'，或在名字末尾加序号/业务后缀）"
+        "**立即再次调用 checkpoint** 完成保存——不要用纯文本说明代替实际调用。"
+        "仅当你原本就是要继承那个已存在的快照、而不是保存自己的新快照时，才不需要重新调用。"
+    ),
     # ===== clean_team ==========================================================
-    # clean_team._desc lives in descs/cn/clean_team.md
+    # clean_team._desc lives in descs/cn/team/clean_team.md
     # ===== spawn_teammate ======================================================
-    # spawn_teammate._desc lives in descs/cn/spawn_teammate.md
+    # spawn_teammate._desc lives in descs/cn/member/spawn_teammate.md
     "spawn_teammate.member_name": (
         "[公开] 成员唯一名（语义化 slug，如 backend-dev-1，DNS label 风格 kebab-case）。"
         "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
@@ -80,12 +88,15 @@ STRINGS: dict[str, str] = {
         "上下文来源成员名。不填默认从 leader 取。填某 teammate 名（如 'understander'）"
         "则从该成员取上下文。该成员必须已通过 spawn_teammate 拉起来，且为 in-process 模式"
     ),
-    "spawn_teammate.compact": (
-        "启用上下文压缩。checkpoint 之前的旧消息压缩为摘要，"
-        "checkpoint 之后的分析全量保留。仅配合 checkpoint fork 使用"
+    "spawn_teammate.fork_mode": (
+        "保留 checkpoint 的哪一侧。可选值：'full'（源成员全部上下文，fork=true 时的默认）、"
+        "'before'（checkpoint 之前的消息，命名 fork 时的默认）、"
+        "'after'（从 checkpoint 起的消息）、"
+        "'keep_before_compact_after'（保留前、把后压缩为摘要）、"
+        "'keep_after_compact_before'（保留后、把前压缩为摘要）。仅配合命名 checkpoint fork 使用"
     ),
     # ===== spawn_human_agent ===================================================
-    # spawn_human_agent._desc lives in descs/cn/spawn_human_agent.md
+    # spawn_human_agent._desc lives in descs/cn/member/spawn_human_agent.md
     "spawn_human_agent.member_name": (
         "[公开] 人类成员唯一名（语义化 slug，如 product-owner，DNS label 风格 kebab-case）。"
         "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
@@ -102,7 +113,7 @@ STRINGS: dict[str, str] = {
         "真人通过 HumanAgentInbox 驱动该成员；模型与启动提示由框架内置模板托管，无需在此提供"
     ),
     # ===== spawn_bridge_agent ==================================================
-    # spawn_bridge_agent._desc lives in descs/cn/spawn_bridge_agent.md
+    # spawn_bridge_agent._desc lives in descs/cn/member/spawn_bridge_agent.md
     "spawn_bridge_agent.member_name": (
         "[公开] 桥接成员唯一名（语义化 slug，如 remote-claude-1，DNS label 风格 kebab-case）。"
         "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
@@ -139,7 +150,7 @@ STRINGS: dict[str, str] = {
         "未指定时由系统自动选择。注意远程 agent 的模型在其自身侧，不由此字段控制"
     ),
     # ===== spawn_external_cli ===================================================
-    # spawn_external_cli._desc lives in descs/cn/spawn_external_cli.md
+    # spawn_external_cli._desc lives in descs/cn/member/spawn_external_cli.md
     "spawn_external_cli.member_name": (
         "[公开] CLI 成员唯一名（语义化 slug，如 cli-coder-1，DNS label 风格 kebab-case）。"
         "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
@@ -164,11 +175,11 @@ STRINGS: dict[str, str] = {
         "具体启动命令、工作目录、MCP 注入等都在那条配置里，本字段只负责按名引用"
     ),
     # ===== shutdown_member =====================================================
-    # shutdown_member._desc lives in descs/cn/shutdown_member.md
+    # shutdown_member._desc lives in descs/cn/member/shutdown_member.md
     "shutdown_member.member_name": "要请求关闭的成员 member_name（语义化 slug，不是显示名）",
     "shutdown_member.force": "是否强制关闭，默认 false。仅在成员卡死、长期无响应或无法正常收尾时使用",
     # ===== approve_plan ========================================================
-    # approve_plan._desc lives in descs/cn/approve_plan.md
+    # approve_plan._desc lives in descs/cn/member/approve_plan.md
     "approve_plan.plan_id": "成员提交的一版执行计划 ID；Leader 使用该字段精确审批某一版计划",
     "approve_plan.approved": "是否批准当前计划。true 表示进入实施，false 表示退回修改",
     "approve_plan.feedback": "审批反馈。拒绝时应说明原因和修改方向；批准时可补充约束、提醒或额外要求",
@@ -178,16 +189,16 @@ STRINGS: dict[str, str] = {
     "submit_plan.plan_id": "可选。成员计划 ID；不传时系统自动生成。Leader 后续用该 plan_id 审批",
     "submit_plan.plan_path": "成员已经写好的 Markdown 计划文件路径；系统会复制为受管快照供 Leader 审批",
     # ===== approve_tool ========================================================
-    # approve_tool._desc lives in descs/cn/approve_tool.md
+    # approve_tool._desc lives in descs/cn/member/approve_tool.md
     "approve_tool.member_name": "发起该工具审批请求的成员 member_name（语义化 slug，不是显示名）",
     "approve_tool.tool_call_id": "待恢复的中断 tool_call_id，应与当前审批请求中的工具调用一致",
     "approve_tool.approved": "是否批准这次工具调用。true 表示允许继续，false 表示拒绝并要求调整方案",
     "approve_tool.feedback": "审批反馈。拒绝时应说明原因和替代方向；批准时可补充边界、风险提醒或额外约束",
     "approve_tool.auto_confirm": "是否对后续同名工具自动批准。默认 false；仅在明确接受该类工具后续继续使用时开启",
     # ===== list_members ========================================================
-    # list_members._desc lives in descs/cn/list_members.md
+    # list_members._desc lives in descs/cn/member/list_members.md
     # ===== create_task ========================================================
-    # create_task._desc lives in descs/cn/create_task.md
+    # create_task._desc lives in descs/cn/task/create_task.md
     "create_task.tasks": "任务列表（单个任务也用数组包裹）",
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
@@ -213,7 +224,7 @@ STRINGS: dict[str, str] = {
         "验证不通过会打回重做开新一轮，超过上限后不再自动打回，而是升级给你处置"
     ),
     # ===== view_task ===========================================================
-    # view_task._desc lives in descs/cn/view_task.md
+    # view_task._desc lives in descs/cn/task/view_task.md
     "view_task.action": (
         "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、"
         "'claimable'（可认领的 pending 任务）、'in_review'（指派给你验证、正在 in_review 的任务）"
@@ -224,7 +235,7 @@ STRINGS: dict[str, str] = {
         "pending/blocked/planning/in_progress/in_review/completed/cancelled，不传则返回全部"
     ),
     # ===== update_task =========================================================
-    # update_task._desc lives in descs/cn/update_task.md
+    # update_task._desc lives in descs/cn/task/update_task.md
     "update_task.task_id": "要更新的任务 ID，传 '*' 取消所有任务",
     "update_task.status": "设为 'cancelled' 取消任务",
     "update_task.title": "新任务标题",
@@ -256,20 +267,20 @@ STRINGS: dict[str, str] = {
         "若其确实无法继续，可先用 shutdown_member(force=false) 让其退出团队，退出后该任务即可取消或改派"
     ),
     # ===== claim_task =========================================================
-    # claim_task._desc lives in descs/cn/claim_task.md
+    # claim_task._desc lives in descs/cn/task/claim_task.md
     "claim_task.task_id": "要领取或完成的任务 ID",
     "claim_task.status": "目标状态：'claimed'（领取）或 'completed'（完成）",
     # ===== member_complete_task ===============================================
-    # member_complete_task._desc lives in descs/cn/member_complete_task.md
+    # member_complete_task._desc lives in descs/cn/task/member_complete_task.md
     "member_complete_task.task_id": "要标记完成的任务 ID（必须是 leader 已经指派给你的任务）",
     "member_complete_task.note": "可选的完成说明，便于团队了解你的执行结果或后续注意事项",
     # ===== verify_task ========================================================
-    # verify_task._desc lives in descs/cn/verify_task.md
+    # verify_task._desc lives in descs/cn/task/verify_task.md
     "verify_task.task_id": "要验证的任务 ID（必须是指派给你验证、当前处于 in_review 的任务）",
     "verify_task.decision": "验证结论：verifier/challenger 投 'pass'/'fail'；inspector 投 0~1 的浮点分数（如 '0.85'）",
     "verify_task.feedback": "验证反馈（打回时会定向发给 author 指导返工，通过时可选）",
     # ===== send_message ========================================================
-    # send_message._desc lives in descs/cn/send_message.md
+    # send_message._desc lives in descs/cn/message/send_message.md
     "send_message.to": (
         '收件人：填 member_name（如 "backend-dev-1"）发送点对点 DM/私聊，仅你与该成员可见；'
         '填成员名数组（如 ["m1","m2"]）多播——同一份内容分别发给每个成员，'
@@ -288,7 +299,7 @@ STRINGS: dict[str, str] = {
         "content 里只写文件路径加一两句摘要。不要为了绕过本限制而把正文拆成多条消息。"
     ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============
-    # send_message_scheduled._desc lives in descs/cn/send_message_scheduled.md
+    # send_message_scheduled._desc lives in descs/cn/message/send_message_scheduled.md
     # ``content`` / ``summary`` are reused verbatim from the send_message keys
     # above — only the recipient semantics differ, so only ``to`` is redefined.
     "send_message_scheduled.to": (
@@ -302,12 +313,12 @@ STRINGS: dict[str, str] = {
     # / param schema via ``harness.prompts.tools`` providers — no entries
     # in this dict.
     # ===== workspace_meta =====================================================
-    # workspace_meta._desc lives in descs/cn/workspace_meta.md
+    # workspace_meta._desc lives in descs/cn/workspace/workspace_meta.md
     "workspace_meta.action": "操作类型：lock（获取文件锁）、unlock（释放文件锁）、locks（列出所有活跃锁）、history（查看文件版本历史）",
     "workspace_meta.path": "目标文件的相对路径（lock/unlock/history 时必填）",
     # ===== swarmflow / structured_output ======================================
-    # swarmflow._desc lives in descs/cn/swarmflow.md
-    # structured_output._desc lives in descs/cn/structured_output.md (无固定参数，schema 动态)
+    # swarmflow._desc lives in descs/cn/workflow/swarmflow.md
+    # structured_output._desc lives in descs/cn/common/structured_output.md (无固定参数，schema 动态)
     "swarmflow.script_path": (
         "磁盘上的 swarmflow 脚本文件路径——一个 Python 模块，含顶层 META（纯字面量）与 "
         "async def run(args)，脚本体用 from swarmflow import 引入 agent()/parallel()/pipeline() "
@@ -348,7 +359,7 @@ STRINGS: dict[str, str] = {
     ),
     # ===== async control tools (list / output / cancel) =======================
     # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc
-    # live in descs/cn/*.md
+    # live in descs/cn/async_task/*.md
     "async_task_output.task_id": "要查询的后台任务 id（来自启动工具返回的 task_id）。",
     "async_task_output.block": (
         "是否阻塞等待任务进入终态：true 时轮询至完成/失败或超时，默认 false 立即返回当前状态。"

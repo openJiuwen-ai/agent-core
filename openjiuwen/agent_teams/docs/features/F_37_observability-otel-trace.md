@@ -271,7 +271,7 @@ DeepAgent 初始化阶段的 ImageModalityProbe 调用发生在 agent span 创�
 | `langfuse.observation.type` | `"agent"` |
 | `agentteam.agent.id` | `{team_name}_{member_name}` |
 | `agentteam.agent.name` | member_name |
-| `agentteam.agent.role` | member_name（保持既有语义） |
+| `agentteam.agent.role` | 成员角色值（`TeamRole.value`，如 `leader` / `teammate` / `human_agent` / `external_cli`） |
 | `agentteam.member.id` | member_name |
 | `agentteam.member.name` | member_name |
 | `agentteam.team.id` | team_name |

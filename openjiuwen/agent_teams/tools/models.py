@@ -14,7 +14,7 @@ import hashlib
 import json
 from typing import Dict, Optional, cast
 
-from sqlalchemy import BigInteger, Index
+from sqlalchemy import BigInteger, Index, Table
 from sqlmodel import SQLModel, Field
 from sqlmodel.main import SQLModelMetaclass
 
@@ -477,6 +477,25 @@ def _get_review_vote_model() -> type[TeamTaskReviewVoteBase]:
         _review_vote_models[session_id] = cast(type[TeamTaskReviewVoteBase], model_cls)
 
     return _review_vote_models[session_id]
+
+
+def static_tables() -> list[Table]:
+    """Return the static (team-scoped) tables registered on ``SQLModel.metadata``.
+
+    ``SQLModel.metadata`` is process-global and the dynamic factories above
+    register one table set into it per session id the process has ever bound,
+    for the lifetime of the process. Schema creation for a database must
+    therefore never walk the whole registry: doing so gives every new database
+    the tables of every unrelated session seen so far, and makes the cost of
+    creating a schema grow with that history rather than with the schema. The
+    per-session tables are owned by ``create_cur_session_tables()``, which
+    creates exactly the current session's set.
+    """
+    return [
+        table
+        for name, table in SQLModel.metadata.tables.items()
+        if not name.startswith(TEAM_DYNAMIC_TABLE_PREFIXES)
+    ]
 
 
 def _clear_session_model_cache(session_id: str) -> None:

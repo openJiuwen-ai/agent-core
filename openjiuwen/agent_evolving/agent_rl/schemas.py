@@ -12,7 +12,16 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-from openjiuwen.agent_evolving.trajectory import Trajectory, trajectory_steps
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.spans import (
+    decode_json_attribute,
+    iter_spans,
+    read_llm_exchange,
+    read_rl_fields,
+    span_attributes,
+)
+from openjiuwen.agent_evolving.trajectory.team import span_category
+from openjiuwen.extensions.observability import semconv
 
 
 # ---------------------------------------------------------------------------
@@ -112,9 +121,8 @@ class RolloutWithReward(BaseModel):
 def trajectory_to_rollouts(trajectory: Trajectory) -> List[Rollout]:
     """Convert an OTLP-first Trajectory to a list of Rollout objects.
 
-    Extracts LLM steps from the Trajectory, mapping each TrajectoryStep
-    with kind='llm' and an LLMCallDetail to a Rollout compatible with
-    the RL training pipeline.
+    Extracts canonical ``llm.call`` spans and maps their prompt/completion
+    projections to a Rollout compatible with the RL training pipeline.
 
     Args:
         trajectory: An OTLP-first Trajectory from agent_evolving.trajectory.
@@ -123,97 +131,33 @@ def trajectory_to_rollouts(trajectory: Trajectory) -> List[Rollout]:
         List of Rollout objects, one per LLM turn.
     """
     rollouts: List[Rollout] = []
-    for step in trajectory_steps(trajectory):
-        if step.kind != "llm":
+    for span in iter_spans(trajectory):
+        if span_category(span) != "llm":
             continue
-        detail = step.detail
-        if detail is None:
-            continue
-
-        # EvolutionRail stores ``response`` / message list entries as Pydantic
-        # models (e.g. AssistantMessage); Rollout and tokenization need dicts.
-        raw_messages = detail.messages if hasattr(detail, "messages") else []
-        if not isinstance(raw_messages, list):
-            raw_messages = []
-        messages_norm: List[Any] = []
-        for m in raw_messages:
-            if isinstance(m, dict):
-                messages_norm.append(m)
-                continue
-            dump = getattr(m, "model_dump", None)
-            if callable(dump):
-                try:
-                    messages_norm.append(dump())
-                except Exception:
-                    messages_norm.append(m)
-            else:
-                messages_norm.append(m)
-
-        raw_tools = detail.tools if hasattr(detail, "tools") else None
-        tools_norm: Optional[List[Any]] = None
-        if isinstance(raw_tools, list):
-            tools_norm = []
-            for t in raw_tools:
-                if isinstance(t, dict):
-                    tools_norm.append(t)
-                    continue
-                dump = getattr(t, "model_dump", None)
-                if callable(dump):
-                    try:
-                        tools_norm.append(dump())
-                    except Exception:
-                        tools_norm.append(t)
-                else:
-                    tools_norm.append(t)
-
-        raw_resp = detail.response if hasattr(detail, "response") else None
-        if raw_resp is None:
-            output_response = None
-        elif isinstance(raw_resp, dict):
-            output_response = raw_resp
-        else:
-            dump = getattr(raw_resp, "model_dump", None)
-            if callable(dump):
-                try:
-                    dumped = dump()
-                    if isinstance(dumped, dict):
-                        output_response = dumped
-                    elif isinstance(dumped, str):
-                        output_response = {"role": "assistant", "content": dumped}
-                    else:
-                        output_response = {
-                            "role": "assistant",
-                            "content": str(dumped),
-                        }
-                except Exception:
-                    output_response = {
-                        "role": "assistant",
-                        "content": str(raw_resp),
-                    }
-            else:
-                output_response = {
-                    "role": getattr(raw_resp, "role", None) or "assistant",
-                    "content": getattr(raw_resp, "content", "") or "",
-                }
-
+        prompt_messages, completion_messages = read_llm_exchange(span)
+        attrs = span_attributes(span)
+        tools_norm = decode_json_attribute(attrs.get(semconv.GEN_AI_TOOL_DEFINITIONS))
+        if tools_norm is not None and not isinstance(tools_norm, list):
+            tools_norm = None
+        output_response = completion_messages[-1] if completion_messages else None
         input_prompt: Dict[str, Any] = {
-            "message": messages_norm,
+            "message": prompt_messages,
             "tools": tools_norm,
         }
-        llm_config = None
-        if hasattr(step, "meta") and step.meta:
-            llm_config = step.meta.get("llm_config")
+        llm_config = decode_json_attribute(attrs.get("llm_config")) if "llm_config" in attrs else None
+        rl_fields = read_rl_fields(span)
+        prompt_ids = rl_fields.get("prompt_token_ids")
+        completion_ids = rl_fields.get("completion_token_ids")
 
-        prompt_ids: Optional[List[int]] = getattr(step, "prompt_token_ids", None)
-        completion_ids: Optional[List[int]] = getattr(step, "completion_token_ids", None)
-
-        rollouts.append(Rollout(
-            turn_id=len(rollouts),
-            input_prompt=input_prompt,
-            output_response=output_response,
-            llm_config=llm_config,
-            input_prompt_ids=prompt_ids or None,
-            output_response_ids=completion_ids or None,
-        ))
+        rollouts.append(
+            Rollout(
+                turn_id=len(rollouts),
+                input_prompt=input_prompt,
+                output_response=output_response,
+                llm_config=llm_config,
+                input_prompt_ids=prompt_ids,
+                output_response_ids=completion_ids,
+            )
+        )
 
     return rollouts

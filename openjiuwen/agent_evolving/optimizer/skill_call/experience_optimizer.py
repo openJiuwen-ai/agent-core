@@ -35,6 +35,7 @@ from openjiuwen.agent_evolving.optimizer.skill_call.tool_call_chain import build
 from openjiuwen.agent_evolving.protocols import EXPERIENCES_TARGET
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.signal.team import build_team_trajectory_summary
+from openjiuwen.agent_evolving.trajectory.messages import tool_call_name
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
@@ -116,7 +117,7 @@ def _build_conversation_snippet(
             )
         tool_calls = message.get("tool_calls")
         if role == "assistant" and tool_calls:
-            names = [tool_call.get("name", "") for tool_call in tool_calls if isinstance(tool_call, dict)]
+            names = [str(tool_call_name(tool_call) or "") for tool_call in tool_calls]
             prefix = f"[assistant] (tool_calls: {', '.join(names)})\n  "
         else:
             prefix = f"[{role}] "

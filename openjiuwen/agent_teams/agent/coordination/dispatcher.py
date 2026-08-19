@@ -34,6 +34,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
 )
 from openjiuwen.agent_teams.agent.coordination.handlers import (
     AgentLifecycleHandler,
+    CheckpointHandler,
     MemberHandler,
     MessageHandler,
     ScheduledStaleTaskHandler,
@@ -223,6 +224,10 @@ class EventDispatcher:
         # (a dedicated event_key, no fan-out overlap), so its registration
         # position is not load-bearing.
         self.workflow = WorkflowHandler(host, blueprint, infra, poll_ctrl)
+        # Checkpoint creation announcements. Listens only for
+        # CHECKPOINT_CREATED (a dedicated event_key, no fan-out overlap), so its
+        # registration position is not load-bearing.
+        self.checkpoint = CheckpointHandler(host, blueprint, infra, poll_ctrl)
 
         # The reliability handler (leader-side remediation + team-level
         # ping-pong) mounts only when the team opts into the reliability
@@ -269,6 +274,7 @@ class EventDispatcher:
             self.stale_task,
             self.team_completion,
             self.workflow,
+            self.checkpoint,
         ]
         if self.reliability is not None:
             handlers.append(self.reliability)

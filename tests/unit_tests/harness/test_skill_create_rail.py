@@ -19,7 +19,11 @@ from openjiuwen.agent_evolving.signal.skill_creation import (
     SKILL_CREATION_SIGNAL_SKILL_TOOL_COVER,
     SkillCreationSignalDetector,
 )
-from openjiuwen.agent_evolving.trajectory import LLMCallDetail, ToolCallDetail, TrajectoryBuilder, TrajectoryStep
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans, merge_trajectories
+from openjiuwen.extensions.observability import semconv
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.sections import SectionName
@@ -31,87 +35,171 @@ from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 def _make_rail(tmp_path, *, auto_trigger=True) -> SkillCreateRail:
     return SkillCreateRail(
         skills_dir=str(tmp_path / "skills"),
+        trajectory_span_processor=TrajectorySpanProcessor(),
         auto_trigger=auto_trigger,
     )
 
 
-def _make_builder(session_id: str = "test") -> TrajectoryBuilder:
-    return TrajectoryBuilder(session_id=session_id, source="test")
+def _make_trajectory(session_id: str = "test", spans: list[dict] | None = None) -> Trajectory:
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map(
+                            {
+                                SESSION_ID: session_id,
+                                TRAJECTORY_ID: f"trajectory-{session_id}",
+                            }
+                        ),
+                    },
+                    "scopeSpans": [{"scope": {}, "spans": spans or []}],
+                }
+            ]
+        }
+    )
+
+
+def _llm_span(span_index: int, tool_calls: list[dict]) -> dict:
+    return {
+        "traceId": "trace-test",
+        "spanId": f"llm-{span_index}",
+        "name": "llm.call",
+        "attributes": attributes_from_map(
+            {
+                f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
+                f"{semconv.GEN_AI_COMPLETION}.0.content": "",
+                semconv.GEN_AI_REQUEST_MODEL: "mock",
+                semconv.GEN_AI_TOOL_CALLS: tool_calls,
+            }
+        ),
+    }
+
+
+def _tool_span(
+    span_index: int,
+    tool_name: str,
+    *,
+    call_result: object = "ok",
+    tool_call_id: str | None = None,
+) -> dict:
+    attrs = {
+        semconv.GEN_AI_TOOL_NAME: tool_name,
+        semconv.GEN_AI_TOOL_INPUT: "{}",
+        semconv.GEN_AI_TOOL_OUTPUT: call_result,
+    }
+    if tool_call_id is not None:
+        attrs[semconv.GEN_AI_TOOL_ID] = tool_call_id
+    return {
+        "traceId": "trace-test",
+        "spanId": f"tool-{span_index}",
+        "name": f"tool.{tool_name}",
+        "attributes": attributes_from_map(attrs),
+    }
 
 
 def _make_signal_detector() -> SkillCreationSignalDetector:
     return SkillCreationSignalDetector()
 
 
-def _set_builder_tool_calling_iterations(
+def _set_trajectory_tool_calling_iterations(
     rail,
     count: int,
     *,
     tools_per_iteration: int = 1,
     tool_name: str = "bash",
     session_id: str = "test",
-) -> None:
-    builder = _make_builder(session_id=session_id)
-    _append_builder_tool_calling_iterations(
-        builder,
+) -> Trajectory:
+    trajectory = _make_trajectory_tool_calling_iterations(
         count,
+        session_id=session_id,
         tools_per_iteration=tools_per_iteration,
         tool_name=tool_name,
     )
-    rail._builder = builder
+    rail._trajectory = trajectory
+    return trajectory
 
 
-def _append_builder_tool_calling_iterations(
-    builder,
+def _make_trajectory_tool_calling_iterations(
     count: int,
     *,
     tools_per_iteration: int = 1,
     tool_name: str = "bash",
     tool_call_id_prefix: str = "tc",
-) -> None:
+    session_id: str = "test",
+) -> Trajectory:
+    spans: list[dict] = []
     for idx in range(count):
         tool_calls = [
             {"id": f"{tool_call_id_prefix}_{idx}_{tool_idx}", "name": tool_name, "arguments": "{}"}
             for tool_idx in range(tools_per_iteration)
         ]
-        builder.record_step(
-            TrajectoryStep(
-                kind="llm",
-                detail=LLMCallDetail(
-                    model="mock",
-                    messages=[],
-                    response={"tool_calls": tool_calls},
-                ),
-                meta={"operator_id": "llm_main"},
-            )
-        )
+        span_index = len(spans)
+        spans.append(_llm_span(span_index, tool_calls))
         for tool_idx in range(tools_per_iteration):
-            _append_builder_tool_call(
-                builder,
-                tool_name,
-                tool_call_id=f"{tool_call_id_prefix}_{idx}_{tool_idx}",
+            spans.append(
+                _tool_span(
+                    len(spans),
+                    tool_name,
+                    tool_call_id=f"{tool_call_id_prefix}_{idx}_{tool_idx}",
+                )
             )
+    return _make_trajectory(session_id=session_id, spans=spans)
 
 
-def _append_builder_tool_call(
-    builder,
+def _append_trajectory_tool_calling_iterations(
+    trajectory: Trajectory,
+    count: int,
+    *,
+    tools_per_iteration: int = 1,
+    tool_name: str = "bash",
+    tool_call_id_prefix: str = "tc",
+) -> Trajectory:
+    start_index = len(list(iter_spans(trajectory)))
+    additions: list[dict] = []
+    for idx in range(count):
+        tool_calls = [
+            {"id": f"{tool_call_id_prefix}_{idx}_{tool_idx}", "name": tool_name, "arguments": "{}"}
+            for tool_idx in range(tools_per_iteration)
+        ]
+        additions.append(_llm_span(start_index + len(additions), tool_calls))
+        for tool_idx in range(tools_per_iteration):
+            additions.append(
+                _tool_span(
+                    start_index + len(additions),
+                    tool_name,
+                    tool_call_id=f"{tool_call_id_prefix}_{idx}_{tool_idx}",
+                )
+            )
+    return merge_trajectories(trajectory, _make_trajectory(trajectory.session_id or "test", additions))
+
+
+def _append_trajectory_tool_call(
+    trajectory: Trajectory,
     tool_name: str,
     *,
     call_result: object = "ok",
     tool_call_id: str | None = None,
-) -> None:
-    builder.record_step(
-        TrajectoryStep(
-            kind="tool",
-            detail=ToolCallDetail(
-                tool_name=tool_name,
-                call_args="{}",
-                call_result=call_result,
-                tool_call_id=tool_call_id,
-            ),
-            meta={"operator_id": tool_name},
-        )
+) -> Trajectory:
+    span_index = len(list(iter_spans(trajectory)))
+    return merge_trajectories(
+        trajectory,
+        _make_trajectory(
+            trajectory.session_id or "test",
+            [
+                _tool_span(
+                    span_index,
+                    tool_name,
+                    call_result=call_result,
+                    tool_call_id=tool_call_id,
+                )
+            ],
+        ),
     )
+
+
+async def _after_task_iteration(rail: SkillCreateRail, ctx) -> None:
+    await rail._on_after_task_iteration(ctx, rail._trajectory)
 
 
 def _make_agent_with_skill_creation_capability(tmp_path):
@@ -227,10 +315,10 @@ class TestSkillCreateRailPrompts:
     @pytest.mark.asyncio
     async def test_follow_up_prompt_contract(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6)
+        _set_trajectory_tool_calling_iterations(rail, 6)
         ctx = _make_task_ctx()
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_called_once()
         prompt = ctx.agent._loop_controller.enqueue_follow_up.call_args.args[0]
@@ -265,14 +353,14 @@ class TestSkillCreateRailTriggering:
         tools_per_iteration,
     ):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(
+        _set_trajectory_tool_calling_iterations(
             rail,
             iterations,
             tools_per_iteration=tools_per_iteration,
         )
         ctx = _make_task_ctx()
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_called_once()
         assert rail._last_prompted_tool_totals["test"] == (iterations, iterations * tools_per_iteration)
@@ -287,28 +375,28 @@ class TestSkillCreateRailTriggering:
     @pytest.mark.asyncio
     async def test_does_not_prompt_below_first_threshold(self, tmp_path, iterations, tools_per_iteration):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(
+        _set_trajectory_tool_calling_iterations(
             rail,
             iterations,
             tools_per_iteration=tools_per_iteration,
         )
         ctx = _make_task_ctx()
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_normal_reply_creation_question_records_prompt_without_follow_up(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6)
+        _set_trajectory_tool_calling_iterations(rail, 6)
         ctx = _make_task_ctx()
         ctx.inputs.result = {
             "output": "这个流程可以沉淀成可复用技能。要不要我创建一个 Skill？",
             "result_type": "answer",
         }
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_not_called()
         assert rail._follow_up_sent is True
@@ -318,14 +406,14 @@ class TestSkillCreateRailTriggering:
     @pytest.mark.asyncio
     async def test_english_normal_reply_creation_question_records_prompt_without_follow_up(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6)
+        _set_trajectory_tool_calling_iterations(rail, 6)
         ctx = _make_task_ctx()
         ctx.inputs.result = {
             "message": {"content": "This workflow is reusable. Should I create a Skill for it?"},
             "result_type": "answer",
         }
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_not_called()
         assert rail._last_prompted_tool_totals["test"] == (6, 6)
@@ -334,14 +422,14 @@ class TestSkillCreateRailTriggering:
     @pytest.mark.asyncio
     async def test_normal_reply_creation_terms_below_threshold_do_not_consume_window(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 5)
+        _set_trajectory_tool_calling_iterations(rail, 5)
         ctx = _make_task_ctx()
         ctx.inputs.result = {
             "output": "这个流程可以沉淀成可复用技能。要不要我创建一个 Skill？",
             "result_type": "answer",
         }
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_not_called()
         assert rail._last_prompted_tool_totals == {}
@@ -350,23 +438,23 @@ class TestSkillCreateRailTriggering:
     @pytest.mark.asyncio
     async def test_normal_reply_creation_question_prevents_small_reprompt_window(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6)
+        initial_trajectory = _set_trajectory_tool_calling_iterations(rail, 6)
         ctx = _make_task_ctx()
         ctx.inputs.result = {
             "output": "这个流程可以沉淀成可复用技能。要不要我创建一个 Skill？",
             "result_type": "answer",
         }
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
         await rail._on_before_invoke(ctx)
         ctx.inputs.result = {"output": "继续完成了一点小修改。", "result_type": "answer"}
-        _append_builder_tool_calling_iterations(
-            rail._builder,
+        rail._trajectory = _append_trajectory_tool_calling_iterations(
+            initial_trajectory,
             1,
             tools_per_iteration=3,
             tool_call_id_prefix="small_after_normal_prompt",
         )
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_not_called()
         assert rail._last_prompted_tool_totals["test"] == (6, 6)
@@ -375,14 +463,14 @@ class TestSkillCreateRailTriggering:
     @pytest.mark.asyncio
     async def test_normal_reply_creation_question_consumes_window_without_controller(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6)
+        _set_trajectory_tool_calling_iterations(rail, 6)
         ctx = _make_task_ctx(has_controller=False)
         ctx.inputs.result = {
             "output": "这个流程可以沉淀成可复用技能。要不要我创建一个 Skill？",
             "result_type": "answer",
         }
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         assert rail._follow_up_sent is True
         assert rail._last_prompted_tool_totals["test"] == (6, 6)
@@ -403,47 +491,51 @@ class TestSkillCreateRailTriggering:
         tools_per_iteration,
     ):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6, session_id="session-a")
+        initial_trajectory = _set_trajectory_tool_calling_iterations(rail, 6, session_id="session-a")
         ctx = _make_task_ctx()
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
         await rail._on_before_invoke(ctx)
-        _append_builder_tool_calling_iterations(
-            rail._builder,
+        rail._trajectory = _append_trajectory_tool_calling_iterations(
+            initial_trajectory,
             extra_iterations,
             tools_per_iteration=tools_per_iteration,
             tool_call_id_prefix="extra",
         )
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         assert ctx.agent._loop_controller.enqueue_follow_up.call_count == 2
 
     @pytest.mark.asyncio
     async def test_does_not_reprompt_when_only_total_still_exceeds_first_threshold(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6, session_id="session-a")
+        initial_trajectory = _set_trajectory_tool_calling_iterations(rail, 6, session_id="session-a")
         ctx = _make_task_ctx()
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
         await rail._on_before_invoke(ctx)
-        _append_builder_tool_calling_iterations(
-            rail._builder,
+        rail._trajectory = _append_trajectory_tool_calling_iterations(
+            initial_trajectory,
             1,
             tools_per_iteration=3,
             tool_call_id_prefix="small",
         )
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_called_once()
         assert rail._last_prompted_tool_totals["session-a"] == (6, 6)
 
     def test_metrics_filter_blacklisted_tools_and_count_unknown_namespaced_tools(self):
-        builder = _make_builder()
-        _append_builder_tool_calling_iterations(builder, 3, tool_name="ask_user")
-        _append_builder_tool_calling_iterations(builder, 2, tool_name="team.send_message", tool_call_id_prefix="send")
-        _append_builder_tool_calling_iterations(builder, 2, tool_name="team.custom_tool", tool_call_id_prefix="custom")
+        trajectory = _make_trajectory()
+        trajectory = _append_trajectory_tool_calling_iterations(trajectory, 3, tool_name="ask_user")
+        trajectory = _append_trajectory_tool_calling_iterations(
+            trajectory, 2, tool_name="team.send_message", tool_call_id_prefix="send"
+        )
+        trajectory = _append_trajectory_tool_calling_iterations(
+            trajectory, 2, tool_name="team.custom_tool", tool_call_id_prefix="custom"
+        )
 
-        metrics = _make_signal_detector().collect_metrics(builder)
+        metrics = _make_signal_detector().collect_metrics(trajectory)
 
         assert metrics.total_effective_tool_calling_iterations == 2
         assert metrics.total_effective_tool_calls == 2
@@ -453,17 +545,16 @@ class TestSkillCreateRailTriggering:
 
     def test_signal_detector_returns_prompt_and_skill_tool_cover_signals(self):
         detector = _make_signal_detector()
-        builder = _make_builder()
-        _append_builder_tool_calling_iterations(builder, 6)
-        prompt_signals = detector.detect(builder)
+        trajectory = _make_trajectory_tool_calling_iterations(6)
+        prompt_signals = detector.detect(trajectory)
 
         assert len(prompt_signals) == 1
         prompt_signal = prompt_signals[0]
         assert prompt_signal.signal_type == SKILL_CREATION_SIGNAL_PROMPT_ELIGIBLE
         assert prompt_signal.reason == "first_prompt_threshold"
 
-        _append_builder_tool_call(builder, "team.skill_tool")
-        cover_signals = detector.detect(builder)
+        trajectory = _append_trajectory_tool_call(trajectory, "team.skill_tool")
+        cover_signals = detector.detect(trajectory)
 
         assert len(cover_signals) == 1
         cover_signal = cover_signals[0]
@@ -472,11 +563,10 @@ class TestSkillCreateRailTriggering:
 
     def test_signal_detector_can_reuse_collected_metrics(self):
         detector = _make_signal_detector()
-        builder = _make_builder()
-        _append_builder_tool_calling_iterations(builder, 6)
-        metrics = detector.collect_metrics(builder)
+        trajectory = _make_trajectory_tool_calling_iterations(6)
+        metrics = detector.collect_metrics(trajectory)
 
-        signals = detector.detect(builder, metrics=metrics)
+        signals = detector.detect(trajectory, metrics=metrics)
 
         assert len(signals) == 1
         assert signals[0].metrics is metrics
@@ -489,17 +579,17 @@ class TestSkillCreateRailTriggering:
         tool_name,
     ):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6)
-        _append_builder_tool_call(rail._builder, tool_name)
+        _set_trajectory_tool_calling_iterations(rail, 6)
+        rail._trajectory = _append_trajectory_tool_call(rail._trajectory, tool_name)
         ctx = _make_task_ctx()
 
-        await rail._on_after_task_iteration(ctx)
-        _append_builder_tool_calling_iterations(
-            rail._builder,
+        await _after_task_iteration(rail, ctx)
+        rail._trajectory = _append_trajectory_tool_calling_iterations(
+            rail._trajectory,
             6,
             tool_call_id_prefix="after_skill_tool",
         )
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_not_called()
         assert rail._last_followed_tool_call_counts["test"] == 13
@@ -507,17 +597,17 @@ class TestSkillCreateRailTriggering:
     @pytest.mark.asyncio
     async def test_next_invoke_can_trigger_after_skill_tool_watermark(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 1, tool_name="skill_tool")
+        initial_trajectory = _set_trajectory_tool_calling_iterations(rail, 1, tool_name="skill_tool")
         ctx = _make_task_ctx()
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
         await rail._on_before_invoke(ctx)
-        _append_builder_tool_calling_iterations(
-            rail._builder,
+        rail._trajectory = _append_trajectory_tool_calling_iterations(
+            initial_trajectory,
             6,
             tool_call_id_prefix="next",
         )
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_called_once()
 
@@ -533,10 +623,10 @@ class TestSkillCreateRailTriggering:
     @pytest.mark.asyncio
     async def test_suppressed_run_kinds_refresh_watermark(self, tmp_path, ctx_kwargs):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6)
+        _set_trajectory_tool_calling_iterations(rail, 6)
         ctx = _make_task_ctx(**ctx_kwargs)
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_not_called()
         assert rail._last_followed_tool_call_counts["test"] == 6
@@ -544,13 +634,13 @@ class TestSkillCreateRailTriggering:
     @pytest.mark.asyncio
     async def test_controller_unavailable_does_not_consume_window(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6)
+        _set_trajectory_tool_calling_iterations(rail, 6)
         ctx = _make_task_ctx(has_controller=False)
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
         ctx.agent._loop_controller = MagicMock()
         ctx.agent._loop_controller.enqueue_follow_up = MagicMock()
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_called_once()
         assert rail._last_followed_tool_call_counts == {}
@@ -558,20 +648,20 @@ class TestSkillCreateRailTriggering:
     @pytest.mark.asyncio
     async def test_auto_trigger_false_suppresses_follow_up(self, tmp_path):
         rail = _make_rail(tmp_path, auto_trigger=False)
-        _set_builder_tool_calling_iterations(rail, 6)
+        _set_trajectory_tool_calling_iterations(rail, 6)
         ctx = _make_task_ctx()
 
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_follow_up_once_per_invoke(self, tmp_path):
         rail = _make_rail(tmp_path)
-        _set_builder_tool_calling_iterations(rail, 6)
+        _set_trajectory_tool_calling_iterations(rail, 6)
         ctx = _make_task_ctx()
 
-        await rail._on_after_task_iteration(ctx)
-        await rail._on_after_task_iteration(ctx)
+        await _after_task_iteration(rail, ctx)
+        await _after_task_iteration(rail, ctx)
 
         ctx.agent._loop_controller.enqueue_follow_up.assert_called_once()

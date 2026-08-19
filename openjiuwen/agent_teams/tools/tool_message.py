@@ -90,7 +90,7 @@ class _SendMessageBase(TeamTool, ABC):
         try:
             return await self._dispatch(to_raw, content, summary)
         except Exception as e:
-            team_logger.error(f"send_message failed: {e}")
+            team_logger.exception("send_message failed")
             return ToolOutput(success=False, error=f"Internal error: {e}")
 
     @abstractmethod

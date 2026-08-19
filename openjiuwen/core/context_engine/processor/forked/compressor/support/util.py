@@ -40,6 +40,9 @@ INTERNAL_USER_PREFIXES = (
     "<memory_block_current>",
     "<memory_block_dialogue>",
     "<memory_block_round>",
+    # SESSION_MEMORY_BLOCK_OPEN from session_memory_compressor.py (inlined to
+    # avoid an import cycle: that module imports from this one).
+    "<memory_block_session>",
     "<recovered_context>",
     "[STATE_REINJECTION]",
 )

@@ -9,9 +9,8 @@ from typing import Any, cast
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.symphony.models import (
-    CapabilityCall,
     CapabilityDescriptor,
     CapabilityFingerprint,
     CapabilityIO,
@@ -200,6 +199,20 @@ class BlockingLLM(CountingLLM):
         return await super().invoke(messages, **kwargs)
 
 
+class ControlledCompletionLLM(CountingLLM):
+    def __init__(self, capability_ids: tuple[str, ...]) -> None:
+        super().__init__()
+        self.started = {capability_id: asyncio.Event() for capability_id in capability_ids}
+        self.release = {capability_id: asyncio.Event() for capability_id in capability_ids}
+
+    async def invoke(self, messages, **kwargs) -> str:
+        context = json.loads(messages[-1]["content"])
+        capability_id = context["capability_id"]
+        self.started[capability_id].set()
+        await self.release[capability_id].wait()
+        return await super().invoke(messages, **kwargs)
+
+
 class PartiallyInvalidLLM(CountingLLM):
     async def invoke(self, messages, **kwargs) -> str:
         context = json.loads(messages[-1]["content"])
@@ -207,6 +220,17 @@ class PartiallyInvalidLLM(CountingLLM):
             self.calls += 1
             return "[]"
         return await super().invoke(messages, **kwargs)
+
+
+class FrameworkFailingLLM:
+    cache_signature = "framework-failure-v1"
+
+    async def invoke(self, messages, **kwargs):
+        del messages, kwargs
+        raise build_error(
+            StatusCode.MODEL_CALL_FAILED,
+            error_msg="model unavailable",
+        )
 
 
 class CoreMessageLLM(CountingLLM):
@@ -261,6 +285,19 @@ def _descriptors() -> list[CapabilityDescriptor]:
             name="Researcher",
             description="Research a topic and return supported findings.",
             content_hash="2" * 64,
+        ),
+    ]
+
+
+def _three_descriptors() -> list[CapabilityDescriptor]:
+    return [
+        *_descriptors(),
+        CapabilityDescriptor(
+            capability_id="writer",
+            capability_type="skill",
+            name="Writer",
+            description="Write a concise response from supplied findings.",
+            content_hash="3" * 64,
         ),
     ]
 
@@ -475,14 +512,101 @@ async def test_incremental_cache_reuses_complete_fingerprint(tmp_path) -> None:
     )
 
     first = await service.build()
-    second = await service.build()
+    progress = []
+    second = await service.build(progress_callback=progress.append)
 
     assert llm.calls == 2
     assert evaluation.calls == 2
     assert second.fingerprints[0].evidence == first.fingerprints[0].evidence
     assert second.fingerprints[0].semantic_profile == first.fingerprints[0].semantic_profile
+    assert progress == []
     cache_payload = json.loads((tmp_path / ".fingerprint-cache.json").read_text(encoding="utf-8"))
     assert cache_payload["entries"]["researcher"]["normalization"]["decisions"]
+
+
+@pytest.mark.asyncio
+async def test_extraction_progress_advances_only_after_concurrent_completion(tmp_path) -> None:
+    descriptors = _three_descriptors()
+    capability_ids = tuple(item.capability_id for item in descriptors)
+    llm = ControlledCompletionLLM(capability_ids)
+    progress = []
+    progress_reached = {current: asyncio.Event() for current in range(1, 4)}
+
+    async def record_progress(event) -> None:
+        progress.append(event)
+        current = event["current"]
+        if current:
+            progress_reached[current].set()
+
+    service = FingerprintService(
+        FakeProvider("snapshot-1", descriptors),
+        tmp_path,
+        llm=llm,
+        settings=FingerprintSettings(
+            enable_llm_extraction=True,
+            batch_size=3,
+            max_concurrency=3,
+        ),
+        evaluation_suite=NoopEvaluationSuite(),
+    )
+
+    task = asyncio.create_task(service.build(progress_callback=record_progress))
+    await asyncio.gather(*(event.wait() for event in llm.started.values()))
+    assert [(item["current"], item["total"]) for item in progress] == [(0, 3)]
+
+    completion_order = ("researcher", "writer", "summarize")
+    for current, capability_id in enumerate(completion_order, start=1):
+        llm.release[capability_id].set()
+        await progress_reached[current].wait()
+
+    await task
+
+    assert [(item["current"], item["total"]) for item in progress] == [
+        (0, 3),
+        (1, 3),
+        (2, 3),
+        (3, 3),
+    ]
+    assert [item.get("capability_id") for item in progress[1:]] == list(completion_order)
+
+
+@pytest.mark.asyncio
+async def test_incremental_progress_counts_only_descriptors_requiring_extraction(tmp_path) -> None:
+    provider = FakeProvider("snapshot-1", _descriptors())
+    service = FingerprintService(
+        provider,
+        tmp_path,
+        evaluation_suite=NoopEvaluationSuite(),
+    )
+    await service.build()
+    provider.descriptors = [
+        provider.descriptors[0],
+        provider.descriptors[1].model_copy(update={"content_hash": "4" * 64}),
+    ]
+    progress = []
+
+    await service.build(progress_callback=progress.append)
+
+    assert [(item["current"], item["total"]) for item in progress] == [(0, 1), (1, 1)]
+
+
+@pytest.mark.asyncio
+async def test_progress_callback_failure_does_not_abort_fingerprint_build(tmp_path) -> None:
+    attempts = 0
+
+    async def failing_progress(_event) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("progress transport failed")
+
+    artifact = await FingerprintService(
+        FakeProvider("snapshot-1", _descriptors()[:1]),
+        tmp_path,
+        evaluation_suite=NoopEvaluationSuite(),
+    ).build(progress_callback=failing_progress)
+
+    assert artifact.fingerprints
+    assert attempts == 2
 
 
 @pytest.mark.asyncio
@@ -795,12 +919,45 @@ async def test_one_llm_extraction_failure_does_not_abort_other_capabilities(tmp_
         evaluation_suite=NoopEvaluationSuite(),
     )
 
-    artifact = await service.build()
+    progress = []
+    artifact = await service.build(progress_callback=progress.append)
     by_id = {item.capability_id: item for item in artifact.fingerprints}
 
     assert [failure.code for failure in by_id["summarize"].failures] == ["LLM_RESPONSE_INVALID"]
     assert by_id["researcher"].semantic_profile.summary == "Profile for Researcher"
     assert llm.calls == 2
+    assert [(item["current"], item["total"]) for item in progress] == [(0, 2), (1, 2), (2, 2)]
+
+
+@pytest.mark.asyncio
+async def test_framework_model_failure_aborts_and_preserves_published_artifact(tmp_path) -> None:
+    settings = FingerprintSettings(enable_llm_extraction=True)
+    provider = FakeProvider("snapshot-1", _descriptors()[:1])
+    initial = await FingerprintService(
+        provider,
+        tmp_path,
+        llm=CountingLLM("initial"),
+        settings=settings,
+        evaluation_suite=NoopEvaluationSuite(),
+    ).build()
+    artifact_path = tmp_path / "fingerprint.json"
+    previous_bytes = artifact_path.read_bytes()
+    assert initial.fingerprints
+
+    service = FingerprintService(
+        provider,
+        tmp_path,
+        llm=FrameworkFailingLLM(),
+        settings=settings,
+        evaluation_suite=NoopEvaluationSuite(),
+    )
+    progress = []
+    with pytest.raises(BaseError) as exc_info:
+        await service.build(force=True, progress_callback=progress.append)
+
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
+    assert artifact_path.read_bytes() == previous_bytes
+    assert [(item["current"], item["total"]) for item in progress] == [(0, 1)]
 
 
 @pytest.mark.asyncio
@@ -864,7 +1021,7 @@ async def test_missing_required_llm_is_an_explicit_configuration_error(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_invalid_raw_trace_timing_is_a_schema_error(tmp_path) -> None:
+async def test_legacy_trace_calls_are_a_schema_error(tmp_path) -> None:
     service = FingerprintService(
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
@@ -873,14 +1030,7 @@ async def test_invalid_raw_trace_timing_is_a_schema_error(tmp_path) -> None:
     trace = {
         "capability_id": "summarize",
         "capability_type": "skill",
-        "calls": [
-            {
-                "capability_id": "summarize",
-                "capability_type": "skill",
-                "started_at": "2026-08-03T00:00:00",
-                "ended_at": "2026-08-03T01:00:00+00:00",
-            }
-        ],
+        "calls": [],
     }
 
     with pytest.raises(BaseError) as exc_info:
@@ -890,26 +1040,16 @@ async def test_invalid_raw_trace_timing_is_a_schema_error(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_trace_model_copy_cannot_bypass_timing_validation(tmp_path) -> None:
+async def test_trace_model_copy_cannot_bypass_message_validation(tmp_path) -> None:
     service = FingerprintService(
         FakeProvider("snapshot-1", _descriptors()[:1]),
         tmp_path,
         evaluation_suite=NoopEvaluationSuite(),
     )
-    valid_call = CapabilityCall(
-        capability_id="summarize",
-        capability_type="skill",
-        started_at=datetime(2026, 8, 3, tzinfo=UTC),
-        ended_at=datetime(2026, 8, 3, 1, tzinfo=UTC),
-    )
-    invalid_call = valid_call.model_copy(
-        update={"started_at": datetime(2026, 8, 3)},  # noqa: DTZ001 -- deliberate bypass attempt.
-    )
     trace = EvaluationCase(
         capability_id="summarize",
         capability_type="skill",
-        calls=(valid_call,),
-    ).model_copy(update={"calls": (invalid_call,)})
+    ).model_copy(update={"message": ({"role": "unknown", "content": "invalid"},)})
 
     with pytest.raises(BaseError) as exc_info:
         await service.build(traces=(trace,))
@@ -988,7 +1128,8 @@ async def test_cancelled_build_preserves_last_successful_artifact(tmp_path) -> N
         evaluation_suite=NoopEvaluationSuite(),
     )
 
-    task = asyncio.create_task(second_service.build(force=True))
+    progress = []
+    task = asyncio.create_task(second_service.build(force=True, progress_callback=progress.append))
     await llm.started.wait()
     assert second_service.cancel_build()
     llm.release.set()
@@ -997,6 +1138,7 @@ async def test_cancelled_build_preserves_last_successful_artifact(tmp_path) -> N
 
     assert exc_info.value.status is StatusCode.COMPONENT_SYMPHONY_BUILD_INTERRUPTED
     assert first_service.read().source_snapshot.snapshot_id == "snapshot-1"
+    assert [(item["current"], item["total"]) for item in progress] == [(0, 1)]
 
 
 @pytest.mark.asyncio
@@ -1213,18 +1355,12 @@ async def test_known_capability_type_alias_is_canonicalized_before_cache_identit
 
 
 @pytest.mark.asyncio
-async def test_trace_call_type_alias_is_canonicalized_before_matching(tmp_path) -> None:
+async def test_trace_case_type_alias_is_canonicalized_before_matching(tmp_path) -> None:
     descriptor = _descriptors()[1].model_copy(update={"capability_type": "SubAgent"})
     trace = EvaluationCase(
-        capability_id="parent",
-        capability_type="workflow",
-        calls=(
-            CapabilityCall(
-                capability_id="researcher",
-                capability_type="SUB-AGENT",
-                success=True,
-            ),
-        ),
+        capability_id="researcher",
+        capability_type="SUB-AGENT",
+        success=True,
     )
 
     artifact = await FingerprintService(
@@ -1234,6 +1370,37 @@ async def test_trace_call_type_alias_is_canonicalized_before_matching(tmp_path) 
     ).build(traces=(trace,))
 
     assert artifact.fingerprints[0].capability_type == "agent"
+    assert artifact.fingerprints[0].quality is not None
+    assert artifact.fingerprints[0].quality.sample_count == 1
+
+
+@pytest.mark.asyncio
+async def test_trace_message_function_name_references_child_fingerprint(tmp_path) -> None:
+    descriptor = _descriptors()[1]
+    trace = EvaluationCase(
+        capability_id="parent",
+        capability_type="workflow",
+        message=(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "research-step",
+                        "type": "function",
+                        "function": {"name": "researcher", "arguments": '{"topic":"weather"}'},
+                    }
+                ],
+            },
+        ),
+    )
+
+    artifact = await FingerprintService(
+        FakeProvider("snapshot-1", [descriptor]),
+        tmp_path,
+        evaluation_suite=NoopEvaluationSuite(),
+    ).build(traces=(trace,))
+
     assert artifact.fingerprints[0].quality is not None
     assert artifact.fingerprints[0].quality.sample_count == 1
 

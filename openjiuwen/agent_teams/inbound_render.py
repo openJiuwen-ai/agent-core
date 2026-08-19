@@ -234,6 +234,43 @@ def render_team_context(*, body: str) -> str:
     return _render_block("team-context", [], body)
 
 
+def render_team_context_with_identity(
+    *,
+    identity_body: str,
+    identity_conversion: str | None = None,
+    info_body: str | None = None,
+) -> str:
+    """Render a ``<team-context>`` block with a nested ``<identity>`` sub-block.
+
+    Fork-aware variant of :func:`render_team_context`: the member's own
+    identity is wrapped in a ``<identity>`` element (with an optional
+    ``<identity-conversion>`` child noting the fork source), so the model can
+    tell the *current* identity block apart from an earlier one inherited
+    through fork. Only used when fork is enabled — the plain
+    :func:`render_team_context` stays byte-identical for non-fork teams.
+
+    Args:
+        identity_body: The identity text (escaped into the ``<identity>``
+            element body).
+        identity_conversion: The fork conversion notice, or ``None`` for a
+            member that was not forked from another. Rendered as a nested
+            ``<identity-conversion>`` child when present.
+        info_body: The team-metadata text (sibling of ``<identity>``, same
+            block), or ``None`` when absent.
+
+    Returns:
+        The rendered ``<team-context>`` block.
+    """
+    identity_parts = [_esc_text(identity_body)]
+    if identity_conversion:
+        identity_parts.append(_render_block("identity-conversion", [], identity_conversion))
+    identity = f"<identity>\n{chr(10).join(identity_parts)}\n</identity>"
+    inner = [identity]
+    if info_body:
+        inner.append(_esc_text(info_body))
+    return f"<team-context>\n{chr(10).join(inner)}\n</team-context>"
+
+
 def snapshot_kind_of(text: str) -> str | None:
     """Return the snapshot kind ``text`` is, or None when it is not one.
 
@@ -296,5 +333,6 @@ __all__ = [
     "render_event",
     "render_inbound",
     "render_team_context",
+    "render_team_context_with_identity",
     "snapshot_kind_of",
 ]

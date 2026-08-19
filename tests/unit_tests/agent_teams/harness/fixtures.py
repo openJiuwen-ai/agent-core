@@ -312,7 +312,7 @@ def make_card(name: str = "native_harness_test") -> AgentCard:
     return AgentCard(name=name, description="native-harness-test")
 
 
-def make_spec(card: AgentCard | None = None, *, completion_timeout: float = 600.0) -> Any:
+def make_spec(card: AgentCard | None = None, *, completion_timeout: float | None = 600.0) -> Any:
     """Build a fake DeepAgentSpec whose ``resolve_parts`` yields task-loop parts.
 
     Forward construction: NativeHarness configures itself from this spec's
@@ -323,7 +323,8 @@ def make_spec(card: AgentCard | None = None, *, completion_timeout: float = 600.
 
     Args:
         card: Optional card for the spec (and thus the harness).
-        completion_timeout: Round completion timeout in seconds.
+        completion_timeout: Slow-round warning threshold in seconds; None
+            disables the warning.
 
     Returns:
         A fake spec exposing ``resolve_parts(context) -> DeepAgentParts``.

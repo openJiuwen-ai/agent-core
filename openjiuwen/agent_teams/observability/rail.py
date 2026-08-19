@@ -30,11 +30,11 @@ from opentelemetry.trace import (
     set_span_in_context,
 )
 
-from openjiuwen.agent_teams.observability.redaction import (
+from openjiuwen.extensions.observability.redaction import (
     redact_completion,
     redact_prompt,
 )
-from openjiuwen.agent_teams.observability.semconv import (
+from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_AGENT_INPUT,
     AT_AGENT_NAME,
@@ -44,7 +44,6 @@ from openjiuwen.agent_teams.observability.semconv import (
     AT_MEMBER_NAME,
     AT_SESSION_ID,
     AT_TEAM_ID,
-    AT_TEAM_NAME,
     DA_TASK_IS_FOLLOW_UP,
     DA_TASK_ITERATION,
     DA_TASK_LOOP_EVENT,
@@ -53,14 +52,14 @@ from openjiuwen.agent_teams.observability.semconv import (
     LANGFUSE_OBSERVATION_TYPE,
     LANGFUSE_SESSION_ID,
 )
-from openjiuwen.agent_teams.observability.span_context import (
+from openjiuwen.extensions.observability.span_context import (
     cascade_close_children,
+    clear_tool_span_context,
     get_current_agent_span,
     get_current_tool_span,
     set_current_agent_span,
-    get_team_span,
-    _tool_span_map,
 )
+from openjiuwen.agent_teams.observability.span_context import get_team_span
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -575,7 +574,7 @@ class ObservabilityRail(DeepAgentRail):
             # LLM spans need no equivalent cleanup: ActiveSpanTracker indexes
             # them by the id of the request that opened them, so an inherited
             # context can never make this member resolve another member's span.
-            _tool_span_map.set({})
+            clear_tool_span_context()
         set_current_agent_span(None)
 
     @staticmethod
@@ -613,6 +612,31 @@ class ObservabilityRail(DeepAgentRail):
         return ""
 
     @staticmethod
+    def _resolve_role(agent: Any) -> str:
+        """Return the role string for span stamping, mirroring ``_resolve_member_name``.
+
+        Source priority (symmetric with member_name resolution):
+          1. ``agent.role`` — ``TeamAgent`` property, returns a ``TeamRole``
+             enum whose ``.value`` is the authoritative role string.
+          2. ``agent.build_context.role`` — ``NativeHarness`` / ``DeepAgent``
+             shells expose the build context set by the configurator from
+             ``ctx.role.value`` (a plain role string such as ``"leader"`` or
+             ``"human_agent"``).
+          3. Falls back to ``""`` (caller substitutes member_name).
+        """
+        role_attr = getattr(agent, "role", None)
+        if isinstance(role_attr, TeamRole):
+            return role_attr.value
+        build_ctx = getattr(agent, "build_context", None)
+        bc_role = getattr(build_ctx, "role", None) if build_ctx else None
+        if isinstance(bc_role, str) and bc_role:
+            try:
+                return TeamRole(bc_role).value
+            except ValueError:
+                pass
+        return ""
+
+    @staticmethod
     def _stamp_agent_attributes(
         span: Span,
         *,
@@ -624,11 +648,13 @@ class ObservabilityRail(DeepAgentRail):
     ) -> None:
         """Apply the common agent-span attributes shared by iteration and invoke spans.
 
-        ``is_leader`` is accepted for symmetry with the iteration path but
-        does not alter the role attribute here — ``AT_AGENT_ROLE`` carries
-        the member name (its long-standing semantics); leader-vs-teammate is
-        distinguished elsewhere via ``agent.role``.
+        ``AT_AGENT_ROLE`` carries the agent's role value (e.g. ``leader`` /
+        ``teammate`` / ``human_agent`` / ``external_cli``) resolved via
+        ``_resolve_role``. Sub-agents and shells that expose neither
+        ``agent.role`` nor a ``build_context.role`` fall back to the member
+        name so the attribute is never empty.
         """
+        role_value = ObservabilityRail._resolve_role(agent) or member_name or ""
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "agent")
         if team_name and member_name:
             span.set_attribute(AT_AGENT_ID, f"{team_name}_{member_name}")
@@ -638,7 +664,7 @@ class ObservabilityRail(DeepAgentRail):
             span.set_attribute(AT_AGENT_NAME, member_name)
             span.set_attribute(AT_MEMBER_ID, member_name)
             span.set_attribute(AT_MEMBER_NAME, member_name)
-        span.set_attribute(AT_AGENT_ROLE, member_name or "")
+        span.set_attribute(AT_AGENT_ROLE, role_value)
         if team_name:
             span.set_attribute(AT_TEAM_ID, team_name)
         if session_id:

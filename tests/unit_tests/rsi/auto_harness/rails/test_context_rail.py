@@ -48,7 +48,6 @@ def test_auto_harness_context_rail_init_keeps_context_processors():
     assert list(processors) == [
         "MessageSummaryOffloader",
         "SessionMemoryCompressor",
-        "ReasoningToolLoopCompactProcessor",
         "DialogueCompressor",
         "CurrentRoundCompressor",
         "RoundLevelCompressor",

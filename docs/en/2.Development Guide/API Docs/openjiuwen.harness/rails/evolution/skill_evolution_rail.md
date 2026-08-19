@@ -37,6 +37,7 @@ configure_skill_evolution(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     auto_save=False,
     language="cn",
 )
@@ -52,6 +53,7 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     auto_save=False,
 )
@@ -78,6 +80,28 @@ When manual configuring, only one shared `EvolutionInterruptRail` should be used
 - Active evolution is available through `request_user_evolution()`; the returned prompt asks the main agent to call `prepare_skill_evolution(user_confirmed=true)` first, then call `evolve_review_task(evolution_review_ref=...)`. The prepare tool collects the current rail's execution/conversation trajectory as default review materials, and `user_intent` only adds optimization direction.
 - Regular skill evolution ignores `kind: team-skill` skills; team skills use `TeamSkillEvolutionRail` / `TeamSkillRail`.
 
+### Externally attributed signals
+
+When a host has already completed attribution, it can call:
+
+```python
+result = await skill_rail.evolve_from_external_signals(
+    signals=[signal],
+    messages=messages,
+    trajectory=trajectory,
+    user_query="Add reusable validation guidance.",
+    requires_approval=True,
+)
+```
+
+This entry point bypasses passive `signal_trigger` detection, so it remains available when `signal_trigger=False`.
+The caller owns attribution and evidence policy. The Rail still requires all signals to target exactly one existing
+regular Skill, rejects disabled, missing, and team-skill targets, and uses the standard optimizer, concurrency
+semaphore, approval, and `EvolutionStore` persistence pipeline.
+
+When `requires_approval=None`, the default remains `not auto_save`; explicit `True` stages an approval request, while
+explicit `False` allows an authorized host to save automatically. Callers should not edit `evolutions.json` directly.
+
 ```text
 class SkillEvolutionRail(
     skills_dir: Union[str, list[str]],
@@ -89,7 +113,7 @@ class SkillEvolutionRail(
     review_runtime: EvolutionReviewRuntime,
     subject_kind: str = "skill",
     language: str = "cn",
-    trajectory_store: Optional[TrajectoryStore] = None,
+    trajectory_span_processor: TrajectorySpanProcessor,
     eval_interval: int = 5,
     evolution_total_timeout_secs: float = 600.0,
     generate_records_llm_policy: LLMInvokePolicy = ...,
@@ -117,7 +141,7 @@ class SkillEvolutionRail(
 * **review_runtime** (EvolutionReviewRuntime): Shared active-review state for review subagent bindings.
 * **subject_kind** (str): Subject kind used by this rail (`"skill"` or `"swarm-skill"` normalized).
 * **language** (str): Prompt language, commonly `"cn"` or `"en"`.
-* **trajectory_store** (TrajectoryStore, optional): Store for captured execution trajectories.
+* **trajectory_span_processor** (TrajectorySpanProcessor): Shared processor already registered with the runtime's OpenTelemetry provider.
 * **eval_interval** (int): Number of presentations between experience scoring checks. Must be at least 1.
 * **evolution_total_timeout_secs** (float): Background evolution timeout budget.
 * **generate_records_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for record generation.
@@ -224,7 +248,7 @@ When `async_evolution=True`, the rail snapshots callback data before the backgro
 
 ### evolution_store -> EvolutionStore
 
-Evolution store for skill data. This is distinct from `trajectory_store`.
+Evolution store for Skill experience data. Execution trajectory capture remains in the injected processor and the Rail's clean window.
 
 ### store -> EvolutionStore
 
@@ -304,6 +328,7 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     auto_save=False,
 )

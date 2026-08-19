@@ -145,6 +145,32 @@ class TestContextEngine:
 
         assert ctx1 is ctx2
 
+    @pytest.mark.asyncio
+    async def test_create_context_does_not_create_default_tiktoken_counter(self, session):
+        engine = ContextEngine(ContextEngineConfig(enable_tiktoken_counter=False))
+
+        with patch("openjiuwen.core.context_engine.context_engine.context_engine_logger") as logger:
+            context = await engine.create_context(context_id="ctx", session=session)
+
+        assert context.token_counter() is None
+        logger.info.assert_called_once_with(
+            "tiktoken counter disabled; using character-based token estimation, session_id=%s context_id=%s",
+            session.get_session_id(),
+            "ctx",
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_context_creates_default_tiktoken_counter_when_enabled(self, session):
+        engine = ContextEngine(ContextEngineConfig(enable_tiktoken_counter=True))
+
+        with patch("openjiuwen.core.context_engine.token.tiktoken_counter.TiktokenCounter") as counter_cls:
+            counter = MagicMock()
+            counter_cls.return_value = counter
+            context = await engine.create_context(context_id="ctx", session=session)
+
+        counter_cls.assert_called_once_with()
+        assert context.token_counter() is counter
+
     def test_context_overflow_matcher_reads_wrapped_provider_error(self):
         provider_error = RuntimeError("invalid_request_error")
         provider_error.body = {

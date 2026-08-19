@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-07-28 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md |
+| 最近一次修订日期 | 2026-08-10 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md |
 
 ## 范围 / 边界
 
@@ -65,7 +65,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
    "什么时候调"、"什么时候不要调"、"昂贵操作的代价信号"。把工具说成
    "send a message" 是简介；说成"广播是 team-size 线性的，少用"才是契约。
 5. **长描述住 Markdown，参数串住 dict**：超过几行的 `_desc` 一律落到
-   `tools/locales/descs/<lang>/<desc_key>.md`；参数描述 / 短串留在
+   `tools/locales/descs/<lang>/<domain>/<desc_key>.md`；参数描述 / 短串留在
    `locales/<lang>.py` 的 `STRINGS`。Markdown 优先级高于 dict——同一
    `_desc` 同时存在两处时 Markdown 覆盖 dict（迁移完成后必须删 dict 项）。
    `desc_key` 通常等于工具 `name`，但**同一工具的不同形态各有自己的 key**
@@ -77,6 +77,10 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
    "善意"行为。特别地：**禁止把不完整的 kwargs 交给 `PromptTemplate.format`**，
    因为 `PromptAssembler.prompt_assemble` 会把缺失的 key 原样回填成 `{{key}}`
    字面量，静默泄漏给 LLM。槽由 loader 从模板自身枚举并强制填满。
+   **唯一的例外是 capability 槽**：调用方用 `t(desc_key, omit={"<slot>"})`
+   点名哪些槽因能力关闭而收敛为空串（`fork_usage` 是范本）。这不是"缺失回退"
+   ——省略的槽由调用方显式列出，没被点名的槽照旧必须有片段文件，缺了照旧炸。
+   omit 用的信号必须与塑造 schema 的信号同源，见不变量 12。
 7. **每条 ToolCard 描述都过 Translator**。工具构造器拿到的是同一个
    `t: Translator` 闭包，`ToolCard.description` 必须由 `t(name)` 提供，
    不许在构造器里写硬编码字面量。
@@ -122,6 +126,15 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     的 schema 中暴露（schema 即契约），无需运行时拒绝。`spawn_teammate`
     始终注册。
     后端的能力门是工具显式校验，不是隐藏断言。
+    **门控的粒度可以细到属性**：`spawn_teammate` 永远注册，但上下文继承
+    （F_75）是可选能力——`fork_enabled()`（即 `TeamAgentSpec.enable_fork`）
+    为 False 时它的 `fork` / `fork_source` / `fork_mode` 三个属性不进 schema，
+    `checkpoint` 工具整个不注册。**schema、描述、工具注册三者必须由同一个
+    信号门控**：描述里的 `{{fork_usage}}` 槽与这些属性同生同灭（不变量 6），
+    否则 leader 会围绕一个它填不了的参数反复权衡——读得到、用不了的提示词
+    比缺失的提示词更糟。属性级门控同样保留 `invoke` 内的防御性检查：MCP
+    客户端直接调 `invoke`、不校验 schema，被省略的属性必须在那里被拒，且
+    要拒在写成员行之前。
 13. **每个 `TeamTool.invoke` 必须返回 `ToolOutput`，永不抛**。工具内部
     `try / except` 捕获后端异常，落 `team_logger.error`，转成
     `ToolOutput(success=False, error=...)` 返回；不允许把 `Exception`
@@ -229,8 +242,58 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `view_task(action=in_review)` 是 reviewer 拉取待验证任务的入口。
 21. **dispatch_mode 是静态 spec 配置，`build_team` 不选择协调模式**（F_62）。系统提示词与
     工具描述按模式在构建期装配、每套一份、互不混写；`build_team` 的运行时开关只有
-    `enable_hitt` / `enable_task_verification`（后者是提示词驱动的"验证预期"开关，覆盖值
-    随 spec 记录的 `dispatch_mode` 一起写进 `team_info` 行——行是记录，spec 是运行时真相）。
+    `enable_hitt` 与 `enable_task_verification`（后者是提示词驱动的"验证预期"开关，
+    **且本身受 dispatch 门控**，见不变量 21b；覆盖值随 spec 记录的 `dispatch_mode`
+    一起写进 `team_info` 行——行是记录，spec 是运行时真相）。
+
+21a. **`build_team` 的返回值承载 leader 的全部协同准则**（[[F_76]]）。leader 的系统提示词只留
+    一段 bootstrap（身份 + build_team/swarmflow 分流 + "先建队"），role / workflow / dispatch /
+    lifecycle / HITT / inbound-tags 全部由 `map_result` 附在建队结果之后下发，内容经
+    `prompts.build_leader_policy_disclosure(...)` 按本次调用选定的模式裁剪。三条约束：
+    **只在成功路径附加**；**HITT 段按 `output.data["enable_hitt"]` 即实际生效值 gate，不是 spec
+    天花板**；`BuildTeamTool` 因此需要构造期拿到 `language` / `lifecycle` / `teammate_mode` /
+    `team_mode` / `dispatch_mode`（`create_team_tools` 的 `team_mode` 参数即为此新增，它不改变
+    任何工具的 schema）。这不违反不变量 21——模式仍由 spec 静态决定，`build_team` 只是**读**它
+    来决定披露哪一套。
+
+    - **`build_team` 因此必须对已存在的团队幂等**：它是准则的唯一交付点，所以"团队已经在了"不能
+      是失败。`TeamBackend.build_team` 开头查团队行，命中则走 `_reattach_team` 接管——**写零行、
+      注册零人**（名册与成员配置是既成事实，teammate 由 `recover_team` 从那份名册拉起），生效的
+      verification flag **从行里读回而非重算**（团队既有配置优先于本次调用的能力参数），
+      `on_team_built` 照常触发（本 session 的 checkpoint 必须记下团队行存在），
+      **不发 `TeamCreated`**（什么都没被创建）。返回值首行区分 `Team created:` /
+      `Existing team taken over:`，准则正文两条路径逐字相同。
+      **要覆盖的场景是 `NEW_TEAM_IN_SESSION`**（新 session 接手已有团队）：child agent session 共享
+      team session id，所以换 session 等于换掉 leader 的整段对话历史，那条带准则的 tool result
+      不在了，而团队、名册、任务都还在。
+    - **`COLD_RECOVER` 则相反：必须拒绝，不是幂等服务**。它是同一个 session 继续跑，历史恢复，
+      准则还在其中，且那条 tool result 由 `team_policy` 重注入保证**不会被压缩掉**——再调一次
+      永远拿不到新信息，只白烧一轮。`BuildTeamTool.invoke` 在 `backend.rejects_rebuild()` 为真时
+      直接返回失败。判据是 `_history_restored`（由 `TeamAgent.recover_from_session` 置位，该方法
+      即冷恢复入口）**与**团队行仍在，**两个条件缺一不可**：恢复出来的 leader 若在本轮被
+      `CoordinationKernel.start` 的"上次清理没做完"分支执行了 `clean_team`，团队行已消失，
+      那时它确实需要重新建队。
+
+21b. **verify 闸是 dispatch 门控的能力，`update_task` 与 `build_team` 双层执法**（[[F_76]]）。`reviewer` /
+    `max_review_rounds` 两个属性只在 `dispatch_mode == "scheduled"` 时进 `update_task` 的 schema，
+    描述里的 `{{update_task_verify_gate}}` 槽用**同一个信号**门控——参数与讲这个参数的散文一起出现、
+    一起消失。第二层在 `invoke`：偷传（MCP 客户端不过 schema）**报错拒掉，不静默剥离**，且在任何写库
+    之前。静默剥离在这里是有害的——leader 会以为验证已开启，然后一直等一个永远不来的裁决。门控的实质
+    理由是 autonomous 没有 `TeamScheduler` 唤起验证者，被推进 `IN_REVIEW` 的任务会永久停住并占死
+    assignee 唯一的活跃任务名额。**不拆成两个工具类**：两形态 `invoke` 的 209 行里 177 行逐字相同且
+    全是有状态行为，按本 spec 的形态判据应走属性级门控（同 `spawn_teammate` 的 fork），不是独立类。
+    与不变量 21 不冲突——模式仍由 spec 静态决定，工具只是读它来决定挂不挂这两个属性。
+
+    **`build_team` 的 `enable_task_verification` 走同一道门**：这个开关唯一能开关的东西就是
+    verify 闸，而闸只在 scheduled 下存在（三个消费点——`create_task` 的 scheduled 形态剥 reviewer、
+    `update_task` 剥 reviewer、`TeamScheduler._reconcile_reviews` 短路——没有一个在 autonomous 下
+    可达）。所以 autonomous 时它既不进 schema，`{{build_team_verify_gate}}` 那节散文也一起消失，
+    `invoke` 对偷传同样报错拒掉。**scheduled 时返回结果必须回带实际生效值**
+    （`data["enable_task_verification"]` + `map_result` 的 `task_verification=`）：spec 天花板会把
+    leader 要的 `True` 收窄成 `False`（`effective = spec and (arg if arg is not None else True)`），
+    而这个开关**不像 `enable_hitt` / `enable_bridge` 那样撞天花板就 `raise_error`，是静默收窄**——
+    回带生效值是 leader 唯一能发现自己没拿到验证闸的通道，否则它会围绕一个不存在的闸去配 reviewer。
+
 22. **`send_message` 的 `content` 有硬上限，超限即拒、且提示如何改走文件通道**（F_64）。
     `tool_message.MAX_CONTENT_CHARS`（当前 2000）以**字符**计——不依赖 tokenizer、不按语言
     分支，这个界只需量级正确。校验落在 `_SendMessageBase.invoke` 里、**`_dispatch` 之前**：
@@ -241,7 +304,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     只说"太长"会让 LLM 原地重试或把正文拆成多条消息。
     **没有收件人豁免**——规则约束的是内容形态，不是收件人，`user` 也一样受限（用户经自己的
     助手 agent 读交接文件）。校验因此不看 `to`，是一条纯粹的长度判断。
-    上限值同时出现在共用片段 `descs/<lang>/fragments/artifact_handoff_policy.md` 里——
+    上限值同时出现在共用片段 `descs/<lang>/fragments/artifact_handoff_policy.md` 里（片段目录
+    不按领域分，见「描述文本路径约定」）——
     让 LLM 事先知道界在哪，省掉一次撞墙往返；`test_tool_message.py` 断言描述里的数字与
     常量一致，防止两者漂移。
 
@@ -314,25 +378,39 @@ Translator = Callable[..., str]
 
 ```
 openjiuwen/agent_teams/tools/locales/
-├── __init__.py                  # make_translator + _load_desc / _slots_of / _load_fragment (@cache)
-├── cn.py                        # STRINGS dict (cn)
-├── en.py                        # STRINGS dict (en)
+├── __init__.py                          # make_translator + _desc_index / _load_desc
+│                                        #   / _slots_of / _load_fragment (均 @cache)
+├── cn.py                                # STRINGS dict (cn)
+├── en.py                                # STRINGS dict (en)
 └── descs/
-    ├── cn/<desc_key>.md         # 优先于 STRINGS["<desc_key>._desc"]
-    ├── cn/fragments/<slot>.md   # 共享片段，填 <desc_key>.md 里的 {{slot}}
-    ├── en/<desc_key>.md
+    ├── cn/<domain>/<desc_key>.md        # 优先于 STRINGS["<desc_key>._desc"]
+    ├── cn/fragments/<slot>.md           # 共享片段，填 <desc_key>.md 里的 {{slot}}
+    ├── en/<domain>/<desc_key>.md
     └── en/fragments/<slot>.md
 ```
 
+`<domain>` 对齐工具实现文件：`team` / `member` / `task` / `message` / `async_task` /
+`workflow` / `workspace` / `common`。两种语言的领域布局逐字相同。
+
 - 文件名 = `desc_key`。默认等于工具 `name`（`build_team` →
-  `descs/cn/build_team.md`）；**同一工具的不同形态各有自己的 key**
+  `descs/cn/team/build_team.md`）；**同一工具的不同形态各有自己的 key**
   （`send_message_scheduled.md`），由形态类在构造时选定（不变量 18）。
+- **领域目录只是给人看的分组，`desc_key` 仍是扁平且全局唯一的命名空间**。解析走
+  `_desc_index(lang)`——按语言递归扫一次建 `desc_key → 路径` 索引并缓存，调用方
+  永远不写领域前缀，挪动一份描述的归属不需要改任何代码。两份文件同名 → 建索引时
+  `ValueError`（否则模型读到哪一份取决于目录遍历顺序）。`fragments/` 不进索引：
+  slot 名与 `desc_key` 是两套命名空间，且片段本就跨领域复用。
 - Markdown 文件存在即覆盖 dict 中同 key 的 `_desc`。迁移完一条描述后
   **必须**把 dict 里的 `_desc` 项删掉，避免出现两个 source-of-truth。
 - 占位符使用 `{{slot}}` 双大括号（`PromptTemplate`），**只允许出现在 md 里**，
   且只能由 `fragments/<slot>.md` 填充。片段是与形态无关的公共散文，可跨工具
   与跨形态复用（`artifact_handoff_policy` 同时服务两个 `send_message` 形态）。
   槽由 loader 从模板自身枚举、强制填满，缺一个就构造期炸（不变量 6）。
+- **capability 槽**：描述一个可选能力的槽，由构造工具的一方传
+  `t(desc_key, omit={"<slot>"})` 收敛为空串（`spawn_teammate` 的
+  `fork_usage`）。omit 名单由调用方显式给出，且必须与塑造 schema 的是同一个
+  信号——参数与讲这个参数的散文永远同生同灭（不变量 12）。渲染后统一 strip，
+  所以位于文末的槽被省略时不留空行。
 - 短描述（参数 / 短 `_desc`）保留在 `cn.py` / `en.py` 的 `STRINGS` 字典，
   不强制迁出去；多行长文本一律落 Markdown。**随场景变化的文案属于 md 槽
   或新 desc_key，不属于插值的 `STRINGS` 值。**
@@ -341,10 +419,10 @@ openjiuwen/agent_teams/tools/locales/
 
 | 集合常量 | 成员 |
 |---|---|
-| `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_teammate`, `spawn_human_agent`, `spawn_bridge_agent`, `spawn_external_cli`, `shutdown_member`, `approve_plan`, `approve_tool`, `create_task`, `update_task`, `swarmflow`, `async_tasks_list`, `async_task_output`, `async_task_cancel` |
+| `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_teammate`, `spawn_human_agent`, `spawn_bridge_agent`, `spawn_external_cli`, `shutdown_member`, `approve_plan`, `approve_tool`, `list_checkpoints`（gate `fork_enabled()`，同 `checkpoint`）, `create_task`, `update_task`, `swarmflow`, `async_tasks_list`, `async_task_output`, `async_task_cancel` |
 | `MEMBER_ONLY_TOOLS` | `claim_task`, `submit_plan` |
 | `MEMBER_ONLY_TOOLS_SCHEDULED` | `member_complete_task`, `submit_plan` |
-| `SHARED_TOOLS` | `view_task`, `send_message`, `workspace_meta`（后者是死条目——不在 `all_tools`，由 `TeamToolRail.init` 单独 append） |
+| `SHARED_TOOLS` | `view_task`, `send_message`, `checkpoint`（gate `fork_enabled()`），`workspace_meta`（后者是死条目——不在 `all_tools`，由 `TeamToolRail.init` 单独 append） |
 | `HUMAN_AGENT_TOOLS` | `view_task`, `member_complete_task`, `send_message` |
 | `LEADER_TOOLS` | `LEADER_ONLY_TOOLS ∪ SHARED_TOOLS`（dispatch-invariant） |
 | `MEMBER_TOOLS_BY_DISPATCH["autonomous"]` | `MEMBER_ONLY_TOOLS ∪ SHARED_TOOLS` |
@@ -476,7 +554,13 @@ manager / backend。新增工具如果发现"我得绕过 manager 直接写表"�
 
 ```python
 all_tools = {
-    "build_team": BuildTeamTool(agent_team, t),
+    # build_team also discloses the leader's collaboration policy (F_76), so it
+    # takes the assembly parameters that decide which variant to render.
+    "build_team": BuildTeamTool(
+        agent_team, t,
+        language=lang, lifecycle=lifecycle,
+        teammate_mode=teammate_mode, team_mode=team_mode, dispatch_mode=dispatch_mode,
+    ),
     "clean_team": CleanTeamTool(agent_team, t),
     ...
 }
@@ -489,8 +573,8 @@ all_tools = {
 3. 把名字加到 `LEADER_ONLY_TOOLS` / `MEMBER_ONLY_TOOLS` /
    `MEMBER_ONLY_TOOLS_SCHEDULED` / `SHARED_TOOLS` / `HUMAN_AGENT_TOOLS` 里需要它的
    那个集合（互斥，不重复加）。
-4. 写 `_desc`：长描述放 `locales/descs/<lang>/<desc_key>.md`，参数串放
-   `locales/<lang>.py`。两边语言都补齐——不允许只补 cn。
+4. 写 `_desc`：长描述放 `locales/descs/<lang>/<domain>/<desc_key>.md`（领域目录对齐它的
+   实现文件），参数串放 `locales/<lang>.py`。两边语言都补齐——不允许只补 cn。
 
 给**已有工具**加一个形态（不是新工具）时是另外四件事：
 
@@ -500,7 +584,7 @@ all_tools = {
    （`send_message` 走这条）。不要默认上基类。
 2. 两个类各自声明 schema 与 `desc_key`；`ToolCard.id` / `name` **保持不变**。
 3. 在 `tool_factory.py` 的形态表里登记；`all_tools` 那一行改成查表构造。
-4. 补 `descs/<lang>/<新 desc_key>.md`（cn + en）；公共段落抽成 `fragments/<slot>.md`
+4. 补 `descs/<lang>/<domain>/<新 desc_key>.md`（cn + en）；公共段落抽成 `fragments/<slot>.md`
    给两个形态共用；只为新参数加 `STRINGS` key，其余复用原 `tool.*` 命名空间。
 
 无论哪条路，`tests/.../test_tool_variants.py::test_every_toolset_assembles` 的

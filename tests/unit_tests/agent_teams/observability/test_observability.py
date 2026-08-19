@@ -20,6 +20,7 @@ from typing import Any, Iterator
 from unittest.mock import MagicMock
 
 import pytest
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind
 
@@ -30,7 +31,7 @@ from openjiuwen.agent_teams.observability import (
     shutdown_observability,
 )
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
-from openjiuwen.agent_teams.observability.semconv import (
+from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_MEMBER_NAME,
     AT_PLAN_APPROVED,
@@ -152,6 +153,97 @@ def _create_team_span(team_name: str) -> Any:
     return get_or_create_team_span(team_name, get_tracer("openjiuwen.agent_teams.observability"))
 
 
+class _RecordingProcessor(SpanProcessor):
+    def __init__(self, events: list[str] | None = None) -> None:
+        self.spans: list[ReadableSpan] = []
+        self.events = events
+
+    def on_end(self, span: ReadableSpan) -> None:
+        self.spans.append(span)
+        if self.events is not None:
+            self.events.append("extra")
+
+
+def test_setup_forwards_additional_processor_to_runtime() -> None:
+    from openjiuwen.agent_teams.observability.setup import get_tracer
+
+    exporter = InMemorySpanExporter()
+    config = ObservabilityConfig(enabled=True, service_name="processor-test", sample_rate=1.0)
+    processor = _RecordingProcessor()
+    try:
+        init_observability(config, span_exporter_override=exporter)
+        init_observability(config, additional_span_processors=(processor, processor))
+
+        tracer = get_tracer("processor-test")
+        with tracer.start_as_current_span("captured"):
+            pass
+
+        assert [span.name for span in processor.spans] == ["captured"]
+        assert [span.name for span in exporter.get_finished_spans()] == ["captured"]
+    finally:
+        shutdown_observability()
+
+
+def test_callback_wiring_failure_rolls_back_runtime_and_team_state(monkeypatch: Any) -> None:
+    import openjiuwen.agent_teams.observability.setup as setup
+    from openjiuwen.extensions.observability.span_context import get_active_span_tracker
+
+    monkeypatch.setattr(
+        setup._runtime,
+        "_register_callbacks",
+        MagicMock(side_effect=RuntimeError("callback wiring failed")),
+    )
+    with pytest.raises(RuntimeError, match="callback wiring failed"):
+        init_observability(
+            ObservabilityConfig(enabled=True, service_name="rollback-test"),
+            span_exporter_override=InMemorySpanExporter(),
+        )
+
+    assert not setup.is_initialized()
+    assert setup.get_config() is None
+    assert get_active_span_tracker() is None
+    shutdown_observability()
+
+
+def test_initialization_commit_failure_clears_published_state(monkeypatch: Any) -> None:
+    import openjiuwen.agent_teams.observability.setup as setup
+    from openjiuwen.extensions.observability.span_context import get_active_span_tracker
+
+    monkeypatch.setattr(
+        setup,
+        "OtelTeamMonitorHandler",
+        MagicMock(side_effect=RuntimeError("monitor commit failed")),
+    )
+    with pytest.raises(RuntimeError, match="monitor commit failed"):
+        init_observability(
+            ObservabilityConfig(enabled=True, service_name="commit-rollback-test"),
+            span_exporter_override=InMemorySpanExporter(),
+        )
+
+    assert not setup.is_initialized()
+    assert setup.get_config() is None
+    assert get_active_span_tracker() is None
+    shutdown_observability()
+
+
+def test_recursive_initialization_is_rejected_and_rolled_back(monkeypatch: Any) -> None:
+    import openjiuwen.agent_teams.observability.setup as setup
+
+    config = ObservabilityConfig(enabled=True, service_name="recursive-init-test")
+
+    def reenter_initialization(callbacks: Any) -> list[Any]:
+        del callbacks
+        init_observability(config, span_exporter_override=InMemorySpanExporter())
+        return []
+
+    monkeypatch.setattr(setup._runtime, "_register_callbacks", reenter_initialization)
+    with pytest.raises(RuntimeError, match="already in progress"):
+        init_observability(config, span_exporter_override=InMemorySpanExporter())
+
+    assert not setup.is_initialized()
+    assert setup.get_config() is None
+    assert not setup._initializing
+    shutdown_observability()
 # ---------------------------------------------------------------------------
 # Callback handler: LLM streaming + reasoning + TTFT
 # ---------------------------------------------------------------------------
@@ -272,6 +364,50 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     assert abs(span_dur_ms - rdur) < 1.0, f"span dur {span_dur_ms} != attr {rdur}"
     # reasoning_tokens mirrored onto the reasoning span (read from usage, not computed).
     assert _attr(rs, "gen_ai.usage.reasoning_tokens") == 5
+
+
+@pytest.mark.asyncio
+async def test_streaming_llm_call_closes_through_team_span_accessor_across_context(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A root-span fallback must support streaming callbacks in another context."""
+    from openjiuwen.extensions.observability import span_context
+
+    team_span = _create_team_span("test_team")
+    fw = Runner.callback_framework
+    messages = [{"role": "user", "content": "hello"}]
+
+    await fw.trigger(
+        LLMCallEvents.LLM_STREAM_INPUT,
+        messages=messages,
+        model="fake-llm-1",
+    )
+
+    # JiuwenClaw opens the root span in the request task, while its long-lived
+    # DeepAgent executes the round in another task that cannot see this
+    # ContextVar. The product adapter supplies the same root through the public
+    # accessor, so every callback phase must resolve through that accessor.
+    span_context.clear_root_span(expected_span=team_span)
+    span_context.set_ambient_root_span(team_span)
+
+    await fw.trigger(
+        LLMCallEvents.LLM_STREAM_OUTPUT,
+        messages=messages,
+        result=_FakeChunk(content="hello", finish_reason="stop"),
+    )
+    await fw.trigger(
+        LLMCallEvents.LLM_OUTPUT,
+        messages=messages,
+        response="hello",
+        usage=_FakeUsage(),
+    )
+
+    llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(llm_spans) == 1
+    assert _attr(llm_spans[0], "langfuse.gen_ai.completion.0.content") == "hello"
+
+    team_span.end()
+    span_context.clear_ambient_root_span()
 
 
 @pytest.mark.asyncio
@@ -1739,7 +1875,6 @@ async def test_cross_iteration_prompt_delta_uses_team_span_count(
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     assert len(llm_spans) >= 2
     iter2_llm = llm_spans[-1]
-    attrs = dict(iter2_llm.attributes or {})
     # system always emitted.
     assert _attr(iter2_llm, "langfuse.gen_ai.prompt.0.role") == "system"
     # m1/m2/m3 ARE re-emitted in iteration 2 (full prompt, not delta).
@@ -2162,7 +2297,7 @@ async def test_subagent_invoke_span_nests_under_leader_iteration(
         set_current_agent_span,
     )
     from openjiuwen.agent_teams.observability.setup import get_tracer
-    from openjiuwen.agent_teams.observability.semconv import AT_MEMBER_NAME, AT_AGENT_NAME
+    from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_AGENT_NAME
     from opentelemetry.trace import SpanKind, set_span_in_context
     from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 
@@ -2200,7 +2335,7 @@ async def test_subagent_invoke_span_nests_under_leader_iteration(
     assert ".invoke" in invoke_span.name
     assert invoke_span.parent is not None
     assert invoke_span.parent.span_id == leader_span.context.span_id, (
-        f"subagent invoke parent should be leader iteration"
+        "subagent invoke parent should be leader iteration"
     )
 
     # after_invoke restores the parent agent span.
@@ -2490,9 +2625,11 @@ def test_usage_keys_are_disjoint_for_langfuse_but_semconv_for_otlp() -> None:
     """
     from types import SimpleNamespace
 
-    from openjiuwen.agent_teams.observability.callback_handler import (
-        LlmSpanState,
+    from openjiuwen.extensions.observability.callback_handler import (
         OtelCallbackHandler,
+    )
+    from openjiuwen.extensions.observability.span_context import (
+        LlmSpanState,
     )
 
     usage = _FakeUsage(
@@ -2540,9 +2677,11 @@ def test_usage_subset_larger_than_its_parent_is_left_alone() -> None:
     """
     from types import SimpleNamespace
 
-    from openjiuwen.agent_teams.observability.callback_handler import (
-        LlmSpanState,
+    from openjiuwen.extensions.observability.callback_handler import (
         OtelCallbackHandler,
+    )
+    from openjiuwen.extensions.observability.span_context import (
+        LlmSpanState,
     )
 
     written: dict[str, Any] = {}

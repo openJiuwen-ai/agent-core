@@ -37,6 +37,7 @@ configure_skill_evolution(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     auto_save=False,
     language="cn",
 )
@@ -52,6 +53,7 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     auto_save=False,
 )
@@ -78,6 +80,27 @@ agent = create_deep_agent(
 - 主动演进通过 `request_user_evolution()` 触发；返回的 prompt 会要求主 agent 先调用 `prepare_skill_evolution(user_confirmed=true)`，再用返回的 `evolution_review_ref` 调用 `evolve_review_task(evolution_review_ref=...)`。prepare tool 会把当前 rail 已采集到的执行/对话轨迹作为默认 review materials，`user_intent` 只补充优化方向。
 - 普通 skill 演进会忽略 `kind: team-skill`；team skill 使用 `TeamSkillEvolutionRail` / `TeamSkillRail`。
 
+### 外部已归因信号入口
+
+宿主已经完成归因时，可以调用：
+
+```python
+result = await skill_rail.evolve_from_external_signals(
+    signals=[signal],
+    messages=messages,
+    trajectory=trajectory,
+    user_query="Add reusable validation guidance.",
+    requires_approval=True,
+)
+```
+
+该入口绕过被动 `signal_trigger` 检测，因此即使 `signal_trigger=False` 也可使用；调用方必须负责信号
+归因和证据策略。Rail 仍会强制所有信号恰好指向一个现存普通 Skill，拒绝禁用、缺失或 team skill
+目标，并通过标准 optimizer、并发 semaphore、审批与 `EvolutionStore` 持久化管线处理。
+
+`requires_approval=None` 时沿用 `not auto_save`；显式 `True` 生成审批请求，显式 `False` 允许宿主在
+已有授权范围内自动保存。调用方不应绕过该入口直接写 `evolutions.json`。
+
 ```text
 class SkillEvolutionRail(
     skills_dir: Union[str, list[str]],
@@ -89,7 +112,7 @@ class SkillEvolutionRail(
     review_runtime: EvolutionReviewRuntime,
     subject_kind: str = "skill",
     language: str = "cn",
-    trajectory_store: Optional[TrajectoryStore] = None,
+    trajectory_span_processor: TrajectorySpanProcessor,
     eval_interval: int = 5,
     evolution_total_timeout_secs: float = 600.0,
     generate_records_llm_policy: LLMInvokePolicy = ...,
@@ -117,7 +140,7 @@ class SkillEvolutionRail(
 * **review_runtime** (EvolutionReviewRuntime): review 子智能体状态与中断审核绑定的共享运行时，active-review 依赖必须显式传入。
 * **subject_kind** (str): 本 rail 的演进对象类型（`"skill"` 或 `"swarm-skill"`，会做统一归一化）。
 * **language** (str): prompt 语言，常见值为 `"cn"` 或 `"en"`。
-* **trajectory_store** (TrajectoryStore, 可选): 执行轨迹存储。
+* **trajectory_span_processor** (TrajectorySpanProcessor): 已注册到运行时 OpenTelemetry provider 的共享 processor。
 * **eval_interval** (int): 经验展示评分检查间隔，必须大于等于 1。
 * **evolution_total_timeout_secs** (float): 后台演进总超时预算。
 * **generate_records_llm_policy** (LLMInvokePolicy): 经验记录生成阶段的 LLM 重试/超时策略。
@@ -154,12 +177,14 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
 )
 team_rail = TeamSkillRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     team_id="research-team",
 )
@@ -259,7 +284,7 @@ event.payload["evolution_meta"]
 
 ### evolution_store -> EvolutionStore
 
-skill 数据的演进存储，与 `trajectory_store` 不同。
+Skill experience 数据的演进存储。执行轨迹仍由注入的 processor 和 Rail clean window 管理。
 
 ### store -> EvolutionStore
 
@@ -339,6 +364,7 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     auto_save=False,
 )

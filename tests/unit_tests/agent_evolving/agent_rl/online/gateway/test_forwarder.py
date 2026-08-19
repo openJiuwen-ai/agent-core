@@ -63,7 +63,7 @@ async def test_forwarder_keeps_structured_tool_calls_unchanged():
 
     assert result == payload
     assert upstream_client.calls[0]["json_body"]["model"] == "m1"
-    assert upstream_client.calls[0]["json_body"]["logprobs"] is True
+    assert "logprobs" not in upstream_client.calls[0]["json_body"]
 
 
 @pytest.mark.asyncio

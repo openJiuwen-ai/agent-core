@@ -11,10 +11,12 @@ For every ``agent(prompt, schema=...)`` the engine issues, the backend:
    executors, NOT teammates, so they get no team-DB roster row);
 2. derives a worker ``DeepAgentSpec`` from the team's *teammate* spec (or the
    leader spec when no teammate is configured) — so a worker is "a teammate
-   without team tools": it keeps teammate capabilities (model / tools / skills /
-   workspace / sys_operation / todo planning) but, being built straight from the
-   raw spec, carries none of the team collaboration tools (those are injected
-   per-member by the configurator, not present on the raw spec);
+   without team tools": it keeps teammate capabilities (model / tools / Skill
+   view / workspace / sys_operation / todo planning) but, being built straight
+   from the raw spec, carries none of the team collaboration tools (those are
+   injected per-member by the configurator, not present on the raw spec). Its
+   Skill view is the one shared library narrowed by its own visibility
+   declaration, mounted here rather than inherited from the raw spec;
 3. builds a :class:`TeamHarness` over that spec and runs it for ONE non-streaming
    execution via :meth:`TeamHarness.run_once` (a plain ``DeepAgent.invoke`` — no
    supervisor, no steer); the worker ends by calling ``structured_output``, whose
@@ -183,6 +185,19 @@ class TeamWorkerBackend(AgentBackend):
                 budget_rail=budget_rail,
             )
             return AgentResult(text=text, tokens=budget_rail.call_tokens)
+        except Exception as e:
+            # Attach this call's rail tally so a failed/budget-exhausted agent's
+            # real consumption still reaches the AGENT_FAILED event tokens (the
+            # ledger already billed it; without this the run's token sum would
+            # drop it while Team budget stayed correct).
+            call_tokens = budget_rail.call_tokens or None
+            if isinstance(e, BackendError):
+                if e.tokens is None:
+                    e.tokens = call_tokens
+            elif call_tokens is not None:
+                # Wrap a non-backend error so _attempt_calls can still read .tokens
+                e = BackendError(str(e), tokens=call_tokens)
+            raise
         finally:
             await self._worktrees.finalize(member_name)
 
@@ -337,6 +352,7 @@ class TeamWorkerBackend(AgentBackend):
             worker_spec = worker_spec.model_copy(
                 update={"workspace": worker_workspace, "cwd": worker_cwd}
             )
+            worker_spec = self._apply_worker_skill_visibility(worker_spec, member_name)
             worker_build_context = derive_member_build_context(
                 self._build_context,
                 team_name=self._team_name,
@@ -407,8 +423,9 @@ class TeamWorkerBackend(AgentBackend):
 
         The workspace is always the worker's own directory. With
         ``agent(options={"isolation": "worktree"})`` only the *cwd* moves into
-        the owner-scoped worktree — otherwise the worker's artifacts and skills
-        view would live inside an ephemeral checkout and vanish with it.
+        the owner-scoped worktree — otherwise the worker's artifacts and its
+        Skill visibility declaration would live inside an ephemeral checkout and
+        vanish with it.
 
         Returns:
             The worker's ``WorkspaceSpec`` and its cwd (the worktree path when
@@ -439,6 +456,67 @@ class TeamWorkerBackend(AgentBackend):
             workspace_manager.mount_into_workspace(ws_root)
 
         return worker_workspace, worker_cwd
+
+    def _apply_worker_skill_visibility(self, worker_spec: Any, member_name: str) -> Any:
+        """Give the worker the team Skill rail instead of the generic one.
+
+        A worker derives from the raw teammate spec, so it inherits that spec's
+        ``skills`` list and would have the DeepAgent factory auto-add the
+        generic ``SkillUseRail`` over its own workspace ``skills/`` node plus
+        every mounted team directory. Workers own no Skill library either: they
+        read the one shared library narrowed by their own visibility
+        declaration, exactly like a teammate. The inherited ``skills`` names are
+        not lost — they seed that declaration the first time it is written.
+
+        Args:
+            worker_spec: The derived worker ``DeepAgentSpec``.
+            member_name: The minted worker identity.
+
+        Returns:
+            A spec copy with Skill discovery replaced by the team Skill rail.
+        """
+        from openjiuwen.agent_teams.skill.rail_spec import (
+            build_team_skill_rail_spec,
+            complete_declared_team_skill_rails,
+        )
+
+        team_workspace_path = self._team_workspace_path()
+        # The base spec may already declare a bare team Skill rail (an embedder
+        # blueprint owns the exposure mode but cannot know the minted worker
+        # identity); complete it before deciding whether one has to be added.
+        declared_rails = complete_declared_team_skill_rails(
+            list(worker_spec.rails or []),
+            team_name=self._team_name,
+            member_name=member_name,
+            config_skills=worker_spec.skills,
+            team_workspace_path=team_workspace_path,
+        )
+        declared_rails = list(declared_rails)
+        skill_rail_spec = build_team_skill_rail_spec(
+            team_name=self._team_name,
+            member_name=member_name,
+            config_skills=worker_spec.skills,
+            declared_rails=declared_rails,
+            team_workspace_path=team_workspace_path,
+        )
+        if skill_rail_spec is not None:
+            declared_rails.append(skill_rail_spec)
+        return worker_spec.model_copy(
+            update={
+                "rails": declared_rails,
+                "skills": [],
+                "enable_skill_discovery": False,
+            },
+        )
+
+    def _team_workspace_path(self) -> str | None:
+        """Return the shared team workspace root, or None when there is none."""
+        from openjiuwen.agent_teams.rails.team_context import get_workspace_manager
+
+        workspace_manager = get_workspace_manager(self._build_context)
+        if workspace_manager is None:
+            return None
+        return workspace_manager.workspace_path
 
     # ------------------------------------------------------------------
     # Helpers

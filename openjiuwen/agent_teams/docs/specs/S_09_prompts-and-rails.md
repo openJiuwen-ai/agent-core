@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-08-05 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md` |
+| 最近一次修订日期 | 2026-08-13 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md`、`F_80_fork-identity-conversion.md` |
 
 ## 范围 / 边界
 
@@ -15,7 +15,7 @@
 
 - `agent_teams/prompts/` 下系统提示词的全部产出路径：模板加载、占位符装配、`PromptSection` 构造。
 - `agent_teams/prompts/messages.py` 与 `agent_teams/team_context.py`：团队状态（自身身份 / 团队元数据 / 成员名册）的消息正文、名册 diff、投递时机与持久化基线。
-- `agent_teams/rails/` 下四个团队级 Rail（`TeamPolicyRail` / `FirstIterationGate` / `TeamToolApprovalRail` / `TeamPermissionRail`）及 team-specific confirmation payload models（`TeamConfirmPayload` / `TeamPermissionConfirmResponse`）的契约、注入时机、与 DeepAgent rail registry 的交互。
+- `agent_teams/rails/` 下三个团队级 Rail（`TeamPolicyRail` / `TeamToolApprovalRail` / `TeamPermissionRail`）及 team-specific confirmation payload models（`TeamConfirmPayload` / `TeamPermissionConfirmResponse`）的契约、注入时机、与 DeepAgent rail registry 的交互。
 - prompts 子模块的 `cn/` `en/` 双语模板布局，以及与 `agent_teams/i18n.py`（运行时硬编码字符串）的边界。
 
 **不管：**
@@ -30,18 +30,28 @@
 ### 装配路径
 
 1. **唯一装配路径 `sections.build_team_*_section`**：每片内容独立产出 `PromptSection`，读 `prompts/<lang>/*.md`。由 `TeamPolicyRail` 合并进 `SystemPromptBuilder`（进程内成员），或经 `build_team_member_system_prompt` 渲染成独立字符串（外部 CLI 成员）。模板正文修改即时生效。
-2. **role policy 由 `build_team_role_section` 直接读**：`sections.build_team_role_section` 按角色 `load_template` 出 `leader_policy`（LEADER）/ `human_agent_policy`（HUMAN_AGENT）/ `teammate_policy`（TEAMMATE、BRIDGE_AGENT；`workspace_prompt_variant="external"` 时为 `teammate_policy_external`）markdown 塞进 role section。没有独立的 policy 装配层（`policy.py` 已删）。**HUMAN_AGENT 必须有自己的一份，不能落回 teammate 版**：teammate 契约里"收到 `from="user"` 必须 `send_message(to="user")` 作答"是无条件义务，而 avatar 的对话对方是**控制者**（另一个真人，纯文本输出即可直达）——复用会让 avatar 把控制者的问话答给团队侧的 `user`。同理执行模式行（plan/build）对 HUMAN_AGENT 不渲染：avatar 从不自主规划或认领。
+1a. **leader 的团队 section 走渐进式披露（[[F_76]]）**：进 builder 的 leader 团队 section 只有两个——`team_bootstrap`（P:11，身份 + `{{collaboration_mechanism}}` capability 槽 + "先调 build_team"）与 `team_extra`（P:17，调用方自定义指令，**不是团队协同准则**且必须建队前生效）。其余 section 由 `sections.build_leader_policy_disclosure(...)` 用**同一套 `build_team_static_sections` + `SystemPromptBuilder` 装配**渲染成文本，经 `tools/tool_team.BuildTeamTool.map_result` 附在建队结果之后下发。四条硬约束：
+   - **披露只在成功路径**：`build_team` 失败时 leader 还在 bootstrap 路上，此时该重读的是分流规则而不是一份不存在的团队的规则。
+   - **HITT gate 读实际生效值**：`map_result` 取 `output.data["enable_hitt"]`（`build_team` 解析 spec 天花板 × 本次选择后的结果），**不是**构造期的 spec `hitt_enabled`。这正是把披露挪到 `build_team` 才能修掉的偏差。
+   - **只有 LEADER 走这条道**：其余角色的协同约定 spawn 时即固定，也没有 `build_team` 可挂载，一律走原来的全量静态集。分流在 `TeamPolicyRail._build_static_sections` 的一个 `role == LEADER` 分支，不下推到各 builder。
+   - **披露内容会被压缩，须重注入**：`core.context_engine.processor.compressor.util.build_team_policy_reinjected_messages`（在 `FullCompactProcessor` 注册名 `team_policy`）在 full compact 后原样重注入那条 tool result，**不得截断**（返回 `list[UserMessage]` 绕开 `state_snapshot_max_chars`）。core 侧按工具名 `build_team` 匹配，**不 import `agent_teams`**——与既有 `TEAM_TOOL_CALL_NAMES` 同法，依赖方向不变。
+
+1b. **模式相关的内容按模式拆模板，不在共用模板里加 caveat（[[F_76]]）**：`leader_policy.md` 全模式共用，因此任何"这条在 A 模式如此、在 B 模式如彼"的内容都不属于它。「任务状态流转」原本就违反这条（同一节并列描述自主认领与调度框架两套驱动），已拆成 `task_state_autonomous.md` / `task_state_scheduled.md`，由 `build_team_task_state_section`（P:16，LEADER only）按 `dispatch_mode` 挑版。
+   - **autonomous 版不得出现验证闸，连警告也不行**：该模式的 `create_task` 不暴露 `reviewer`，且没有调度 runtime 去唤起验证者（`TeamScheduler` 只在 `dispatch_mode == "scheduled"` 的 leader 上构造），被硬推进 `in_review` 的任务会永久停在那里并占住该成员唯一的活跃任务名额。但模板**不写"本模式没有验证闸"这类说明**——点名一个不存在的能力正是让模型去够它的原因，与 `fork_usage` 槽关闭时整节消失同理。门控理由属于 spec 与代码注释，不属于提示词。
+   - **这是一次真实回归的修复**：`leader_policy.md` 的该节曾是模式感知措辞（"在 `create_task` schema 暴露 `reviewer` 的调度形态里，也可以创建时直接设置"），被一次 scheduled-only 的改动抹平为无条件的 `create_task(reviewer=[...])`，正好污染了 autonomous。`tests/unit_tests/agent_teams/test_team_policy_rail.py::TestTeamTaskStateSection::test_autonomous_documents_no_verify_gate` 是这条的回归闸。
+
+2. **role policy 由 `build_team_role_section` 直接读**：`sections.build_team_role_section` 按角色 `load_template` 出 `leader_policy`（LEADER）/ `human_agent_policy`（HUMAN_AGENT）/ `teammate_policy`（TEAMMATE、BRIDGE_AGENT；`workspace_prompt_variant="external"` 时为 `teammate_policy_external`）markdown 塞进 role section。没有独立的 policy 装配层（`policy.py` 已删）。**模板本身纯静态无占位符**——`leader_policy` 的 `{{collaboration_mechanism}}` 槽已随 [[F_76]] 移交 `leader_bootstrap` 独占并从 `leader_policy.md` 物理删除；一个槽只允许一个消费者。**HUMAN_AGENT 必须有自己的一份，不能落回 teammate 版**：teammate 契约里"收到 `from="user"` 必须 `send_message(to="user")` 作答"是无条件义务，而 avatar 的对话对方是**控制者**（另一个真人，纯文本输出即可直达）——复用会让 avatar 把控制者的问话答给团队侧的 `user`。同理执行模式行（plan/build）对 HUMAN_AGENT 不渲染：avatar 从不自主规划或认领。
 3. **生产路径就是 rail 注入**：`TeamHarness.build` 走 `TeamPolicyRail`。早期的 `policy.build_system_prompt` + `system_prompt.md` 壳模板老路径与 `role_policy` 中间层都仅测试在用，已随 desc/prompt 归一移除（测试迁移到 `load_template` / `build_team_member_system_prompt`）。
 
 ### Section / 文件落位
 
 4. **`TeamPolicyRail` 是团队 section 名的唯一发行方**：所有团队相关 section 名集中在 `TeamSectionName` 类常量里，priority 取值集中在该 rail 的注释表里。其他模块不得 hardcode `"team_*"` section 名。
 5. **section name 全局唯一**：`SystemPromptBuilder._sections` 是 `dict[str, PromptSection]`，同名 add 直接覆盖。团队 section 与 harness 内置 section（safety / capabilities / runtime / ...）必须不冲突。
-6. **section priority 单调约定**：进 builder 的团队 section 占 11–18（含 HITT 契约 / bridge 自契约 P:12、inbound 说明 section P:18）；harness 内置 section 排在 0–10、20–60、70–99，priority 升序拼接。相同 priority 顺序由插入序决定。**团队侧不再有任何 prompt attachment**（[[F_70]]）——`team_identity`（P:10）只在外部 CLI 的静态 prompt 里出现，`team_info` / `team_members` 已不是 section。
+6. **section priority 单调约定**：进 builder 的团队 section 占 11–18（含 `team_bootstrap` P:11、HITT 契约 / bridge 自契约 P:12、`team_task_state` P:16、inbound 说明 section P:18）；harness 内置 section 排在 0–10、20–60、70–99，priority 升序拼接。相同 priority 顺序由插入序决定。`team_bootstrap` 与 `team_role` 同占 P:11 且互斥——leader 只出前者，其余角色只出后者。**团队侧不再有任何 prompt attachment**（[[F_70]]）——`team_identity`（P:10）只在外部 CLI 的静态 prompt 里出现，`team_info` / `team_members` 已不是 section。
 
 6a. **系统提示词前缀里不放 per-member 内容**：进 builder 的团队 section 必须对同一 team、同一角色的所有成员逐字一致，否则每个成员各自占一份 prompt 前缀 KV cache，成员一多缓存命中率就塌。**当前唯一的 per-member 内容**是成员自己的身份（`member_name` / `display_name` / 私有工作区路径 / 私有工作约定，见 `prompts/messages.build_identity_text`）；进程内成员经**对话历史**收到它（见不变量 13），只有外部 CLI 成员把它内联成静态 `team_identity` section（P:10，`include_member_specific=True`）——那份 prompt 是独立进程的一次性快照，不与兄弟成员共享前缀。例外仅两处，都因角色本身单例而不构成放大：`hitt_human_agent` / `bridge_agent` 模板的 `{{self_line}}`。新增 section 前先问它是否 per-member——是就走历史消息，不要塞进 builder。
 
-7. **role-specific section 在不应出现的角色下返回 `None`**：`build_team_workflow_section` / `build_team_lifecycle_section` 在 `role != LEADER` 时返回 `None`；`build_team_hitt_section` 在 `hitt_enabled` 为 False（或角色无 HITT 版）时返回 `None`；`build_team_bridge_section` 在 `role != BRIDGE_AGENT` 时返回 `None`。**禁止用空字符串占位**——返回 `None` 等价于不挂 section。
+7. **role-specific section 在不应出现的角色下返回 `None`**：`build_team_workflow_section` / `build_team_lifecycle_section` / `build_team_task_state_section` 在 `role != LEADER` 时返回 `None`（它们仍**只为 LEADER 产出**，只是自 [[F_76]] 起这份产出流向 `build_team` 的 ToolResult 而非 builder）；`build_team_hitt_section` 在 `hitt_enabled` 为 False（或角色无 HITT 版）时返回 `None`；`build_team_bridge_section` 在 `role != BRIDGE_AGENT` 时返回 `None`。**禁止用空字符串占位**——返回 `None` 等价于不挂 section。
    - **HITT 是单一静态契约（[[F_52]]）**：`build_team_hitt_section` 出 roster-agnostic 的规则段，进 system prompt builder（P:12，静态、KV 稳定），gate 用 `hitt_enabled`（capability flag，HITT 一开即 present，无需先 spawn 人类）。人类成员不再有独立名册段——他们在名册消息里标 `[human]`（撤销 [[F_50]] 的 `team_hitt_roster`）。
    - **Bridge 只有 avatar 自契约（[[F_52]]）**：bridge 成员在 peer 眼里就是普通 teammate（名册消息里不标记、无 peer 向说明段），只有 avatar 本人（`role == BRIDGE_AGENT`）拿 `bridge_agent` 自契约；已删 `bridge_leader` / `bridge_teammate` 模板。
    - **TEAMMATE 默认走 anonymous 变体（F_18）**：`_hitt_template_name` 对 `role == TEAMMATE` 默认选 `hitt_teammate_anonymous`——**无 `[human]` 引用、无 "real humans" 标签**的 role-neutral 契约。开关 `TeamAgentSpec.expose_human_agents_to_teammates=True` 切回 `hitt_teammate`（引用 `[human]` 标签）。该开关**同时**门控名册消息里 `[human]` 标记对 teammate 的可见性（`mark_humans`）：LEADER / HUMAN_AGENT 恒见，TEAMMATE 仅 expose 时见。
@@ -65,9 +75,12 @@
       - 两条通道共用同一个 tracker，谁先拿到 pending 就谁投递；**已在历史里的消息永远不改写**——改一条旧消息会让它之后的 KV cache 全部作废。
     - **同一次投递里产生的 `<team-context>` 正文合并成一个标签**：身份与团队元数据都是"关于团队的既成事实"，各包一个标签是把同一类东西说两遍。分别在不同调用上产生时自然是两条消息，不合并。
     - **身份 = `member_name` + `display_name` + 私有工作区路径 + 私有工作约定**：判据是"per-member、spawn 时固定、此后恒定"，凡满足的都进这一段正文，不另开通道。`display_name` 必须**读自己那行 member 行**——名册每行都以两个名字标识成员，少了它成员认不出哪一行是自己，而构造期的值只是 spec 默认（leader 的真实标签由 `build_team(leader_display_name=...)` 写入 DB），所以身份通道**等自己那行存在**才发：teammate 在 spawn 时就有行，leader 则在建队后那次调用上拿到。私有工作区路径带一句用途说明（区分于团队共享工作空间、不作为新 skill 的创建目标）——只给路径模型分不清分工。公开 `desc` 仍然不进自己的身份（见不变量 18a）。
+    - **`enable_fork=True` 团队的身份块加 `<identity>` 内壳 + 能力声明（[[F_80]]）**：`TeamContextTracker._fork_capable = team_backend.fork_enabled()`（`getattr` 兜底，无该方法的 backend / 外部 runtime 走 off 路径）。开启时 `build_identity_text(fork_capable=True)` 在正文顶部加恒定能力声明（「你是拥有身份转换能力的成员，当前身份以本块及转换通知为准」），`pending_text` 改调 `inbound_render.render_team_context_with_identity` 把身份包进 `<identity>`。**关闭时输出与改造前逐字一致**（原 `render_team_context` + `fork_capable=False`），非 fork 团队前缀 KV 与模型输入零变化。`<identity>` 内壳在**结构层**渲染、只转义最内层正文——`<team-context>` 正文的 `html.escape` 会吃掉嵌套标签，嵌套必须由渲染函数拼接而非塞进 body。
     - **投递进度基线必须持久化在成员自己的 child `AgentSession`**（state key `team_prompt_context`，字段 `identity_emitted` / `team_info_mtime` / `roster_mtime` / `roster`）。`TeamPolicyRail` **每一轮都会被重建**（round 结束 native 进 TERMINATED，下次 start 重新 `RailSpec.build`），基线留内存等于每轮重发；pause/resume、stop→start 只是更严重的版本。该 state 与成员的对话历史存在同一个 agent-session 桶里，由同一次 `AgentStorage.save` 落盘，故两者不会漂移。
     - **先投递、后 `commit`**：`pending_text()` 只渲染不推进，`commit()` 由调用方在投递成功后调用；反过来写会在投递失败时永久丢掉一条公告。tracker **不持锁**——一个成员的 rail 钩子、CLI `send` 与事件补偿都在同一条协程上。
     - **名册消息必带 `<team-note kind="announcement-only">`**（文案 `i18n.team_context.roster_announcement_note`，嵌在该 `<team-event>` 内部，见不变量 28）：否则成员看到"有人加入"就会礼节性寒暄，白烧一轮 LLM + 一轮邮箱投递并连锁触发对方。
+
+13b. **fork 继承目标的身份块带 `<identity-conversion>` 子块声明当前身份（[[F_80]]）**：fork 源身份块留在继承历史里无法删除（动它即破坏前缀 KV），转换语义只能追加。`_on_teammate_created` 在 fork 上下文非空且 `is_empty()` 为假时把源名写进 `ctx.fork_source`（缺省 = leader 自己的名字），随 spawn payload 跨进程序列化，经 `TeamPolicyInput.fork_source` → `TeamPolicyRail` → `TeamContextTracker` 透传。目标首条身份投递时，`render_team_context_with_identity` 在 `<identity>` 内嵌 `<identity-conversion>`（正文由 `build_identity_conversion` 渲染，声明当前身份并明示更早身份块的私有约定/工作区不再适用），使模型区分"继承来的旧身份"与"当前身份"。**只追加、不改继承段**——KV 命中不变。普通 spawn（`fork_source` 为空）不渲染该子块；`enable_fork=False` 团队整条路径保持原状（不变量 13 的逐字一致约束）。
 
 13a. **被覆盖的快照类输入整条剔除，只剔 teammate 的（[[F_71]]）**：`TeamPolicyRail.on_user_message` 在折入团队状态**之前**先给这批输入做减法——同一批里出现多条同 kind 的快照事件时，只留最后一条。四条硬约束：
     - **只有全量幂等快照才算快照**：`inbound_render.SNAPSHOT_EVENT_KINDS` 当前只有 `task-board`。增量（`roster-change`）与按主体分片的事件（`stale-claim` 带 `task_id`）丢掉早的那条就是丢信息，**不得**加进这个集合。
@@ -80,15 +93,13 @@
 ### Rail 注入契约
 
 15. **Rail 通过 DeepAgent 的 rail registry 注入，不直接修改 `SystemPromptBuilder`**：`TeamPolicyRail` 在 `init(agent)` 里捕获 `agent.system_prompt_builder` 引用，于 `before_model_call` 写入 section；在 `uninit(agent)` 里按名移除。**禁止**绕过 rail 把 section 直接 `add_section` 到 *DeepAgent 的共享 builder* 上。**例外（外部 CLI 成员）**：非 DeepAgent 的外部 CLI 成员没有共享 builder，由 `sections.build_team_member_system_prompt(...)` 把同一批静态 section 装进一个**一次性 `SystemPromptBuilder`** 渲染成独立字符串(见不变量 18a / [[F_25_external-cli-hardening-and-gemini]])——这不违反本条，因为它不触碰任何 DeepAgent 的共享 builder，且**只装 team section、排除其它 rail**。
-    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections` 与 `build_team_member_system_prompt`（外部 CLI）都委托它构建 role / HITT 契约（gate `hitt_enabled`）/ bridge 自契约（仅 BRIDGE_AGENT）/ workflow / dispatch / lifecycle / extra——**全部静态且成员间一致**，两条路径拿到一致的静态 section。成员**公开 `desc` 不进自己的 prompt**（只进他人的名册消息）；成员**私有 `prompt` 只发给自己**（identity 正文的 `## 私有工作约定` 子节）。团队状态（`team_info` / 名册）**不在其中**——它不是 section，由 `TeamContextTracker` 投递进对话（见不变量 13）。inbound_tags 说明 section **无条件**构造（见 [[F_51]] / [[F_70]]），它同时解释 `<team-context>` 与两种名册 `<team-event>`。**唯一按路径分化的是 `include_member_specific`**：外部 CLI 传 True，把 per-member 的 `team_identity` section 内联进静态 prompt（独立进程的一次性快照，无共享前缀可保护、启动期也没有对话可写）；进程内成员走默认 False、由 tracker 投进历史（见不变量 6a）。
+    - 18a. **静态 section 的单一真相源是 `sections.build_team_static_sections(...)`**：`TeamPolicyRail._build_static_sections`（非 leader 分支）、`build_team_member_system_prompt`（外部 CLI）与 `build_leader_policy_disclosure`（leader 的 `build_team` 披露，[[F_76]]）三条路径都委托它构建 role / HITT 契约（gate `hitt_enabled`）/ bridge 自契约（仅 BRIDGE_AGENT）/ workflow / dispatch / lifecycle / extra——**全部静态且成员间一致**，两条路径拿到一致的静态 section。成员**公开 `desc` 不进自己的 prompt**（只进他人的名册消息）；成员**私有 `prompt` 只发给自己**（identity 正文的 `## 私有工作约定` 子节）。团队状态（`team_info` / 名册）**不在其中**——它不是 section，由 `TeamContextTracker` 投递进对话（见不变量 13）。inbound_tags 说明 section **无条件**构造（见 [[F_51]] / [[F_70]]），它同时解释 `<team-context>` 与两种名册 `<team-event>`。**唯一按路径分化的是 `include_member_specific`**：外部 CLI 传 True，把 per-member 的 `team_identity` section 内联进静态 prompt（独立进程的一次性快照，无共享前缀可保护、启动期也没有对话可写）；进程内成员走默认 False、由 tracker 投进历史（见不变量 6a）。
 16. **Mount order load-bearing**：`TeamHarness.build` 必须先挂 `TeamToolRail` 并 eager `init`，再挂 `TeamPolicyRail`。原因：policy 输出引用 ability 快照，能力必须先就位。Rail 顺序的修改必须同步检视 mount path。
-17. **`uninit` 必须把自己写入 builder 的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section（HITT 契约 / bridge 自契约都在其中）。团队状态写在成员自己的对话历史里，那是它的历史、不由 rail 清理。rail 卸载后 builder 不得残留团队 section。
+17. **`uninit` 必须把自己写入 builder 的 section 全部清掉**：`TeamPolicyRail.uninit` 删除 `_static_sections` 里的每个 section（HITT 契约 / bridge 自契约都在其中；leader 则是 `team_bootstrap` / `team_extra` 两个）。团队状态写在成员自己的对话历史里，那是它的历史、不由 rail 清理。rail 卸载后 builder 不得残留团队 section。
 18. **`team_backend is None` 时状态通道退化**：单测可只关心 static 内容；缺 backend 时 `team_info` / 名册两条通道整体跳过，只剩恒定的 identity 通道（它不需要 backend）。
 
-### `FirstIterationGate`
-
-19. **打开仅一次性，可 reset**：`asyncio.Event.set()` 等价开锁；新一轮要先 `reset()` 再 `wait()`。Gate 没有自动复位机制，由 `start_agent` 路径显式调用。
-20. **HUMAN_AGENT 不挂 gate**：`agent_configurator` 仅对非 `HUMAN_AGENT` 角色构造 `FirstIterationGate`。human-agent 没有自主 task loop，挂上等不到 trigger。
+> 不变量 19 / 20 曾描述 `FirstIterationGate`，该 rail 已随单 supervisor 模型删除
+> （`agent_teams/rails/` 下已无此文件）。编号留空不复用，避免打乱后续引用。
 
 ### `TeamToolApprovalRail`
 
@@ -113,6 +124,33 @@
     `_render_block(tag, attrs, body, note="")`，无 note 时拼进空串，**不存在「有没有 note」
     的分支**。`inbound_tags.md`（cn/en）必须与此逐字一致：正文边界写作「除 `<team-note>`
     子元素外」，并明确「看嵌在哪个标签里，不要按前后位置猜」。
+
+### 输入批次配额
+
+29. **一批排队输入喂给一次模型调用的量，由 rail 在消费点现场决定（[[F_78]]）**。两条队列各有
+    一个收窄点，性质不同、手段也不同：
+    - **follow-up 批次靠剔除**：整批经 `ON_USER_MESSAGE` 交给 rail，`TeamPolicyRail._drop_superseded`
+      把被后来者覆盖的任务看板整条丢掉（见不变量 13 / [[F_71]]）。可行的前提是看板是**全量幂等
+      快照**——丢掉旧的不损失信息。
+    - **steering 批次靠限量**：队列里是信箱消息，每条各说各的、一条都不能丢，所以只能少拿。
+      `AgentCallbackEvent.BEFORE_STEERING_DRAIN` 在**每次 drain 之前**触发（队列为空则不触发），
+      带 `SteeringDrainInputs(pending, limit)`；rail 写 `limit`，多个 rail 按 priority 串行、
+      各自看到前一个留下的值。`TeamPolicyRail` 对**非 leader** 成员写 `steer_batch_size`（默认 2）。
+    - **必须在 drain 之前决定**：全取之后再把多余的 `push_steering` 回塞队尾会乱序——rail 链里有
+      真实 await，期间投进来的新消息会排在回塞消息之前。在 drain 之前定量，多余的消息从没离开
+      过队列，FIFO 顺序天然成立。
+    - **队列非空时至少取 1 条**（`drain_steering` 内部 `max(1, limit)`）：消费必须推进，否则
+      `has_pending_steering()` 恒真会让 loop 空转到 `max_iterations` 耗尽。`steer_batch_size`
+      另有 spec 侧 `> 0` 校验。
+    - **不需要额外的续跑机制**：inner loop 本来就在 `has_pending_steering()` 为真时继续迭代，
+      剩下的消息由后续模型调用取走。
+    - **leader 不限量**，与它不参与看板剔除同源：它读的是快照之间的差异来决定重规划还是收尾。
+30. **新增 `AgentCallbackEvent` 成员必须同时做路由决策**：`DeepAgent` 有外层与内层 ReActAgent
+    两个 callback-manager 命名空间，`_register_rail_selective` 按 `_BRIDGE_EVENTS` /
+    `_OUTER_ONLY_EVENTS` / `_DEEP_EVENTS` 分流，**漏了就静默落到外层、rail 永不触发**。内层
+    ReAct loop 触发的事件（`BEFORE_MODEL_CALL` / `ON_USER_MESSAGE` /
+    `BEFORE_STEERING_DRAIN` …）一律进 `_BRIDGE_EVENTS`。
+    `tests/unit_tests/harness/test_deep_agent_rail_event_routing.py` 强制这一条。
 
 ## 接口契约
 
@@ -269,7 +307,9 @@ def format_member_line(
 ) -> str: ...
 
 def build_identity_text(*, member_name, display_name=None, member_workspace_path=None,
-                        member_prompt=None, language="cn") -> str | None
+                        member_prompt=None, language="cn",
+                        fork_capable=False) -> str | None
+def build_identity_conversion(*, source, member_name, language="cn") -> str
 def build_team_info_text(*, team_info, team_workspace_mount=None,
                          team_workspace_path=None, language="cn") -> str | None
 def build_roster_snapshot_text(*, members, mark_humans=False, language="cn") -> str | None
@@ -280,6 +320,10 @@ def build_roster_delta_text(*, delta, mark_humans=False, language="cn") -> str |
 - 名册元素至少含 `member_name` / `display_name`；`desc` / `role` 可选。**自身排除由
   `TeamBackend.list_members` 负责**（它已经剔除调用者），渲染层不再做二次排除。
 - `diff_roster` 只跟踪 `display_name` / `desc` / `role`——运行时状态一直在变，不是名册成员关系。
+- `build_identity_text(fork_capable=True)` 在正文顶部加身份转换能力声明；默认 `False` 输出与
+  改造前**逐字相同**。`build_identity_conversion` 渲染 `<identity-conversion>` 的正文（源名 +
+  当前名 + 私有约定/工作区不再适用），由 `TeamContextTracker` 在 `fork_source` 非空时传入
+  `render_team_context_with_identity`（见不变量 13 / 13b）。
 
 ### `team_context.py`
 
@@ -303,6 +347,7 @@ class TeamContextTracker:
         team_workspace_path: str | None = None,
         expose_human_agents_to_teammates: bool = False,
         language: str = "cn",
+        fork_source: str | None = None,   # fork 源名；None = 普通 spawn
     ) -> None: ...
 
     async def pending_text(self, session) -> str | None:

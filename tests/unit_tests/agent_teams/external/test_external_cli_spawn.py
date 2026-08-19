@@ -62,7 +62,7 @@ def _ctx(
             external_publish_url=_EVENT_WS_URL,
         )
     return TeamRuntimeContext(
-        role=TeamRole.TEAMMATE,
+        role=TeamRole.EXTERNAL_CLI,
         member_name=member,
         cli_agent=cli_agent,
         team_spec=TeamSpec(
@@ -92,7 +92,7 @@ def test_descriptor_from_context_carries_identity():
     assert descriptor.session_id == "sess-1"
     assert descriptor.team_name == "ext_team"
     assert descriptor.member_name == "dev-1"
-    assert descriptor.role == "teammate"
+    assert descriptor.role == "external_cli"
     assert descriptor.language == "en"
     assert descriptor.teammate_mode == "build_mode"
     transport = descriptor.transport_config
@@ -252,6 +252,7 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
         runtime = await build_cli_runtime(
             _ctx(member="dev-1", cli_agent="codex"),
             cwd="/workspace",
+            cli_path="/opt/codex-cli",
             codex_bin="/opt/codex",
             inject_mcp=True,
             mcp_default_tools_approval_mode="approve",
@@ -274,7 +275,7 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
         "sandbox": "full-access",
     }
     assert runtime._config.kwargs["cwd"] == "/workspace"
-    assert runtime._config.kwargs["codex_bin"] == "/opt/codex"
+    assert runtime._config.kwargs["codex_bin"] == "/opt/codex-cli"
     assert (
         'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"'
         in runtime._config.kwargs["config_overrides"]
@@ -304,7 +305,7 @@ async def test_build_cli_runtime_codex_requires_stable_member_agent_id():
 async def test_build_cli_runtime_codex_rejects_full_command_override():
     token = set_session_id("sess-1")
     try:
-        with pytest.raises(BaseError, match="configure codex_bin instead"):
+        with pytest.raises(BaseError, match="configure cli_path instead"):
             await build_cli_runtime(
                 _ctx(member="dev-1", cli_agent="codex"),
                 command_override=("codex", "app-server", "--listen", "stdio://"),

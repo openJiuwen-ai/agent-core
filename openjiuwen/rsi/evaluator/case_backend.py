@@ -13,9 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.setup import get_config, init_observability
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.rsi.config import EvaluatorConfig
 from openjiuwen.rsi.evaluator.controlled_skill_treatment_rail import (
@@ -74,6 +77,11 @@ class SingleHarnessExecutionBackend:
     """Run an evaluation case through one DeepAgent bound to one ExpertHarness."""
 
     config: EvaluatorConfig
+    _trajectory_span_processor: TrajectorySpanProcessor = field(
+        default_factory=TrajectorySpanProcessor,
+        init=False,
+        repr=False,
+    )
 
     async def execute(
         self,
@@ -152,6 +160,7 @@ class SingleHarnessExecutionBackend:
                 agent,
                 output_dir=output_dir,
                 role_name=role_name,
+                trajectory_span_processor=self._trajectory_span_processor,
             )
 
             response = await run_agent_with_empty_response_recovery(
@@ -195,13 +204,21 @@ def _attach_single_harness_trajectory_rail(
     *,
     output_dir: str | Path,
     role_name: str,
+    trajectory_span_processor: TrajectorySpanProcessor,
 ) -> None:
     """Persist native tool calls so candidate capability gates can observe them."""
     from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
 
     trace_root = Path(output_dir).expanduser().resolve() / ROLE_TRAJECTORY_DIR_NAME
+    config = get_config() or ObservabilityConfig(exporter="file", traces_dir=str(trace_root))
+    init_observability(config, additional_span_processors=(trajectory_span_processor,))
     store = RoleFileTrajectoryStore(trace_root, role_name or "solver")
-    agent.add_rail(TrajectoryRail(trajectory_store=store))
+    agent.add_rail(
+        TrajectoryRail(
+            trajectory_store=store,
+            trajectory_span_processor=trajectory_span_processor,
+        )
+    )
 
 
 def _single_harness_rails(

@@ -307,6 +307,22 @@ def test_assistant_add_handles_none_reasoning_content():
     assert result.reasoning_content == "Some reasoning"
 
 
+def test_assistant_add_keeps_latest_non_empty_metadata():
+    chunk1 = AssistantMessageChunk(
+        content="",
+        metadata={"anthropic_content_blocks": [{"type": "thinking", "thinking": "a"}]},
+    )
+    chunk2 = AssistantMessageChunk(
+        content="",
+        metadata={"anthropic_content_blocks": [{"type": "thinking", "thinking": "ab"}]},
+    )
+    chunk3 = AssistantMessageChunk(content="")
+
+    result = chunk1 + chunk2 + chunk3
+
+    assert result.metadata == chunk2.metadata
+
+
 def test_assistant_add_merges_finish_reason():
     """Test that __add__ handles finish_reason."""
     chunk1 = AssistantMessageChunk(

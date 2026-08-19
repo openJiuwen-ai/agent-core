@@ -3,6 +3,7 @@
 
 """Unit tests for the F_62 TeamScheduler (leader-side scheduled dispatch)."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -83,6 +84,7 @@ class FakeHost:
     def __init__(self):
         self.leader_inputs: list[str] = []
         self.started_members: list[str] = []
+        self.harness = SimpleNamespace(find_rails=lambda _rail_type: [])
 
     async def deliver_input(self, content, *, use_steer: bool = True) -> None:
         self.leader_inputs.append(str(content))
@@ -92,7 +94,15 @@ class FakeHost:
         return True
 
 
-def _build_scheduler(db, bus, **spec_overrides):
+def _build_scheduler(
+    db,
+    bus,
+    *,
+    build_context=None,
+    review_feedback_rail=None,
+    skill_create_rail=None,
+    **spec_overrides,
+):
     """Assemble a TeamScheduler over a real task manager and fake host/mail."""
     task_manager = TeamTaskManager(
         team_name=TEAM,
@@ -115,7 +125,21 @@ def _build_scheduler(db, bus, **spec_overrides):
     infra.team_backend = AsyncMock(team_name=TEAM)
     blueprint = SimpleNamespace(spec=spec, team_name=TEAM)
     host = FakeHost()
-    scheduler = TeamScheduler(host, blueprint=blueprint, infra=infra)
+    if review_feedback_rail is not None:
+        def _find_rails(rail_type):
+            if rail_type.__name__ == "TeamSkillEvolutionRail":
+                return [review_feedback_rail]
+            if rail_type.__name__ == "TeamSkillCreateRail" and skill_create_rail is not None:
+                return [skill_create_rail]
+            return []
+
+        host.harness = SimpleNamespace(find_rails=_find_rails)
+    scheduler = TeamScheduler(
+        host,
+        blueprint=blueprint,
+        infra=infra,
+        build_context=build_context,
+    )
     return scheduler, host, message_manager, task_manager
 
 
@@ -351,6 +375,38 @@ async def test_review_fail_settles_rework_with_feedback(db, bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_review_fail_dispatches_aggregated_feedback_to_mounted_rail(db, bus):
+    rail = SimpleNamespace(
+        review_feedback_evolution_enabled=True,
+        handle_review_feedback=AsyncMock(),
+        bind_review_feedback_skill_create_rail=lambda _rail: None,
+    )
+    scheduler, _host, _mm, tm = _build_scheduler(
+        db,
+        bus,
+        build_context=SimpleNamespace(session_id="sched_session"),
+        review_feedback_rail=rail,
+        default_max_review_rounds=3,
+    )
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
+    assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "fail", "broken build")).ok
+    assert (await _reviewer_mgr(db, bus, "rev-2").verify_task("r", "pass")).ok
+
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    await asyncio.sleep(0)
+    if scheduler._review_feedback_tasks:
+        await asyncio.gather(*scheduler._review_feedback_tasks)
+
+    rail.handle_review_feedback.assert_awaited_once()
+    payload = rail.handle_review_feedback.await_args.args[0]
+    assert payload["task_id"] == "r"
+    assert payload["review_round"] == 1
+    assert payload["session_id"] == "sched_session"
+    assert "broken build" in payload["feedback"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_round_ceiling_escalates_to_leader(db, bus):
     scheduler, host, mm, tm = _build_scheduler(db, bus)
     await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",), max_rounds=1)
@@ -557,3 +613,45 @@ def test_settle_review_tally_inspector_avg_none():
         "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
         "inspector_count": 1, "inspector_voted": 1, "inspector_avg": None,
     }) == VERDICT_FAIL
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_task_list_drained_waits_for_task_feedback_then_finalizes_team_feedback(db, bus):
+    order: list[str] = []
+
+    class _FeedbackRail:
+        review_feedback_evolution_enabled = True
+
+        def bind_review_feedback_skill_create_rail(self, _rail):
+            return None
+
+        async def handle_review_feedback(self, _payload):
+            order.append("task")
+
+        async def finalize_review_feedback(self, payload):
+            order.append(f"team:{payload['team_id']}")
+
+    rail = _FeedbackRail()
+    build_context = SimpleNamespace(session_id="sched_session")
+    scheduler, _host, _mm, _tm = _build_scheduler(
+        db,
+        bus,
+        build_context=build_context,
+        review_feedback_rail=rail,
+    )
+    await scheduler.activate()
+    pending = asyncio.create_task(
+        scheduler._invoke_review_feedback_rail(
+            rail.handle_review_feedback,
+            {"task_id": "r", "review_round": 1},
+        )
+    )
+    scheduler._review_feedback_tasks.add(pending)
+    pending.add_done_callback(scheduler._review_feedback_tasks.discard)
+
+    event = EventMessage.from_event(TaskListDrainedEvent(team_name=TEAM, task_count=1))
+    await scheduler.on_event(event)
+    await scheduler.on_event(event)
+
+    assert order == ["task", f"team:{TEAM}"]

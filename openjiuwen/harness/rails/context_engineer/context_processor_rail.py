@@ -9,14 +9,7 @@ from typing import Any, Dict, List, Tuple, Union
 
 from pydantic import BaseModel
 
-from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.context_engine import (
-    LOOP_COMPACT_BAILOUT_STATE_KEY,
-    TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
-    ReasoningToolLoopCompactProcessorConfig,
-)
 from openjiuwen.core.context_engine.context.session_memory_manager import (
     SessionMemoryConfig,
     SessionMemoryManager,
@@ -37,9 +30,12 @@ from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader
     MessageSummaryOffloaderConfig as ForkedMessageSummaryOffloaderConfig,
 )
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
-from openjiuwen.core.foundation.llm import ModelRequestConfig
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    ModelRequestConfig,
+    ToolMessage,
+)
 from openjiuwen.core.foundation.tool.base import ToolCard
-from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.sections.compression_recall import build_compression_recall_section
 from openjiuwen.harness.prompts.sections.reload import build_reload_section
@@ -50,21 +46,6 @@ from openjiuwen.harness.schema.state import (
     DeepAgentState,
 )
 
-# (processor_key, config_attr, session_state_key, abort_marker)
-_LOOP_BAILOUT_SPECS: Tuple[Tuple[str, str, str, str], ...] = (
-    (
-        "ReasoningToolLoopCompactProcessor",
-        "bailout_threshold",
-        LOOP_COMPACT_BAILOUT_STATE_KEY,
-        "reasoning/tool loop unresolved after repeated compaction",
-    ),
-    (
-        "ReasoningToolLoopCompactProcessor",
-        "tool_args_bailout_threshold",
-        TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY,
-        "identical tool-call/args loop unresolved after repeated compaction",
-    ),
-)
 _SESSION_MEMORY_PROCESSOR_KEY = "SessionMemoryCompressor"
 
 
@@ -125,11 +106,34 @@ class ContextProcessorRail(DeepAgentRail):
         self._all_processors: List[Tuple[str, BaseModel]] = []
         self._reload_enabled = False
         self._recall_enabled = False
+        self._initialized = False
         # Abilities this rail actually registered, mapped from tool name to the
         # exact card that was stored. The name is the ability-manager key, while
         # the card identity tells uninit whether this rail is still the owner or
         # another rail has since taken the name over.
         self._owned_tool_cards: Dict[str, ToolCard] = {}
+
+    def add_processors(
+        self,
+        processors: Union[
+            Tuple[str, BaseModel],
+            Tuple[str, Dict],
+            List[Tuple[str, BaseModel]],
+            List[Tuple[str, Dict]],
+        ],
+    ) -> None:
+        """Add or replace processor configs before the rail is initialized."""
+        if self._initialized:
+            raise RuntimeError("Cannot add context processors after ContextProcessorRail.init()")
+
+        additions = [processors] if isinstance(processors, tuple) else list(processors)
+        for processor_key, processor_config in additions:
+            for index, (existing_key, _) in enumerate(self._user_processors):
+                if existing_key == processor_key:
+                    self._user_processors[index] = (processor_key, processor_config)
+                    break
+            else:
+                self._user_processors.append((processor_key, processor_config))
 
     @staticmethod
     def _merge_config_with_overrides(
@@ -229,10 +233,6 @@ class ContextProcessorRail(DeepAgentRail):
                 ),
             ),
             (
-                "ReasoningToolLoopCompactProcessor",
-                ReasoningToolLoopCompactProcessorConfig(),
-            ),
-            (
                 "DialogueCompressor",
                 ForkedDialogueCompressorConfig(
                     model=model_cfg,
@@ -264,6 +264,7 @@ class ContextProcessorRail(DeepAgentRail):
 
     def init(self, agent) -> None:
         """Inject / merge processors into agent.react_agent._config.context_processors."""
+        self._initialized = True
         config = getattr(getattr(agent, "react_agent", None), "_config", None)
         if config is None:
             return
@@ -306,6 +307,15 @@ class ContextProcessorRail(DeepAgentRail):
                 model_client_config=model_client_config,
             )
 
+        affinity_config = getattr(config, "kv_cache_affinity_config", None)
+        affinity_enabled = bool(
+            getattr(affinity_config, "enable_kv_cache_affinity", False)
+        )
+        self._apply_compressor_affinity_policy(
+            all_processors,
+            enabled=affinity_enabled,
+        )
+
         self._maybe_setup_session_memory_manager(all_processors, model_config, model_client_config)
 
         config.context_processors = all_processors
@@ -326,7 +336,13 @@ class ContextProcessorRail(DeepAgentRail):
         context_engine_config = getattr(config, "context_engine_config", None)
         recall_config = getattr(context_engine_config, "compression_recall_config", None)
         supported_compressor_present = any(
-            processor_name in {"DialogueCompressor", "CurrentRoundCompressor", "RoundLevelCompressor"}
+            processor_name
+            in {
+                "DialogueCompressor",
+                "CurrentRoundCompressor",
+                "RoundLevelCompressor",
+                "SessionMemoryCompressor",
+            }
             for processor_name, _ in all_processors
         )
         recall_requested = isinstance(recall_config, CompressionRecallConfig) and recall_config.enabled
@@ -342,6 +358,25 @@ class ContextProcessorRail(DeepAgentRail):
             self._protect_compression_recall_tool_results(all_processors)
             self._register_compression_recall_tool(agent)
         self._reload_enabled = bool(getattr(context_engine_config, "enable_reload", False))
+
+    @staticmethod
+    def _apply_compressor_affinity_policy(
+        processors: List[Tuple[str, BaseModel]],
+        *,
+        enabled: bool,
+    ) -> None:
+        """Keep compressor affinity aligned with the owning ReActAgent."""
+        supported = {
+            "DialogueCompressor",
+            "CurrentRoundCompressor",
+            "RoundLevelCompressor",
+        }
+        for name, processor_config in processors:
+            if name in supported and hasattr(
+                processor_config,
+                "enable_kv_cache_affinity",
+            ):
+                processor_config.enable_kv_cache_affinity = enabled
 
     def _maybe_setup_session_memory_manager(
         self,
@@ -413,13 +448,12 @@ class ContextProcessorRail(DeepAgentRail):
         self._all_processors = []
         self._reload_enabled = False
         self._recall_enabled = False
+        self._initialized = False
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        self._reset_loop_bailout_counter(ctx)
         await self.fix_incomplete_tool_context(ctx)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        self._maybe_bailout_loop_compactions(ctx)
         self._refresh_task_state_runtime(ctx)
         await self._maybe_inject_offload_section()
         self._maybe_inject_compression_recall_section()
@@ -450,74 +484,6 @@ class ContextProcessorRail(DeepAgentRail):
             ctx,
             workspace=self.workspace,
         )
-
-    def _resolve_loop_bailout_threshold(self, processor_key: str, config_attr: str) -> int:
-        """Return the configured loop-compaction bail-out threshold (0 = off)."""
-        for key, cfg in self._all_processors:
-            if key != processor_key:
-                continue
-            threshold = getattr(cfg, config_attr, 0)
-            try:
-                return max(0, int(threshold))
-            except (TypeError, ValueError):
-                return 0
-        return 0
-
-    @staticmethod
-    def _reset_loop_bailout_counter(ctx: AgentCallbackContext) -> None:
-        """Clear shared loop-compaction counters at the start of an invoke."""
-        session = ctx.session
-        if session is None:
-            return
-        session.update_state({state_key: 0 for _, _, state_key, _ in _LOOP_BAILOUT_SPECS})
-
-    def _maybe_bailout_loop_compactions(self, ctx: AgentCallbackContext) -> None:
-        """Raise before the model call when a loop persists after compaction.
-
-        ``ReasoningToolLoopCompactProcessor`` increments shared counters on the
-        session every time it folds a consecutive identical loop (one counter
-        per match rule). Once a counter reaches its configured bail-out
-        threshold, abort the run so the caller can perceive the failure instead
-        of looping forever.
-
-        Raising ``AbortError`` (with a ``build_error`` cause) is required because
-        plain exceptions raised inside a rail callback are swallowed by the
-        callback framework; ``AbortError`` re-raises its cause across the
-        ``trigger`` boundary so the underlying ``build_error`` propagates.
-        """
-        session = ctx.session
-        if session is None:
-            return
-        for processor_key, config_attr, state_key, marker in _LOOP_BAILOUT_SPECS:
-            threshold = self._resolve_loop_bailout_threshold(processor_key, config_attr)
-            if threshold <= 0:
-                continue
-            try:
-                count = int(session.get_state(state_key) or 0)
-            except (TypeError, ValueError):
-                count = 0
-            if count < threshold:
-                continue
-            # Clear first so a caller-level retry / next invoke starts clean.
-            session.update_state({state_key: 0})
-            logger.warning(
-                "[ContextProcessorRail] %s: compaction_count=%d >= threshold=%d; aborting run",
-                marker,
-                count,
-                threshold,
-            )
-            raise AbortError(
-                marker,
-                cause=build_error(
-                    StatusCode.CONTEXT_EXECUTION_ERROR,
-                    error_msg=(
-                        f"{marker}: the model repeated identical tool loops "
-                        f"through {count} compaction(s) "
-                        f"(processor={processor_key}, rule={config_attr}, "
-                        f"threshold={threshold})"
-                    ),
-                ),
-            )
 
     @staticmethod
     def _refresh_task_state_runtime(ctx: AgentCallbackContext) -> None:
@@ -569,8 +535,6 @@ class ContextProcessorRail(DeepAgentRail):
     @staticmethod
     async def fix_incomplete_tool_context(ctx: AgentCallbackContext) -> None:
         """Validate and fix incomplete context messages before entering ReAct loop."""
-        from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
-
         try:
             context = ctx.context
             if context is None:
@@ -696,3 +660,8 @@ class ContextProcessorRail(DeepAgentRail):
             return
         language = self._system_prompt_builder.language or "cn"
         self._system_prompt_builder.add_section(build_compression_recall_section(language))
+
+
+__all__ = [
+    "ContextProcessorRail",
+]

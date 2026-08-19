@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import uuid
 from enum import Enum
-from typing import Optional, Union, Any, Self
+from typing import Optional, Union, Any, Self, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -24,6 +24,34 @@ class ProviderType(str, Enum):
     IntelliRouter = "intelli_router"
 
 
+class LLMApiMode(str, Enum):
+    ChatCompletions = "chat_completions"
+    Responses = "responses"
+    AnthropicMessages = "anthropic_messages"
+
+
+class LLMAuthMode(str, Enum):
+    ApiKey = "api_key"
+    NoneAuth = "none"
+    CustomHeaders = "custom_headers"
+    OpenAIAccountOAuth = "openai_account_oauth"
+
+
+class KVCacheExtensionConfig(BaseModel):
+    mode: Literal["none", "release", "affinity"] = "none"
+    release_endpoint: str = "/release_kv_cache"
+    session_field: str = "cache_salt"
+    enable_cache_sharing_field: str = "cache_sharing"
+    affinity_field: str = "agent_hint"
+
+
+class LLMExtensionsConfig(BaseModel):
+    prompt_cache: dict[str, Any] = Field(default_factory=dict)
+    kv_cache: KVCacheExtensionConfig = Field(default_factory=KVCacheExtensionConfig)
+    response_fields: dict[str, Any] = Field(default_factory=dict)
+    request_extra_body: dict[str, Any] = Field(default_factory=dict)
+
+
 _TOP_LEVEL_API_KEY_PROVIDERS = {
     ProviderType.OpenAI.value,
     ProviderType.OpenRouter.value,
@@ -34,6 +62,10 @@ _TOP_LEVEL_API_KEY_PROVIDERS = {
     ProviderType.InferenceAffinity.value,
 }
 _TOP_LEVEL_API_BASE_PROVIDERS = _TOP_LEVEL_API_KEY_PROVIDERS | {ProviderType.OpenAIAccount.value}
+_DEFAULT_API_BASE_BY_ENDPOINT_PROFILE = {
+    "ollama": "http://localhost:11434/v1",
+    "lmstudio": "http://localhost:1234/v1",
+}
 
 
 class ModelClientConfig(BaseModel):
@@ -82,7 +114,14 @@ class ModelClientConfig(BaseModel):
         default=None,
         description="Developer-provided headers merged per LLM call"
     )
-    model_config = {"extra": "allow"}  # Allow extra fields injected by core/provider (e.g. default headers)
+    api_mode: Optional[LLMApiMode] = Field(default=None, description="LLM API mode")
+    auth_mode: LLMAuthMode = Field(default=LLMAuthMode.ApiKey, description="LLM authentication mode")
+    endpoint_profile: Optional[str] = Field(default=None, description="OpenAI-compatible endpoint profile name")
+    extensions: LLMExtensionsConfig = Field(default_factory=LLMExtensionsConfig)
+    legacy_client_provider: Optional[str] = Field(default=None, description="Original provider before normalization")
+    model_config = {
+        "extra": "allow",
+    }
 
     @model_validator(mode='after')
     def validate_client_provider(self) -> Self:
@@ -123,7 +162,17 @@ class ModelClientConfig(BaseModel):
             )
 
     def _validate_top_level_provider_config(self, provider: str) -> None:
-        if provider in _TOP_LEVEL_API_KEY_PROVIDERS and not str(self.api_key or "").strip():
+        if not str(self.api_base or "").strip() and self.endpoint_profile:
+            default_api_base = _DEFAULT_API_BASE_BY_ENDPOINT_PROFILE.get(
+                str(self.endpoint_profile).strip().lower()
+            )
+            if default_api_base:
+                self.api_base = default_api_base
+        if self.auth_mode != LLMAuthMode.ApiKey.value and self.auth_mode != LLMAuthMode.ApiKey:
+            requires_api_key = False
+        else:
+            requires_api_key = provider in _TOP_LEVEL_API_KEY_PROVIDERS
+        if requires_api_key and not str(self.api_key or "").strip():
             raise build_error(
                 StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                 error_msg=f"api_key is required for provider {provider}."

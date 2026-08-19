@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 from math import isfinite
 from typing import Any
 
@@ -21,6 +21,11 @@ from openjiuwen.symphony.models import (
     ImprovementSuggestion,
     MetricResult,
     SuggestionPriority,
+)
+from openjiuwen.symphony.models._message_trace import (
+    message_has_assistant_or_tool_evidence,
+    message_has_user_input,
+    project_message_calls,
 )
 
 
@@ -40,24 +45,27 @@ def _trace_evidence(context: EvaluationContext, description: str) -> EvidenceRef
     return EvidenceRef(evidence_type="evaluation_case", reference=reference, description=description)
 
 
-def _matches_capability(call: Any, context: EvaluationContext) -> bool:
-    if not isinstance(call, dict):
+def _has_output_evidence(value: Any) -> bool:
+    if value is None:
         return False
-    identity = (call.get("capability_id"), call.get("capability_type"))
-    return identity == (context.capability_id, context.capability_type)
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (dict, list, tuple)):
+        return bool(value)
+    return True
 
 
-def _non_negative_finite_float(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    numeric_value = float(value)
-    if not isfinite(numeric_value) or numeric_value < 0:
-        return None
-    return numeric_value
+def _child_has_input_context(context: EvaluationContext) -> bool:
+    case = context.case
+    if case is None:
+        return False
+    if case.query.strip():
+        return True
+    return any(message_has_user_input(case.message[: call.assistant_message_index]) for call in context.matching_calls)
 
 
 def _output_evaluation_payload(context: EvaluationContext) -> dict[str, Any]:
-    """Exclude parent outputs when a trace attributes evidence to a child capability."""
+    """Keep only the matching tool-call fragment for an indirectly evaluated child."""
 
     payload = context.payload()
     case = context.case
@@ -71,11 +79,64 @@ def _output_evaluation_payload(context: EvaluationContext) -> dict[str, Any]:
         return payload
     case_payload = dict(raw_case)
     case_payload["expected_output"] = None
-    case_payload["actual_output"] = None
+    case_payload["output"] = None
     case_payload["success"] = None
-    raw_calls = case_payload.get("calls")
-    if isinstance(raw_calls, list):
-        case_payload["calls"] = [call for call in raw_calls if _matches_capability(call, context)]
+    matching_calls = context.matching_calls
+    matching_ids = {call.tool_call_id for call in matching_calls}
+    matching_assistant_indexes = {call.assistant_message_index for call in matching_calls}
+    matching_tool_indexes = {call.tool_message_index for call in matching_calls if call.tool_message_index is not None}
+    raw_message = case_payload.get("message")
+    filtered_message: list[dict[str, Any]] = []
+    if isinstance(raw_message, list):
+        relevant_user_indexes: set[int] = set()
+        latest_user_index: int | None = None
+        for index, item in enumerate(raw_message):
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") == "user":
+                latest_user_index = index
+            elif index in matching_assistant_indexes and latest_user_index is not None:
+                relevant_user_indexes.add(latest_user_index)
+        for index, item in enumerate(raw_message):
+            if not isinstance(item, dict):
+                continue
+            if index in relevant_user_indexes and item.get("role") == "user":
+                filtered_message.append(item)
+            elif index in matching_assistant_indexes and item.get("role") == "assistant":
+                raw_tool_calls = item.get("tool_calls")
+                if not isinstance(raw_tool_calls, list):
+                    continue
+                filtered_tool_calls = [
+                    tool_call
+                    for tool_call in raw_tool_calls
+                    if isinstance(tool_call, dict) and tool_call.get("id") in matching_ids
+                ]
+                if filtered_tool_calls:
+                    filtered_message.append(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": filtered_tool_calls,
+                        }
+                    )
+            elif index in matching_tool_indexes and item.get("role") == "tool":
+                filtered_message.append(item)
+    case_payload["message"] = filtered_message
+    payload["case"] = case_payload
+    return payload
+
+
+def _compact_accuracy_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Omit empty case fields from the Accuracy judge prompt only."""
+
+    raw_case = payload.get("case")
+    if not isinstance(raw_case, dict):
+        return payload
+    case_payload = {key: value for key, value in raw_case.items() if value is not None}
+    if case_payload.get("query") == "":
+        case_payload.pop("query")
+    if case_payload.get("message") == []:
+        case_payload.pop("message")
     payload["case"] = case_payload
     return payload
 
@@ -261,15 +322,6 @@ class SuccessRateEvaluator(TraceEvaluator):
             context.fingerprint.capability_type,
         )
         success = case.success if directly_evaluated else None
-        calls = context.matching_calls
-        if directly_evaluated and not calls:
-            calls = case.calls
-        if success is None and calls:
-            call_outcomes = [
-                call.success if call.success is not None else False if call.error else None for call in calls
-            ]
-            if all(outcome is not None for outcome in call_outcomes):
-                success = all(bool(outcome) for outcome in call_outcomes)
         if success is None:
             return self.not_applicable(
                 context,
@@ -310,12 +362,6 @@ class SuccessRateEvaluator(TraceEvaluator):
         )
 
 
-def _duration_ms(started_at: datetime | None, ended_at: datetime | None) -> float | None:
-    if started_at is None or ended_at is None:
-        return None
-    return max(0.0, (ended_at - started_at).total_seconds() * 1_000.0)
-
-
 def _percentile(values: list[float], fraction: float) -> float:
     ordered = sorted(values)
     if len(ordered) == 1:
@@ -344,7 +390,7 @@ def latency_statistics(values: Iterable[float]) -> dict[str, Any]:
 
 
 class LatencyEvaluator(TraceEvaluator):
-    """Observe supplied call latency and only score an explicit caller target."""
+    """Observe caller-supplied TTFT and end-to-end latency without scoring."""
 
     metric_id = "latency"
 
@@ -355,79 +401,35 @@ class LatencyEvaluator(TraceEvaluator):
         case = context.case
         if case is None:
             return self.not_applicable(context, "No evaluation trace case was supplied.", code="missing_trace_case")
-        samples: list[float] = []
         directly_evaluated = (case.capability_id, case.capability_type) == (
             context.fingerprint.capability_id,
             context.fingerprint.capability_type,
         )
-        case_duration: float | None = None
-        if directly_evaluated:
-            for key in ("duration_ms", "latency_ms"):
-                case_duration = _non_negative_finite_float(case.metadata.get(key))
-                if case_duration is not None:
-                    break
-        calls = context.matching_calls
-        if directly_evaluated and not calls:
-            calls = case.calls
-        for call in calls:
-            value = call.latency_ms
-            if value is None:
-                value = _duration_ms(call.started_at, call.ended_at)
-            if value is not None:
-                samples.append(float(value))
-        if case_duration is not None:
-            samples = [case_duration]
-        details = latency_statistics(samples)
+        if not directly_evaluated:
+            return self.not_applicable(
+                context,
+                "The trace does not contain latency for the evaluated child capability.",
+                code="missing_latency_observation",
+            )
+        if case.latency is None:
+            return self.not_applicable(context, "The trace has no latency value.", code="missing_latency_observation")
+        details: dict[str, Any] = {}
+        if case.latency.ttft is not None:
+            details["ttft_ms"] = case.latency.ttft
+        if case.latency.e2e is not None:
+            details["e2e_ms"] = case.latency.e2e
         if not details:
             return self.not_applicable(
                 context,
-                "The trace does not contain latency observations.",
+                "The trace has no latency observations.",
                 code="missing_latency_observation",
             )
-        details["observation_basis"] = "case_end_to_end" if case_duration is not None else "capability_calls"
-        evidence = _trace_evidence(context, "Caller-supplied latency observations were aggregated.")
-        target: float | None = None
-        target_sources = (
-            (case.metadata, context.fingerprint.metadata)
-            if directly_evaluated
-            else (*[call.metadata for call in calls], context.fingerprint.metadata)
-        )
-        for metadata in target_sources:
-            for key in ("latency_target_ms", "target_latency_ms", "expected_latency_ms"):
-                target = _non_negative_finite_float(metadata.get(key))
-                if target is not None:
-                    break
-            if target is not None:
-                break
-        if target is None:
-            return self.result(
-                context,
-                score=None,
-                status="observed",
-                reason="Latency was observed without applying a target or admission threshold.",
-                details=details,
-                evidence=(evidence,),
-            )
-        if case_duration is not None:
-            observed = case_duration
-            target_basis = "case_end_to_end"
-        elif len(samples) == 1:
-            observed = samples[0]
-            target_basis = "single_call_latency"
-        else:
-            observed = float(details["avg_ms"])
-            target_basis = "average_call_latency"
-        passed = observed <= target
-        details.update({"observed_ms": observed, "target_ms": target, "target_basis": target_basis})
+        evidence = _trace_evidence(context, "Caller-supplied latency observations were recorded.")
         return self.result(
             context,
-            score=1.0 if passed else 0.0,
-            status="pass" if passed else "fail",
-            reason=(
-                "Observed latency met the supplied target."
-                if passed
-                else "Observed latency exceeded the supplied target."
-            ),
+            score=None,
+            status="observed",
+            reason="Latency was observed without applying a target or admission threshold.",
             details=details,
             evidence=(evidence,),
         )
@@ -437,9 +439,71 @@ class AccuracyEvaluator(LLMTraceEvaluator):
     """Judge factual or expected-output correctness of a supplied result."""
 
     metric_id = "accuracy"
+    allows_null_score = True
+    response_instruction = (
+        "Return only JSON with score 0, 1, or null and a concise reason.\n"
+        "When score is null, reason must state which not-applicable condition applies."
+    )
     rubric = (
-        "Judge whether the actual output is correct for the query and supplied evidence. "
-        "Treat expected output and capability-call results as authoritative when present."
+        "准确性三值评分标准：\n"
+        "请先判断本次准确性评估是否适用。仅在满足下列“不适用”条件之一时，"
+        "返回 score=null；否则必须继续按照准确或不准确规则返回 score=1 或 score=0。\n"
+        "不适用（score=null）：\n"
+        "1. 用户 query 与 Evaluation data 中 fingerprint.description 描述的 Skill"
+        " 能力范围明确无关，且 query 中不存在任何属于该 Skill 的实质子意图。\n"
+        "2. 完整 message 和可选 output 中没有任何可供用户使用、可进行事实准确性"
+        " 判断的实质回答，只包含内部规划、路由标记、工具调用参数、空工具结果、"
+        "状态信息、NO_REPLY 或无实质内容的拒答。\n"
+        "3. 工具结果中如果包含明确、完整、实际可作为会话结果的自然语言回答，"
+        "应视为存在实质回答；仅有工具调用或原始结构化数据不自动等于实质回答。\n"
+        "不得返回 score=null 的情况：\n"
+        "- 已存在面向用户的实质回答，但回答不完整、质量较差或包含事实错误；"
+        "此时必须返回 score=0 或 score=1。\n"
+        "- 事实证据不足、缺少后续确认或评估模型不了解新知识；"
+        "这些情况必须继续遵循本 rubric 的证据规则，不能以此返回 null。\n"
+        "- query 同时包含多个意图，只要其中存在属于当前 Skill 的实质子意图，"
+        "就必须评估相关回答并返回 0 或 1。\n"
+        "优秀（score=1，满足以下所有条件）：\n"
+        "- 无事实性错误，核心信息准确。\n"
+        "- 完全符合客观事实，无任何事实性错误。\n"
+        "- 逻辑严密，推理严谨，无逻辑谬误。\n"
+        "- 符合行业规范/专业规范，表述专业。\n"
+        "- 新知识/新产品场景：当回答涉及新知识、新产品、新功能等内容时，"
+        "即使评估模型的历史训练数据中未包含这些信息，只要回答逻辑合理、"
+        "符合用户需求、表述清晰，也应判断为准确回答。\n"
+        "不及格（score=0，满足以下条件之一）：\n"
+        "- 存在事实性错误，与客观事实不符。\n"
+        "- 存在逻辑谬误，推理过程断裂。\n"
+        "- 存在专业偏差，违背行业标准/专业规范。\n"
+        "- 输出内容不可用，可能误导用户。\n"
+        "补充规则：\n"
+        "1. 事实核查：以有无事实错误为首要判断标准，检查执行结果中是否存在"
+        "事实性错误。\n"
+        "2. 逻辑验证：检查推理过程是否严密，是否存在逻辑谬误。\n"
+        "3. 专业规范：评估是否符合行业规范/专业规范。\n"
+        "4. 新知识处理：对于涉及新知识、新产品、新功能的内容，评估其逻辑"
+        "合理性和表述清晰度。\n"
+        "5. 时间基准：Evaluation data 中的 reference_time 是本次评估的权威"
+        "当前时间，即使它晚于模型训练截止时间，也必须将其视为真实时间"
+        "基准。不得仅因电影、产品、功能或事件晚于模型训练时间，就认定其"
+        "尚未发生或存在事实错误。对于训练截止时间之后的信息，优先依据"
+        "工具结果、对话上下文和回答的内部一致性判断；没有相反证据时，"
+        "不得仅以模型不知道该信息为由判定 score=0；但如果工具结果或"
+        "上下文与回答矛盾，仍应判定为事实错误。\n"
+        "6. 时间证据判断：将今年、今天、当前等相对时间统一按 reference_time"
+        " 解析。工具内容的发布时间与其描述的事件日期是两个不同时间，不得"
+        "混淆。如果较早发布的工具结果说明事件计划于某个日期发生，且事件"
+        "日期不晚于 reference_time，则回答称该事件已经发生不与该工具结果"
+        "矛盾。只有存在延期、取消、尚未发生等相反证据时，才能据此判定事实"
+        "错误。缺少事件发生后的二次确认属于证据不足；证据不足不等于事实"
+        "错误，也不等于证据矛盾。\n"
+        "7. 错误判定的证据要求：判定 score=0 时，必须指出回答中的具体事实，"
+        "以及与其直接冲突的工具结果、上下文证据或确定的客观事实。新闻发布"
+        "时间早于事件日期本身不构成冲突。如果没有明确相反证据，不得把不"
+        "确定或缺少后续确认解释为事实错误。\n"
+        "注意事项：如果数据不完整但不存在明确错误或相反证据，应判定"
+        " score=1，并在 reason 中简要说明证据边界。核心评估重点是有无事实"
+        "错误，只要存在事实性错误即判定为不及格。"
     )
 
     def validate_context(self, context: EvaluationContext) -> MetricResult | None:
@@ -453,24 +517,44 @@ class AccuracyEvaluator(LLMTraceEvaluator):
             context.fingerprint.capability_id,
             context.fingerprint.capability_type,
         )
-        matching_outputs = [call.output for call in context.matching_calls if call.output is not None]
-        has_actual_output = case.actual_output is not None if directly_evaluated else bool(matching_outputs)
-        if not has_actual_output:
-            return self.not_applicable(context, "The trace has no actual output.", code="missing_actual_output")
-        if directly_evaluated and case.expected_output is not None and case.actual_output == case.expected_output:
-            evidence = _trace_evidence(context, "Actual output exactly matches the supplied expected output.")
+        outputs_match = (
+            case.output is not None and case.expected_output is not None and case.output == case.expected_output
+        )
+        if directly_evaluated and outputs_match:
+            evidence = _trace_evidence(context, "Output exactly matches the supplied expected output.")
             return self.result(
                 context,
                 score=1.0,
                 status="pass",
-                reason="Actual output exactly matches the supplied expected output.",
+                reason="Output exactly matches the supplied expected output.",
                 details={"evaluation_method": "exact_match"},
                 evidence=(evidence,),
             )
+        if directly_evaluated:
+            has_input = bool(case.query.strip()) or message_has_user_input(case.message)
+            has_evidence = _has_output_evidence(case.output) or message_has_assistant_or_tool_evidence(case.message)
+        else:
+            has_input = _child_has_input_context(context)
+            has_evidence = any(
+                call.tool_message_index is not None and _has_output_evidence(call.output)
+                for call in context.matching_calls
+            )
+        if not has_input or not has_evidence:
+            return self.not_applicable(context, "The trace has no usable message or output.", code="missing_output")
         return None
 
     def evaluation_payload(self, context: EvaluationContext) -> dict[str, Any]:
-        return _output_evaluation_payload(context)
+        payload = _compact_accuracy_payload(_output_evaluation_payload(context))
+        event_time = context.case.event_time if context.case is not None else None
+        if event_time is None:
+            reference_time = datetime.now(UTC)
+            reference_time_source = "evaluation_time"
+        else:
+            reference_time = event_time
+            reference_time_source = "event_time"
+        payload["reference_time"] = reference_time.isoformat()
+        payload["reference_time_source"] = reference_time_source
+        return payload
 
 
 class CompletenessEvaluator(LLMTraceEvaluator):
@@ -478,8 +562,9 @@ class CompletenessEvaluator(LLMTraceEvaluator):
 
     metric_id = "completeness"
     rubric = (
-        "Judge whether the actual output and capability calls complete every material part "
-        "of the caller-supplied query."
+        "Judge whether the complete message trace and optional output complete every material part "
+        "of the caller-supplied query. Treat assistant requests to tools and the corresponding tool responses "
+        "as execution evidence."
     )
 
     def validate_context(self, context: EvaluationContext) -> MetricResult | None:
@@ -493,21 +578,28 @@ class CompletenessEvaluator(LLMTraceEvaluator):
             context.fingerprint.capability_id,
             context.fingerprint.capability_type,
         )
-        matching_outputs = [call.output for call in context.matching_calls if call.output not in (None, "")]
-        has_usable_output = case.actual_output not in (None, "") if directly_evaluated else bool(matching_outputs)
-        if has_usable_output:
+        if directly_evaluated:
+            has_input = bool(case.query.strip()) or message_has_user_input(case.message)
+            has_evidence = _has_output_evidence(case.output) or message_has_assistant_or_tool_evidence(case.message)
+        else:
+            has_input = _child_has_input_context(context)
+            has_evidence = any(
+                call.tool_message_index is not None and _has_output_evidence(call.output)
+                for call in context.matching_calls
+            )
+        if has_input and has_evidence:
             return None
-        evidence = _trace_evidence(context, "The trace contains no usable actual output.")
+        evidence = _trace_evidence(context, "The trace contains no usable message or output.")
         return self.result(
             context,
             score=0.0,
             status="fail",
-            reason="The trace contains no usable actual output.",
+            reason="The trace contains no usable message or output.",
             evidence=(evidence,),
             failures=(
                 FailureReason(
-                    code="missing_actual_output",
-                    message="The trace contains no usable actual output.",
+                    code="missing_output",
+                    message="The trace contains no usable message or output.",
                     severity=FailureSeverity.WARNING,
                     evidence=(evidence,),
                 ),
@@ -517,7 +609,7 @@ class CompletenessEvaluator(LLMTraceEvaluator):
                     code="produce_complete_output",
                     message="Return an output that addresses the requested task.",
                     priority=SuggestionPriority.HIGH,
-                    related_failures=("missing_actual_output",),
+                    related_failures=("missing_output",),
                 ),
             ),
         )
@@ -542,7 +634,7 @@ class CapabilitySelectionEvaluator(LLMTraceEvaluator):
         case = context.case
         if case is None:
             return self.not_applicable(context, "No evaluation trace case was supplied.", code="missing_trace_case")
-        if not case.calls:
+        if not project_message_calls(case.message):
             return self.not_applicable(
                 context,
                 "The trace contains no capability selections.",
@@ -567,7 +659,7 @@ class CompositionEffectivenessEvaluator(LLMTraceEvaluator):
         case = context.case
         if case is None:
             return self.not_applicable(context, "No evaluation trace case was supplied.", code="missing_trace_case")
-        if len(case.calls) < 2:
+        if len(project_message_calls(case.message)) < 2:
             return self.not_applicable(
                 context,
                 "Composition evaluation requires at least two observed capability calls.",

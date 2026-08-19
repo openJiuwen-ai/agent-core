@@ -309,7 +309,7 @@ class TeamAgentSpec(BaseModel):
     "predefined" to lock the roster and drop the leader's
     ``spawn_member`` tool.
     """
-    dispatch_mode: Literal["autonomous", "scheduled"] = "scheduled"
+    dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
     """How a task reaches the member that executes it. Static configuration.
 
     Orthogonal to ``team_mode`` (which governs whether the roster can
@@ -323,7 +323,7 @@ class TeamAgentSpec(BaseModel):
     in favour of ``member_complete_task``. Prompts and tool shapes are
     assembled per mode at build time; the mode never changes at runtime.
     """
-    enable_task_verification: bool = True
+    enable_task_verification: bool = False
     """Team-level "verification expected" switch for the verify gate.
 
     Purely prompt-driven: when True the leader's task-creation guidance
@@ -369,6 +369,16 @@ class TeamAgentSpec(BaseModel):
     prompt away from a team whose members are simply all busy. Measured off
     the leader's process-local idle clock, never DB ``updated_at``.
     Ignored under scheduled dispatch. See F_65.
+    """
+    steer_batch_size: int = 2
+    """How many queued steering inputs a non-leader member takes per model call.
+
+    Mailbox messages reach a running member one queue entry each, so a member
+    coming back from a busy stretch used to get the whole pile fused into one
+    turn. This caps the batch; the rest stays queued and arrives at the
+    following model calls, in order. The leader is exempt — it reads the
+    sequence of task-board snapshots to decide whether to re-plan, so it must
+    keep seeing all of it. See F_78.
     """
     transport: Optional[TransportSpec] = None
     """Pluggable transport layer specification.
@@ -454,6 +464,29 @@ class TeamAgentSpec(BaseModel):
     - ``enable_bridge=False`` with any BRIDGE_AGENT in predefined → error.
     - ``enable_bridge=True`` with no BRIDGE_AGENT predefined → allowed
       (dynamic spawn path).
+    """
+    enable_fork: bool = False
+    """Spec-level capability gate for context inheritance (fork).
+
+    True opens three surfaces at once, all keyed off this one flag:
+
+    - the ``checkpoint(name)`` tool, which lets any member save a named
+      snapshot of its own conversation position;
+    - the ``fork`` / ``fork_source`` / ``compact`` properties on
+      ``spawn_teammate``'s schema;
+    - the "context inheritance" section of ``spawn_teammate``'s description.
+
+    False (default) removes all three. Schema and prose are gated on the same
+    signal deliberately: a leader that reads about ``fork`` but has no
+    ``fork`` property to fill deliberates over a mechanism it cannot invoke,
+    which is worse than never mentioning it.
+
+    Fork only takes effect under ``spawn_mode="inprocess"`` — it injects the
+    source member's live message list into the new member's context engine,
+    which requires both to share a process. Under ``spawn_mode="process"``
+    the captured context cannot cross the boundary and is dropped. For the
+    same reason ``fork_source`` must name a member the caller hosts
+    in-process (the leader itself, or a teammate it spawned).
     """
     enable_swarmflow: bool = False
     """Spec-level capability gate for swarmflow orchestration.
@@ -629,6 +662,20 @@ class TeamAgentSpec(BaseModel):
         if self.stale_pending_idle_timeout <= 0:
             raise ValueError(
                 f"stale_pending_idle_timeout must be > 0 seconds, got {self.stale_pending_idle_timeout}",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_steer_batch_size(self) -> "TeamAgentSpec":
+        """Reject a steering batch that would consume nothing (F_78).
+
+        A member always takes at least one queued message, so a zero here
+        would not stall anything — it would silently mean "one", which is a
+        worse thing to configure by accident than an outright error.
+        """
+        if self.steer_batch_size <= 0:
+            raise ValueError(
+                f"steer_batch_size must be > 0 messages, got {self.steer_batch_size}",
             )
         return self
 

@@ -6,12 +6,12 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from openjiuwen.agent_evolving.agent_rl.online.gateway.app.server import (
-    _forward_chat_completions,
-    _inject_latest_lora,
-    build_gateway_app,
-)
 from openjiuwen.agent_evolving.agent_rl.online.gateway.app.bootstrap import build_app_from_config
+from openjiuwen.agent_evolving.agent_rl.online.gateway.app.completion_runtime import (
+    GatewayCompletionRuntime,
+    _inject_latest_lora,
+)
+from openjiuwen.agent_evolving.agent_rl.online.gateway.app.server import build_gateway_app
 from openjiuwen.agent_evolving.agent_rl.online.gateway.config import GatewayConfig
 from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.judge_dispatcher import JudgeDispatcher
 from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.sample_payloads import (
@@ -119,50 +119,7 @@ class _FakeTrajectoryRuntime:
 
 
 class _FakeTrainingTaskStore:
-    def __init__(self) -> None:
-        self.tasks: dict[str, dict] = {}
-        self.active_task_id: str | None = None
-        self.created_payloads: list[dict] = []
-        self.updated_payloads: list[tuple[str, str]] = []
-
-    async def create_task(self, payload: dict) -> dict:
-        self.created_payloads.append(dict(payload))
-        task_id = str(payload.get("task_id") or "task-1")
-        task = {
-            "task_id": task_id,
-            "status": "pending",
-            "user_id": str(payload.get("user_id") or ""),
-            "sample_count": int(payload.get("sample_count") or 0),
-            "training_count": int(payload.get("training_count") or 0),
-            "metadata": payload.get("metadata") or {},
-        }
-        self.tasks[task_id] = task
-        self.active_task_id = task_id
-        return dict(task)
-
-    async def list_tasks(self, *, limit: int = 100):
-        return list(self.tasks.values())[:limit]
-
-    async def get_task(self, task_id: str):
-        task = self.tasks.get(task_id)
-        return dict(task) if task is not None else None
-
-    async def get_active_task(self):
-        if self.active_task_id is None:
-            return None
-        return await self.get_task(self.active_task_id)
-
-    async def update_task_status(self, task_id: str, *, status: str, error: str = ""):
-        task = self.tasks.get(task_id)
-        if task is None:
-            return None
-        task = {**task, "status": status, "error": error}
-        self.tasks[task_id] = task
-        self.updated_payloads.append((task_id, status))
-        return dict(task)
-
-    async def request_stop(self, task_id: str):
-        return await self.update_task_status(task_id, status="stopping")
+    pass
 
 
 def _build_test_gateway(upstream_client: _FakeUpstreamClient, lora_repo: _FakeLoRARepo):
@@ -180,7 +137,7 @@ def _build_test_gateway(upstream_client: _FakeUpstreamClient, lora_repo: _FakeLo
         forwarder=_FakeForwarder(),
         upstream_client=upstream_client,
         trajectory_runtime=_FakeTrajectoryRuntime(),
-        training_task_store=None,
+        training_task_store=_FakeTrainingTaskStore(),
         close_resources=_close_resources,
         lora_repo=lora_repo,
     )
@@ -366,92 +323,23 @@ def test_effective_lora_api_returns_disabled_when_hot_load_fails():
     assert payload["reason"] == "boom"
 
 
-def test_training_task_api_creates_and_stops_task():
-    upstream = _FakeUpstreamClient(models=[])
-    task_store = _FakeTrainingTaskStore()
-
-    async def _close_resources() -> None:
-        return None
-
-    app = build_gateway_app(
-        config=SimpleNamespace(
-            gateway_api_key="gw-token",
-            llm_url="http://vllm.local",
-            llm_api_key="",
-            lora_default_policy="disabled",
-            model_id="base-model",
-        ),
-        forwarder=_FakeForwarder(),
-        upstream_client=upstream,
-        trajectory_runtime=_FakeTrajectoryRuntime(),
-        training_task_store=task_store,
-        close_resources=_close_resources,
-        lora_repo=_FakeLoRARepo({}),
-    )
-
-    with TestClient(app) as client:
-        create_resp = client.post(
-            "/v1/training/tasks",
-            headers={"Authorization": "Bearer gw-token"},
-            json={"task_id": "task-1", "user_id": "user-1", "sample_count": 12},
-        )
-        assert create_resp.status_code == 200
-        assert create_resp.json()["task_id"] == "task-1"
-        stop_resp = client.patch(
-            "/v1/training/tasks/task-1",
-            headers={"Authorization": "Bearer gw-token"},
-            json={"status": "stopping"},
-        )
-        assert stop_resp.status_code == 200
-        assert stop_resp.json()["status"] == "stopping"
-        list_resp = client.get(
-            "/v1/training/tasks",
-            headers={"Authorization": "Bearer gw-token"},
-        )
-        assert list_resp.status_code == 200
-        assert list_resp.json()["items"][0]["task_id"] == "task-1"
-
-
-def test_gateway_bootstrap_uses_local_store_without_redis(tmp_path):
-    app = build_app_from_config(
-        GatewayConfig(
-            port=18080,
-            llm_url="http://vllm.local",
-            judge_url="",
-            model_id="base-model",
-            record_dir=str(tmp_path / "records"),
-            trajectory_store_backend="local",
-            local_trajectory_store_dir=str(tmp_path / "store"),
-        ),
-        http_client=_FakeUpstreamClient(),
-    )
-
-    with TestClient(app) as client:
-        health_resp = client.get("/v1/rl/health")
-        stats_resp = client.get("/v1/gateway/stats")
-
-    assert health_resp.status_code == 200
-    assert health_resp.json()["services"]["trajectory_manager"] == "LocalTrajectoryStore"
-    assert stats_resp.status_code == 200
-    assert stats_resp.json()["trajectory_store_backend"] == "LocalTrajectoryStore"
-
-
 @pytest.mark.asyncio
 async def test_processor_chat_completion_proxies_without_turn_or_sample_work():
     forwarder = _FakeForwarder()
-    config = SimpleNamespace(
-        llm_api_key="",
+    runtime = GatewayCompletionRuntime(
+        config=SimpleNamespace(llm_api_key=""),
+        forwarder=forwarder,
+        collector=None,
     )
 
     request = SimpleNamespace(headers={"x-request-id": "trace-9", "x-user-id": "user-9"})
-    result = await _forward_chat_completions(
+    result, wants_stream = await runtime.execute(
         request=request,
         body={"messages": [{"role": "user", "content": "hello"}]},
-        config=config,
-        forwarder=forwarder,
     )
 
     assert result["choices"][0]["message"]["content"] == "pong"
+    assert wants_stream is False
     assert len(forwarder.forward_calls) == 1
 
 

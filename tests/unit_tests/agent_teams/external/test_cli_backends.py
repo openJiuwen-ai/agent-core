@@ -38,11 +38,36 @@ def test_codex_static_config_uses_explicit_binary_not_full_command():
     config = ExternalCliAgentSpec(cli_agent="codex", codex_bin="/opt/codex")
     assert config.codex_bin == "/opt/codex"
 
-    with pytest.raises(ValidationError, match="use codex_bin"):
+    with pytest.raises(ValidationError, match="use cli_path"):
         ExternalCliAgentSpec(cli_agent="codex", command=["codex", "app-server"])
 
     with pytest.raises(ValidationError, match="only valid"):
         ExternalCliAgentSpec(cli_agent="generic", codex_bin="/opt/codex")
+
+
+def test_sdk_static_config_accepts_cli_path():
+    """SDK-backed CLI agents accept a custom executable path."""
+    claude_config = ExternalCliAgentSpec(cli_agent="claude", cli_path="/opt/claude")
+    codex_config = ExternalCliAgentSpec(cli_agent="codex", cli_path="/opt/codex")
+
+    assert claude_config.cli_path == "/opt/claude"
+    assert codex_config.cli_path == "/opt/codex"
+
+    with pytest.raises(ValidationError, match="cli_path is only valid"):
+        ExternalCliAgentSpec(cli_agent="generic", cli_path="/opt/generic")
+
+
+def test_sdk_static_config_rejects_empty_paths():
+    """Optional CLI path fields accept None but reject empty strings."""
+    config = ExternalCliAgentSpec(cli_agent="codex", cli_path=None, codex_bin=None)
+    assert config.cli_path is None
+    assert config.codex_bin is None
+
+    with pytest.raises(ValidationError, match="String should have at least 1 character"):
+        ExternalCliAgentSpec(cli_agent="claude", cli_path="")
+
+    with pytest.raises(ValidationError, match="String should have at least 1 character"):
+        ExternalCliAgentSpec(cli_agent="codex", codex_bin="")
 
 
 def test_mcp_approval_mode_is_explicit_and_codex_only():

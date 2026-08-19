@@ -15,6 +15,80 @@ def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, parsed))
 
 
+def build_browser_state_metadata_js() -> str:
+    """Build Playwright code for fresh page, tab, and position state."""
+
+    return """
+async (page) => {
+  const pages = page.context().pages();
+
+  const tabs = await Promise.all(
+    pages.map(async (tab, index) => {
+      let title = '';
+      try {
+        title = await tab.title();
+      } catch (_error) {
+        title = '';
+      }
+      return {
+        index,
+        current: tab === page,
+        url: tab.url(),
+        title,
+      };
+    })
+  );
+
+  const pagePosition = await page.evaluate(() => {
+    const root = document.documentElement;
+    const body = document.body;
+    const viewportWidth = Math.max(0, window.innerWidth || root?.clientWidth || 0);
+    const viewportHeight = Math.max(0, window.innerHeight || root?.clientHeight || 0);
+    const pageWidth = Math.max(
+      viewportWidth,
+      root?.scrollWidth || 0,
+      body?.scrollWidth || 0
+    );
+    const pageHeight = Math.max(
+      viewportHeight,
+      root?.scrollHeight || 0,
+      body?.scrollHeight || 0
+    );
+    const scrollX = Math.max(0, window.scrollX || window.pageXOffset || 0);
+    const scrollY = Math.max(0, window.scrollY || window.pageYOffset || 0);
+
+    return {
+      viewport_width: viewportWidth,
+      viewport_height: viewportHeight,
+      page_width: pageWidth,
+      page_height: pageHeight,
+      scroll_x: scrollX,
+      scroll_y: scrollY,
+      pixels_above: scrollY,
+      pixels_below: Math.max(0, pageHeight - scrollY - viewportHeight),
+      pixels_left: scrollX,
+      pixels_right: Math.max(0, pageWidth - scrollX - viewportWidth),
+    };
+  });
+
+  let title = '';
+  try {
+    title = await page.title();
+  } catch (_error) {
+    title = '';
+  }
+
+  return {
+    ok: true,
+    url: page.url(),
+    title,
+    tabs,
+    page_position: pagePosition,
+  };
+}
+""".strip()
+
+
 def build_interactive_probe_js(
     *,
     max_items: int = 50,

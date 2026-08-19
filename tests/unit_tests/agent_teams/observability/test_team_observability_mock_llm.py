@@ -160,7 +160,11 @@ async def test_leader_single_iteration_trace_via_runner(
                     return
 
         try:
-            await asyncio.wait_for(_consume(), timeout=8.0)
+            # The stream never emits team_completed here, so this wait always
+            # expires — it is a cap on how long the team is left running, not
+            # an expected duration. Only exported spans are asserted, and the
+            # run that produces them finishes well under a second.
+            await asyncio.wait_for(_consume(), timeout=3.0)
         except asyncio.TimeoutError:
             team_logger.info("[UT] stream timed out (expected)")
 
@@ -203,9 +207,9 @@ async def test_leader_single_iteration_trace_via_runner(
     agent_ids = {s.context.span_id for s in agent_spans}
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     for llm in llm_spans:
-        assert llm.parent is not None, f"llm.call needs a parent"
+        assert llm.parent is not None, "llm.call needs a parent"
         assert llm.parent.span_id in agent_ids, \
-            f"llm.call parent not an agent span"
+            "llm.call parent not an agent span"
 
     # --- 4. No orphan spans ---
     span_ids = {s.context.span_id for s in all_spans}
@@ -230,7 +234,7 @@ async def test_leader_single_iteration_trace_via_runner(
         assert rs.parent is not None, "reasoning span needs parent"
         has_io = (_attr(rs, "gen_ai.completion.0.content")
                   or _attr(rs, "langfuse.observation.output"))
-        assert has_io, f"reasoning span needs completion or output"
+        assert has_io, "reasoning span needs completion or output"
 
 
 if __name__ == "__main__":

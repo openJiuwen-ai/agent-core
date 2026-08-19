@@ -36,6 +36,10 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
     TeamSpec,
 )
+from openjiuwen.agent_teams.skill.rail_spec import (
+    build_team_skill_rail_spec,
+    complete_declared_team_skill_rails,
+)
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
 from openjiuwen.core.common.logging import team_logger
@@ -439,11 +443,11 @@ class AgentConfigurator:
             )
 
         # cwd is a separate layer from the workspace. The workspace stays the
-        # member's private artifact directory (memory, skills view, .team
-        # mount); cwd is where shell runs and relative paths resolve. Team
-        # isolation moves cwd into the worktree without dragging the workspace
-        # along -- otherwise the member's artifacts and skills view would live
-        # inside an ephemeral checkout and vanish with it.
+        # member's private artifact directory (memory, Skill visibility
+        # declaration, .team mount); cwd is where shell runs and relative paths
+        # resolve. Team isolation moves cwd into the worktree without dragging
+        # the workspace along -- otherwise the member's artifacts and its Skill
+        # grants would live inside an ephemeral checkout and vanish with it.
         member_cwd = ctx.worktree_path or agent_spec.cwd or None
         member_project_root = agent_spec.project_root or agent_spec.cwd or None
 
@@ -470,6 +474,14 @@ class AgentConfigurator:
         enable_read_image_multimodal = agent_spec.enable_read_image_multimodal
         if enable_read_image_multimodal is None:
             enable_read_image_multimodal = False
+        # Skills are cleared and discovery is switched off on purpose: the
+        # DeepAgent factory auto-adds the generic SkillUseRail when either is
+        # truthy, and that rail scans the member workspace's own ``skills/``
+        # node plus every mounted team directory. A team member instead reads
+        # the one shared Skill library through ``core.team.skill_use``, which
+        # narrows it by the member's and the team's visibility declarations.
+        # ``agent_spec.skills`` is not discarded -- it travels into that rail's
+        # params as the member declaration's seed allow-list.
         build_spec = agent_spec.model_copy(
             update={
                 "card": self._card,
@@ -479,7 +491,8 @@ class AgentConfigurator:
                 "project_root": member_project_root,
                 "sys_operation": sys_operation_spec,
                 "tools": list(agent_spec.tools or []),
-                "enable_skill_discovery": True,
+                "skills": [],
+                "enable_skill_discovery": False,
                 "enable_task_loop": True,
                 "enable_read_image_multimodal": enable_read_image_multimodal,
             }
@@ -534,6 +547,7 @@ class AgentConfigurator:
                     "teammate_mode": teammate_mode,
                     "dispatch_mode": spec.dispatch_mode,
                     "lifecycle": spec.lifecycle,
+                    "team_mode": _resolve_team_mode(spec),
                     "exclude_tools": exclude,
                     "qualify_ids": spec.spawn_mode == "inprocess",
                     "team_name": resolved_team_name,
@@ -554,13 +568,15 @@ class AgentConfigurator:
                     "team_workspace_mount": team_workspace_mount,
                     "team_workspace_path": team_workspace_path,
                     "expose_human_agents_to_teammates": spec.expose_human_agents_to_teammates,
+                    "steer_batch_size": spec.steer_batch_size,
+                    "fork_source": ctx.fork_source or "",
                 },
             ),
         ]
         if self.workspace_manager:
             team_rail_specs.append(RailSpec(type=TEAM_WORKSPACE, params={}))
 
-        is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
+        is_coordinated_teammate = ctx.role.is_coordinated_member and ctx.team_spec
         approval_tools = agent_spec.approval_required_tools or []
         can_request_approval = is_coordinated_teammate and self.team_backend and self.messager
         # When team permissions are enabled the platform-mounted
@@ -734,13 +750,41 @@ class AgentConfigurator:
         team_rail_specs.append(observability_rail_spec)
         base_rails = _apply_team_worktree_shell_guard(
             list(build_spec.rails or []),
-            enabled=ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE},
+            enabled=ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE, TeamRole.EXTERNAL_CLI},
         )
-        if ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE} and not _has_team_worktree_shell_guard(base_rails):
+        if ctx.role in {
+            TeamRole.LEADER,
+            TeamRole.TEAMMATE,
+            TeamRole.EXTERNAL_CLI,
+        } and not _has_team_worktree_shell_guard(base_rails):
             team_logger.warning(
                 "Team-managed worktree shell guard was not applied for member {} because core.sys_operation is absent",
                 member_name,
             )
+        # Declared last, once base_rails is final: whether the Skill rail brings
+        # its own read_file / bash fallback depends on a system-operation rail
+        # being present, and a blueprint that declares its own Skill rail keeps it.
+        # A blueprint that declared a bare team Skill rail is completed first --
+        # it owns the exposure mode, but only the member is knowable here.
+        member_workspace_path = ws_spec.root_path
+        base_rails = complete_declared_team_skill_rails(
+            base_rails,
+            team_name=resolved_team_name,
+            member_name=member_name,
+            config_skills=agent_spec.skills,
+            team_workspace_path=team_workspace_path,
+            member_workspace_path=member_workspace_path,
+        )
+        skill_rail_spec = build_team_skill_rail_spec(
+            team_name=resolved_team_name,
+            member_name=member_name,
+            config_skills=agent_spec.skills,
+            declared_rails=base_rails,
+            team_workspace_path=team_workspace_path,
+            member_workspace_path=member_workspace_path,
+        )
+        if skill_rail_spec is not None:
+            team_rail_specs.append(skill_rail_spec)
         build_spec = build_spec.model_copy(
             update={"rails": base_rails + team_rail_specs},
         )
@@ -873,6 +917,7 @@ class AgentConfigurator:
             enable_bridge=spec.enable_bridge,
             dispatch_mode=spec.dispatch_mode,
             enable_task_verification=spec.enable_task_verification,
+            enable_fork=spec.enable_fork,
             external_cli_agents=spec.external_cli_agents,
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,

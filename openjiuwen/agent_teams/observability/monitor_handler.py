@@ -21,8 +21,8 @@ from opentelemetry.trace import (
     set_span_in_context,
 )
 
-from openjiuwen.agent_teams.observability.config import ObservabilityConfig
-from openjiuwen.agent_teams.observability.semconv import (
+from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.semconv import (
     AT_EVENT_TYPE,
     AT_MEMBER_ID,
     AT_MEMBER_NAME,

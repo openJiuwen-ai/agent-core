@@ -14,10 +14,34 @@ Independent Rail that auto-detects multi-agent collaboration patterns and sugges
 - When count reaches threshold (default 2) and no existing Team/Swarm Skill was used, injects a short follow_up via `TaskLoopController` to wake up the next round
 - The full self-check rules are injected as system prompt text. If the Agent finds reusable team collaboration value, it confirms through normal reply text; after user confirmation, it invokes `swarmskill-creator` or a compatible team skill creator Skill. If that creator is unavailable, the Agent should tell the user in normal reply text.
 
+### External repeated-evidence entry point
+
+A trusted host that has identified a repeated reusable pattern with no attributable existing Skill can stage a
+creation approval:
+
+```python
+staged = await create_rail.propose_from_external_evidence(
+    proposal_key="release-recovery-checklist",
+    reusable_guidance="Create a reusable release recovery checklist.",
+    evidence=["task-a: ...", "task-b: ..."],
+    reason="The same missing workflow caused two review failures.",
+)
+```
+
+The method requires `auto_trigger=True`, a non-empty key and guidance, and at least two deduplicated evidence items.
+Each key emits at most one approval host event during the Rail lifetime. It never creates or mutates a Skill directly.
+The host can identify ownership with `owns_external_proposal(request_id)` and resolve the answer with
+`resolve_external_proposal(request_id, accepted=...)`; acceptance returns a constrained creation prompt, while
+rejection and unknown requests return `None`.
+
+The Rail validates evidence count, not semantic equivalence. The caller must group matching patterns before calling
+this method and must not combine unrelated task failures merely to reach two evidence items.
+
 ```text
 class TeamSkillCreateRail(
     skills_dir: str,
     *,
+    trajectory_span_processor: TrajectorySpanProcessor,
     language: str = "cn",
     auto_trigger: bool = True,
     min_team_members_for_create: int = 2,
@@ -27,6 +51,7 @@ class TeamSkillCreateRail(
 **Parameters**:
 
 * **skills_dir** (str): Skill directory path.
+* **trajectory_span_processor** (TrajectorySpanProcessor): Shared processor already registered with the runtime's OpenTelemetry provider.
 * **language** (str): Language setting, supports `"cn"` or `"en"`.
 * **auto_trigger** (bool): Whether to auto-trigger, defaults to `True`.
 * **min_team_members_for_create** (int): Trigger threshold, `spawn_member` call count reaching this value triggers, defaults to 2.
@@ -70,6 +95,7 @@ configure_skill_evolution(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     team=True,
     auto_save=False,
     language="cn",
@@ -86,6 +112,7 @@ team_rail = TeamSkillRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     team_id="research-team",
     auto_save=False,
@@ -127,9 +154,7 @@ class TeamSkillRail(
     llm: Model,
     model: str,
     language: str = "cn",
-    trajectory_store: Optional[TrajectoryStore] = None,
-    trajectory_source: Optional[TrajectorySource] = None,
-    trajectory_sink: Optional[TrajectorySink] = None,
+    trajectory_span_processor: TrajectorySpanProcessor,
     member_role: Optional[str] = None,
     signal_trigger: Optional[bool] = None,
     auto_save: bool = False,
@@ -137,7 +162,6 @@ class TeamSkillRail(
     async_evolution: bool = True,
     max_concurrent_evolution: int = 1,
     team_id: Optional[str] = None,
-    trajectories_dir: Optional[Path] = None,
     record_llm_policy: LLMInvokePolicy = ...,
     evaluate_llm_policy: LLMInvokePolicy = ...,
     simplify_llm_policy: LLMInvokePolicy = ...,
@@ -156,17 +180,14 @@ class TeamSkillRail(
 * **llm** (Model): LLM client instance.
 * **model** (str): Model name.
 * **language** (str): Language setting.
-* **trajectory_store** (TrajectoryStore, optional): Trajectory store instance.
-* **trajectory_source** (TrajectorySource, optional): Runtime source for aggregated member trajectory evidence.
-* **trajectory_sink** (TrajectorySink, optional): Runtime sink for publishing this member's latest trajectory snapshot.
-* **member_role** (str, optional): Role written to published snapshots. Defaults to `"leader"` for team skill evolution.
+* **trajectory_span_processor** (TrajectorySpanProcessor): Shared processor already registered with the runtime's OpenTelemetry provider.
+* **member_role** (str, optional): Role copied into projected trajectory resource metadata. Defaults to `"leader"` for team skill evolution.
 * **signal_trigger** (bool, optional): Whether to detect passive team completion and trigger passive evolution, defaults to `False`.
 * **auto_save** (bool): Whether to auto-save generated experience records, defaults to `False` (requires user approval).
 * **review_runtime** (EvolutionReviewRuntime): Shared active-review runtime required for review subagent + active approval tools.
 * **async_evolution** (bool): Whether to execute evolution asynchronously, defaults to `True`.
 * **max_concurrent_evolution** (int): Max concurrent background evolution tasks, defaults to 1.
 * **team_id** (str, optional): Team ID.
-* **trajectories_dir** (Path, optional): Trajectory directory path.
 * **record_llm_policy** (LLMInvokePolicy): Experience record generation LLM invocation policy.
 * **evaluate_llm_policy** (LLMInvokePolicy): Experience evaluation LLM invocation policy.
 * **simplify_llm_policy** (LLMInvokePolicy): Experience simplify LLM invocation policy.
@@ -177,29 +198,14 @@ class TeamSkillRail(
 * **review_interval** (int): Review interval accepted by the shared base rail. It must be at least 1 and defaults to 5; Team review follow-ups remain completion-driven.
 * **review_agent_max_iterations** (int): Maximum iterations for `evolution_reviewer`, defaults to 40.
 
-### Runtime Trajectory Source/Sink
+### Runtime trajectory capture
 
-`TeamSkillRail` uses `trajectory_source` and `trajectory_sink` for online team trajectory aggregation. A common setup is to pass the same `InMemoryTrajectoryRegistry` as both:
+`TeamSkillRail` consumes the canonical clean window maintained by `EvolutionRail`. Its subscription uses the current
+Team root trace ID, so the leader Rail can select same-process collaboration spans without a runtime source/sink
+registry. The host must inject the same registered `TrajectorySpanProcessor` used by the other Rails in that runtime.
 
-```python
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
-from openjiuwen.harness.rails import TeamSkillRail
-
-trajectory_registry = InMemoryTrajectoryRegistry()
-
-team_rail = TeamSkillRail(
-    skills_dir="/path/to/skills",
-    llm=model_client,
-    model="gpt-4",
-    team_id="research-team",
-    trajectory_source=trajectory_registry,
-    trajectory_sink=trajectory_registry,
-)
-```
-
-The rail publishes `MemberTrajectorySnapshot` values after invoke. Snapshots contain `team_id`, `session_id`, `member_id`, `member_role`, `trajectory`, and `recorded_at_ms`; they do not contain a public revision. `InMemoryTrajectoryRegistry` owns latest-snapshot ordering: newer `recorded_at_ms` wins, and equal timestamps are resolved by registry receive order.
-
-To aggregate multiple members, every rail or agent that should contribute evidence must publish to the same `trajectory_sink`; this rail then reads that shared registry through `trajectory_source`.
+The Team clean window is online evolution evidence, not a full Team runtime archive. The current implementation does
+not provide `TeamTrajectoryRail`, `MemberTrajectorySnapshot`, or `InMemoryTrajectoryRegistry`.
 
 ### Priority
 
@@ -224,18 +230,6 @@ Shared experience optimizer configured with `profile="team"` for the passive sig
 ### evolution_config -> dict
 
 Complete evolution configuration, including phase LLM invocation policies and timeout settings.
-
----
-
-## Runtime Trajectory Methods
-
-### set_trajectory_source(source) -> None
-
-Bind or replace the runtime `TrajectorySource` used to aggregate team trajectory evidence.
-
-### set_trajectory_sink(sink, *, team_id, member_role=None) -> None
-
-Bind or replace the runtime `TrajectorySink` used to publish this rail's member snapshots. `team_id` is required when `sink` is not `None`. `member_role` defaults to `"leader"` for team skill evolution.
 
 ---
 
@@ -459,26 +453,28 @@ Trajectory issue dataclass:
 ## Example
 
 ```python
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
-from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillRail
+from openjiuwen.harness.rails import EvolutionReviewRuntime, TeamSkillCreateRail, TeamSkillRail
 from openjiuwen.harness import create_deep_agent
+
+# Application-owned processor already registered with OpenTelemetry.
+processor = runtime_processor
+review_runtime = EvolutionReviewRuntime()
 
 # Create team skill creation rail
 create_rail = TeamSkillCreateRail(
     skills_dir="/path/to/skills",
+    trajectory_span_processor=processor,
     min_team_members_for_create=2,
 )
-
-trajectory_registry = InMemoryTrajectoryRegistry()
 
 # Create team skill evolution rail
 team_rail = TeamSkillRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=processor,
+    review_runtime=review_runtime,
     team_id="research-team",
-    trajectory_source=trajectory_registry,
-    trajectory_sink=trajectory_registry,
     auto_save=False,
     async_evolution=True,
 )

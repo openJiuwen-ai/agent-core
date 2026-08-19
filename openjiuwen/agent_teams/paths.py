@@ -18,6 +18,13 @@ import re
 from pathlib import Path
 
 _configured_openjiuwen_home: Path | None = None
+_configured_global_skills_dir: Path | None = None
+
+# Per-workspace Skill visibility declaration file name. Skills live in exactly
+# one physical library (``global_skills_dir()``); which team member may see
+# which Skill is recorded in this file at the workspace root, not as a
+# materialized per-member ``skills/`` view.
+SKILL_VISIBILITY_FILENAME = "skills-visibility.json"
 
 
 def configure_openjiuwen_home(path: str | Path) -> None:
@@ -44,12 +51,52 @@ def get_agent_teams_home() -> Path:
     return get_openjiuwen_home() / ".agent_teams"
 
 
+def configure_global_skills_dir(path: str | Path) -> None:
+    """Point the single Skill library at a host-owned directory.
+
+    Embedders that already own a Skill library (the jiuwenswarm platform keeps
+    it under its own agent workspace) call this once at startup so every team
+    and member resolves the same physical directory. The override lives in the
+    process, exactly like :func:`configure_openjiuwen_home`.
+
+    Args:
+        path: Absolute path of the Skill library directory.
+    """
+    global _configured_global_skills_dir
+    _configured_global_skills_dir = Path(path)
+
+
+def reset_global_skills_dir() -> None:
+    """Clear the Skill library override and restore the default layout."""
+    global _configured_global_skills_dir
+    _configured_global_skills_dir = None
+
+
+def global_skills_dir() -> Path:
+    """Return the one physical Skill library shared by every team member.
+
+    There is no per-team or per-member Skill directory: visibility is a
+    declaration file (see :func:`member_skill_visibility_path`), not a second
+    copy on disk.
+
+    Layout (standalone openJiuWen): ``{get_openjiuwen_home()}/workspace/skills``.
+
+    Returns:
+        Absolute path of the Skill library directory.
+    """
+    if _configured_global_skills_dir is not None:
+        return _configured_global_skills_dir
+    return get_openjiuwen_home() / "workspace" / "skills"
+
+
 def __getattr__(name: str) -> Path:
     """Preserve backward-compatible module attributes for path constants."""
     if name == "OPENJIUWEN_HOME":
         return get_openjiuwen_home()
     if name == "AGENT_TEAMS_HOME":
         return get_agent_teams_home()
+    if name == "GLOBAL_SKILLS_DIR":
+        return global_skills_dir()
     raise AttributeError(name)
 
 
@@ -90,12 +137,78 @@ def independent_member_workspace(member_name: str) -> Path:
     return get_openjiuwen_home() / f"{member_name}_workspace"
 
 
+def team_workspace_dir(team_name: str) -> Path:
+    """Return the shared team workspace root.
+
+    Layout: ``{team_home}/team-workspace/``
+
+    Args:
+        team_name: Team identifier.
+
+    Returns:
+        Absolute path to the shared team workspace directory.
+    """
+    return team_home(team_name) / "team-workspace"
+
+
+def team_member_workspace_dir(team_name: str, member_name: str) -> Path:
+    """Return the stable workspace root of one team member.
+
+    Layout: ``{team_home}/workspaces/{member_name}_workspace/``
+
+    Args:
+        team_name: Team identifier.
+        member_name: Member identifier.
+
+    Returns:
+        Absolute path to the member workspace directory.
+    """
+    return team_home(team_name) / "workspaces" / f"{member_name}_workspace"
+
+
+def member_skill_visibility_path(team_name: str, member_name: str) -> Path:
+    """Return the Skill visibility declaration path of one team member.
+
+    Layout:
+        ``{team_home}/workspaces/{member_name}_workspace/skills-visibility.json``
+
+    The file sits at the workspace root rather than inside a ``skills/``
+    subdirectory: members own no Skill directory of their own, only a view onto
+    :func:`global_skills_dir`.
+
+    Args:
+        team_name: Team identifier.
+        member_name: Member identifier.
+
+    Returns:
+        Absolute path to the member's visibility declaration file.
+    """
+    return team_member_workspace_dir(team_name, member_name) / SKILL_VISIBILITY_FILENAME
+
+
+def team_skill_visibility_path(team_name: str) -> Path:
+    """Return the team-wide Skill visibility declaration path.
+
+    Layout: ``{team_home}/team-workspace/skills-visibility.json``
+
+    The team document is composed with each member's own document; see
+    ``openjiuwen.agent_teams.skill.visibility.compose_skill_visibility``.
+
+    Args:
+        team_name: Team identifier.
+
+    Returns:
+        Absolute path to the team's visibility declaration file.
+    """
+    return team_workspace_dir(team_name) / SKILL_VISIBILITY_FILENAME
+
+
 def team_memory_dir(team_name: str) -> Path:
     """Return the per-team shared memory directory.
 
     Layout: ``{AGENT_TEAMS_HOME}/{team_name}/team-memory/``
     """
-    return team_home(team_name) / "team-workspace" / "team-memory"
+    return team_workspace_dir(team_name) / "team-memory"
 
 
 def _safe_segment(value: str, fallback: str = "_") -> str:

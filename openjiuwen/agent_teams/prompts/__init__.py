@@ -31,6 +31,8 @@ from openjiuwen.agent_teams.prompts.messages import (
 from openjiuwen.agent_teams.prompts.section_cache import MtimeSectionCache
 from openjiuwen.agent_teams.prompts.sections import (
     TeamSectionName,
+    build_leader_bootstrap_section,
+    build_leader_policy_disclosure,
     build_team_bridge_section,
     build_team_dispatch_section,
     build_team_extra_section,
@@ -41,6 +43,7 @@ from openjiuwen.agent_teams.prompts.sections import (
     build_team_member_system_prompt,
     build_team_role_section,
     build_team_static_sections,
+    build_team_task_state_section,
     build_team_workflow_section,
 )
 from openjiuwen.agent_teams.prompts.team_plan_agent import (
@@ -72,6 +75,8 @@ __all__ = [
     "TeamSectionName",
     "apply_team_plan_agent_prompt",
     "build_identity_text",
+    "build_leader_bootstrap_section",
+    "build_leader_policy_disclosure",
     "build_roster_delta_text",
     "build_roster_snapshot_text",
     "build_team_bridge_section",
@@ -89,6 +94,7 @@ __all__ = [
     "build_team_plan_mode_section",
     "build_team_role_section",
     "build_team_static_sections",
+    "build_team_task_state_section",
     "build_team_workflow_section",
     "diff_roster",
     "format_member_line",

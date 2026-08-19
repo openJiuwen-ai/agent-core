@@ -1,343 +1,223 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-
-"""TrajectoryStore: persistence interface for trajectories.
-
-Provides protocol and implementations for saving/loading/querying
-trajectory data with optional version isolation.
-"""
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Synchronous persistence for canonical :class:`Trajectory` snapshots."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
+from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Protocol
 
-from openjiuwen.agent_evolving.trajectory.types import (
-    LegacyTrajectory,
-    LLMCallDetail,
-    StepDetail,
-    ToolCallDetail,
-    Trajectory,
-    TrajectoryStep,
-    trajectory_case_id,
-    trajectory_execution_id,
-    trajectory_from_legacy,
-    trajectory_meta,
-    trajectory_session_id,
-    trajectory_source,
+from openjiuwen.agent_evolving.trajectory.legacy import is_legacy_record, upgrade_legacy_record
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
+from openjiuwen.agent_evolving.trajectory.schema import (
+    CASE_ID,
+    MEMBER_ID,
+    SESSION_ID,
+    TEAM_ID,
+    TRAJECTORY_SOURCE,
 )
-
-_OJ_SESSION_ID = "openjiuwen.session_id"
-_OLD_OJ_SESSION_ID = "openjiuwen.session.id"
-_TRAJECTORY_ID = "openjiuwen.trajectory_id"
-_OLD_TRAJECTORY_ID = "openjiuwen.trajectory.id"
-TrajectoryRecord = Trajectory
 
 
 class TrajectoryStore(Protocol):
-    """Trajectory persistence protocol."""
+    """Protocol implemented by synchronous trajectory archives."""
 
-    def save(
-        self,
-        trajectory: TrajectoryRecord,
-        version: Optional[str] = None,
-    ) -> None:
-        """Save trajectory. Version is used for experiment isolation.
-
-        Args:
-            trajectory: Trajectory to save
-            version: Optional version identifier
-        """
-        ...
+    def save(self, trajectory: Trajectory, version: str | None = None) -> None:
+        """Persist one canonical trajectory snapshot."""
 
     def load(
         self,
-        execution_id: str,
-        version: Optional[str] = None,
-    ) -> Optional[TrajectoryRecord]:
-        """Load a specific trajectory.
-
-        Args:
-            execution_id: Execution ID of the trajectory
-            version: Optional version identifier
-
-        Returns:
-            Loaded Trajectory or None if not found
-        """
-        ...
+        trajectory_id: str,
+        version: str | None = None,
+    ) -> Trajectory | None:
+        """Load the oldest matching trajectory, if present."""
 
     def query(
         self,
-        version: Optional[str] = None,
-        **filters,
-    ) -> List[TrajectoryRecord]:
-        """Query trajectory list.
+        *,
+        version: str | None = None,
+        session_id: str | None = None,
+        team_id: str | None = None,
+        member_id: str | None = None,
+        case_id: str | None = None,
+        source: str | None = None,
+    ) -> list[Trajectory]:
+        """Return snapshots matching stable resource metadata."""
 
-        Args:
-            version: Optional version identifier
-            **filters: Filters like session_id, case_id, source, etc.
 
-        Returns:
-            List of matching Trajectories
-        """
-        ...
+def _version_name(version: str | None) -> str:
+    value = "default" if version is None else str(version)
+    if value in {"", ".", ".."} or any(separator in value for separator in ("/", "\\")):
+        raise ValueError("version must be a simple path component")
+    return value
+
+
+def _query_filters(**values: str | None) -> dict[str, str]:
+    filters: dict[str, str] = {}
+    for key, value in values.items():
+        if value is not None:
+            filters[key] = str(value)
+    return filters
+
+
+def _resource_value(trajectory: Trajectory, *keys: str) -> Any:
+    attributes = trajectory.resource_attributes
+    for key in keys:
+        if key in attributes and attributes[key] is not None:
+            return attributes[key]
+    return None
+
+
+def _metadata_value(trajectory: Trajectory, key: str) -> str | None:
+    if key == "trajectory_id":
+        value = trajectory.trajectory_id
+    elif key == "session_id":
+        value = _resource_value(trajectory, SESSION_ID)
+    elif key == "team_id":
+        value = _resource_value(trajectory, TEAM_ID)
+    elif key == "member_id":
+        value = _resource_value(trajectory, MEMBER_ID)
+    elif key == "case_id":
+        value = _resource_value(trajectory, CASE_ID)
+    elif key == "source":
+        value = _resource_value(trajectory, TRAJECTORY_SOURCE) or "offline"
+    else:
+        raise KeyError(key)
+    return None if value is None else str(value)
+
+
+def _canonical_input(trajectory: Any) -> Trajectory:
+    if isinstance(trajectory, Trajectory):
+        return Trajectory.from_otlp(trajectory.to_otlp())
+    raise TypeError("store accepts only canonical Trajectory")
+
+
+def _canonical_record(data: Mapping[str, Any]) -> Trajectory:
+    if is_legacy_record(data):
+        return upgrade_legacy_record(data)
+    return Trajectory.from_otlp(data)
 
 
 class InMemoryTrajectoryStore:
-    """In-memory store for testing and development."""
+    """Process-local canonical trajectory archive."""
 
     def __init__(self) -> None:
-        """Initialize empty store."""
-        self._data: Dict[str, Dict[str, TrajectoryRecord]] = {}
+        self._data: dict[str, dict[str, Trajectory]] = {}
 
-    def save(
-        self,
-        trajectory: TrajectoryRecord,
-        version: Optional[str] = None,
-    ) -> None:
-        """Save trajectory to memory."""
-        ver = version or "default"
-        if ver not in self._data:
-            self._data[ver] = {}
-        self._data[ver][trajectory_execution_id(trajectory)] = trajectory
+    def save(self, trajectory: Trajectory, version: str | None = None) -> None:
+        canonical = _canonical_input(trajectory)
+        version_name = _version_name(version)
+        self._data.setdefault(version_name, {})[canonical.trajectory_id] = canonical
 
-    def load(
-        self,
-        execution_id: str,
-        version: Optional[str] = None,
-    ) -> Optional[TrajectoryRecord]:
-        """Load trajectory from memory."""
-        ver = version or "default"
-        return self._data.get(ver, {}).get(execution_id)
+    def load(self, trajectory_id: str, version: str | None = None) -> Trajectory | None:
+        return self._data.get(_version_name(version), {}).get(str(trajectory_id))
 
     def query(
         self,
-        version: Optional[str] = None,
-        **filters,
-    ) -> List[TrajectoryRecord]:
-        """Query trajectories from memory."""
-        ver = version or "default"
-        trajectories = list(self._data.get(ver, {}).values())
-
-        # Apply filters
-        for key, value in filters.items():
-            trajectories = [
-                t for t in trajectories
-                if self._filter_trajectory_value(t, key) == value
-            ]
-
-        return trajectories
-
-    @staticmethod
-    def _filter_trajectory_value(trajectory: TrajectoryRecord, key: str) -> Any:
-        if key == "execution_id":
-            return trajectory_execution_id(trajectory)
-        if key == "session_id":
-            return trajectory_session_id(trajectory)
-        if key == "case_id":
-            return trajectory_case_id(trajectory)
-        if key == "member_id":
-            return trajectory_meta(trajectory).get("member_id")
-        if key == "source":
-            return trajectory_source(trajectory)
-        return trajectory_meta(trajectory).get(key)
+        *,
+        version: str | None = None,
+        session_id: str | None = None,
+        team_id: str | None = None,
+        member_id: str | None = None,
+        case_id: str | None = None,
+        source: str | None = None,
+    ) -> list[Trajectory]:
+        filters = _query_filters(
+            session_id=session_id,
+            team_id=team_id,
+            member_id=member_id,
+            case_id=case_id,
+            source=source,
+        )
+        trajectories = list(self._data.get(_version_name(version), {}).values())
+        return [
+            trajectory
+            for trajectory in trajectories
+            if all(_metadata_value(trajectory, key) == value for key, value in filters.items())
+        ]
 
 
 class FileTrajectoryStore:
-    """File-based store (JSONL) for jiuwenclaw personal assistant."""
+    """Append-only JSONL archive with read-only historical conversion."""
 
     def __init__(self, base_dir: Path) -> None:
-        """Initialize with base directory.
-
-        Args:
-            base_dir: Directory to store trajectory files
-        """
         self._base_dir = Path(base_dir)
         self._base_dir.mkdir(parents=True, exist_ok=True)
 
-    def _get_file_path(self, version: Optional[str]) -> Path:
-        """Get file path for version."""
-        filename = f"trajectories_{version or 'default'}.jsonl"
-        return self._base_dir / filename
+    def _get_file_path(self, version: str | None) -> Path:
+        return self._base_dir / f"trajectories_{_version_name(version)}.jsonl"
 
-    def save(
-        self,
-        trajectory: TrajectoryRecord,
-        version: Optional[str] = None,
-    ) -> None:
-        """Append trajectory to JSONL file."""
-        file_path = self._get_file_path(version)
+    def save(self, trajectory: Trajectory, version: str | None = None) -> None:
+        canonical = _canonical_input(trajectory)
+        payload = canonical.to_otlp()
+        resource_spans = payload.get("resourceSpans")
+        if not isinstance(resource_spans, list) or not resource_spans:
+            raise ValueError("trajectory payload must contain non-empty resourceSpans")
+        record = {"resourceSpans": to_json_compatible(resource_spans)}
+        with self._get_file_path(version).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
-        # Convert to JSON-serializable dict
-        data = self._trajectory_to_dict(trajectory)
-
-        with open(file_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(data, ensure_ascii=False) + "\n")
-
-    def load(
-        self,
-        execution_id: str,
-        version: Optional[str] = None,
-    ) -> Optional[Trajectory]:
-        """Load trajectory by execution_id."""
-        file_path = self._get_file_path(version)
-
-        if not file_path.exists():
-            return None
-
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+    @staticmethod
+    def _records(path: Path) -> Iterator[dict[str, Any]]:
+        if not path.exists():
+            return
+        with path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                if not line.strip():
                     continue
                 try:
-                    data = json.loads(line)
-                    if self._execution_id_from_record(data) == execution_id:
-                        return self._dict_to_trajectory(data)
-                except json.JSONDecodeError:
+                    record = json.loads(line)
+                except (TypeError, json.JSONDecodeError):
                     continue
+                if isinstance(record, dict):
+                    yield record
 
+    @staticmethod
+    def _decode(record: Mapping[str, Any]) -> Trajectory | None:
+        try:
+            return _canonical_record(record)
+        except (TypeError, ValueError, KeyError):
+            return None
+
+    def load(self, trajectory_id: str, version: str | None = None) -> Trajectory | None:
+        target = str(trajectory_id)
+        for record in self._records(self._get_file_path(version)):
+            trajectory = self._decode(record)
+            if trajectory is not None and trajectory.trajectory_id == target:
+                return trajectory
         return None
 
     def query(
         self,
-        version: Optional[str] = None,
-        **filters,
-    ) -> List[Trajectory]:
-        """Query trajectories matching filters."""
-        file_path = self._get_file_path(version)
-        results: List[Trajectory] = []
-
-        if not file_path.exists():
-            return results
-
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    # Apply filters
-                    if all(
-                        self._filter_value(data, key) == value
-                        for key, value in filters.items()
-                    ):
-                        traj = self._dict_to_trajectory(data)
-                        if traj:
-                            results.append(traj)
-                except (json.JSONDecodeError, KeyError):
-                    continue
-
+        *,
+        version: str | None = None,
+        session_id: str | None = None,
+        team_id: str | None = None,
+        member_id: str | None = None,
+        case_id: str | None = None,
+        source: str | None = None,
+    ) -> list[Trajectory]:
+        filters = _query_filters(
+            session_id=session_id,
+            team_id=team_id,
+            member_id=member_id,
+            case_id=case_id,
+            source=source,
+        )
+        results: list[Trajectory] = []
+        for record in self._records(self._get_file_path(version)):
+            trajectory = self._decode(record)
+            if trajectory is None:
+                continue
+            if all(_metadata_value(trajectory, key) == value for key, value in filters.items()):
+                results.append(trajectory)
         return results
 
-    @staticmethod
-    def _trajectory_to_dict(trajectory: TrajectoryRecord) -> dict:
-        """Convert Trajectory to dict."""
-        if trajectory.otlp_trace and isinstance(trajectory.otlp_trace, dict):
-            return FileTrajectoryStore._to_json_compatible(trajectory.otlp_trace)
-        return FileTrajectoryStore._to_json_compatible(trajectory)
 
-    @staticmethod
-    def _to_json_compatible(obj: Any) -> Any:
-        """Recursively convert values to JSON-compatible data."""
-        if hasattr(obj, "model_dump") and callable(obj.model_dump):
-            return FileTrajectoryStore._to_json_compatible(obj.model_dump())
-
-        if hasattr(obj, "__dataclass_fields__"):
-            return FileTrajectoryStore._to_json_compatible(asdict(obj))
-
-        if isinstance(obj, (list, tuple)):
-            return [FileTrajectoryStore._to_json_compatible(item) for item in obj]
-
-        if isinstance(obj, dict):
-            return {
-                str(key): FileTrajectoryStore._to_json_compatible(value)
-                for key, value in obj.items()
-            }
-
-        if isinstance(obj, (str, int, float, bool)) or obj is None:
-            return obj
-
-        return str(obj)
-
-    @staticmethod
-    def _dict_to_trajectory(data: dict) -> Optional[Trajectory]:
-        """Convert dict to Trajectory."""
-        try:
-            if FileTrajectoryStore._is_otlp_trace_data(data):
-                return FileTrajectoryStore._otlp_to_trajectory(data)
-
-            legacy_data = dict(data)
-            steps_data = legacy_data.get("steps", [])
-            steps = []
-            for step_data in steps_data:
-                step_data = dict(step_data)
-                detail_data = step_data.get("detail")
-                detail: Optional[StepDetail] = None
-
-                if isinstance(detail_data, dict):
-                    if "messages" in detail_data:
-                        detail = LLMCallDetail(**detail_data)
-                    elif "tool_name" in detail_data:
-                        detail = ToolCallDetail(**detail_data)
-
-                step_data["detail"] = detail
-                steps.append(TrajectoryStep(**step_data))
-
-            legacy_meta = dict(legacy_data.get("meta") or {})
-            legacy_source = legacy_data.get("source") or legacy_meta.pop("source", None) or "offline"
-            legacy = LegacyTrajectory(
-                execution_id=str(legacy_data["execution_id"]),
-                steps=steps,
-                source=str(legacy_source),
-                case_id=legacy_data.get("case_id"),
-                session_id=legacy_data.get("session_id"),
-                cost=legacy_data.get("cost"),
-                meta=legacy_meta,
-            )
-            otlp_trace = legacy_data.get("otlp_trace")
-            return trajectory_from_legacy(
-                legacy,
-                otlp_trace=otlp_trace if isinstance(otlp_trace, dict) else None,
-            )
-
-        except (KeyError, TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _is_otlp_trace_data(data: dict) -> bool:
-        return isinstance(data, dict) and isinstance(data.get("resourceSpans"), list)
-
-    @staticmethod
-    def _execution_id_from_record(data: dict) -> Optional[str]:
-        if FileTrajectoryStore._is_otlp_trace_data(data):
-            return trajectory_execution_id(Trajectory(otlp_trace=data))
-        value = data.get("execution_id")
-        return str(value) if value is not None else None
-
-    @staticmethod
-    def _filter_value(data: dict, key: str) -> Any:
-        if not FileTrajectoryStore._is_otlp_trace_data(data):
-            if key == "source":
-                meta = data.get("meta") or {}
-                return data.get("source") or meta.get("source")
-            return data.get(key)
-        trajectory = Trajectory(otlp_trace=data)
-        if key == "execution_id":
-            return trajectory_execution_id(trajectory)
-        if key == "session_id":
-            return trajectory_session_id(trajectory)
-        if key == "case_id":
-            return trajectory_case_id(trajectory)
-        if key == "member_id":
-            return trajectory_meta(trajectory).get("member_id")
-        if key == "source":
-            return trajectory_source(trajectory)
-        return trajectory_meta(trajectory).get(key)
-
-    @staticmethod
-    def _otlp_to_trajectory(data: dict) -> Optional[Trajectory]:
-        return Trajectory(otlp_trace=data)
+__all__ = [
+    "FileTrajectoryStore",
+    "InMemoryTrajectoryStore",
+    "TrajectoryStore",
+]

@@ -157,6 +157,21 @@ async def test_probe_rejection_is_cached_as_unsupported() -> None:
 
 
 @pytest.mark.asyncio
+async def test_probe_recognizes_not_a_multimodal_model_without_retry() -> None:
+    invoke = AsyncMock(
+        side_effect=ValueError(
+            "API returned error 400: Qwen3-235B-A22B-W8A8 "
+            "is not a multimodal model"
+        )
+    )
+    llm = _make_llm(invoke=invoke)
+
+    assert await probe_image_support(llm) is False
+    assert get_cached_image_support(llm) is False
+    assert invoke.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_scheduled_probe_runs_once_and_fills_cache() -> None:
     started = asyncio.Event()
     release = asyncio.Event()

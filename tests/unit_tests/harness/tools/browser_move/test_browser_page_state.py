@@ -181,6 +181,34 @@ def test_ax_ref_reused_after_navigation_gets_a_new_current_target() -> None:
     assert new_target.target_id != old_target_id
 
 
+def test_replacing_ax_snapshot_preserves_present_refs_and_removes_missing_refs() -> None:
+    state = BrowserPageState(page_id="page-ref-replacement")
+    state.replace_ax_snapshot(
+        "\n".join(
+            [
+                '- textbox "Email" [ref=e1]',
+                '- button "Continue" [ref=e2]',
+            ]
+        )
+    )
+    email_target = state.resolve_target(generation_id="g0", ref="e1")
+    assert email_target is not None
+
+    state.replace_ax_snapshot(
+        "\n".join(
+            [
+                '- textbox "Email" [ref=e1]',
+                '- button "Submit" [ref=e3]',
+            ]
+        )
+    )
+
+    assert state.resolve_target(generation_id="g0", ref="e1") is email_target
+    assert state.resolve_target(generation_id="g0", ref="e3") is not None
+    with pytest.raises(ValueError, match="Unknown AX ref: e2"):
+        state.resolve_target(generation_id="g0", ref="e2")
+
+
 def test_runtime_resolves_probe_target_without_model_generated_css() -> None:
     runtime = _make_bare_runtime()
     payload = {

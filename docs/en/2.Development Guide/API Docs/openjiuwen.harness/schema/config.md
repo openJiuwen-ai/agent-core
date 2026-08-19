@@ -78,16 +78,13 @@ Full configuration dataclass for a [`DeepAgent`](../deep_agent.md#class-openjiuw
 - **skills** (list[str], optional): Skill identifiers. Default: `None`.
 - **backend** (str, optional): LLM backend identifier. Default: `None`.
 - **sys_operation** (SysOperation, optional): System operation instance. Default: `None`.
-- **completion_timeout** (float): Timeout in seconds for a single completion call. Default: `600.0`.
+- **completion_timeout** (Optional[float]): Timeout in seconds for a single completion call. Default: `600.0`; `None` disables the limit.
 - **language** (str, optional): Language code. Default: `None`.
 - **prompt_mode** (str | [PromptMode](../prompts/prompts.md#enum-openjiuwenharnesspromptspromptmode), optional): Prompt assembly mode. Default: `None`.
 - **vision_model_config** ([VisionModelConfig](#class-openjiuwenharnessschemavisionmodelconfig), optional): Vision model configuration. Default: `None`.
 - **audio_model_config** ([AudioModelConfig](#class-openjiuwenharnessschemaudiomodelconfig), optional): Audio model configuration. Default: `None`.
 - **rails** (list[Rail], optional): Guardrails. Default: `None`.
 - **progressive_tool_enabled** (bool, optional): Enable progressive tool exposure. Default: `None`.
-- **progressive_tool_always_visible_tools** (list[str], optional): Tools always visible to the model. Default: `None`.
-- **progressive_tool_default_visible_tools** (list[str], optional): Tools visible by default. Default: `None`.
-- **progressive_tool_max_loaded_tools** (int): Maximum number of concurrently loaded tools. Default: `12`.
 
 ---
 

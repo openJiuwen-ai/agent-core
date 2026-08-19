@@ -16,6 +16,9 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
+from openjiuwen.core.foundation.kv_cache import (
+    KV_CACHE_EPHEMERAL_TAIL_METADATA,
+)
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
 from openjiuwen.harness.prompts.sections.prompt_attachments import (
     get_prompt_attachment_guidance,
@@ -72,6 +75,7 @@ WindowMutator = Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]
 
 _DEFAULT_MAX_PROMPT_ATTACHMENT_CHARS = 12000
 _DEFAULT_MAX_RENDERED_CHARS = 48000
+PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY = "prompt_attachment_preserve_tail"
 
 
 def _utc_now() -> str:
@@ -533,14 +537,26 @@ class PromptAttachmentManager:
         messages: list[BaseMessage],
         rendered_prompt_attachments: str,
     ) -> list[BaseMessage]:
-        """Append rendered prompt attachment text as a standalone user message."""
+        """Insert attachments before any explicitly preserved trailing messages."""
 
         if not rendered_prompt_attachments:
             return list(messages)
 
-        new_messages = list(messages)
-        new_messages.append(UserMessage(content=rendered_prompt_attachments))
-        return new_messages
+        tail_start = len(messages)
+        while tail_start > 0:
+            metadata = getattr(messages[tail_start - 1], "metadata", {}) or {}
+            if not bool(metadata.get(PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY)):
+                break
+            tail_start -= 1
+
+        # An attachment is request-scoped and not persisted in conversation
+        # history.  Preserve the marker even when upstream requires the
+        # attachment to be inserted before browser-state tail messages.
+        attachment_message = UserMessage(
+            content=rendered_prompt_attachments,
+            metadata={KV_CACHE_EPHEMERAL_TAIL_METADATA: True},
+        )
+        return [*messages[:tail_start], attachment_message, *messages[tail_start:]]
 
     def make_window_mutator(self, session_id: str) -> WindowMutator:
         """Build the ContextEngine final-window mutator."""
@@ -663,6 +679,7 @@ class PromptAttachmentManager:
             raise ValueError("destructive prompt attachment operation requires at least one filter")
 
 __all__ = [
+    "PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY",
     "PromptAttachment",
     "PromptAttachmentContextWriter",
     "PromptAttachmentKind",

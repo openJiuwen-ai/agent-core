@@ -16,17 +16,16 @@ from openjiuwen.harness.prompts.sections.context import (
 )
 
 
-_SYSTEM_CONTEXT_SECTIONS = frozenset({
-    "context.user",
-})
+_SYSTEM_CONTEXT_SECTIONS = frozenset()
 
-# AGENT.md, SOUL.md, and IDENTITY.md remain ordinary Workspace files that
-# tools can read and edit, but their contents are not injected into the system
-# prompt.
+# AGENT.md, SOUL.md, IDENTITY.md, and USER.md remain ordinary Workspace files
+# that tools can read and edit, but their contents are not injected into the
+# system prompt.
 _DISABLED_CONTEXT_SECTIONS = frozenset({
     "context.agent",
     "context.soul",
     "context.identity",
+    "context.user",
 })
 
 _ATTACHMENT_CONTEXT_SECTIONS = frozenset({

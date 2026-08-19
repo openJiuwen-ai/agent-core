@@ -8,8 +8,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/scheduling/` |
-| 最近一次修订日期 | 2026-07-16 |
-| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留） |
+| 最近一次修订日期 | 2026-08-10 |
+| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback） |
 
 ## 范围 / 边界
 
@@ -20,6 +20,7 @@
 - 评审投票的数据面（票表、`review_round`）与判定面（`verdict.judge`、`settle_review`）分工。
 - `SchedulerHost` 窄协议与 kernel 接线（组合 wake、`SCHEDULER_SCAN` 回声、激活/失活时机）。
 - 成员交接消息的两阶段渲染契约（模板 key / 占位符标准 / 命名空间白名单 / 展开点 / 降级链）。
+- 失败轮次 reviewer feedback 与团队终态向宿主发布的可选 callback 契约。
 
 **这个规约不管：**
 
@@ -56,6 +57,12 @@
     `IN_REVIEW`、阈值 `_STALE_CLAIM_SECONDS`=10min），使自主基类切换不波及本模式。代价是
     同款缺陷仍在：成员 idle 跨长 pause 后 resume，其活跃任务会被 `now - updated_at` 误判为
     stale。迁移到 idle 时钟是 `F_65_runtime-idle-clock-stall-nudge.md` 记录的已知遗留。
+16. **review feedback callback 是可选旁路，不是调度判定的一部分**（F_73）：scheduler 只从
+    host harness 查找已声明式挂载且启用该能力的 `TeamSkillEvolutionRail`；每个失败 settle 后按
+    `(task_id, review_round)` 至多后台调用一次 `rail.handle_review_feedback(...)`，异常只记录、不改变
+    任务状态。团队看板全部终态时，scheduler 先等待当前 callback 收敛，再至多调用一次
+    `rail.finalize_review_feedback(...)`。scheduler 不读取轨迹、不归因 Skill、不调用 LLM、不写演进
+    存储，也不负责 Rail 的构造和审批传输。
 
 ## 接口契约
 
@@ -82,18 +89,48 @@ class TeamScheduler:
     async def on_event(self, event: CoordinationEvent) -> None: ...
 ```
 
+可选 Rail 入口使用 duck-typed 契约，不进入 `SchedulerHost`：
+
+```python
+rail = next(
+    candidate
+    for candidate in host.harness.find_rails(TeamSkillEvolutionRail)
+    if candidate.review_feedback_evolution_enabled
+)
+
+await rail.handle_review_feedback({
+    "team_id": str,
+    "session_id": str,
+    "task_id": str,
+    "review_round": int,
+    "task_title": str,
+    "task_content": str,
+    "assignee": str,
+    "feedback": str,
+})
+
+await rail.finalize_review_feedback({
+    "team_id": str,
+    "session_id": str,
+})
+```
+
+未挂载或未启用对应 Rail 时等价于未启用。task callback 由 scheduler 作为后台任务执行；终态入口
+等待已启动 callback 后执行。callback 不得依赖 scheduler 重试提供 exactly-once
+语义：去重状态只在当前 scheduler 进程内有效。
+
 kernel 侧：
 
 - `CoordinationKernel.scheduler` 属性暴露实例（测试/调试）。
 - `_build_wake_callback()`：有调度器时组合 "coordination dispatch → scheduler.on_event"，否则裸 dispatch。
 - `notify_team_built()`：build_team 成功回调（`TeamAgent._mark_team_built`）→ 存在调度器则 `activate()`。
 
-配置消费（全部只在 leader 侧，不跨进程镜像）：`TeamAgentSpec.verify_vote_threshold`（默认 2/3，(0,1]）、`default_max_review_rounds`（默认 3，≥1）、`review_stall_timeout`（默认 1800s，>0）、`enable_task_verification`（提示词驱动，`CapabilityOverrides` 可在 build_team 覆盖）。
+配置消费（全部只在 leader 侧，不跨进程镜像）：`TeamAgentSpec.verify_vote_threshold`（默认 2/3，(0,1]）、`default_max_review_rounds`（默认 3，≥1）、`review_stall_timeout`（默认 1800s，>0）、`enable_task_verification`（提示词驱动，`CapabilityOverrides` 可在 build_team 覆盖；该参数只在 scheduled 下向模型暴露——本节这些配置都只有 scheduled 才有消费者，见 [[F_76]] 与 `S_08` 不变量 21b）。
 
 ## 数据结构
 
 - 票表 / `review_round` / `max_review_rounds` / `team_info` 能力列：见 `S_12`。
-- 调度器内存记账：`_review_dispatched: set[(task_id, round)]`、`_renudged_at: dict[(task_id, round), ms]`、`_escalated: set[(task_id, round)]`、`_digested_tasks: set[task_id]`、`_all_done_announced: bool`（`activate()` 复位）。
+- 调度器内存记账：`_review_dispatched: set[(task_id, round)]`、`_renudged_at: dict[(task_id, round), ms]`、`_escalated: set[(task_id, round)]`、`_digested_tasks: set[task_id]`、`_all_done_announced: bool`、`_review_feedback_dispatched: set[(task_id, round)]`、`_review_feedback_tasks: set[asyncio.Task]`、`_team_review_feedback_dispatched: bool`。其中团队终态 callback 标记在 `activate()` 复位；失败轮次去重随 scheduler 实例生命周期保留。
 
 ## 消息面
 
@@ -146,3 +183,4 @@ leader 摘要不经邮箱 → 无 meta 通道、无投递时展开，维持一�
 - **`S_03_coordination-protocol`**：wake_callback 组合、`SCHEDULER_SCAN` 的产生点（`_filter_self`）、调度器生命周期挂点在该 spec 的 kernel 段登记；coordination"不做决策"铁律由本包承接决策而保持成立。
 - **`S_08_team-tools-contract`**：scheduled 形态 `create_task`（assignee 必填 + `max_review_rounds`）、`verify_task` 按模式二分的语义与描述形态、`build_team` 不选协调模式（不变量 21）。
 - **`S_12_schema-data-models`**：状态机（`start` 边的 PLANNING/IN_PROGRESS 落点）、票表、任务行新列、`TASK_REVIEW_VOTE` 事件、消息表 `meta` 投递载荷列与其三铁律。
+- **`F_73_reviewer-feedback-skill-evolution-boundaries`**：定义 scheduler callback 之外的归因、成员轨迹、Skill Rail 与创建审批边界；本文只约束 callback 的派发时机和失败隔离。

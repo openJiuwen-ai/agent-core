@@ -272,6 +272,19 @@ class BrowserPageState:
         self._update_blockers({}, [text[:4000]])
         return tuple(registered)
 
+    def replace_ax_snapshot(self, value: Any) -> tuple[str, ...]:
+        """Replace current-generation AX refs with refs from one complete snapshot."""
+        text = value if isinstance(value, str) else str(value)
+        snapshot_refs = set(_ANY_REF_RE.findall(text))
+        missing_refs = [
+            ref_value
+            for ref_value, generation in self.reference_generations.items()
+            if generation == self.generation and ref_value not in snapshot_refs
+        ]
+        for ref_value in missing_refs:
+            self._remove_current_ax_ref(ref_value)
+        return self.register_ax_snapshot(text)
+
     def add_field_coverage(self, fields: Iterable[str]) -> None:
         """Record structured fields extracted from the current document."""
         for field_name in fields:
@@ -460,6 +473,21 @@ class BrowserPageState:
                 f"Stale target_id {target.target_id} belongs to {target.generation_id}; "
                 f"current generation is {self.generation_id}."
             )
+
+    def _remove_current_ax_ref(self, ref_value: str) -> None:
+        target_id = self._ref_targets.get(ref_value)
+        target = self._targets.get(target_id or "")
+        if target is not None and target.generation == self.generation and target.source == "ax":
+            self._targets.pop(target.target_id, None)
+            self._interactive_target_ids = [
+                current_target_id
+                for current_target_id in self._interactive_target_ids
+                if current_target_id != target.target_id
+            ]
+            if self._ref_targets.get(ref_value) == target.target_id:
+                self._ref_targets.pop(ref_value, None)
+        if self.reference_generations.get(ref_value) == self.generation:
+            self.reference_generations.pop(ref_value, None)
 
     def _export_targets(self, target_ids: Iterable[str], limit: int) -> list[Dict[str, Any]]:
         exported: list[Dict[str, Any]] = []

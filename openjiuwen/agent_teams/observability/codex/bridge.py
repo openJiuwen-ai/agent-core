@@ -311,11 +311,13 @@ class CodexSpanBridge:
         member_agent_id: str,
         team_name: str,
         session_id: str,
+        role: str | None = None,
     ) -> None:
         self._member_name = member_name
         self._member_agent_id = member_agent_id
         self._team_name = team_name
         self._session_id = session_id
+        self._role = role or ""
         self._turn_index = 0
         self._turn_span: Any | None = None
         self._config: Any | None = None
@@ -383,8 +385,8 @@ class CodexSpanBridge:
         from opentelemetry import context as otel_context
         from opentelemetry.trace import SpanKind, set_span_in_context
 
-        from openjiuwen.agent_teams.observability.redaction import redact_prompt
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.redaction import redact_prompt
+        from openjiuwen.extensions.observability.semconv import (
             AT_AGENT_ID,
             AT_AGENT_INPUT,
             AT_AGENT_NAME,
@@ -411,7 +413,7 @@ class CodexSpanBridge:
         span.set_attribute(AT_AGENT_INPUT, safe_prompt)
         span.set_attribute(AT_AGENT_ID, self._member_agent_id)
         span.set_attribute(AT_AGENT_NAME, self._member_name)
-        span.set_attribute(AT_AGENT_ROLE, "teammate")
+        span.set_attribute(AT_AGENT_ROLE, self._role or self._member_name)
         span.set_attribute(AT_MEMBER_ID, self._member_name)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
         if self._team_name:
@@ -609,11 +611,11 @@ class CodexSpanBridge:
             set_span_in_context,
         )
 
-        from openjiuwen.agent_teams.observability.redaction import (
+        from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
         )
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.semconv import (
             AT_MEMBER_NAME,
             AT_SESSION_ID,
             AT_TEAM_NAME,
@@ -903,7 +905,7 @@ class CodexSpanBridge:
             set_span_in_context,
         )
 
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.semconv import (
             AT_MEMBER_NAME,
             AT_SESSION_ID,
             AT_TEAM_NAME,
@@ -1060,11 +1062,11 @@ class CodexSpanBridge:
             set_span_in_context,
         )
 
-        from openjiuwen.agent_teams.observability.redaction import (
+        from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
         )
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.semconv import (
             AT_MEMBER_NAME,
             AT_SESSION_ID,
             AT_TEAM_NAME,
@@ -1162,7 +1164,7 @@ class CodexSpanBridge:
         text = _json_text(value)
         if config is None:
             return _truncate(text, 40960)
-        from openjiuwen.agent_teams.observability.redaction import (
+        from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
         )
@@ -1218,11 +1220,11 @@ class CodexSpanBridge:
         from opentelemetry import context as otel_context
         from opentelemetry.trace import Status, StatusCode, set_span_in_context
 
-        from openjiuwen.agent_teams.observability.redaction import (
+        from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
         )
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.semconv import (
             GEN_AI_USAGE_COMPLETION_TOKENS,
             GEN_AI_USAGE_PROMPT_TOKENS,
             GEN_AI_USAGE_TOTAL_TOKENS,
@@ -1279,8 +1281,8 @@ class CodexSpanBridge:
 
         from opentelemetry.trace import Status, StatusCode
 
-        from openjiuwen.agent_teams.observability.redaction import redact_completion
-        from openjiuwen.agent_teams.observability.semconv import (
+        from openjiuwen.extensions.observability.redaction import redact_completion
+        from openjiuwen.extensions.observability.semconv import (
             AT_AGENT_OUTPUT,
             LANGFUSE_OBSERVATION_OUTPUT,
         )

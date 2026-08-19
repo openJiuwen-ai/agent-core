@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/worktree/`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-08-05 |
-| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md、F_74_leader-member-activity-and-team-idle.md |
+| 最近一次修订日期 | 2026-08-13 |
+| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md、F_74_leader-member-activity-and-team-idle.md、F_77_team-idle-requires-a-settled-task-board.md、F_79_team-scoped-skill-library-and-visibility.md、F_80_fork-identity-conversion.md |
 
 ## 范围 / 边界
 
@@ -120,7 +120,8 @@
    看到 `ctx.worktree_path` 时把它写进成员的 **cwd**（`DeepAgentSpec.cwd`），
    `WorkspaceSpec.root_path` **始终**是成员自己的稳定目录
    （`ensure_team_member_workspace_link`，即 stable_base 语义）。理由：workspace 装
-   成员产物 / memory / skills 视图 / `.team` 挂载点，若它跟着 worktree 走，worktree
+   成员产物 / memory / Skill 可见性声明（`skills-visibility.json`，成员没有自己的
+   `skills/` 目录，见 [[F_79]]）/ `.team` 挂载点，若它跟着 worktree 走，worktree
    一删这些就没了。由此 workspace 恒为团队自己的目录，**无条件**注册进
    `TeamBackend.cleanup_path`；worktree 本身不在 cleanup_path 里，`clean_team` 仍
    只经 `git worktree remove` 拆它。成员没有 workspace spec 时兜底
@@ -140,13 +141,21 @@
    `todo/` 等）后重数，仍 > 0 → 保留；repo root 无法解析 → 保留；**只有全部通过才**
    `remove_worktree` 并清空 `options.worktree.path`。保留下来的 worktree 由 leader
    依据 `worktree_path` 与可用 branch 信息处理冲突。
-9. **Inprocess chunk forwarder 与 handle 同生命周期**：`SpawnManager` 在
+9. **`fork_source` 随 `TeamRuntimeContext` 跨进程 wire（[[F_80]]）**：
+   `_on_teammate_created` 在 fork 上下文非空且 `is_empty()` 为假时把源名写进
+   `ctx.fork_source`（缺省 = leader 自己的名字）；`build_spawn_config` 已把
+   `ctx.model_dump(mode="json")` 序列化进 payload、`from_spawn_payload` 用
+   `TeamRuntimeContext.model_validate` 还原，因此该字段对 inprocess / subprocess
+   两条路径天然可用。目标侧 `TeamPolicyRail` 经 `TeamPolicyInput.fork_source` 读到
+   并透传给 `TeamContextTracker`，在其首条身份投递中渲染 `<identity-conversion>`
+   转换通知（见 `S_09` 不变量 13b）。普通 spawn 不写该字段（保持 `None`）。
+10. **Inprocess chunk forwarder 与 handle 同生命周期**：`SpawnManager` 在
    inprocess 路径上立即 `_wire_inprocess_chunk_forward` 把 teammate
    `StreamController` 的 chunk 转发到 leader `stream_queue`（forwarder 存在 handle 的
    `chunk_forward` 字段上）；`cleanup_teammate` 必须先 `remove_chunk_observer` 再
    `force_kill`，否则会有迟到 chunk 落进已废弃的 leader 队列。子进程模式没有这个钩子，
    teammate chunk 只能走 messager（当前 unimplemented，列为 future work）。
-10. **取消 / 暂停一律转发给 runtime，`StreamController` 自己不做超时编排**。
+11. **取消 / 暂停一律转发给 runtime，`StreamController` 自己不做超时编排**。
     四个方法各自只有一行，语义全在 `harness` 那边（见 [[F_60]]）：
 
     | 方法 | 转发 | 语义 |
@@ -161,29 +170,29 @@
     "`_cancel_requested` + `wait_for(2.0)` + `task.cancel()` 兜底"两阶段编排、
     以及常量 `_COOPERATIVE_ABORT_TIMEOUT_SECONDS` 都已随 [[F_28]] 删除**——超时
     与安全检查点是 harness supervisor 的职责，不要在本层重建。
-11. **清理路径吞 `CancelledError + Exception`**：`SpawnManager.cleanup_teammate`
+12. **清理路径吞 `CancelledError + Exception`**：`SpawnManager.cleanup_teammate`
     （`suppress(Exception)`，摘 observer）、`SpawnManager.cancel_recovery_tasks`
     与 `StreamController.stop()`（均 `suppress(asyncio.CancelledError, Exception)`，
     await 已 cancel 的 task）里的 suppress 是 invariant——caller 已经表态要拆掉这
     条链，再把异常往外抛会污染上层 shutdown。重构清理路径时必须保留，并检查
     `import contextlib` 还在（之前漏过一次）。`shutdown_all_handles` 自己不 suppress，
     它逐个走 `cleanup_teammate` 并 `try/except` 记日志后继续。
-12. **transient-retry 状态是 per-cycle 私有**：`_retry_attempt` /
+13. **transient-retry 状态是 per-cycle 私有**：`_retry_attempt` /
     `_swallow_failed_round` 由 `StreamController.start()` 在每个 run cycle 入口重置，
     `_swallow_failed_round` 另在每个 round `started` 事件上清零（`_map_round`）。
     这两个字段绝不能跨 cycle 存活，否则上一个 cycle 耗尽的重试预算会让新 cycle 的
     第一个 transient 错误直接透传给消费者。
-13. **Observer 例外自隔离**：`_forward_outputs` fan-out 时单个 observer 抛异常
+14. **Observer 例外自隔离**：`_forward_outputs` fan-out 时单个 observer 抛异常
     **只**会被自动 `remove_chunk_observer`（记 exception 日志后继续），绝不能让本地
     stream 被 consumer 阻塞或拖垮。新增 observer 实现要做到 idempotent detach。
-14. **`ExecutionStatus` 只由 runtime 的 round 事件驱动，且每条路径都收敛到 IDLE**：
+15. **`ExecutionStatus` 只由 runtime 的 round 事件驱动，且每条路径都收敛到 IDLE**：
     `_map_round(kind)` 是唯一发布点，四种 kind 各走一条合法边链——
     `started` → STARTING → RUNNING；`finished` → COMPLETING → COMPLETED → IDLE；
     `aborted` / `paused` → CANCEL_REQUESTED → CANCELLING → CANCELLED → IDLE；
     `failed` → FAILED → IDLE。状态机不允许"round 跑完了但既不是 COMPLETED 也不是
     CANCELLED / FAILED"的中间态。**`StreamController` 不再自己判断"这轮是不是被取消
     了"**——它只翻译 runtime 报上来的 kind。
-15. **Spawn 子进程命令固定**：`spawn_process` 用 `sys.executable -m
+16. **Spawn 子进程命令固定**：`spawn_process` 用 `sys.executable -m
     openjiuwen.core.runner.spawn.child_process` 启动，不是 `os.fork`。
     Windows / macOS / Linux 全平台使用相同的 `asyncio.create_subprocess_exec`
     路径，依赖 stdin/stdout pipe 通信。**禁止**为了"在 Linux 上更快"切到
@@ -319,6 +328,7 @@ class StreamController:
         execution_updater: Callable[[ExecutionStatus], Any],
         wake_mailbox_callback: Optional[Callable[[], Any]] = None,
         request_completion_poll_callback: Optional[Callable[[], Awaitable[None]]] = None,
+        task_board_probe: Optional[Callable[[], Awaitable[bool]]] = None,   # F_77；leader 接 TeamAgent.is_task_board_settled
     ): ...
 
     # cycle 生命周期（由 CoordinationKernel 调，非 round 级）
@@ -336,7 +346,7 @@ class StreamController:
     def close_stream(self) -> None: ...                                       # put_nowait(None)
     def emit_completion_and_close(self, member_count: int, task_count: int) -> None: ...
     def emit_team_idle(self, members: dict[str, str]) -> None: ...  # team.idle 标记，不关流（F_74）
-    def schedule_team_idle(self) -> None: ...  # 武装去抖 2s 的 team.idle 定时（替换既有 pending）
+    def schedule_team_idle(self) -> None: ...  # 武装去抖 2s 的 team.idle 定时（替换既有 pending）；到点两条件依次复查（F_77）
     def cancel_team_idle(self) -> None: ...    # 丢弃待发定时；幂等，stop / close_stream 都调
 
     # 状态查询（一律直读 harness.state，本层不缓存）
@@ -377,6 +387,13 @@ class StreamController:
   `CancelledError`（task 必须以 cancelled 状态结束），done callback 对非取消结束
   必须 `task.exception()` 取出异常，否则 GC 时的 "Task exception was never
   retrieved" 会盖掉真正的失败。
+- **team.idle 是两条件、且顺序固定**（F_77）：去抖到点后先复查
+  `member_registry.is_idle()`（全员静止），**通过之后**才经 `task_board_probe`
+  问任务板——leader 注入的 `TeamAgent.is_task_board_settled` 走一次聚合 COUNT
+  （`task.count_tasks_terminality`），`non_terminal == 0` 即算静止，**空板同样算**。
+  顺序不可换：板查询是一次 DB 往返，成员还在动时问它既浪费也答非所问。probe 为
+  None（任何非 leader）时该条件恒真——它们本来就不武装 marker。probe 抛错一律按
+  "未静止"处理压住 marker，不允许把一次读失败当成 idle 播出去。
 
 ### session_id contextvar 契约
 

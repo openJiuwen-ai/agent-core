@@ -33,6 +33,9 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabiliti
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserRuntimeRail,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_rail import (
+    BrowserWorkingContextRail,
+)
 
 
 def _fake_model() -> MagicMock:
@@ -172,10 +175,17 @@ def test_browser_agent_prompt_enforces_convergent_browser_strategy() -> None:
     assert "observable condition waits" in english
     assert "navigate directly to that URL" in english
     assert "Stop immediately" in english
+    assert "Every model call includes the latest complete <browser_state> observation" in english
+    assert "A fresh browser capture occurs initially" in english
+    assert "page_change=unchanged" in english
+    assert "<required_next_action>" in english
     assert "直接构造搜索结果 URL" in chinese
     assert "可观察条件" in chinese
     assert "直接导航该 URL" in chinese
     assert "立即结束" in chinese
+    assert "<browser_state_progress>" in chinese
+    assert "page_change=unchanged" in chinese
+    assert "<required_next_action>" in chinese
     assert "browser_run_code_unsafe" not in english
     assert "browser_run_code_unsafe" not in chinese
     assert "makes a browser_run_code tool visible" in english
@@ -267,6 +277,15 @@ def test_default_wiring_main_agent_card_is_browser_agent() -> None:
     assert calls[0]["card"].name == "browser_agent"
 
 
+def test_default_browser_agent_identity_is_stable_across_reconstruction() -> None:
+    calls, fake = _capture_create_deep_agent()
+    with _patch_all(fake)[0]:
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+        create_browser_agent(_fake_model(), settings=_fake_settings())
+
+    assert calls[0]["card"].id == calls[1]["card"].id
+
+
 def test_default_wiring_main_agent_has_no_subagents() -> None:
     calls, fake = _capture_create_deep_agent()
     with _patch_all(fake)[0]:
@@ -302,9 +321,10 @@ def test_default_wiring_main_agent_has_browser_runtime_rail() -> None:
 
     rails = calls[0].get("rails", [])
     assert any(isinstance(rail, BrowserRuntimeRail) for rail in rails)
+    assert any(isinstance(rail, BrowserWorkingContextRail) for rail in rails)
 
 
-def test_default_wiring_windows_browser_probe_and_snapshot_results() -> None:
+def test_default_wiring_adds_browser_state_and_windows_large_tool_results() -> None:
     calls, fake = _capture_create_deep_agent()
     with _patch_all(fake)[0]:
         create_browser_agent(_fake_model(), settings=_fake_settings())
@@ -314,9 +334,9 @@ def test_default_wiring_windows_browser_probe_and_snapshot_results() -> None:
     assert len(context_rails) == 1
 
     processors = context_rails[0]._user_processors
-    assert len(processors) == 1
-    key, config = processors[0]
-    assert key == "ToolResultWindowProcessor"
+    assert len(processors) == 3
+    processor_map = dict(processors)
+    config = processor_map["ToolResultWindowProcessor"]
     # Pin the intended contract literally (not against the source constant) so a
     # regression like the plain "browser_snapshot" name is actually caught.
     assert config.tool_names == [
@@ -325,12 +345,28 @@ def test_default_wiring_windows_browser_probe_and_snapshot_results() -> None:
         "browser_snapshot",
     ]
     assert config.keep_last_k == 1
+    assert processor_map["BrowserWorkingContextProcessor"].max_recent_steps > 0
+    assert processor_map["BrowserStateContextProcessor"].provider is not None
     assert config.trim_size == 1000
     assert config.min_offload_chars == 4096
     assert config.small_result_trim_size == 800
 
 
-def test_caller_context_processor_rail_suppresses_injection() -> None:
+def test_working_context_processor_uses_browser_agent_language() -> None:
+    calls, fake = _capture_create_deep_agent()
+    with _patch_all(fake)[0]:
+        create_browser_agent(
+            _fake_model(),
+            settings=_fake_settings(),
+            language="cn",
+        )
+
+    context_rail = next(rail for rail in calls[0]["rails"] if isinstance(rail, ContextProcessorRail))
+    processor_map = dict(context_rail._user_processors)
+    assert processor_map["BrowserWorkingContextProcessor"].language == "cn"
+
+
+def test_caller_context_processor_rail_is_augmented_with_browser_state() -> None:
     calls, fake = _capture_create_deep_agent()
     caller_rail = ContextProcessorRail(preset=False)
     with _patch_all(fake)[0]:
@@ -338,8 +374,13 @@ def test_caller_context_processor_rail_suppresses_injection() -> None:
 
     rails = calls[0].get("rails", [])
     context_rails = [rail for rail in rails if isinstance(rail, ContextProcessorRail)]
-    # Only the caller's rail is present; the browser agent does not add its own.
+    # Only the caller's rail is present, and it receives the required live state
+    # processor rather than competing with a second context rail.
     assert context_rails == [caller_rail]
+    assert [key for key, _ in caller_rail._user_processors] == [
+        "BrowserWorkingContextProcessor",
+        "BrowserStateContextProcessor",
+    ]
 
 
 def test_default_wiring_does_not_add_sys_operation_rail() -> None:

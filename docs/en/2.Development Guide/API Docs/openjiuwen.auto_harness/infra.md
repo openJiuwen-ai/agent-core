@@ -648,9 +648,6 @@ Top-level `harness_config.yaml` schema for runtime extensions. Defines the compl
 * **default_mode**(`Optional[str]`): Default mode, default `None`
 * **permissions**(`Optional[Dict[str, Any]]`): Permission configuration, default `None`
 * **progressive_tool_enabled**(`Optional[bool]`): Whether to enable progressive tools, default `None`
-* **progressive_tool_always_visible_tools**(`List[str]`): Always visible tool list, default empty list
-* **progressive_tool_default_visible_tools**(`List[str]`): Default visible tool list, default empty list
-* **progressive_tool_max_loaded_tools**(`Optional[int]`): Maximum loaded tool count, default `None`
 * **subagents**(`Optional[List[Dict[str, Any]]]`): Sub-agent configuration, default `None`
 * **context**(`Optional[Dict[str, Any]]`): Context configuration, default `None`
 * **stop_eval_conditions**(`Optional[Dict[str, Any]]`): Stop evaluation conditions, default `None`

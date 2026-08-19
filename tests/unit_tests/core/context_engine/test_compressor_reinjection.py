@@ -26,6 +26,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.round_level_comp
     RoundLevelCompressorConfig,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
+from openjiuwen.core.foundation.kv_cache import KVCacheIdentity
 
 
 def _tool_call(call_id: str, name: str, arguments: str) -> ToolCall:
@@ -482,3 +483,133 @@ async def test_non_retryable_compression_error_does_not_retry():
     assert updated_window is window
     assert executor.invoke.await_count == 1
     assert context.set_messages.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_compressor_uses_independent_affinity_identity_and_cleans_it_up():
+    compressor = DialogueCompressor(
+        DialogueCompressorConfig(enable_kv_cache_affinity=True)
+    )
+    executor = _attach_executor(compressor, "isolated compact state")
+    model = MagicMock()
+    model.build_kv_cache_affinity_invoke_kwargs.return_value = {
+        "session_id": "session-1:compressor:dialogue",
+        "parent_session_id": "session-1",
+    }
+    model.evict_kvc = AsyncMock(return_value=True)
+    compressor._model = model
+    context = _context({})
+    window = _context_window(
+        [
+            UserMessage(content="Historical request"),
+            AssistantMessage(content="historical padding " * 600),
+            UserMessage(content="Current task"),
+        ]
+    )
+
+    event, _ = await compressor.on_get_context_window(context, window)
+
+    assert event is not None
+    model.build_kv_cache_affinity_invoke_kwargs.assert_called_once_with(
+        session_id="session-1:compressor:dialogue",
+        parent_session_id="session-1",
+        enable_kv_cache_affinity=True,
+    )
+    assert executor.invoke.await_args.kwargs == {
+        "session_id": "session-1:compressor:dialogue",
+        "parent_session_id": "session-1",
+    }
+    model.evict_kvc.assert_awaited_once_with(
+        session_id="session-1:compressor:dialogue",
+        parent_session_id="session-1",
+        target="session",
+    )
+
+
+@pytest.mark.asyncio
+async def test_compressor_affinity_off_sends_no_hint_or_cleanup():
+    compressor = DialogueCompressor(
+        DialogueCompressorConfig(enable_kv_cache_affinity=False)
+    )
+    executor = _attach_executor(compressor, "ordinary compact state")
+    model = MagicMock()
+    model.evict_kvc = AsyncMock(return_value=True)
+    compressor._model = model
+    context = _context({})
+    window = _context_window(
+        [
+            UserMessage(content="Historical request"),
+            AssistantMessage(content="historical padding " * 600),
+            UserMessage(content="Current task"),
+        ]
+    )
+
+    event, _ = await compressor.on_get_context_window(context, window)
+
+    assert event is not None
+    assert executor.invoke.await_args.kwargs == {}
+    model.build_kv_cache_affinity_invoke_kwargs.assert_not_called()
+    model.evict_kvc.assert_not_awaited()
+
+
+def test_compressor_affinity_derives_from_owner_provider_cache_identity():
+    compressor = DialogueCompressor(
+        DialogueCompressorConfig(enable_kv_cache_affinity=True)
+    )
+    model = MagicMock()
+    model.build_kv_cache_affinity_invoke_kwargs.return_value = {
+        "session_id": "stable-child:compressor:dialogue",
+        "parent_session_id": "stable-child",
+    }
+    compressor._model = model
+    context = _context({}, session_id="runtime-session-id")
+    context.get_session_ref.return_value.get_cache_identity.return_value = (
+        KVCacheIdentity(
+            cache_id="stable-child",
+            parent_cache_id="session-1",
+        )
+    )
+
+    invoke_kwargs, identity = compressor._build_compressor_affinity(context)
+
+    assert invoke_kwargs == {
+        "session_id": "stable-child:compressor:dialogue",
+        "parent_session_id": "stable-child",
+    }
+    assert identity == KVCacheIdentity(
+        cache_id="stable-child:compressor:dialogue",
+        parent_cache_id="stable-child",
+    )
+
+
+@pytest.mark.asyncio
+async def test_compressor_cache_cleanup_failure_does_not_fail_compression():
+    compressor = DialogueCompressor(
+        DialogueCompressorConfig(enable_kv_cache_affinity=True)
+    )
+    _attach_executor(compressor, "compact state survives cleanup failure")
+    model = MagicMock()
+    model.build_kv_cache_affinity_invoke_kwargs.return_value = {
+        "session_id": "session-1:compressor:dialogue",
+        "parent_session_id": "session-1",
+    }
+    model.evict_kvc = AsyncMock(side_effect=RuntimeError("cleanup failed"))
+    compressor._model = model
+    context = _context({})
+    window = _context_window(
+        [
+            UserMessage(content="Historical request"),
+            AssistantMessage(content="historical padding " * 600),
+            UserMessage(content="Current task"),
+        ]
+    )
+
+    event, updated_window = await compressor.on_get_context_window(
+        context,
+        window,
+    )
+
+    assert event is not None
+    assert "compact state survives cleanup failure" in (
+        updated_window.context_messages[0].content
+    )

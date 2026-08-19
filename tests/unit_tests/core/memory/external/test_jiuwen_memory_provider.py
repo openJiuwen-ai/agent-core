@@ -592,42 +592,46 @@ class _FakeConfig:
 
 
 def _build_fake_mem_modules(local_api):
-    """Build fake api / common / common.type_def / retrieval / retrieval.types /
-    config modules for sys.modules injection.
+    """Build fake jiuwen_memory.* modules for sys.modules injection.
 
-    ``api.assemble`` returns ``local_api`` (the fake LocalMemoryAPI); tests
-    configure local_api's write/recall and assert on call_args.
+    Mirrors the real package layout: top-level ``jiuwen_memory`` package with
+    ``jiuwen_memory.api`` / ``jiuwen_memory.common.type_def`` /
+    ``jiuwen_memory.retrieval`` / ``jiwen_memory.config`` submodules.
+    ``jiuwen_memory.api.assemble`` returns ``local_api`` (the fake
+    LocalMemoryAPI); tests configure local_api's add/search and assert on
+    call_args.
     """
-    api_mod = types.ModuleType("api")
+    api_mod = types.ModuleType("jiuwen_memory.api")
     api_mod.assemble = MagicMock(return_value=local_api)
 
-    ctd_pkg = types.ModuleType("common.type_def")
+    ctd_pkg = types.ModuleType("jiuwen_memory.common.type_def")
     ctd_pkg.Scope = _FakeScope
     ctd_pkg.Modality = _FakeModality
     ctd_pkg.Context = _FakeContext
     ctd_pkg.MemoryUnit = _FakeMemoryUnit
 
-    common_pkg = types.ModuleType("common")
+    common_pkg = types.ModuleType("jiuwen_memory.common")
     common_pkg.__path__ = []  # mark as package
 
-    rt_mod = types.ModuleType("retrieval.types")
-    rt_mod.DisclosureLevel = _FakeDisclosureLevel
-    rt_mod.RetrievedItem = _FakeRetrievedItem
-    rt_mod.RetrievalResult = _FakeRetrievalResult
-
-    retrieval_pkg = types.ModuleType("retrieval")
+    retrieval_pkg = types.ModuleType("jiuwen_memory.retrieval.types")
     retrieval_pkg.__path__ = []
+    retrieval_pkg.DisclosureLevel = _FakeDisclosureLevel
+    retrieval_pkg.RetrievedItem = _FakeRetrievedItem
+    retrieval_pkg.RetrievalResult = _FakeRetrievalResult
 
-    config_mod = types.ModuleType("config")
+    config_mod = types.ModuleType("jiuwen_memory.config")
     config_mod.Config = _FakeConfig
 
+    top_pkg = types.ModuleType("jiuwen_memory")
+    top_pkg.__path__ = []
+
     return {
-        "api": api_mod,
-        "common": common_pkg,
-        "common.type_def": ctd_pkg,
-        "retrieval": retrieval_pkg,
-        "retrieval.types": rt_mod,
-        "config": config_mod,
+        "jiuwen_memory": top_pkg,
+        "jiuwen_memory.api": api_mod,
+        "jiuwen_memory.common": common_pkg,
+        "jiuwen_memory.common.type_def": ctd_pkg,
+        "jiuwen_memory.retrieval.types": retrieval_pkg,
+        "jiuwen_memory.config": config_mod,
     }
 
 
@@ -637,14 +641,14 @@ def fake_kernel():
 
     ``api_mod.assemble`` is the MagicMock the backend calls via
     ``from api import assemble``; it returns ``local_api`` (the fake
-    LocalMemoryAPI). Tests configure local_api.write/recall and assert on
+    LocalMemoryAPI). Tests configure local_api.add/search and assert on
     call_args, and can assert on api_mod.assemble to check config flow.
     """
     local_api = MagicMock()
-    local_api.write = MagicMock(return_value=[])
-    local_api.recall = MagicMock(return_value=_FakeRetrievalResult(items=[]))
+    local_api.add = MagicMock(return_value=[])
+    local_api.search = MagicMock(return_value=_FakeRetrievalResult(items=[]))
     modules = _build_fake_mem_modules(local_api)
-    api_mod = modules["api"]
+    api_mod = modules["jiuwen_memory.api"]
     saved = {k: sys.modules.get(k) for k in modules}
     sys.modules.update(modules)
     try:
@@ -713,7 +717,7 @@ async def _init_sdk(provider, fake_kernel):
 @pytest.mark.asyncio
 async def test_sdk_add_passes_content_scope_tags_metadata(fake_kernel):
     api_mod, local_api = fake_kernel
-    local_api.write = MagicMock(
+    local_api.add = MagicMock(
         return_value=[_FakeMemoryUnit(id="id-1", content="a fact", tier=_FakeTier("semantic"))]
     )
     provider = await _init_sdk(
@@ -727,7 +731,7 @@ async def test_sdk_add_passes_content_scope_tags_metadata(fake_kernel):
     assert data["item_id"] == "id-1"
     assert data["tier"] == "semantic"
 
-    args, kwargs = local_api.write.call_args
+    args, kwargs = local_api.add.call_args
     assert args[0] == "a fact"                       # content
     scope = args[1]
     assert scope.org == "org1" and scope.user == "alice"
@@ -739,19 +743,19 @@ async def test_sdk_add_passes_content_scope_tags_metadata(fake_kernel):
 @pytest.mark.asyncio
 async def test_sdk_add_without_infer_omits_metadata(fake_kernel):
     api_mod, local_api = fake_kernel
-    local_api.write = MagicMock(return_value=[_FakeMemoryUnit(id="id-1")])
+    local_api.add = MagicMock(return_value=[_FakeMemoryUnit(id="id-1")])
     provider = await _init_sdk(
         JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u", infer_turns=False),
         fake_kernel,
     )
     await provider.handle_tool_call("mem2_add", {"content": "raw text"})
-    assert local_api.write.call_args.kwargs["metadata"] is None
+    assert local_api.add.call_args.kwargs["metadata"] is None
 
 
 @pytest.mark.asyncio
 async def test_sdk_add_deduped_when_write_returns_empty(fake_kernel):
     api_mod, local_api = fake_kernel
-    local_api.write = MagicMock(return_value=[])     # all deduped (infer path)
+    local_api.add = MagicMock(return_value=[])     # all deduped (infer path)
     provider = await _init_sdk(
         JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u", infer_turns=False),
         fake_kernel,
@@ -779,7 +783,7 @@ async def test_sdk_add_missing_content_errors(fake_kernel):
 @pytest.mark.asyncio
 async def test_sdk_search_passes_query_scope_top_k_disclosure(fake_kernel):
     api_mod, local_api = fake_kernel
-    local_api.recall = MagicMock(
+    local_api.search = MagicMock(
         return_value=_FakeRetrievalResult(items=[
             _FakeRetrievedItem(unit_id="h1", content="c1", score=0.9),
         ])
@@ -794,7 +798,7 @@ async def test_sdk_search_passes_query_scope_top_k_disclosure(fake_kernel):
     assert data["results"][0]["content"] == "c1"
     assert data["results"][0]["item_id"] == "h1"
 
-    args, kwargs = local_api.recall.call_args
+    args, kwargs = local_api.search.call_args
     assert args[0] == "Python"                       # query
     ctx = args[1]
     assert ctx.scope.org == "org1" and ctx.scope.user == "alice"
@@ -806,12 +810,12 @@ async def test_sdk_search_passes_query_scope_top_k_disclosure(fake_kernel):
 @pytest.mark.asyncio
 async def test_sdk_search_top_k_capped(fake_kernel):
     api_mod, local_api = fake_kernel
-    local_api.recall = MagicMock(return_value=_FakeRetrievalResult(items=[]))
+    local_api.search = MagicMock(return_value=_FakeRetrievalResult(items=[]))
     provider = await _init_sdk(
         JiuwenMemoryProvider(mode="sdk", infer_turns=False), fake_kernel
     )
     await provider.handle_tool_call("mem2_search", {"query": "q", "top_k": 9999})
-    assert local_api.recall.call_args.kwargs["top_k"] == 50   # _MAX_TOP_K
+    assert local_api.search.call_args.kwargs["top_k"] == 50   # _MAX_TOP_K
 
 
 @pytest.mark.asyncio
@@ -822,13 +826,13 @@ async def test_sdk_search_empty_query_errors_without_recall(fake_kernel):
     )
     out = await provider.handle_tool_call("mem2_search", {"query": ""})
     assert "error" in json.loads(out)
-    local_api.recall.assert_not_called()
+    local_api.search.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_sdk_search_failure_returns_empty(fake_kernel):
     api_mod, local_api = fake_kernel
-    local_api.recall = MagicMock(side_effect=RuntimeError("boom"))
+    local_api.search = MagicMock(side_effect=RuntimeError("boom"))
     provider = await _init_sdk(
         JiuwenMemoryProvider(mode="sdk", infer_turns=False), fake_kernel
     )
@@ -842,7 +846,7 @@ async def test_sdk_search_failure_returns_empty(fake_kernel):
 @pytest.mark.asyncio
 async def test_sdk_prefetch_formats_marked_block(fake_kernel):
     api_mod, local_api = fake_kernel
-    local_api.recall = MagicMock(
+    local_api.search = MagicMock(
         return_value=_FakeRetrievalResult(items=[
             _FakeRetrievedItem(content="likes Python", score=0.8),
         ])
@@ -861,20 +865,20 @@ async def test_sdk_prefetch_formats_marked_block(fake_kernel):
 @pytest.mark.asyncio
 async def test_sdk_sync_turn_stores_only_user_by_default(fake_kernel):
     api_mod, local_api = fake_kernel
-    local_api.write = MagicMock(return_value=[_FakeMemoryUnit(id="i")])
+    local_api.add = MagicMock(return_value=[_FakeMemoryUnit(id="i")])
     provider = await _init_sdk(
         JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u", infer_turns=False),
         fake_kernel,
     )
     await provider.sync_turn("user says", "assistant says")
-    assert local_api.write.call_count == 1          # only user turn
-    assert local_api.write.call_args.args[0] == "user says"
+    assert local_api.add.call_count == 1          # only user turn
+    assert local_api.add.call_args.args[0] == "user says"
 
 
 @pytest.mark.asyncio
 async def test_sdk_sync_turn_saves_assistant_when_enabled(fake_kernel):
     api_mod, local_api = fake_kernel
-    local_api.write = MagicMock(return_value=[_FakeMemoryUnit(id="i")])
+    local_api.add = MagicMock(return_value=[_FakeMemoryUnit(id="i")])
     provider = await _init_sdk(
         JiuwenMemoryProvider(
             mode="sdk", tenant_id="t", user_id="u",
@@ -883,21 +887,21 @@ async def test_sdk_sync_turn_saves_assistant_when_enabled(fake_kernel):
         fake_kernel,
     )
     await provider.sync_turn("user says", "assistant says")
-    assert local_api.write.call_count == 2
-    contents = [c.args[0] for c in local_api.write.call_args_list]
+    assert local_api.add.call_count == 2
+    contents = [c.args[0] for c in local_api.add.call_args_list]
     assert contents == ["user says", "assistant says"]
 
 
 @pytest.mark.asyncio
 async def test_sdk_sync_turn_infer_flag_respected(fake_kernel):
     api_mod, local_api = fake_kernel
-    local_api.write = MagicMock(return_value=[_FakeMemoryUnit(id="i")])
+    local_api.add = MagicMock(return_value=[_FakeMemoryUnit(id="i")])
     provider = await _init_sdk(
         JiuwenMemoryProvider(mode="sdk", tenant_id="t", user_id="u", infer_turns=False),
         fake_kernel,
     )
     await provider.sync_turn("user says", "assistant says", infer=True)
-    assert local_api.write.call_args.kwargs["metadata"] == {"infer": "true"}
+    assert local_api.add.call_args.kwargs["metadata"] == {"infer": "true"}
 
 
 # ---- tool dispatch edges ------------------------------------------------ #

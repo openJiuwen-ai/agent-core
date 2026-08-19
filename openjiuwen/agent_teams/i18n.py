@@ -51,6 +51,22 @@ STRINGS: dict[str, dict[str, str]] = {
             "人类成员 {member_name} 仍持有 {count} 个活跃任务 [{task_ids}]，不允许非强制关闭。"
             "请先通过 send_message 与成员协商是否同意强制关闭并取消任务。"
         ),
+        # agent/fork.py — fork name mismatch surfaced to the leader
+        "checkpoint.fork_not_found": (
+            "[fork 警告] checkpoint '{fork}' 未能按 fork_source 解析{detail}，"
+            "已回退为全量继承（成员 {member}）。可用 checkpoint：{available}。"
+            "请用 list_checkpoints 核对名字后再 fork。"
+        ),
+        "checkpoint.fork_source_mismatch": (
+            "（创建者 '{creator}' 与 fork_source '{source}' 不匹配）"
+        ),
+        # agent/coordination/handlers/checkpoint.py — leader announcement body/note
+        "checkpoint.created_body": (
+            "成员 {member} 创建了 checkpoint '{name}'（消息位置 {count}）{description}"
+        ),
+        "checkpoint.created_note": (
+            "这是 checkpoint 创建公告，仅供你 fork 时核对名字使用，不需要回复。"
+        ),
         # reliability/ — anomaly remediation messages
         "reliability.steer_self_correct": (
             "⚙️[可靠性] 检测到 {kind}：{summary}。请停止重复无效操作，改换策略或换用其他工具。"
@@ -303,6 +319,24 @@ STRINGS: dict[str, dict[str, str]] = {
             "Human agent {member_name} still holds {count} active task(s) [{task_ids}] "
             "and cannot be shut down without force. "
             "Use send_message to coordinate with the member on whether to force-shutdown and cancel the tasks."
+        ),
+        # agent/fork.py — fork name mismatch surfaced to the leader
+        "checkpoint.fork_not_found": (
+            "[fork warning] checkpoint '{fork}' could not be resolved against "
+            "fork_source{detail}; fell back to full-context inheritance "
+            "(member {member}). Available checkpoints: {available}. "
+            "Use list_checkpoints to verify names before forking."
+        ),
+        "checkpoint.fork_source_mismatch": (
+            " (creator '{creator}' does not match fork_source '{source}')"
+        ),
+        # agent/coordination/handlers/checkpoint.py — leader announcement body/note
+        "checkpoint.created_body": (
+            "Member {member} created checkpoint '{name}' (message position {count}){description}"
+        ),
+        "checkpoint.created_note": (
+            "This is a checkpoint-created announcement for your fork coordination; "
+            "no reply is needed."
         ),
         # reliability/ — anomaly remediation messages
         "reliability.steer_self_correct": (

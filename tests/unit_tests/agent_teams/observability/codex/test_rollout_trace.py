@@ -171,6 +171,36 @@ def test_rollout_reader_removes_only_abandoned_owned_roots(
     assert live.exists()
 
 
+@pytest.mark.level0
+def test_rollout_reader_treats_pid_probe_os_error_as_abandoned(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from openjiuwen.agent_teams.observability.codex import rollout_trace
+
+    root = tmp_path / "openjiuwen-codex-rollout-os-error"
+    root.mkdir()
+    (root / ".openjiuwen-owner.json").write_text(
+        json.dumps({"pid": 333}),
+        encoding="utf-8",
+    )
+    old = time.time() - 120
+    os.utime(root, (old, old))
+
+    def raise_os_error(pid: int, signal_number: int) -> None:
+        raise OSError(11, "bad executable format")
+
+    monkeypatch.setattr(rollout_trace.os, "kill", raise_os_error)
+
+    removed = rollout_trace._cleanup_stale_roots(
+        base_dir=tmp_path,
+        now=time.time(),
+    )
+
+    assert removed == 1
+    assert not root.exists()
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_rollout_reader_drains_and_removes_root_on_close(tmp_path: Path):
@@ -207,7 +237,7 @@ def test_rollout_inference_emits_exact_content_reasoning_and_tool_parent(
     from openjiuwen.agent_teams.observability import ObservabilityConfig
     from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
     from openjiuwen.agent_teams.observability import setup
-    from openjiuwen.agent_teams.observability.semconv import (
+    from openjiuwen.extensions.observability.semconv import (
         LANGFUSE_OBSERVATION_INPUT,
         LANGFUSE_OBSERVATION_OUTPUT,
     )
@@ -393,7 +423,7 @@ def test_rollout_exec_wrapper_keeps_distinct_display_and_logical_names(
     from openjiuwen.agent_teams.observability import ObservabilityConfig
     from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
     from openjiuwen.agent_teams.observability import setup
-    from openjiuwen.agent_teams.observability.semconv import (
+    from openjiuwen.extensions.observability.semconv import (
         LANGFUSE_OBSERVATION_OUTPUT,
     )
 

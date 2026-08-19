@@ -459,13 +459,13 @@ class _ServerBackend:
 class _SDKBackend:
     """Backend that drives a local ``JiuwenMemory`` kernel in-process.
 
-    Builds the engine via ``from api import assemble`` (the same entry the HTTP
-    server uses) and calls ``api.write`` / ``api.recall`` directly. No network
-    hop, no separate server to run — the kernel lives for the provider's
-    lifetime.
+    Builds the engine via ``from jiuwen_memory.api import assemble`` (the same
+    entry the HTTP server uses) and calls ``api.add`` / ``api.search`` directly.
+    No network hop, no separate server to run — the kernel lives for the
+    provider's lifetime.
 
     The ``JiuwenMemory`` package must be installed (``pip install JiuwenMemory``)
-    so that ``from api import assemble`` resolves.
+    so that ``from jiuwen_memory.api import assemble`` resolves.
     """
 
     def __init__(
@@ -527,9 +527,9 @@ class _SDKBackend:
             self._save_assistant_turns = bool(kwargs["save_assistant_turns"])
 
         try:
-            from api import assemble
-            from common.type_def import Scope, Modality, Context
-            from retrieval.types import DisclosureLevel
+            from jiuwen_memory.api import assemble
+            from jiuwen_memory.common.type_def import Scope, Modality, Context
+            from jiuwen_memory.retrieval.types import DisclosureLevel
         except ImportError as exc:
             raise RuntimeError(
                 "JiuwenMemory is not installed. Install it with "
@@ -540,7 +540,7 @@ class _SDKBackend:
         # built-in in-memory defaults (good for tests, lost on restart).
         cfg = None
         try:
-            from config import Config
+            from jiuwen_memory.config import Config
             if self._config_dict:
                 cfg = Config.from_dict(self._config_dict)
         except Exception as exc:  # pragma: no cover - config parse failure
@@ -575,7 +575,7 @@ class _SDKBackend:
         if not self._api or not self._is_initialized or not query:
             return []
         scope = self._resolve_scope(**kwargs)
-        # JiuwenMemory's LocalMemoryAPI.recall is a *sync* method that internally
+        # JiuwenMemory's LocalMemoryAPI.search is a *sync* method that internally
         # asyncio.run()s the engine. We're already in a running loop, so run the
         # sync call in a worker thread — its asyncio.run() works there.
         ctx = self._context_cls(scope)
@@ -583,7 +583,7 @@ class _SDKBackend:
         k = min(int(top_k) or _DEFAULT_TOP_K, _MAX_TOP_K)
         try:
             res = await asyncio.to_thread(
-                self._api.recall, query, ctx, identity=scope, top_k=k, disclosure=disclosure
+                self._api.search, query, ctx, identity=scope, top_k=k, disclosure=disclosure
             )
             return [
                 {
@@ -628,11 +628,11 @@ class _SDKBackend:
         if infer:
             metadata["infer"] = "true"
         modality = self._modality_cls.TEXT
-        # See search(): the sync LocalMemoryAPI.write asyncio.run()s internally,
+        # See search(): the sync LocalMemoryAPI.add asyncio.run()s internally,
         # so dispatch it to a worker thread from our running loop.
         try:
             units = await asyncio.to_thread(
-                self._api.write,
+                self._api.add,
                 content,
                 scope,
                 modality,

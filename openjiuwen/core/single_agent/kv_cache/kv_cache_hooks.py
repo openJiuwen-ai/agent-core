@@ -9,6 +9,7 @@ from typing import Any
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.kv_cache import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
+    KV_CACHE_EPHEMERAL_TAIL_METADATA,
     KVCacheAffinityConfig,
     resolve_session_lineage,
 )
@@ -118,6 +119,7 @@ class KVCacheModelCallHook:
             session: Any,
             session_id: str | None,
             parent_session_id: str | None,
+            context_window: Any,
     ) -> dict:
         extra_kwargs: dict = {}
         build_release = getattr(llm, "build_kv_cache_invoke_kwargs", None)
@@ -134,6 +136,20 @@ class KVCacheModelCallHook:
                 parent_session_id=parent_session_id,
                 enable_kv_cache_affinity=True,
             ))
+            messages = context_window.get_messages()
+            if messages and KVCacheModelCallHook._is_ephemeral_tail_message(
+                    messages[-1]
+            ):
+                # The protocol defines manage_request=False as normal
+                # inference followed by edits. The attachment is the final
+                # message, so evict its half-open range [len - 1, len).
+                extra_kwargs.update({
+                    "kv_action": "evict",
+                    "target": "messages",
+                    "manage_request": False,
+                    "msg_start": len(messages) - 1,
+                    "msg_end": len(messages),
+                })
         return extra_kwargs
 
     async def _evict_changed_window(
@@ -151,6 +167,15 @@ class KVCacheModelCallHook:
             return
         change = context.detect_context_window_change(context_window)
         if change is None or not change.has_change:
+            return
+        if self._is_attachment_tail_only_change(change, context_window):
+            logger.debug(
+                "Skip duplicate Ascend KV cache pure-management eviction: "
+                "the previous attachment tail was evicted after inference. "
+                "session_id=%s parent_session_id=%s",
+                session_id,
+                parent_session_id or session_id,
+            )
             return
 
         target = "messages" if change.msg_start is not None else "tools"
@@ -179,7 +204,7 @@ class KVCacheModelCallHook:
             logger.warning(
                 "Ascend KV cache window diff eviction failed; continue normal inference. "
                 "session_id=%s parent_session_id=%s target=%s "
-                "msg_range=[%s,%s] tools_range=[%s,%s] error=%s",
+                "msg_range=[%s,%s) tools_range=[%s,%s) error=%s",
                 session_id,
                 parent_session_id or session_id,
                 target,
@@ -194,7 +219,7 @@ class KVCacheModelCallHook:
             logger.warning(
                 "Ascend KV cache window diff eviction returned false; continue normal inference. "
                 "session_id=%s parent_session_id=%s target=%s "
-                "msg_range=[%s,%s] tools_range=[%s,%s]",
+                "msg_range=[%s,%s) tools_range=[%s,%s)",
                 session_id,
                 parent_session_id or session_id,
                 target,
@@ -203,6 +228,49 @@ class KVCacheModelCallHook:
                 change.tools_start,
                 change.tools_end,
             )
+
+    @staticmethod
+    def _is_ephemeral_tail_message(message: Any) -> bool:
+        metadata = getattr(message, "metadata", None)
+        return (
+            isinstance(metadata, dict)
+            and metadata.get(KV_CACHE_EPHEMERAL_TAIL_METADATA) is True
+        )
+
+    @classmethod
+    def _is_attachment_tail_only_change(
+            cls,
+            change: Any,
+            context_window: Any,
+    ) -> bool:
+        """Return whether only an already-evicted attachment tail moved.
+
+        The final message is not ignored unconditionally. Both windows must
+        end with the internal attachment marker, and the old body without
+        that tail must be a complete prefix of the new body. Only then is the
+        old tail known to have been evicted by the previous
+        ``manage_request=False`` request.
+        """
+        old_messages = list(change.old_messages or [])
+        new_messages = list(context_window.get_messages() or [])
+        if not old_messages or not new_messages:
+            return False
+        if not cls._is_ephemeral_tail_message(old_messages[-1]):
+            return False
+        if not cls._is_ephemeral_tail_message(new_messages[-1]):
+            return False
+
+        old_tools = list(change.old_tools or [])
+        new_tools = list(context_window.get_tools() or [])
+        if old_tools != new_tools:
+            return False
+
+        old_body = old_messages[:-1]
+        new_body = new_messages[:-1]
+        return (
+            len(new_body) >= len(old_body)
+            and new_body[:len(old_body)] == old_body
+        )
 
     @staticmethod
     async def _release_changed_window(

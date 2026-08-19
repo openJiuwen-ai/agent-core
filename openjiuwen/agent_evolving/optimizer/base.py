@@ -12,7 +12,7 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from openjiuwen.agent_evolving.trajectory.types import Trajectory
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger

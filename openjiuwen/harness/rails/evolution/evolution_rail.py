@@ -17,43 +17,49 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
+import threading
+from contextvars import ContextVar
 from copy import deepcopy
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, List, Optional, Union
+from types import MappingProxyType
+from typing import Any, Collection, List, Mapping, Optional, Union
 
-from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
-from openjiuwen.agent_evolving.trajectory import (
-    InMemoryTrajectoryStore,
-    LLMCallDetail,
-    MemberTrajectorySnapshot,
-    ToolCallDetail,
-    Trajectory,
-    TrajectoryBuilder,
-    TrajectorySink,
-    TrajectoryStep,
-    TrajectoryStore,
-    ensure_otlp_handlers_registered,
-    trajectory_meta,
-    trajectory_from_steps,
-    trajectory_session_id,
+from openjiuwen.agent_evolving.trajectory.messages import (
+    DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+    MessageField,
+    trajectory_to_messages,
 )
-from openjiuwen.agent_evolving.trajectory.semconv import (
-    LEGACY_STEP_META,
-    OJ_RL_COMPLETION_TOKEN_IDS,
-    OJ_RL_LOGPROBS,
-    OJ_RL_PROMPT_TOKEN_IDS,
-    OJ_RL_REWARD,
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.agent_evolving.trajectory.schema import (
+    MEMBER_ID,
+    RL_COMPLETION_TOKEN_IDS,
+    RL_LOGPROBS,
+    RL_PROMPT_TOKEN_IDS,
+    SESSION_ID,
+    TEAM_ID,
+    TRAJECTORY_ID,
+    TRAJECTORY_SCHEMA_VERSION,
+    TRAJECTORY_SCHEMA_VERSION_ATTR,
+    TRAJECTORY_SOURCE,
 )
-from openjiuwen.agent_evolving.trajectory.span_codec import (
-    otlp_value_to_python,
-    to_otlp_value,
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    iter_spans,
+    merge_trajectories,
+    span_attributes,
+    span_sort_key,
+    trim_trajectory,
 )
-from openjiuwen.agent_evolving.trajectory.types import _otlp_step_kind
+from openjiuwen.agent_evolving.trajectory.team import span_category
+from openjiuwen.extensions.observability import semconv as observability_semconv
+from openjiuwen.extensions.observability.span_context import get_root_span
 from openjiuwen.core.common.background_tasks import BackgroundTask
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -62,7 +68,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.harness.rails.evolution.contracts import EvolutionHostEventMeta, EvolutionSnapshot
+from openjiuwen.harness.rails.evolution.contracts import EvolutionHostEventMeta
 
 
 def _split_response_token_fields(
@@ -91,6 +97,9 @@ def _split_response_token_fields(
             response_dict = dumped
     if not isinstance(response_dict, dict):
         return response, None, None, None
+    # ``ModelCallInputs.response`` may be a caller-owned dict.  Enrichment is
+    # deliberately immutable, so never pop fields from the callback object.
+    response_dict = deepcopy(response_dict)
     prompt_token_ids = response_dict.pop("prompt_token_ids", None)
     completion_token_ids = response_dict.pop("completion_token_ids", None)
     logprobs = response_dict.pop("logprobs", None)
@@ -123,39 +132,98 @@ def _normalize_skill_names(raw: Optional[Union[str, list[str]]]) -> set[str]:
     return set()
 
 
-def _extract_response_tool_call_ids(response: Any) -> list[str]:
-    """Return tool call ids from an assistant response dict/object."""
-    if response is None:
-        return []
-    payload = response
-    if hasattr(response, "model_dump"):
+@dataclass
+class _InvokeCapture:
+    """State bound to one callback context and one processor subscription."""
+
+    subscription: object
+    scope_key: tuple[str, ...]
+    session_id: str
+    member_id: str | None
+    team_id: str | None = None
+    context_token: Any = None
+
+
+class _TeamTrajectoryCaptureMixin:
+    """Route one Agent rail subscription to the active Team trace.
+
+    Team skill rails stay mounted on the leader Agent, but their execution
+    evidence is team-scoped.  The active root span is the only source of truth
+    for both the trace route and the team identity; silently falling back to a
+    local Agent subscription would lose member spans and produce a misleading
+    clean window.
+    """
+
+    _TEAM_SUBSCRIPTION_CATEGORIES = (
+        "llm",
+        "tool",
+        "agent",
+        "task",
+        "message",
+        "member",
+        "team",
+    )
+
+    @staticmethod
+    def _team_span_identity() -> tuple[str, str]:
+        """Return the active root trace id and team name, or fail explicitly."""
+
+        root = get_root_span()
+        if root is None:
+            raise RuntimeError("team trajectory capture requires an active root span")
+
+        recording = getattr(root, "is_recording", None)
         try:
-            dumped = response.model_dump()
-        except Exception:
-            dumped = None
-        if isinstance(dumped, dict):
-            payload = dumped
-    if not isinstance(payload, dict):
-        return []
-    ids: list[str] = []
-    for tool_call in payload.get("tool_calls") or []:
-        if isinstance(tool_call, dict):
-            tool_call_id = tool_call.get("id")
-        else:
-            tool_call_id = getattr(tool_call, "id", None)
-        if tool_call_id:
-            ids.append(str(tool_call_id))
-    return ids
+            recording = recording() if callable(recording) else recording
+        except Exception as exc:
+            raise RuntimeError("team trajectory capture requires a recording root span") from exc
+        if not recording:
+            raise RuntimeError("team trajectory capture requires a recording root span")
+
+        context = getattr(root, "context", None)
+        trace_id = getattr(context, "trace_id", None)
+        if not isinstance(trace_id, int) or trace_id <= 0:
+            raise RuntimeError("team trajectory capture requires a non-zero trace_id")
+
+        attributes = getattr(root, "attributes", None) or {}
+        try:
+            team_name = attributes.get(observability_semconv.AT_TEAM_NAME)
+        except AttributeError as exc:
+            raise RuntimeError("team trajectory capture requires AT_TEAM_NAME on the root span") from exc
+        team_id = str(team_name).strip() if team_name is not None else ""
+        if not team_id:
+            raise RuntimeError("team trajectory capture requires AT_TEAM_NAME on the root span")
+        return f"{trace_id:032x}", team_id
+
+    @staticmethod
+    def _subscription_categories() -> Collection[str]:
+        return _TeamTrajectoryCaptureMixin._TEAM_SUBSCRIPTION_CATEGORIES
+
+    def _capture_route(self, ctx: AgentCallbackContext) -> tuple[str | None, str | None, str]:
+        del ctx
+        trace_id, team_id = self._team_span_identity()
+        return None, team_id, trace_id
+
+    @staticmethod
+    def _scope_key(
+        *,
+        session_id: str,
+        member_id: str | None,
+        team_id: str | None,
+    ) -> tuple[str, ...]:
+        del member_id
+        if not team_id:
+            raise RuntimeError("team trajectory capture requires a team_id")
+        return ("team", team_id, str(session_id))
 
 
-def _extract_tool_call_id(tool_call: Any) -> str | None:
-    if tool_call is None:
-        return None
-    if isinstance(tool_call, dict):
-        value = tool_call.get("id")
-    else:
-        value = getattr(tool_call, "id", None)
-    return str(value) if value else None
+@dataclass(frozen=True)
+class PreparedEvolutionInput:
+    """Detached input shared by synchronous and background evolution paths."""
+
+    trajectory: Trajectory
+    messages: tuple[dict[str, Any], ...]
+    skill_name: str | None = None
 
 
 class EvolutionTriggerPoint(Enum):
@@ -174,11 +242,11 @@ class EvolutionRail(DeepAgentRail):
     Inheriting this class provides automatic trajectory collection.
     Subclasses should override one or more extension points:
       - _on_before_invoke(ctx): Initialization at invoke start
-      - _on_after_model_call(ctx): Step-level updates after LLM calls
-      - _on_after_tool_call(ctx): Tool-level updates after tool calls
-      - _on_after_invoke(ctx): Custom logic after invoke, before builder cleared
-      - _on_after_task_iteration(ctx): Custom logic after each task-loop iteration
-      - run_evolution(trajectory, ctx): Called when evolution_trigger fires
+      - _on_after_model_call(ctx, trajectory): Updates after LLM calls
+      - _on_after_tool_call(ctx, trajectory): Updates after tool calls
+      - _on_after_invoke(ctx, trajectory): Custom logic after final draining
+      - _on_after_task_iteration(ctx, trajectory): Updates after each task-loop iteration
+      - run_evolution(prepared): Called when evolution_trigger fires
 
     The evolution trigger point is configurable via ``evolution_trigger``.
     """
@@ -188,19 +256,19 @@ class EvolutionRail(DeepAgentRail):
 
     def __init__(
         self,
-        trajectory_store: Optional[TrajectoryStore] = None,
-        max_trajectory_steps: Optional[int] = 200,
         evolution_trigger: EvolutionTriggerPoint = EvolutionTriggerPoint.AFTER_INVOKE,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,
         disabled_skills: Optional[Union[str, list[str]]] = None,
+        *,
+        trajectory_span_processor: TrajectorySpanProcessor,
+        max_trajectory_spans: Optional[int] = 200,
     ):
         """Initialize EvolutionRail.
 
         Args:
-            trajectory_store: Optional trajectory store. If None, uses InMemoryTrajectoryStore.
-            max_trajectory_steps: Optional maximum number of recent trajectory steps
-                retained in the cross-invoke builder window.
+            max_trajectory_spans: Optional maximum number of recent spans retained
+                in each scope-local clean window.
             evolution_trigger: When to automatically trigger run_evolution.
                 AFTER_INVOKE (default): after invoke completes
                 AFTER_TASK_ITERATION: after each task-loop iteration, before next round
@@ -214,20 +282,26 @@ class EvolutionRail(DeepAgentRail):
                 Limits LLM competition with the main agent flow. Default is 1.
             disabled_skills: Optional deny-list of skill names excluded from self-optimization.
                 Supports a single skill name (str) or multiple names (list[str]).
+            trajectory_span_processor: Required shared observability processor.
         """
         super().__init__()
-        self._trajectory_store = trajectory_store or InMemoryTrajectoryStore()
-        self._builder: Optional[TrajectoryBuilder] = None
-        self._max_trajectory_steps = max_trajectory_steps
+        if not isinstance(trajectory_span_processor, TrajectorySpanProcessor):
+            raise TypeError("trajectory_span_processor must be a TrajectorySpanProcessor")
+        if max_trajectory_spans is not None and max_trajectory_spans <= 0:
+            raise ValueError("max_trajectory_spans must be positive or None")
+        self._trajectory_span_processor = trajectory_span_processor
+        self._max_trajectory_spans = max_trajectory_spans
         self._evolution_trigger = evolution_trigger
-        self._trajectory_sink: Optional[TrajectorySink] = None
         self._disabled_skills: set[str] = _normalize_skill_names(disabled_skills)
-        self._team_id: Optional[str] = None
         self._member_role: Optional[str] = None
-        self._last_llm_ref: Optional[str] = None
-        self._tool_call_parent_refs: dict[str, str] = {}
-        self.trajectory_consumer_id = f"{type(self).__name__}:{id(self):x}"
-        self.trajectory_state_manager = ensure_otlp_handlers_registered()
+        self._scope_windows: dict[tuple[str, ...], Trajectory] = {}
+        self._scope_locks: dict[tuple[str, ...], threading.RLock] = {}
+        self._window_lock = threading.RLock()
+        self._subscription_lock = threading.RLock()
+        self._active_captures: dict[object, _InvokeCapture] = {}
+        self._invoke_capture: ContextVar[_InvokeCapture | None] = ContextVar(
+            f"{type(self).__name__}.trajectory_capture", default=None
+        )
 
         self._async_evolution = async_evolution
         self._bg_tasks: set[BackgroundTask] = set()
@@ -235,22 +309,27 @@ class EvolutionRail(DeepAgentRail):
         self._evolution_sem = asyncio.Semaphore(max_concurrent_evolution)
 
     @property
-    def trajectory_store(self) -> TrajectoryStore:
-        """Get the trajectory store."""
-        return self._trajectory_store
+    def trajectory_span_processor(self) -> TrajectorySpanProcessor:
+        """Return the explicitly injected observability processor."""
+
+        return self._trajectory_span_processor
 
     @property
     def disabled_skills(self) -> set[str]:
         """Set of skill names excluded from self-optimization."""
         return self._disabled_skills
 
-    def init(self, agent: Any) -> None:
-        """Ensure process-wide trajectory trace handlers are registered."""
-        super().init(agent)
-        self.trajectory_state_manager = ensure_otlp_handlers_registered()
-
     def uninit(self, agent: Any) -> None:
-        """Run rail cleanup without unregistering process-wide trajectory handlers."""
+        """Release subscriptions and in-memory clean windows owned by this rail."""
+        with self._subscription_lock:
+            captures = list(self._active_captures.values())
+            self._active_captures.clear()
+        for capture in captures:
+            self._trajectory_span_processor.unsubscribe(capture.subscription)
+        self._invoke_capture.set(None)
+        with self._window_lock:
+            self._scope_windows.clear()
+            self._scope_locks.clear()
         super().uninit(agent)
 
     @classmethod
@@ -258,227 +337,103 @@ class EvolutionRail(DeepAgentRail):
         """Normalize skill names into a set."""
         return _normalize_skill_names(raw)
 
-    @property
-    def builder(self) -> Optional[TrajectoryBuilder]:
-        """Public accessor for the trajectory builder.
+    def set_member_role(self, member_role: Any) -> None:
+        """Set the role copied to projected resource metadata."""
 
-        Subclasses (TeamSkillRail, RLRail) need to access the builder
-        for custom evolution triggering outside of after_invoke.
-        """
-        return self._builder
-
-    def set_trajectory_sink(
-        self,
-        sink: Optional[TrajectorySink],
-        *,
-        team_id: Optional[str],
-        member_role: Optional[str] = None,
-    ) -> None:
-        """Bind this rail to a runtime trajectory sink."""
-        if sink is not None and not team_id:
-            raise ValueError("team_id is required when binding a trajectory sink")
-        self._trajectory_sink = sink
-        self._team_id = team_id
-        role = self._DEFAULT_MEMBER_ROLE if member_role is None else member_role
-        self._member_role = _normalize_member_role(role)
+        self._member_role = _normalize_member_role(member_role)
 
     # ---- Trajectory collection (final, subclasses should not override) ----
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Initialize trajectory builder at the start of each invoke."""
+        """Create one invoke-local processor subscription."""
         inputs = ctx.inputs
         if not isinstance(inputs, InvokeInputs):
             return
 
         session_id = self._resolve_trajectory_session_id(ctx, inputs)
-
-        # Reuse the builder across invoke rounds in the same session.
-        if self._builder is not None and self._builder.session_id == session_id:
-            logger.debug(
-                "[EvolutionRail] reusing trajectory builder session_id=%s",
-                session_id,
-            )
-            self._bind_trajectory_trace(ctx)
-            await self._on_before_invoke(ctx)
-            return
-
-        # Capture member_id for team trajectory aggregation
-        agent_id = getattr(ctx.agent, "card", None)
-        member_id = agent_id.id if agent_id else None
-        meta = {"member_role": self._member_role} if self._member_role else None
-        self._builder = TrajectoryBuilder(
+        if not session_id:
+            raise ValueError("trajectory session_id is required")
+        member_id, team_id, trace_id = self._capture_route(ctx)
+        scope_key = self._scope_key(session_id=session_id, member_id=member_id, team_id=team_id)
+        subscription = self._trajectory_span_processor.subscribe(
+            include_span_categories=self._subscription_categories(),
+            trace_id=trace_id,
+        )
+        capture = _InvokeCapture(
+            subscription=subscription,
+            scope_key=scope_key,
             session_id=session_id,
-            source="online",
             member_id=member_id,
-            meta=meta,
-            max_steps=self._max_trajectory_steps,
+            team_id=team_id,
         )
-        self._last_llm_ref = None
-        self._tool_call_parent_refs = {}
-        logger.debug(
-            "[EvolutionRail] created trajectory builder session_id=%s, member_id=%s, member_role=%s",
-            session_id,
-            member_id,
-            self._member_role,
-        )
-        self._bind_trajectory_trace(ctx)
-
-        # Trigger extension point for subclasses
-        await self._on_before_invoke(ctx)
+        capture.context_token = self._invoke_capture.set(capture)
+        with self._subscription_lock:
+            self._active_captures[subscription] = capture
+        try:
+            await self._on_before_invoke(ctx)
+        except Exception:
+            self._unsubscribe_capture(capture)
+            raise
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Record LLM step and trigger evolution extension point."""
-        if self._builder is None:
-            return
-
+        """Drain the current subscription, enrich RL fields, then hook."""
         inputs = ctx.inputs
-        if not isinstance(inputs, ModelCallInputs):
-            return
-
-        # Build LLMCallDetail
-        detail: Optional[LLMCallDetail] = None
-        prompt_token_ids = None
-        completion_token_ids = None
-        logprobs = None
-        if inputs.messages or inputs.response:
-            model_name = "unknown"
-            if model_name == "unknown" and ctx.agent:
-                config = getattr(ctx.agent, "config", None)
-                if config:
-                    model_name = getattr(config, "model", None) or model_name
-
-            response_dict, prompt_token_ids, completion_token_ids, logprobs = _split_response_token_fields(
-                inputs.response
-            )
-
-            detail = LLMCallDetail(
-                model=model_name,
-                messages=list(inputs.messages) if inputs.messages else [],
-                response=response_dict,
-                tools=list(inputs.tools) if inputs.tools else None,
-            )
-
-        # Get agent_id from ctx.agent.card.id
-        agent_id = getattr(ctx.agent, "card", None)
-        agent_id_str = agent_id.id if agent_id else "unknown"
-        llm_ref = f"llm_{len(self._builder.steps) + 1:04d}"
-
-        step = TrajectoryStep(
-            kind="llm",
-            detail=detail,
-            prompt_token_ids=prompt_token_ids,
-            completion_token_ids=completion_token_ids,
-            logprobs=logprobs,
-            meta={
-                "operator_id": f"{agent_id_str}/llm_main",
-                "agent_id": agent_id_str,
-            },
+        capture = self._resolve_capture(ctx=ctx)
+        trajectory, increment, issues = self._drain_for_hook(
+            ctx,
+            required_category="llm",
+            merge=False,
+            capture=capture,
         )
-        self._builder.record_step(step)
-        self._last_llm_ref = llm_ref
-        for tool_call_id in _extract_response_tool_call_ids(response_dict):
-            self._tool_call_parent_refs[tool_call_id] = llm_ref
-
-        # Trigger extension point
-        await self._on_after_model_call(ctx)
-
-        # Trigger evolution if configured
+        if capture is not None and isinstance(inputs, ModelCallInputs):
+            if increment is not None and not issues:
+                enriched_increment = self._enrich_latest_llm(increment, inputs.response)
+                trajectory = self._merge_clean_increment(capture, enriched_increment)
+        await self._on_after_model_call(ctx, trajectory)
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_MODEL_CALL and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_MODEL_CALL, ctx
         ):
-            trajectory = self._build_trajectory(ctx)
             if trajectory is not None:
                 await self._trigger_evolution(trajectory, ctx)
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Record tool step and trigger evolution extension point."""
-        inputs = ctx.inputs
-        if not isinstance(inputs, ToolCallInputs):
-            return
-
-        if self._builder is None:
-            logger.debug("[EvolutionRail] after_tool_call trajectory recording skipped because builder is empty")
-            await self._on_after_tool_call(ctx)
-            return
-
-        # Build ToolCallDetail
-        detail: Optional[ToolCallDetail] = None
-        tool_call = getattr(inputs, "tool_call", None)
-        tool_call_id = _extract_tool_call_id(tool_call)
-        if inputs.tool_name:
-            detail = ToolCallDetail(
-                tool_name=inputs.tool_name,
-                call_args=inputs.tool_args,
-                call_result=inputs.tool_result,
-                tool_call_id=tool_call_id,
-            )
-
-        meta = {
-            "operator_id": inputs.tool_name,
-        }
-        parent_llm_ref = self._tool_call_parent_refs.get(tool_call_id or "") or self._last_llm_ref
-        if parent_llm_ref:
-            meta["parent_llm_call"] = parent_llm_ref
-
-        step = TrajectoryStep(
-            kind="tool",
-            detail=detail,
-            meta=meta,
-        )
-        self._builder.record_step(step)
-
-        # Trigger extension point
-        await self._on_after_tool_call(ctx)
-
-        # Trigger evolution if configured
+        """Drain the current subscription, then invoke the tool hook."""
+        trajectory, _, _ = self._drain_for_hook(ctx, required_category="tool")
+        await self._on_after_tool_call(ctx, trajectory)
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TOOL_CALL and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_TOOL_CALL, ctx
         ):
-            trajectory = self._build_trajectory(ctx)
             if trajectory is not None:
                 await self._trigger_evolution(trajectory, ctx)
 
     async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
-        """Called after each task-loop iteration."""
-        await self._on_after_task_iteration(ctx)
+        """Drain the current subscription, then invoke the iteration hook."""
+        trajectory, _, _ = self._drain_for_hook(ctx)
+        await self._on_after_task_iteration(ctx, trajectory)
 
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TASK_ITERATION and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_TASK_ITERATION, ctx
         ):
-            trajectory = self._build_trajectory(ctx)
             if trajectory is not None:
                 await self._trigger_evolution(trajectory, ctx)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Finalize trajectory for this invoke round."""
-        if self._builder is None:
-            return
-
-        trace_id = self._trace_id_from_ctx(ctx)
+        """Final-drain an invoke and release its isolated subscription."""
+        capture = self._resolve_capture(ctx=ctx)
         try:
-            trajectory = self._build_trajectory(ctx, finalize=True)
-            if trajectory is None:
-                return
-
-            self._trajectory_store.save(trajectory)
-
-            self._publish_trajectory_snapshot(trajectory)
-
-            # Extension point: called after saving, before builder is cleared
-            await self._on_after_invoke(ctx)
+            trajectory, _, _ = self._drain_for_hook(ctx, capture=capture)
+            await self._on_after_invoke(ctx, trajectory)
 
             # Trigger evolution if configured for after_invoke
             if self._evolution_trigger == EvolutionTriggerPoint.AFTER_INVOKE and self._allow_evolution_trigger(
                 EvolutionTriggerPoint.AFTER_INVOKE, ctx
             ):
-                await self._trigger_evolution(trajectory, ctx)
-                await self._on_after_evolution_triggered(trajectory, ctx)
+                if trajectory is not None:
+                    await self._trigger_evolution(trajectory, ctx)
+                    await self._on_after_evolution_triggered(trajectory, ctx)
         finally:
-            if trace_id is not None:
-                self.trajectory_state_manager.release_trace(
-                    trace_id,
-                    consumer_id=self.trajectory_consumer_id,
-                )
+            if capture is not None:
+                self._unsubscribe_capture(capture)
 
     # ---- Trajectory helper methods ----
 
@@ -489,263 +444,421 @@ class EvolutionRail(DeepAgentRail):
     ) -> str:
         """Resolve the runtime session id used for trajectory accumulation."""
         session = getattr(ctx, "session", None)
-        if session is not None and isinstance(session, Session):
-            return session.get_session_id()
+        if session is not None and hasattr(session, "get_session_id"):
+            return str(session.get_session_id())
         return inputs.conversation_id or ""
 
-    def _reset_trajectory_builder(self) -> None:
-        """Reset the current trajectory builder.
+    @staticmethod
+    def _subscription_categories() -> Collection[str]:
+        """Return categories selected by this rail's invoke subscription."""
 
-        Subclasses use this at their own lifecycle boundary, for example
-        after uploading an RL episode. The base rail does not expose public
-        reset because generic evolution rails should keep a session window.
-        """
-        self._builder = None
-        self._last_llm_ref = None
-        self._tool_call_parent_refs = {}
+        return ("llm", "tool")
 
-    def _build_trajectory(
-        self,
-        ctx: Optional[AgentCallbackContext] = None,
-        *,
-        finalize: bool = False,
-    ) -> Optional[Trajectory]:
-        """Build trajectory from current builder with snapshot.
+    def _capture_route(self, ctx: AgentCallbackContext) -> tuple[str | None, str | None, str | None]:
+        """Resolve one internally consistent subscription and scope route."""
 
-        Returns trajectory on success, None if no builder.
-        """
-        trace_trajectory = self._build_trace_trajectory(ctx, finalize=finalize) if ctx is not None else None
-        if trace_trajectory is not None:
-            return self._merge_builder_otlp_attributes(trace_trajectory)
-        if self._builder is None:
-            return None
-        meta = dict(self._builder.meta)
-        meta.pop("source", None)
-        return trajectory_from_steps(
-            execution_id=str(uuid.uuid4()),
-            steps=list(self._builder.steps),
-            source=self._builder.source,
-            case_id=self._builder.case_id,
-            session_id=self._builder.session_id,
-            cost=self._builder.cost if self._builder.cost["input_tokens"] > 0 else None,
-            meta=meta,
+        team_id = getattr(ctx, "team_id", None)
+        if team_id is None:
+            team = getattr(ctx, "team", None)
+            team_id = getattr(team, "id", None) if team is not None else None
+
+        member_id = None
+        session = getattr(ctx, "session", None)
+        get_agent_id = getattr(session, "get_agent_id", None)
+        if callable(get_agent_id):
+            try:
+                member_id = get_agent_id()
+            except Exception:
+                member_id = None
+        if not member_id:
+            agent_card = getattr(getattr(ctx, "agent", None), "card", None)
+            member_id = getattr(agent_card, "id", None)
+        return (
+            str(member_id) if member_id else None,
+            str(team_id) if team_id else None,
+            self._single_agent_trace_id(),
         )
 
-    def _merge_builder_otlp_attributes(self, trajectory: Trajectory) -> Trajectory:
-        """Merge builder-only RL fields into trace-backed OTLP span attributes."""
-        if self._builder is None or not self._builder.steps or not isinstance(trajectory.otlp_trace, dict):
-            return trajectory
-
-        builder_steps = list(self._builder.steps)
-        builder_index = 0
-        for span in self._iter_otlp_spans(trajectory.otlp_trace):
-            span_kind = self._otlp_span_step_kind(span)
-            if span_kind is None:
-                continue
-            while builder_index < len(builder_steps) and builder_steps[builder_index].kind != span_kind:
-                builder_index += 1
-            if builder_index >= len(builder_steps):
-                break
-
-            source_step = builder_steps[builder_index]
-            builder_index += 1
-            attributes = span.setdefault("attributes", [])
-            self._set_otlp_span_attr(attributes, OJ_RL_REWARD, source_step.reward, overwrite=False)
-            self._set_otlp_span_attr(
-                attributes,
-                OJ_RL_PROMPT_TOKEN_IDS,
-                deepcopy(source_step.prompt_token_ids),
-                overwrite=False,
-            )
-            self._set_otlp_span_attr(
-                attributes,
-                OJ_RL_COMPLETION_TOKEN_IDS,
-                deepcopy(source_step.completion_token_ids),
-                overwrite=False,
-            )
-            self._set_otlp_span_attr(attributes, OJ_RL_LOGPROBS, deepcopy(source_step.logprobs), overwrite=False)
-
-            if source_step.meta:
-                legacy_meta = self._get_otlp_span_attr(attributes, LEGACY_STEP_META)
-                merged_meta = dict(legacy_meta) if isinstance(legacy_meta, dict) else {}
-                for key, value in source_step.meta.items():
-                    if value is not None:
-                        merged_meta.setdefault(key, deepcopy(value))
-                self._set_otlp_span_attr(attributes, LEGACY_STEP_META, merged_meta)
-        return trajectory
+    @staticmethod
+    def _single_agent_trace_id() -> str | None:
+        """Return an active single-agent root trace for cross-task routing."""
+        root = get_root_span()
+        if root is None or not str(getattr(root, "name", "")).startswith("agent."):
+            return None
+        recording = getattr(root, "is_recording", None)
+        if callable(recording):
+            try:
+                recording = recording()
+            except Exception:
+                recording = False
+        if not recording:
+            return None
+        trace_id = getattr(getattr(root, "context", None), "trace_id", None)
+        if not isinstance(trace_id, int) or trace_id <= 0:
+            return None
+        return f"{trace_id:032x}"
 
     @staticmethod
-    def _iter_otlp_spans(otlp_trace: dict) -> list[dict]:
-        spans: list[dict] = []
-        for resource_span in otlp_trace.get("resourceSpans") or []:
-            for scope_span in resource_span.get("scopeSpans") or []:
-                spans.extend(scope_span.get("spans") or [])
-        return spans
+    def _scope_key(
+        *,
+        session_id: str,
+        member_id: str | None,
+        team_id: str | None,
+    ) -> tuple[str, ...]:
+        """Return the clean-window key for one invoke."""
+
+        del team_id
+        return ("agent", session_id, member_id or "")
+
+    def _scope_lock(self, key: tuple[str, ...]) -> threading.RLock:
+        with self._window_lock:
+            return self._scope_locks.setdefault(key, threading.RLock())
+
+    def _scope_metadata(self, capture: _InvokeCapture) -> dict[str, Any]:
+        """Build canonical resource metadata for one captured scope."""
+
+        return self._trajectory_metadata(
+            session_id=capture.session_id,
+            member_id=capture.member_id,
+            team_id=capture.team_id,
+        )
+
+    def _trajectory_metadata(
+        self,
+        *,
+        session_id: str,
+        member_id: str | None = None,
+        team_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Build metadata shared by callback projections and the public getter."""
+
+        metadata: dict[str, Any] = {
+            TRAJECTORY_ID: str(uuid.uuid4()),
+            TRAJECTORY_SCHEMA_VERSION_ATTR: TRAJECTORY_SCHEMA_VERSION,
+            TRAJECTORY_SOURCE: "online",
+            SESSION_ID: str(session_id),
+        }
+        if member_id:
+            metadata[MEMBER_ID] = str(member_id)
+        if team_id:
+            metadata[TEAM_ID] = str(team_id)
+        if self._member_role:
+            metadata["agentteam.agent.role"] = self._member_role
+        return metadata
 
     @staticmethod
-    def _get_otlp_span_attr(attributes: list[dict], key: str) -> Any:
-        for item in attributes or []:
-            if isinstance(item, dict) and item.get("key") == key:
-                return otlp_value_to_python(item.get("value") or {})
+    def _with_scope_metadata(trajectory: Trajectory, metadata: Mapping[str, Any]) -> Trajectory:
+        """Replace producer resource attributes with the canonical envelope."""
+
+        payload = trajectory.to_otlp()
+        for resource_span in payload.get("resourceSpans") or []:
+            resource = resource_span.setdefault("resource", {})
+            resource["attributes"] = attributes_from_map(metadata)
+        return Trajectory.from_otlp(payload)
+
+    def _project_window(self, capture: _InvokeCapture) -> Trajectory | None:
+        """Return an immutable, detached snapshot with canonical metadata."""
+
+        with self._scope_lock(capture.scope_key):
+            window = self._scope_windows.get(capture.scope_key)
+            if window is None:
+                return None
+            payload = window.to_otlp()
+        projected = Trajectory.from_otlp(payload)
+        return self._with_scope_metadata(projected, self._scope_metadata(capture))
+
+    def get_trajectory(
+        self,
+        *,
+        session_id: str,
+        member_id: str | None = None,
+        team_id: str | None = None,
+    ) -> Trajectory | None:
+        """Return the current clean window for an Agent or Team scope."""
+
+        if team_id is not None and member_id is not None:
+            raise ValueError("member_id must be omitted for a Team trajectory scope")
+        key = (
+            ("team", str(team_id), str(session_id))
+            if team_id is not None
+            else ("agent", str(session_id), str(member_id or ""))
+        )
+        with self._scope_lock(key):
+            window = self._scope_windows.get(key)
+            if window is None:
+                return None
+            projected = Trajectory.from_otlp(window.to_otlp())
+        return self._with_scope_metadata(
+            projected,
+            self._trajectory_metadata(
+                session_id=str(session_id),
+                member_id=member_id if team_id is None else None,
+                team_id=team_id,
+            ),
+        )
+
+    def _current_capture(self) -> _InvokeCapture | None:
+        return self._invoke_capture.get()
+
+    @staticmethod
+    def _capture_matches(
+        capture: _InvokeCapture,
+        *,
+        session_id: str | None,
+        member_id: str | None,
+        team_id: str | None,
+    ) -> bool:
+        """Return whether a capture matches every provided scope locator."""
+        if session_id is not None and capture.session_id != str(session_id):
+            return False
+        if member_id is not None and capture.member_id != str(member_id):
+            return False
+        if team_id is not None and capture.team_id != str(team_id):
+            return False
+        return True
+
+    def _find_active_capture(self, scope_key: tuple[str, ...]) -> _InvokeCapture | None:
+        """Return the unique active capture for an exact scope key."""
+
+        with self._subscription_lock:
+            matches = [
+                capture
+                for capture in self._active_captures.values()
+                if capture.scope_key == scope_key
+            ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning(
+                "[%s] multiple active trajectory captures match scope=%s",
+                type(self).__name__,
+                scope_key,
+            )
         return None
 
-    @staticmethod
-    def _set_otlp_span_attr(attributes: list[dict], key: str, value: Any, *, overwrite: bool = True) -> None:
-        if value is None:
+    def _resolve_capture(
+        self,
+        *,
+        ctx: AgentCallbackContext | None = None,
+        session_id: str | None = None,
+        member_id: str | None = None,
+        team_id: str | None = None,
+    ) -> _InvokeCapture | None:
+        """Resolve an invoke capture locally or by its explicit execution scope."""
+
+        if ctx is not None:
+            session = getattr(ctx, "session", None)
+            if session_id is None:
+                get_session_id = getattr(session, "get_session_id", None)
+                if callable(get_session_id):
+                    session_id = str(get_session_id())
+            if member_id is None:
+                get_agent_id = getattr(session, "get_agent_id", None)
+                if callable(get_agent_id):
+                    member_id = str(get_agent_id())
+            if team_id is None:
+                get_team_id = getattr(session, "get_team_id", None)
+                if callable(get_team_id):
+                    team_id = str(get_team_id())
+            if member_id is None or team_id is None:
+                try:
+                    route_member_id, route_team_id, _ = self._capture_route(ctx)
+                except RuntimeError:
+                    route_member_id = route_team_id = None
+                member_id = member_id or route_member_id
+                team_id = team_id or route_team_id
+
+        capture = self._current_capture()
+        if capture is not None:
+            with self._subscription_lock:
+                is_active = self._active_captures.get(capture.subscription) is capture
+            if is_active and self._capture_matches(
+                capture,
+                session_id=session_id,
+                member_id=member_id,
+                team_id=team_id,
+            ):
+                return capture
+        if not session_id:
+            return None
+
+        scope_key = None
+        try:
+            scope_key = self._scope_key(
+                session_id=str(session_id),
+                member_id=member_id,
+                team_id=team_id,
+            )
+        except RuntimeError:
+            # Team capture resolution is allowed to fail when no Team root is
+            # active; callers treat that as no matching invoke capture.
+            scope_key = None
+        if scope_key is None:
+            return None
+        return self._find_active_capture(scope_key)
+
+    def _unsubscribe_capture(self, capture: _InvokeCapture) -> None:
+        self._trajectory_span_processor.unsubscribe(capture.subscription)
+        with self._subscription_lock:
+            self._active_captures.pop(capture.subscription, None)
+        if self._invoke_capture.get() is capture:
+            if capture.context_token is not None:
+                try:
+                    self._invoke_capture.reset(capture.context_token)
+                except ValueError:
+                    self._invoke_capture.set(None)
+            else:
+                self._invoke_capture.set(None)
+
+    def _merge_clean_increment(
+        self,
+        capture: _InvokeCapture,
+        increment: Trajectory,
+    ) -> Trajectory:
+        with self._scope_lock(capture.scope_key):
+            current = self._scope_windows.get(capture.scope_key)
+            merged = merge_trajectories(current, increment) if current is not None else increment
+            merged = trim_trajectory(merged, self._max_trajectory_spans)
+            self._scope_windows[capture.scope_key] = merged
+        return self._project_window(capture)
+
+    def _reset_current_scope(self) -> None:
+        """Discard the active scope window at an explicit lifecycle boundary."""
+
+        capture = self._current_capture()
+        if capture is None:
             return
-        encoded = {"key": key, "value": to_otlp_value(value)}
-        for item in attributes:
-            if isinstance(item, dict) and item.get("key") == key:
-                if overwrite:
-                    item.update(encoded)
-                return
-        attributes.append(encoded)
+        with self._scope_lock(capture.scope_key):
+            self._scope_windows.pop(capture.scope_key, None)
 
-    @classmethod
-    def _otlp_span_step_kind(cls, span: dict) -> Optional[str]:
-        attrs = {
-            item.get("key"): otlp_value_to_python(item.get("value") or {})
-            for item in span.get("attributes") or []
-            if isinstance(item, dict) and item.get("key")
-        }
-        return _otlp_step_kind(span, attrs)
+    @staticmethod
+    def _capture_quality_issues(trajectory: Trajectory | None) -> tuple[Mapping[str, object], ...]:
+        """Report parse/continuity failures that the processor cannot infer."""
 
-    def _build_trace_trajectory(
+        if trajectory is None:
+            return ()
+        issues: list[Mapping[str, object]] = []
+        indexed_pattern = re.compile(r"^(gen_ai\.(?:prompt|completion))\.(\d+)\.")
+        for span in iter_spans(trajectory):
+            attrs = span_attributes(span)
+            indexes: dict[str, set[int]] = {}
+            for key in attrs:
+                match = indexed_pattern.match(str(key))
+                if match:
+                    indexes.setdefault(match.group(1), set()).add(int(match.group(2)))
+            for base, values in indexes.items():
+                if values and values != set(range(max(values) + 1)):
+                    issues.append(MappingProxyType({"code": "indexed_attribute_gap", "attribute": base}))
+            if span_category(span) != "tool":
+                continue
+            for key in (observability_semconv.GEN_AI_TOOL_INPUT, observability_semconv.GEN_AI_TOOL_OUTPUT):
+                value = attrs.get(key)
+                if not isinstance(value, str) or not value.strip() or value.strip()[0] not in "[{":
+                    continue
+                try:
+                    json.loads(value)
+                except ValueError:
+                    issues.append(MappingProxyType({"code": "tool_payload_json_error", "attribute": key}))
+        return tuple(issues)
+
+    def _drain_for_hook(
         self,
         ctx: AgentCallbackContext,
         *,
-        finalize: bool,
-    ) -> Optional[Trajectory]:
-        trace_id = self._trace_id_from_ctx(ctx)
-        if trace_id is None:
-            return None
+        required_category: str | None = None,
+        merge: bool = True,
+        capture: _InvokeCapture | None = None,
+    ) -> tuple[Trajectory | None, Trajectory | None, tuple[Mapping[str, object], ...]]:
+        """Drain one subscription and apply the clean-window quality gate."""
 
-        session_id = self._builder.session_id if self._builder is not None else self._session_id_from_ctx(ctx)
-        member_id = self._builder.member_id if self._builder is not None else self._member_id_from_ctx(ctx)
-        meta = dict(self._builder.meta) if self._builder is not None else {}
-        if self._member_role:
-            meta.setdefault("member_role", self._member_role)
-        source = self._trajectory_source_name()
-
-        self.trajectory_state_manager.bind_trace(
-            trace_id,
-            session_id=session_id,
-            source=source,
-            member_id=member_id,
-            meta=meta,
-            consumer_id=self.trajectory_consumer_id,
-        )
-        return self.trajectory_state_manager.build_trajectory(
-            trace_id,
-            session_id=session_id,
-            source=source,
-            member_id=member_id,
-            meta=meta,
-            max_steps=self._max_trajectory_steps,
-            finalize=finalize,
-        )
-
-    def _bind_trajectory_trace(self, ctx: AgentCallbackContext) -> None:
-        trace_id = self._trace_id_from_ctx(ctx)
-        if trace_id is None:
-            return
-        session_id = self._builder.session_id if self._builder is not None else self._session_id_from_ctx(ctx)
-        member_id = self._builder.member_id if self._builder is not None else self._member_id_from_ctx(ctx)
-        meta = dict(self._builder.meta) if self._builder is not None else {}
-        if self._member_role:
-            meta.setdefault("member_role", self._member_role)
-        self.trajectory_state_manager.bind_trace(
-            trace_id,
-            session_id=session_id,
-            source=self._trajectory_source_name(),
-            member_id=member_id,
-            meta=meta,
-            consumer_id=self.trajectory_consumer_id,
-        )
-
-    def _trajectory_source_name(self) -> str:
-        if self._builder is None:
-            return "online"
-        return self._builder.source or "online"
-
-    @staticmethod
-    def _trace_id_from_ctx(ctx: AgentCallbackContext) -> Optional[str]:
-        session = getattr(ctx, "session", None)
-        tracer = session.tracer() if session is not None and hasattr(session, "tracer") else None
-        span_manager = getattr(tracer, "tracer_agent_span_manager", None)
-        trace_id = getattr(span_manager, "_trace_id", None)
-        if trace_id:
-            return str(trace_id)
-        last_span = getattr(span_manager, "last_span", None)
-        trace_id = getattr(last_span, "trace_id", None)
-        return str(trace_id) if trace_id else None
-
-    @staticmethod
-    def _session_id_from_ctx(ctx: AgentCallbackContext) -> str:
-        session = getattr(ctx, "session", None)
-        if session is not None and isinstance(session, Session):
-            return session.get_session_id()
-        inputs = getattr(ctx, "inputs", None)
-        if isinstance(inputs, InvokeInputs):
-            return inputs.conversation_id or ""
-        return ""
-
-    @staticmethod
-    def _member_id_from_ctx(ctx: AgentCallbackContext) -> Optional[str]:
-        agent_card = getattr(getattr(ctx, "agent", None), "card", None)
-        return getattr(agent_card, "id", None)
-
-    def _save_trajectory(self, trajectory: Trajectory) -> None:
-        """Save trajectory to store."""
-        self._trajectory_store.save(trajectory)
-
-    def _publish_trajectory_snapshot(self, trajectory: Trajectory) -> None:
-        sink = self._trajectory_sink
-        team_id = self._team_id
-        if sink is None or not team_id:
-            return
-        meta = trajectory_meta(trajectory)
-        session_id = trajectory_session_id(trajectory)
-        member_id = meta.get("member_id")
-        if not member_id:
-            return
-        member_role = _normalize_member_role(meta.get("member_role")) or self._member_role
-        sink.publish_member_trajectory(
-            MemberTrajectorySnapshot.make(
-                team_id=team_id,
-                member_id=str(member_id),
-                member_role=member_role,
-                session_id=session_id,
-                trajectory=trajectory,
+        capture = capture or self._resolve_capture(ctx=ctx)
+        if capture is None:
+            return None, None, ()
+        increment, issues = self._trajectory_span_processor.drain(capture.subscription)
+        if increment is not None:
+            self._record_execution_increment(capture, increment)
+            issues = tuple(issues) + self._capture_quality_issues(increment)
+        if issues:
+            return None, increment, issues
+        if required_category is not None:
+            has_required = bool(
+                increment is not None
+                and any(span_category(span) == required_category for span in iter_spans(increment))
             )
-        )
+            if not has_required:
+                # A model/tool callback with no corresponding ended span is a
+                # capture-quality failure, not a business error.
+                return (
+                    None,
+                    increment,
+                    (MappingProxyType({"code": "missing_required_span", "category": required_category}),),
+                )
+        if increment is not None and merge:
+            return self._merge_clean_increment(capture, increment), increment, ()
+        if increment is not None:
+            return self._project_window(capture), increment, ()
+        return self._project_window(capture), None, ()
+
+    @staticmethod
+    def _record_execution_increment(
+        capture: _InvokeCapture,
+        increment: Trajectory,
+    ) -> None:
+        """Recorder extension point; the base evolution rail does not archive."""
+
+        del capture, increment
+
+    @staticmethod
+    def _enrich_latest_llm(trajectory: Trajectory, response: Any) -> Trajectory:
+        """Return a copy with token fields attached to the latest LLM span."""
+
+        _, prompt_ids, completion_ids, logprobs = _split_response_token_fields(response)
+        if prompt_ids is None and completion_ids is None and logprobs is None:
+            return trajectory
+        payload = trajectory.to_otlp()
+        target: dict[str, Any] | None = None
+        # ``iter_spans`` intentionally returns detached projections.  Locate
+        # the mutable copy in the private payload tree instead, then wrap the
+        # resulting payload in a fresh immutable Trajectory below.
+        for resource_span in payload.get("resourceSpans") or []:
+            for scope_span in resource_span.get("scopeSpans") or []:
+                for span in scope_span.get("spans") or []:
+                    if not isinstance(span, dict):
+                        continue
+                    if span_category(span) != "llm":
+                        continue
+                    if target is None or span_sort_key(span) >= span_sort_key(target):
+                        target = span
+        if target is None:
+            return trajectory
+        attrs = span_attributes(target)
+        if prompt_ids is not None:
+            attrs[RL_PROMPT_TOKEN_IDS] = deepcopy(prompt_ids)
+        if completion_ids is not None:
+            attrs[RL_COMPLETION_TOKEN_IDS] = deepcopy(completion_ids)
+        if logprobs is not None:
+            attrs[RL_LOGPROBS] = deepcopy(logprobs)
+        target["attributes"] = attributes_from_map(attrs)
+        return Trajectory.from_otlp(payload)
 
     async def _trigger_evolution(
         self,
         trajectory: Trajectory,
         ctx: AgentCallbackContext,
     ) -> None:
-        """Internal: trigger evolution with async/sync handling."""
+        """Prepare one detached input, then execute it sync or in background."""
+        prepared = await self._prepare_evolution_input(trajectory, ctx)
+        if prepared is None:
+            return
         if self._async_evolution:
-            snapshot = await self._snapshot_for_evolution(trajectory, ctx)
-            if snapshot is not None:
-                snapshot_contract = EvolutionSnapshot.from_legacy_dict(snapshot)
-
-                # Detach from the request task group. create_background_task() would
-                # otherwise attach under the active root group and get cascade-cancelled
-                # as soon as OuterLoop/request cleanup finishes (~0.2s), aborting evaluate.
-                bg_task = BackgroundTask.from_asyncio_task(
-                    asyncio.create_task(
-                        self._safe_run_evolution(snapshot),
-                        name=f"evolution-{snapshot_contract.skill_name or 'unknown'}",
-                    ),
-                    group="evolution",
-                )
-                self._bg_tasks.add(bg_task)
-                # Prune completed tasks to prevent unbounded growth
-                self._bg_tasks = {t for t in self._bg_tasks if not t.done()}
+            task = asyncio.create_task(
+                self._safe_run_evolution(prepared),
+                name=f"evolution-{prepared.skill_name or 'unknown'}",
+            )
+            self._bg_tasks.add(BackgroundTask.from_asyncio_task(task, group="evolution"))
+            self._bg_tasks = {item for item in self._bg_tasks if not item.done()}
         else:
-            await self.run_evolution(trajectory, ctx)
+            await self._safe_run_evolution(prepared)
 
     # ---- Evolution extension points (override as needed, default no-op) ----
 
@@ -757,30 +870,41 @@ class EvolutionRail(DeepAgentRail):
         """
         pass
 
-    async def _on_after_model_call(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_model_call(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Called after each model call.
 
         ctx contains current model input/output, suitable for step-level evolution.
         Override this method to implement RL-style step-level updates.
         """
-        pass
+        del ctx, trajectory
 
-    async def _on_after_tool_call(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_tool_call(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Called after each tool call.
 
         ctx contains tool name, args and result, suitable for tool selection evolution.
         Override this method to implement tool selection optimization.
         """
-        pass
+        del ctx, trajectory
 
-    async def _on_after_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Called at the end of each invoke, before builder is cleared.
+    async def _on_after_invoke(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
+        """Called at the end of each invoke after final drain and gate.
 
-        The trajectory has been saved, but the builder is still available.
-        Override this method to implement custom post-invoke logic
-        (e.g., threshold detection, follow_up triggering).
+        Override this method to implement custom post-invoke logic from the
+        supplied clean projection (e.g., threshold detection or follow-up).
         """
-        pass
+        del ctx, trajectory
 
     async def _on_after_evolution_triggered(
         self,
@@ -794,13 +918,17 @@ class EvolutionRail(DeepAgentRail):
         """
         pass
 
-    async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_task_iteration(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Extension point for after_task_iteration hook.
 
         Override this method to implement custom per-iteration logic
-        while the trajectory builder is still populated.
+        using only the supplied clean projection.
         """
-        pass
+        del ctx, trajectory
 
     def _allow_evolution_trigger(
         self,
@@ -810,26 +938,26 @@ class EvolutionRail(DeepAgentRail):
         """Return whether the current trigger point is allowed to launch evolution."""
         return True
 
-    async def _snapshot_for_evolution(
+    async def _prepare_evolution_input(
         self,
         trajectory: Trajectory,
         ctx: AgentCallbackContext,
-    ) -> Optional[dict]:
-        """Phase 1: Synchronously capture snapshot while ctx is alive.
+    ) -> Optional[PreparedEvolutionInput]:
+        """Phase 1: Synchronously capture detached input while ctx is alive.
 
-        Subclasses override to capture additional data (e.g. messages,
-        session state). Called in after_invoke before spawning background task.
+        Subclasses override to capture additional immutable state (e.g.
+        presented experience entries). Called in after_invoke before spawning
+        a background task.
         """
-        return await self.build_base_evolution_snapshot(trajectory, ctx)
-
-    async def build_base_evolution_snapshot(
-        self,
-        trajectory: Trajectory,
-        ctx: AgentCallbackContext,
-    ) -> Optional[dict]:
-        """Build the base evolution snapshot without subclass filtering."""
-        messages = self._collect_messages_from_trajectory(trajectory)
-        return EvolutionSnapshot(trajectory=trajectory, messages=messages).to_legacy_dict()
+        del ctx
+        messages = self._trajectory_to_messages(
+            trajectory,
+            fields=DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+        )
+        return PreparedEvolutionInput(
+            trajectory=trajectory,
+            messages=tuple(deepcopy(messages)),
+        )
 
     @classmethod
     def _normalize_callback_messages(cls, messages: List[Any]) -> List[dict]:
@@ -863,18 +991,16 @@ class EvolutionRail(DeepAgentRail):
             result.append(item)
         return result
 
-    @classmethod
-    def _collect_messages_from_trajectory(cls, trajectory: Optional[Trajectory]) -> List[dict]:
-        """Derive message-like dicts from recorded trajectory steps."""
+    @staticmethod
+    def _trajectory_to_messages(
+        trajectory: Optional[Trajectory],
+        *,
+        fields: Collection[MessageField] = DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+    ) -> List[dict]:
+        """Derive detached messages with explicitly selected semantic fields."""
         if trajectory is None:
             return []
-        raw = ConversationSignalDetector.convert_trajectory_to_messages(trajectory)
-        normalized = cls._normalize_callback_messages(raw)
-        deduped: List[dict] = []
-        for message in normalized:
-            if message not in deduped:
-                deduped.append(message)
-        return deduped
+        return trajectory_to_messages(trajectory, fields=fields)
 
     @staticmethod
     def _extract_tool_args(tool_args: Any) -> dict[str, Any]:
@@ -907,23 +1033,28 @@ class EvolutionRail(DeepAgentRail):
         content = getattr(result, "content", "")
         return content if isinstance(content, str) else str(content)
 
-    async def _safe_run_evolution(self, snapshot: dict) -> None:
+    async def _safe_run_evolution(self, prepared: PreparedEvolutionInput) -> None:
         """Phase 2: Safely execute evolution in background.
 
         Catches exceptions to prevent polluting the main lifecycle flow.
         Acquires semaphore to limit concurrent evolution LLM calls.
         """
+        if not isinstance(prepared, PreparedEvolutionInput):
+            raise TypeError("prepared must be a PreparedEvolutionInput")
         outcome: dict[str, str] | None = None
         try:
-            trajectory = snapshot["trajectory"]
             total_timeout = self._get_evolution_total_timeout_secs()
-            if total_timeout is None:
-                async with self._evolution_sem:
-                    await self.run_evolution(trajectory, ctx=None, snapshot=snapshot)
-            else:
-                async with asyncio.timeout(total_timeout):
+            # Suppression must cover the actual execution body so spans from
+            # optimizer/judge/review calls are exporter-visible but never routed
+            # into the triggering Agent subscription.
+            with self._trajectory_span_processor.suppress():
+                if total_timeout is None:
                     async with self._evolution_sem:
-                        await self.run_evolution(trajectory, ctx=None, snapshot=snapshot)
+                        await self.run_evolution(prepared)
+                else:
+                    async with asyncio.timeout(total_timeout):
+                        async with self._evolution_sem:
+                            await self.run_evolution(prepared)
         except TimeoutError:
             total_timeout = self._get_evolution_total_timeout_secs()
             timeout_text = f"{total_timeout:.2f}".rstrip("0").rstrip(".") if total_timeout is not None else "unknown"
@@ -943,24 +1074,9 @@ class EvolutionRail(DeepAgentRail):
         """Optional total timeout for one background evolution task."""
         return None
 
-    async def run_evolution(
-        self,
-        trajectory: Trajectory,
-        ctx: Optional[AgentCallbackContext] = None,
-        *,
-        snapshot: Optional[dict] = None,
-    ) -> None:
-        """Called when evolution_trigger fires or subclass calls manually.
-
-        In async mode: ctx=None, snapshot contains captured data.
-        In sync mode: ctx is active, snapshot=None (backward-compatible).
-
-        Args:
-            trajectory: Complete trajectory for this conversation round
-            ctx: Callback context (None in async mode)
-            snapshot: Captured data from _snapshot_for_evolution (None in sync mode)
-        """
-        pass
+    async def run_evolution(self, prepared: PreparedEvolutionInput) -> None:
+        """Called with one detached input when evolution is triggered."""
+        del prepared
 
     async def drain_pending_approval_events(
         self,
@@ -1089,9 +1205,7 @@ class EvolutionRail(DeepAgentRail):
             try:
                 await asyncio.wait_for(task.wait(), timeout=120.0)
             except TimeoutError:
-                logger.warning(
-                    "[EvolutionRail] background task still running after wait timeout; cancelling"
-                )
+                logger.warning("[EvolutionRail] background task still running after wait timeout; cancelling")
                 await task.cancel(reason="evolution_rail_wait_timeout")
             except Exception as exc:
                 logger.warning("[EvolutionRail] background task wait failed: %s", exc)

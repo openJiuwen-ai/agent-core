@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import shutil
 import tempfile
@@ -21,74 +20,36 @@ from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from .http_helpers import build_upstream_headers, ensure_gateway_auth, stream_chat_response
-from .request_context import require_messages, require_user_id, resolve_trace_id
-from ...lora_runtime import build_lora_info, lora_id as build_lora_id
-from ..trajectory import GatewayTrajectoryRuntime
-from ..upstream import Forwarder, UpstreamGatewayClient
+from openjiuwen.agent_evolving.agent_rl.online.gateway.collector.ports import GatewayCollector
+from openjiuwen.core.common.logging import logger
+
 from ....storage.lora_repo import LoRAPublishRequest
 from ....storage.training_task_store import TrainingTaskStore
+from ...lora_runtime import build_lora_info
+from ...lora_runtime import lora_id as build_lora_id
+from ..trajectory import GatewayTrajectoryRuntime
+from ..upstream import Forwarder, UpstreamGatewayClient
+from .anthropic_routes import create_anthropic_router
+from .collection_routes import create_collection_router
+from .completion_runtime import GatewayCompletionRuntime
+from .http_helpers import build_upstream_headers, ensure_gateway_auth, stream_chat_response
 
-logger = logging.getLogger("online_rl.gateway")
 
-
-def _inject_latest_lora(
+async def _snapshot_stats(
     *,
-    body: dict[str, Any],
-    user_id: str,
-    lora_repo: Any = None,
-    lora_default_policy: str = "disabled",
-) -> dict[str, Any] | None:
-    if lora_repo is None or lora_default_policy != "latest_by_user":
-        return None
-    latest_lora = lora_repo.get_latest(user_id)
-    if latest_lora:
-        body["model"] = user_id
-        extra_body = body.get("extra_body")
-        if isinstance(extra_body, dict):
-            extra_body.pop("lora_name", None)
-            if not extra_body:
-                body.pop("extra_body", None)
-        return build_lora_info(user_id, latest_lora, default_policy=lora_default_policy)
-    return None
-
-
-async def _forward_chat_completions(
-    *,
-    request: Request,
-    body: dict[str, Any],
-    config: Any,
-    forwarder: Forwarder,
+    trajectory_runtime: GatewayTrajectoryRuntime,
+    total_requests: int,
+    completion_runtime: GatewayCompletionRuntime,
 ) -> dict[str, Any]:
-    t0 = time.perf_counter()
-    trace_id = resolve_trace_id(request)
-    messages = require_messages(body)
-    require_user_id(request, config)
-    upstream_headers = build_upstream_headers(request, llm_api_key=config.llm_api_key)
-
-    logger.debug(
-        "[Gateway %s] proxy_only messages=%d stream=%s",
-        trace_id,
-        len(messages),
-        bool(body.get("stream", False)),
-    )
-
-    response_json = await forwarder.forward(body=body, headers=upstream_headers)
-    logger.debug(
-        "[Gateway] chat_completions cost_ms=%.1f",
-        (time.perf_counter() - t0) * 1000,
-    )
-    return response_json
-
-
-async def _snapshot_stats(*, trajectory_runtime: GatewayTrajectoryRuntime, total_requests: int) -> dict[str, Any]:
     trajectory_stats = await trajectory_runtime.snapshot_stats()
     return {
         "total_requests": total_requests,
         "total_samples": trajectory_stats["total_samples"],
-        "trajectory_store_backend": trajectory_stats["trajectory_store_backend"],
         "trajectory_store_total": trajectory_stats["trajectory_store_total"],
         "trajectory_store_pending": trajectory_stats["trajectory_store_pending"],
+        "collection": completion_runtime.collection_stats(),
+        "sft_pending_raw": trajectory_stats.get("sft_pending_raw", 0),
+        "sft_pending_samples": trajectory_stats.get("sft_pending_samples", 0),
     }
 
 
@@ -148,17 +109,20 @@ def _trajectory_list_filters(request: Request) -> TrajectoryListFilters:
     )
 
 
+def _lora_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
 def _lora_to_response(
     version: Any,
     *,
     latest_version: str | None = None,
     load_status: str = "not_loaded",
+    size_bytes: int = 0,
 ) -> dict[str, Any]:
     is_latest = latest_version == version.version
-    path = Path(version.path)
-    size_bytes = 0
-    if path.exists():
-        size_bytes = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
     return {
         "lora_id": _lora_id(version.user_id, version.version),
         "model_id": version.user_id,
@@ -229,13 +193,21 @@ def build_gateway_app(
     forwarder: Forwarder,
     upstream_client: UpstreamGatewayClient,
     trajectory_runtime: GatewayTrajectoryRuntime,
-    training_task_store: TrainingTaskStore | None = None,
+    training_task_store: TrainingTaskStore,
     close_resources: Callable[[], Awaitable[None]],
     lora_repo: Any = None,
+    collector: GatewayCollector | None = None,
 ) -> FastAPI:
     """Assemble FastAPI app and bind gateway public/internal routes."""
     metrics_lock = asyncio.Lock()
     total_requests = 0
+    gateway_instance_id = str(getattr(config, "instance_id", "")).strip()
+    completion_runtime = GatewayCompletionRuntime(
+        config=config,
+        forwarder=forwarder,
+        collector=collector,
+        lora_repo=lora_repo,
+    )
 
     async def _inc_request_counter() -> None:
         nonlocal total_requests
@@ -338,11 +310,19 @@ def build_gateway_app(
         }
 
     async def _lora_response(version: Any, *, latest_version: str | None = None) -> dict[str, Any]:
+        size_bytes = await asyncio.to_thread(_lora_size_bytes, Path(version.path))
         return _lora_to_response(
             version,
             latest_version=latest_version,
             load_status=await _lora_load_status(version),
+            size_bytes=size_bytes,
         )
+
+    async def _create_training_task(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
+        try:
+            return await training_task_store.create_task(payload or {})
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @asynccontextmanager
     async def _lifespan(_: FastAPI):
@@ -352,10 +332,25 @@ def build_gateway_app(
             await close_resources()
 
     app = FastAPI(title="Online-RL Gateway", lifespan=_lifespan)
+    app.state.trajectory_collector = collector
+    app.state.gateway_instance_id = gateway_instance_id
+    app.include_router(
+        create_collection_router(
+            config=config,
+            collection_manager=collector,
+        )
+    )
+    app.include_router(
+        create_anthropic_router(
+            config=config,
+            completion_runtime=completion_runtime,
+            increment_request_counter=_inc_request_counter,
+        )
+    )
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
-        return {"status": "ok"}
+        return {"status": "ok", "instance_id": gateway_instance_id}
 
     @app.get("/v1/gateway/stats")
     async def gateway_stats(authorization: Optional[str] = Header(default=None)) -> dict[str, Any]:
@@ -365,6 +360,7 @@ def build_gateway_app(
         return await _snapshot_stats(
             trajectory_runtime=trajectory_runtime,
             total_requests=request_count,
+            completion_runtime=completion_runtime,
         )
 
     @app.post("/v1/training/tasks")
@@ -372,22 +368,26 @@ def build_gateway_app(
         payload: Optional[dict[str, Any]] = Body(default=None),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, Any]:
+        """Create the single active async training task consumed by the scheduler."""
         await ensure_gateway_auth(config.gateway_api_key, authorization)
-        if training_task_store is None:
-            raise HTTPException(status_code=503, detail="training task store is not configured")
-        try:
-            return await training_task_store.create_task(payload or {})
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return await _create_training_task(payload)
+
+    @app.post("/v1/training/tasks:trigger")
+    async def trigger_training_task(
+        payload: Optional[dict[str, Any]] = Body(default=None),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        """Explicit manual trigger alias for creating one async training task."""
+        await ensure_gateway_auth(config.gateway_api_key, authorization)
+        return await _create_training_task(payload)
 
     @app.get("/v1/training/tasks")
     async def list_training_tasks(
         limit: int = Query(default=20),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, Any]:
+        """List recent async training tasks."""
         await ensure_gateway_auth(config.gateway_api_key, authorization)
-        if training_task_store is None:
-            raise HTTPException(status_code=503, detail="training task store is not configured")
         return {"items": await training_task_store.list_tasks(limit=limit)}
 
     @app.get("/v1/training/tasks/{task_id}")
@@ -395,9 +395,8 @@ def build_gateway_app(
         task_id: str,
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, Any]:
+        """Get one async training task by id."""
         await ensure_gateway_auth(config.gateway_api_key, authorization)
-        if training_task_store is None:
-            raise HTTPException(status_code=503, detail="training task store is not configured")
         task = await training_task_store.get_task(task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="training task not found")
@@ -409,9 +408,8 @@ def build_gateway_app(
         payload: Optional[dict[str, Any]] = Body(default=None),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, Any]:
+        """Request stop or update terminal status for one async training task."""
         await ensure_gateway_auth(config.gateway_api_key, authorization)
-        if training_task_store is None:
-            raise HTTPException(status_code=503, detail="training task store is not configured")
         payload = payload or {}
         status = str(payload.get("status") or "").strip()
         if status not in {"stopping", "canceled", "succeeded", "failed"}:
@@ -437,7 +435,7 @@ def build_gateway_app(
             len(payload.get("samples") or []) if isinstance(payload.get("samples"), list) else None,
         )
         try:
-            result = await trajectory_runtime.rail_ingestor.ingest_rail_batch(payload)
+            result = await trajectory_runtime.batch_create_trajectories(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "result": result}
@@ -718,31 +716,7 @@ def build_gateway_app(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"invalid json: {exc}") from exc
 
-        user_id = require_user_id(request, config)
-        lora_info = _inject_latest_lora(
-            body=body,
-            user_id=user_id,
-            lora_repo=lora_repo,
-            lora_default_policy=getattr(config, "lora_default_policy", "disabled"),
-        )
-        if lora_info:
-            logger.info(
-                "[Gateway] applied LoRA adapter user=%s version=%s path=%s via model field",
-                user_id,
-                lora_info.get("version"),
-                lora_info.get("path"),
-            )
-
-        client_wants_stream = bool(body.pop("stream", False))
-
-        response_json = await _forward_chat_completions(
-            request=request,
-            body=body,
-            config=config,
-            forwarder=forwarder,
-        )
-        if lora_info:
-            response_json["rl_lora"] = lora_info
+        response_json, client_wants_stream = await completion_runtime.execute(request=request, body=body)
 
         if client_wants_stream:
             return StreamingResponse(

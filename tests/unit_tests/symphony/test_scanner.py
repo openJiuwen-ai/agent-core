@@ -1,18 +1,21 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Tests for secure Skill folder discovery and manifest normalization."""
+"""Tests for trusted local Skill folder discovery and manifest normalization."""
 
 from __future__ import annotations
 
 import json
+import os
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
-import openjiuwen.symphony.shared.fingerprint.parser as parser_module
+import openjiuwen.symphony.shared.fingerprint.safe_filesystem as safe_filesystem_module
 import openjiuwen.symphony.shared.fingerprint.scanner as scanner_module
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.symphony.shared.fingerprint import (
     DataTypeVocabulary,
     SkillFolderScanner,
@@ -114,6 +117,48 @@ inputs:
     assert "BODY-ONLY-SECRET" not in serialized_payloads
 
 
+def test_parser_normalizes_unquoted_yaml_dates_before_json_serialization(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    unquoted_entrypoint = _write_skill(
+        root / "unquoted-date",
+        """
+released_on: 2026-08-08
+metadata:
+  history:
+    - 2026-08-07
+inputs:
+  cutoff:
+    type: date
+    default: 2026-08-08
+""",
+    )
+    quoted_entrypoint = _write_skill(
+        root / "quoted-date",
+        """
+released_on: "2026-08-08"
+metadata:
+  history:
+    - "2026-08-07"
+inputs:
+  cutoff:
+    type: date
+    default: "2026-08-08"
+""",
+    )
+
+    unquoted = SkillManifestParser().parse(unquoted_entrypoint, root=root)
+    quoted = SkillManifestParser().parse(quoted_entrypoint, root=root)
+    scan = SkillFolderScanner(root).scan()
+
+    assert unquoted.frontmatter["released_on"] == "2026-08-08"
+    assert unquoted.frontmatter["metadata"]["history"] == ["2026-08-07"]
+    assert unquoted.frontmatter["inputs"]["cutoff"]["default"] == "2026-08-08"
+    assert unquoted.frontmatter == quoted.frontmatter
+    json.dumps(unquoted.frontmatter)
+    json.dumps(quoted.frontmatter)
+    json.dumps(scan.to_dict())
+
+
 def test_scanner_is_deterministic_and_hashes_only_safe_recursive_assets(tmp_path: Path) -> None:
     skills_root = tmp_path / "skills"
     alpha = skills_root / "alpha"
@@ -201,61 +246,75 @@ def test_scanner_never_traverses_symlinked_skill_directories(tmp_path: Path) -> 
     assert any(item.code == "symlink_skipped" and item.path == "linked-skill" for item in result.diagnostics)
 
 
-def test_scanner_does_not_follow_directory_replaced_after_parent_enumeration(tmp_path: Path, monkeypatch) -> None:
+def test_scanner_uses_path_io_without_anchored_open_support(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "skills"
-    victim = root / "victim"
-    _write_skill(victim, "name: original", body="ORIGINAL")
-    outside = tmp_path / "outside"
-    _write_skill(outside, "name: outside", body="OUTSIDE SECRET")
-    original_open = scanner_module.open_directory_no_follow
-
-    def replace_then_open(path: Path, *, root: Path):
-        if path == victim and victim.is_dir() and not victim.is_symlink():
-            victim.rename(root / "victim-original")
-            victim.symlink_to(outside, target_is_directory=True)
-        return original_open(path, root=root)
-
-    monkeypatch.setattr(scanner_module, "open_directory_no_follow", replace_then_open)
+    _write_skill(root / "visible", "name: visible")
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
 
     result = SkillFolderScanner(root).scan()
 
-    assert result.capabilities == ()
-    assert any(item.code == "directory_read_failed" and item.path == "victim" for item in result.diagnostics)
-    assert "OUTSIDE SECRET" not in result.to_dict().__repr__()
+    assert [item.capability_id for item in result] == ["visible"]
 
 
-def test_scanner_fails_closed_without_secure_anchored_open(tmp_path: Path, monkeypatch) -> None:
+def test_regular_file_open_includes_binary_flag_when_available(tmp_path: Path, monkeypatch) -> None:
+    target = tmp_path / "asset.txt"
+    target.write_bytes(b"line-one\r\nline-two\r\n")
+    original_open = safe_filesystem_module.os.open
+    binary_flag = 1 << 29
+    observed_flags: list[int] = []
+
+    def recording_open(path, flags, mode=0o777):
+        observed_flags.append(flags)
+        return original_open(path, flags & ~binary_flag, mode)
+
+    monkeypatch.setattr(safe_filesystem_module.os, "O_BINARY", binary_flag, raising=False)
+    monkeypatch.setattr(safe_filesystem_module.os, "open", recording_open)
+
+    descriptor = safe_filesystem_module.open_regular_file_no_follow(target, root=tmp_path)
+
+    assert descriptor is not None
+    os.close(descriptor)
+    assert observed_flags and observed_flags[0] & binary_flag
+
+
+def test_scanner_skips_reparse_point_directories(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "skills"
+    hidden = root / "junction" / "hidden"
+    _write_skill(hidden, "name: hidden")
     _write_skill(root / "visible", "name: visible")
-    monkeypatch.setattr(scanner_module, "supports_anchored_open", lambda: False)
+    original_scandir = scanner_module.os.scandir
+    reparse_flag = 0x0400
 
-    with pytest.raises(BaseError) as caught:
-        SkillFolderScanner(root).scan()
+    class FakeDirectoryEntry:
+        def __init__(self, path: Path, *, is_reparse_point: bool = False) -> None:
+            self.name = path.name
+            self._path = path
+            self._is_reparse_point = is_reparse_point
 
-    assert caught.value.status is StatusCode.COMPONENT_SYMPHONY_INVENTORY_INVALID
+        def stat(self, *, follow_symlinks: bool = True):
+            del follow_symlinks
+            path_stat = self._path.lstat()
+            return SimpleNamespace(
+                st_mode=path_stat.st_mode,
+                st_file_attributes=reparse_flag if self._is_reparse_point else 0,
+            )
 
+    def fake_scandir(path):
+        if Path(path) == root:
+            entries = [
+                FakeDirectoryEntry(root / "junction", is_reparse_point=True),
+                FakeDirectoryEntry(root / "visible"),
+            ]
+            return nullcontext(iter(entries))
+        return original_scandir(path)
 
-def test_parser_does_not_follow_ancestor_replaced_after_validation(tmp_path: Path, monkeypatch) -> None:
-    root = tmp_path / "skills"
-    entrypoint = _write_skill(root / "skill", "name: original", body="ORIGINAL")
-    outside = tmp_path / "outside" / "skill"
-    _write_skill(outside, "name: outside", body="OUTSIDE SECRET")
-    original_validate = parser_module._validate_entrypoint
+    monkeypatch.setattr(scanner_module.stat, "FILE_ATTRIBUTE_REPARSE_POINT", reparse_flag, raising=False)
+    monkeypatch.setattr(scanner_module.os, "scandir", fake_scandir)
 
-    def validate_then_replace(path: Path, scan_root: Path | str | None) -> str | None:
-        result = original_validate(path, scan_root)
-        if result is None:
-            original_folder = entrypoint.parent
-            original_folder.rename(root / "original-moved")
-            original_folder.symlink_to(outside, target_is_directory=True)
-        return result
+    result = SkillFolderScanner(root).scan()
 
-    monkeypatch.setattr(parser_module, "_validate_entrypoint", validate_then_replace)
-
-    parsed = SkillManifestParser().parse(entrypoint, root=root)
-
-    assert parsed.descriptor is None
-    assert "OUTSIDE SECRET" not in parsed.semantic_content
+    assert [item.capability_id for item in result] == ["visible"]
+    assert any(item.code == "symlink_skipped" and item.path == "junction" for item in result.diagnostics)
 
 
 def test_scanner_rejects_manifest_changed_between_parse_and_asset_hash(tmp_path: Path, monkeypatch) -> None:
@@ -283,14 +342,14 @@ def test_scanner_rejects_manifest_changed_between_parse_and_asset_hash(tmp_path:
 def test_scanner_rejects_root_that_becomes_unreadable_after_validation(tmp_path: Path, monkeypatch) -> None:
     scan_root = tmp_path / "skills"
     _write_skill(scan_root / "visible", "name: visible")
-    original_open = scanner_module.open_directory_no_follow
+    original_scandir = scanner_module.os.scandir
 
-    def fail_root_open(path: Path, *, root: Path):
-        if path == scan_root:
-            return None
-        return original_open(path, root=root)
+    def fail_root_scan(path):
+        if Path(path) == scan_root:
+            raise PermissionError("unreadable")
+        return original_scandir(path)
 
-    monkeypatch.setattr(scanner_module, "open_directory_no_follow", fail_root_open)
+    monkeypatch.setattr(scanner_module.os, "scandir", fail_root_scan)
 
     with pytest.raises(BaseError) as caught:
         SkillFolderScanner(scan_root).scan()
@@ -309,6 +368,69 @@ def test_scanner_reports_bad_items_and_continues(tmp_path: Path) -> None:
 
     assert [item.capability_id for item in result] == ["good"]
     assert any(item.code == "invalid_frontmatter" and item.path == "bad/SKILL.md" for item in result.diagnostics)
+
+
+def test_scanner_isolates_unexpected_item_load_errors(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    _write_skill(root / "good", "name: good")
+    _write_skill(root / "broken", "name: broken")
+
+    class FaultyParser(SkillManifestParser):
+        def parse(self, entrypoint: Path, *args: Any, **kwargs: Any):
+            if entrypoint.parent.name == "broken":
+                raise TypeError("synthetic item failure with sensitive details")
+            return super().parse(entrypoint, *args, **kwargs)
+
+    result = SkillFolderScanner(root, parser=FaultyParser()).scan()
+
+    assert [item.capability_id for item in result] == ["good"]
+    diagnostic = next(item for item in result.diagnostics if item.code == "skill_load_failed")
+    assert diagnostic.severity == "error"
+    assert diagnostic.path == "broken/SKILL.md"
+    assert diagnostic.capability_id == "broken"
+    assert diagnostic.details == {"error_type": "TypeError"}
+    serialized = json.dumps(result.to_dict(), ensure_ascii=False)
+    assert "synthetic item failure" not in serialized
+    assert "TypeError" in serialized
+
+
+def test_scanner_isolates_unexpected_asset_hash_errors(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "skills"
+    _write_skill(root / "good", "name: good")
+    _write_skill(root / "broken", "name: broken")
+    original_hash = scanner_module._hash_safe_assets
+
+    def fail_broken(skill_root: Path, *args: Any, **kwargs: Any):
+        if skill_root.name == "broken":
+            raise OSError("synthetic asset failure with sensitive details")
+        return original_hash(skill_root, *args, **kwargs)
+
+    monkeypatch.setattr(scanner_module, "_hash_safe_assets", fail_broken)
+
+    result = SkillFolderScanner(root).scan()
+
+    assert [item.capability_id for item in result] == ["good"]
+    diagnostic = next(item for item in result.diagnostics if item.code == "skill_asset_hash_failed")
+    assert diagnostic.severity == "error"
+    assert diagnostic.path == "broken/SKILL.md"
+    assert diagnostic.capability_id == "broken"
+    assert diagnostic.details == {"error_type": "OSError"}
+    assert "synthetic asset failure" not in json.dumps(result.to_dict(), ensure_ascii=False)
+
+
+def test_scanner_propagates_framework_item_load_errors(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    _write_skill(root / "broken", "name: broken")
+    expected = build_error(StatusCode.COMPONENT_SYMPHONY_CONFIG_ERROR, reason="synthetic config failure")
+
+    class FaultyParser(SkillManifestParser):
+        def parse(self, entrypoint: Path, *args: Any, **kwargs: Any):
+            raise expected
+
+    with pytest.raises(BaseError) as caught:
+        SkillFolderScanner(root, parser=FaultyParser()).scan()
+
+    assert caught.value is expected
 
 
 def test_recursive_yaml_is_isolated_as_one_manifest_diagnostic(tmp_path: Path) -> None:

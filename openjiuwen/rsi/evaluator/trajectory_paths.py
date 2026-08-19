@@ -10,8 +10,16 @@ import re
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.spans import (
+    iter_spans,
+    read_llm_exchange,
+    read_tool_call,
+    span_attributes,
+)
 from openjiuwen.agent_evolving.trajectory.store import FileTrajectoryStore
-from openjiuwen.agent_evolving.trajectory.types import Trajectory, to_legacy_trajectory
+from openjiuwen.agent_evolving.trajectory.team import span_category
+from openjiuwen.extensions.observability import semconv
 
 ROLE_TRAJECTORY_DIR_NAME = "tr"
 TRAJECTORY_EVENTS_FILE_NAME = "trajectory_events.jsonl"
@@ -53,10 +61,46 @@ class RoleFileTrajectoryStore(FileTrajectoryStore):
     def save(self, trajectory: Trajectory, version: str | None = None) -> None:
         file_path = self._get_file_path(version)
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        legacy = to_legacy_trajectory(trajectory)
-        data = _bounded_trajectory_dict(FileTrajectoryStore._to_json_compatible(legacy))
+        data = _bounded_trajectory_dict(_role_trace_dict(trajectory))
         with open(_filesystem_path(file_path), "w", encoding="utf-8") as file:
             file.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+
+def _role_trace_dict(trajectory: Trajectory) -> dict[str, Any]:
+    """Project canonical spans into the compact RSI role-trace artifact."""
+
+    steps: list[dict[str, Any]] = []
+    for span in iter_spans(trajectory):
+        category = span_category(span)
+        error = None
+        if category == "llm":
+            attributes = span_attributes(span)
+            prompts, completions = read_llm_exchange(span)
+            detail = {
+                "model": attributes.get(semconv.GEN_AI_REQUEST_MODEL, ""),
+                "messages": prompts,
+                "response": completions[-1] if completions else {},
+                "tools": attributes.get(semconv.GEN_AI_TOOL_DEFINITIONS, []),
+            }
+        elif category == "tool":
+            tool_call = read_tool_call(span)
+            detail = {
+                "tool_name": tool_call.get("name", ""),
+                "call_args": tool_call.get("input", {}),
+                "call_result": tool_call.get("output", {}),
+            }
+            error = tool_call.get("error")
+        else:
+            continue
+        step: dict[str, Any] = {"kind": category, "detail": detail}
+        if error:
+            step["error"] = error
+        steps.append(step)
+    return {
+        "execution_id": trajectory.trajectory_id,
+        "session_id": trajectory.session_id,
+        "steps": steps,
+    }
 
 
 def _safe_role_file_stem(value: str | None) -> str:

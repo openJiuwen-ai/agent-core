@@ -10,19 +10,18 @@ from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.tool import ToolCard, ToolInfo
+from openjiuwen.core.foundation.tool import ToolCard, ToolExposure, ToolInfo
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.sections.progressive_tool_rail import (
-    build_multilingual_navigation_section,
     build_multilingual_progressive_tool_rules_section,
-    build_navigation_entry,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import DeepAgentConfig
-from openjiuwen.harness.tools import LoadToolsTool, SearchToolsTool
+from openjiuwen.harness.tools import ToolSearchTool
+from openjiuwen.harness.tools.tool_discovery.bm25 import BM25ToolIndex
 
-_VISIBLE_TOOLS_KEY = "__progressive_visible_tool_names__"
+_DISCOVERED_TOOLS_KEY = "__progressive_discovered_tool_names__"
 _DISCOVERY_TRACE_KEY = "__progressive_tool_discovery_trace__"
 
 
@@ -39,9 +38,6 @@ class ProgressiveToolRail(DeepAgentRail):
         """
         super().__init__()
         self._config = config
-        self.default_visible_tools = set(config.progressive_tool_default_visible_tools or [])
-        self.always_visible_tools = set(config.progressive_tool_always_visible_tools or [])
-        self.max_loaded_tools = config.progressive_tool_max_loaded_tools
 
         self._meta_tool_names: Set[str] = set()
         # Meta tools this rail actually registered, mapped from tool name to the
@@ -50,6 +46,9 @@ class ProgressiveToolRail(DeepAgentRail):
         # another rail has since taken the name over.
         self._owned_tool_cards: Dict[str, ToolCard] = {}
         self._cached_all_tool_infos: List[ToolInfo] = []
+        self._tool_search_index: Optional[BM25ToolIndex] = None
+        self._tool_search_index_revision: Optional[int] = None
+        self._tool_search_registry: Any = None
 
     def init(self, agent) -> None:
         """Register progressive meta tools to resource manager and ability manager."""
@@ -57,14 +56,8 @@ class ProgressiveToolRail(DeepAgentRail):
         agent_id = getattr(getattr(agent, "card", None), "id", None)
 
         tools = [
-            SearchToolsTool(
+            ToolSearchTool(
                 search_tools=self._search_tools,
-                append_trace=self._append_trace,
-                language=language,
-                agent_id=agent_id,
-            ),
-            LoadToolsTool(
-                load_tools=self._load_tools,
                 language=language,
                 agent_id=agent_id,
             ),
@@ -82,6 +75,36 @@ class ProgressiveToolRail(DeepAgentRail):
                     logger.warning(
                         f"[ProgressiveToolRail] failed to register tool '{tool.card.name}': {exc}"
                     )
+
+        # Keep the registry reference, but defer the initial BM25 build until
+        # DeepAgent has initialized every startup-stage rail.  Tool exposure is
+        # assigned by AbilityManager at registration time; this rail only
+        # consumes that decision for visibility and indexing.
+        self._tool_search_registry = getattr(agent, "ability_manager", None)
+
+    def finalize_startup(self, agent: Any) -> None:
+        """Build the initial BM25 catalog after startup registrations finish."""
+        self._tool_search_registry = getattr(agent, "ability_manager", None)
+        self._rebuild_tool_search_index(agent)
+
+    async def finalize_startup_async(self, agent: Any) -> None:
+        """Materialize lazy tool schemas, then build the startup catalog.
+
+        MCP-backed cards are materialized by ``AbilityManager.list_tool_info``;
+        calling it here ensures those startup tools are included before the
+        first BM25 snapshot instead of waiting for the first model request.
+        """
+        ability_manager = getattr(agent, "ability_manager", None)
+        list_tool_info = getattr(ability_manager, "list_tool_info", None)
+        if callable(list_tool_info):
+            try:
+                await list_tool_info()
+            except Exception as exc:
+                logger.warning(
+                    "[ProgressiveToolRail] failed to materialize startup tool schemas: %s",
+                    exc,
+                )
+        self.finalize_startup(agent)
 
     def uninit(self, agent) -> None:
         """Remove the meta tools this rail still owns."""
@@ -103,16 +126,13 @@ class ProgressiveToolRail(DeepAgentRail):
         self._owned_tool_cards.clear()
         self._meta_tool_names.clear()
         self._cached_all_tool_infos = []
+        self._tool_search_index = None
+        self._tool_search_index_revision = None
+        self._tool_search_registry = None
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Cache full tool inventory and initialize per-session visible tools."""
+        """Cache the full registered tool inventory for discovery authorization."""
         self._cached_all_tool_infos = await self._list_tool_infos(ctx.agent)
-
-        session = getattr(ctx, "session", None)
-        self._init_visible_tools(
-            session,
-            default_visible_tools=list(self.default_visible_tools),
-        )
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         _ = ctx
@@ -132,10 +152,8 @@ class ProgressiveToolRail(DeepAgentRail):
 
         builder = self._get_prompt_builder(ctx)
 
-        navigation_section = await self._build_navigation_section(session)
         rules_section = self._build_progressive_tool_rules_section()
 
-        builder.add_section(navigation_section)
         builder.add_section(rules_section)
 
         inputs = getattr(ctx, "inputs", None)
@@ -161,15 +179,13 @@ class ProgressiveToolRail(DeepAgentRail):
             original_tool_names[:20],
         )
 
-        session_visible_tools = set(self._get_visible_tools(session))
-        baseline_visible_tools = set(self.always_visible_tools)
         meta_visible_tools = set(self._meta_tool_names)
+        direct_visible_tools = self._get_direct_tool_names(ctx.agent)
 
         logger.info(
-            "[ProgressiveToolRail][DEBUG] visibility | meta=%s | baseline=%s | session_visible=%s",
+            "[ProgressiveToolRail][DEBUG] visibility | meta=%s | direct=%s",
             sorted(meta_visible_tools),
-            sorted(baseline_visible_tools),
-            sorted(session_visible_tools),
+            sorted(direct_visible_tools),
         )
 
         filtered_tools: List[ToolInfo] = []
@@ -183,11 +199,7 @@ class ProgressiveToolRail(DeepAgentRail):
                 filtered_tools.append(tool)
                 continue
 
-            if tool_name in baseline_visible_tools:
-                filtered_tools.append(tool)
-                continue
-
-            if tool_name in session_visible_tools:
+            if tool_name in direct_visible_tools:
                 filtered_tools.append(tool)
                 continue
 
@@ -208,6 +220,29 @@ class ProgressiveToolRail(DeepAgentRail):
 
         inputs.tools = filtered_tools
 
+    @staticmethod
+    def _get_direct_tool_names(agent: Any) -> Set[str]:
+        """Return registered cards whose exposure policy is direct."""
+        ability_manager = getattr(agent, "ability_manager", None)
+        list_abilities = getattr(ability_manager, "list", None)
+        if not callable(list_abilities):
+            return set()
+        try:
+            abilities = list_abilities() or []
+        except Exception:
+            return set()
+        if not isinstance(abilities, (list, tuple)):
+            return set()
+        direct_names: Set[str] = set()
+        for card in abilities:
+            if not isinstance(card, ToolCard):
+                continue
+            name = str(getattr(card, "name", "") or "")
+            exposure = getattr(card, "exposure", ToolExposure.DIRECT)
+            if name and exposure == ToolExposure.DIRECT:
+                direct_names.add(name)
+        return direct_names
+
     async def _list_tool_infos(self, agent) -> List[ToolInfo]:
         """List all tool infos currently registered on the agent."""
         if not hasattr(agent, "ability_manager"):
@@ -223,6 +258,101 @@ class ProgressiveToolRail(DeepAgentRail):
         """Return cached full tool inventory."""
         return list(self._cached_all_tool_infos or [])
 
+    def _list_registered_deferred_tool_infos(self, agent: Any) -> List[ToolInfo]:
+        """Build index documents from registered deferred ToolCards."""
+        ability_manager = getattr(agent, "ability_manager", None) or self._tool_search_registry
+        list_abilities = getattr(ability_manager, "list", None)
+        if not callable(list_abilities):
+            return []
+
+        documents: List[ToolInfo] = []
+        try:
+            abilities = list_abilities() or []
+        except Exception as exc:
+            logger.warning(
+                f"[ProgressiveToolRail] failed to list registered cards for BM25: {exc}"
+            )
+            return []
+        if not isinstance(abilities, (list, tuple)):
+            return []
+
+        for card in abilities:
+            if not isinstance(card, ToolCard):
+                continue
+            if str(getattr(card, "name", "") or "") in self._meta_tool_names:
+                continue
+
+            exposure = getattr(card, "exposure", ToolExposure.DIRECT)
+            if exposure != ToolExposure.DEFERRED:
+                continue
+
+            try:
+                documents.append(card.tool_info())
+            except Exception as exc:
+                logger.warning(
+                    "[ProgressiveToolRail] failed to convert deferred card '%s' "
+                    "to ToolInfo: %s",
+                    getattr(card, "name", ""),
+                    exc,
+                )
+        return documents
+
+    def _rebuild_tool_search_index(
+        self,
+        agent: Any = None,
+        tool_infos: Optional[List[ToolInfo]] = None,
+    ) -> None:
+        """Build and store a new immutable BM25 index."""
+        if tool_infos is None:
+            tool_infos = self._list_registered_deferred_tool_infos(agent)
+
+        self._tool_search_index = BM25ToolIndex.build(tool_infos)
+        ability_manager = getattr(agent, "ability_manager", None) or self._tool_search_registry
+        revision = getattr(ability_manager, "registry_revision", None)
+        self._tool_search_index_revision = (
+            int(revision) if isinstance(revision, int) else None
+        )
+
+    def _ensure_tool_search_index(self, agent: Any = None) -> None:
+        """Reuse the startup index unless the ability registry changed."""
+        ability_manager = getattr(agent, "ability_manager", None) or self._tool_search_registry
+        revision = getattr(ability_manager, "registry_revision", None)
+        normalized_revision = int(revision) if isinstance(revision, int) else None
+
+        if (
+            self._tool_search_index is not None
+            and normalized_revision is not None
+            and normalized_revision == self._tool_search_index_revision
+        ):
+            return
+
+        if self._tool_search_index is not None and normalized_revision is None:
+            # Test doubles and legacy callers may not expose a registry
+            # revision. Keep the startup index stable in that case.
+            if self._tool_search_index.document_count > 0:
+                return
+
+            if not callable(getattr(ability_manager, "list", None)):
+                fallback = [
+                    tool
+                    for tool in self._cached_all_tool_infos
+                    if str(getattr(tool, "name", "") or "") not in self._meta_tool_names
+                ]
+                if fallback:
+                    self._rebuild_tool_search_index(tool_infos=fallback)
+            return
+
+        if ability_manager is not None and callable(getattr(ability_manager, "list", None)):
+            self._rebuild_tool_search_index(agent)
+            return
+
+        fallback = [
+            tool
+            for tool in self._cached_all_tool_infos
+            if str(getattr(tool, "name", "") or "") not in self._meta_tool_names
+        ]
+        self._rebuild_tool_search_index(tool_infos=fallback)
+
     async def _get_real_tool_infos(self) -> List[ToolInfo]:
         """Return non-meta tools from the cached inventory."""
         infos = await self._list_all_tool_infos()
@@ -235,298 +365,127 @@ class ProgressiveToolRail(DeepAgentRail):
     async def _search_tools(
         self,
         query: str,
-        limit: int = 10,
-        detail_level: int = 1,
+        limit: int = 5,
+        session: Any = None,
     ) -> List[Dict[str, Any]]:
-        """Search the cached tool inventory by name, description, and parameter text."""
+        """Search BM25 and authorize matching tools for the next direct call."""
         query = (query or "").strip().lower()
         if not query:
             return []
 
-        all_tools = await self._get_real_tool_infos()
-        scored: List[tuple[int, ToolInfo]] = []
+        self._ensure_tool_search_index()
+        matched = (
+            self._tool_search_index.search(query, limit=max(1, limit))
+            if self._tool_search_index is not None
+            else []
+        )
 
-        for tool in all_tools:
-            name = str(getattr(tool, "name", "") or "")
-            description = str(getattr(tool, "description", "") or "")
-            parameters = getattr(tool, "parameters", None)
-
-            haystack = " ".join(
-                [
-                    name.lower(),
-                    description.lower(),
-                    self._parameters_to_text(parameters).lower(),
-                ]
-            )
-
-            score = 0
-            if query == name.lower():
-                score += 100
-            if query in name.lower():
-                score += 40
-            if query in description.lower():
-                score += 25
-            if query in haystack:
-                score += 10
-
-            for token in query.split():
-                if token and token in haystack:
-                    score += 3
-
-            if score > 0:
-                scored.append((score, tool))
-
-        scored.sort(key=lambda item: (-item[0], getattr(item[1], "name", "")))
-        matched = [tool for _, tool in scored[: max(1, limit)]]
-
-        return [
-            self._build_tool_summary(tool, detail_level=detail_level)
-            for tool in matched
-        ]
-
-    async def _load_tools(
-        self,
-        session: Any,
-        tool_names: List[str],
-        replace: bool = False,
-    ) -> Dict[str, Any]:
-        """Mark tools as callable in the current session."""
-        if session is None:
-            return {
-                "loaded_tools": [],
-                "visible_tools": [],
-                "skipped_tools": list(tool_names or []),
-                "message": "session is required for load_tools",
-            }
-
-        all_tools = await self._get_real_tool_infos()
-        available_names = {str(getattr(tool, "name", "") or "") for tool in all_tools}
-
-        requested = [str(name).strip() for name in tool_names if str(name).strip()]
-        valid_names: List[str] = []
-        skipped_names: List[str] = []
-
-        for name in requested:
-            if name in self.always_visible_tools:
-                valid_names.append(name)
-                continue
-
-            if name in available_names:
-                valid_names.append(name)
-            else:
-                skipped_names.append(name)
-
-        current_visible = self._get_visible_tools(session)
-
-        if replace:
-            next_visible = list(dict.fromkeys(valid_names))
-        else:
-            next_visible = list(dict.fromkeys(current_visible + valid_names))
-
-        if len(next_visible) > self.max_loaded_tools:
-            overflow = next_visible[self.max_loaded_tools:]
-            skipped_names.extend(overflow)
-            next_visible = next_visible[: self.max_loaded_tools]
-
-        self._set_visible_tools(session, next_visible)
-
+        matched_names = [str(getattr(tool, "name", "") or "") for tool in matched]
+        self._authorize_discovered_tools(session, matched_names)
         self._append_trace(
             session,
             {
-                "action": "load_tools",
-                "requested": requested,
-                "loaded": valid_names,
-                "visible_before": list(current_visible),
-                "visible_after": next_visible,
-                "skipped": skipped_names,
-                "replace": replace,
+                "action": "tool_search",
+                "query": query,
+                "limit": max(1, limit),
+                "matched": matched_names,
             },
         )
 
-        return {
-            "loaded_tools": valid_names,
-            "visible_tools": next_visible,
-            "skipped_tools": skipped_names,
-            "message": (
-                f"loaded {len(valid_names)} tool(s), "
-                f"visible now: {', '.join(next_visible) if next_visible else '(none)'}"
-            ),
-        }
+        return [self._build_tool_schema(tool) for tool in matched]
 
-    async def _build_navigation_section(self, session: Any):
-        """Build multilingual tool-navigation section."""
-        entries_cn = await self._build_navigation_entries(session, language="cn")
-        entries_en = await self._build_navigation_entries(session, language="en")
-        return build_multilingual_navigation_section(entries_cn, entries_en)
+    def _authorize_discovered_tools(self, session: Any, names: List[str]) -> None:
+        """Record search hits as callable for this session's following turn."""
+        if session is None:
+            return
+        current = self._get_discovered_tools(session)
+        self._set_discovered_tools(session, list(dict.fromkeys(current + names)))
 
-    def _build_progressive_tool_rules_section(self):
-        """Build multilingual progressive-tool-rules section."""
-        return build_multilingual_progressive_tool_rules_section()
-
-    async def _build_navigation_entries(
-        self,
-        session: Any,
-        language: str = "cn",
-    ) -> List[str]:
-        """Render a compact list of navigation-worthy tools."""
-        all_tools = await self._get_real_tool_infos()
-        loaded = set(self._get_visible_tools(session))
-        baseline = set(self.always_visible_tools) | set(self.default_visible_tools)
-
-        entries: List[str] = []
-        seen: Set[str] = set()
-
-        def include_tool(name: str) -> bool:
-            if name in seen:
-                return False
-            if name in baseline:
-                return True
-            if name in loaded:
-                return True
-            if name in {"code", "read_file", "bash", "list_skill", "pdf", "xlsx"}:
-                return True
-            return False
-
-        sorted_tools = sorted(
-            all_tools,
-            key=lambda t: (
-                self._tool_group_rank(t),
-                str(getattr(t, "name", "") or ""),
-            ),
-        )
-
-        for tool in sorted_tools:
-            name = str(getattr(tool, "name", "") or "")
-            if not name or not include_tool(name):
-                continue
-            seen.add(name)
-
-            summary = self._tool_summary_for_navigation(tool)
-            group = self._tool_group_for_navigation(tool)
-
-            if language == "en":
-                status = (
-                    "callable"
-                    if name in loaded or name in self.always_visible_tools
-                    else "navigation-only"
-                )
-                group_label = group
-            else:
-                status = (
-                    "可调用"
-                    if name in loaded or name in self.always_visible_tools
-                    else "仅导航"
-                )
-                group_label = self._tool_group_to_cn(group)
-
-            entries.append(
-                build_navigation_entry(
-                    name=name,
-                    group=group_label,
-                    status=status,
-                    summary=summary,
-                    language=language,
-                )
-            )
-
-        return entries
-
-    @staticmethod
-    def _tool_summary_for_navigation(tool: ToolInfo) -> str:
-        """Return a short summary line for navigation display."""
-        description = str(getattr(tool, "description", "") or "").strip()
-        if not description:
-            return "No summary available."
-        line = description.splitlines()[0].strip()
-        return line[:160]
-
-    @staticmethod
-    def _tool_group_for_navigation(tool: ToolInfo) -> str:
-        """Infer a coarse navigation group for a tool."""
-        name = str(getattr(tool, "name", "") or "").lower()
-        description = str(getattr(tool, "description", "") or "").lower()
-
-        if any(k in name for k in ["read", "write", "edit", "file", "bash", "code"]):
-            return "runtime"
-        if any(k in name for k in ["pdf", "invoice", "document"]):
-            return "document"
-        if any(k in name for k in ["xlsx", "excel", "sheet", "spreadsheet"]):
-            return "spreadsheet"
-        if "skill" in name:
-            return "skill"
-        if any(k in description for k in ["pdf", "invoice", "document"]):
-            return "document"
-        if any(k in description for k in ["xlsx", "excel", "spreadsheet"]):
-            return "spreadsheet"
-        return "general"
-
-    @staticmethod
-    def _tool_group_to_cn(group: str) -> str:
-        """Translate group label into Chinese."""
-        mapping = {
-            "skill": "技能",
-            "runtime": "运行时",
-            "document": "文档",
-            "spreadsheet": "表格",
-            "general": "通用",
-        }
-        return mapping.get(group, "通用")
-
-    @staticmethod
-    def _tool_group_rank(tool: ToolInfo) -> int:
-        """Sort order for navigation groups."""
-        group = ProgressiveToolRail._tool_group_for_navigation(tool)
-        order = {
-            "skill": 0,
-            "runtime": 1,
-            "document": 2,
-            "spreadsheet": 3,
-            "general": 9,
-        }
-        return order.get(group, 99)
-
-    def _get_visible_tools(self, session: Any) -> List[str]:
-        """Read current session-visible tool names."""
+    def _get_discovered_tools(self, session: Any) -> List[str]:
         if session is None:
             return []
-        state = session.get_state(_VISIBLE_TOOLS_KEY)
+        state = session.get_state(_DISCOVERED_TOOLS_KEY)
         if isinstance(state, list):
             return [str(item).strip() for item in state if str(item).strip()]
         return []
 
-    def _set_visible_tools(self, session: Any, names: List[str]) -> None:
-        """Persist current session-visible tool names."""
+    def _set_discovered_tools(self, session: Any, names: List[str]) -> None:
         if session is None:
             return
-        normalized = list(
-            dict.fromkeys([str(name).strip() for name in names if str(name).strip()])
-        )
-        session.update_state({_VISIBLE_TOOLS_KEY: normalized})
-
-    def _init_visible_tools(
-        self,
-        session: Any,
-        *,
-        default_visible_tools: Optional[List[str]] = None,
-    ) -> None:
-        """Initialize session visibility state once per session."""
-        if session is None:
-            return
-
-        current = session.get_state(_VISIBLE_TOOLS_KEY)
-        if isinstance(current, list):
-            return
-
-        initial = list(
-            dict.fromkeys(
-                [
-                    *list(self.always_visible_tools),
-                    *(list(default_visible_tools or [])),
-                ]
+        session.update_state({
+            _DISCOVERED_TOOLS_KEY: list(
+                dict.fromkeys(str(name).strip() for name in names if str(name).strip())
             )
+        })
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Allow direct tools and tools found by ``tool_search`` only."""
+        inputs = getattr(ctx, "inputs", None)
+        tool_name = str(getattr(inputs, "tool_name", "") or "")
+        if not tool_name or tool_name in self._meta_tool_names:
+            return
+
+        session = getattr(ctx, "session", None)
+        ability_manager = getattr(ctx.agent, "ability_manager", None)
+        card = ability_manager.get(tool_name) if ability_manager is not None else None
+        if not isinstance(card, ToolCard):
+            if (
+                tool_name in self._get_discovered_tools(session)
+                and tool_name in {
+                    str(getattr(tool, "name", "") or "")
+                    for tool in self._cached_all_tool_infos
+                }
+            ):
+                return
+            self._reject_tool_call(ctx, f"Unknown tool '{tool_name}'.")
+            return
+
+        exposure = getattr(card, "exposure", ToolExposure.DIRECT)
+        if exposure == ToolExposure.DIRECT:
+            return
+
+        if tool_name in self._get_discovered_tools(session):
+            # Isolated rail tests and lightweight adapters may expose only the
+            # cached ToolInfo inventory. The real AbilityManager path still
+            # requires a registered card above; the fallback only confirms
+            # that the name came from this rail's search catalog.
+            return
+
+        self._reject_tool_call(
+            ctx,
+            f"Deferred tool '{tool_name}' must be found with tool_search before it can be called.",
         )
-        session.update_state({_VISIBLE_TOOLS_KEY: initial})
-        session.update_state({_DISCOVERY_TRACE_KEY: []})
+
+    @staticmethod
+    def _reject_tool_call(ctx: AgentCallbackContext, message: str) -> None:
+        """Prevent execution and provide a normal tool result to the model."""
+        inputs = getattr(ctx, "inputs", None)
+        tool_call = getattr(inputs, "tool_call", None)
+        tool_call_id = str(getattr(tool_call, "id", "") or "")
+        if not tool_call_id:
+            tool_call_id = "unknown-tool-call"
+        from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+
+        if hasattr(ctx, "extra"):
+            ctx.extra["_skip_tool"] = True
+        if inputs is not None:
+            inputs.tool_result = {"error": message}
+            inputs.tool_msg = ToolMessage(content=message, tool_call_id=tool_call_id)
+
+    @staticmethod
+    def _build_tool_schema(tool: ToolInfo) -> Dict[str, Any]:
+        """Return the exact model-callable schema represented by ToolInfo."""
+        return {
+            "name": str(getattr(tool, "name", "") or ""),
+            "description": str(getattr(tool, "description", "") or ""),
+            "parameters": ProgressiveToolRail._safe_serialize_parameters(
+                getattr(tool, "parameters", None)
+            ),
+        }
+
+    def _build_progressive_tool_rules_section(self):
+        """Build multilingual progressive-tool-rules section."""
+        return build_multilingual_progressive_tool_rules_section()
 
     def _append_trace(self, session: Any, event: Dict[str, Any]) -> None:
         """Append progressive-tool discovery trace into session state."""

@@ -429,14 +429,22 @@ class AvatarSessionManager:
                     team_logger.debug("[swarmflow] structured_output detach failed for %s", state.member_name)
 
         state.turns_executed += 1
-        self._raise_on_interrupt_or_fail(state, result)
-
         turn_tokens = state.budget_rail.call_tokens - tokens_before
+
+        try:
+            self._raise_on_interrupt_or_fail(state, result)
+        except BackendError as e:
+            # Surface this turn's burned tokens on the failure so the run's
+            # token sum does not drop a budget-exhausted/failed session turn.
+            if e.tokens is None:
+                e.tokens = turn_tokens or None
+            raise
 
         if submit is not None:
             if not (submit.called and submit.captured is not None):
                 raise BackendError(
-                    f"session '{state.member_name}' did not submit a structured result via structured_output"
+                    f"session '{state.member_name}' did not submit a structured result via structured_output",
+                    tokens=turn_tokens or None,
                 )
             # Prefer free-text narration from the round; fall back to JSON capture.
             text = prefer_natural_or_structured_text(_output_text(result), submit.captured)
