@@ -84,6 +84,7 @@ async def test_spawn_wait_list_tool_chain_uses_real_control() -> None:
             status_payloads = [
                 call.args[0].payload["subagent_updated"]
                 for call in session.write_stream.await_args_list
+                if "subagent_updated" in call.args[0].payload
             ]
             assert any(item["status"] == "running" for item in status_payloads)
             assert any(

@@ -27,10 +27,20 @@ class TranscriptProjector:
         self._seq = 0
         self._reasoning_parts: list[str] = []
         self._current_task_id = ""
+        self._phase_id = 0
+        self._phase_open = False
+        self._saw_reasoning = False
 
     def reset_for_turn(self, task_id: str) -> None:
         self._current_task_id = task_id
         self._reasoning_parts = []
+        self._phase_open = False
+        self._saw_reasoning = False
+        # _phase_id is deliberately not reset: ids stay unique across turns.
+
+    @property
+    def phase_id(self) -> int:
+        return self._phase_id
 
     def begin_turn(self, task_id: str, user_query: str) -> SubagentMessage:
         if task_id != self._current_task_id:
@@ -63,8 +73,9 @@ class TranscriptProjector:
         task_id: str,
         aggregator: TurnOutputAggregator,
     ) -> SubagentMessage:
-        reasoning = aggregator.reasoning_text() or "".join(self._reasoning_parts)
-        reasoning = reasoning.strip() or None
+        reasoning = self._take_phase_reasoning()
+        if reasoning is None and not self._saw_reasoning:
+            reasoning = (aggregator.reasoning_text() or "").strip() or None
         if aggregator.is_error():
             return self._make(
                 task_id=task_id,
@@ -112,12 +123,25 @@ class TranscriptProjector:
             success=success,
             extra=extra,
             at_ms=time.time() * 1000,
+            phase_id=self._phase_id,
         )
 
     def _accumulate_reasoning(self, payload: dict[str, Any]) -> None:
         content = payload.get("content")
-        if isinstance(content, str) and content:
-            self._reasoning_parts.append(content)
+        if not isinstance(content, str) or not content:
+            return
+        if not self._phase_open:
+            self._phase_id += 1
+            self._phase_open = True
+        self._saw_reasoning = True
+        self._reasoning_parts.append(content)
+
+    def _take_phase_reasoning(self) -> str | None:
+        """Detach the reasoning accumulated since the last phase boundary."""
+        text = "".join(self._reasoning_parts).strip()
+        self._reasoning_parts = []
+        self._phase_open = False
+        return text or None
 
     def _project_tool_call(self, payload: dict[str, Any], task_id: str) -> SubagentMessage:
         info = _tool_info(payload)
@@ -136,6 +160,7 @@ class TranscriptProjector:
             role="assistant",
             event_type="chat.tool_call",
             content=content,
+            reasoning_content=self._take_phase_reasoning(),
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             extra={"tool_call": info},
@@ -158,6 +183,7 @@ class TranscriptProjector:
             role="assistant",
             event_type="chat.tool_result",
             content=result_text or tool_name,
+            reasoning_content=self._take_phase_reasoning(),
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             success=success if isinstance(success, bool) else None,
@@ -171,6 +197,7 @@ class TranscriptProjector:
             role="assistant",
             event_type="chat.error",
             content=summary,
+            reasoning_content=self._take_phase_reasoning(),
         )
 
 

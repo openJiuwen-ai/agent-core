@@ -12,6 +12,10 @@ from openjiuwen.harness.subagent_runtime.models import SubagentActivity
 
 _PERSISTABLE_KINDS = frozenset({"tool_call", "tool_result", "error"})
 
+# Chunks that end the current thinking phase: whatever the model reasons about
+# after one of these belongs to a new phase.
+_PHASE_BOUNDARY_KINDS = frozenset({"tool_call", "tool_result", "error"})
+
 
 def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
@@ -65,6 +69,8 @@ class ActivityProjector:
         self._thinking_buffer = ""
         self._last_thinking_emit_ms = 0.0
         self._current_task_id = ""
+        self._phase_id = 0
+        self._phase_open = False
 
     def reset_for_turn(self, task_id: str) -> None:
         self._current_task_id = task_id
@@ -72,38 +78,97 @@ class ActivityProjector:
         self._truncated = False
         self._thinking_buffer = ""
         self._last_thinking_emit_ms = 0.0
+        self._phase_open = False
+        # _phase_id is deliberately not reset: ids stay unique across turns.
 
-    def project(self, chunk: Any, *, task_id: str) -> SubagentActivity | None:
+    @property
+    def phase_id(self) -> int:
+        return self._phase_id
+
+    def project(self, chunk: Any, *, task_id: str) -> list[SubagentActivity]:
+        """Map one stream chunk to the activities it produces, in emit order."""
         if task_id and task_id != self._current_task_id:
             self.reset_for_turn(task_id)
 
         chunk_type, payload = _parse_chunk(chunk)
-        if self._truncated and chunk_type == "llm_reasoning":
-            return None
+        if chunk_type == "llm_reasoning":
+            return self._project_reasoning(payload, task_id)
+        if chunk_type not in _PHASE_BOUNDARY_KINDS:
+            return []
+        return self._project_boundary(chunk_type, payload, task_id)
 
-        max_per_turn = self._config.activity_queue_size
-        if not self._truncated and self._turn_count >= max_per_turn:
-            self._truncated = True
-            return self._make(
-                kind="truncated",
-                task_id=task_id,
-                summary="activity stream truncated for this turn",
-                dropped=self._turn_count - max_per_turn + 1,
-            )
+    def flush_pending(self, task_id: str = "") -> list[SubagentActivity]:
+        """Emit the thinking tail still buffered when a turn ends."""
+        tail = self._flush_thinking(task_id or self._current_task_id)
+        self._phase_open = False
+        return [tail] if tail is not None else []
+
+    def _project_reasoning(
+        self,
+        payload: dict[str, Any],
+        task_id: str,
+    ) -> list[SubagentActivity]:
+        if self._truncated:
+            return []
+        content = payload.get("content")
+        if not isinstance(content, str) or not content:
+            return []
+        marker = self._enter_truncated(task_id)
+        if marker is not None:
+            return [marker]
+
+        if not self._phase_open:
+            self._phase_id += 1
+            self._phase_open = True
+        self._thinking_buffer += content
+
+        now_ms = time.time() * 1000
+        buffer_full = len(self._thinking_buffer) >= self._config.activity_text_max_len
+        throttle_elapsed = (
+            now_ms - self._last_thinking_emit_ms
+        ) >= self._config.activity_throttle_ms
+        if not buffer_full and not throttle_elapsed:
+            return []
+        return [self._emit_thinking(task_id, now_ms)]
+
+    def _project_boundary(
+        self,
+        chunk_type: str,
+        payload: dict[str, Any],
+        task_id: str,
+    ) -> list[SubagentActivity]:
+        activities: list[SubagentActivity] = []
+        tail = self._flush_thinking(task_id)
+        if tail is not None:
+            activities.append(tail)
+        self._phase_open = False
+
+        marker = self._enter_truncated(task_id)
+        if marker is not None:
+            activities.append(marker)
+            return activities
 
         if chunk_type == "tool_call":
-            return self._emit(self._project_tool_call(payload, task_id))
-        if chunk_type == "tool_result":
-            return self._emit(self._project_tool_result(payload, task_id))
-        if chunk_type == "llm_reasoning":
-            return self._project_thinking(payload, task_id)
-        if chunk_type == "error":
-            return self._emit(self._project_error(payload, task_id))
-        return None
+            activities.append(self._emit(self._project_tool_call(payload, task_id)))
+        elif chunk_type == "tool_result":
+            activities.append(self._emit(self._project_tool_result(payload, task_id)))
+        else:
+            activities.append(self._emit(self._project_error(payload, task_id)))
+        return activities
 
-    def _emit(self, activity: SubagentActivity | None) -> SubagentActivity | None:
-        if activity is None:
+    def _enter_truncated(self, task_id: str) -> SubagentActivity | None:
+        max_per_turn = self._config.activity_queue_size
+        if self._truncated or self._turn_count < max_per_turn:
             return None
+        self._truncated = True
+        return self._make(
+            kind="truncated",
+            task_id=task_id,
+            summary="activity stream truncated for this turn",
+            dropped=self._turn_count - max_per_turn + 1,
+        )
+
+    def _emit(self, activity: SubagentActivity) -> SubagentActivity:
         self._turn_count += 1
         return activity
 
@@ -133,6 +198,7 @@ class ActivityProjector:
             ok=ok,
             at_ms=time.time() * 1000,
             dropped=dropped,
+            phase_id=self._phase_id,
         )
 
     def _project_tool_call(self, payload: dict[str, Any], task_id: str) -> SubagentActivity:
@@ -176,25 +242,21 @@ class ActivityProjector:
         summary = _pick_str(payload, "error", "message") or "subagent error"
         return self._make(kind="error", task_id=task_id, summary=summary)
 
-    def _project_thinking(self, payload: dict[str, Any], task_id: str) -> SubagentActivity | None:
-        content = payload.get("content")
-        if not isinstance(content, str) or not content:
-            return None
-        self._thinking_buffer += content
-        now_ms = time.time() * 1000
-        buffer_full = len(self._thinking_buffer) >= self._config.activity_text_max_len
-        throttle_elapsed = (
-            now_ms - self._last_thinking_emit_ms
-        ) >= self._config.activity_throttle_ms
-        if not buffer_full and not throttle_elapsed:
-            return None
-
+    def _emit_thinking(self, task_id: str, now_ms: float) -> SubagentActivity:
         summary = self._thinking_buffer
         self._thinking_buffer = ""
         self._last_thinking_emit_ms = now_ms
         return self._emit(
             self._make(kind="thinking", task_id=task_id, summary=summary),
         )
+
+    def _flush_thinking(self, task_id: str) -> SubagentActivity | None:
+        if not self._thinking_buffer:
+            return None
+        if self._truncated:
+            self._thinking_buffer = ""
+            return None
+        return self._emit_thinking(task_id, time.time() * 1000)
 
 
 __all__ = ["ActivityProjector", "_PERSISTABLE_KINDS"]

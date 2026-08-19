@@ -60,3 +60,32 @@ def test_end_turn_attaches_reasoning_to_final() -> None:
     assert final_message.event_type == "chat.final"
     assert final_message.content == "done"
     assert final_message.reasoning_content == "plan step 1"
+
+
+def test_reasoning_is_split_per_phase_across_a_tool_call() -> None:
+    projector = _projector()
+    projector.begin_turn("task-1", "query")
+    projector.project(
+        {"type": "llm_reasoning", "payload": {"content": "I should read the file"}},
+        task_id="task-1",
+    )
+    tool_message = projector.project(
+        {"type": "tool_call", "payload": {"tool_call": {"tool_name": "read_file"}}},
+        task_id="task-1",
+    )
+    projector.project(
+        {"type": "llm_reasoning", "payload": {"content": "the file says X"}},
+        task_id="task-1",
+    )
+    aggregator = TurnOutputAggregator()
+    aggregator.consume({"type": "llm_reasoning", "payload": {"content": "I should read the file"}})
+    aggregator.consume({"type": "llm_reasoning", "payload": {"content": "the file says X"}})
+    aggregator.consume({"type": "llm_output", "payload": {"content": "done"}})
+    final_message = projector.end_turn("task-1", aggregator)
+
+    assert tool_message is not None
+    assert tool_message.reasoning_content == "I should read the file"
+    assert tool_message.phase_id == 1
+    # The post-tool reasoning is a new phase and must not repeat the first one.
+    assert final_message.reasoning_content == "the file says X"
+    assert final_message.phase_id == 2

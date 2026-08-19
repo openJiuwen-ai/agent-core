@@ -229,9 +229,11 @@ class SubagentInstance:
                     aggregator.consume(chunk)
                     if self._on_chunk is not None:
                         await self._on_chunk(chunk)
-            await self._settle_turn(op, aggregator)
+            # Drain the turn tail before settling: the terminal status doubles as
+            # the turn-end signal, so nothing may be emitted after it.
             if self._on_turn_stream_end is not None:
                 await self._on_turn_stream_end(op, aggregator)
+            await self._settle_turn(op, aggregator)
             succeeded = (
                 not aggregator.is_error()
                 and self.status.current().kind is SubagentStatusKind.COMPLETED

@@ -148,6 +148,9 @@ class SubagentSessionManager:
             await self._transcript_handler(message)
 
         async def on_turn_stream_end(op: UserInputOp, aggregator: Any) -> None:
+            if self._activity_handler is not None:
+                for activity in projector.flush_pending(op.task_id):
+                    self._activity_handler(activity)
             if self._transcript_handler is None:
                 return
             message = transcript_projector.end_turn(op.task_id, aggregator)
@@ -159,8 +162,7 @@ class SubagentSessionManager:
                 return
             task_id = instance.current_task_id or ""
             if self._activity_handler is not None:
-                activity = projector.project(chunk, task_id=task_id)
-                if activity is not None:
+                for activity in projector.project(chunk, task_id=task_id):
                     self._activity_handler(activity)
             if self._transcript_handler is not None:
                 message = transcript_projector.project(chunk, task_id=task_id)
@@ -186,7 +188,9 @@ class SubagentSessionManager:
                     self._activity_handler is not None or self._transcript_handler is not None
                 ) else None,
                 on_turn_stream_start=on_turn_stream_start if self._transcript_handler else None,
-                on_turn_stream_end=on_turn_stream_end if self._transcript_handler else None,
+                on_turn_stream_end=on_turn_stream_end if (
+                    self._activity_handler is not None or self._transcript_handler is not None
+                ) else None,
             )
             instance_holder["instance"] = instance
             await instance.start_worker()

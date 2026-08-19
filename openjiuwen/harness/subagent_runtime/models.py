@@ -253,6 +253,7 @@ class SubagentActivity:
     ok: bool | None = None
     at_ms: float = 0.0
     dropped: int | None = None
+    phase_id: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -262,6 +263,7 @@ class SubagentActivity:
             "kind": self.kind,
             "summary": self.summary,
             "at_ms": self.at_ms,
+            "phase_id": self.phase_id,
         }
         if self.tool_name is not None:
             payload["tool_name"] = self.tool_name
@@ -290,6 +292,7 @@ class SubagentActivity:
             ok=ok,
             at_ms=float(raw.get("at_ms") or 0.0),
             dropped=dropped,
+            phase_id=int(raw.get("phase_id") or 0),
         )
 
     def is_persistable(self) -> bool:
@@ -313,6 +316,7 @@ class SubagentMessage:
     success: bool | None = None
     extra: dict[str, Any] | None = None
     at_ms: float = 0.0
+    phase_id: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -324,6 +328,7 @@ class SubagentMessage:
             "event_type": self.event_type,
             "content": self.content,
             "at_ms": self.at_ms,
+            "phase_id": self.phase_id,
         }
         if self.reasoning_content:
             payload["reasoning_content"] = self.reasoning_content
@@ -356,6 +361,7 @@ class SubagentMessage:
             success=success,
             extra=extra if isinstance(extra, dict) else None,
             at_ms=float(raw.get("at_ms") or 0.0),
+            phase_id=int(raw.get("phase_id") or 0),
         )
 
 
