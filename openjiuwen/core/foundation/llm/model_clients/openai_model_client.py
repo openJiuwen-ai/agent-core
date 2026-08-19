@@ -248,14 +248,17 @@ def _should_omit_authorization(model_client_config: ModelClientConfig) -> bool:
 
 
 def _normalize_openai_base_url(api_base: str) -> str:
-    """Normalize host /v1 /chat/completions forms to an OpenAI SDK base_url."""
+    """Return an OpenAI SDK base_url without inventing a ``/v1`` suffix.
+
+    Caller-provided ``api_base`` is passed through after trimming whitespace
+    and a trailing slash. If the value is a full chat-completions URL, strip
+    that path so the SDK (or affinity HTTP client) can append endpoint paths.
+    """
     base = str(api_base or "").strip().rstrip("/")
     if not base:
         return base
     if base.endswith("/chat/completions"):
         base = base[: -len("/chat/completions")].rstrip("/")
-    if not base.endswith("/v1"):
-        base = f"{base}/v1"
     return base
 
 
