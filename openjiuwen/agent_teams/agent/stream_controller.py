@@ -126,6 +126,7 @@ class StreamController:
         # the matching ask. Guarded by _interrupt_lock.
         self._pending_interrupt_resumes: list[Any] = []
         self._interrupt_lock = asyncio.Lock()
+        self._drain_task: Optional[asyncio.Task] = None
         # Transient-retry state (per cycle): attempts so far, and whether to
         # swallow the remaining chunks of a round that emitted a retryable
         # task_failed (reset when the next round starts).
@@ -210,6 +211,12 @@ class StreamController:
     async def stop(self) -> None:
         """Stop the output forwarder. The runtime unregisters its own events."""
         self._pending_interrupt_resumes.clear()
+        drain = self._drain_task
+        self._drain_task = None
+        if drain is not None and not drain.done():
+            drain.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await drain
         task = self._forward_task
         self._forward_task = None
         if task is not None and not task.done():
@@ -378,17 +385,23 @@ class StreamController:
         # supervisor dispatch path: harness.send awaits an ack the single
         # supervisor can only process after the current on_state callback
         # returns, so a synchronous send here would deadlock. An approval whose
-        # ask never re-committed (turn aborted) is an orphan — drop it.
-        if self._pending_interrupt_resumes:
-            if self.has_pending_interrupt():
-                asyncio.create_task(self._drain_pending_interrupt_resumes())
-            else:
-                self._pending_interrupt_resumes.clear()
-                team_logger.info(
-                    "[{}] dropped orphaned queued interrupt resumes (round "
-                    "ended without re-committing their ask)",
-                    self._member_name() or "?",
-                )
+        # ask never re-committed (turn aborted) is an orphan — drop it. The
+        # queue is mutated under _interrupt_lock to keep the invariant
+        # consistent with resume_interrupt / _drain_pending_interrupt_resumes.
+        drain_now = False
+        async with self._interrupt_lock:
+            if self._pending_interrupt_resumes:
+                if self.has_pending_interrupt():
+                    drain_now = True
+                else:
+                    self._pending_interrupt_resumes.clear()
+                    team_logger.info(
+                        "[{}] dropped orphaned queued interrupt resumes (round "
+                        "ended without re-committing their ask)",
+                        self._member_name() or "?",
+                    )
+        if drain_now and (self._drain_task is None or self._drain_task.done()):
+            self._drain_task = asyncio.create_task(self._drain_pending_interrupt_resumes())
         await self._wake_mailbox_if_interrupt_cleared()
         if self._request_completion_poll is not None:
             await self._request_completion_poll()
@@ -545,35 +558,50 @@ class StreamController:
             return "dropped"
 
     async def _drain_pending_interrupt_resumes(self) -> None:
-        """Deliver queued interrupt resumes whose ask the round has now reached.
+        """Deliver the next queued interrupt resume whose ask the round reached.
 
         Triggered when a round settles (IDLE) with a pending interrupt: the
-        just-committed interrupt state may now match a previously-queued
-        approval whose ``tool_call_id`` was not yet pending when it arrived.
-        Delivery runs outside the lock so a slow ``harness.send`` does not
-        block other resumes; a delivery failure is logged and the approval is
-        discarded.
+        just-committed interrupt state may now match a previously-queued approval
+        whose ``tool_call_id`` was not yet pending when it arrived. Deliver at
+        most ONE per pass: a delivery starts a resume round that clears the
+        interrupt slot, so any later queued approvals become invalid until the
+        round re-commits their ask (drained on the next IDLE settle). Re-check
+        validity immediately before sending in case the state changed between
+        the scan and now (e.g. a competing send already started a round).
         """
-        to_deliver: list[Any] = []
         async with self._interrupt_lock:
             if not self._pending_interrupt_resumes:
                 return
+            deliverable = None
             remaining: list[Any] = []
             for candidate in self._pending_interrupt_resumes:
-                if self.is_valid_interrupt_resume(candidate):
-                    to_deliver.append(candidate)
+                if deliverable is None and self.is_valid_interrupt_resume(candidate):
+                    deliverable = candidate
                 else:
                     remaining.append(candidate)
             self._pending_interrupt_resumes = remaining
-        harness = self._resources.harness
-        if harness is None or not to_deliver:
+            if deliverable is None:
+                return
+        # Re-check outside the lock: a competing send may have started a round
+        # and cleared the slot since the scan. Still valid => slot present =>
+        # round IDLE => harness.send starts a clean resume round (not a
+        # follow-up). Invalid => re-queue for the next IDLE settle.
+        if not self.is_valid_interrupt_resume(deliverable):
+            async with self._interrupt_lock:
+                self._pending_interrupt_resumes.insert(0, deliverable)
             return
-        for candidate in to_deliver:
-            try:
-                await harness.send(candidate)
-            except Exception:
-                team_logger.warning(
-                    "[{}] queued interrupt resume delivery failed",
-                    self._member_name() or "?",
-                    exc_info=True,
-                )
+        harness = self._resources.harness
+        if harness is None:
+            async with self._interrupt_lock:
+                self._pending_interrupt_resumes.insert(0, deliverable)
+            return
+        try:
+            await harness.send(deliverable)
+        except Exception:
+            team_logger.warning(
+                "[{}] queued interrupt resume delivery failed",
+                self._member_name() or "?",
+                exc_info=True,
+            )
+            async with self._interrupt_lock:
+                self._pending_interrupt_resumes.insert(0, deliverable)
