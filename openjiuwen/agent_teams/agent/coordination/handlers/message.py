@@ -28,9 +28,11 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
 from openjiuwen.agent_teams.debate import (
     DebateMessageRole,
+    make_debate_invocation_meta,
+    normalize_debate_meta,
     parse_debate_coordination_meta,
 )
-from openjiuwen.agent_teams.i18n import reply_hint_for, t
+from openjiuwen.agent_teams.i18n import STRINGS, reply_hint_for, t
 from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_BROADCAST,
     INBOUND_TYPE_DIRECT,
@@ -42,6 +44,7 @@ from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_time_context
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.agent_teams.tools.message_manager import DirectMessageOptions
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -249,6 +252,19 @@ class MessageHandler(BaseCoordinationHandler):
                         getattr(msg, "coordination_meta", None),
                     )
                     debate_state = getattr(backend, "debate_state", None)
+                    if await self._is_capped_peer_message(
+                        member_name,
+                        msg,
+                        debate_meta,
+                        debate_state,
+                    ):
+                        if await self._answer_capped_peer_message(
+                            member_name,
+                            msg,
+                            debate_meta,
+                        ):
+                            delivered.append(msg)
+                        continue
                     if self._round.has_pending_interrupt():
                         # Approval messages are admitted to resume_interrupt;
                         # all other messages are deferred until the interrupt clears.
@@ -298,6 +314,11 @@ class MessageHandler(BaseCoordinationHandler):
                             expanded=expanded,
                             is_human_agent=is_human_agent,
                             now_ms=get_current_time(),
+                            suppress_reply_hint=(
+                                debate_meta is not None
+                                and debate_meta["message_role"]
+                                == DebateMessageRole.CAP_NOTICE.value
+                            ),
                         )
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
@@ -315,6 +336,87 @@ class MessageHandler(BaseCoordinationHandler):
         if team_spec is not None and team_spec.language:
             return team_spec.language
         return "cn"
+
+    async def _is_capped_peer_message(
+        self,
+        member_name: str,
+        msg: Any,
+        debate_meta: dict[str, str] | None,
+        debate_state: Any,
+    ) -> bool:
+        if not (
+            self._blueprint.role == TeamRole.TEAMMATE
+            and debate_meta is not None
+            and debate_meta["message_role"] == DebateMessageRole.PEER.value
+            and debate_state is not None
+            and msg.from_member_name != member_name
+            and await debate_state.is_participant_capped(debate_meta["round_id"])
+        ):
+            return False
+        try:
+            sender = await self._infra.team_backend.get_member(msg.from_member_name)
+        except Exception as exc:  # noqa: BLE001 - uncertain sender identity must fail open
+            team_logger.warning(
+                "[%s] failed to resolve debate peer %s: %s",
+                member_name,
+                msg.from_member_name,
+                exc,
+            )
+            return False
+        return sender is not None and getattr(sender, "role", None) == TeamRole.TEAMMATE.value
+
+    async def _answer_capped_peer_message(
+        self,
+        member_name: str,
+        msg: Any,
+        debate_meta: dict[str, str],
+    ) -> bool:
+        language = "en" if self._language().startswith("en") else "cn"
+        display_name = await self._member_display_name(member_name)
+        content = STRINGS[language]["debate.cap_notice"].format_map(
+            {
+                "member_name": display_name,
+            },
+        )
+        coordination_meta = normalize_debate_meta(
+            make_debate_invocation_meta(
+                debate_meta["round_id"],
+                DebateMessageRole.CAP_NOTICE,
+            ),
+        )
+        try:
+            message_id = await self._infra.message_manager.send_message(
+                content=content,
+                to_member_name=msg.from_member_name,
+                from_member_name=member_name,
+                options=DirectMessageOptions(
+                    coordination_meta=coordination_meta,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - keep the source message unread for retry
+            team_logger.warning(
+                "[%s] failed to send debate cap notice for message %s: %s",
+                member_name,
+                msg.message_id,
+                exc,
+            )
+            return False
+        if message_id is None:
+            team_logger.warning(
+                "[%s] failed to persist debate cap notice for message %s",
+                member_name,
+                msg.message_id,
+            )
+            return False
+        return True
+
+    async def _member_display_name(self, member_name: str) -> str:
+        try:
+            member = await self._infra.team_backend.get_member(member_name)
+        except Exception:  # noqa: BLE001 - presentation falls back to the stable routing name
+            return member_name
+        display_name = str(getattr(member, "display_name", "") or "").strip()
+        return display_name or member_name
 
     async def _expand(self, msg: Any) -> ExpandedMessage:
         """Render a message row's delivery text (F_63 two-phase templating).
@@ -566,7 +668,15 @@ class MessageHandler(BaseCoordinationHandler):
         merged.sort(key=lambda m: m.timestamp, reverse=True)
         return merged
 
-    def _format_message(self, msg: Any, *, expanded: ExpandedMessage, is_human_agent: bool, now_ms: int) -> str:
+    def _format_message(
+        self,
+        msg: Any,
+        *,
+        expanded: ExpandedMessage,
+        is_human_agent: bool,
+        now_ms: int,
+        suppress_reply_hint: bool = False,
+    ) -> str:
         """Render one TeamMessage as ``<team-inbound>`` XML for agent input.
 
         The message body goes verbatim inside the ``<team-inbound>`` element
@@ -609,8 +719,9 @@ class MessageHandler(BaseCoordinationHandler):
                 note_kind="hitt-silence",
                 note_text=t("hitt.silence_note"),
             )
-        note_kind = None if expanded.is_template else "reply-hint"
-        note_text = None if expanded.is_template else reply_hint_for(msg.from_member_name)
+        omit_reply_hint = expanded.is_template or suppress_reply_hint
+        note_kind = None if omit_reply_hint else "reply-hint"
+        note_text = None if omit_reply_hint else reply_hint_for(msg.from_member_name)
         return render_inbound(
             content=expanded.body,
             sender=msg.from_member_name,

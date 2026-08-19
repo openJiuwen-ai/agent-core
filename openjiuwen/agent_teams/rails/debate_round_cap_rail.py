@@ -16,6 +16,7 @@ from openjiuwen.agent_teams.debate import (
     make_debate_invocation_meta,
     parse_debate_coordination_meta,
 )
+from openjiuwen.agent_teams.i18n import STRINGS
 from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -37,6 +38,7 @@ _OPEN_TASK_STATUSES = frozenset(
     }
 )
 _ELIGIBILITY_KEY_PREFIX = "_team_debate_round_cap_eligible"
+_CAP_NOTICE_KEY_PREFIX = "_team_debate_round_cap_notice"
 
 
 class DebateRoundCapRail(DeepAgentRail):
@@ -115,7 +117,7 @@ class DebateRoundCapRail(DeepAgentRail):
                 await self._debate.mark_failed(member_name)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Tag debate messages and reject teammate peer sends at the cap."""
+        """Tag debate messages and transform over-limit sends into notices."""
         if ctx.extra.get("_skip_tool") or not self._is_send_message(ctx.inputs.tool_name):
             return
         if self._role == TeamRole.LEADER:
@@ -145,11 +147,39 @@ class DebateRoundCapRail(DeepAgentRail):
         eligible = await self._should_apply(args)
         ctx.extra[eligibility_key] = eligible
         if eligible:
+            ctx.inputs.tool_args = args
+            if self._count >= self._max:
+                args["content"] = self._text(
+                    "debate.cap_notice",
+                    member_name=await self._display_name(),
+                )
+                self._inject_meta(
+                    ctx,
+                    make_debate_invocation_meta(
+                        round_id,
+                        DebateMessageRole.CAP_NOTICE,
+                    ),
+                )
+                ctx.extra[self._cap_notice_key(ctx)] = True
+                return
             inactive = await self._inactive_targets(args.get("to"))
             if inactive:
                 self._reject_tool(ctx, self._inactive_target_text(inactive))
-            elif self._count >= self._max:
-                self._reject_tool(ctx, self._limit_error_text())
+                return
+            self._inject_meta(
+                ctx,
+                make_debate_invocation_meta(
+                    round_id,
+                    DebateMessageRole.PEER,
+                ),
+            )
+            if self._count == self._max - 1:
+                content = str(args.get("content", "") or "")
+                suffix = self._text(
+                    "debate.cap_public_suffix",
+                    member_name=await self._display_name(),
+                )
+                args["content"] = f"{content}\n\n{suffix}"
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Settle Leader invitations or count a successful teammate peer send."""
@@ -181,6 +211,8 @@ class DebateRoundCapRail(DeepAgentRail):
             if args.get("final_report") is True and self._tool_succeeded(ctx):
                 await self._debate.complete_participant(round_id)
             return
+        if ctx.extra.pop(self._cap_notice_key(ctx), False):
+            return
         eligible = ctx.extra.pop(self._eligibility_key(ctx), None)
         if eligible is None:
             eligible = await self._should_apply(ctx.inputs.tool_args)
@@ -190,6 +222,14 @@ class DebateRoundCapRail(DeepAgentRail):
         async with self._count_lock:
             if self._count < self._max:
                 self._count += 1
+                reached_cap = self._count == self._max
+            else:
+                reached_cap = False
+        if reached_cap and await self._debate.mark_participant_capped(round_id):
+            self._append_tool_instruction(
+                ctx,
+                self._text("debate.cap_private_instruction"),
+            )
 
     async def _should_apply(self, tool_args: Any) -> bool:
         args = self._parse_args(tool_args)
@@ -352,17 +392,6 @@ class DebateRoundCapRail(DeepAgentRail):
         except Exception:  # noqa: BLE001 - preserve final-report path on lookup failure
             return "team_leader"
 
-    def _limit_error_text(self) -> str:
-        if self._language.startswith("zh") or self._language == "cn":
-            return (
-                f"已达到思辨互发上限（本成员 {self._count}/{self._max} 次）。"
-                "请停止向其他成员或全体继续互发，并仅在尚未汇报时向 Leader 发送一次最终要点。"
-            )
-        return (
-            f"Debate send_message limit reached ({self._count}/{self._max}). "
-            "Stop messaging peers or broadcasting; send one final report to the Leader only if needed."
-        )
-
     def _inactive_target_text(self, inactive: set[str]) -> str:
         names = ", ".join(sorted(inactive - {"*"}))
         if self._language.startswith("zh") or self._language == "cn":
@@ -415,6 +444,38 @@ class DebateRoundCapRail(DeepAgentRail):
     @staticmethod
     def _eligibility_key(ctx: AgentCallbackContext) -> str:
         return f"{_ELIGIBILITY_KEY_PREFIX}:{id(ctx)}"
+
+    @staticmethod
+    def _cap_notice_key(ctx: AgentCallbackContext) -> str:
+        return f"{_CAP_NOTICE_KEY_PREFIX}:{id(ctx)}"
+
+    async def _display_name(self) -> str:
+        try:
+            member = await self._team.get_member(self._member_name)
+        except Exception:  # noqa: BLE001 - presentation falls back to the stable routing name
+            return self._member_name
+        display_name = str(getattr(member, "display_name", "") or "").strip()
+        return display_name or self._member_name
+
+    def _text(self, key: str, *, member_name: str | None = None) -> str:
+        language = "en" if self._language.startswith("en") else "cn"
+        return STRINGS[language][key].format_map(
+            {
+                "member_name": member_name or self._member_name,
+                "count": self._max,
+                "max_count": self._max,
+            },
+        )
+
+    @staticmethod
+    def _append_tool_instruction(ctx: AgentCallbackContext, instruction: str) -> None:
+        tool_msg = ctx.inputs.tool_msg
+        if not isinstance(tool_msg, ToolMessage):
+            return
+        if isinstance(tool_msg.content, str):
+            tool_msg.content = f"{tool_msg.content}\n\n{instruction}"
+        elif isinstance(tool_msg.content, list):
+            tool_msg.content.append(instruction)
 
     @staticmethod
     def _parse_args(tool_args: Any) -> dict[str, Any]:

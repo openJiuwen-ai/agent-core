@@ -23,6 +23,7 @@ class DebateMessageRole(str, Enum):
 
     INVITE = "invite"
     PEER = "peer"
+    CAP_NOTICE = "cap_notice"
     FINAL_REPORT = "final_report"
 
 
@@ -50,6 +51,7 @@ class DebateRunState:
         self.finalizing = False
         self.finalized = False
         self.participant_round_id: str | None = None
+        self.participant_capped_round_id: str | None = None
         self._leader_wakeup: LeaderWakeup | None = None
         self._clock = time.monotonic
         self._terminal_grace_seconds = 300.0
@@ -78,6 +80,7 @@ class DebateRunState:
     def reset_participant_round(self) -> None:
         """Clear teammate-local state when a new harness run cycle is built."""
         self.participant_round_id = None
+        self.participant_capped_round_id = None
 
     async def reset_finalized_leader_round(self) -> bool:
         """Clear a completed round before the next external user input."""
@@ -112,8 +115,24 @@ class DebateRunState:
             return False
         async with self._lock:
             changed = self.participant_round_id != round_id
+            if self.participant_capped_round_id != round_id:
+                self.participant_capped_round_id = None
             self.participant_round_id = round_id
             return changed
+
+    async def mark_participant_capped(self, round_id: str) -> bool:
+        """Mark the active participant round as capped."""
+        async with self._lock:
+            if self.participant_round_id != round_id:
+                return False
+            changed = self.participant_capped_round_id != round_id
+            self.participant_capped_round_id = round_id
+            return changed
+
+    async def is_participant_capped(self, round_id: str) -> bool:
+        """Return whether the participant reached its cap in this round."""
+        async with self._lock:
+            return bool(round_id) and self.participant_capped_round_id == round_id
 
     async def complete_participant(self, round_id: str) -> bool:
         """Clear a teammate's active round after a successful final report."""

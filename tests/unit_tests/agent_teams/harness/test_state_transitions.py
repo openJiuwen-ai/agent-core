@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.agent_teams.debate import normalize_debate_meta
 from openjiuwen.core.runner import Runner
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
 from openjiuwen.agent_teams.rails.debate_round_cap_rail import DebateRoundCapRail
@@ -254,7 +255,12 @@ async def test_debate_cap_rail_persists_across_idle_mailbox_rounds() -> None:
             if isinstance(item, DebateRoundCapRail)
         ] == [rail]
         assert rail._count == 2
-        assert fake.tool_contexts[2].extra["_skip_tool"] is True
+        cap_notice = fake.tool_contexts[2]
+        assert cap_notice.extra.get("_skip_tool") is None
+        assert "member has reached" in cap_notice.inputs.tool_args["content"]
+        assert normalize_debate_meta(
+            cap_notice.inputs.tool_args["_team_debate_meta"],
+        )["message_role"] == "cap_notice"
         assert fake.tool_contexts[3].extra.get("_skip_tool") is None
     finally:
         await Runner.stop()
