@@ -74,7 +74,7 @@ DEFAULT_DOCKER_IMAGE = "yr-docker-runtime:v0"
 DEFAULT_DOCKER_WORKDIR = "/tmp/test"
 DEFAULT_DOCKER_MOUNTS = [{"source": "/tmp", "target": "/tmp/test", "readonly": True}]
 DEFAULT_DOCKER_CPU = 1000
-DEFAULT_DOCKER_MEMORY = 512
+DEFAULT_DOCKER_MEMORY = 1024
 YUANRONG_IDLE_TIMEOUT = -1
 
 
