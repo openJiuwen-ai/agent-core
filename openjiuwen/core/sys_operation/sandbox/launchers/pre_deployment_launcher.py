@@ -32,7 +32,7 @@ class PreDeploymentLauncher(SandboxLauncher):
                 reason="teardown",
             )
 
-        elif sandbox_type == "jiuwenbox":
+        elif sandbox_type in ("jiuwenbox", "jiuwenbox-conch"):
             from openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox import (
                 build_jiuwenbox_shared_scope_key,
                 delete_jiuwenbox_sandbox,

@@ -63,7 +63,7 @@ build_jiuwenbox_http_client(
 ) -> httpx.Client
 ```
 
-Creates a synchronous `httpx.Client` for the JiuwenBox HTTP API. A trailing `/` is removed from `base_url`. A non-empty `api_token` adds Bearer authentication; when omitted, the function reads `JIUWENBOX_API_TOKEN`.
+Creates a synchronous `httpx.Client` for the JiuwenBox HTTP API. A trailing `/` is removed from `base_url`. TCP endpoints use `http://host:port`; Unix Domain Socket endpoints use `unix:///abs/socket/path` (three slashes and an absolute path) via `httpx.HTTPTransport(uds=...)`. A non-empty `api_token` adds Bearer authentication; when omitted, the function reads `JIUWENBOX_API_TOKEN`.
 
 The caller must close the returned client or use it as a context manager.
 
