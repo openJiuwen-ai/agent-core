@@ -37,10 +37,14 @@ def _affinity_client(api_base: str = "https://example.test") -> OpenAIModelClien
 @pytest.mark.parametrize(
     ("api_base", "expected"),
     [
-        ("http://host:8000", "http://host:8000/v1"),
+        ("http://host:8000", "http://host:8000"),
         ("http://host:8000/v1", "http://host:8000/v1"),
+        ("http://host:8000/v1/", "http://host:8000/v1"),
         ("http://host:8000/v1/chat/completions", "http://host:8000/v1"),
-        ("http://host:8000/chat/completions", "http://host:8000/v1"),
+        ("http://host:8000/chat/completions", "http://host:8000"),
+        ("https://gw.internal/llm", "https://gw.internal/llm"),
+        ("https://host/v1/infers/xxx", "https://host/v1/infers/xxx"),
+        ("https://host/v2", "https://host/v2"),
     ],
 )
 def test_normalize_openai_base_url(api_base, expected):
