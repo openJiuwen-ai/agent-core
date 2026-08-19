@@ -70,15 +70,15 @@ class LspRail(DeepAgentRail):
         self._log_file: "Path | None" = None
         self._initialize_options: "InitializeOptions | None" = None
         self._initialization_lock: asyncio.Lock | None = None
+        self._initialization_task: asyncio.Task[None] | None = None
         self._shutdown_task: asyncio.Task[None] | None = None
 
     def init(self, agent: Any) -> None:
         """Initialize LSP subsystem and register LspTool on the agent.
 
-        This method resolves options, creates an LspTool instance, and registers
-        it on the agent's ability_manager. LSP manager initialization happens in
-        ``before_model_call`` so this synchronous lifecycle hook never blocks a
-        running event loop.
+        This method resolves options, creates an LspTool instance, registers it
+        on the agent's ability_manager, and starts LSP initialization before the
+        first model call.
 
         Args:
             agent: The DeepAgent instance to register tools on.
@@ -154,11 +154,23 @@ class LspRail(DeepAgentRail):
             agent.ability_manager.add_ability(self._lsp_tool.card, self._lsp_tool)
             self._initialized = True
             logger.info(
-                "LspRail: registered LspTool; LSP initialization will run before the first model call (cwd=%s)",
+                "LspRail: registered LspTool; starting LSP initialization (cwd=%s)",
                 effective_cwd,
             )
+            self._start_lsp_initialization()
         except Exception as exc:
             logger.warning("LspRail: failed to register LspTool, error: %s", exc)
+
+    def _start_lsp_initialization(self) -> None:
+        """Start LSP initialization without adding it to the model-call path."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self._ensure_lsp_initialized())
+            return
+
+        if self._initialization_task is None or self._initialization_task.done():
+            self._initialization_task = loop.create_task(self._ensure_lsp_initialized())
 
     async def _ensure_lsp_initialized(self) -> None:
         """Initialize LSP without blocking the event loop that owns this rail."""
@@ -333,8 +345,6 @@ class LspRail(DeepAgentRail):
         sees the errors without the agent having to call any diagnostic tool
         explicitly.
         """
-        await self._ensure_lsp_initialized()
-
         from openjiuwen.harness.lsp import get_pending_lsp_diagnostics
 
         diagnostics = get_pending_lsp_diagnostics()
