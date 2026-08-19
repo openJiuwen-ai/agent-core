@@ -19,14 +19,11 @@ is exactly one root kind (session), so no provider interface exists.
 
 from __future__ import annotations
 
-import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from openjiuwen.agent_teams.paths import team_session_dir
-
-team_logger = logging.getLogger("agent_teams")
 
 # DB ``content`` column value marking "body lives in the session file".
 # No path is stored — ``SessionFileStore.get`` derives it from the row fields.
