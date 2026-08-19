@@ -191,6 +191,46 @@ def log_llm_response(log: Any, ai_message: Any) -> None:
                 )
 
 
+# --- tool_call streaming progress heartbeat --------------------------------
+# During sustained tool_calls-only streaming (long tool_call argument gen,
+# e.g. debate long replies / writing large files), dev-stable react_agent
+# accumulates tool_call chunks WITHOUT writing to the session stream. The
+# member's stream goes silent → relay's team stall watchdog (300s) kills the
+# round (OA.05000090). Emit a throttled llm_toolcall_progress frame so sidecar
+# → relay sees a business frame (mapped to chat.processing_status). True stalls
+# (chunks stop) naturally stop the heartbeat → watchdog still catches them.
+# Mirrors the contentless probe in foundation/llm/model.py.
+_TOOLCALL_PROGRESS_GRACE_S = 15.0
+_TOOLCALL_PROGRESS_INTERVAL_S = 30.0
+
+
+def _maybe_toolcall_progress_output(
+        *,
+        last_contentful_at: float,
+        last_progress_at: float,
+        now: float,
+        chunk_count: int,
+        index: int,
+) -> Optional["OutputSchema"]:
+    """Return an llm_toolcall_progress OutputSchema when a tool_calls-only
+    streak has outlasted GRACE and the previous progress frame is older than
+    INTERVAL; else None. Caller updates last_contentful_at on content/reasoning
+    chunks and last_progress_at after emitting."""
+    if (now - last_contentful_at >= _TOOLCALL_PROGRESS_GRACE_S) and (
+        now - last_progress_at >= _TOOLCALL_PROGRESS_INTERVAL_S
+    ):
+        return OutputSchema(
+            type="llm_toolcall_progress",
+            index=index,
+            payload={
+                "elapsed_s": round(now - last_contentful_at, 1),
+                "chunk_count": chunk_count,
+                "result_type": "answer",
+            },
+        )
+    return None
+
+
 class ReActAgentConfig(BaseModel):
     """ReActAgent Configuration Class
 
