@@ -32,7 +32,6 @@ from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
-    ToolCallInputs,
 )
 from openjiuwen.harness.prompts.sections.task_completion import (
     build_completion_signal_section,
@@ -626,7 +625,6 @@ class TaskCompletionRail(DeepAgentRail):
             build_goal_current_instruction(record, language),
             self._extract_attempt_context(ctx),
             language,
-            contract=record.contract,
             blocking_history=record.blocking_history,
         )
         try:

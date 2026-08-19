@@ -169,68 +169,6 @@ class TokenUsage:
         )
 
 
-_CONTRACT_LABELS: Dict[str, Dict[str, str]] = {
-    "cn": {
-        "outcome": "完成结果",
-        "verification": "验证标准",
-        "constraints": "约束",
-        "boundaries": "范围",
-        "stop_when": "停止条件",
-    },
-    "en": {
-        "outcome": "Outcome",
-        "verification": "Verification",
-        "constraints": "Constraints",
-        "boundaries": "Boundaries",
-        "stop_when": "Stop when",
-    },
-}
-
-_CONTRACT_FIELDS = ("outcome", "verification", "constraints", "boundaries", "stop_when")
-
-
-@dataclass
-class GoalContract:
-    """Structured completion contract for a goal.
-
-    Turns a vague natural-language objective into verifiable criteria so the
-    transcript assessor can check each item instead of guessing from the
-    objective's semantics. Injected into both the agent's ``<goal_task>``
-    and the assessor prompt. Contract != evaluation rubric (it is user/draft
-    generated, coarser than rubrics, does not leak the gold standard).
-    """
-
-    outcome: str = ""
-    verification: str = ""
-    constraints: str = ""
-    boundaries: str = ""
-    stop_when: str = ""
-
-    def is_empty(self) -> bool:
-        return not any(getattr(self, f).strip() for f in _CONTRACT_FIELDS)
-
-    def to_dict(self) -> Dict[str, str]:
-        return {f: getattr(self, f) for f in _CONTRACT_FIELDS}
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "GoalContract":
-        if not isinstance(data, dict):
-            return cls()
-        return cls(**{f: str(data.get(f) or "") for f in _CONTRACT_FIELDS})
-
-    def render_block(self, language: str = "cn") -> str:
-        if self.is_empty():
-            return ""
-        labels = _CONTRACT_LABELS.get(language, _CONTRACT_LABELS["cn"])
-        sep = "：" if language == "cn" else ": "
-        lines = []
-        for f in _CONTRACT_FIELDS:
-            value = getattr(self, f).strip()
-            if value:
-                lines.append(f"- {labels[f]}{sep}{value}")
-        return "\n".join(lines)
-
-
 @dataclass
 class GoalRecord:
     goal_id: str
@@ -244,7 +182,6 @@ class GoalRecord:
     token_budget: Optional[int] = None
     last_assessment: Optional[GoalAssessment] = None
     last_stop_reason: Optional[str] = None
-    contract: Optional[GoalContract] = None
     blocking_history: list[str] = field(default_factory=list)
     time_used_seconds: int = 0
     active_started_at: Optional[str] = None
@@ -290,7 +227,6 @@ class GoalRecord:
             "token_budget": self.token_budget,
             "last_assessment": self.last_assessment.to_dict() if self.last_assessment else None,
             "last_stop_reason": self.last_stop_reason,
-            "contract": self.contract.to_dict() if self.contract else None,
             "blocking_history": list(self.blocking_history),
             "time_used_seconds": self.time_used_seconds,
             "active_started_at": self.active_started_at,
@@ -311,7 +247,6 @@ class GoalRecord:
             raise ValueError("invalid persisted GoalRecord status") from exc
         usage_data = data.get("token_usage")
         assessment_data = data.get("last_assessment")
-        contract_data = data.get("contract")
         # Session ``update_dict`` treats nested ``None`` as key deletion. After
         # pause/complete, ``active_started_at`` may be absent rather than null.
         time_used_raw = data.get("time_used_seconds", 0)
@@ -343,9 +278,6 @@ class GoalRecord:
             if isinstance(assessment_data, dict)
             else None,
             last_stop_reason=data.get("last_stop_reason") or None,
-            contract=GoalContract.from_dict(contract_data)
-            if isinstance(contract_data, dict)
-            else None,
             blocking_history=list(data.get("blocking_history") or []),
             time_used_seconds=_non_negative_int(time_used_raw, "time_used_seconds"),
             active_started_at=active_started_at,
@@ -361,7 +293,6 @@ class GoalRecord:
         objective: str,
         max_attempts: Optional[int] = None,
         token_budget: Optional[int] = None,
-        contract: Optional[GoalContract] = None,
     ) -> "GoalRecord":
         now = _utc_now_iso()
         return cls(
@@ -370,7 +301,6 @@ class GoalRecord:
             objective=objective,
             max_attempts=max_attempts,
             token_budget=token_budget,
-            contract=contract,
             active_started_at=now,
             created_at=now,
             updated_at=now,
@@ -389,7 +319,6 @@ class GoalStopConfig:
 __all__ = [
     "GoalAssessment",
     "GoalAssessmentStatus",
-    "GoalContract",
     "GoalOperationError",
     "GoalRecord",
     "GoalStatus",

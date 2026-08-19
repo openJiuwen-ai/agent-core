@@ -10,7 +10,6 @@ from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.harness.goal.schema import (
     GoalAssessment,
     GoalAssessmentStatus,
-    GoalContract,
     GoalOperationError,
     GoalRecord,
     GoalStatus,
@@ -102,7 +101,6 @@ class GoalManager:
         overwrite_confirmed: bool = False,
         token_budget: Optional[int] = None,
         max_attempts: Optional[int] = None,
-        contract: Optional[GoalContract] = None,
     ) -> GoalRecord:
         normalized = objective.strip()
         if not normalized:
@@ -145,7 +143,6 @@ class GoalManager:
                 objective=normalized,
                 token_budget=token_budget,
                 max_attempts=max_attempts,
-                contract=contract,
             )
             self._store.save(record)
             await self._commit_store_locked()
