@@ -52,6 +52,17 @@ from openjiuwen.harness.rails.evolution.team_context_evolution_rail import (
 )
 from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import TeamSkillEvolutionRail
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
+from openjiuwen.harness.rails.evolution.ttse import (
+    SignalBasedSuccessDetector,
+    SuccessDetector,
+    SuccessOutcome,
+    TrajectoryErrorSuccessDetector,
+    TTSEConfig,
+    TTSERail,
+    TTSERecordStore,
+    configure_ttse_evolution,
+    unconfigure_ttse_evolution,
+)
 from openjiuwen.harness.rails.skills.skill_create_rail import SkillCreateRail
 from openjiuwen.harness.rails.skills.team_skill_create_rail import TeamSkillCreateRail
 
@@ -92,4 +103,13 @@ __all__ = [
     "ensure_evolution_review_agent_config",
     "remove_evolution_review_agent_config",
     "unconfigure_skill_evolution",
+    "configure_ttse_evolution",
+    "unconfigure_ttse_evolution",
+    "TTSEConfig",
+    "TTSERail",
+    "TTSERecordStore",
+    "SuccessDetector",
+    "SuccessOutcome",
+    "TrajectoryErrorSuccessDetector",
+    "SignalBasedSuccessDetector",
 ]

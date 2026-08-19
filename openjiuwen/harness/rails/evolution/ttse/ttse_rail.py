@@ -1,0 +1,449 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""TTSERail: Two-Track Self-Evolution as a native jiuwen rail.
+
+Subclasses :class:`EvolutionRail` so FACT/TIP dual-track induction and
+injection run on the shared trajectory-collection machinery without coupling
+to the skill-body track:
+
+  * **Track 1 (FACT)** - declarative environment facts.
+  * **Track 2 (meta-TIP)** - capability selection (which skill/tool to use and
+    when) plus procedures for tasks that used no skill.
+
+Injection happens in ``before_model_call``. The frozen TTSE algorithm lives
+in :mod:`prompts` / :mod:`induction`; only the I/O layer (trajectory source,
+capability enumeration, persistence, prompt section) is rewired to jiuwen
+async primitives.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any, List, Optional
+
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
+from openjiuwen.core.single_agent.prompts.builder import PromptSection
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
+from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
+
+from .capabilities import render_capabilities
+from .config import TTSEConfig
+from .induction import blame, induce, induce_batch, synthesize
+from .render import build_section_text, rules_numbered
+from .retrieval import retrieve_top_k
+from .stores import TTSERecordStore
+from .success import SuccessDetector, TrajectoryErrorSuccessDetector
+from .trajectory_adapter import messages_to_trajectory_text
+
+
+class TTSERail(EvolutionRail):
+    """``EvolutionRail`` + FACT/TIP dual-track induction and injection."""
+
+    def __init__(
+        self,
+        *,
+        llm: Model,
+        model: str,
+        ttse_config: Optional[TTSEConfig] = None,
+        embedding: Optional[EmbeddingProvider] = None,
+        success_detector: Optional[SuccessDetector] = None,
+        **kwargs: Any,
+    ) -> None:
+        self._ttse_llm = llm
+        self._ttse_model = model
+        self._ttse_config = ttse_config or TTSEConfig()
+        self._ttse_store = TTSERecordStore(self._ttse_config, embedding=embedding)
+        # Pluggable success detector gates the blame/synthesize pass.
+        self._success_detector = success_detector or TrajectoryErrorSuccessDetector(self._ttse_config.success_threshold)
+        # Per-invoke injection cache (query -> rendered section body).
+        self._inj_query: Optional[str] = None
+        self._inj_body: Optional[str] = None
+        # Serializes the whole bank-mutating reflection (blame/retire/synth/induce)
+        # so concurrent background reflections (one per invoke) don't interleave.
+        self._evolution_lock = asyncio.Lock()
+        # Batch induce buffer: when batch_size > 1, per-task observations collect
+        # here and induce as ONE call every batch_size tasks (cost amortization).
+        # All access is inside _evolution_lock, so it stays race-free.
+        self._batch_buffer: list[dict] = []
+        # Last capability list seen during induction; reused by flush() which
+        # has no ctx/agent to introspect.
+        self._last_capabilities: Optional[str] = None
+        super().__init__(**kwargs)
+
+    # ------------------------------------------------------------------
+    # Snapshot enrichment: capture agent state while ctx is still alive
+    # (async mode runs run_evolution in a background task with ctx=None).
+    # ------------------------------------------------------------------
+
+    async def _snapshot_for_evolution(self, trajectory, ctx: AgentCallbackContext):
+        snapshot = await super()._snapshot_for_evolution(trajectory, ctx)
+        if snapshot is None:
+            return None
+        agent = getattr(ctx, "agent", None)
+        try:
+            snapshot["ttse_capabilities"] = await render_capabilities(agent)
+        except Exception as exc:  # noqa: BLE001 - never block snapshot capture
+            logger.warning("[TTSERail] capability enumeration failed: %s", exc)
+        snapshot["ttse_task_query"] = self._extract_query(ctx)
+        return snapshot
+
+    # ------------------------------------------------------------------
+    # Evolution: FACT/meta-TIP induction
+    # ------------------------------------------------------------------
+
+    def _allow_evolution_trigger(self, trigger_point, ctx: AgentCallbackContext) -> bool:
+        """Trigger every invoke: TTSE induces from EVERY task.
+
+        Skip heartbeat/cron background runs so those do not grow the bank.
+        """
+        if not self._ttse_config.evolve_enabled:
+            return False
+        if ctx is not None and self._is_background_run(ctx):
+            return False
+        return True
+
+    @staticmethod
+    def _is_background_run(ctx: AgentCallbackContext) -> bool:
+        inputs = getattr(ctx, "inputs", None)
+        for method_name in ("is_heartbeat", "is_cron"):
+            method = getattr(inputs, method_name, None)
+            if callable(method) and method():
+                return True
+
+        run_kind = getattr(inputs, "run_kind", None)
+        if run_kind is None:
+            run_kind = getattr(ctx, "extra", {}).get("run_kind") if ctx is not None else None
+        if run_kind in (RunKind.HEARTBEAT, RunKind.CRON):
+            return True
+        if isinstance(run_kind, str) and run_kind in {RunKind.HEARTBEAT.value, RunKind.CRON.value}:
+            return True
+
+        conversation_id = getattr(inputs, "conversation_id", None)
+        return isinstance(conversation_id, str) and conversation_id.startswith(("heartbeat", "cron"))
+
+    async def run_evolution(self, trajectory, ctx: Optional[AgentCallbackContext] = None, *, snapshot=None):
+        if not self._ttse_config.evolve_enabled:
+            logger.debug("[TTSERail] run_evolution skipped: evolve_enabled=False")
+            return
+        if trajectory is None:
+            logger.debug("[TTSERail] run_evolution skipped: trajectory is None")
+            return
+        logger.info("[TTSERail] run_evolution started")
+        try:
+            await self._run_ttse_induction(trajectory, ctx, snapshot=snapshot)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[TTSERail] induction failed: %s", exc)
+
+    async def _run_ttse_induction(
+        self,
+        trajectory,
+        ctx: Optional[AgentCallbackContext] = None,
+        *,
+        snapshot: Optional[dict] = None,
+    ) -> None:
+        snapshot = snapshot or {}
+        messages = snapshot.get("messages")
+        if messages is None:
+            messages = self._collect_messages_from_trajectory(trajectory)
+
+        capabilities = snapshot.get("ttse_capabilities")
+        if capabilities is None:
+            capabilities = await render_capabilities(getattr(ctx, "agent", None))
+        # Cache so flush() (which has no ctx) can reuse the real capability list.
+        self._last_capabilities = capabilities
+
+        task_query = snapshot.get("ttse_task_query") or self._extract_query(ctx)
+        if not task_query:
+            task_query = self._last_user_text(messages)
+
+        traj_text = messages_to_trajectory_text(messages, budget=self._ttse_config.traj_char_budget)
+        if not traj_text:
+            logger.debug("[TTSERail] induction skipped: empty trajectory text")
+            return
+        logger.info(
+            "[TTSERail] starting induction query=%s batch_size=%s has_capabilities=%s",
+            (task_query or "")[:80],
+            self._ttse_config.batch_size,
+            bool(capabilities),
+        )
+
+        # Inject per-dimension grader scores at the head of the trajectory so
+        # induce sees WHERE the task was strong/weak, not just the pass/fail
+        # outcome label.
+        _dim_scores = snapshot.get("ttse_dim_scores")
+        _overall = snapshot.get("ttse_score")
+        if isinstance(_dim_scores, dict) and _dim_scores:
+            _parts = [f"{k}={float(v):.2f}" for k, v in _dim_scores.items() if v is not None]
+            if _overall is not None:
+                _parts.append(f"overall={float(_overall):.2f}")
+            if _parts:
+                traj_text = (
+                    "[GRADER SCORES 0-1 per dimension, lower = weaker] "
+                    + " ".join(_parts)
+                    + " — account for BOTH high dimensions (what worked) and low "
+                    "dimensions (what was weak / should improve) when extracting rules." + "\n" + traj_text
+                )
+
+        # Whole-section lock: the reflection reads the bank (dedup inputs in
+        # ``induce``/``induce_batch``, snapshots in ``_blame_and_retire``) and
+        # then mutates it (retire/add). In async-evolution mode a fresh
+        # background reflection is spawned per invoke, so two could interleave
+        # and clobber each other's dedup view or retire. Serialize the whole
+        # read-modify-write so one reflection's bank view is stable end to end.
+        async with self._evolution_lock:
+            result = await self._success_detector.detect(trajectory, messages, ctx=ctx, snapshot=snapshot)
+            outcome = result.outcome
+            logger.info(
+                "[TTSERail] success detect outcome=%s reason=%s score=%s",
+                outcome,
+                result.reason,
+                result.score,
+            )
+
+            if self._ttse_config.batch_size <= 1:
+                # Per-task mode (reference ``learn``): induce on EVERY task.
+                # success -> tactics; fail -> blame/retire/synthesize -> induce.
+                if outcome == "fail":
+                    await self._blame_and_resolve(task_query, traj_text, capabilities)
+                facts, tips = await induce(
+                    llm=self._ttse_llm,
+                    model=self._ttse_model,
+                    policy=self._ttse_config.induce_llm_policy,
+                    task_prompt=task_query,
+                    traj_text=traj_text,
+                    capabilities=capabilities,
+                    existing_facts=self._ttse_store.facts_texts(),
+                    existing_tips=self._ttse_store.tips_texts(),
+                    outcome=outcome,
+                )
+                added = await self._add_rules(facts, tips)
+                if added:
+                    logger.info(
+                        "[TTSERail] induced %s new rule(s) (outcome=%s); bank stats=%s",
+                        added,
+                        outcome,
+                        self._ttse_store.stats(),
+                    )
+                return
+
+            # Batch mode (reference ``learn_batch``): buffer this task. blame/retire
+            # still run per failed task (concentrated here); synthesize + induce
+            # run ONCE per batch -> N tasks amortize to a single induce LLM call.
+            self._batch_buffer.append(
+                {
+                    "task_id": snapshot.get("task_id") or "",
+                    "task_prompt": task_query,
+                    "traj_text": traj_text[: self._ttse_config.batch_traj_budget],
+                    "outcome": outcome,
+                }
+            )
+            if outcome == "fail":
+                await self._blame_and_retire(task_query, traj_text)
+            if len(self._batch_buffer) >= self._ttse_config.batch_size:
+                await self._flush_batch(capabilities)
+
+    async def _blame_and_retire(self, task_query: str, traj_text: str) -> None:
+        """Fail path step 1: blame -> retire (no synthesize).
+
+        Shared by the per-task and batch paths so blame/retire can run per
+        failed task while synthesize is deferred to once-per-batch.
+        """
+        flat = self._ttse_store.snapshot_flat()
+        if not flat:
+            logger.info("[TTSERail] blame skipped: bank is empty")
+            return
+        logger.info("[TTSERail] blaming %s rule(s)", len(flat))
+        numbered = rules_numbered(flat)
+        idx, reason = await blame(
+            llm=self._ttse_llm,
+            model=self._ttse_model,
+            policy=self._ttse_config.induce_llm_policy,
+            task_prompt=task_query,
+            traj_text=traj_text,
+            rules_numbered=numbered,
+            n_rules=len(flat),
+        )
+        if idx is not None and 1 <= idx <= len(flat):
+            text, rtype = flat[idx - 1]
+            removed = await self._ttse_store.retire(text, rtype, reason, task_id="")
+            if removed:
+                logger.info(
+                    "[TTSERail] retired %s #%d (%s): %s",
+                    rtype,
+                    idx,
+                    reason[:60],
+                    text[:60],
+                )
+
+    async def _synthesize_resolving(self, capabilities: str) -> None:
+        """Fail path step 2: propose one resolving TIP when >= 2 rules remain.
+
+        synthesize runs against the bank AFTER retire so a retired bad rule does
+        not seed a contradiction. Below 2 rules there is nothing to contradict.
+        """
+        flat_after = self._ttse_store.snapshot_flat()
+        if len(flat_after) < 2:
+            return
+        new_tip = await synthesize(
+            llm=self._ttse_llm,
+            model=self._ttse_model,
+            policy=self._ttse_config.induce_llm_policy,
+            rules_numbered=rules_numbered(flat_after),
+            capabilities=capabilities,
+        )
+        if new_tip and await self._ttse_store.add_tip(new_tip):
+            logger.info("[TTSERail] synthesized resolving TIP: %s", new_tip[:80])
+
+    async def _blame_and_resolve(self, task_query: str, traj_text: str, capabilities: str) -> None:
+        """Per-task fail path: blame -> retire -> synthesize (before induce)."""
+        logger.info("[TTSERail] starting blame and resolve query=%s", (task_query or "")[:80])
+        await self._blame_and_retire(task_query, traj_text)
+        await self._synthesize_resolving(capabilities)
+
+    async def _add_rules(self, facts: List[str], tips: List[str]) -> int:
+        added = 0
+        for fact in facts:
+            if await self._ttse_store.add_fact(fact):
+                added += 1
+        for tip in tips:
+            if await self._ttse_store.add_tip(tip):
+                added += 1
+        return added
+
+    async def _flush_batch(self, capabilities: str) -> None:
+        """Batch flush: synthesize once + ONE induce_batch over buffered tasks."""
+        if not self._batch_buffer:
+            return
+        await self._synthesize_resolving(capabilities)
+        group = list(self._batch_buffer)
+        self._batch_buffer.clear()
+        facts, tips = await induce_batch(
+            llm=self._ttse_llm,
+            model=self._ttse_model,
+            policy=self._ttse_config.induce_llm_policy,
+            group=group,
+            capabilities=capabilities,
+            existing_facts=self._ttse_store.facts_texts(),
+            existing_tips=self._ttse_store.tips_texts(),
+        )
+        added = await self._add_rules(facts, tips)
+        if added:
+            logger.info(
+                "[TTSERail] batch-induced %s new rule(s) over %s task(s); bank stats=%s",
+                added,
+                len(group),
+                self._ttse_store.stats(),
+            )
+
+    async def flush(self) -> None:
+        """Force-induce any buffered (partial) batch.
+
+        With ``batch_size > 1`` a reflection only induces when the buffer fills.
+        Call this at a task-group boundary (or shutdown) so a trailing partial
+        batch is not lost. No-op in per-task mode or when the buffer is empty.
+        Acquires the evolution lock so it cannot interleave with a reflection.
+        """
+        if not self._batch_buffer:
+            return
+        async with self._evolution_lock:
+            if not self._batch_buffer:
+                return
+            await self._flush_batch(self._last_capabilities or await render_capabilities(None))
+
+    # ------------------------------------------------------------------
+    # Injection (before_model_call)
+    # ------------------------------------------------------------------
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        await super().before_model_call(ctx)
+        if not self._ttse_config.inject_enabled:
+            return
+        builder = getattr(getattr(ctx, "inputs", None), "system_prompt_builder", None)
+        if builder is None:
+            builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
+        if builder is None:
+            return
+
+        query = self._extract_query(ctx)
+        body = await self._resolve_injection_body(query)
+        if not body:
+            # Bank empty (or retrieval found nothing): drop any stale section.
+            if builder.has_section(SectionName.TTSE_FACTS_TIPS):
+                builder.remove_section(SectionName.TTSE_FACTS_TIPS)
+            return
+        builder.add_section(
+            PromptSection(
+                name=SectionName.TTSE_FACTS_TIPS,
+                content={"cn": body, "en": body},
+                priority=45,
+            )
+        )
+
+    async def _resolve_injection_body(self, query: str) -> str:
+        """Compute (and per-invoke cache) the section body for ``query``.
+
+        Within one invoke the query is constant across model steps, so the
+        retrieval result is cached and re-embedded only when the query changes.
+        """
+        if query and query == self._inj_query and self._inj_body is not None:
+            return self._inj_body
+        body = await self._build_injection_body_async(query)
+        self._inj_query = query or None
+        self._inj_body = body or None
+        return body
+
+    async def _build_injection_body_async(self, query: str) -> str:
+        """Top-K retrieval when an embedding provider is configured."""
+        if self._ttse_config.embedding is None:
+            return self._build_injection_body()
+        retrieved = await retrieve_top_k(
+            query,
+            self._ttse_store,
+            k_facts=self._ttse_config.top_k_facts,
+            k_tips=self._ttse_config.top_k_tips,
+        )
+        if retrieved is None:
+            return self._build_injection_body()
+        facts, tips = retrieved
+        if not facts and not tips:
+            return ""
+        return build_section_text(facts, tips, retrieved=True)
+
+    def _build_injection_body(self) -> str:
+        """Whole-bank render (count-sorted). Used when no embedding provider."""
+        return build_section_text(
+            self._ttse_store.facts_records(),
+            self._ttse_store.tips_records(),
+            retrieved=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Query extraction helpers
+    # ------------------------------------------------------------------
+
+    def _extract_query(self, ctx: Optional[AgentCallbackContext]) -> str:
+        if ctx is None:
+            return ""
+        inputs = getattr(ctx, "inputs", None)
+        query = getattr(inputs, "query", None) or getattr(inputs, "retrieval_query", None)
+        if query:
+            return str(query)
+        return self._last_user_text(getattr(inputs, "messages", None))
+
+    @staticmethod
+    def _last_user_text(messages) -> str:
+        if not messages:
+            return ""
+        for msg in reversed(messages):
+            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+            if role == "user":
+                content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+                if content:
+                    return str(content)
+        return ""
+
+
+__all__ = ["TTSERail"]

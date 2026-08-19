@@ -414,6 +414,67 @@ _EXEC_CONTENT_KEYS = (
     "shell_command",
 )
 
+
+def is_tool_execution_failure(content: str, tool_name: str = "") -> Optional[str]:
+    """Return an excerpt if tool output matches execution-failure rules, else None.
+
+    Shared by ConversationSignalDetector and TTSE success detection so the
+    keyword / data-fetch / schema-dump rules stay single-sourced.
+    """
+    name = (tool_name or "").lower()
+    if name in _DATA_FETCH_TOOLS:
+        return None
+    text = content or ""
+    match = _FAILURE_KEYWORDS.search(text)
+    if not match:
+        return None
+    if _TOOL_SCHEMA_PATTERN.search(text):
+        return None
+    return _extract_around_match(text, match)
+
+
+def detect_tool_error_signals(messages: List[dict]) -> List[EvolutionSignal]:
+    """Scan messages for tool ``execution_failure`` signals.
+
+    Deterministic regex scan over ``role in ("tool", "function")`` messages.
+    Resolves tool names from assistant ``tool_calls`` when the tool message
+    only carries ``tool_call_id``. Does not attribute skills.
+    """
+    signals: List[EvolutionSignal] = []
+    tool_call_id_to_name: Dict[str, str] = {}
+    for msg in messages or []:
+        role = str(_get_field(msg, "role") or "")
+        tool_calls = _get_field(msg, "tool_calls", []) or []
+        if role == "assistant" and tool_calls:
+            for tool_call in tool_calls:
+                tc_id = str(_tool_call_field(tool_call, "id") or "")
+                tc_name = str(_tool_call_field(tool_call, "name") or "")
+                if tc_id and tc_name:
+                    tool_call_id_to_name[tc_id] = tc_name
+            continue
+        if role not in ("tool", "function"):
+            continue
+        tool_name = str(_get_field(msg, "name") or _get_field(msg, "tool_name") or "")
+        tool_call_id = str(_get_field(msg, "tool_call_id", "") or "")
+        if not tool_name and tool_call_id:
+            tool_name = tool_call_id_to_name.get(tool_call_id, "")
+        content = str(_get_field(msg, "content") or "")
+        excerpt = is_tool_execution_failure(content, tool_name)
+        if not excerpt:
+            continue
+        signals.append(
+            make_evolution_signal(
+                signal_type="execution_failure",
+                section="Troubleshooting",
+                excerpt=excerpt,
+                tool_name=tool_name or None,
+                skill_name=None,
+                source="passive_conversation",
+            )
+        )
+    return signals
+
+
 DetectionInput = Union[Trajectory, List[dict]]
 
 
@@ -644,14 +705,15 @@ class ConversationSignalDetector:
                         )
                     del pending_scripts[tool_call_id]
 
-                if tool_name.lower() in _DATA_FETCH_TOOLS:
-                    continue
-
-                match = _FAILURE_KEYWORDS.search(content)
-                if match:
-                    if _TOOL_SCHEMA_PATTERN.search(content):
-                        continue
-                    excerpt = _extract_around_match(content, match)
+                excerpt = is_tool_execution_failure(content, str(tool_name or ""))
+                if excerpt:
+                    logger.debug(
+                        "[ConversationSignalDetector] tool attributed to skill=%s "
+                        "signal_type=execution_failure tool=%s msg_idx=%d",
+                        active_skill,
+                        tool_name or None,
+                        msg_idx,
+                    )
                     signals.append(
                         make_evolution_signal(
                             signal_type="execution_failure",
@@ -840,5 +902,7 @@ SignalDetector = ConversationSignalDetector
 __all__ = [
     "ConversationSignalDetector",
     "SignalDetector",  # backward compatibility alias
+    "detect_tool_error_signals",
+    "is_tool_execution_failure",
     "make_signal_fingerprint",
 ]
