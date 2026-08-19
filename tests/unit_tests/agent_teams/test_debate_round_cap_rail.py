@@ -25,7 +25,7 @@ from openjiuwen.agent_teams.schema.build_context import BuildContext
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
-from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.rail.base import ModelCallInputs, ToolCallInputs
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -72,6 +72,13 @@ def _rail(
             SimpleNamespace(member_name=name, role=TeamRole.TEAMMATE.value)
             for name in ("member-a", "member-b", "peer", "other")
         ]
+    )
+    backend.get_member = AsyncMock(
+        return_value=SimpleNamespace(
+            member_name="self",
+            display_name="Data Analyst",
+            role=TeamRole.TEAMMATE.value,
+        ),
     )
     backend.debate_state = DebateRunState(language="en")
     return DebateRoundCapRail(
@@ -123,27 +130,98 @@ async def test_ignores_non_debate_targets_other_tools_and_failed_results() -> No
 
 
 @pytest.mark.asyncio
-async def test_cap_rejects_peers_but_only_tags_explicit_final_report() -> None:
-    rail = _rail(cap=1)
+async def test_debate_metadata_and_capped_state_are_round_scoped() -> None:
+    state = DebateRunState(language="en")
+
+    assert normalize_debate_meta(
+        make_debate_invocation_meta("round-1", DebateMessageRole.PEER),
+    )["message_role"] == "peer"
+    assert normalize_debate_meta(
+        make_debate_invocation_meta("round-1", DebateMessageRole.CAP_NOTICE),
+    )["message_role"] == "cap_notice"
+
+    await state.activate_participant("round-1")
+    assert await state.mark_participant_capped("round-1") is True
+    assert await state.is_participant_capped("round-1") is True
+
+    await state.complete_participant("round-1")
+    assert await state.is_participant_capped("round-1") is True
+
+    await state.activate_participant("round-2")
+    assert await state.is_participant_capped("round-1") is False
+    assert await state.is_participant_capped("round-2") is False
+
+
+@pytest.mark.asyncio
+async def test_peer_send_is_tagged_and_last_send_caps_participant() -> None:
+    rail = _rail(cap=2)
     await rail._debate.activate_participant("round-1")
-    await rail.after_tool_call(
-        _context(to="peer", result=ToolOutput(success=True)),
-    )
 
     peer = _context(to="peer")
     await rail.before_tool_call(peer)
+    assert normalize_debate_meta(peer.inputs.tool_args["_team_debate_meta"])["message_role"] == "peer"
+    peer.inputs.tool_result = ToolOutput(success=True)
+    peer.inputs.tool_msg = ToolMessage(content="sent", tool_call_id="call-1")
     await rail.after_tool_call(peer)
-    broadcast = _context(to="*")
-    await rail.before_tool_call(broadcast)
+
+    last = _context(to="peer")
+    await rail.before_tool_call(last)
+    assert "Data Analyst has reached" in last.inputs.tool_args["content"]
+    last.inputs.tool_result = ToolOutput(success=True)
+    last.inputs.tool_msg = ToolMessage(content="sent", tool_call_id="call-1")
+    await rail.after_tool_call(last)
+
+    assert rail._count == 2
+    assert await rail._debate.is_participant_capped("round-1") is True
+    assert "final_report=true" in last.inputs.tool_msg.content
+
+
+@pytest.mark.asyncio
+async def test_failed_last_send_does_not_cap_participant() -> None:
+    rail = _rail(cap=2)
+    await rail._debate.activate_participant("round-1")
+    await rail.after_tool_call(_context(to="peer", result=ToolOutput(success=True)))
+
+    failed = _context(to="peer")
+    await rail.before_tool_call(failed)
+    failed.inputs.tool_result = ToolOutput(success=False, error="failed")
+    failed.inputs.tool_msg = ToolMessage(content="failed", tool_call_id="call-1")
+    await rail.after_tool_call(failed)
+
+    assert rail._count == 1
+    assert await rail._debate.is_participant_capped("round-1") is False
+
+
+@pytest.mark.asyncio
+async def test_over_limit_peer_send_becomes_uncounted_cap_notice() -> None:
+    rail = _rail(cap=1)
+    await rail._debate.activate_participant("round-1")
+    await rail.after_tool_call(_context(to="peer", result=ToolOutput(success=True)))
+
+    peer = _context(to="peer")
+    await rail.before_tool_call(peer)
+
+    assert peer.extra.get("_skip_tool") is None
+    assert "Data Analyst has reached" in peer.inputs.tool_args["content"]
+    assert normalize_debate_meta(peer.inputs.tool_args["_team_debate_meta"])["message_role"] == "cap_notice"
+
+    peer.inputs.tool_result = ToolOutput(success=True)
+    peer.inputs.tool_msg = ToolMessage(content="sent", tool_call_id="call-1")
+    await rail.after_tool_call(peer)
+
+    assert rail._count == 1
+
+
+@pytest.mark.asyncio
+async def test_only_explicit_final_report_to_leader_is_tagged() -> None:
+    rail = _rail(cap=1)
+    await rail._debate.activate_participant("round-1")
     ordinary_leader = _context(to="leader", result=ToolOutput(success=True))
     await rail.before_tool_call(ordinary_leader)
     await rail.after_tool_call(ordinary_leader)
     final_report = _context(to="leader", final_report=True)
     await rail.before_tool_call(final_report)
 
-    assert peer.extra["_skip_tool"] is True
-    assert broadcast.extra["_skip_tool"] is True
-    assert peer.inputs.tool_result["error"]
     assert ordinary_leader.extra.get("_skip_tool") is None
     assert "_team_debate_meta" not in ordinary_leader.inputs.tool_args
     assert rail._debate.participant_round_id == "round-1"
@@ -152,7 +230,7 @@ async def test_cap_rejects_peers_but_only_tags_explicit_final_report() -> None:
         "round_id": "round-1",
         "message_role": "final_report",
     }
-    assert rail._count == 1
+    assert rail._count == 0
 
 
 @pytest.mark.asyncio
@@ -209,7 +287,9 @@ async def test_literal_leader_is_a_peer_when_real_leader_has_another_name() -> N
     await rail.before_tool_call(peer_named_leader)
     await rail.after_tool_call(peer_named_leader)
 
-    assert "_team_debate_meta" not in peer_named_leader.inputs.tool_args
+    assert normalize_debate_meta(
+        peer_named_leader.inputs.tool_args["_team_debate_meta"],
+    )["message_role"] == "peer"
     assert rail._debate.participant_round_id == "round-1"
     assert rail._count == 1
 
