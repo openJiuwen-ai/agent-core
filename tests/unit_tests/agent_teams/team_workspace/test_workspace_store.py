@@ -145,9 +145,7 @@ class TestLinkEntryBypassesProbe:
             # Un-evolved baseline reads as None (caller falls back to DB).
             assert store.read_card("T", "w1") is None
             # Evolved body round-trips through the link-shaped path.
-            target = (
-                team_member_workspace_dir("T", "w1") / "prompts" / "identity" / "card.md"
-            )
+            target = team_member_workspace_dir("T", "w1") / "prompts" / "identity" / "card.md"
             meta, _ = read_frontmatter(target.read_text(encoding="utf-8"))
             target.write_text(write_frontmatter(meta, "evolved"), encoding="utf-8")
             assert store.read_card("T", "w1") == "evolved"

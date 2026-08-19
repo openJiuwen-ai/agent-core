@@ -14,7 +14,6 @@ from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
-
 # ========== Team Management ==========
 
 

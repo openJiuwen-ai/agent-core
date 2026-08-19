@@ -20,8 +20,8 @@ from openjiuwen.agent_teams.paths import (
     reset_openjiuwen_home,
     team_session_worktrees_dir,
 )
-from openjiuwen.agent_teams.schema.build_context import BuildContext
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
+from openjiuwen.agent_teams.schema.build_context import BuildContext
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tools.member_options import (
@@ -30,12 +30,12 @@ from openjiuwen.agent_teams.tools.member_options import (
     get_member_worktree,
     set_member_worktree_options,
 )
-from openjiuwen.agent_teams.worktree.naming import build_teammate_worktree_name
 from openjiuwen.agent_teams.worktree.lifecycle import (
     MemberWorktreeInfo,
     TeammateWorktreeLifecycle,
     WorktreeContributionState,
 )
+from openjiuwen.agent_teams.worktree.naming import build_teammate_worktree_name
 from openjiuwen.harness.tools.worktree import WorktreeConfig
 from openjiuwen.harness.tools.worktree.models import WorktreeChangeSummary
 
@@ -229,9 +229,7 @@ async def test_team_clean_requires_project_dir_for_existing_worktree(tmp_path):
     worktree_path = tmp_path / "member-worktree"
     worktree_path.mkdir()
     member = _member(
-        options=build_member_options(
-            worktree=_stored_worktree(path=str(worktree_path), project_dir=project_dir)
-        )
+        options=build_member_options(worktree=_stored_worktree(path=str(worktree_path), project_dir=project_dir))
     )
     manager = _FakeWorktreeManager()
     spawn_manager = _spawn_manager(member, manager, None)

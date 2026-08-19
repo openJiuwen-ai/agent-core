@@ -124,9 +124,7 @@ class TestFrameworkRoots:
             tmp_path,
         )
         (tmp_path / "tools" / "locales" / "descs" / "cn" / "task").mkdir(parents=True)
-        (tmp_path / "tools" / "locales" / "descs" / "cn" / "task" / "submit_plan.md").write_text(
-            "x", encoding="utf-8"
-        )
+        (tmp_path / "tools" / "locales" / "descs" / "cn" / "task" / "submit_plan.md").write_text("x", encoding="utf-8")
         assert WorkspaceLayout.framework_descs_dir("cn").parts[-2] == "descs"
         found = [p.name for p in WorkspaceLayout.iter_framework_desc_files("cn")]
         assert found == ["submit_plan.md"]

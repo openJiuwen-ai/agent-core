@@ -41,6 +41,7 @@ from openjiuwen.agent_teams.interaction.router import (
     parse_interact_str,
     resolve_targets,
 )
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.monitor import (
     TeamMonitor,
     create_monitor,
@@ -63,7 +64,6 @@ from openjiuwen.agent_teams.runtime.pool import (
     RuntimeState,
     TeamRuntimePool,
 )
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
@@ -298,9 +298,8 @@ class TeamRuntimeManager:
                     member_name,
                     current_status.value if current_status is not None else None,
                 )
-                if (
-                    current_status is MemberStatus.SHUTDOWN
-                    and await kv_cache_hooks.has_manageable_member_binding(agent)
+                if current_status is MemberStatus.SHUTDOWN and await kv_cache_hooks.has_manageable_member_binding(
+                    agent
                 ):
                     await agent.stop_coordination(on_quiesced=_evict_member)
                 else:
@@ -415,9 +414,7 @@ class TeamRuntimeManager:
             return DeliverResult.failure("unsupported_interactive_input")
 
         try:
-            external_event = (
-                payload if isinstance(payload, ExternalTeamEvent) else ExternalTeamEvent.from_wire(payload)
-            )
+            external_event = payload if isinstance(payload, ExternalTeamEvent) else ExternalTeamEvent.from_wire(payload)
         except ValueError:
             return DeliverResult.failure("invalid_external_event")
         if external_event is not None:
@@ -435,9 +432,7 @@ class TeamRuntimeManager:
         # the interact gate (a lightweight publish, not a leader round).
         reply = self._as_swarmflow_human_reply(payloads)
         if reply is not None:
-            return await self._route_swarmflow_human_reply(
-                entry, reply[0], reply[1], reply[2]
-            )
+            return await self._route_swarmflow_human_reply(entry, reply[0], reply[1], reply[2])
 
         ticket = await entry.interact_gate.admit()
         if ticket is None:
@@ -472,7 +467,7 @@ class TeamRuntimeManager:
             return None
         if not item.target.startswith(prefix):
             return None
-        rest = item.target[len(prefix):]
+        rest = item.target[len(prefix) :]
         if not rest:
             return None
         from openjiuwen.agent_teams.schema.events import parse_swarmflow_human_reply_target
@@ -498,9 +493,7 @@ class TeamRuntimeManager:
         messager = getattr(backend, "messager", None) if backend is not None else None
         if messager is None:
             return DeliverResult.failure("no_messager")
-        topic = swarmflow_human_reply_topic(
-            entry.current_session_id, entry.team_name, run_id
-        )
+        topic = swarmflow_human_reply_topic(entry.current_session_id, entry.team_name, run_id)
         message = EventMessage(
             event_type=TeamEvent.WORKFLOW_HUMAN_REPLY,
             payload={"correlation_id": correlation_id, "answer": answer},

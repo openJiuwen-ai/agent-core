@@ -7,6 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+from openjiuwen.agent_teams.context import (
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
@@ -16,10 +20,6 @@ from openjiuwen.agent_teams.schema.status import (
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
-)
-from openjiuwen.agent_teams.context import (
-    reset_session_id,
-    set_session_id,
 )
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,

@@ -382,11 +382,13 @@ class TeamPolicyRail(DeepAgentRail):
         *this* leader to do, and it has to be in force before the team exists —
         it may well be the instruction that decides what team to build.
         """
-        sections = [build_leader_bootstrap_section(
-            swarmflow_enabled=swarmflow_enabled,
-            language=self._language,
-            loader=self._loader,
-        )]
+        sections = [
+            build_leader_bootstrap_section(
+                swarmflow_enabled=swarmflow_enabled,
+                language=self._language,
+                loader=self._loader,
+            )
+        ]
         extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
         if extra is not None:
             sections.append(extra)

@@ -7,12 +7,12 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.agent_teams.tools.tool_base import MappedToolOutput, TeamTool
 from openjiuwen.agent_teams.tools.tool_async import (
     AsyncTaskCancelTool,
     AsyncTaskOutputTool,
     AsyncTasksListTool,
 )
+from openjiuwen.agent_teams.tools.tool_base import MappedToolOutput, TeamTool
 from openjiuwen.agent_teams.tools.tool_member import (
     ApprovePlanTool,
     ApproveToolCallTool,
@@ -226,9 +226,7 @@ def create_team_tools(
         "claim_task": ClaimTaskTool(task_mgr, t),
         "submit_plan": SubmitPlanTool(task_mgr, t),
         "verify_task": VerifyTaskTool(task_mgr, t, desc_key=_VERIFY_TASK_DESC_KEY[dispatch_mode]),
-        "member_complete_task": MemberCompleteTaskTool(
-            task_mgr, t, desc_key=_MEMBER_COMPLETE_DESC_KEY[dispatch_mode]
-        ),
+        "member_complete_task": MemberCompleteTaskTool(task_mgr, t, desc_key=_MEMBER_COMPLETE_DESC_KEY[dispatch_mode]),
         # Messaging
         "send_message": send_message_cls(
             msg_mgr,

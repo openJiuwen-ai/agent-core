@@ -207,9 +207,7 @@ class TeamAgent(BaseAgent):
             try:
                 await agent.aclose()
             except Exception:
-                team_logger.debug(
-                    "[{}] tiny agent dispose failed", self._member_name() or "?", exc_info=True
-                )
+                team_logger.debug("[{}] tiny agent dispose failed", self._member_name() or "?", exc_info=True)
         infra.tiny_agents.clear()
 
     @property
@@ -1168,16 +1166,14 @@ class TeamAgent(BaseAgent):
         return agent
 
     async def _on_teammate_created(self, teammate_id: str):
-        team_logger.info("[%s] on_teammate_created: %s",
-                         self._member_name() or "?", teammate_id)
+        team_logger.info("[%s] on_teammate_created: %s", self._member_name() or "?", teammate_id)
 
         # ── Resolve fork context ──
         fork_ctx: ForkContext | None = None
         if self.team_backend is not None:
             fork_info = self.team_backend.consume_fork_on_spawn(teammate_id)
             team_logger.debug(
-                "[fork] _on_teammate_created: member=%s fork_info=%s "
-                "checkpoints=%s spawned_handles=%s",
+                "[fork] _on_teammate_created: member=%s fork_info=%s checkpoints=%s spawned_handles=%s",
                 teammate_id,
                 fork_info,
                 list(self._named_checkpoints.keys()),
@@ -1188,19 +1184,15 @@ class TeamAgent(BaseAgent):
                     native = self._resolve_fork_native(fork_info.get("source"))
                     team_logger.debug(
                         "[fork] resolve_fork_native: source=%s native=%s",
-                        fork_info.get("source"), type(native).__name__ if native else "None",
+                        fork_info.get("source"),
+                        type(native).__name__ if native else "None",
                     )
                     if native is not None:
                         fork_value = fork_info["fork"]
-                        is_named = (
-                            isinstance(fork_value, str)
-                            and fork_value not in ("true", "false")
-                        )
+                        is_named = isinstance(fork_value, str) and fork_value not in ("true", "false")
                         # Default mode: live fork → full; named fork → before
                         # (preserves the legacy truncation behaviour).
-                        fork_mode = fork_info.get("fork_mode") or (
-                            "full" if not is_named else "before"
-                        )
+                        fork_mode = fork_info.get("fork_mode") or ("full" if not is_named else "before")
                         ckpt_record = self._named_checkpoints.get(fork_value) if is_named else None
                         ckpt_idx = ckpt_record["count"] if ckpt_record else None
 
@@ -1208,8 +1200,10 @@ class TeamAgent(BaseAgent):
                         # meaningful for its creator's context. Only applies when
                         # the mode actually consumes the checkpoint index.
                         mode_uses_ckpt = fork_mode in (
-                            "before", "after",
-                            "keep_before_compact_after", "keep_after_compact_before",
+                            "before",
+                            "after",
+                            "keep_before_compact_after",
+                            "keep_after_compact_before",
                         )
                         if is_named and mode_uses_ckpt and ckpt_record is not None:
                             source_name = fork_info.get("source") or self._member_name()
@@ -1219,15 +1213,19 @@ class TeamAgent(BaseAgent):
                                     "[fork] checkpoint '%s' created by '%s' but "
                                     "fork_source='%s'; the index belongs to another "
                                     "member and may not fit this source's context",
-                                    fork_value, creator, source_name,
+                                    fork_value,
+                                    creator,
+                                    source_name,
                                 )
                                 # The recorded count is only meaningful for its
                                 # creator's context. Falling back to full keeps the
                                 # behaviour consistent with the leader notification.
                                 ckpt_idx = None
                                 from openjiuwen.agent_teams.i18n import t
+
                                 await self._notify_fork_name_not_found(
-                                    teammate_id, fork_value,
+                                    teammate_id,
+                                    fork_value,
                                     detail=t(
                                         "checkpoint.fork_source_mismatch",
                                         creator=creator,
@@ -1243,9 +1241,9 @@ class TeamAgent(BaseAgent):
                             # Live fork: the only meaningful mode is full.
                             if fork_mode != "full":
                                 team_logger.warning(
-                                    "[fork] fork_mode=%s ignored for live fork "
-                                    "member=%s; using full context",
-                                    fork_mode, teammate_id,
+                                    "[fork] fork_mode=%s ignored for live fork member=%s; using full context",
+                                    fork_mode,
+                                    teammate_id,
                                 )
                         elif fork_mode == "full":
                             # Named fork with full mode: ignore the checkpoint index.
@@ -1257,18 +1255,21 @@ class TeamAgent(BaseAgent):
                                 # (ckpt_idx cleared above) but has already been
                                 # warned and notified with the detail.
                                 team_logger.warning(
-                                    "[fork] checkpoint '%s' not found for "
-                                    "member=%s; falling back to full context",
-                                    fork_value, teammate_id,
+                                    "[fork] checkpoint '%s' not found for member=%s; falling back to full context",
+                                    fork_value,
+                                    teammate_id,
                                 )
                                 await self._notify_fork_name_not_found(teammate_id, fork_value)
                         elif fork_mode == "before":
                             fork_ctx = ForkContext.from_agent(
-                                native, checkpoint=ckpt_idx,
+                                native,
+                                checkpoint=ckpt_idx,
                             )
                         elif fork_mode == "after":
                             fork_ctx = ForkContext.from_agent(
-                                native, checkpoint=ckpt_idx, keep="after",
+                                native,
+                                checkpoint=ckpt_idx,
+                                keep="after",
                             )
                         elif fork_mode == "keep_before_compact_after":
                             fork_ctx = ForkContext.from_agent(native)
@@ -1279,26 +1280,31 @@ class TeamAgent(BaseAgent):
                             fork_ctx.compact_split = ckpt_idx
                         else:
                             team_logger.warning(
-                                "[fork] unknown fork_mode '%s' for member=%s; "
-                                "using full context", fork_mode, teammate_id,
+                                "[fork] unknown fork_mode '%s' for member=%s; using full context",
+                                fork_mode,
+                                teammate_id,
                             )
                         team_logger.debug(
                             "[fork] ForkContext created: msgs=%d empty=%s",
-                            len(fork_ctx.messages), fork_ctx.is_empty(),
+                            len(fork_ctx.messages),
+                            fork_ctx.is_empty(),
                         )
                         team_logger.info(
                             "[fork] %s into %s (msgs=%d)%s",
-                            "compacted fork" if fork_ctx.compact_split is not None else
-                            "checkpoint fork" if is_named and fork_mode != "full" else "live fork",
+                            "compacted fork"
+                            if fork_ctx.compact_split is not None
+                            else "checkpoint fork"
+                            if is_named and fork_mode != "full"
+                            else "live fork",
                             teammate_id,
                             len(fork_ctx.messages),
                             f" split_at={fork_ctx.compact_split}" if fork_ctx.compact_split is not None else "",
                         )
                 except Exception as exc:  # noqa: BLE001 - never let fork capture block the spawn
                     team_logger.warning(
-                        "[fork] fork capture failed for member=%s: %s; "
-                        "spawning without inherited context",
-                        teammate_id, exc,
+                        "[fork] fork capture failed for member=%s: %s; spawning without inherited context",
+                        teammate_id,
+                        exc,
                     )
                     fork_ctx = None
 
@@ -1376,7 +1382,8 @@ class TeamAgent(BaseAgent):
         except Exception as exc:  # noqa: BLE001 - best-effort, never block the spawn
             team_logger.warning(
                 "[fork] failed to notify leader about missing checkpoint '%s': %s",
-                fork_name, exc,
+                fork_name,
+                exc,
             )
 
     def share_checkpoints_with(self, other: "TeamAgent") -> None:

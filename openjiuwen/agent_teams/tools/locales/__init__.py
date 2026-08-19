@@ -50,6 +50,7 @@ caller's ``**kwargs`` (only runtime error messages do this — parameter
 descriptions are plain literals).  Text that varies belongs in a Markdown
 slot or a variant-specific key, never in an interpolated ``STRINGS`` value.
 """
+
 from __future__ import annotations
 
 import re
@@ -104,10 +105,7 @@ def _desc_index(lang: str) -> dict[str, Path]:
             continue
         clash = index.get(path.stem)
         if clash is not None:
-            raise ValueError(
-                f"Duplicate description key '{path.stem}' for language '{lang}': "
-                f"{clash} and {path}"
-            )
+            raise ValueError(f"Duplicate description key '{path.stem}' for language '{lang}': {clash} and {path}")
         index[path.stem] = path
     return index
 
@@ -145,9 +143,7 @@ def _load_fragment(slot: str, lang: str) -> str:
     """
     path = _DESCS_DIR / lang / _FRAGMENTS_DIRNAME / f"{slot}.md"
     if not path.is_file():
-        raise FileNotFoundError(
-            f"Missing description fragment '{slot}' for language '{lang}': expected {path}"
-        )
+        raise FileNotFoundError(f"Missing description fragment '{slot}' for language '{lang}': expected {path}")
     return path.read_text(encoding="utf-8").strip()
 
 
@@ -181,9 +177,7 @@ def _render_desc(tmpl: PromptTemplate, desc_key: str, lang: str, omit: frozenset
     # assembler's silent "reinstate the {{literal}}" behaviour ever reaching a
     # model-facing string.
     if "{{" in rendered:
-        raise ValueError(
-            f"Unresolved placeholder left in description '{desc_key}' (language '{lang}')"
-        )
+        raise ValueError(f"Unresolved placeholder left in description '{desc_key}' (language '{lang}')")
     return rendered
 
 

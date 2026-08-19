@@ -36,6 +36,7 @@ Lifecycle ownership is orthogonal to the agent itself:
   ``TeamInfra`` (one per name, per process), disposed when the team stops. See
   ``TeamAgent.get_tiny_agent``.
 """
+
 from __future__ import annotations
 
 import asyncio

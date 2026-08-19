@@ -13,8 +13,8 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -80,9 +80,7 @@ async def inprocess_spawn(
     # objects clobbering each other at ``post_run``).
     team_agent.share_checkpoints_with(teammate)
     if teammate.team_backend is not None:
-        teammate.team_backend.set_store_checkpoint_fn(
-            team_agent.set_checkpoint
-        )
+        teammate.team_backend.set_store_checkpoint_fn(team_agent.set_checkpoint)
 
     # Fork context injection: seed the teammate's context engine with the
     # fork source's conversation history so it inherits prior understanding.
@@ -94,11 +92,14 @@ async def inprocess_spawn(
         )
         team_logger.debug(
             "[fork] inprocess_spawn: injected %d messages into %s compact_split=%s",
-            len(fork_from.messages), ctx.member_name, fork_from.compact_split,
+            len(fork_from.messages),
+            ctx.member_name,
+            fork_from.compact_split,
         )
         team_logger.info(
             "[fork] %d messages injected into %s",
-            len(fork_from.messages), ctx.member_name,
+            len(fork_from.messages),
+            ctx.member_name,
         )
         # Compaction: compress the side opposite ``compact_direction`` at the
         # split point.
@@ -106,14 +107,16 @@ async def inprocess_spawn(
             from openjiuwen.agent_teams.fork_compact import compact_context
 
             await compact_context(
-                native, split_at=fork_from.compact_split,
+                native,
+                split_at=fork_from.compact_split,
                 session_id=session_id,
                 direction=fork_from.compact_direction,
             )
     else:
         team_logger.debug(
             "[fork] inprocess_spawn: NO fork injection for %s (fork_from=%s)",
-            ctx.member_name, "present" if fork_from else "None",
+            ctx.member_name,
+            "present" if fork_from else "None",
         )
 
     # Empty query means "no first round": the teammate comes up, subscribes,

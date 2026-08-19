@@ -20,7 +20,6 @@ from openjiuwen.harness.subagents.plan_agent import (
     DEFAULT_PLAN_AGENT_SYSTEM_PROMPT,
 )
 
-
 TEAM_PLAN_AGENT_DESC: Dict[str, str] = {
     "cn": "团队规划专家。基于目标、约束和上下文设计团队执行方案、分工、依赖和验收计划。",
     "en": (

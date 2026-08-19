@@ -23,10 +23,10 @@ from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
 )
-from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
+from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec, SysOperationSpec, WorkspaceSpec
@@ -338,10 +338,10 @@ class AgentConfigurator:
         )
 
     def create_worktree_manager(self, spec: TeamAgentSpec) -> WorktreeManager:
+        from openjiuwen.harness.tools.worktree import WorktreeCreatedEvent as HarnessWorktreeCreatedEvent
         from openjiuwen.harness.tools.worktree import (
             WorktreeManager,
         )
-        from openjiuwen.harness.tools.worktree import WorktreeCreatedEvent as HarnessWorktreeCreatedEvent
         from openjiuwen.harness.tools.worktree import WorktreeRemovedEvent as HarnessWorktreeRemovedEvent
 
         ws_mgr = self.workspace_manager
@@ -712,8 +712,7 @@ class AgentConfigurator:
             if swarmflow_worker_base_spec is not None:
                 swarmflow_worker_base_spec = swarmflow_worker_base_spec.model_copy(
                     update={
-                        "rails": list(swarmflow_worker_base_spec.rails or [])
-                                 + [observability_rail_spec],
+                        "rails": list(swarmflow_worker_base_spec.rails or []) + [observability_rail_spec],
                     },
                 )
 
@@ -1079,10 +1078,7 @@ class AgentConfigurator:
         # (run before configure). When the manager already carries a cache,
         # just route the backend's reads to it — the leader's one cache
         # instance is the team's single source of truth.
-        if (
-            self.workspace_manager is not None
-            and self.workspace_manager.workspace_cache is not None
-        ):
+        if self.workspace_manager is not None and self.workspace_manager.workspace_cache is not None:
             if self.team_backend is not None:
                 self.team_backend.attach_workspace_manager(self.workspace_manager)
             team_logger.info(

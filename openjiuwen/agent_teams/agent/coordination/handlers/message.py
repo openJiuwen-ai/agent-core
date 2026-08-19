@@ -199,7 +199,6 @@ class MessageHandler(BaseCoordinationHandler):
         is_human_agent = backend is not None and await backend.is_human_agent(member_name)
         is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
 
-
         while True:
             all_unread = await self._read_all_unread(member_name)
             new_messages = [m for m in all_unread if m.message_id not in seen_ids]

@@ -157,7 +157,7 @@ async def render_review_request_for_harness(
     # Inject per-reviewer instruction from the structured reviewer list.
     instruction = ""
     if reviewer:
-        for detail in (task.reviewer_details() if hasattr(task, 'reviewer_details') else []):
+        for detail in task.reviewer_details() if hasattr(task, "reviewer_details") else []:
             if detail.get("reviewer_id") == reviewer:
                 instruction = detail.get("instruction", "")
                 break

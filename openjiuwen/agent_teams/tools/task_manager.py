@@ -7,18 +7,19 @@ This module provides task management functionality for agent teams.
 """
 
 import json
+import re
 import shutil
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-import re
-import uuid
 from typing import (
     Any,
     List,
     Optional,
 )
 
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.schema.events import (
@@ -57,7 +58,6 @@ from openjiuwen.agent_teams.schema.task import (
     TaskOpResult,
     TaskSummary,
 )
-from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamTaskBase,
@@ -450,9 +450,7 @@ class TeamTaskManager:
         # Entry gate mirrors a member self-serve: plan-mode assignees land in
         # the plan gate (PLANNING) and must get approval; build-mode assignees
         # start executing (IN_PROGRESS).
-        entry_status = (
-            TaskStatus.PLANNING if member.mode == MemberMode.PLAN_MODE.value else TaskStatus.IN_PROGRESS
-        )
+        entry_status = TaskStatus.PLANNING if member.mode == MemberMode.PLAN_MODE.value else TaskStatus.IN_PROGRESS
 
         # Idempotent re-assign: same member, already at its entry gate -> no-op.
         if task.assignee == assignee and task.status == entry_status.value:
@@ -461,8 +459,7 @@ class TeamTaskManager:
 
         if task.assignee and task.assignee != assignee:
             return TaskOpResult.fail(
-                f"Task {task_id} is already claimed by {task.assignee}; "
-                f"reset the task before reassigning to {assignee}"
+                f"Task {task_id} is already claimed by {task.assignee}; reset the task before reassigning to {assignee}"
             )
 
         success = await self.db.task.claim_task(task_id, assignee, to_status=entry_status)
@@ -643,8 +640,7 @@ class TeamTaskManager:
             if current is None:
                 return TaskOpResult.fail(f"Task {task_id} not found")
             return TaskOpResult.fail(
-                f"Task {task_id} cannot be completed from status '{current.status}' "
-                f"(must be in_progress)"
+                f"Task {task_id} cannot be completed from status '{current.status}' (must be in_progress)"
             )
 
         # Extract completed task info and unblocked tasks
@@ -692,8 +688,7 @@ class TeamTaskManager:
         submitted = await self.db.task.submit_for_review(task.task_id)
         if not submitted:
             return TaskOpResult.fail(
-                f"Task {task.task_id} cannot be submitted for review from status "
-                f"'{task.status}' (must be in_progress)"
+                f"Task {task.task_id} cannot be submitted for review from status '{task.status}' (must be in_progress)"
             )
         team_logger.info("Task %s submitted for review", task.task_id)
         await self._publish_task_event(
@@ -740,14 +735,10 @@ class TeamTaskManager:
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
         if task.status != TaskStatus.IN_REVIEW.value:
-            return TaskOpResult.fail(
-                f"Task {task_id} is not under review (status '{task.status}'); nothing to verify"
-            )
+            return TaskOpResult.fail(f"Task {task_id} is not under review (status '{task.status}'); nothing to verify")
         reviewers = task.reviewers()
         if self.member_name not in reviewers:
-            return TaskOpResult.fail(
-                f"{self.member_name} is not a reviewer of task {task_id}; cannot verify it"
-            )
+            return TaskOpResult.fail(f"{self.member_name} is not a reviewer of task {task_id}; cannot verify it")
         if self.member_name == task.assignee:
             return TaskOpResult.fail(f"{self.member_name} cannot verify their own task {task_id}")
 
@@ -758,9 +749,7 @@ class TeamTaskManager:
             try:
                 score = float(normalized)
                 if not (0.0 <= score <= 1.0):
-                    return TaskOpResult.fail(
-                        f"verify_task decision must be a number in [0.0, 1.0], got '{decision}'"
-                    )
+                    return TaskOpResult.fail(f"verify_task decision must be a number in [0.0, 1.0], got '{decision}'")
                 normalized = f"{score:.2f}"
             except ValueError:
                 return TaskOpResult.fail(
@@ -769,7 +758,7 @@ class TeamTaskManager:
         elif normalized not in ("pass", "fail"):
             return TaskOpResult.fail(f"verify_task decision must be 'pass' or 'fail', got '{decision}'")
 
-        team_logger.info("[verify_task] reviewer=%s task=%s decision=%s", self.member_name, task_id, normalized) 
+        team_logger.info("[verify_task] reviewer=%s task=%s decision=%s", self.member_name, task_id, normalized)
 
         if self._dispatch_mode == "scheduled":
             return await self._record_review_vote(task, normalized, feedback)
@@ -810,9 +799,16 @@ class TeamTaskManager:
             ),
             error_label=f"Task review vote event for {task.task_id}",
         )
-        team_logger.info("[verify_vote] reviewer=%s task=%s decision=%s round=%d tally(pass=%d fail=%d of %d)", 
-                         self.member_name, task.task_id, decision, task.review_round,  
-                         tally["pass_count"], tally["fail_count"], tally["reviewer_count"]) 
+        team_logger.info(
+            "[verify_vote] reviewer=%s task=%s decision=%s round=%d tally(pass=%d fail=%d of %d)",
+            self.member_name,
+            task.task_id,
+            decision,
+            task.review_round,
+            tally["pass_count"],
+            tally["fail_count"],
+            tally["reviewer_count"],
+        )
         return TaskOpResult.success(data=tally)
 
     @staticmethod
@@ -884,10 +880,7 @@ class TeamTaskManager:
                         if feedback:
                             fail_feedback[name] = feedback
 
-        inspector_avg = (
-            sum(inspector_scores.values()) / len(inspector_scores)
-            if inspector_scores else None
-        )
+        inspector_avg = sum(inspector_scores.values()) / len(inspector_scores) if inspector_scores else None
 
         return {
             "task_id": task.task_id,
@@ -930,9 +923,7 @@ class TeamTaskManager:
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
         if task.status != TaskStatus.IN_REVIEW.value:
-            return TaskOpResult.fail(
-                f"Task {task_id} is not under review (status '{task.status}'); nothing to settle"
-            )
+            return TaskOpResult.fail(f"Task {task_id} is not under review (status '{task.status}'); nothing to settle")
 
         if normalized == "pass":
             return await self._verify_pass(task)
@@ -989,11 +980,7 @@ class TeamTaskManager:
         never returned to itself as a review target.
         """
         in_review = await self.list_tasks(status=TaskStatus.IN_REVIEW.value)
-        return [
-            task
-            for task in in_review
-            if reviewer_name in task.reviewers() and task.assignee != reviewer_name
-        ]
+        return [task for task in in_review if reviewer_name in task.reviewers() and task.assignee != reviewer_name]
 
     def _task_plan_dir(self, task_id: str) -> Path:
         return self.plans_dir / self.team_plan_id / "tasks" / _safe_token(task_id, "task")
@@ -1649,8 +1636,7 @@ class TeamTaskManager:
         busy_task_id = await self.get_other_active_task_id(member_name, task_id)
         if busy_task_id:
             return TaskOpResult.fail(
-                f"Member {member_name} already has an active task {busy_task_id}; "
-                f"finish it before starting {task_id}"
+                f"Member {member_name} already has an active task {busy_task_id}; finish it before starting {task_id}"
             )
 
         started = await self.db.task.start_task(task_id, member_name, to_status=entry_status)
@@ -1767,9 +1753,7 @@ class TeamTaskManager:
         task_plan_index = self._read_task_plan_index(task_id)
         latest_plan_id = str(task_plan_index.get("latest_plan_id") or "")
         if latest_plan_id and plan_id != latest_plan_id:
-            return TaskOpResult.fail(
-                f"Plan {plan_id} is stale; review latest plan_id {latest_plan_id}"
-            )
+            return TaskOpResult.fail(f"Plan {plan_id} is stale; review latest plan_id {latest_plan_id}")
 
         if plan_index.get("decision") != "pending":
             return TaskOpResult.fail(
@@ -1781,8 +1765,7 @@ class TeamTaskManager:
         plan_path = Path(plan_path_raw) if plan_path_raw else self._task_plan_path(task_id, plan_id)
         if not plan_path.is_file():
             return TaskOpResult.fail(
-                f"Plan {plan_id} for task {task_id} has no submitted plan file; "
-                "the member must call submit_plan first"
+                f"Plan {plan_id} for task {task_id} has no submitted plan file; the member must call submit_plan first"
             )
 
         tool_call_id = str(plan_index.get("tool_call_id") or "")

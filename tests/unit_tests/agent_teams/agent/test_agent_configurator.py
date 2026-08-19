@@ -58,6 +58,7 @@ class TestAttachWorkspaceCacheCreatesEmptyCache:
 
     def test_leader_creates_empty_cache_attached_to_manager(self, isolated_home):
         configurator = AgentConfigurator(AgentCard(name="test-agent", description="test"))
+
         # Real setter semantics (like TeamWorkspaceManager.attach_workspace_cache):
         # the attached cache becomes the manager's resident instance.
         def _attach(cache):
