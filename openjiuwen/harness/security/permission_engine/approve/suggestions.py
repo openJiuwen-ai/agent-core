@@ -9,7 +9,7 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
-from openjiuwen.harness.security.shell_ast import (
+from openjiuwen.harness.security.permission_engine.toolguard.shell_ast import (
     ShellAstParseResult,
     ShellSubcommand,
     parse_shell_for_permission,

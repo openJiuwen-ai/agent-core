@@ -22,17 +22,17 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import (
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.security.core import PermissionEngine
-from openjiuwen.harness.security.host import (
+from openjiuwen.harness.security.permission_engine.host import (
     PermissionConfirmationRequest,
     PermissionSceneHookInput,
     ToolPermissionHost,
 )
-from openjiuwen.harness.security.models import (
+from openjiuwen.harness.security.permission_engine.models import (
     PermissionConfirmResponse,
     PermissionLevel,
     PermissionResult,
 )
-from openjiuwen.harness.security.models import PermissionsSection
+from openjiuwen.harness.security.permission_engine.models import PermissionsSection
 from openjiuwen.harness.security.patterns import (
     merge_permission_allow_rule_into_permissions,
     write_permissions_section_to_agent_config_yaml,
@@ -44,6 +44,7 @@ TOOL_NAME_ALIASES = {
     "free_search": "mcp_free_search",
     "paid_search": "mcp_paid_search",
     "fetch_webpage": "mcp_fetch_webpage",
+    "web_fetch_webpage": "mcp_fetch_webpage",
     "exec_command": "mcp_exec_command",
 }
 
@@ -286,13 +287,36 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     def _persist_allow_always(
         self, normalized_name: str, tool_args: dict
     ) -> bool:
-        """工具级「始终允许」与 file_guard 路径白名单：先合并磁盘，再写盘。"""
+        """永久允许：merge 后走 ``persist_allow_rule``（无 Host 则写 YAML）。"""
+        return self._persist_merged_allow(
+            normalized_name,
+            tool_args,
+            persist_hook=self._host.persist_allow_rule,
+            write_yaml_fallback=True,
+        )
+
+    def _persist_session_allow(
+        self, normalized_name: str, tool_args: dict
+    ) -> bool:
+        """会话内记住：merge 后走 ``persist_session_allow_rule``（无钩子则只更新内存）。"""
+        return self._persist_merged_allow(
+            normalized_name,
+            tool_args,
+            persist_hook=self._host.persist_session_allow_rule,
+            write_yaml_fallback=False,
+        )
+
+    def _persist_merged_allow(
+        self,
+        normalized_name: str,
+        tool_args: dict,
+        *,
+        persist_hook: Any,
+        write_yaml_fallback: bool,
+    ) -> bool:
+        """工具级记住与 file_guard 路径白名单：先合并快照，再写盘。"""
         from openjiuwen.harness.security.patterns import merge_file_guard_access_allows
 
-        # Read from on-disk snapshot first (via host callback) so that
-        # entries the user already deleted from config.yaml are NOT
-        # restored.  Fall back to engine.config only when snapshot is
-        # unavailable.
         base_cfg: PermissionsSection | None = None
         if self._host.get_permissions_snapshot is not None:
             try:
@@ -322,11 +346,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         prev_cfg = deepcopy(self._engine.config)
         self.update_config(cfg)
 
-        if self._host.persist_allow_rule is not None:
+        if persist_hook is not None:
             try:
-                persisted = bool(
-                    self._host.persist_allow_rule(cast(dict[str, Any], cfg))
-                )
+                persisted = bool(persist_hook(cast(dict[str, Any], cfg)))
             except Exception:
                 logger.warning(
                     "[PermissionEngine] permission.persist.host_failed",
@@ -335,16 +357,18 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 persisted = False
             if not persisted:
                 self.update_config(prev_cfg)
-        else:
-            if not write_permissions_section_to_agent_config_yaml(
-                self._host.permission_yaml_path,
-                cfg,
-            ):
-                self.update_config(prev_cfg)
-                persisted = False
-            else:
-                persisted = True
-        return persisted
+            return persisted
+
+        if not write_yaml_fallback:
+            return True
+
+        if not write_permissions_section_to_agent_config_yaml(
+            self._host.permission_yaml_path,
+            cfg,
+        ):
+            self.update_config(prev_cfg)
+            return False
+        return True
 
     async def resolve_interrupt(
         self,
@@ -480,6 +504,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     persisted = False
                     if confirm_payload.approved and confirm_payload.auto_confirm and confirm_payload.persist_allow:
                         persisted = self._persist_allow_always(normalized_name, tool_args)
+                    elif confirm_payload.approved and confirm_payload.auto_confirm:
+                        persisted = self._persist_session_allow(normalized_name, tool_args)
                     logger.info(
                         "[PermissionEngine] permission.persist.result tool=%s "
                         "confirm_path=hosted persisted=%s persist_allow=%s",
@@ -554,10 +580,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 payload.persist_allow,
             )
         elif payload.approved and payload.auto_confirm and not payload.persist_allow:
+            persisted = self._persist_session_allow(normalized_name, tool_args)
             logger.info(
-                "[PermissionEngine] permission.session_only tool=%s confirm_path=%s auto_confirm_key=%s",
+                "[PermissionEngine] permission.session_persist.result tool=%s "
+                "confirm_path=%s persisted=%s auto_confirm_key=%s",
                 tool_name,
                 self._confirm_path_label(),
+                persisted,
                 auto_confirm_key,
             )
 

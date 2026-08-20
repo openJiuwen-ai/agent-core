@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Compatibility shim. Prefer ``toolguard.patterns`` (match) and ``approve.merge`` (HITL)."""
+"""HITL merge / suggestions (pure functions; product YAML I/O stays with Host)."""
 
 from openjiuwen.harness.security.permission_engine.approve.merge import (
     merge_external_directory_allow_into_permissions,
@@ -10,24 +10,16 @@ from openjiuwen.harness.security.permission_engine.approve.merge import (
     persist_cli_trusted_directory,
     write_permissions_section_to_agent_config_yaml,
 )
-from openjiuwen.harness.security.permission_engine.toolguard.patterns import (
-    CommandMatcher,
-    PathMatcher,
-    PatternMatcher,
-    URLMatcher,
-    build_command_allow_pattern,
-    contains_path,
-    match_wildcard,
+from openjiuwen.harness.security.permission_engine.approve.suggestions import (
+    PermissionSuggestion,
+    build_permission_suggestions,
+    build_shell_permission_suggestions,
 )
 
 __all__ = [
-    "CommandMatcher",
-    "PathMatcher",
-    "PatternMatcher",
-    "URLMatcher",
-    "build_command_allow_pattern",
-    "contains_path",
-    "match_wildcard",
+    "PermissionSuggestion",
+    "build_permission_suggestions",
+    "build_shell_permission_suggestions",
     "merge_external_directory_allow_into_permissions",
     "merge_file_guard_access_allows",
     "merge_file_guard_path_rule",

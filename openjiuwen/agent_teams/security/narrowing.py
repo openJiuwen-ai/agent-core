@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from openjiuwen.harness.security.models import PermissionLevel
+from openjiuwen.harness.security.permission_engine.models import PermissionLevel
 from openjiuwen.harness.security.tiered_policy import _parse_level, strictest
 
 
