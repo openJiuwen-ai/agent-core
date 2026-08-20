@@ -151,6 +151,7 @@ class TextualParameter:
     def __init__(self, llm_call: LLMCall):
         self.llm_call = llm_call
         self.gradients: Dict[str, str] = {}
+        self.candidates: Dict[str, List[str]] = {}
         self.description: str = ""
 
     def set_gradient(self, name: str, gradient: str):
@@ -158,6 +159,19 @@ class TextualParameter:
 
     def get_gradient(self, name: str) -> Optional[str]:
         return self.gradients.get(name)
+
+    def set_candidates(self, name: str, candidates: List[str]):
+        """Record every candidate value an optimizer considered for ``name``.
+
+        ``gradients`` holds only the single value ``update()`` will apply;
+        this holds the full pool (e.g. every candidate prompt a multi-candidate
+        optimizer generated) so a caller like ``Trainer.search_prompt_candidates``
+        can evaluate more than just the winner.
+        """
+        self.candidates[name] = list(candidates)
+
+    def get_candidates(self, name: str) -> List[str]:
+        return list(self.candidates.get(name, []))
 
     def set_description(self, description: str):
         self.description = description
