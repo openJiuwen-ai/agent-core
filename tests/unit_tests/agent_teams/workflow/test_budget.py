@@ -11,7 +11,9 @@ response and force-finishing the round that crosses the ceiling.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -51,7 +53,12 @@ async def run(args):
 _POLLING_SCRIPT = '''
 from swarmflow import agent, budget
 
-META = {"name": "poll", "description": "wind down on remaining()", "phases": []}
+META = {
+    "name": "poll",
+    "description": "wind down on remaining()",
+    "phases": [],
+    "workflow_token_limit": 100,
+}
 
 async def run(args):
     done = 0
@@ -59,6 +66,42 @@ async def run(args):
         await agent("task", label="a")
         done += 1
     return {"done": done, "spent": budget.spent(), "remaining": budget.remaining()}
+'''
+
+# Declares a per-run ceiling; pairs with _DualLedgerBackend below to exercise
+# the per-run gate + the ``<journal>.budget`` sidecar lifecycle.
+_LIMIT_SCRIPT = '''
+from swarmflow import agent
+
+META = {
+    "name": "limit",
+    "description": "declared per-run ceiling",
+    "phases": [],
+    "workflow_token_limit": 100,
+}
+
+async def run(args):
+    for i in range(5):
+        await agent(f"task {i}", label=f"a{i}")
+    return "done"
+'''
+
+# The "redesigned" relaunch: same META name (same journal stem), fewer and
+# differently-keyed calls, so nothing replays from run 1's cache.
+_REDESIGNED_SCRIPT = '''
+from swarmflow import agent
+
+META = {
+    "name": "limit",
+    "description": "declared per-run ceiling",
+    "phases": [],
+    "workflow_token_limit": 100,
+}
+
+async def run(args):
+    for i in range(2):
+        await agent(f"cheap {i}", label=f"b{i}")
+    return "done"
 '''
 
 
@@ -79,6 +122,23 @@ class _FixedCostBackend(AgentBackend):
     async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
         self.calls += 1
         self.budget.add(self._cost)
+        return AgentResult(text=f"ran {opts.get('label')}", tokens=self._cost)
+
+
+class _DualLedgerBackend(_FixedCostBackend):
+    """Also bills the per-run ledger, like the real backend fanning rails out to both.
+
+    The base class only bills the session ledger, which is enough for the
+    session-gate tests; exercising the per-run gate (and its sidecar) needs a
+    backend that reports each call to ``workflow_budget`` too — exactly what
+    ``AgentBackend.bind_workflow_budget`` documents as the real backends' job.
+    """
+
+    async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+        self.calls += 1
+        self.budget.add(self._cost)
+        if self.workflow_budget is not None:
+            self.workflow_budget.add(self._cost)
         return AgentResult(text=f"ran {opts.get('label')}", tokens=self._cost)
 
 
@@ -148,8 +208,13 @@ def test_run_without_a_budget_is_unbounded(tmp_path):
 
 
 def test_script_can_wind_down_on_remaining_before_the_gate_fires(tmp_path):
-    """A script polling remaining() finishes normally — the gate is only a backstop."""
-    backend = _FixedCostBackend(cost=20)
+    """A script polling remaining() finishes normally — the gate is only a backstop.
+
+    ``budget.*`` reads the per-run ledger, so the script declares its
+    ``workflow_token_limit`` and the backend must report each call to that
+    ledger (``_DualLedgerBackend``) — only production rails bill both.
+    """
+    backend = _DualLedgerBackend(cost=20)
     result = asyncio.run(
         run_workflow(
             _write(tmp_path, _POLLING_SCRIPT),
@@ -175,6 +240,84 @@ def test_mock_backend_bills_the_ledger(tmp_path):
     ledger = BudgetLedger(total=1_000_000)
     asyncio.run(run_workflow(_write(tmp_path, _SCRIPT), budget=ledger))
     assert ledger.spent > 0
+
+
+# ---------------------------------------------------------------- sidecar / relaunch
+
+
+def _sidecar_json(journal_path: str) -> dict:
+    return json.loads(Path(f"{journal_path}.budget").read_text(encoding="utf-8"))
+
+
+def test_completed_run_seals_a_terminal_sidecar(tmp_path):
+    """A run that finishes normally seals its sidecar with terminal=True."""
+    journal = str(tmp_path / "j.jsonl")
+    script = tmp_path / "flow.py"
+    script.write_text(_LIMIT_SCRIPT, encoding="utf-8")
+
+    backend = _DualLedgerBackend(cost=10)  # 5 x 10 = 50, under the 100 ceiling
+    asyncio.run(run_workflow(str(script), backend=backend, journal_path=journal))
+
+    snap = _sidecar_json(journal)
+    assert snap["terminal"] is True
+    assert snap["spent"] == 50
+    assert snap["total"] == 100
+
+
+def test_relaunch_after_a_terminal_run_resets_the_per_run_ceiling(tmp_path):
+    """A gate-failed run is terminal: the relaunch starts from a fresh ceiling.
+
+    Run 1 burns past the declared per-run limit (30/call vs 100) and fails with
+    BudgetExhausted. Without the reset, run 2's first agent() would find the
+    ledger still exhausted (120/100) and fail identically — the leader's
+    "redesign and relaunch" loop would be dead on arrival. The terminal seal is
+    what lets the redesigned, cheaper script actually rerun.
+    """
+    journal = str(tmp_path / "j.jsonl")
+    expensive = tmp_path / "expensive.py"
+    expensive.write_text(_LIMIT_SCRIPT, encoding="utf-8")
+    cheap = tmp_path / "cheap.py"
+    cheap.write_text(_REDESIGNED_SCRIPT, encoding="utf-8")
+
+    # Run 1: calls 1-4 land (120 >= 100), call 5 is refused by the gate.
+    backend = _DualLedgerBackend(cost=30)
+    with pytest.raises(BudgetExhausted):
+        asyncio.run(run_workflow(str(expensive), backend=backend, journal_path=journal))
+    assert backend.calls == 4
+    snap = _sidecar_json(journal)
+    assert snap["terminal"] is True
+    assert snap["spent"] == 120
+
+    # Run 2 (same journal stem = the relaunch path): fresh ceiling, so the
+    # cheaper script completes; its two new calls miss the cache and rebill.
+    backend2 = _DualLedgerBackend(cost=30)
+    asyncio.run(run_workflow(str(cheap), backend=backend2, journal_path=journal, resume=journal))
+    assert backend2.calls == 2
+    snap2 = _sidecar_json(journal)
+    assert snap2["terminal"] is True
+    assert snap2["spent"] == 60  # 2 x 30 from zero, not 120 + 60
+
+
+def test_interrupted_sidecar_still_carries_its_tally(tmp_path):
+    """No final seal (crash / pause / stop): the tally still carries on relaunch.
+
+    A mid-run snapshot is written without the terminal flag; the next run must
+    resume from that spent tally — the crash-recovery semantics the sidecar was
+    built for — and hit the gate immediately rather than re-spending the ceiling.
+    """
+    journal = str(tmp_path / "j.jsonl")
+    script = tmp_path / "flow.py"
+    script.write_text(_LIMIT_SCRIPT, encoding="utf-8")
+
+    runner._write_budget_snapshot(
+        f"{journal}.budget", BudgetLedger(total=100, spent=100)
+    )
+    assert _sidecar_json(journal)["terminal"] is False
+
+    backend = _DualLedgerBackend(cost=30)
+    with pytest.raises(BudgetExhausted):
+        asyncio.run(run_workflow(str(script), backend=backend, journal_path=journal))
+    assert backend.calls == 0  # the very first agent() is refused: 100/100 carried
 
 
 # ---------------------------------------------------------------- rail
