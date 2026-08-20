@@ -155,7 +155,16 @@ class SwarmflowTool(AsyncTool):
         run_id: str,
         completion_ctx: dict[str, Any] | None = None,
     ) -> str:
-        """Terminal completion text injected after the background run succeeds."""
+        """Terminal completion text injected after the background run succeeds.
+
+        A completed run may still have finished OVER budget: the rail
+        force-finishes in-flight agents past the ceiling, their settled calls
+        land after the limit, and — unlike the engine gate — nothing fails the
+        run. In that case an overrun block is appended (snapshot tallies +
+        per-phase cost ranking + redesign guidance) so the leader can rewrite
+        the script to fit the user's budget before relaunching on the fresh
+        per-run ceiling.
+        """
         from openjiuwen.agent_teams.workflow.observer import summarize_run
 
         parts: list[str] = []
@@ -168,11 +177,21 @@ class SwarmflowTool(AsyncTool):
         if body:
             parts.append(body)
         summary = "\n".join(parts)
-        return self._local_t(
+        message = self._local_t(
             "swarmflow.completed",
             run_id=run_id,
             result=summary,
         )
+        overrun_fields = _budget_overrun_fields(
+            getattr(observer, "events", None) if observer is not None else None,
+            self._language,
+        )
+        if overrun_fields is not None:
+            message = (
+                f"{message}\n"
+                + self._local_t("swarmflow.budget_overrun", run_id=run_id, **overrun_fields)
+            )
+        return message
 
     def format_failed_injection(
         self,
@@ -650,6 +669,113 @@ class SwarmflowTool(AsyncTool):
     def _local_t(self, key: str, **kwargs: object) -> str:
         raw = STRINGS[self._message_lang()][key]
         return raw.format_map(kwargs) if kwargs else raw
+
+
+def _final_budget_snapshots(events: Any) -> tuple[dict | None, dict | None]:
+    """Last session / workflow ledger snapshots carried on the event stream.
+
+    Budget snapshots ride ``AGENT_COMPLETED`` / ``AGENT_FAILED`` / terminal
+    events only, so a backward scan for the last non-``None`` payload of each
+    ledger yields the final tally of the run. Returns ``(session, workflow)``;
+    either side is ``None`` when no event ever carried it (e.g. no per-run
+    ceiling declared, or a backend that never snapshots).
+    """
+    budget: dict | None = None
+    wf_budget: dict | None = None
+    for ev in reversed(events):
+        if wf_budget is None and getattr(ev, "workflow_budget", None) is not None:
+            wf_budget = ev.workflow_budget
+        if budget is None and getattr(ev, "budget", None) is not None:
+            budget = ev.budget
+        if budget is not None and wf_budget is not None:
+            break
+    return budget, wf_budget
+
+
+def _phase_token_ranking(events: Any) -> list[tuple[str, int]] | None:
+    """Top-3 phases by per-agent token consumption, folded from the events.
+
+    Sums ``tokens`` off ``AGENT_COMPLETED`` / ``AGENT_FAILED`` events grouped
+    by ``phase`` — the observer-side twin of the ledger's ``phase_tokens``
+    tally, available to the completion path without reaching into the engine
+    runtime. ``None`` when no agent reported a token count.
+    """
+    from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
+
+    acc: dict[str, int] = {}
+    for ev in events:
+        if ev.kind not in (ProgressKind.AGENT_COMPLETED, ProgressKind.AGENT_FAILED):
+            continue
+        tokens = ev.tokens
+        if not tokens:
+            continue
+        phase = ev.phase or "(unphased)"
+        acc[phase] = acc.get(phase, 0) + tokens
+    if not acc:
+        return None
+    return sorted(acc.items(), key=lambda kv: kv[1], reverse=True)[:3]
+
+
+def _budget_overrun_fields(events: Any, language: str) -> dict | None:
+    """Placeholder dict for ``swarmflow.budget_overrun``, or ``None`` when within budget.
+
+    A run that COMPLETED over budget (rail force-finish settles in-flight
+    calls past the ceiling) never raises, so the failed-path
+    ``BudgetExhausted`` feedback stays silent for it. This closes that gap:
+    derive the overrun from the final ledger snapshots on the event stream and
+    hand the leader the same redesign inputs the failed path provides —
+    scope / spent / total / top phases / guidance. Session wins over workflow
+    when both overran (matches the engine gate's reporting order).
+    """
+    if not events:
+        return None
+    budget, wf_budget = _final_budget_snapshots(events)
+    scope: str | None = None
+    if budget is not None and budget.get("total") is not None and budget.get("exhausted"):
+        scope = "session"
+    elif (
+        wf_budget is not None
+        and wf_budget.get("total") is not None
+        and wf_budget.get("exhausted")
+    ):
+        scope = "workflow"
+    if scope is None:
+        return None
+    snap = budget if scope == "session" else wf_budget
+    lang = language if language in ("cn", "en") else "cn"
+    guidance = STRINGS[lang][
+        "swarmflow.budget_overrun.workflow_guidance"
+        if scope == "workflow"
+        else "swarmflow.budget_overrun.session_guidance"
+    ]
+    # When the session layer overran, surface the per-run contrast so the
+    # leader sees the run-level tally alongside the session total; when the
+    # workflow layer overran, spent/total already IS the per-run tally.
+    if (
+        scope == "session"
+        and wf_budget is not None
+        and wf_budget.get("total") is not None
+    ):
+        workflow_contrast = (
+            f"Run 级对照：spent={wf_budget.get('spent')}/{wf_budget.get('total')}。"
+            if lang == "cn"
+            else f"Run-level tally: spent={wf_budget.get('spent')}/{wf_budget.get('total')}. "
+        )
+    else:
+        workflow_contrast = ""
+    if lang == "cn":
+        trigger_layer = "workflow（单次额度）" if scope == "workflow" else "session（会话总额）"
+    else:
+        trigger_layer = "workflow (per-run)" if scope == "workflow" else "session (shared)"
+    return {
+        "spent": snap.get("spent") if snap.get("spent") is not None else "?",
+        "total": snap.get("total") if snap.get("total") is not None else "?",
+        "trigger_layer": trigger_layer,
+        "workflow_contrast": workflow_contrast,
+        "top_phases": _format_top_phases(_phase_token_ranking(events))
+        or ("（无）" if lang == "cn" else "(none)"),
+        "guidance": guidance,
+    }
 
 
 def _format_top_phases(top_phases: list[tuple[str, int]] | None) -> str:
