@@ -57,6 +57,7 @@ META = {
     "description": "一行描述，权限对话框里展示",
     "whenToUse": "适合做什么（可选，工作流列表里展示）",
     "phases": [{"title": "Search", "detail": "并行检索"}, {"title": "Verify", "model": "..."}],  # title 也可为纯字符串
+    "workflow_token_limit": 200000,  # 本次 run 独立 token 额度；用户给出预算时必填（见「预算」节）
 }
 
 async def run(args):
@@ -66,7 +67,7 @@ async def run(args):
 ```
 
 - `META` 必须是**纯字面量**——不能有变量、函数调用、f-string、字符串拼接（加载期静态提取）。
-- 必填 `name` / `description`；可选 `whenToUse`（工作流列表展示）、`phases`。
+- 必填 `name` / `description`；可选 `whenToUse`（工作流列表展示）、`phases`、`workflow_token_limit`（本次 run 的独立 token 额度，纯整数；见「预算 budget」节）。
 - `phases[].title` 与脚本里 `phase()` 调用的标题**精确匹配**；没有对应 `phase()` 的项自成一个进度组。某阶段项可带 `model` 覆盖该阶段默认模型（`{"title": "Verify", "model": "..."}`）。
 - **返回值语义**：worker 被告知"它的最终文本**就是**返回值"（不是给人看的消息），所以它返回**原始数据**。`run(args)` 的返回值（通常是 dict）即工作流最终结果，自动回灌给调用者。
 
@@ -132,6 +133,7 @@ c = await parallel([... for x in b])
 - 校验失败由模型自动重试；耗尽返回 `None`。用 `compact()` / `.filter` 过滤 `None` 再用。
 
 ## 预算 budget（硬天花板）
+- **两层预算**：`budget.*` 是**会话共享总额**（由部署方配置）；`META["workflow_token_limit"]` 是**本次 run 的独立额度**。用户在请求里给出 token / 预算数字（如"预算 90K""控制在 20 万 token 内"）时，**必须**把它换算成整数写进 `META["workflow_token_limit"]`——引擎按 run 计账、UI 显示为 run 预算徽标，超限时你会收到反馈并需重设脚本；不写则该 run 无独立上限（只受会话总额约束，UI 也无 run 徽标）。
 - `budget.total`（用户本轮 token 目标，由部署方配置，未设为 `None`）、`budget.spent()`（已花 token，**取自模型返回的真实用量**、含输入+输出；跨主循环 + 所有工作流共享，非按工作流独立）、`budget.remaining()`（`max(0, total - spent())`，无目标时为 `None`）。
 - **硬天花板**：`spent()` 达到 `total` 后，在跑的 agent 会在它下一次模型调用处被就地终止，后续 `agent()` 直接报错终止整个运行（该错误 `except Exception` 拦不住）。据此动态决定深度（`while budget.total and budget.remaining() > N`）或静态伸缩扇出（`FLEET = budget.total // 100_000 if budget.total else 5`）。没设 `total` 时 `remaining()` 是 `None`——动态循环必须 `guard budget.total`，否则会一直跑到 1000 上限。
 - `spent()` 是**实时**的：并发 agent 的消耗一返回就入账，所以轮询到的是全局真账，不是上一轮的旧值。天花板是兜底——**脚本自己按 `remaining()` 收尾**才能干净结束；撞上天花板则整个运行判失败。单次调用的用量只有返回后才入账，故 `spent()` 允许小幅越过 `total`。
