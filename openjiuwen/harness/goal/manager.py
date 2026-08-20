@@ -343,7 +343,10 @@ class GoalManager:
                     record.last_assessment = GoalAssessment(
                         status=GoalAssessmentStatus.CONTINUE,
                         evidence=assessment.evidence,
-                        remaining_work=assessment.evidence,
+                        remaining_work=(
+                            assessment.remaining_work
+                            or "Continue after resolving the blocking condition."
+                        ),
                         next_instruction=(
                             f"Same blocking observed "
                             f"{len(record.blocking_history)}/"
