@@ -50,7 +50,7 @@ class TestATemplateScan:
     """A-class: full-directory scan mirrors every framework prompt md."""
 
     def test_every_framework_prompt_lands_in_system(self, assembler):
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         system_dir = _team_root() / "prompts" / "system"
         framework_files = list(WorkspaceLayout.iter_framework_prompt_files("cn"))
         assert len(framework_files) > 0  # the framework has prompts to mirror
@@ -59,7 +59,7 @@ class TestATemplateScan:
         assert landed == expected
 
     def test_a_class_frontmatter_kind_and_baseline(self, assembler):
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         sample = sorted((_team_root() / "prompts" / "system").glob("*.cn.md"))[0]
         meta, body = read_frontmatter(sample.read_text(encoding="utf-8"))
         from openjiuwen.agent_teams.team_workspace.frontmatter import body_sha256
@@ -73,7 +73,7 @@ class TestCToolScan:
     """C-class: domain mirror + param-level JSON dict."""
 
     def test_tool_md_mirrors_desc_domains(self, assembler):
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         tool_dir = _team_root() / "prompts" / "tool"
         desc_files = list(WorkspaceLayout.iter_framework_desc_files("cn"))
         assert len(desc_files) > 0
@@ -83,7 +83,7 @@ class TestCToolScan:
             assert mirrored.exists(), f"missing C-class mirror: {mirrored}"
 
     def test_tool_param_dict_lands_flat(self, assembler):
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         param_file = _team_root() / "prompts" / "tool" / TOOL_PARAM_FILE_FMT.format(lang="cn")
         assert param_file.exists()
         meta, body = read_frontmatter(param_file.read_text(encoding="utf-8"))
@@ -95,10 +95,10 @@ class TestCToolScan:
         assert any("." in key for key in parsed)
 
     def test_tool_param_handwritten_survives_reassembly(self, assembler):
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         param_file = _team_root() / "prompts" / "tool" / TOOL_PARAM_FILE_FMT.format(lang="cn")
         param_file.write_text('{"my.custom.key": "hand edited"}', encoding="utf-8")
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         assert param_file.read_text(encoding="utf-8") == '{"my.custom.key": "hand edited"}'
 
 
@@ -106,14 +106,14 @@ class TestBIdentity:
     """B-class: team files only when values exist; member files on spawn."""
 
     def test_team_card_written_only_with_value(self, assembler):
-        assembler.write_team_workspace(team_name="T", language="cn", team_desc="team desc")
+        assembler.write_team_identity(team_name="T", team_desc="team desc")
         card = _team_root() / "prompts" / "identity" / "team_card.md"
         assert card.exists()
         _, body = read_frontmatter(card.read_text(encoding="utf-8"))
         assert body == "team desc"
 
     def test_team_card_skipped_without_value(self, assembler):
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_team_identity(team_name="T")
         card = _team_root() / "prompts" / "identity" / "team_card.md"
         assert not card.exists()
 
@@ -135,26 +135,26 @@ class TestIdempotentReassembly:
     """Re-assembly reuses baselines and never clobbers evolved files."""
 
     def test_second_assembly_is_noop_on_unevolved(self, assembler):
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         sample = sorted((_team_root() / "prompts" / "system").glob("*.cn.md"))[0]
         first = sample.read_text(encoding="utf-8")
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         assert sample.read_text(encoding="utf-8") == first
 
     def test_evolved_a_class_survives_reassembly(self, assembler):
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         target = sorted((_team_root() / "prompts" / "system").glob("*.cn.md"))[0]
         meta, _ = read_frontmatter(target.read_text(encoding="utf-8"))
         target.write_text(write_frontmatter(meta, "evolved body"), encoding="utf-8")
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         _, body = read_frontmatter(target.read_text(encoding="utf-8"))
         assert body == "evolved body"
 
     def test_malformed_frontmatter_rebuilt_on_reassembly(self, assembler):
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         target = sorted((_team_root() / "prompts" / "system").glob("*.cn.md"))[0]
         target.write_text("---\nkind: [unclosed\n---\nbody", encoding="utf-8")
-        assembler.write_team_workspace(team_name="T", language="cn")
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
         meta, body = read_frontmatter(target.read_text(encoding="utf-8"))
         assert body != "body"  # rebuilt from the framework default, not kept
         assert meta["baseline_sha256"] is not None

@@ -4,9 +4,8 @@
 """Unit tests for ``WorkspaceCache`` lazy get + invalidate (design-v5, 212).
 
 Covers: a miss reads the file once and fills the dict; a hit is a zero-IO
-dict lookup; ``invalidate`` drops the dict so the next get re-reads;
-``evolution_enabled=False`` short-circuits to ``None`` without IO; the
-frontmatter evolution judgement (body-hash vs baseline) governs override.
+dict lookup; ``invalidate`` drops the dict so the next get re-reads; the
+write-side ``fill_*`` priming; the frontmatter read serves the latest body.
 """
 
 import json
@@ -36,7 +35,6 @@ def ws(tmp_path):
             WorkspaceStore(),
             "T",
             language="cn",
-            evolution_enabled=True,
         )
     finally:
         reset_openjiuwen_home()
@@ -115,11 +113,13 @@ class TestLazyGetReadsOnceThenHits:
 
 
 class TestUnevolvedFallsBack:
-    """Un-evolved files (body == baseline) never override the default."""
+    """Un-evolved files: A-class serves the (framework-equal) body, B-class
+    still returns None (the store only serves evolved values; the DB fallback
+    equals the file body)."""
 
-    def test_a_class_unevolved_returns_none(self, ws):
+    def test_a_class_unevolved_returns_body(self, ws):
         _baseline_file(_team_root() / "prompts" / "system" / "x.cn.md", "baseline body")
-        assert ws.get_template("x") is None
+        assert ws.get_template("x").content == "baseline body"
 
     def test_b_class_unevolved_returns_none(self, ws):
         _baseline_file(
@@ -127,28 +127,6 @@ class TestUnevolvedFallsBack:
             "baseline desc",
         )
         assert ws.get_member_field("leader", "desc") is None
-
-
-class TestEvolutionEnabledGate:
-    """evolution_enabled=False reads nothing — every value stays None."""
-
-    def test_disabled_get_reads_nothing(self, tmp_path):
-        home = tmp_path / "home"
-        home.mkdir()
-        configure_openjiuwen_home(str(home))
-        try:
-            cache = WorkspaceCache(
-                WorkspaceStore(),
-                "T",
-                language="cn",
-                evolution_enabled=False,
-            )
-            _evolved_file(_team_root() / "prompts" / "system" / "x.cn.md", "evolved")
-            assert cache.get_template("x") is None
-            assert cache.get_member_field("leader", "desc") is None
-            assert cache.get_tool_md("submit_plan") is None
-        finally:
-            reset_openjiuwen_home()
 
 
 class TestInvalidate:
