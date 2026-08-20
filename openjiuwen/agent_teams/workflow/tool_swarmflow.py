@@ -30,6 +30,7 @@ from openjiuwen.agent_teams.id_generator import generate_id
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard

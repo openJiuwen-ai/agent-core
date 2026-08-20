@@ -231,6 +231,11 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
             description=description,
             message=f"Workflow started, args: {args_text}",
             phases=phases,
+            # Ledgers exist (possibly unbounded) before the run starts, so the
+            # budget badges can render from the first event instead of waiting
+            # for the first agent to complete.
+            budget=_budget_snapshot(rt.budget),
+            workflow_budget=_wf_budget_snapshot(rt),
         ))
         result = await _invoke_loaded(loaded, rt.args)
         result_text = _preview(result) or ""
