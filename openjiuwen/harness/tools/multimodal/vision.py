@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import mimetypes
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
@@ -19,6 +20,8 @@ from openjiuwen.harness.schema.config import (
 )
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
+
+logger = logging.getLogger(__name__)
 
 SANDBOX_PATH_MARKER = "home/user"
 
@@ -124,6 +127,12 @@ def _invoke_chat_completion(
             }
         ],
     )
+    # Record token usage from vision model API response
+    try:
+        from openjiuwen.harness.tools.multimodal_telemetry import record_multimodal_token_usage
+        record_multimodal_token_usage(response, model_name=config.model, system="openai")
+    except Exception as exc:
+        logger.warning("[vision] record_multimodal_token_usage failed: %s", exc)
     response_text = _extract_response_text(response)
     if not response_text:
         raise ValueError("Vision model returned empty content.")
