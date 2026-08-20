@@ -306,15 +306,16 @@ def _budget_snapshot(ledger, scope: str = "session") -> dict:
 
 
 def _wf_budget_snapshot(rt) -> dict | None:
-    """Snapshot the per-run ledger, or ``None`` when it has no ceiling set.
+    """Snapshot the per-run ledger, always — even when it has no ceiling set.
 
     A script that does not declare ``workflow_token_limit`` gets an unbounded
-    per-run ledger (``total=None``), for which a snapshot carries no useful
-    ``spent/total`` ceiling — the frontend then falls back to the raw per-run
-    ``token_count`` display.
+    per-run ledger (``total=None``); its snapshot still reports ``spent`` so a
+    frontend can render an "unbounded" run-budget badge with live consumption
+    (the TUI's own formatter ignores snapshots without a numeric ``total``,
+    so this changes nothing for it).
     """
     wb = rt.workflow_budget
-    if wb.total is None:
+    if wb is None:
         return None
     return _budget_snapshot(wb, scope="workflow")
 
