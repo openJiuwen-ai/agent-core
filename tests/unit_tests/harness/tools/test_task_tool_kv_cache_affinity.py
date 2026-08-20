@@ -14,6 +14,7 @@ from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.tools.subagent.task_tool import TaskTool
 
 
@@ -45,6 +46,65 @@ def _make_tool(*, enabled: bool = True, subagent: _FakeSubAgent | None = None) -
         create_subagent=create_subagent,
     )
     return TaskTool(ToolCard(id="task_tool", name="task_tool", description="task"), parent), model
+
+
+def test_team_member_subagent_scope_is_stable_and_distinct() -> None:
+    kwargs = {
+        "sub_session_id": "product-session_sub_code_01234567",
+        "runtime_parent_session_id": "product-session",
+    }
+
+    member_a = kv_cache_hooks.scope_sub_session_id(
+        **kwargs,
+        parent_cache_id="team:product-session:team:team-a:member:member-a",
+    )
+    member_a_repeat = kv_cache_hooks.scope_sub_session_id(
+        **kwargs,
+        parent_cache_id="team:product-session:team:team-a:member:member-a",
+    )
+    member_b = kv_cache_hooks.scope_sub_session_id(
+        **kwargs,
+        parent_cache_id="team:product-session:team:team-a:member:member-b",
+    )
+
+    assert member_a == member_a_repeat
+    assert member_a != member_b
+
+
+@pytest.mark.asyncio
+async def test_team_member_subagent_uses_member_cache_lineage() -> None:
+    subagent = _FakeSubAgent("code")
+    tool, model = _make_tool(subagent=subagent)
+    session = Session(session_id="product-session")
+    session.set_team_cache_scope(team_id="team-a", agent_id="member-a")
+    member_cache_id = "team:product-session:team:team-a:member:member-a"
+
+    with patch(
+            "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal",
+        new=Mock(return_value=True),
+    ) as dispatch_mock, patch(
+            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
+        new=AsyncMock(return_value=True),
+    ) as evict_mock:
+        result = await tool.invoke(
+            {"subagent_type": "code", "task_description": "run task"},
+            session=session,
+        )
+
+    assert result.success is True
+    sub_session_id = subagent.inputs[0]["conversation_id"]
+    assert re.fullmatch(
+        r"product-session_sub_code_[0-9a-f]{8}_scope_[0-9a-f]{12}",
+        sub_session_id,
+    )
+    assert subagent.inputs[0]["parent_session_id"] == member_cache_id
+    dispatch_mock.assert_not_called()
+    evict_mock.assert_awaited_once_with(
+        model,
+        session_id=sub_session_id,
+        parent_session_id=member_cache_id,
+        enabled=True,
+    )
 
 
 @pytest.mark.asyncio

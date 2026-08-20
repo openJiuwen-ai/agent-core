@@ -3,12 +3,14 @@
 
 """Thin KVC policy hooks for DeepAgent subagent lifecycles."""
 
+import hashlib
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.kv_cache import (
     dispatch_session_kv_cache_signal,
     evict_session_kv_cache,
+    resolve_session_lineage,
 )
 
 
@@ -24,6 +26,42 @@ def is_sticky_subagent_type(subagent_type: str) -> bool:
     # its model session sticky would leak the previous query's tools/PageState
     # into an unrelated TaskTool call.
     return str(subagent_type or "").strip() == "verification_agent"
+
+
+def resolve_subagent_parent_cache_id(parent_session: Any) -> str:
+    """Return the provider-facing parent identity without changing OFF behavior."""
+    runtime_session_id = str(parent_session.get_session_id() or "").strip()
+    try:
+        cache_id, _ = resolve_session_lineage(parent_session)
+    except Exception as exc:
+        logger.warning(
+            "[HarnessKVC] parent lineage resolution failed; using runtime session: "
+            "session_id=%s error=%s",
+            runtime_session_id,
+            exc,
+        )
+        return runtime_session_id
+    return str(cache_id or runtime_session_id).strip() or runtime_session_id
+
+
+def scope_sub_session_id(
+        sub_session_id: str,
+        *,
+        runtime_parent_session_id: str,
+        parent_cache_id: str,
+) -> str:
+    """Disambiguate Team-member children while keeping runtime ids path-safe.
+
+    Team members share one product runtime session id but own different
+    provider-facing cache identities.  Raw cache identities contain ``:`` and
+    therefore cannot safely become Windows workspace/session directory names.
+    A stable digest preserves the existing runtime prefix while separating
+    children created by different members.
+    """
+    if not parent_cache_id or parent_cache_id == runtime_parent_session_id:
+        return sub_session_id
+    digest = hashlib.sha256(parent_cache_id.encode("utf-8")).hexdigest()[:12]
+    return f"{sub_session_id}_scope_{digest}"
 
 
 def resolve_sub_session_id(

@@ -10,6 +10,7 @@ from openjiuwen.core.foundation.kv_cache import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
     KVCacheAffinityConfig,
 )
+from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
 
 
@@ -51,3 +52,18 @@ def test_child_session_hook_injects_parent_lineage_when_enabled() -> None:
             KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: "parent-session",
         }
     }
+
+
+def test_child_session_hook_uses_team_member_cache_identity() -> None:
+    parent_session = Session(session_id="product-session", envs={"existing": "value"})
+    parent_session.set_team_cache_scope(team_id="team-a", agent_id="member-a")
+
+    kwargs = kv_cache_hooks.build_child_session_kwargs(
+        _agent(enabled=True),
+        parent_session,
+    )
+
+    assert kwargs["envs"]["existing"] == "value"
+    assert kwargs["envs"][KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV] == (
+        "team:product-session:team:team-a:member:member-a"
+    )

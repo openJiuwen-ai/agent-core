@@ -360,5 +360,18 @@ def build_child_session_kwargs(agent: Any, parent_session: Any) -> dict:
     if getattr(kv_config, "enable_kv_cache_affinity", False) is not True:
         return {}
     child_envs = dict(parent_session.get_envs() or {})
-    child_envs[KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV] = parent_session.get_session_id()
+    runtime_session_id = parent_session.get_session_id()
+    try:
+        parent_cache_id, _ = resolve_session_lineage(parent_session)
+    except Exception as exc:
+        logger.warning(
+            "KVC child lineage resolution failed; using runtime session: "
+            "session_id=%s error=%s",
+            runtime_session_id,
+            exc,
+        )
+        parent_cache_id = runtime_session_id
+    child_envs[KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV] = (
+        parent_cache_id or runtime_session_id
+    )
     return {"envs": child_envs}

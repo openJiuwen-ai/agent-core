@@ -264,10 +264,16 @@ class TaskTool(Tool):
                 reason="'resume_task_id' is supported only for browser_agent",
             )
 
-        parent_session_id = parent_session.get_session_id()
+        runtime_parent_session_id = parent_session.get_session_id()
+        affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
+        parent_cache_id = runtime_parent_session_id
+        if affinity_enabled:
+            parent_cache_id = kv_cache_hooks.resolve_subagent_parent_cache_id(
+                parent_session
+            )
         try:
             sub_session_id = self._build_sub_session_id(
-                parent_session_id,
+                runtime_parent_session_id,
                 str(subagent_type),
                 str(resume_task_id or ""),
             )
@@ -276,9 +282,16 @@ class TaskTool(Tool):
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
                 reason=str(exc),
             ) from exc
+        if affinity_enabled and not resume_task_id:
+            sub_session_id = kv_cache_hooks.scope_sub_session_id(
+                sub_session_id,
+                runtime_parent_session_id=runtime_parent_session_id,
+                parent_cache_id=parent_cache_id,
+            )
         logger.info(
             f"[TaskTool] Creating subagent: {subagent_type}, "
-            f"parent_session={parent_session_id}, sub_session={sub_session_id}"
+            f"runtime_parent_session={runtime_parent_session_id}, "
+            f"cache_parent_session={parent_cache_id}, sub_session={sub_session_id}"
         )
 
         try:
@@ -308,7 +321,6 @@ class TaskTool(Tool):
             logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
         succeeded = False
-        affinity_enabled = False
         parent_subject = current_execution_subject()
         parent_subject_id = parent_subject.subject_id if parent_subject else "main"
         subject = ExecutionSubject(
@@ -329,7 +341,7 @@ class TaskTool(Tool):
                 unregister_run_root_span,
             )
 
-            owner_root = get_root_span(session_id=parent_session_id)
+            owner_root = get_root_span(session_id=runtime_parent_session_id)
             if owner_root is not None and owner_root.is_recording():
                 # The subagent runtime binds its isolated sub-session in
                 # callbacks that may execute outside the dispatch task's
@@ -348,13 +360,12 @@ class TaskTool(Tool):
             try:
                 await prepare_subagent_task_resources(subagent)
                 parent_invocation_id = current_usage_invocation_id()
-                affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
                 if affinity_enabled:
                     kv_cache_hooks.prefetch_sticky_subagent(
                         self.parent_agent,
                         subagent_type=str(subagent_type),
                         sub_session_id=sub_session_id,
-                        parent_session_id=parent_session_id,
+                        parent_session_id=parent_cache_id,
                     )
                 # Invoke subagent with isolated session_id
                 subagent_inputs = {
@@ -367,7 +378,7 @@ class TaskTool(Tool):
                         "resume_task_id": sub_session_id,
                     }
                 if affinity_enabled:
-                    subagent_inputs["parent_session_id"] = parent_session_id
+                    subagent_inputs["parent_session_id"] = parent_cache_id
                     # The child owns a new request-local report.  Keep the
                     # delegation boundary explicit when the child/cache lineage
                     # feature is enabled, without changing the legacy disabled
@@ -378,7 +389,7 @@ class TaskTool(Tool):
                 delegation_token = bind_usage_delegation(
                     build_usage_delegation_attribution(
                         agent_id=getattr(getattr(subagent, "card", None), "id", None),
-                        parent_session_id=parent_session_id,
+                        parent_session_id=runtime_parent_session_id,
                         delegation_id=sub_session_id,
                         parent_invocation_id=parent_invocation_id,
                     )
@@ -418,7 +429,7 @@ class TaskTool(Tool):
                         self.parent_agent,
                         subagent_type=str(subagent_type),
                         sub_session_id=sub_session_id,
-                        parent_session_id=parent_session_id,
+                        parent_session_id=parent_cache_id,
                         succeeded=succeeded,
                     )
 
