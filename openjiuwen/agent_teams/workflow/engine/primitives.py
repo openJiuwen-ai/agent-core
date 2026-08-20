@@ -1182,7 +1182,13 @@ def log(message: Any) -> None:
 
 
 class _Budget:
-    """Reads the active run's ledger via the contextvar — importable & run-agnostic.
+    """Reads the active run's **workflow-level** ledger via the contextvar.
+
+    Importable & run-agnostic: the public ``budget`` name in scripts now reports
+    the per-run budget (``rt.workflow_budget``, sourced from
+    ``META.workflow_token_limit``) — not the session-wide ledger — so a script
+    polling ``budget.remaining()`` sees exactly what "this run" has left before
+    its own ceiling, which is the ceiling the engine enforces for the run.
 
     Live rather than end-of-call: the ledger is written by the backend as each
     model call returns, so a script polling ``remaining()`` sees the burn of
@@ -1191,15 +1197,15 @@ class _Budget:
 
     @property
     def total(self) -> int | None:
-        return _rt.get().budget.total
+        return _rt.get().workflow_budget.total
 
     @staticmethod
     def spent() -> int:
-        return _rt.get().budget.spent
+        return _rt.get().workflow_budget.spent
 
     @staticmethod
     def remaining() -> int | None:
-        return _rt.get().budget.remaining()
+        return _rt.get().workflow_budget.remaining()
 
 
 #: Importable singleton: `from swarmflow import budget` then `budget.spent()`.
