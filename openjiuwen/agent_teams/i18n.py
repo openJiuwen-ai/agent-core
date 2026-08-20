@@ -296,8 +296,12 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "swarmflow.budget_exhausted.workflow_guidance": (
             "该上限为本次工作流的单次额度（与会话总额独立），由用户设定不可改；"
-            "必须重新设计工作流以降低 token 消耗（简化流程、减少 agent、更换更省 token 的模型等），"
-            "新 run 的额度会重置。请重新设计工作流后再重试 swarmflow。"
+            "必须重新设计工作流以降低 token 消耗（简化流程、减少 agent、更换更省 token 的模型等）后重跑。"
+            "重跑额度的规则：换 META name（新工作流名）重跑=额度全新重置，但结果缓存不复用、"
+            "所有 agent 全部重新计费，故重设计须把全量预期消耗压回额度内；"
+            "同名重跑=额度续算（剩余额度=上限−上次已花），未改动的 agent 调用可复用结果缓存"
+            "（不重新调用模型、不计 token），但本次已超支、剩余额度为负，同名重跑会被立即拦截。"
+            "因此请换一个 META name 并重新设计工作流后再重试 swarmflow。"
         ),
         "swarmflow.budget_exhausted.session_guidance": (
             "该预算为团队共享总额（会话级），当前已耗尽。"
@@ -314,9 +318,13 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "swarmflow.budget_overrun.workflow_guidance": (
             "该上限为本次工作流的单次额度（用户设定，不可改），本次 run 已违反。"
-            "新 run 的额度会重置：若需重跑，请重新设计工作流，把预期消耗压回该额度内"
-            "（精简高消耗 phase、减少 agent 数、限制输出长度、更换更省 token 的模型）"
-            "后再调用 swarmflow。"
+            "若需重跑，请重新设计工作流，把预期消耗压回该额度内"
+            "（精简高消耗 phase、减少 agent 数、限制输出长度、更换更省 token 的模型）。"
+            "重跑额度的规则：换 META name（新工作流名）重跑=额度全新重置，"
+            "但结果缓存不复用、所有 agent 全部重新计费，故重设计须把全量预期消耗压回额度内；"
+            "同名重跑=额度续算（剩余额度=上限−上次已花），未改动的 agent 可复用结果缓存，"
+            "但本次已超支、剩余额度为负，同名重跑会被立即拦截。"
+            "因此请换一个 META name 并重新设计工作流后再调用 swarmflow。"
         ),
         "swarmflow.budget_overrun.session_guidance": (
             "该预算为团队共享总额（会话级），当前已超限。结果已照常交付，"
@@ -639,9 +647,16 @@ STRINGS: dict[str, dict[str, str]] = {
         "swarmflow.budget_exhausted.workflow_guidance": (
             "This ceiling is the run's per-run token budget (independent of the session "
             "total), set by the user and must NOT be changed; you must redesign the "
-            "workflow to consume fewer tokens (simplify / fewer agents / cheaper model) "
-            "and relaunch — the new run's ceiling resets. Redesign the workflow before "
-            "retrying swarmflow."
+            "workflow to consume fewer tokens (simplify / fewer agents / cheaper "
+            "model) and relaunch. Relaunch budget rules: relaunching under a NEW META "
+            "name resets the ceiling to a fresh budget, but the result cache does NOT "
+            "carry over — every agent is billed again, so the redesign must fit the "
+            "FULL expected spend under the ceiling; relaunching under the SAME name "
+            "continues the ledger (remaining = ceiling − prior spend) with unchanged "
+            "agent calls replaying from cache (no model call, zero tokens), but this "
+            "run already overspent, so a same-name relaunch is gated immediately. "
+            "Therefore pick a new META name, redesign the workflow, then retry "
+            "swarmflow."
         ),
         "swarmflow.budget_exhausted.session_guidance": (
             "This is the team's shared (session-wide) token ceiling and is currently "
@@ -660,10 +675,17 @@ STRINGS: dict[str, dict[str, str]] = {
         "swarmflow.budget_overrun.workflow_guidance": (
             "This ceiling is the run's per-run token budget (independent of the "
             "session total), set by the user and must NOT be changed — this run "
-            "violated it. A new run's ceiling resets: before relaunching, redesign "
-            "the workflow so its expected spend fits within it (trim the heaviest "
-            "phases, fewer agents, shorter outputs, a cheaper model), then call "
-            "swarmflow again."
+            "violated it. Before relaunching, redesign the workflow so its expected "
+            "spend fits within it (trim the heaviest phases, fewer agents, shorter "
+            "outputs, a cheaper model). Relaunch budget rules: relaunching under a "
+            "NEW META name resets the ceiling to a fresh budget, but the result "
+            "cache does NOT carry over — every agent is billed again, so the "
+            "redesign must fit the FULL expected spend under the ceiling; "
+            "relaunching under the SAME name continues the ledger "
+            "(remaining = ceiling − prior spend) with unchanged agents replaying "
+            "from cache, but this run already overspent, so a same-name relaunch "
+            "is gated immediately. Therefore pick a new META name, redesign the "
+            "workflow, then call swarmflow again."
         ),
         "swarmflow.budget_overrun.session_guidance": (
             "This is the team's shared (session-wide) token ceiling and it is now "
