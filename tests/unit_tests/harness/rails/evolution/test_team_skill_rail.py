@@ -857,13 +857,7 @@ async def test_stage_evolution_from_signals_does_not_hardcode_workflow_signal_se
 
         result = await rail._stage_evolution_from_signals(
             "team-skill-a",
-            trajectory=_trajectory_from_steps(
-                execution_id="e1",
-                session_id="s1",
-                steps=[],
-                source="online",
-            ),
-            signals=[
+            [
                 make_evolution_signal(
                     signal_type="trajectory_issue",
                     section="",
@@ -872,7 +866,14 @@ async def test_stage_evolution_from_signals_does_not_hardcode_workflow_signal_se
                     context={"trajectory_issues": [{"issue_type": "timeout"}]},
                 )
             ],
-            auto_approve=False,
+            [],
+            trajectory=_trajectory_from_steps(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
+            requires_approval=True,
         )
         bind_kwargs = rail._online_updater.bind.call_args.kwargs
         assert bind_kwargs["online_contexts"]["team-skill-a"].trajectory.session_id == "s1"
@@ -1948,6 +1949,50 @@ async def test_team_handle_evolution_from_signals_emits_no_records_outcome():
         assert outcomes[-1].payload["evolution_meta"]["status"] == "no_evolution_no_records"
         assert outcomes[-1].payload["evolution_meta"]["rail_kind"] == "team"
         assert outcomes[-1].payload["evolution_meta"]["skill_name"] == "team-skill-a"
+
+
+@pytest.mark.asyncio
+async def test_team_external_signals_use_team_approval_flow():
+    with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
+        rail = TeamSkillRail.__new__(TeamSkillRail)
+        rail._disabled_skills = set()
+        rail._auto_save = False
+        rail._evolution_sem = asyncio.Semaphore(1)
+        rail._evolution_store = SimpleNamespace(skill_exists=Mock(return_value=True))
+        rail._is_regular_skill = Mock(return_value=True)
+        expected = OnlineEvolutionResult(skill_name="team-skill-a", status="staged")
+        rail._handle_evolution_from_signals_with_result = AsyncMock(return_value=expected)
+        signal = make_evolution_signal(
+            signal_type="trajectory_issue",
+            section="",
+            excerpt="detected issue",
+            skill_name="team-skill-a",
+        )
+        trajectory = _trajectory_from_steps(
+            execution_id="e1",
+            session_id="s1",
+            steps=[],
+            source="online",
+        )
+
+        result = await rail.evolve_from_external_signals(
+            signals=[signal],
+            messages=[{"role": "user", "content": "review feedback"}],
+            trajectory=trajectory,
+            user_query="aggregated feedback",
+            requires_approval=True,
+        )
+
+        assert result is expected
+        rail._handle_evolution_from_signals_with_result.assert_awaited_once_with(
+            skill_name="team-skill-a",
+            trajectory=trajectory,
+            signals=[signal],
+            auto_approve=False,
+            user_query="aggregated feedback",
+            messages=[{"role": "user", "content": "review feedback"}],
+            emit_host_events=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -3071,6 +3116,8 @@ async def test_stage_evolution_from_signals_rejects_legacy_excerpt_arguments():
         await TeamSkillRail._stage_evolution_from_signals(  # type: ignore[misc]
             rail,
             "team-skill-a",
+            [],
+            [],
             trajectory=_trajectory_from_steps(
                 execution_id="e1",
                 session_id="s1",
@@ -3078,5 +3125,5 @@ async def test_stage_evolution_from_signals_rejects_legacy_excerpt_arguments():
                 source="online",
             ),
             excerpt="legacy",
-            auto_approve=False,
+            requires_approval=True,
         )

@@ -1136,7 +1136,7 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         self,
         *,
         skill_name: str,
-        trajectory: Trajectory,
+        trajectory: Optional[Trajectory],
         signals: list[EvolutionSignal],
         auto_approve: bool,
         user_query: str = "",
@@ -1154,9 +1154,9 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
             skill_name=skill_name,
             trajectory=trajectory,
             signals=signals,
-            auto_approve=auto_approve,
+            requires_approval=not auto_approve,
             user_query=user_query,
-            messages=messages,
+            messages=messages or [],
         )
         request = result.request
         if result.status in ONLINE_EVOLUTION_OUTCOME_STATUSES:
@@ -1218,25 +1218,49 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         )
         return result
 
+    async def _handle_evolution_from_signals(
+        self,
+        *,
+        skill_name: str,
+        signals: list[EvolutionSignal],
+        messages: list[dict],
+        trajectory: Optional[Trajectory] = None,
+        ctx: Optional[AgentCallbackContext],
+        user_query: str = "",
+        requires_approval: bool,
+        emit_host_events: bool = True,
+    ) -> OnlineEvolutionResult:
+        """Route the shared external-signal entry point through Team approval events."""
+        del ctx
+        return await self._handle_evolution_from_signals_with_result(
+            skill_name=skill_name,
+            trajectory=trajectory,
+            signals=signals,
+            auto_approve=not requires_approval,
+            user_query=user_query,
+            messages=messages,
+            emit_host_events=emit_host_events,
+        )
+
     async def _stage_evolution_from_signals(
         self,
         skill_name: str,
-        *,
-        trajectory: Trajectory,
         signals: list[EvolutionSignal],
-        auto_approve: bool,
+        messages: list[dict],
+        *,
+        trajectory: Optional[Trajectory] = None,
         user_query: str = "",
-        messages: Optional[list[dict]] = None,
+        requires_approval: bool,
     ) -> OnlineEvolutionResult:
         """Stage team-skill evolution from normalized signals through the shared orchestrator."""
         self._emit_progress("staging", f"staging evolution request for '{skill_name}'", skill_name=skill_name)
         return await self._online_orchestrator.evolve(
             skill_name=skill_name,
             signals=signals,
-            messages=messages or [],
+            messages=messages,
             user_query=user_query,
             trajectory=trajectory,
-            requires_approval=not auto_approve,
+            requires_approval=requires_approval,
             metadata={},
             source="team_skill_experience_updater",
         )
