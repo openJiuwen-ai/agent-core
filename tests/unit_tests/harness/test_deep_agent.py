@@ -1543,6 +1543,35 @@ def test_create_subagent_can_override_parent_image_multimodal_setting(tmp_path) 
     )
 
 
+def test_create_subagent_merges_overlapping_factory_kwargs(tmp_path) -> None:
+    subagent_config = SubAgentConfig(
+        agent_card=AgentCard(name="reviewer", description="reviewer"),
+        system_prompt="Review.",
+        factory_name=CODE_AGENT_FACTORY_NAME,
+        factory_kwargs={
+            "enable_read_image_multimodal": False,
+            "code_graph_profile": "graph",
+        },
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        enable_read_image_multimodal=False,
+        subagents=[subagent_config],
+    )
+
+    with patch(
+        "openjiuwen.harness.subagents.code_agent.create_code_agent",
+        return_value=object(),
+    ) as mock_create_code_agent:
+        parent.create_subagent("reviewer", "sub_session_id")
+
+    kwargs = mock_create_code_agent.call_args.kwargs
+    assert kwargs["enable_read_image_multimodal"] is False
+    assert kwargs["code_graph_profile"] == "graph"
+
+
 def test_create_subagent_keeps_parent_work_dir_restriction_when_stricter(tmp_path) -> None:
     workspace_root = tmp_path / "parent_workspace"
     subagent_config = SubAgentConfig(
