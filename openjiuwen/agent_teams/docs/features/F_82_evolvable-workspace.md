@@ -56,7 +56,7 @@ workspace 根 = `paths.team_workspace_dir`（顶层单一真相）；workspace �
 
 ### 演进判定（读侧唯一依据）
 
-`body_sha256(body) != frontmatter.baseline_sha256` → 已演进 → 读侧用文件 body 覆盖代码默认/DB 值；hash 一致 → 未演进 → 走默认；畸形 frontmatter → 文件无效 → 走默认。总开关 `evolution_enabled` 关时文件照常写、读侧一律不覆盖。
+`body_sha256(body) != frontmatter.baseline_sha256` → 已演进 → 读侧用文件 body 覆盖代码默认/DB 值；hash 一致 → 未演进 → 走默认；畸形 frontmatter → 文件无效 → 走默认。总开关 `evolution_enabled` 关时（2026-08-20 起）**不写文件、不建 cache**——读侧一律回退框架默认 / DB 裸值，已落盘文件保留但不生效（语义重定义见 F_85）。
 
 ## 决策
 
@@ -76,9 +76,9 @@ cache 无 probe、无 mtime：`get*` miss 时读一次进内存，hit 纯 dict �
 
 装配时写基线 + 建空 cache；演进方改文件 → 下次 run 生效（Runner finally `invalidate` 清空 dict，下次 run 第一次 `get*` 重读）。运行期不监听文件变化（不做 hot reload），保持稳态零 IO。
 
-### D5：总开关 `evolution_enabled` 只管读侧
+### D5：总开关 `evolution_enabled`（2026-08-20 语义重定义，取代本节旧文）
 
-写盘不受开关影响（文件总是写入，首次装配即使关闭也建基线），读侧关闭时 cache build 不读文件、所有值 None、调用方走默认。开关在 `TeamAgentSpec.evolution_enabled`（默认 true），随装配 ctx 传入。
+~~只管读侧：写盘不受开关影响，文件总是写入~~ → **演进机制总开关**：`on` 写全部最新 + 建 cache（读侧演进值覆盖）；`off` **不写文件 + 不建 cache**（读侧回退框架默认 / DB 裸值，已落盘文件保留但不生效）。**开关改变必走换 session 冷恢复**——同 session `RESUME_FROM_PAUSE` 复用 agent 忽略传入 spec，改开关必被重新 configure 判定。开关在 `TeamAgentSpec.evolution_enabled`（默认 true），随 `setup_team_backend` 传 TeamBackend（`_spec_evolution_enabled` 守卫写侧）。实现细节与 ST 见 `features/F_85_workspace-md-io-optimization.md`。
 
 ### D6：无 frontmatter 手写文件视为已演进；畸形 frontmatter 视为无效
 
