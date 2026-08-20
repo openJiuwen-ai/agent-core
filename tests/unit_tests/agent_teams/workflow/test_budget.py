@@ -533,6 +533,40 @@ async def test_budget_exhausted_emits_workflow_failed_with_budget(monkeypatch):
     assert ev.budget["remaining"] == 0
 
 
+@pytest.mark.asyncio
+async def test_dry_ledger_with_normal_return_is_a_failure(monkeypatch):
+    """A force-finished run must not report WORKFLOW_COMPLETED.
+
+    The rail drains a ledger by force-finishing in-flight agents, so the script
+    can simply return — no entry gate ever fires (the last agent blew the
+    ceiling and there is no next ``agent()`` to stop). Such a return is an
+    overrun, not a completion: it must surface as WORKFLOW_FAILED with the
+    exhausted scope, exactly like the gate path, or the UI shows "workflow
+    completed" over a truncated run.
+    """
+    wf_led = BudgetLedger(total=500, spent=600)  # dry per-run ledger
+    sink = _Sink()
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(),
+                 workflow_budget=wf_led)
+    rt.progress_sink = sink
+
+    async def partial(loaded, args):
+        return "partial (force-finished) result"
+
+    monkeypatch.setattr(runner, "_invoke_loaded", partial)
+    with pytest.raises(BudgetExhausted) as ei:
+        await runner._exec_loaded(_Loaded(), rt)
+
+    assert ei.value.scope == "workflow"
+    kinds = [e.kind for e in sink.events]
+    assert ProgressKind.WORKFLOW_COMPLETED not in kinds
+    failed = [e for e in sink.events if e.kind == ProgressKind.WORKFLOW_FAILED]
+    assert len(failed) == 1
+    assert failed[0].budget_exhausted_scope == "workflow"
+    assert failed[0].workflow_budget is not None
+    assert failed[0].workflow_budget["exhausted"] is True
+
+
 # ---------------------------------------------------------------------------
 # Emitter + _BackendCallResult + _attempt_calls token threading
 # ---------------------------------------------------------------------------

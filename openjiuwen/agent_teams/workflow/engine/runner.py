@@ -35,6 +35,7 @@ from .primitives import (
     _preview,
     _rt,
     _seq,
+    _top_phases,
     _wf_budget_snapshot,
 )
 from .progress import PhasePlan, ProgressKind, ProgressSink, WorkflowProgressEvent, noop_progress_sink
@@ -238,6 +239,31 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
             workflow_budget=_wf_budget_snapshot(rt),
         ))
         result = await _invoke_loaded(loaded, rt.args)
+        # The rail force-finishes in-flight agents instead of raising, so a
+        # drained ledger can end a run with the script simply returning — no
+        # entry gate ever fired (e.g. the *last* agent blew the ceiling and
+        # there is no next agent() to stop). That return is not a completion:
+        # reroute it through the BudgetExhausted handler below (terminal
+        # sidecar + WORKFLOW_FAILED + scope), so the UI reports the overrun
+        # instead of "workflow completed" and a same-name relaunch gets a
+        # fresh ceiling rather than resuming a dead tally.
+        if rt.budget.exhausted:
+            raise BudgetExhausted(
+                f"session token budget exhausted: {rt.budget.spent}/{rt.budget.total}",
+                scope="session", spent=rt.budget.spent, total=rt.budget.total,
+                workflow_spent=rt.workflow_budget.spent,
+                workflow_total=rt.workflow_budget.total,
+                top_phases=_top_phases(rt),
+            )
+        if rt.workflow_budget.exhausted:
+            raise BudgetExhausted(
+                f"workflow token budget exhausted: {rt.workflow_budget.spent}/{rt.workflow_budget.total}",
+                scope="workflow", spent=rt.workflow_budget.spent,
+                total=rt.workflow_budget.total,
+                workflow_spent=rt.workflow_budget.spent,
+                workflow_total=rt.workflow_budget.total,
+                top_phases=_top_phases(rt),
+            )
         result_text = _preview(result) or ""
         rt.progress_sink(WorkflowProgressEvent(
             kind=ProgressKind.WORKFLOW_COMPLETED,
