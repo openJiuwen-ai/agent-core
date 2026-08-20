@@ -11,8 +11,10 @@ driving and input delivery. This controller only:
 - maps the runtime's phase/round events onto MemberStatus / ExecutionStatus;
 - forwards cancel/abort to the runtime.
 
-It no longer drives rounds, queues pending inputs, or re-starts itself: the
-single-supervisor model in the runtime makes those obsolete.
+It no longer drives rounds or re-starts itself: the single-supervisor model
+in the runtime makes those obsolete. It does, however, queue interrupt resumes
+that arrive while a round is busy executing a prior tool in the same turn (see
+``resume_interrupt`` / ``_drain_pending_interrupt_resumes``).
 """
 
 from __future__ import annotations
@@ -119,6 +121,13 @@ class StreamController:
         self._chunk_observers: list[ChunkObserver] = []
         # Background task pumping runtime.outputs() into the stream; per cycle.
         self._forward_task: Optional[asyncio.Task] = None
+        # Interrupt resumes that arrived while a round was busy executing a
+        # prior permission-gated tool in the same turn (the 2nd of N approvals).
+        # Drained by _drain_pending_interrupt_resumes when the round settles on
+        # the matching ask. Guarded by _interrupt_lock.
+        self._pending_interrupt_resumes: list[Any] = []
+        self._interrupt_lock = asyncio.Lock()
+        self._drain_task: Optional[asyncio.Task] = None
         # Transient-retry state (per cycle): attempts so far, and whether to
         # swallow the remaining chunks of a round that emitted a retryable
         # task_failed (reset when the next round starts).
@@ -197,6 +206,14 @@ class StreamController:
 
     async def stop(self) -> None:
         """Stop the output forwarder. The runtime unregisters its own events."""
+        async with self._interrupt_lock:
+            self._pending_interrupt_resumes.clear()
+            drain = self._drain_task
+            self._drain_task = None
+        if drain is not None and not drain.done():
+            drain.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await drain
         task = self._forward_task
         self._forward_task = None
         if task is not None and not task.done():
@@ -360,6 +377,30 @@ class StreamController:
         if team_member is not None and await team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
             self.close_stream()
             return
+        # A round that settled with a pending interrupt may now match a queued
+        # approval (the 2nd of N approvals emitted in one turn). Drain off the
+        # supervisor dispatch path: harness.send awaits an ack the single
+        # supervisor can only process after the current on_state callback
+        # returns, so a synchronous send here would deadlock. An approval whose
+        # ask never re-committed (turn aborted) is an orphan — drop it. The
+        # queue is mutated under _interrupt_lock to keep the invariant
+        # consistent with resume_interrupt / _drain_pending_interrupt_resumes.
+        drain_now = False
+        async with self._interrupt_lock:
+            if self._pending_interrupt_resumes:
+                if self.has_pending_interrupt():
+                    drain_now = True
+                else:
+                    self._pending_interrupt_resumes.clear()
+                    team_logger.info(
+                        "[{}] dropped orphaned queued interrupt resumes (round "
+                        "ended without re-committing their ask)",
+                        self._member_name() or "?",
+                    )
+        if drain_now and (self._drain_task is None or self._drain_task.done()):
+            # No lock here: _on_idle_settled is edge-triggered from the single
+            # supervisor thread, so two IDLE settles cannot overlap.
+            self._drain_task = asyncio.create_task(self._drain_pending_interrupt_resumes())
         await self._wake_mailbox_if_interrupt_cleared()
         if self._request_completion_poll is not None:
             await self._request_completion_poll()
@@ -480,3 +521,95 @@ class StreamController:
     def has_in_flight_round(self) -> bool:
         """Return whether a round is in flight (phase RUNNING)."""
         return self.is_agent_running()
+
+    async def resume_interrupt(self, user_input: Any) -> str:
+        """Resume a pending HITL interrupt, or queue it when the round is busy.
+
+        When the leader emits N permission-gated tool calls in one turn, the
+        user may approve the 2nd while the 1st is still executing — before the
+        round has re-committed the 2nd tool's interrupt. That approval cannot
+        be delivered yet (no matching pending interrupt) and must not be
+        dropped, so it is queued here and drained by
+        ``_drain_pending_interrupt_resumes`` when the round settles on the
+        matching ask.
+
+        Returns ``"delivered"``, ``"queued"``, or ``"dropped"`` (stale: no
+        pending interrupt and no in-flight round).
+        """
+        async with self._interrupt_lock:
+            if self.is_valid_interrupt_resume(user_input):
+                harness = self._resources.harness
+                if harness is not None:
+                    await harness.send(user_input)
+                return "delivered"
+            if self.has_in_flight_round():
+                self._pending_interrupt_resumes.append(user_input)
+                team_logger.info(
+                    "[{}] queued interrupt resume (round in flight)",
+                    self._member_name() or "?",
+                )
+                return "queued"
+            team_logger.info(
+                "[{}] dropping stale interrupt resume input (no pending "
+                "interrupt, no in-flight round)",
+                self._member_name() or "?",
+            )
+            return "dropped"
+
+    async def _drain_pending_interrupt_resumes(self) -> None:
+        """Deliver the next queued interrupt resume whose ask the round reached.
+
+        Triggered when a round settles (IDLE) with a pending interrupt: the
+        just-committed interrupt state may now match a previously-queued approval
+        whose ``tool_call_id`` was not yet pending when it arrived. Deliver at
+        most ONE per pass: a delivery starts a resume round that clears the
+        interrupt slot, so any later queued approvals become invalid until the
+        round re-commits their ask (drained on the next IDLE settle).
+
+        The whole pick + re-check + send runs under ``_interrupt_lock`` so a
+        concurrent ``resume_interrupt`` (delivered branch) cannot start a
+        competing send for the same slot while the drain is mid-flight. This is
+        safe from the supervisor deadlock that motivates deferring the drain off
+        the ``on_state`` callback: by the time this task runs, the supervisor
+        has returned to its ``get()`` loop and can process the ``_CmdSend`` ack.
+        """
+        async with self._interrupt_lock:
+            if not self._pending_interrupt_resumes:
+                return
+            deliverable = None
+            remaining: list[Any] = []
+            for candidate in self._pending_interrupt_resumes:
+                if deliverable is None and self.is_valid_interrupt_resume(candidate):
+                    deliverable = candidate
+                else:
+                    remaining.append(candidate)
+            self._pending_interrupt_resumes = remaining
+            if deliverable is None:
+                return
+            # Re-check immediately before sending: the slot may have been
+            # cleared between the IDLE settle and now (a competing send or a
+            # round that already consumed the interrupt). The lock guards the
+            # queue, but the slot itself is cleared by the supervisor's round
+            # execution outside this lock, so the re-check is still meaningful.
+            if not self.is_valid_interrupt_resume(deliverable):
+                self._pending_interrupt_resumes.insert(0, deliverable)
+                return
+            harness = self._resources.harness
+            if harness is None:
+                team_logger.warning(
+                    "[{}] queued interrupt resume has no harness; dropping",
+                    self._member_name() or "?",
+                )
+                return
+            try:
+                await harness.send(deliverable)
+            except Exception:
+                # Do NOT re-queue: a send failure means the harness is gone,
+                # so the next IDLE settle (which would re-drain) will never
+                # fire — re-queueing would stall indefinitely. The approval is
+                # moot against an unavailable harness.
+                team_logger.warning(
+                    "[{}] queued interrupt resume delivery failed; dropping",
+                    self._member_name() or "?",
+                    exc_info=True,
+                )
