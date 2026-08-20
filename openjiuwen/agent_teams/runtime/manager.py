@@ -467,7 +467,8 @@ class TeamRuntimeManager:
             return None
         if not item.target.startswith(prefix):
             return None
-        rest = item.target[len(prefix) :]
+        start = len(prefix)
+        rest = item.target[start:]
         if not rest:
             return None
         from openjiuwen.agent_teams.schema.events import parse_swarmflow_human_reply_target
