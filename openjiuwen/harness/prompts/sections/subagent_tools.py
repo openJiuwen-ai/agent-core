@@ -31,7 +31,7 @@ SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具
 ### 调用约束
 
 - subagent_spawn 立即返回 subagent_id，**不含**最终 output。
-- **同一 turn 内 spawn 后必须 subagent_wait** 收集结果；默认 timeout_ms 600000（10 分钟），简单查询 120000，深度调研/编码 600000+。
+- **同一 turn 内 spawn 后必须 subagent_wait** 收集结果；默认 timeout_ms 1800000（30 分钟），简单查询 120000，超长任务可到 3600000。一轮任务本身也是 30 分钟硬顶，把 wait 调得比这更长不会让子代理跑得更久。
 - 本轮结束后实例仍保留（status=idle）；同一 subagent_type 不要重复 spawn。
 - 追问同一实例用 subagent_send_input，不要为相同意图重复 spawn。
 - status=idle 表示实例仍存活，可直接 subagent_send_input，**不要**调用 subagent_resume。
@@ -62,7 +62,7 @@ SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools
 ### Usage constraints
 
 - subagent_spawn returns subagent_id immediately and does **not** include the final output.
-- **Call subagent_wait in the same turn after spawn**; default timeout_ms 600000 (10 min), 120000 for quick tasks, 600000+ for research/coding.
+- **Call subagent_wait in the same turn after spawn**; default timeout_ms 1800000 (30 min), 120000 for quick tasks, up to 3600000 for very long work. A subagent turn is also capped at 30 min; a longer wait does not extend that cap.
 - Instances stay alive after one turn completes (status=idle); do not respawn the same sticky type.
 - Follow up on the same instance with subagent_send_input instead of respawning the same intent.
 - status=idle means the instance is live—call subagent_send_input directly, **not** subagent_resume.

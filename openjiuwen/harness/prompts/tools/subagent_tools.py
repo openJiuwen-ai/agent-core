@@ -36,16 +36,16 @@ SUBAGENT_WAIT_DESCRIPTION: Dict[str, str] = {
         "阻塞等待一个或多个 subagent_id 达到终态，返回 statuses、results、output_files 与 timed_out。"
         "output_files[subagent_id] 是该子代理本轮回答的完整文件路径；"
         "正文较长或后续还要引用细节时，用 read_file 读该文件，勿让子代理重复输出。"
-        "timeout_ms 默认 600000（10 分钟）；简单查询可传 120000（2 分钟），"
-        "深度调研/编码建议 600000 或更长（上限 3600000）。"
+        "timeout_ms 默认 1800000（30 分钟）；简单查询可传 120000（2 分钟），"
+        "超长调研/编码可到上限 3600000。"
     ),
     "en": (
         "Block until all listed subagent_ids reach a final status; returns statuses, "
         "results, output_files, and timed_out. "
         "output_files[subagent_id] is the absolute path to that subagent's full turn answer; "
         "for long output or later reference, read_file that path instead of asking the subagent "
-        "to repeat it. Default timeout_ms is 600000 (10 min); use 120000 (2 min) for "
-        "simple queries and 600000+ for research or coding (max 3600000)."
+        "to repeat it. Default timeout_ms is 1800000 (30 min); use 120000 (2 min) for "
+        "simple queries, and up to 3600000 for very long research or coding."
     ),
 }
 
@@ -143,8 +143,8 @@ def get_subagent_wait_input_params(language: str = "cn") -> Dict[str, Any]:
             "timeout_ms": {
                 "type": "integer",
                 "description": (
-                    "Wait deadline in milliseconds. Default 600000 (10 min); "
-                    "use 120000 for quick tasks, 600000+ for research/coding."
+                    "Wait deadline in milliseconds. Default 1800000 (30 min); "
+                    "use 120000 for quick tasks, up to 3600000 for very long research/coding."
                 ),
             },
         },
