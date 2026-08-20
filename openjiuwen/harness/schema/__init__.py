@@ -10,6 +10,16 @@ from openjiuwen.harness.schema.config import (
     VisionModelConfig,
     is_vision_model_config_complete,
 )
+from openjiuwen.harness.schema.code_graph import (
+    CodeGraphBudget,
+    CodeGraphLocation,
+    CodeGraphRelation,
+    CodeGraphRequest,
+    CodeGraphResult,
+    CodeGraphRunState,
+    CodeGraphScope,
+    GraphQueryPolicy,
+)
 from openjiuwen.harness.schema.loop_event import (
     DeepLoopEvent,
     DeepLoopEventType,
@@ -35,6 +45,14 @@ __all__ = [
     "VisionModelConfig",
     "is_vision_model_config_complete",
     "SubAgentConfig",
+    "CodeGraphRequest",
+    "CodeGraphResult",
+    "CodeGraphRunState",
+    "CodeGraphLocation",
+    "CodeGraphRelation",
+    "CodeGraphScope",
+    "CodeGraphBudget",
+    "GraphQueryPolicy",
     "DeepLoopEvent",
     "DeepLoopEventType",
     "create_loop_event",
