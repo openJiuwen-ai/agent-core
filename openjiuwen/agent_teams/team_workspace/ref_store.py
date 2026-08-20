@@ -32,6 +32,7 @@ import shutil
 from pathlib import Path
 
 from openjiuwen.agent_teams.paths import get_agent_teams_home
+from openjiuwen.agent_teams.skill.file_lock import cross_process_file_lock
 from openjiuwen.agent_teams.team_workspace.paths import (
     MEMBER_MODE_DYNAMIC,
     member_real_dir,
@@ -52,25 +53,31 @@ class MemberRefStore:
         mode: str = MEMBER_MODE_DYNAMIC,
         member_workspace_prefix: bool = True,
     ) -> int:
-        """Record one team reference; return the resulting count."""
+        """Record one team reference; return the resulting count.
+
+        The read-modify-write of ``.refs.json`` runs under a cross-process
+        file lock (same primitive as ``skills-visibility.json`` writers) so
+        two teams adding references concurrently never lose an entry.
+        """
         refs_path = self._refs_path(
             team_name,
             member_name,
             mode=mode,
             member_workspace_prefix=member_workspace_prefix,
         )
-        data = self._read(refs_path)
-        if data is None:
-            refs_path.parent.mkdir(parents=True, exist_ok=True)
-            self._write(refs_path, {"kind": mode, "teams": [team_name]})
-            return 1
-        teams = self._teams(data)
-        if team_name not in teams:
-            teams.append(team_name)
-            data["kind"] = data.get("kind") or mode
-            data["teams"] = teams
-            self._write(refs_path, data)
-        return len(teams)
+        with cross_process_file_lock(refs_path):
+            data = self._read(refs_path)
+            if data is None:
+                refs_path.parent.mkdir(parents=True, exist_ok=True)
+                self._write(refs_path, {"kind": mode, "teams": [team_name]})
+                return 1
+            teams = self._teams(data)
+            if team_name not in teams:
+                teams.append(team_name)
+                data["kind"] = data.get("kind") or mode
+                data["teams"] = teams
+                self._write(refs_path, data)
+            return len(teams)
 
     def remove_ref(
         self,
@@ -91,18 +98,19 @@ class MemberRefStore:
             mode=mode,
             member_workspace_prefix=member_workspace_prefix,
         )
-        data = self._read(refs_path)
-        if data is None:
-            return 0
-        teams = self._teams(data)
-        if team_name in teams:
-            teams.remove(team_name)
-        if not teams:
-            refs_path.unlink(missing_ok=True)
-            return 0
-        data["teams"] = teams
-        self._write(refs_path, data)
-        return len(teams)
+        with cross_process_file_lock(refs_path):
+            data = self._read(refs_path)
+            if data is None:
+                return 0
+            teams = self._teams(data)
+            if team_name in teams:
+                teams.remove(team_name)
+            if not teams:
+                refs_path.unlink(missing_ok=True)
+                return 0
+            data["teams"] = teams
+            self._write(refs_path, data)
+            return len(teams)
 
     def get_ref_count(
         self,
@@ -173,7 +181,11 @@ class MemberRefStore:
             return False
         if not member_dir.is_dir():
             return False
-        shutil.rmtree(member_dir, ignore_errors=True)
+        try:
+            shutil.rmtree(member_dir)
+        except OSError as exc:
+            team_logger.warning("delete_if_zero: remove %s failed: %s", member_dir, exc)
+            return False
         return True
 
     def cleanup_team_dynamic_members(self, team_name: str) -> list[str]:

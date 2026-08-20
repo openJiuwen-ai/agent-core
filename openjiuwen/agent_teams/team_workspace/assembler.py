@@ -55,6 +55,7 @@ def prepare_member_workspace(
         team_name,
         leader_member_name=leader_member_name,
         predefined_members=predefined_members,
+        member_workspace_prefix=member_workspace_prefix,
     )
 
     root = MemberWorkspaceBinder().setup(

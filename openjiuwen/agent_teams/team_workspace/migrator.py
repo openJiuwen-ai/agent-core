@@ -16,6 +16,7 @@ the team, not a reusable workspace.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from openjiuwen.agent_teams.paths import team_home
@@ -47,6 +48,7 @@ class TeamWorkspaceMigrator:
         leader_member_name: str | None = None,
         predefined_members: set[str] | None = None,
         persistent_members: set[str] | None = None,
+        member_workspace_prefix: bool = True,
     ) -> bool:
         """Run the filesystem migration for one team.
 
@@ -63,6 +65,10 @@ class TeamWorkspaceMigrator:
                 executors never enter the roster) — they are skipped. ``None``
                 falls back to classifying everything non-leader/non-predefined
                 as dynamic.
+            member_workspace_prefix: Passed through to the dynamic real-dir
+                formula; must match the value the binder will use, otherwise
+                migrated content and the reference count land in different
+                directories.
 
         Returns True when any directory was moved. Never touches the DB.
         """
@@ -100,9 +106,30 @@ class TeamWorkspaceMigrator:
                 team_name,
                 member_name,
                 mode,
-                member_workspace_prefix=True,
+                member_workspace_prefix=member_workspace_prefix,
             )
             if target == entry:
+                continue
+            if target.exists():
+                # Shared real dir already live (a prior migrate, or another
+                # team's binder setup). The legacy entry is stale residue:
+                # drop it and link to the existing dir — a plain rename would
+                # raise ``Directory not empty`` / ``PermissionError`` on an
+                # occupied target, or swap an empty shared dir out from under
+                # a live link.
+                try:
+                    shutil.rmtree(entry)
+                except OSError as exc:
+                    team_logger.warning(
+                        "migrate: dropping stale legacy dir %s failed: %s", entry, exc
+                    )
+                    continue
+                if not self._link(target, team_name, member_name):
+                    # Link failed — retreat into the team tree (v3 R2): the
+                    # shared dir stays untouched, this team gets its own dir.
+                    entry.mkdir(parents=True, exist_ok=True)
+                    continue
+                moved = True
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             entry.rename(target)

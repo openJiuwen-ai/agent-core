@@ -89,12 +89,12 @@ class MemberWorkspaceBinder:
             binding.member_name,
             MEMBER_MODE_PREDEFINED,
         )
-        self._ensure_real_dir_and_link(binding, root, real_dir)
-        self._ref_store.add_ref(
-            binding.team_name,
-            binding.member_name,
-            mode=MEMBER_MODE_PREDEFINED,
-        )
+        if self._ensure_real_dir_and_link(binding, root, real_dir):
+            self._ref_store.add_ref(
+                binding.team_name,
+                binding.member_name,
+                mode=MEMBER_MODE_PREDEFINED,
+            )
         return root
 
     def _setup_dynamic(self, binding: TeamMemberBinding) -> Path:
@@ -105,31 +105,40 @@ class MemberWorkspaceBinder:
             MEMBER_MODE_DYNAMIC,
             member_workspace_prefix=binding.member_workspace_prefix,
         )
-        self._ensure_real_dir_and_link(binding, root, real_dir)
-        self._ref_store.add_ref(
-            binding.team_name,
-            binding.member_name,
-            mode=MEMBER_MODE_DYNAMIC,
-            member_workspace_prefix=binding.member_workspace_prefix,
-        )
+        if self._ensure_real_dir_and_link(binding, root, real_dir):
+            self._ref_store.add_ref(
+                binding.team_name,
+                binding.member_name,
+                mode=MEMBER_MODE_DYNAMIC,
+                member_workspace_prefix=binding.member_workspace_prefix,
+            )
         return root
 
+    @staticmethod
     def _ensure_real_dir_and_link(
-        self,
         binding: TeamMemberBinding,
         root: Path,
         real_dir: Path,
-    ) -> None:
+    ) -> bool:
         """Create the real directory + link, retreating into the team on failure.
 
         The in-team ``root`` is the member's stable access path either way:
         link succeeds → ``root`` is a link to ``real_dir``; link fails → the
         real directory is created at ``root`` (v3 R2).
+
+        Returns True when ``root`` is a link (real dir external, cross-team
+        reuse live); False when the retreat fell back to an in-team real
+        directory — the caller must then skip reference counting, since there
+        is no shared real dir to count and ``add_ref`` would otherwise
+        recreate the team-external directory.
         """
         # Reuse-first: an already-existing link (or a real in-team directory
         # left by a prior retreat) is left as-is.
-        if is_dir_link(root) or root.is_dir():
-            return
+        if is_dir_link(root):
+            return True
+        if root.is_dir():
+            # Real in-team directory left by a prior retreat.
+            return False
         real_dir.parent.mkdir(parents=True, exist_ok=True)
         real_dir.mkdir(parents=True, exist_ok=True)
         root.parent.mkdir(parents=True, exist_ok=True)
@@ -142,12 +151,25 @@ class MemberWorkspaceBinder:
                 binding.member_name,
                 exc,
             )
+            # Retreat leaves no team-external residue: the real dir was
+            # pre-created for the junction path, so undo it (v3 R2).
+            if real_dir.is_dir():
+                try:
+                    real_dir.rmdir()
+                except OSError as clean_exc:
+                    team_logger.warning(
+                        "could not remove pre-created real dir %s: %s",
+                        real_dir,
+                        clean_exc,
+                    )
             root.mkdir(parents=True, exist_ok=True)
-            return
+            return False
+        return True
 
     # ── teardown ───────────────────────────────────────────────────────────
 
-    def unlink(self, team_name: str, member_name: str) -> None:
+    @staticmethod
+    def unlink(team_name: str, member_name: str) -> None:
         """Remove the link only; the real directory is untouched."""
         remove_dir_link(team_member_workspace_dir(team_name, member_name))
 
@@ -182,7 +204,8 @@ class MemberWorkspaceBinder:
         """
         return self._ref_store.cleanup_team_dynamic_members(team_name)
 
-    def cleanup_team_links(self, team_name: str) -> None:
+    @staticmethod
+    def cleanup_team_links(team_name: str) -> None:
         """Remove every link under ``<team>/workspaces/``; never touch targets.
 
         Call before any whole-tree ``shutil.rmtree`` of the team home — a

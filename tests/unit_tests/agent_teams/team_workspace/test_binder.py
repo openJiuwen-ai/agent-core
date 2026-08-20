@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import errno
-import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -77,10 +76,13 @@ def test_setup_idempotent() -> None:
 
 @pytest.mark.level0
 def test_link_failure_retreats_into_team(monkeypatch) -> None:
-    """EACCES on create_dir_link → real dir is created in-team (v3 R2)."""
-    monkeypatch.setattr(os, "name", "posix")
+    """EACCES on create_dir_link → real dir is created in-team (v3 R2).
 
-    def fake_create(*args, **kwargs):
+    ``create_dir_link`` is fully patched here, so ``os.name`` is untouched:
+    monkeypatching it to "posix" would make ``pathlib.Path`` try to build a
+    ``PosixPath`` on Windows and crash pytest's failure rendering.
+    """
+    def fake_create(*_args, **_kwargs):
         raise OSError(errno.EACCES, "permission denied")
 
     monkeypatch.setattr(

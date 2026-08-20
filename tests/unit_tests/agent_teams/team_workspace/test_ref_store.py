@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -140,3 +141,47 @@ def test_legacy_count_format_normalized() -> None:
     assert store.get_ref_count("teamA", "memX") == 0, "legacy count files read as empty"
     store.add_ref("teamA", "memX", mode=MEMBER_MODE_DYNAMIC)
     assert store.get_ref_teams("teamA", "memX") == ["teamA"], "rewritten with teams list"
+
+
+@pytest.mark.level0
+def test_delete_if_zero_returns_false_when_rmtree_fails(monkeypatch) -> None:
+    """A failed rmtree must not be reported as success (no false cleanup)."""
+    store = MemberRefStore()
+    store.add_ref("teamA", "memX", mode=MEMBER_MODE_DYNAMIC)
+    real = member_real_dir("teamA", "memX", MEMBER_MODE_DYNAMIC)
+    store.remove_ref("teamA", "memX")
+
+    def boom(*_args, **_kwargs):
+        raise OSError(13, "permission denied")
+
+    monkeypatch.setattr(shutil, "rmtree", boom)
+    assert store.delete_if_zero("teamA", "memX") is False
+    assert real.is_dir(), "directory survives a failed removal"
+
+
+@pytest.mark.level0
+def test_add_ref_and_remove_ref_run_under_cross_process_lock(monkeypatch) -> None:
+    """The .refs.json read-modify-write must hold the cross-process lock (P2).
+
+    Serializing the read-modify-write is what prevents lost updates when two
+    teams reference the same shared member concurrently. The lock primitive
+    itself is already covered by ``test_skill_file_lock``; this test pins that
+    the store actually enters it on every mutation.
+    """
+    from openjiuwen.agent_teams.skill.file_lock import cross_process_file_lock, lock_path_for
+
+    acquired: list[str] = []
+    real_lock = cross_process_file_lock
+
+    def guarded(target, **kwargs):
+        acquired.append(str(target))
+        return real_lock(target, **kwargs)
+
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.team_workspace.ref_store.cross_process_file_lock", guarded
+    )
+    store = MemberRefStore()
+    store.add_ref("teamA", "memX", mode=MEMBER_MODE_DYNAMIC)
+    store.remove_ref("teamA", "memX")
+    assert [Path(t).name for t in acquired] == [".refs.json", ".refs.json"]
+    assert lock_path_for(Path(acquired[0])).name.endswith(".refs.json.lock")

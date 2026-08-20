@@ -492,6 +492,24 @@ class TeamBackend:
 
     # ------------------------------------------------------------------
 
+    def _cleanup_member_workspace_links(self) -> None:
+        """Detach member links and release dynamic real dirs (block C).
+
+        Called before ``_remove_cleanup_paths``: a junction must never be
+        descended by ``shutil.rmtree``, and the external dynamic real dirs
+        under ``.agent_teams/`` would otherwise accumulate across team
+        cleanups. Fail-soft: an ``OSError`` is logged and skipped.
+        """
+        try:
+            from openjiuwen.agent_teams.team_workspace.binder import MemberWorkspaceBinder
+
+            binder = MemberWorkspaceBinder()
+            binder.cleanup_team_links(self.team_name)
+            for member_name in binder.cleanup_team_dynamic_members(self.team_name):
+                binder.delete_if_zero(self.team_name, member_name)
+        except OSError as exc:
+            team_logger.error(f"Failed to clean member workspace links for {self.team_name}: {exc}")
+
     async def _remove_cleanup_paths(self) -> None:
         """Remove every registered cleanup path with ``shutil.rmtree``.
 
@@ -521,7 +539,11 @@ class TeamBackend:
             if is_dir_link(target):
                 # Unlink only — never rmtree a link (junction descent would
                 # delete the target's shared contents).
-                remove_dir_link(target)
+                try:
+                    remove_dir_link(target)
+                except OSError as exc:
+                    team_logger.error(f"Failed to remove team directory link {target}: {exc}")
+                    continue
                 team_logger.info(f"Removed team directory link: {target}")
                 continue
             if not target.is_dir():
@@ -1073,6 +1095,11 @@ class TeamBackend:
             except Exception as e:
                 team_logger.error(f"on_team_cleaned callback failed for team {self.team_name}: {e}")
 
+        # Block C: detach member links and release the team's dynamic real
+        # dirs under ``.agent_teams/`` before any rmtree — a junction must
+        # never be descended, and the external dirs must not accumulate.
+        self._cleanup_member_workspace_links()
+
         # Remove registered filesystem paths for the team.  TeamAgent
         # registers actual resolved workspace/output paths, not the whole
         # team_home parent: team_home contains per-session state such as
@@ -1121,6 +1148,7 @@ class TeamBackend:
         success = await self.db.force_delete_team_session(self.team_name)
 
         try:
+            self._cleanup_member_workspace_links()
             await self._remove_cleanup_paths()
         except Exception as e:
             team_logger.error("Failed to remove cleanup paths for {}: {}", self.team_name, e)

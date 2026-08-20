@@ -93,3 +93,52 @@ def test_migrate_rolls_back_when_link_fails(monkeypatch) -> None:
     assert moved is False
     assert legacy.is_dir(), "directory rolled back into the team tree on link failure"
     assert not member_real_dir("teamA", "memX", MEMBER_MODE_DYNAMIC).exists()
+
+
+@pytest.mark.level0
+def test_migrate_honors_prefix_off() -> None:
+    """prefix=False teams migrate dynamic legacy dirs to ``.agent_teams/<m>``."""
+    legacy = _legacy_dir("teamA", "memX")
+    legacy.mkdir(parents=True)
+    moved = TeamWorkspaceMigrator().migrate("teamA", member_workspace_prefix=False)
+    assert moved is True
+    real = member_real_dir(
+        "teamA", "memX", MEMBER_MODE_DYNAMIC, member_workspace_prefix=False
+    )
+    assert real.is_dir()
+    assert not member_real_dir("teamA", "memX", MEMBER_MODE_DYNAMIC).exists()
+
+
+@pytest.mark.level0
+def test_migrate_reuses_existing_shared_target() -> None:
+    """Target already migrated by another team → drop legacy residue, reuse."""
+    shared = apaths.get_agent_teams_home() / "shared"
+    shared.mkdir(parents=True)
+    (shared / "artifact.txt").write_text("live", encoding="utf-8")
+    legacy = _legacy_dir("teamA", "shared")
+    legacy.mkdir(parents=True)
+    moved = TeamWorkspaceMigrator().migrate("teamA", predefined_members={"shared"})
+    assert moved is True
+    assert is_dir_link(apaths.team_member_workspace_dir("teamA", "shared"))
+    assert (shared / "artifact.txt").read_text(encoding="utf-8") == "live"
+    assert is_dir_link(legacy), "stale in-team real dir replaced by a transparent link"
+
+
+@pytest.mark.level0
+def test_migrate_reuse_retreats_when_link_fails(monkeypatch) -> None:
+    """Existing shared target + link failure → in-team real dir, no crash."""
+    shared = apaths.get_agent_teams_home() / "shared"
+    shared.mkdir(parents=True)
+    legacy = _legacy_dir("teamA", "shared")
+    legacy.mkdir(parents=True)
+
+    def fake_create(*_args, **_kwargs):
+        raise OSError(13, "permission denied")
+
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.team_workspace.migrator.create_dir_link", fake_create
+    )
+    moved = TeamWorkspaceMigrator().migrate("teamA", predefined_members={"shared"})
+    assert moved is False
+    assert legacy.is_dir(), "retreat re-creates the in-team real dir"
+    assert shared.is_dir(), "shared dir untouched"
