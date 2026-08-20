@@ -784,6 +784,140 @@ async def test_tool_approval_event_resumes_interrupt():
     assert interactive_input.user_inputs["call-1"]["auto_confirm"] is True
 
 
+def _interactive_input(tool_call_id: str) -> InteractiveInput:
+    ii = InteractiveInput()
+    ii.update(tool_call_id, {"approved": True, "feedback": "", "auto_confirm": False})
+    return ii
+
+
+def _wire_harness(agent: TeamAgent) -> MagicMock:
+    harness = MagicMock()
+    harness.send = AsyncMock()
+    agent._configurator.resources.harness = harness
+    return harness
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_resume_interrupt_queues_when_round_busy():
+    """A 2nd approval arriving while the round is busy is queued, not dropped."""
+    agent = _make_leader()
+    harness = _wire_harness(agent)
+    sc = agent._stream_controller
+    sc.is_valid_interrupt_resume = MagicMock(return_value=False)  # slot absent (round busy)
+    sc.has_in_flight_round = MagicMock(return_value=True)
+
+    status = await agent.resume_interrupt(_interactive_input("call-2"))
+
+    assert status == "queued"
+    harness.send.assert_not_called()
+    assert sc._pending_interrupt_resumes  # the approval is buffered, not lost
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_queued_interrupt_drained_when_ask_committed():
+    """A queued approval is delivered once the round commits its interrupt."""
+    agent = _make_leader()
+    harness = _wire_harness(agent)
+    sc = agent._stream_controller
+    sc.is_valid_interrupt_resume = MagicMock(return_value=False)
+    sc.has_in_flight_round = MagicMock(return_value=True)
+
+    approval = _interactive_input("call-2")
+    await agent.resume_interrupt(approval)
+    harness.send.assert_not_called()
+
+    # Round settles and re-commits the 2nd tool's interrupt → approval now valid.
+    sc.is_valid_interrupt_resume = MagicMock(return_value=True)
+    await sc._drain_pending_interrupt_resumes()
+
+    harness.send.assert_awaited_once_with(approval)
+    assert sc._pending_interrupt_resumes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_resume_interrupt_dropped_when_stale():
+    """An approval with no pending interrupt and no in-flight round is dropped."""
+    agent = _make_leader()
+    harness = _wire_harness(agent)
+    sc = agent._stream_controller
+    sc.is_valid_interrupt_resume = MagicMock(return_value=False)
+    sc.has_in_flight_round = MagicMock(return_value=False)
+
+    status = await agent.resume_interrupt(_interactive_input("call-x"))
+
+    assert status == "dropped"
+    harness.send.assert_not_called()
+    assert sc._pending_interrupt_resumes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_concurrent_resume_interrupts_serialize_under_lock():
+    """Two concurrent approvals both land in the queue; the lock prevents a race."""
+    agent = _make_leader()
+    harness = _wire_harness(agent)
+    sc = agent._stream_controller
+    sc.is_valid_interrupt_resume = MagicMock(return_value=False)
+    sc.has_in_flight_round = MagicMock(return_value=True)
+
+    a = _interactive_input("call-a")
+    b = _interactive_input("call-b")
+    await asyncio.gather(agent.resume_interrupt(a), agent.resume_interrupt(b))
+
+    assert len(sc._pending_interrupt_resumes) == 2
+    assert a in sc._pending_interrupt_resumes
+    assert b in sc._pending_interrupt_resumes
+    harness.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_idle_settle_schedules_deferred_drain_delivery():
+    """_on_idle_settled drains a queued approval off the supervisor callback path.
+
+    Reproduces the production trigger: a queued approval plus a committed
+    pending interrupt schedules the drain as a task (not an inline harness.send
+    that would deadlock the supervisor) and delivers it once the task runs.
+    """
+    agent = _make_leader()
+    harness = _wire_harness(agent)
+    sc = agent._stream_controller
+    sc.is_valid_interrupt_resume = MagicMock(return_value=True)
+    sc.has_pending_interrupt = MagicMock(return_value=True)
+
+    approval = _interactive_input("call-2")
+    sc._pending_interrupt_resumes.append(approval)
+    sc._state.team_member = None  # skip the db-backed shutdown guard; drain is the unit under test
+
+    await sc._on_idle_settled()
+    # The drain was scheduled off the on_state callback; let it run.
+    if sc._drain_task is not None:
+        await sc._drain_task
+
+    harness.send.assert_awaited_once_with(approval)
+    assert sc._pending_interrupt_resumes == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_idle_settle_drops_orphans_when_no_pending_interrupt():
+    """A queued approval whose ask never re-committed is dropped at IDLE."""
+    agent = _make_leader()
+    harness = _wire_harness(agent)
+    sc = agent._stream_controller
+    sc.has_pending_interrupt = MagicMock(return_value=False)
+
+    sc._pending_interrupt_resumes.append(_interactive_input("call-orphan"))
+    sc._state.team_member = None  # skip the db-backed shutdown guard
+    await sc._on_idle_settled()
+
+    harness.send.assert_not_called()
+    assert sc._pending_interrupt_resumes == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_idle_human_agent_tears_down_on_self_shutdown():
