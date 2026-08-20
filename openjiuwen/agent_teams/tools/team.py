@@ -497,11 +497,19 @@ class TeamBackend:
 
         Sorts paths by depth (deepest first) so that a parent directory
         and its descendants both get removed cleanly even if the caller
-        registered overlapping entries.  Failures are logged and do not
-        abort the overall cleanup.
+        registered overlapping entries.  A registered path that is a
+        directory link (symlink / Windows junction) is unlinked only —
+        ``shutil.rmtree`` would descend a junction and delete the target
+        contents (a shared member workspace outside the team tree).
+        Failures are logged and do not abort the overall cleanup.
         """
         if not self._cleanup_paths:
             return
+
+        from openjiuwen.agent_teams.team_workspace.dir_links import (
+            is_dir_link,
+            remove_dir_link,
+        )
 
         ordered = sorted(
             self._cleanup_paths,
@@ -510,6 +518,12 @@ class TeamBackend:
         )
         for raw in ordered:
             target = Path(raw)
+            if is_dir_link(target):
+                # Unlink only — never rmtree a link (junction descent would
+                # delete the target's shared contents).
+                remove_dir_link(target)
+                team_logger.info(f"Removed team directory link: {target}")
+                continue
             if not target.is_dir():
                 continue
             try:

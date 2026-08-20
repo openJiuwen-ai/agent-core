@@ -14,7 +14,6 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
-    Callable,
     Literal,
     Optional,
     Union,
@@ -217,6 +216,16 @@ class TeamAgentSpec(BaseModel):
     teammate_mode: str = "build_mode"
     """Member execution mode: ``build_mode`` or ``plan_mode``."""
     spawn_mode: str = "process"
+    member_workspace_prefix: bool = True
+    """Dynamic-only switch for member workspace isolation (block C).
+
+    When True, dynamic member real directories live at
+    ``.agent_teams/<team>#<member>/`` (per-team isolation). When False they
+    share the plain ``.agent_teams/<member>/`` shape (same as predefined).
+    The in-team link name is unaffected — it stays
+    ``workspaces/<member>_workspace`` either way, so A/B code and the worker
+    path never notice the switch.
+    """
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[PredefinedMemberSpec] = []
     external_cli_agents: list[ExternalCliAgentSpec] = []
@@ -766,6 +775,7 @@ class TeamAgentSpec(BaseModel):
             model_pool_strategy=team_strategy,
             external_messager_config=external_messager_config,
             workspace=self.workspace.model_dump() if self.workspace is not None else None,
+            member_workspace_prefix=self.member_workspace_prefix,
         )
 
         messager_config = self.transport.build() if self.transport else None
