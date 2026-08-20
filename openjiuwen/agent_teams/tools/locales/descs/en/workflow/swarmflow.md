@@ -57,6 +57,7 @@ META = {
     "description": "one line, shown in the permission dialog",
     "whenToUse": "what it's for (optional, shown in the workflow list)",
     "phases": [{"title": "Search", "detail": "parallel retrieval"}, {"title": "Verify", "model": "..."}],  # title may be a plain string
+    "workflow_token_limit": 200000,  # per-run token ceiling; required when the user gives a budget (see Budget)
 }
 
 async def run(args):
@@ -66,7 +67,7 @@ async def run(args):
 ```
 
 - `META` must be a **pure literal** — no variables, function calls, f-strings, or string concatenation (extracted statically at load time).
-- Required `name` / `description`; optional `whenToUse` (shown in the workflow list), `phases`.
+- Required `name` / `description`; optional `whenToUse` (shown in the workflow list), `phases`, `workflow_token_limit` (the run's own token ceiling, a plain integer; see Budget).
 - `phases[].title` must match the `phase()` calls exactly; a phase with no matching call forms its own progress group. A phase entry may carry `model` to override that phase's default model (`{"title": "Verify", "model": "..."}`).
 - **Return-value semantics**: a worker is told its final text **IS** the return value (not a human-facing message), so it returns **raw data**. The value `run(args)` returns (usually a dict) is the workflow's final result, fed back to the caller automatically.
 
@@ -129,6 +130,7 @@ that middle `transform` needs no barrier — rewrite as a pipeline with the tran
 - Validation failure is retried by the model; on exhaustion it returns `None`. Filter `None` with `compact()` / `.filter` before use.
 
 ## Budget (hard ceiling)
+- **Two budget layers**: `budget.*` is the **session-wide shared total** (set by the deployment); `META["workflow_token_limit"]` is the run's **own ceiling**. When the user's request states a token/budget figure ("budget 90K", "keep it under 200k tokens"), you MUST convert it to an integer and write it into `META["workflow_token_limit"]` — the engine bills per run, the UI shows it as the run budget badge, and an overrun feeds back to you to redesign the script; omit it and the run has no ceiling of its own (only the session total binds, and no run badge shows).
 - `budget.total` (the turn's token target, set by the deployment, `None` if unset), `budget.spent()` (tokens spent, **taken from the usage the model itself reports**, input + output; shared across the main loop and all workflows — not per-workflow), `budget.remaining()` (`max(0, total - spent())`, `None` when no target).
 - **Hard ceiling**: once `spent()` reaches `total`, agents already running are stopped where they stand at their next model call, and a further `agent()` raises and ends the whole run (that error is not catchable with `except Exception`). Drive depth dynamically (`while budget.total and budget.remaining() > N`) or scale fan-out statically (`FLEET = budget.total // 100_000 if budget.total else 5`). With no `total` set, `remaining()` is `None` — a dynamic loop MUST guard on `budget.total`, else it runs to the 1000 cap.
 - `spent()` is **live**: concurrent agents are billed the moment each model call returns, so polling it sees the real global figure, not a stale one. The ceiling is a backstop — **wind down on `remaining()` yourself** to finish cleanly; hitting the ceiling fails the run. A single call is only billed once it returns, so `spent()` may overshoot `total` slightly.
