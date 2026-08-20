@@ -471,10 +471,15 @@ class TeamRuntimeManager:
             return DeliverResult.failure("not_active")
 
         if isinstance(payload, InteractiveInput):
-            if entry.agent.has_pending_interrupt():
-                await entry.agent.resume_interrupt(payload)
-                return DeliverResult.success(None)
-            return DeliverResult.failure("unsupported_interactive_input")
+            # resume_interrupt delivers now if a matching interrupt is pending,
+            # queues the approval if the round is busy (e.g. the 2nd of N
+            # permission-gated tool calls in one turn), or drops it when no
+            # round is in flight (stale). Only the stale case surfaces the
+            # unsupported_interactive_input failure that callers may recognise.
+            status = await entry.agent.resume_interrupt(payload)
+            if status == "dropped":
+                return DeliverResult.failure("unsupported_interactive_input")
+            return DeliverResult.success(None)
 
         try:
             external_event = (

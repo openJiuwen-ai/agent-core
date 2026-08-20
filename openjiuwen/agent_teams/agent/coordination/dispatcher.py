@@ -99,8 +99,13 @@ class AgentRoundController(Protocol):
         """Guarantee that content reaches the DeepAgent regardless of state."""
         ...
 
-    async def resume_interrupt(self, user_input: Any) -> None:
-        """Resume a pending HITL interrupt with structured input."""
+    async def resume_interrupt(self, user_input: Any) -> str:
+        """Resume a pending HITL interrupt with structured input.
+
+        Returns ``"delivered"`` (resume started), ``"queued"`` (round in
+        flight; drained when the round settles on the matching interrupt), or
+        ``"dropped"`` (no pending interrupt and no in-flight round).
+        """
         ...
 
 
