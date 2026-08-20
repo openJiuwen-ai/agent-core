@@ -19,6 +19,7 @@ from openjiuwen.rsi.evaluator.case_backend import (
     build_backend,
 )
 from openjiuwen.rsi.evaluator.case_runner import CaseRunner
+from openjiuwen.rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.evaluator.judger import build_judger
 from openjiuwen.rsi.evaluator.metrics_collector import MetricsCollector
 from openjiuwen.rsi.schema import (
@@ -34,6 +35,10 @@ _TRANSIENT_ERROR_MARKERS = (
     "connection refused",
     "connection aborted",
     "connectionerror",
+    "remoteprotocolerror",
+    "peer closed connection",
+    "incomplete chunked read",
+    "server disconnected",
     "remotedisconnected",
     "timed out",
     "timeout",
@@ -117,12 +122,26 @@ class TeamEvaluator:
             retry_history: list[dict[str, Any]] = []
             retry_limit = max(0, int(self.config.transient_case_retry_limit))
             for attempt in range(retry_limit + 1):
-                case_ref = await self.case_runner.execute(
-                    case={**case, "case_id": case_id},
-                    output_dir=str(case_output_dir),
-                    team_skill_ref_path=team_skill_ref_path,
-                    harness_refs=harness_refs,
-                )
+                try:
+                    case_ref = await self.case_runner.execute(
+                        case={**case, "case_id": case_id},
+                        output_dir=str(case_output_dir),
+                        team_skill_ref_path=team_skill_ref_path,
+                        harness_refs=harness_refs,
+                    )
+                except EvaluationInfrastructureError as exc:
+                    transient_error = _transient_transport_error(str(exc))
+                    if not transient_error or attempt >= retry_limit:
+                        raise
+                    retry_history.append(
+                        {
+                            "attempt": attempt + 1,
+                            "error": transient_error,
+                        }
+                    )
+                    shutil.rmtree(case_output_dir, ignore_errors=True)
+                    await asyncio.sleep(min(2**attempt, 4))
+                    continue
                 transient_error = _transient_case_error(case_ref)
                 if not transient_error or attempt >= retry_limit:
                     break
@@ -263,6 +282,11 @@ def _transient_case_error(case_ref: EvaluationCaseTraceRef) -> str:
     except (OSError, json.JSONDecodeError):
         return ""
     error = str(payload.get("error", "") or "").strip()
+    return _transient_transport_error(error)
+
+
+def _transient_transport_error(error: str) -> str:
+    """Return the original error when it describes a retryable transport failure."""
     lowered = error.lower()
     if any(marker in lowered for marker in _TRANSIENT_ERROR_MARKERS):
         return error

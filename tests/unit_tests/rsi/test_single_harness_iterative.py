@@ -21,6 +21,10 @@ from openjiuwen.rsi.config import (
     MemberOptimizerConfig,
 )
 from openjiuwen.rsi.evaluator.runtime_adapters import RSISkillUseRail
+from openjiuwen.rsi.improver_evolution.policy import (
+    VersionedImproverPolicy,
+    write_improver_policy,
+)
 from openjiuwen.rsi.single_harness import (
     IterativeSingleHarnessRequest,
     SingleHarnessIterativeOptimizationOrchestrator,
@@ -32,11 +36,58 @@ from openjiuwen.rsi.single_harness.iterative import (
     _bind_task_acceptance_contracts,
     _candidate_capabilities,
     _failed_machine_evidence,
+    _initialize_frozen_baseline,
     _invoked_skill_names,
     _invoked_tool_names,
     _refresh_optimization_experience,
+    _resume_fingerprint_matches,
     _tool_names_match,
 )
+
+
+def test_frozen_baseline_seeds_global_comparison_without_consuming_batches(tmp_path: Path) -> None:
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    cases = []
+    for case_id, score in (("case_001", 1.0), ("case_002", 0.0)):
+        result_path = tmp_path / case_id / "result.json"
+        result_path.parent.mkdir()
+        result_path.write_text("{}", encoding="utf-8")
+        cases.append(
+            {
+                "case_id": case_id,
+                "status": "passed" if score == 1.0 else "failed",
+                "score": score,
+                "result_path": str(result_path),
+            }
+        )
+    baseline_eval_ref = tmp_path / "baseline" / "eval_ref.yaml"
+    _write_yaml(
+        baseline_eval_ref,
+        {
+            "harness_refs_path": str(harness_refs),
+            "cases": cases,
+        },
+    )
+    state = {
+        "best_score": None,
+        "best_eval_ref_path": "",
+        "baseline_score": None,
+        "baseline_eval_ref_path": "",
+        "retained_case_ids": [],
+    }
+
+    _initialize_frozen_baseline(
+        state,
+        baseline_eval_ref_path=str(baseline_eval_ref),
+        source_harness_refs_path=str(harness_refs),
+        expected_case_ids={"case_001", "case_002"},
+    )
+
+    assert state["baseline_score"] == 0.5
+    assert state["best_score"] == 0.5
+    assert state["best_eval_ref_path"] == str(baseline_eval_ref.resolve())
+    assert state["retained_case_ids"] == []
 
 
 class _Evaluator:
@@ -79,6 +130,58 @@ class _Evaluator:
             },
         )
         return str(eval_ref)
+
+
+def test_default_i0_can_resume_pre_policy_chain_state() -> None:
+    requested = {
+        "optimization_chain_version": 13,
+        "dataset_files": ["cases.json"],
+        "dataset_sha256": ["abc"],
+        "source_harness_refs_path": "harness_refs.yaml",
+        "sibling_candidate_count": 1,
+        "improver_policy_digest": iterative_module.default_improver_policy().canonical_digest,
+    }
+    stored = dict(requested)
+    stored["optimization_chain_version"] = 12
+    stored.pop("improver_policy_digest")
+
+    assert _resume_fingerprint_matches(stored, requested) is True
+    assert (
+        _resume_fingerprint_matches(
+            stored,
+            {**requested, "improver_policy_digest": "sha256:different"},
+        )
+        is False
+    )
+
+
+def test_native_feedback_chain_does_not_resume_pre_p0_state() -> None:
+    requested = {
+        "optimization_chain_version": 14,
+        "dataset_files": ["cases.json"],
+        "dataset_sha256": ["abc"],
+        "source_harness_refs_path": "harness_refs.yaml",
+        "sibling_candidate_count": 1,
+        "improver_policy_digest": iterative_module.default_improver_policy().canonical_digest,
+    }
+    stored = dict(requested)
+    stored["optimization_chain_version"] = 13
+
+    assert _resume_fingerprint_matches(stored, requested) is False
+
+
+def test_evidence_chain_protocol_does_not_resume_v16_state() -> None:
+    requested = {
+        "optimization_chain_version": 17,
+        "dataset_files": ["cases.json"],
+        "dataset_sha256": ["abc"],
+        "source_harness_refs_path": "harness_refs.yaml",
+        "sibling_candidate_count": 2,
+        "improver_policy_digest": iterative_module.default_improver_policy().canonical_digest,
+    }
+    stored = {**requested, "optimization_chain_version": 16}
+
+    assert _resume_fingerprint_matches(stored, requested) is False
 
 
 class _Analyzer:
@@ -177,7 +280,7 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
     ]
     assert orchestrator.config.member_optimizer.allowed_prompt_surfaces == ["prompt_section"]
     assert orchestrator.config.member_optimizer.max_roles_per_run == 1
-    assert orchestrator.config.member_optimizer.max_actions_per_plan == 1
+    assert orchestrator.config.member_optimizer.max_actions_per_plan == 3
     report = yaml.safe_load(Path(result.report_path).read_text(encoding="utf-8"))
     assert report["mode"] == "single_harness_benchmark"
     assert report["accepted_candidate_count"] == 1
@@ -217,6 +320,392 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
     assert Path(resumed.published_harness_refs_path).is_file()
     repaired_refs = yaml.safe_load(Path(resumed.published_harness_refs_path).read_text(encoding="utf-8"))
     assert Path(repaired_refs["harness_refs"]["solver"]).is_dir()
+
+
+def test_frozen_baseline_keeps_epoch_optimization_batch_sequential(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {"case_id": "case_001", "input": "fix first"},
+                    {"case_id": "case_002", "input": "fix second"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    baseline_cases = []
+    for case_id in ("case_001", "case_002"):
+        result_path = tmp_path / "baseline" / "cases" / case_id / "result.json"
+        result_path.parent.mkdir(parents=True)
+        result_path.write_text("{}", encoding="utf-8")
+        baseline_cases.append(
+            {
+                "case_id": case_id,
+                "status": "failed",
+                "score": 0.0,
+                "result_path": str(result_path),
+            }
+        )
+    baseline_eval_ref = tmp_path / "baseline" / "eval_ref.yaml"
+    _write_yaml(
+        baseline_eval_ref,
+        {
+            "harness_refs_path": str(harness_refs),
+            "cases": baseline_cases,
+        },
+    )
+    config = AutoCoordinatingHarnessConfig(
+        evaluator=EvaluatorConfig(backend="single_harness"),
+        data_loader=DataLoaderConfig(batch_size=1),
+        member_optimizer=MemberOptimizerConfig(),
+    )
+    evaluator = _Evaluator()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        config,
+        evaluator=evaluator,
+        analyzer=_Analyzer(),
+        member_optimizer=_MemberOptimizer(),
+    )
+
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+                baseline_eval_ref_path=str(baseline_eval_ref),
+            )
+        )
+    )
+
+    source_calls = [call for call in evaluator.calls if Path(call["output_dir"]).name == "source"]
+    assert [len(call["cases"]) for call in source_calls] == [1, 1]
+    assert [Path(call["output_dir"]).parent.name for call in source_calls] == ["b001", "b002"]
+    full_calls = [call for call in evaluator.calls if Path(call["output_dir"]).name == "full"]
+    assert len(full_calls) == 1
+    assert len(full_calls[0]["cases"]) == 2
+    report = yaml.safe_load(Path(result.report_path).read_text(encoding="utf-8"))
+    assert report["baseline_score"] == 0.0
+    assert report["best_score"] == 1.0
+
+
+def test_candidate_evaluation_uses_short_run_level_path(tmp_path: Path) -> None:
+    optimization_dir = tmp_path / "single_harness_optimization"
+
+    candidate_dir = iterative_module._candidate_evaluation_output_dir(
+        optimization_output_dir=optimization_dir,
+        epoch=1,
+        batch_index=2,
+        attempt_index=3,
+        candidate_index=1,
+    )
+
+    assert candidate_dir == tmp_path / "ce" / "e001" / "b002" / "a003" / "c001"
+    assert optimization_dir not in candidate_dir.parents
+
+
+def test_three_siblings_freeze_parent_then_select_from_policy_top_m(
+    tmp_path: Path,
+) -> None:
+    events: list[dict[str, Any]] = []
+    realized_scores = {1: 0.4, 2: 0.9, 3: 0.7}
+
+    class SiblingEvaluator:
+        def __init__(self) -> None:
+            self.full_checkpoint_inputs: list[dict[str, Any]] = []
+
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            output_dir = Path(kwargs["output_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            refs_path = Path(kwargs["harness_refs_path"])
+            refs = yaml.safe_load(refs_path.read_text(encoding="utf-8"))
+            candidate_index = int(refs.get("candidate_index", 0) or 0)
+            is_candidate_gate = "ce" in output_dir.parts
+            if is_candidate_gate:
+                kind = "candidate_evaluate"
+                score = realized_scores[candidate_index]
+            elif output_dir.name == "residual_source":
+                kind = "residual_evaluate"
+                score = 1.0
+            elif output_dir.name == "full":
+                kind = "full_evaluate"
+                score = 1.0
+                self.full_checkpoint_inputs.append(
+                    {
+                        "candidate_index": candidate_index,
+                        "promotion_status": str(refs.get("promotion_status", "")),
+                        "harness_refs_path": str(refs_path),
+                    }
+                )
+            else:
+                kind = "source_evaluate"
+                score = 0.0
+            events.append(
+                {
+                    "kind": kind,
+                    "candidate_index": candidate_index,
+                    "harness_refs_path": str(refs_path),
+                    "case_ids": [str(case["case_id"]) for case in kwargs["cases"]],
+                    "output_dir": str(output_dir),
+                }
+            )
+
+            case_refs = []
+            for case in kwargs["cases"]:
+                case_dir = output_dir / "cases" / str(case["case_id"])
+                case_dir.mkdir(parents=True, exist_ok=True)
+                result_path = case_dir / "result.json"
+                trace_path = case_dir / "trace.json"
+                result_path.write_text("{}", encoding="utf-8")
+                trace_path.write_text("{}", encoding="utf-8")
+                case_refs.append(
+                    {
+                        "case_id": case["case_id"],
+                        "status": "passed" if score >= 1.0 else "failed",
+                        "score": score,
+                        "result_path": str(result_path),
+                        "trace_path": str(trace_path),
+                    }
+                )
+            eval_ref = output_dir / "eval_ref.yaml"
+            _write_yaml(
+                eval_ref,
+                {
+                    "harness_refs_path": str(refs_path),
+                    "team_skill_ref_path": kwargs["team_skill_ref_path"],
+                    "cases": case_refs,
+                },
+            )
+            return str(eval_ref)
+
+    class SiblingAnalyzer:
+        async def analyze(self, invocation: Any) -> str:
+            output_dir = Path(invocation.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            analysis_ref = output_dir / "analysis_ref.yaml"
+            _write_yaml(
+                analysis_ref,
+                {
+                    "issues": [
+                        {
+                            "issue_id": "issue_001",
+                            "category": "member_harness",
+                            "severity": "high",
+                            "summary": "The solver does not update the workbook.",
+                            "failure_mode": "The required edit is omitted.",
+                            "recommendation": "Add a bounded edit decision.",
+                            "affected_cases": ["case_001"],
+                            "optimization_target": "member_harness",
+                            "metadata": {
+                                "attribution": {
+                                    "target_ref": "member_harness.solver.prompt_section",
+                                }
+                            },
+                        }
+                    ]
+                },
+            )
+            return str(analysis_ref)
+
+    class SiblingOptimizer:
+        async def optimize(self, **kwargs: Any) -> str:
+            generation = kwargs["optimization_experience"]["sibling_generation"]
+            candidate_index = int(generation["candidate_index"])
+            events.append(
+                {
+                    "kind": "optimize",
+                    "candidate_index": candidate_index,
+                    "harness_refs_path": kwargs["harness_refs_path"],
+                    "source_eval_ref_path": kwargs["eval_ref_path"],
+                    "analysis_ref_path": kwargs["analysis_result_path"],
+                    "output_dir": kwargs["output_dir"],
+                    "improver_version_id": kwargs["optimization_experience"]
+                    .get("improver_policy", {})
+                    .get("version_id", ""),
+                }
+            )
+            output_dir = Path(kwargs["output_dir"])
+            run_dir = output_dir / "member_optimization_001"
+            run_dir.mkdir(parents=True)
+            candidate_harness = run_dir / f"candidate_{candidate_index}"
+            candidate_harness.mkdir()
+            (candidate_harness / "harness.yaml").write_text(
+                f"name: candidate_{candidate_index}\n",
+                encoding="utf-8",
+            )
+            candidate_refs = run_dir / f"candidate_{candidate_index}_refs.yaml"
+            _write_yaml(
+                candidate_refs,
+                {
+                    "candidate_index": candidate_index,
+                    "harness_refs": {"solver": str(candidate_harness)},
+                },
+            )
+            plan_path = run_dir / "plan.yaml"
+            _write_yaml(
+                plan_path,
+                {
+                    "targets": [
+                        {
+                            "role": "solver",
+                            "attributed_issue_ids": ["issue_001"],
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "action_id": f"candidate_{candidate_index}_action",
+                            "role": "solver",
+                            "action_group": "prompt",
+                            "operation": "add",
+                            "target_path": (f"prompt_sections/candidate_{candidate_index}.md"),
+                            "expected_effect": (f"Apply edit strategy {candidate_index}."),
+                            "attributed_issue_ids": ["issue_001"],
+                        }
+                    ],
+                },
+            )
+            member_ref = run_dir / "member_optimization_ref.yaml"
+            _write_yaml(
+                member_ref,
+                {
+                    "status": "success",
+                    "optimized_harness_refs_path": str(candidate_refs),
+                    "candidate_ready_roles": ["solver"],
+                    "plan_path": str(plan_path),
+                    "metadata": {
+                        "analysis_result_path": kwargs["analysis_result_path"],
+                    },
+                },
+            )
+            return str(member_ref)
+
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(
+        json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}),
+        encoding="utf-8",
+    )
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    policy = VersionedImproverPolicy(
+        version_id="I_test",
+        parent_version_id="I0",
+        training_ledger_digest="sha256:test-ledger",
+        generation_directives={"require_unique_candidate_fingerprint": True},
+    )
+    policy_path = write_improver_policy(tmp_path / "improver_policy.yaml", policy)
+    evaluator = SiblingEvaluator()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            max_epochs=1,
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            data_loader=DataLoaderConfig(batch_size=1),
+            member_optimizer=MemberOptimizerConfig(
+                max_repair_rounds_per_batch=1,
+                sibling_candidate_count=3,
+                improver_policy_ref=str(policy_path),
+            ),
+        ),
+        evaluator=evaluator,
+        analyzer=SiblingAnalyzer(),
+        member_optimizer=SiblingOptimizer(),
+    )
+
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+            )
+        )
+    )
+
+    optimize_events = [event for event in events if event["kind"] == "optimize"]
+    candidate_eval_events = [event for event in events if event["kind"] == "candidate_evaluate"]
+    assert [event["candidate_index"] for event in optimize_events] == [1, 2, 3]
+    assert len(candidate_eval_events) == 3
+    assert max(events.index(event) for event in optimize_events) < min(
+        events.index(event) for event in candidate_eval_events
+    )
+    assert {event["harness_refs_path"] for event in optimize_events} == {str(harness_refs)}
+    assert len({event["source_eval_ref_path"] for event in optimize_events}) == 1
+    assert len({event["analysis_ref_path"] for event in optimize_events}) == 1
+    assert {event["improver_version_id"] for event in optimize_events} == {"I_test"}
+    assert len({event["output_dir"] for event in optimize_events}) == 3
+    assert {Path(event["output_dir"]).name for event in optimize_events} == {
+        "c001",
+        "c002",
+        "c003",
+    }
+    assert {tuple(event["case_ids"]) for event in candidate_eval_events} == {("case_001",)}
+
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    assert state["improver_policy"]["version_id"] == "I_test"
+    assert state["improver_policy"]["policy_digest"] == policy.canonical_digest
+    gates = sorted(state["candidate_gates"], key=lambda gate: gate["candidate_index"])
+    assert [gate["candidate_target_score"] for gate in gates] == [0.4, 0.9, 0.7]
+    assert {tuple(gate["target_case_ids"]) for gate in gates} == {("case_001",)}
+    assert len({gate["source_eval_ref_path"] for gate in gates}) == 1
+    assert len({gate["before_harness_refs_path"] for gate in gates}) == 1
+    assert [gate["primary_gate_accepted"] for gate in gates] == [True, True, True]
+    assert [gate["within_selection_budget"] for gate in gates] == [True, False, False]
+    assert [gate["selected_for_promotion"] for gate in gates] == [True, False, False]
+    assert [gate["status"] for gate in gates] == ["accepted", "shadow_evaluated", "shadow_evaluated"]
+    winner_refs = gates[0]["candidate_harness_refs_path"]
+    assert state["current_harness_refs_path"] == winner_refs
+    assert state["best_harness_refs_path"] == winner_refs
+    assert evaluator.full_checkpoint_inputs == [
+        {
+            "candidate_index": 1,
+            "promotion_status": "provisional",
+            "harness_refs_path": winner_refs,
+        }
+    ]
+
+    completed = state["completed_batches"]["epoch_001:batch_001"]
+    assert completed["repair_round_count"] == 1
+    assert len(completed["candidate_attempts"]) == 3
+    assert len(completed["improvement_cohort_ids"]) == 1
+    cohort_id = completed["improvement_cohort_ids"][0]
+    expected_candidate_ids = {gate["candidate_id"] for gate in gates}
+
+    def nested_candidate_ids(value: Any) -> set[str]:
+        if isinstance(value, dict):
+            found = {str(value["candidate_id"]) for key in ("candidate_id",) if key in value and str(value[key])}
+            for item in value.values():
+                found.update(nested_candidate_ids(item))
+            return found
+        if isinstance(value, list):
+            found: set[str] = set()
+            for item in value:
+                found.update(nested_candidate_ids(item))
+            return found
+        return set()
+
+    cohort = state["improvement_instances"][cohort_id]
+    assert nested_candidate_ids(cohort) == expected_candidate_ids
+    assert cohort["cohort"]["rank_frozen"] is True
+    assert cohort["cohort"]["ranking_policy"] == "static_priority_v1"
+    assert cohort["cohort"]["improver_version_id"] == "I_test"
+    assert cohort["cohort"]["improver_policy_digest"] == policy.canonical_digest
+    assert [candidate["proposal_rank"]["predicted_rank"] for candidate in cohort["candidates"]] == [1, 2, 3]
+    assert all(
+        set(candidate["proposal_rank"]["ranking_features"]) >= {"executable", "coverage", "atomicity", "duplicate"}
+        for candidate in cohort["candidates"]
+    )
+    assert cohort["metrics"]["best_of_k_gain"]["value"] == pytest.approx(0.9)
+    assert cohort["metrics"]["top_m_gain"]["value"] == pytest.approx(0.4)
+    assert cohort["metrics"]["selection_regret"]["value"] == pytest.approx(0.5)
+    ledger_path = Path(state["candidate_feedback_ledger_path"])
+    assert ledger_path.is_file()
+    ledger = yaml.safe_load(ledger_path.read_text(encoding="utf-8"))
+    assert nested_candidate_ids(ledger) == expected_candidate_ids
 
 
 def test_all_dataset_cases_enter_batches_without_internal_holdout(
@@ -395,10 +884,14 @@ def test_verified_passes_are_protected_from_later_epoch_optimization(
     assert report["retained_case_ids"] == ["solved"]
 
 
-@pytest.mark.parametrize("first_candidate_resolves_all", [False, True])
+@pytest.mark.parametrize(
+    ("first_candidate_resolves_all", "candidate_succeeds"),
+    [(False, True), (True, True), (False, False)],
+)
 def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
     tmp_path: Path,
     first_candidate_resolves_all: bool,
+    candidate_succeeds: bool,
 ) -> None:
     class SerialIssueEvaluator:
         async def evaluate_batch(self, **kwargs: Any) -> str:
@@ -409,7 +902,9 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
             case_refs = []
             for case in kwargs["cases"]:
                 case_id = str(case["case_id"])
-                passed = generation >= 1 if case_id == "case_001" or first_candidate_resolves_all else generation >= 2
+                passed = candidate_succeeds and (
+                    generation >= 1 if case_id == "case_001" or first_candidate_resolves_all else generation >= 2
+                )
                 case_dir = output_dir / "cases" / case_id
                 case_dir.mkdir(parents=True, exist_ok=True)
                 result_path = case_dir / "result.json"
@@ -554,6 +1049,7 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
             max_epochs=1,
             evaluator=EvaluatorConfig(backend="single_harness"),
             data_loader=DataLoaderConfig(batch_size=2),
+            member_optimizer=MemberOptimizerConfig(max_repair_rounds_per_batch=1),
         ),
         evaluator=SerialIssueEvaluator(),
         analyzer=TwoIssueAnalyzer(),
@@ -570,21 +1066,675 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
         )
     )
 
-    expected_scopes = [["issue_001"]] if first_candidate_resolves_all else [["issue_001"], ["issue_002"]]
+    expected_scopes = (
+        [["issue_001"]] if first_candidate_resolves_all and candidate_succeeds else [["issue_001"], ["issue_002"]]
+    )
     assert optimizer.issue_scopes == expected_scopes
     report = yaml.safe_load(Path(result.report_path).read_text(encoding="utf-8"))
-    assert report["best_score"] == 1.0
-    assert report["accepted_candidate_count"] == len(expected_scopes)
+    assert report["best_score"] == (1.0 if candidate_succeeds else 0.0)
+    assert report["accepted_candidate_count"] == (len(expected_scopes) if candidate_succeeds else 0)
     state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
     completed = state["completed_batches"]["epoch_001:batch_001"]
-    assert [attempt["source_issue_id"] for attempt in completed["candidate_attempts"]] == ["issue_001", "issue_002"]
-    expected_accepted_targets = ["case_001"] if first_candidate_resolves_all else ["case_001", "case_002"]
+    assert [attempt["source_issue_id"] for attempt in completed["candidate_attempts"]] == [
+        item[0] for item in expected_scopes
+    ]
+    expected_accepted_targets = (
+        (["case_001"] if first_candidate_resolves_all else ["case_001", "case_002"]) if candidate_succeeds else []
+    )
     assert completed["accepted_target_case_ids"] == expected_accepted_targets
-    if first_candidate_resolves_all:
-        second_attempt = completed["candidate_attempts"][1]
-        assert second_attempt["candidate_gate_status"] == "skipped"
-        assert second_attempt["candidate_gate_reason"] == ("issue_already_resolved_in_latest_source")
-        assert second_attempt["member_optimization_ref_path"] == ""
+    assert completed["repair_round_count"] == 1
+    expected_analysis_count = len(expected_scopes) if candidate_succeeds else 1
+    assert len(completed["analysis_ref_paths"]) == expected_analysis_count
+    assert completed["repair_stop_reason"] == (
+        "all_batch_cases_completed" if candidate_succeeds else "repair_round_limit_reached"
+    )
+
+
+def test_single_harness_respects_explicit_action_and_repair_limits() -> None:
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            member_optimizer=MemberOptimizerConfig(
+                max_actions_per_plan=2,
+                max_repair_rounds_per_batch=4,
+            ),
+        ),
+        evaluator=_Evaluator(),
+        analyzer=_Analyzer(),
+        member_optimizer=_MemberOptimizer(),
+    )
+
+    assert orchestrator.config.member_optimizer.max_actions_per_plan == 2
+    assert orchestrator.config.member_optimizer.max_repair_rounds_per_batch == 4
+
+
+def test_partial_candidate_is_reanalyzed_before_case_is_retained(tmp_path: Path) -> None:
+    class ProgressiveEvaluator:
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            output_dir = Path(kwargs["output_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            refs_name = Path(kwargs["harness_refs_path"]).stem
+            generation = int(refs_name.rsplit("_", 1)[-1]) if refs_name.startswith("candidate_refs_") else 0
+            score = {0: 0.0, 1: 0.5}.get(generation, 1.0)
+            case_dir = output_dir / "cases" / "case_001"
+            case_dir.mkdir(parents=True, exist_ok=True)
+            result_path = case_dir / "result.json"
+            trace_path = case_dir / "trace.json"
+            result_path.write_text("{}", encoding="utf-8")
+            trace_path.write_text("{}", encoding="utf-8")
+            eval_ref = output_dir / "eval_ref.yaml"
+            _write_yaml(
+                eval_ref,
+                {
+                    "cases": [
+                        {
+                            "case_id": "case_001",
+                            "status": "passed" if score >= 1.0 else "failed",
+                            "score": score,
+                            "result_path": str(result_path),
+                            "trace_path": str(trace_path),
+                        }
+                    ]
+                },
+            )
+            return str(eval_ref)
+
+    class ResidualAnalyzer:
+        def __init__(self) -> None:
+            self.eval_refs: list[str] = []
+
+        async def analyze(self, invocation: Any) -> str:
+            self.eval_refs.append(invocation.eval_ref_path)
+            output_dir = Path(invocation.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            index = len(self.eval_refs)
+            analysis_ref = output_dir / "analysis_ref.yaml"
+            _write_yaml(
+                analysis_ref,
+                {
+                    "issues": [
+                        {
+                            "issue_id": f"issue_{index}",
+                            "category": "member_harness",
+                            "severity": "high",
+                            "summary": f"Residual behavior {index} remains.",
+                            "recommendation": f"Apply repair stage {index}.",
+                            "affected_cases": ["case_001"],
+                            "optimization_target": "member_harness",
+                            "metadata": {
+                                "attribution": {
+                                    "target_ref": "member_harness.solver.prompt_section",
+                                }
+                            },
+                        }
+                    ]
+                },
+            )
+            return str(analysis_ref)
+
+    class ProgressiveOptimizer:
+        def __init__(self) -> None:
+            self.analysis_refs: list[str] = []
+
+        async def optimize(self, **kwargs: Any) -> str:
+            self.analysis_refs.append(kwargs["analysis_result_path"])
+            generation = len(self.analysis_refs)
+            issue_id = str(kwargs["optimization_issue_ids"][0])
+            run_dir = Path(kwargs["output_dir"]) / f"run_{generation}"
+            run_dir.mkdir(parents=True)
+            candidate = run_dir / f"candidate_{generation}"
+            candidate.mkdir()
+            (candidate / "harness.yaml").write_text(
+                f"name: candidate_{generation}\n",
+                encoding="utf-8",
+            )
+            candidate_refs = run_dir / f"candidate_refs_{generation}.yaml"
+            _write_yaml(candidate_refs, {"harness_refs": {"solver": str(candidate)}})
+            plan_path = run_dir / "plan.yaml"
+            _write_yaml(
+                plan_path,
+                {
+                    "targets": [{"role": "solver", "attributed_issue_ids": [issue_id]}],
+                    "actions": [
+                        {
+                            "action_id": f"action_{generation}",
+                            "role": "solver",
+                            "action_group": "prompt",
+                            "operation": "add",
+                            "target_path": f"prompt_sections/repair_{generation}.md",
+                            "attributed_issue_ids": [issue_id],
+                        }
+                    ],
+                },
+            )
+            member_ref = run_dir / "member_ref.yaml"
+            _write_yaml(
+                member_ref,
+                {
+                    "status": "success",
+                    "optimized_harness_refs_path": str(candidate_refs),
+                    "plan_path": str(plan_path),
+                    "metadata": {"analysis_result_path": kwargs["analysis_result_path"]},
+                },
+            )
+            return str(member_ref)
+
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(
+        json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}),
+        encoding="utf-8",
+    )
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    analyzer = ResidualAnalyzer()
+    optimizer = ProgressiveOptimizer()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            member_optimizer=MemberOptimizerConfig(max_repair_rounds_per_batch=2),
+        ),
+        evaluator=ProgressiveEvaluator(),
+        analyzer=analyzer,
+        member_optimizer=optimizer,
+    )
+
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+            )
+        )
+    )
+
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    completed = state["completed_batches"]["epoch_001:batch_001"]
+    attempts = completed["candidate_attempts"]
+    assert len(attempts) == 2
+    assert attempts[0]["completed_target_case_ids"] == []
+    assert attempts[0]["residual_case_ids"] == ["case_001"]
+    assert attempts[1]["completed_target_case_ids"] == ["case_001"]
+    assert completed["retained_case_ids_after_batch"] == ["case_001"]
+    assert completed["repair_stop_reason"] == "all_batch_cases_completed"
+    assert len(set(optimizer.analysis_refs)) == 2
+    assert analyzer.eval_refs[1] == attempts[0]["residual_eval_ref_path"]
+
+
+def test_residual_repair_stops_when_analyzer_repeats_same_issue(tmp_path: Path) -> None:
+    class PartialEvaluator:
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            output_dir = Path(kwargs["output_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            optimized = "candidate_refs" in Path(kwargs["harness_refs_path"]).name
+            score = 0.5 if optimized else 0.0
+            case_dir = output_dir / "cases" / "case_001"
+            case_dir.mkdir(parents=True, exist_ok=True)
+            result_path = case_dir / "result.json"
+            trace_path = case_dir / "trace.json"
+            result_path.write_text("{}", encoding="utf-8")
+            trace_path.write_text("{}", encoding="utf-8")
+            eval_ref = output_dir / "eval_ref.yaml"
+            _write_yaml(
+                eval_ref,
+                {
+                    "cases": [
+                        {
+                            "case_id": "case_001",
+                            "status": "failed",
+                            "score": score,
+                            "result_path": str(result_path),
+                            "trace_path": str(trace_path),
+                        }
+                    ]
+                },
+            )
+            return str(eval_ref)
+
+    class RepeatingAnalyzer:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def analyze(self, invocation: Any) -> str:
+            self.call_count += 1
+            output_dir = Path(invocation.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            analysis_ref = output_dir / "analysis_ref.yaml"
+            _write_yaml(
+                analysis_ref,
+                {
+                    "issues": [
+                        {
+                            "issue_id": f"regenerated_{self.call_count}",
+                            "category": "member_harness",
+                            "severity": "high",
+                            "summary": "The same behavior remains unresolved.",
+                            "recommendation": "Apply the same repair direction.",
+                            "affected_cases": ["case_001"],
+                            "optimization_target": "member_harness",
+                            "metadata": {
+                                "attribution": {
+                                    "target_ref": "member_harness.solver.prompt_section",
+                                }
+                            },
+                        }
+                    ]
+                },
+            )
+            return str(analysis_ref)
+
+    class OneCandidateOptimizer(_MemberOptimizer):
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def optimize(self, **kwargs: Any) -> str:
+            self.call_count += 1
+            member_ref = await super().optimize(**kwargs)
+            member_info = yaml.safe_load(Path(member_ref).read_text(encoding="utf-8"))
+            plan_path = Path(member_info["plan_path"])
+            plan = yaml.safe_load(plan_path.read_text(encoding="utf-8"))
+            issue_id = str(kwargs["optimization_issue_ids"][0])
+            plan["targets"] = [{"role": "solver", "attributed_issue_ids": [issue_id]}]
+            plan["actions"][0]["attributed_issue_ids"] = [issue_id]
+            _write_yaml(plan_path, plan)
+            member_info["metadata"] = {"analysis_result_path": kwargs["analysis_result_path"]}
+            _write_yaml(Path(member_ref), member_info)
+            return member_ref
+
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(
+        json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}),
+        encoding="utf-8",
+    )
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    analyzer = RepeatingAnalyzer()
+    optimizer = OneCandidateOptimizer()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            member_optimizer=MemberOptimizerConfig(max_repair_rounds_per_batch=3),
+        ),
+        evaluator=PartialEvaluator(),
+        analyzer=analyzer,
+        member_optimizer=optimizer,
+    )
+
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+            )
+        )
+    )
+
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    completed = state["completed_batches"]["epoch_001:batch_001"]
+    assert optimizer.call_count == 1
+    assert analyzer.call_count == 2
+    assert completed["repair_stop_reason"] == "repeated_issue_detected"
+    assert completed["residual_case_ids"] == ["case_001"]
+    assert completed["retained_case_ids_after_batch"] == []
+    assert state["retained_case_ids"] == []
+    assert state["current_harness_refs_path"] == str(harness_refs)
+
+
+def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: Path) -> None:
+    class RepairEvaluator:
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            output_dir = Path(kwargs["output_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            refs_name = Path(kwargs["harness_refs_path"]).name
+            score = 1.0 if refs_name == "candidate_refs_2.yaml" else 0.0
+            case_dir = output_dir / "cases" / "case_001"
+            case_dir.mkdir(parents=True, exist_ok=True)
+            result_path = case_dir / "result.json"
+            trace_path = case_dir / "trace.json"
+            result_path.write_text("{}", encoding="utf-8")
+            trace_path.write_text("{}", encoding="utf-8")
+            eval_ref = output_dir / "eval_ref.yaml"
+            _write_yaml(
+                eval_ref,
+                {
+                    "cases": [
+                        {
+                            "case_id": "case_001",
+                            "status": "passed" if score else "failed",
+                            "score": score,
+                            "result_path": str(result_path),
+                            "trace_path": str(trace_path),
+                        }
+                    ]
+                },
+            )
+            return str(eval_ref)
+
+    class RepairAnalyzer:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def analyze(self, invocation: Any) -> str:
+            self.call_count += 1
+            output_dir = Path(invocation.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            analysis_ref = output_dir / "analysis_ref.yaml"
+            scope = "persisted artifacts" if self.call_count == 1 else "every output channel"
+            _write_yaml(
+                analysis_ref,
+                {
+                    "issues": [
+                        {
+                            "issue_id": "issue_001",
+                            "category": "member_harness",
+                            "summary": f"Mask secrets in {scope}.",
+                            "recommendation": f"Apply credential masking to {scope}.",
+                            "affected_cases": ["case_001"],
+                            "optimization_target": "member_harness",
+                            "metadata": {"attribution": {"target_ref": "member_harness.solver.prompt_section"}},
+                        }
+                    ]
+                },
+            )
+            return str(analysis_ref)
+
+    class RepairOptimizer:
+        def __init__(self) -> None:
+            self.parent_refs: list[str] = []
+            self.analysis_refs: list[str] = []
+
+        async def optimize(self, **kwargs: Any) -> str:
+            self.parent_refs.append(kwargs["harness_refs_path"])
+            self.analysis_refs.append(kwargs["analysis_result_path"])
+            generation = len(self.parent_refs)
+            run_dir = Path(kwargs["output_dir"]) / f"repair_{generation}"
+            run_dir.mkdir(parents=True)
+            candidate = run_dir / f"candidate_{generation}"
+            candidate.mkdir()
+            (candidate / "harness.yaml").write_text(f"name: repair_{generation}\n", encoding="utf-8")
+            candidate_refs = run_dir / f"candidate_refs_{generation}.yaml"
+            _write_yaml(candidate_refs, {"harness_refs": {"solver": str(candidate)}})
+            plan_path = run_dir / "plan.yaml"
+            _write_yaml(
+                plan_path,
+                {
+                    "targets": [{"role": "solver", "attributed_issue_ids": ["issue_001"]}],
+                    "actions": [
+                        {
+                            "action_id": f"repair_{generation}",
+                            "role": "solver",
+                            "action_group": "prompt",
+                            "operation": "modify",
+                            "target_path": "prompt_sections/security.md",
+                            "attributed_issue_ids": ["issue_001"],
+                        }
+                    ],
+                },
+            )
+            member_ref = run_dir / "member_ref.yaml"
+            _write_yaml(
+                member_ref,
+                {
+                    "status": "success",
+                    "optimized_harness_refs_path": str(candidate_refs),
+                    "plan_path": str(plan_path),
+                    "metadata": {"analysis_result_path": kwargs["analysis_result_path"]},
+                },
+            )
+            return str(member_ref)
+
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}), encoding="utf-8")
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    analyzer = RepairAnalyzer()
+    optimizer = RepairOptimizer()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            member_optimizer=MemberOptimizerConfig(max_repair_rounds_per_batch=2),
+        ),
+        evaluator=RepairEvaluator(),
+        analyzer=analyzer,
+        member_optimizer=optimizer,
+    )
+
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+            )
+        )
+    )
+
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    completed = state["completed_batches"]["epoch_001:batch_001"]
+    assert len(completed["candidate_attempts"]) == 2
+    assert completed["candidate_attempts"][0]["candidate_gate_status"] == "rejected"
+    assert completed["candidate_attempts"][1]["candidate_gate_status"] == "accepted"
+    assert completed["repair_stop_reason"] == "all_batch_cases_completed"
+    assert analyzer.call_count == 2
+    assert optimizer.parent_refs[1].endswith("candidate_refs_1.yaml")
+    assert "failure_analysis" in optimizer.analysis_refs[1]
+    assert state["candidate_gates"][0]["selected_as_repair_parent"] is True
+
+
+def test_repair_parent_prefers_native_signal_when_pass_hat_k_ties() -> None:
+    gates = [
+        {
+            "candidate_id": "native_low",
+            "candidate_target_score": 0.0,
+            "target_score_delta": 0.0,
+            "candidate_native_target_score": 0.35,
+            "native_target_score_delta": 0.15,
+            "native_dimension_delta": 0.1,
+            "predicted_rank": 1,
+            "capabilities": [],
+        },
+        {
+            "candidate_id": "native_high",
+            "candidate_target_score": 0.0,
+            "target_score_delta": 0.0,
+            "candidate_native_target_score": 0.82,
+            "native_target_score_delta": 0.62,
+            "native_dimension_delta": 0.4,
+            "predicted_rank": 2,
+            "capabilities": [],
+        },
+    ]
+
+    repair_parent = iterative_module._best_realized_sibling_gate(gates)
+    assert repair_parent is not None
+    assert repair_parent["candidate_id"] == "native_high"
+
+    feedback = {
+        "candidates": [{"candidate_id": "native_low"}, {"candidate_id": "native_high"}],
+        "selection": {},
+    }
+    iterative_module._attach_native_signal_feedback(feedback, gates)
+    assert feedback["candidates"][1]["continuous_outcome"] == {
+        "source_native_target_score": None,
+        "candidate_native_target_score": 0.82,
+        "native_target_score_delta": 0.62,
+        "native_dimension_delta": 0.4,
+        "source_signal_sources_by_case": {},
+        "candidate_signal_sources_by_case": {},
+        "role": "sibling_and_repair_ranking_only",
+        "promotion_authority": "eval_ref_pass_hat_k",
+    }
+    assert feedback["selection"]["realized_sort_policy"] == "pass_hat_k_then_native_continuous_v1"
+
+
+def test_pass_hat_k_stays_ahead_of_native_signal_in_realized_ranking() -> None:
+    pass_hat_k_winner = {
+        "candidate_id": "pass_hat_k_winner",
+        "candidate_target_score": 1.0,
+        "target_score_delta": 1.0,
+        "candidate_native_target_score": 0.1,
+        "native_target_score_delta": -0.4,
+        "predicted_rank": 2,
+        "capabilities": [],
+    }
+    native_only_winner = {
+        "candidate_id": "native_only_winner",
+        "candidate_target_score": 0.0,
+        "target_score_delta": 0.0,
+        "candidate_native_target_score": 0.99,
+        "native_target_score_delta": 0.8,
+        "predicted_rank": 1,
+        "capabilities": [],
+    }
+
+    selected = iterative_module._best_realized_sibling_gate([native_only_winner, pass_hat_k_winner])
+    assert selected is pass_hat_k_winner
+
+
+def test_native_signal_improvement_cannot_pass_candidate_gate(tmp_path: Path) -> None:
+    def write_eval(
+        root: Path,
+        *,
+        pass_hat_k_score: float,
+        trial_scores: list[float],
+        dimension_scores: dict[str, float],
+    ) -> str:
+        case_dir = root / "cases" / "case_001"
+        case_dir.mkdir(parents=True, exist_ok=True)
+        result_path = case_dir / "result.json"
+        result_path.write_text(
+            json.dumps(
+                {
+                    "evaluation": {
+                        "metadata": {
+                            "trial_scores": trial_scores,
+                            "trial_details": [
+                                {
+                                    "trial_index": index,
+                                    "dimension_scores": {
+                                        name: {
+                                            "availability": "available",
+                                            "value": value,
+                                            "source": "judge_detail",
+                                        }
+                                        for name, value in dimension_scores.items()
+                                    },
+                                }
+                                for index in range(1, 4)
+                            ],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        trace_path = case_dir / "trace.json"
+        trace_path.write_text("{}", encoding="utf-8")
+        eval_ref = root / "eval_ref.yaml"
+        _write_yaml(
+            eval_ref,
+            {
+                "cases": [
+                    {
+                        "case_id": "case_001",
+                        "status": "passed" if pass_hat_k_score >= 1.0 else "failed",
+                        "score": pass_hat_k_score,
+                        "result_path": str(result_path),
+                        "trace_path": str(trace_path),
+                    }
+                ]
+            },
+        )
+        return str(eval_ref)
+
+    source_eval = write_eval(
+        tmp_path / "source",
+        pass_hat_k_score=0.0,
+        trial_scores=[0.1, 0.2, 0.3],
+        dimension_scores={"accuracy": 0.1, "completeness": 0.3},
+    )
+
+    class NativeOnlyImprovementEvaluator:
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            return write_eval(
+                Path(kwargs["output_dir"]),
+                pass_hat_k_score=0.0,
+                trial_scores=[0.8, 0.9, 1.0],
+                dimension_scores={"accuracy": 0.8, "completeness": 0.9},
+            )
+
+    class FeedbackAnalyzer(_Analyzer):
+        def __init__(self) -> None:
+            self.paired_feedback: list[dict[str, Any]] = []
+
+        async def analyze(self, invocation: Any) -> str:
+            self.paired_feedback.append(dict(invocation.prior_candidate_feedback))
+            return await super().analyze(invocation)
+
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(
+        json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}),
+        encoding="utf-8",
+    )
+    analyzer = FeedbackAnalyzer()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            member_optimizer=MemberOptimizerConfig(candidate_holdout_cases=0),
+        ),
+        evaluator=NativeOnlyImprovementEvaluator(),
+        analyzer=analyzer,
+        member_optimizer=_MemberOptimizer(),
+    )
+
+    gate = asyncio.run(
+        orchestrator._candidate_gate(
+            cases=[{"case_id": "case_001", "input": "fix"}],
+            source_eval_ref=source_eval,
+            before_harness_refs_path=str(tmp_path / "baseline_refs.yaml"),
+            candidate_harness_refs_path=str(tmp_path / "candidate_refs.yaml"),
+            member_status="success",
+            capabilities=[],
+            output_dir=tmp_path / "candidate_eval",
+            dataset=SimpleNamespace(
+                dataset_id="test",
+                dataset_dir=str(dataset_path.parent),
+                dataset_files=[str(dataset_path)],
+                cases=1,
+            ),
+        )
+    )
+
+    assert gate["accepted"] is False
+    assert gate["reason"] == "candidate_did_not_improve_target_cases"
+    assert gate["candidate_target_score"] == 0.0
+    assert gate["source_native_target_score"] == pytest.approx(0.2)
+    assert gate["candidate_native_target_score"] == pytest.approx(0.9)
+    assert gate["native_target_score_delta"] == pytest.approx(0.7)
+    assert gate["native_dimension_delta"] == pytest.approx(0.65)
+    assert gate["native_signal_role"] == "sibling_and_repair_ranking_only"
+    feedback = analyzer.paired_feedback[0]["by_case"]["case_001"][0]
+    assert feedback["source_native_score"] == pytest.approx(0.2)
+    assert feedback["candidate_native_score"] == pytest.approx(0.9)
+    assert feedback["native_score_delta"] == pytest.approx(0.7)
+    assert feedback["native_dimension_deltas"] == {
+        "accuracy": pytest.approx(0.7),
+        "completeness": pytest.approx(0.6),
+    }
+    assert feedback["native_signal_role"] == "sibling_and_repair_ranking_only"
+    checkpoint_selection = iterative_module._select_gate_from_epoch_checkpoint(
+        gate,
+        full_eval_ref=gate["candidate_eval_ref_path"],
+        error_case_ids=set(),
+        machine_evidence_case_ids=set(),
+    )
+    assert checkpoint_selection["retained"] is False
+    assert checkpoint_selection["reason"] == "candidate_failed_target_replay_checkpoint"
 
 
 def test_batch_winner_is_rolled_back_when_clean_full_checkpoint_does_not_improve(
@@ -1267,7 +2417,15 @@ def test_prior_candidate_feedback_returns_case_scoped_causal_delta() -> None:
                 "experiment_id": "e001-b001-a1",
                 "surface": "skill",
                 "outcome": "partial_contract_progress",
+                "status": "rejected",
+                "reason": "candidate_made_partial_verifier_progress",
                 "failure_class": "partial_contract_progress",
+                "predicted_rank": 1,
+                "predicted_score": 125.0,
+                "source_target_score": 0.0,
+                "candidate_target_score": 0.4,
+                "target_score_delta": 0.4,
+                "selected_for_promotion": False,
                 "verifier_deltas_by_case": {
                     "case_001": {
                         "newly_passed_fail_to_pass": ["state_a"],
@@ -1292,8 +2450,63 @@ def test_prior_candidate_feedback_returns_case_scoped_causal_delta() -> None:
 
     experiment = feedback["by_case"]["case_001"][0]
     assert experiment["verifier_delta"]["remaining_failed_fail_to_pass"] == ["state_b"]
+    assert experiment["predicted_rank"] == 1
+    assert experiment["source_target_score"] == 0.0
+    assert experiment["candidate_target_score"] == 0.4
+    assert experiment["target_score_delta"] == 0.4
+    assert experiment["selected_for_promotion"] is False
     assert experiment["candidate_failure_diagnosis"]["root_cause"] == ("state_b was omitted")
     assert "other" not in feedback["by_case"]
+
+
+def test_compact_analysis_diagnoses_preserves_multiple_case_diagnoses(tmp_path: Path) -> None:
+    diagnoses_path = tmp_path / "per_case_diagnoses.json"
+    diagnoses_path.write_text(
+        json.dumps(
+            {
+                "per_case_diagnoses": [
+                    {
+                        "case_id": "case_001",
+                        "root_cause": "first independent failure",
+                        "target_ref": "member_harness.solver.skill",
+                    },
+                    {
+                        "case_id": "case_001",
+                        "root_cause": "second independent failure",
+                        "target_ref": "member_harness.solver.tool",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    _write_yaml(
+        analysis_ref,
+        {"metadata": {"per_case_diagnoses_path": str(diagnoses_path)}},
+    )
+
+    compact = iterative_module._compact_analysis_diagnoses(analysis_ref)
+
+    assert [item["root_cause"] for item in compact["case_001"]] == [
+        "first independent failure",
+        "second independent failure",
+    ]
+    state = {
+        "optimization_journal": [
+            {
+                "experiment_id": "e001-b001-a1",
+                "verifier_deltas_by_case": {"case_001": {}},
+                "candidate_failure_diagnoses": compact,
+            }
+        ]
+    }
+    feedback = iterative_module._prior_candidate_feedback(
+        state,
+        [{"case_id": "case_001"}],
+    )["by_case"]["case_001"][0]
+    assert feedback["candidate_failure_diagnosis"]["root_cause"] == "first independent failure"
+    assert len(feedback["candidate_failure_diagnoses"]) == 2
 
 
 def test_invoked_skill_names_reads_skill_tool_arguments(tmp_path: Path) -> None:
@@ -1351,6 +2564,49 @@ def test_invoked_skill_names_reads_skill_tool_arguments(tmp_path: Path) -> None:
     )
 
     assert _invoked_skill_names(str(eval_ref)) == {"post_edit_validation"}
+
+
+def test_jiuwenswarm_type_steps_count_successful_skill_before_code_edit() -> None:
+    from openjiuwen.rsi.evaluator.trajectory_usage import (
+        collect_pre_edit_successful_usage,
+        collect_successful_skill_names,
+    )
+
+    trajectory = {
+        "steps": [
+            {
+                "type": "tool",
+                "detail": {
+                    "tool_name": "skill_tool",
+                    "call_args": {
+                        "skill_name": "spreadsheet_delivery_preflight",
+                        "relative_file_path": "SKILL.md",
+                    },
+                    "call_result": "success=True data={'skill_content': 'ok'} error=None",
+                },
+            },
+            {
+                "type": "tool",
+                "detail": {
+                    "tool_name": "code",
+                    "call_args": {"code": "workbook.save('/workspace/output/result.xlsx')"},
+                    "call_result": "success=True data={} error=None",
+                },
+            },
+        ]
+    }
+    all_names: set[str] = set()
+    pre_edit_names: set[str] = set()
+
+    collect_successful_skill_names(trajectory, all_names)
+    first_edit = collect_pre_edit_successful_usage(
+        trajectory,
+        skill_names=pre_edit_names,
+    )
+
+    assert all_names == {"spreadsheet_delivery_preflight"}
+    assert pre_edit_names == {"spreadsheet_delivery_preflight"}
+    assert first_edit == 1
 
 
 def test_task_start_trigger_counts_as_natural_skill_delivery(
@@ -1535,6 +2791,197 @@ def test_candidate_gate_rejects_generated_skill_that_was_not_invoked(tmp_path: P
     assert gate["expected_skill_names"] == ["post_edit_validation"]
     assert gate["invoked_skill_names"] == []
     assert gate["missing_expected_skill_names"] == ["post_edit_validation"]
+
+
+def test_candidate_gate_reports_evaluation_error_before_missing_skill(
+    tmp_path: Path,
+) -> None:
+    class ErrorEvaluator:
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            output_dir = Path(kwargs["output_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            eval_ref = output_dir / "eval_ref.yaml"
+            _write_yaml(
+                eval_ref,
+                {
+                    "cases": [
+                        {
+                            "case_id": "case_001",
+                            "status": "error",
+                            "score": 0.0,
+                        }
+                    ]
+                },
+            )
+            return str(eval_ref)
+
+    source_eval = tmp_path / "source" / "eval_ref.yaml"
+    _write_yaml(source_eval, {"cases": [{"case_id": "case_001", "score": 0.0}]})
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(
+        json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}),
+        encoding="utf-8",
+    )
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            evaluator=EvaluatorConfig(backend="single_harness"),
+        ),
+        evaluator=ErrorEvaluator(),
+        analyzer=_Analyzer(),
+        member_optimizer=_MemberOptimizer(),
+    )
+
+    gate = asyncio.run(
+        orchestrator._candidate_gate(
+            cases=[{"case_id": "case_001", "input": "fix"}],
+            source_eval_ref=str(source_eval),
+            before_harness_refs_path=str(tmp_path / "baseline_refs.yaml"),
+            candidate_harness_refs_path=str(tmp_path / "candidate_refs.yaml"),
+            member_status="success",
+            capabilities=[
+                {
+                    "action_group": "skill",
+                    "operation": "add",
+                    "runtime_name": "post_edit_validation",
+                }
+            ],
+            output_dir=tmp_path / "candidate_eval",
+            dataset=type(
+                "Dataset",
+                (),
+                {
+                    "dataset_id": "test",
+                    "dataset_dir": str(dataset_path.parent),
+                    "dataset_files": [str(dataset_path)],
+                    "cases": 1,
+                },
+            )(),
+        )
+    )
+
+    assert gate["accepted"] is False
+    assert gate["status"] == "inconclusive"
+    assert gate["reason"] == "candidate_gate_inconclusive_due_to_error_cases"
+
+
+def test_candidate_gate_requires_every_skill_and_tool_in_multi_action_plan(tmp_path: Path) -> None:
+    class MultiCapabilityEvaluator:
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            output_dir = Path(kwargs["output_dir"])
+            case_dir = output_dir / "cases" / "case_001"
+            trajectory_dir = case_dir / "tr"
+            trajectory_dir.mkdir(parents=True, exist_ok=True)
+            steps = [
+                {
+                    "kind": "tool",
+                    "error": None,
+                    "detail": {
+                        "tool_name": "skill_tool",
+                        "call_args": json.dumps({"skill_name": skill_name}),
+                        "call_result": {"success": True},
+                    },
+                }
+                for skill_name in ["invoice_rules", "style_guide"]
+            ] + [
+                {
+                    "kind": "tool",
+                    "error": None,
+                    "detail": {
+                        "tool_name": tool_name,
+                        "call_args": "{}",
+                        "call_result": {"success": True},
+                    },
+                }
+                for tool_name in ["formatter", "validator"]
+            ]
+            (trajectory_dir / "solver.jsonl").write_text(
+                json.dumps({"steps": steps}) + "\n",
+                encoding="utf-8",
+            )
+            trace_path = case_dir / "trace.json"
+            trace_path.write_text(
+                json.dumps({"trajectory_dir": str(trajectory_dir)}),
+                encoding="utf-8",
+            )
+            result_path = case_dir / "result.json"
+            result_path.write_text("{}", encoding="utf-8")
+            eval_ref = output_dir / "eval_ref.yaml"
+            _write_yaml(
+                eval_ref,
+                {
+                    "cases": [
+                        {
+                            "case_id": "case_001",
+                            "status": "passed",
+                            "score": 1.0,
+                            "result_path": str(result_path),
+                            "trace_path": str(trace_path),
+                        }
+                    ]
+                },
+            )
+            return str(eval_ref)
+
+    source_eval = tmp_path / "source" / "eval_ref.yaml"
+    _write_yaml(
+        source_eval,
+        {"cases": [{"case_id": "case_001", "status": "failed", "score": 0.0}]},
+    )
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(
+        json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}),
+        encoding="utf-8",
+    )
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(evaluator=EvaluatorConfig(backend="single_harness")),
+        evaluator=MultiCapabilityEvaluator(),
+        analyzer=_Analyzer(),
+        member_optimizer=_MemberOptimizer(),
+    )
+    capabilities = [
+        {
+            "action_group": action_group,
+            "operation": "add",
+            "runtime_name": runtime_name,
+            "target_case_ids": ["case_001"],
+        }
+        for action_group, runtime_name in [
+            ("skill", "invoice_rules"),
+            ("skill", "style_guide"),
+            ("tool", "formatter"),
+            ("tool", "validator"),
+        ]
+    ]
+
+    gate = asyncio.run(
+        orchestrator._candidate_gate(
+            cases=[{"case_id": "case_001", "input": "fix"}],
+            source_eval_ref=str(source_eval),
+            before_harness_refs_path=str(tmp_path / "baseline_refs.yaml"),
+            candidate_harness_refs_path=str(tmp_path / "candidate_refs.yaml"),
+            member_status="success",
+            capabilities=capabilities,
+            output_dir=tmp_path / "candidate_eval",
+            dataset=type(
+                "Dataset",
+                (),
+                {
+                    "dataset_id": "test",
+                    "dataset_dir": str(dataset_path.parent),
+                    "dataset_files": [str(dataset_path)],
+                    "cases": 1,
+                },
+            )(),
+        )
+    )
+
+    assert gate["accepted"] is True
+    assert gate["expected_skill_names"] == ["invoice_rules", "style_guide"]
+    assert gate["expected_tool_names"] == ["formatter", "validator"]
+    assert gate["missing_expected_skill_names"] == []
+    assert gate["missing_expected_tool_names"] == []
 
 
 @pytest.mark.parametrize("action_group", ["skill", "tool"])

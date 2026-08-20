@@ -21,12 +21,15 @@ from openjiuwen.rsi.evaluator.case_backend import (
     build_backend,
 )
 from openjiuwen.rsi.evaluator.case_runner import CaseRunner
+from openjiuwen.rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.evaluator.judger import (
     ExactMatchJudger,
     ScriptBasedJudger,
     build_judger,
 )
 from openjiuwen.rsi.evaluator.metrics_collector import MetricsCollector
+from openjiuwen.rsi.evaluator.team_evaluator import TeamEvaluator
+from openjiuwen.rsi.schema import EvaluationCaseTraceRef
 
 
 class _Backend:
@@ -59,6 +62,41 @@ class _Backend:
 
     async def cleanup(self, team_name: str, session_id: str) -> None:
         self.cleaned.append((team_name, session_id))
+
+
+class _InfrastructureRetryCaseRunner:
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = list(errors)
+        self.calls = 0
+
+    async def execute(self, *, case: dict[str, Any], output_dir: str, **_: Any) -> EvaluationCaseTraceRef:
+        self.calls += 1
+        if self.errors:
+            raise EvaluationInfrastructureError(self.errors.pop(0))
+        case_dir = Path(output_dir)
+        case_dir.mkdir(parents=True, exist_ok=True)
+        result_path = case_dir / "result.json"
+        trace_path = case_dir / "trace.json"
+        result_path.write_text(
+            json.dumps(
+                {
+                    "case_id": case["case_id"],
+                    "status": "passed",
+                    "score": 1.0,
+                    "evaluation": {"passed": True, "method": "script_based"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        trace_path.write_text(json.dumps({"case_id": case["case_id"]}), encoding="utf-8")
+        return EvaluationCaseTraceRef(
+            case_id=case["case_id"],
+            case_path="",
+            trace_path=str(trace_path),
+            result_path=str(result_path),
+            status="passed",
+            score=1.0,
+        )
 
 
 def test_build_backend_accepts_only_single_harness() -> None:
@@ -119,6 +157,52 @@ async def test_case_runner_persists_trace_result_and_artifact(tmp_path: Path) ->
     assert trace["behavior_trace"]["normalized_trace_path"]
     assert (tmp_path / "case" / "artifacts" / "answer.txt").read_text(encoding="utf-8") == "answer"
     assert backend.cleaned and backend.cleaned[0][0] == "single_harness"
+
+
+@pytest.mark.asyncio
+async def test_team_evaluator_retries_transient_infrastructure_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _skip_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("openjiuwen.rsi.evaluator.team_evaluator.asyncio.sleep", _skip_sleep)
+    evaluator = TeamEvaluator(EvaluatorConfig(transient_case_retry_limit=1))
+    case_runner = _InfrastructureRetryCaseRunner(
+        ["RemoteProtocolError: peer closed connection (incomplete chunked read)"]
+    )
+    evaluator.case_runner = case_runner  # type: ignore[assignment]
+
+    eval_ref = await evaluator.evaluate_batch(
+        cases=[{"case_id": "case-1"}],
+        team_skill_ref_path="",
+        harness_refs_path="",
+        output_dir=str(tmp_path / "evaluation"),
+    )
+
+    retry_files = list((tmp_path / "evaluation" / "cases").glob("*_transient_retries.json"))
+    assert Path(eval_ref).is_file()
+    assert case_runner.calls == 2
+    assert len(retry_files) == 1
+    assert "incomplete chunked read" in retry_files[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_team_evaluator_does_not_retry_deterministic_infrastructure_error(tmp_path: Path) -> None:
+    evaluator = TeamEvaluator(EvaluatorConfig(transient_case_retry_limit=5))
+    case_runner = _InfrastructureRetryCaseRunner(["invalid Harness package"])
+    evaluator.case_runner = case_runner  # type: ignore[assignment]
+
+    with pytest.raises(EvaluationInfrastructureError, match="invalid Harness package"):
+        await evaluator.evaluate_batch(
+            cases=[{"case_id": "case-1"}],
+            team_skill_ref_path="",
+            harness_refs_path="",
+            output_dir=str(tmp_path / "evaluation"),
+        )
+
+    assert case_runner.calls == 1
 
 
 @pytest.mark.asyncio

@@ -762,6 +762,53 @@ class TestSignalExtractors:
 class TestDiagnosisAgentStrategy:
     """DeepAgent strategy factory and normalization contracts."""
 
+    def test_json_extraction_ignores_braces_inside_strings(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+        parsed = analyzer_module._extract_json_object(
+            'Reasoning first. {"diagnoses":[{"root_cause":"literal } in source"}]}'
+        )
+
+        assert parsed == {"diagnoses": [{"root_cause": "literal } in source"}]}
+
+    def test_truncated_diagnosis_json_is_retryable(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.model_call import RetryableModelOutputError
+
+        error = analyzer_module._unusable_diagnosis_output_error(
+            "case_001",
+            [
+                'Analysis before JSON. {"diagnoses":[{"issue_ca',
+                'Still truncated. {"diagnoses":[{"summary":"unfinished',
+            ],
+        )
+
+        assert isinstance(error, RetryableModelOutputError)
+        assert "incomplete JSON after repair" in str(error)
+
+    def test_non_json_service_error_remains_non_retryable(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+        error = analyzer_module._unusable_diagnosis_output_error(
+            "case_001",
+            ["Error code: 401 - invalid_api_key"],
+        )
+
+        assert isinstance(error, ValueError)
+        assert not isinstance(error, analyzer_module._DiagnosisOutputFormatError)
+        assert "contained a model-service error" in str(error)
+
+    def test_non_json_diagnosis_prose_is_a_format_error(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+        error = analyzer_module._unusable_diagnosis_output_error(
+            "case_001",
+            ["Confirmed. The verifier flagged a residual raw source header."],
+        )
+
+        assert isinstance(error, analyzer_module._DiagnosisOutputFormatError)
+        assert "did not contain JSON" in str(error)
+
     def test_build_analysis_strategy_returns_diagnosis_agent_strategy(self) -> None:
         from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import build_analysis_strategy
@@ -914,6 +961,11 @@ class TestDiagnosisAgentStrategy:
         assert diagnosed_case_ids == ["unresolved"]
         assert artifact.metadata["per_case_count"] == 2
         assert artifact.metadata["diagnosed_case_count"] == 1
+        causal_evidence_path = Path(artifact.metadata["causal_evidence_path"])
+        causal_evidence = json.loads(causal_evidence_path.read_text(encoding="utf-8"))
+        assert causal_evidence["schema_version"] == 1
+        assert [case["case_id"] for case in causal_evidence["cases"]] == ["unresolved"]
+        assert causal_evidence["cases"][0]["causal_digest"]["outcome"]["case_id"] == "unresolved"
 
     @pytest.mark.asyncio
     async def test_per_case_diagnosis_uses_case_dir_as_workspace(
@@ -1119,7 +1171,7 @@ class TestDiagnosisAgentStrategy:
         ) == "FORMAT = root.opts.datetimeformat\n"
 
     @pytest.mark.asyncio
-    async def test_per_case_diagnosis_raises_when_agent_returns_non_json(
+    async def test_per_case_diagnosis_raises_when_agent_returns_service_error_text(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1167,12 +1219,102 @@ class TestDiagnosisAgentStrategy:
         monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
         monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
 
-        with pytest.raises(ValueError, match="per-case diagnosis output did not contain JSON"):
+        with pytest.raises(ValueError, match="contained a model-service error"):
             await strategy._per_case_diagnosis(
                 [case],
                 DeterministicSignals(method="script_based"),
                 None,
             )
+
+    @pytest.mark.asyncio
+    async def test_per_case_diagnosis_isolates_one_case_format_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+            CaseAnalysisInput,
+            DeterministicSignals,
+        )
+
+        cases: list[CaseAnalysisInput] = []
+        for case_id in ("case_bad", "case_good"):
+            case_dir = tmp_path / "case_results" / case_id
+            result_path = case_dir / "result.json"
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text("{}", encoding="utf-8")
+            cases.append(
+                CaseAnalysisInput(
+                    case_id=case_id,
+                    status="failed",
+                    score=0.0,
+                    input="input",
+                    expected=None,
+                    response="response",
+                    error="",
+                    evaluation_method="script_based",
+                    evaluation_passed=False,
+                    evaluation_reason="failed",
+                    evaluation_metadata={},
+                    trace_path=str(case_dir / "trace.json"),
+                    result_path=str(result_path),
+                )
+            )
+
+        strategy = analyzer_module.DiagnosisAgentStrategy(
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
+        )
+
+        async def fake_build_agent(workspace: str) -> dict[str, str]:
+            return {"workspace": workspace}
+
+        async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
+            if "case_bad" in agent["workspace"]:
+                return "Diagnosis prose without a JSON object."
+            return json.dumps(
+                {
+                    "diagnoses": [
+                        {
+                            "issue_category": "unassigned",
+                            "severity": "low",
+                            "summary": "No optimizable cause is supported.",
+                            "failure_mode": "insufficient_evidence",
+                            "failure_cluster": {
+                                "failed_checks": ["check_good"],
+                                "observable_behavior": "the check remains unresolved",
+                            },
+                            "root_cause": "Evidence does not separate the mechanisms.",
+                            "critical_mistake": "No evidence-backed decision is available.",
+                            "general_mechanism": "Collect a discriminator before optimization.",
+                            "target_ref": "unassigned",
+                            "evidence_refs": [],
+                            "affected_components": [],
+                            "recommendation": "Keep this diagnosis unassigned.",
+                            "decision_contract": {
+                                "acceptance_observable": "the check remains unresolved",
+                                "activation_phase": "during_investigation",
+                            },
+                            "confidence": "low",
+                        }
+                    ]
+                }
+            )
+
+        monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
+        monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
+
+        results = await strategy._per_case_diagnosis(
+            cases,
+            DeterministicSignals(method="script_based"),
+            None,
+        )
+
+        assert [item["case_id"] for item in results] == ["case_bad", "case_good"]
+        assert results[0]["analysis_failed"] is True
+        assert results[0]["diagnosis_error_type"] == "output_format"
+        assert results[1]["failure_mode"] == "insufficient_evidence"
 
     @pytest.mark.asyncio
     async def test_per_case_diagnosis_runs_cases_sequentially(
@@ -1651,6 +1793,42 @@ class TestDiagnosisAgentStrategy:
         assert "Previous diagnosis output was not valid JSON" in prompts[1]
         assert "single valid JSON object" in prompts[1]
 
+    @pytest.mark.asyncio
+    async def test_run_agent_does_not_replay_prose_for_service_retry_budget(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+        prompts: list[str] = []
+
+        async def fake_run_agent(*args: Any, **kwargs: Any) -> str:
+            prompts.append(kwargs["inputs"]["query"])
+            return "I will analyze this case in prose instead of returning JSON."
+
+        monkeypatch.setattr(Runner, "run_agent", fake_run_agent)
+
+        raw = await analyzer_module._run_agent(object(), "large evidence prompt", max_retries=20)
+
+        assert raw.startswith("I will analyze")
+        assert len(prompts) == 2
+        assert prompts[0] == "large evidence prompt"
+        assert "FORMAT-ONLY TASK" in prompts[1]
+
+    def test_json_repair_prompt_is_format_only_and_keeps_completed_analysis(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+        original = "ORIGINAL-EVIDENCE " * 10_000
+        conclusion = "The first wrong decision was submitting before checking all receipts."
+
+        prompt = analyzer_module._build_json_repair_prompt(original, conclusion)
+
+        assert "FORMAT-ONLY TASK" in prompt
+        assert conclusion in prompt
+        assert "ORIGINAL-EVIDENCE" not in prompt
+        assert '"diagnoses"' in prompt
+
 
 class TestDiagnosisPromptEvidenceSummary:
     """Verify per-case diagnosis prompt consumes bounded evidence, not raw case dirs."""
@@ -1683,6 +1861,19 @@ class TestDiagnosisPromptEvidenceSummary:
 
         return DeterministicSignals(method="llm_as_judge")
 
+    def test_inline_payload_uses_compact_json(self, tmp_path: Path) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+        payload = analyzer_module._build_diagnosis_input_json(
+            case=self._make_case_input(str(tmp_path / "result.json")),
+            signals=self._make_signals(),
+            retrieved_experience=None,
+            evidence_summary_available=False,
+        )
+
+        assert '\n  "authoritative_task_contract"' not in payload
+        assert payload.startswith('{"analysis_protocol":')
+
     def test_prompt_contains_evidence_summary_when_available(self, tmp_path: Path) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_prompt,
@@ -1707,7 +1898,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "bounded read-only discriminator" in prompt
         assert "Authoritative Task Contract" in prompt
         assert "Commands and probes in Agent-Generated Execution Evidence are not task facts" in prompt
-        assert '"evidence_summary_available": true' in prompt
+        assert '"evidence_summary_available":true' in prompt
         assert "Analyze concrete member harness capability" in prompt
         assert "member_harness.<role>.<variable>" in prompt
         assert "judge/normalized_trace.json" not in prompt
@@ -1731,7 +1922,7 @@ class TestDiagnosisPromptEvidenceSummary:
         )
 
         assert "No evidence_summary.md is available" in prompt
-        assert '"evidence_summary_available": false' in prompt
+        assert '"evidence_summary_available":false' in prompt
         assert "Analyze team organization" in prompt
 
     def test_prompt_does_not_contain_absolute_case_dir_path(self, tmp_path: Path) -> None:
@@ -1869,11 +2060,12 @@ class TestDiagnosisPromptEvidenceSummary:
         )
         payload = json.loads(raw)
 
+        assert payload["analysis_protocol"]["version"] == "generic_behavior_causal_v2"
         assert payload["retrieved_experience"]["matches"][0]["component_layer"] == "prompt_section"
         assert payload["experience_usage_policy"]["must_use_current_evidence_first"] is True
         assert "Do not copy a historical target_ref" in payload["experience_usage_policy"]["rules"][0]
 
-    def test_system_prompt_requires_isolated_repository_investigation(self) -> None:
+    def test_system_prompt_uses_generic_evidence_grounded_protocol(self) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
             DIAGNOSIS_SYSTEM_PROMPT,
         )
@@ -1881,23 +2073,39 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "trace.json" in DIAGNOSIS_SYSTEM_PROMPT
         assert "result.json" in DIAGNOSIS_SYSTEM_PROMPT
         assert "repository/" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "at least two plausible mechanisms" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "repository-grounded discriminator" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Do NOT read case-root" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Never inspect benchmark gold/solution patches" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "code, documents, spreadsheets, search" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "Scores establish that an outcome failed" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "score alone never establishes why" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "Compare at least two plausible explanations" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "evidence_status" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "supported_hypothesis" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "same aggregate score by itself is not new causal evidence" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "case-root `trace.json`" in DIAGNOSIS_SYSTEM_PROMPT
         assert "authoritative_benchmark_test_contract.test_patch" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "acceptance evidence" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "hidden tests, `test_patch`" not in DIAGNOSIS_SYSTEM_PROMPT
         assert "evidence_summary.md" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Repository Investigation Protocol" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Experience Use Protocol" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Falsify the proposed mechanism" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Epistemic boundary" in DIAGNOSIS_SYSTEM_PROMPT
         assert "no-exception smoke probe" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "intermediate container" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "positive override case" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "authoritative_task_contract.input_excerpt" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "agent-generated command tested it" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "Do not convert a Tool, Skill, Config" in DIAGNOSIS_SYSTEM_PROMPT
+
+    def test_generic_protocol_rejects_assigned_target_with_insufficient_evidence(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _diagnosis_validation_conflicts,
+        )
+
+        conflicts = _diagnosis_validation_conflicts(
+            {
+                "evidence_status": "insufficient",
+                "target_ref": "member_harness.solver.prompt",
+                "confidence": "medium",
+                "failed_requirement": "unknown",
+                "discriminating_evidence": "none",
+                "evidence_refs": [{"trace_id": "t", "role": "solver", "message_index": 1}],
+                "decision_contract": {"acceptance_observable": "a changed answer"},
+            },
+            {},
+        )
+
+        assert "insufficient evidence must use target_ref=unassigned" in conflicts
+        assert "insufficient evidence must use confidence=low" in conflicts
 
     def test_system_prompt_preserves_role_aware_target_refs(self) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
@@ -3002,6 +3210,251 @@ class TestAttributionMetadata:
         assert "decisive_step" not in entry
         assert "anchor_strength" not in entry
         assert "root_cause" not in entry
+
+
+class TestBoundedMultiDiagnosis:
+    @staticmethod
+    def _diagnosis(
+        *,
+        failure_mode: str,
+        failed_check: str,
+        observable: str,
+        target_ref: str = "member_harness.solver.skill",
+    ) -> dict[str, Any]:
+        return {
+            "issue_category": "member_harness",
+            "severity": "medium",
+            "summary": f"failure in {failed_check}",
+            "failure_mode": failure_mode,
+            "failure_cluster": {
+                "failed_checks": [failed_check],
+                "observable_behavior": observable,
+            },
+            "root_cause": f"root cause for {failed_check}",
+            "critical_mistake": f"wrong decision before {failed_check}",
+            "general_mechanism": "select the behavior required by the observed contract",
+            "target_ref": target_ref,
+            "evidence_refs": [],
+            "affected_components": ["solver"],
+            "recommendation": f"update {target_ref}",
+            "decision_contract": {
+                "acceptance_observable": observable,
+                "activation_phase": "during_investigation",
+            },
+            "confidence": "medium",
+        }
+
+    def test_normalize_case_diagnoses_bounds_deduplicates_and_prioritizes_residuals(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _normalize_case_diagnoses,
+        )
+
+        fixed = self._diagnosis(
+            failure_mode="fixed_formula",
+            failed_check="formula_check",
+            observable="formula is recalculated correctly",
+        )
+        remaining = self._diagnosis(
+            failure_mode="missing_payment",
+            failed_check="payment_b_check",
+            observable="Payment B appears in the output",
+        )
+        duplicate_remaining = self._diagnosis(
+            failure_mode="missing_payment",
+            failed_check="payment_b_check",
+            observable="Payment B appears in the output",
+        )
+        unrelated = self._diagnosis(
+            failure_mode="wrong_header",
+            failed_check="header_check",
+            observable="the required header is present",
+            target_ref="member_harness.solver.prompt",
+        )
+        regression = self._diagnosis(
+            failure_mode="regressed_total",
+            failed_check="existing_total_check",
+            observable="the previously correct total remains unchanged",
+        )
+        parsed = {
+            "diagnoses": [
+                fixed,
+                remaining,
+                duplicate_remaining,
+                unrelated,
+                regression,
+            ]
+        }
+        feedback = {
+            "experiments": [
+                {
+                    "verifier_delta": {
+                        "newly_passed_fail_to_pass": ["formula_check"],
+                        "remaining_failed_fail_to_pass": ["payment_b_check"],
+                        "regressed_pass_to_pass": ["existing_total_check"],
+                    }
+                }
+            ]
+        }
+
+        diagnoses = _normalize_case_diagnoses(
+            parsed,
+            prior_candidate_feedback=feedback,
+        )
+
+        assert [item["failure_mode"] for item in diagnoses] == [
+            "regressed_total",
+            "missing_payment",
+            "wrong_header",
+        ]
+        assert all(item["failure_mode"] != "fixed_formula" for item in diagnoses)
+
+        legacy = _normalize_case_diagnoses(remaining)
+        assert legacy == [remaining]
+
+    def test_normalize_case_diagnoses_rejects_empty_json_placeholders(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _normalize_case_diagnoses,
+        )
+
+        assert _normalize_case_diagnoses({"diagnoses": [{}]}) == []
+        assert _normalize_case_diagnoses({"diagnoses": [{"severity": "medium"}]}) == []
+        assert _normalize_case_diagnoses(
+            {
+                "diagnoses": [
+                    {
+                        "target_ref": "unassigned",
+                        "summary": "Current evidence cannot attribute the failure.",
+                    }
+                ]
+            }
+        ) == [
+            {
+                "target_ref": "unassigned",
+                "summary": "Current evidence cannot attribute the failure.",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_per_case_diagnosis_flattens_wrapped_diagnoses(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+            CaseAnalysisInput,
+            DeterministicSignals,
+        )
+
+        case_dir = tmp_path / "case_results" / "case_multi"
+        result_path = case_dir / "result.json"
+        result_path.parent.mkdir(parents=True)
+        result_path.write_text("{}", encoding="utf-8")
+        case = CaseAnalysisInput(
+            case_id="case_multi",
+            status="failed",
+            score=0.0,
+            input="produce both required outputs",
+            expected=None,
+            response="partial output",
+            error="",
+            evaluation_method="script_based",
+            evaluation_passed=False,
+            evaluation_reason="two independent checks failed",
+            evaluation_metadata={},
+            trace_path=str(case_dir / "trace.json"),
+            result_path=str(result_path),
+        )
+        strategy = analyzer_module.DiagnosisAgentStrategy(
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
+        )
+        diagnoses = [
+            self._diagnosis(
+                failure_mode="missing_payment",
+                failed_check="payment_b_check",
+                observable="Payment B appears in the output",
+            ),
+            self._diagnosis(
+                failure_mode="wrong_formula",
+                failed_check="formula_check",
+                observable="the computed formula matches the contract",
+                target_ref="member_harness.solver.prompt",
+            ),
+        ]
+
+        async def fake_build_agent(workspace: str) -> dict[str, str]:
+            return {"workspace": workspace}
+
+        async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
+            assert "Return at most 3 diagnoses" in prompt
+            return json.dumps({"diagnoses": diagnoses})
+
+        monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
+        monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
+        monkeypatch.setattr(
+            analyzer_module,
+            "_diagnosis_validation_conflicts",
+            lambda *args, **kwargs: [],
+        )
+
+        results = await strategy._per_case_diagnosis(
+            [case],
+            DeterministicSignals(method="script_based"),
+            None,
+        )
+
+        assert [item["failure_mode"] for item in results] == [
+            "missing_payment",
+            "wrong_formula",
+        ]
+        assert [item["case_id"] for item in results] == ["case_multi", "case_multi"]
+        assert [item["diagnosis_index"] for item in results] == [1, 2]
+        assert all(item["diagnosis_count"] == 2 for item in results)
+
+    def test_aggregation_keeps_distinct_clusters_from_same_case_independent(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _aggregate_structured_diagnoses,
+        )
+
+        first = self._diagnosis(
+            failure_mode="missing_required_output",
+            failed_check="payment_b_check",
+            observable="Payment B appears in the output",
+        )
+        second = self._diagnosis(
+            failure_mode="missing_required_output",
+            failed_check="formula_check",
+            observable="the computed formula matches the contract",
+        )
+        for diagnosis in (first, second):
+            diagnosis.update(
+                {
+                    "evidence_status": "supported_hypothesis",
+                    "failed_requirement": "one explicit output requirement was not satisfied",
+                    "competing_hypotheses": ["instruction gap", "tool result handling gap"],
+                    "discriminating_evidence": "the trace shows the omitted final-output action",
+                }
+            )
+        per_case = [
+            {"case_id": "case_multi", **first},
+            {"case_id": "case_multi", **second},
+        ]
+
+        issues = _aggregate_structured_diagnoses(
+            per_case_results=per_case,
+            max_issues=5,
+            evidence_limit_per_issue=3,
+        )
+
+        assert len(issues) == 2
+        assert {tuple(issue.metadata["attribution"]["failure_cluster"]["failed_checks"]) for issue in issues} == {
+            ("payment_b_check",),
+            ("formula_check",),
+        }
+        assert all(issue.affected_cases == ["case_multi"] for issue in issues)
+        assert all(issue.metadata["attribution"]["evidence_status"] == "supported_hypothesis" for issue in issues)
+        assert all(issue.metadata["attribution"]["competing_hypotheses"] for issue in issues)
 
 
 class TestDeterministicAggregation:

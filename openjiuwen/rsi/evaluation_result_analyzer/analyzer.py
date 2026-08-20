@@ -20,6 +20,7 @@ and build_judge_prompt with the class that uses them.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -45,6 +46,11 @@ from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
     DeterministicSignals,
     EvaluationSummaryInput,
 )
+from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+    build_causal_evidence_digest,
+    compact_candidate_feedback,
+    load_public_task_contract,
+)
 from openjiuwen.rsi.evaluation_result_analyzer.signal_extractor import (
     build_signal_extractor,
 )
@@ -54,6 +60,7 @@ from openjiuwen.rsi.member_optimizer.model_config import (
     without_inner_sdk_retries,
 )
 from openjiuwen.rsi.model_call import (
+    RetryableModelOutputError,
     is_retryable_model_call_failure,
     run_model_call_with_retries,
 )
@@ -70,7 +77,6 @@ if TYPE_CHECKING:
 _TEXT_SNIPPET_CHARS = 1200
 _METADATA_SNIPPET_CHARS = 2000
 _EXPERIENCE_SNIPPET_CHARS = 2000
-_CANDIDATE_FEEDBACK_CHARS = 8000
 _COORDINATOR_ROLE_KEYS = {
     "coordinator",
     "lead",
@@ -92,22 +98,45 @@ _EVIDENCE_SUMMARY_CHARS = 6000
 _AGGREGATION_DIAGNOSIS_CHARS = 1200
 _AGGREGATION_SIGNAL_CHARS = 4000
 _RAW_OUTPUT_CHARS = 512
+_MAX_DIAGNOSES_PER_CASE = 3
+_HARNESS_PROMPT_CHARS = 12_000
+_HARNESS_SKILL_CHARS = 3_000
+_HARNESS_CONFIG_KEYS = {
+    "name",
+    "version",
+    "engine",
+    "engine_revision",
+    "system_prompt",
+    "prompt",
+    "max_steps",
+    "max_iterations",
+    "rollout_wall_clock_seconds",
+    "command_timeout_seconds",
+    "tool_loop_compaction",
+    "skills",
+    "tools",
+    "rails",
+}
+_SENSITIVE_CONFIG_KEY = re.compile(r"(?:api.?key|token|secret|password|credential)", re.IGNORECASE)
+_ARTIFACT_SUFFIXES = {".csv", ".docx", ".html", ".json", ".md", ".pdf", ".pptx", ".txt", ".xlsx"}
 
 
 # ---------------------------------------------------------------------------
 # Prompt constants (§4 of the design plan)
 # ---------------------------------------------------------------------------
 
-DIAGNOSIS_SYSTEM_PROMPT = """\
+_LEGACY_DIAGNOSIS_SYSTEM_PROMPT = """\
 You are a reverse-attribution root-cause analyst for multi-agent AI team
 evaluations. Your conclusion MUST point at a concrete, optimizable
 variable backed by trace evidence. Vague summaries are rejected.
 
 ## Input
 The user message contains the task contract, the current case's authoritative
-benchmark test contract when available, case facts, and inline
-`primary_evidence.evidence_summary_text`. The summary is extracted from
-normalized trace and verifier outputs by code. The runtime may also contain:
+benchmark test contract when available, case facts, and a deterministic
+`primary_evidence.causal_digest`. The digest preserves each trial, exact tool
+requests, public tool schemas, final outputs, and cross-trial contrasts instead
+of flattening the trajectory. `primary_evidence.evidence_summary_text` retains
+verifier and validation evidence. The runtime may also contain:
 - `evidence_summary.md`: an audit copy of the inline evidence;
 - `repository/`: an isolated snapshot of the exact workspace evaluated for the
   case, including the solver's patch but excluding evaluator internals;
@@ -157,8 +186,19 @@ message_index, and optional step_pointer.
    member/team variable, then use trace evidence to support that attribution.
 2. Walk BACKWARD to the EARLIEST decisive turn that caused it (first failed tool
    call, malformed handoff, wrong decision the later failures depend on).
-3. Apply Target Reference Semantics to decide scope, role, and exactly one
-   optimizable variable. Weak/ambiguous evidence => target_ref="unassigned",
+   For repeated-trial evaluations, first compare successful and failed trials.
+   Prefer the earliest behavior that covaries with the outcome over a behavior
+   present in every trial. When every trial fails, compare terminal action
+   variants and judge-dimension changes without inventing a successful pattern.
+   A field observed only in a tool response is not a missing request field. It
+   is actionable only when the public request schema or task contract declares
+   it as an allowed or required request field.
+3. Partition the failed outcome into at most three independent failure clusters.
+   A cluster must be tied either to a different failed verifier/check group or
+   to a different runtime-observable behavior. Do not split paraphrases of the
+   same mistake into separate diagnoses. For each cluster, apply Target
+   Reference Semantics to decide scope, role, and exactly one optimizable
+   variable. Weak/ambiguous evidence => target_ref="unassigned",
    confidence=low. Never fabricate evidence/variables.
 4. Falsify the proposed mechanism before naming it as root cause. Repository
    investigation is the mechanism-selection step, not optional corroboration.
@@ -182,11 +222,13 @@ message_index, and optional step_pointer.
    `prior_candidate_feedback` is a paired Source-versus-Candidate experiment
    for this same case. It is stronger than a repeated explanation of the
    Source failure: preserve every FAIL_TO_PASS operation that the candidate
-   newly made pass, diagnose the operations that still fail, and use the
-   candidate patch/diagnosis to falsify the previous mechanism. Never restart
-   from the original failure as if the candidate had not run. A candidate that
-   moves some official tests from failure to success is partial semantic
-   progress even though the case score remains zero.
+   newly made pass, diagnose newly regressed checks first, then operations that
+   still fail, and use the candidate patch/diagnosis to falsify the previous
+   mechanism. Do not emit a diagnosis whose cluster contains only checks the
+   candidate already fixed. Never restart from the original failure as if the
+   candidate had not run. A candidate that moves some official tests from
+   failure to success is partial semantic progress even though the case score
+   remains zero.
    When it says `empty_patch=true`, treat that only as the terminal execution
    outcome, never as the semantic root cause or causal discriminator. Walk back
    through the trace and make exactly one of two determinations: (a) if a
@@ -302,7 +344,11 @@ fix belongs to that role's local ExpertHarness.
 
 Variables (member_harness.<role>.<variable>):
 - prompt: role identity, domain framing, behavioral style, or task interpretation is wrong.
-- skill: reusable multi-step capability is not triggered, missing, misused, or procedurally flawed.
+- skill: a reusable multi-step capability is not triggered, missing, misused,
+  or procedurally flawed. Do not choose it merely because a literal local fix
+  can be paraphrased in general language. The downstream planner independently
+  requires cross-case support before it permits any Skill change; a one-case
+  Skill hypothesis will run only as a bounded prompt experiment.
 - tool: local atomic tool choice, args, schema, call format, implementation, or result handling is wrong.
 - config: runtime/model/harness configuration for this role is wrong.
 
@@ -343,46 +389,54 @@ Return the JSON object immediately. Keep every string field concise
 (normally <= 240 characters). Do not include markdown, prose, analysis notes,
 or step-by-step reasoning outside the JSON object.
 
-Per-case schema:
+Per-case schema (one wrapper containing 1-3 diagnoses):
 {
-  "issue_category": "member_harness | team_skill | unassigned",
-  "severity": "high | medium | low",
-  "summary": "<one sentence: the concrete root cause>",
-  "failure_mode": "<short label, e.g. repeated_failed_tool_call>",
-  "root_cause": "<fundamental reason; cite trace_id+role+#index>",
-  "critical_mistake": "<earliest decisive wrong turn; cite the evidence ptr>",
-  "general_mechanism": "<structural (NOT task-specific) fix for this class>",
-  "target_ref": "<member_harness.<role>.<variable> | team_skill.<role>.<variable> | unassigned>",
-  "evidence_refs": [
+  "diagnoses": [
     {
-      "trace_id": "<id>",
-      "role": "<member_role>",
-      "message_index": 0,
-      "step_pointer": "<step_N or empty>"
+      "issue_category": "member_harness | team_skill | unassigned",
+      "severity": "high | medium | low",
+      "summary": "<one sentence: the concrete root cause>",
+      "failure_mode": "<short structural failure label>",
+      "failure_cluster": {
+        "failed_checks": ["<failed verifier/check id>"],
+        "observable_behavior": "<specific runtime-visible failure>"
+      },
+      "root_cause": "<fundamental reason; cite trace_id+role+#index>",
+      "critical_mistake": "<earliest decisive wrong turn; cite the evidence ptr>",
+      "general_mechanism": "<structural (NOT task-specific) fix for this class>",
+      "target_ref": "<member_harness.<role>.<variable> | team_skill.<role>.<variable> | unassigned>",
+      "evidence_refs": [
+        {
+          "trace_id": "<id>",
+          "role": "<member_role>",
+          "message_index": 0,
+          "step_pointer": "<step_N or empty>"
+        }
+      ],
+      "affected_components": ["<member_role>"],
+      "recommendation": "<concrete change to the target_ref variable>",
+      "decision_contract": {
+        "wrong_decision": "<the decision that produced the failed observable>",
+        "causal_distinction": "<the evidence-backed distinction that changes the decision>",
+        "required_action": "<the action selected by that distinction, not a menu of alternatives>",
+        "acceptance_observable": "<runtime behavior that demonstrates the action is correct>",
+        "scope_boundary": ["<nearby behavior that is not an equivalent substitute>"],
+        "activation_phase": "<task_start | during_investigation | post_diagnosis | pre_submission>"
+      },
+      "validation_observations": {
+        "project_test_suite_attempted": false,
+        "project_test_suite_result": "not_observed | passed | failed",
+        "authoritative_verifier_result": "passed | failed | unknown",
+        "contradiction_explanation": "<why local project tests and verifier differ, or empty>"
+      },
+      "verifier_observations": {
+        "patch_successfully_applied": true,
+        "failed_fail_to_pass_tests": ["<authoritative failed test id>"],
+        "failed_pass_to_pass_tests": ["<authoritative regression test id>"]
+      },
+      "confidence": "high | medium | low"
     }
-  ],
-  "affected_components": ["<member_role>"],
-  "recommendation": "<concrete change to the target_ref variable>",
-  "decision_contract": {
-    "wrong_decision": "<the decision that produced the failed observable>",
-    "causal_distinction": "<the evidence-backed distinction that changes the decision>",
-    "required_action": "<the action selected by that distinction, not a menu of alternatives>",
-    "acceptance_observable": "<runtime behavior that demonstrates the action is correct>",
-    "scope_boundary": ["<nearby behavior that is not an equivalent substitute>"],
-    "activation_phase": "<task_start | during_investigation | post_diagnosis | pre_submission>"
-  },
-  "validation_observations": {
-    "project_test_suite_attempted": false,
-    "project_test_suite_result": "not_observed | passed | failed",
-    "authoritative_verifier_result": "passed | failed | unknown",
-    "contradiction_explanation": "<why local project tests and verifier differ, or empty>"
-  },
-  "verifier_observations": {
-    "patch_successfully_applied": true,
-    "failed_fail_to_pass_tests": ["<authoritative failed test id>"],
-    "failed_pass_to_pass_tests": ["<authoritative regression test id>"]
-  },
-  "confidence": "high | medium | low"
+  ]
 }
 
 Aggregation schema:
@@ -447,8 +501,199 @@ Aggregation schema:
 - activation_phase MUST name the earliest runtime phase where the evidence
   needed for required_action exists; post-diagnosis actions are not optional
   task-start methods.
+- Return no more than 3 diagnoses. Every pair must have either different
+  failed_checks or a materially different observable_behavior; paraphrases,
+  downstream symptoms, and repeated recommendations are one diagnosis. Prefer
+  fewer well-supported diagnoses over filling the limit.
 - recommendation MUST name the target_ref variable and what to change.
 - Prefer "unassigned" over guessing.
+"""
+
+GENERIC_ANALYZER_PROTOCOL_VERSION = "generic_behavior_causal_v2"
+
+DIAGNOSIS_SYSTEM_PROMPT = """\
+You are an evidence-grounded behavior analyst for an AI Harness improvement
+loop. The evaluated task may involve code, documents, spreadsheets, search,
+reasoning, tool use, or multi-agent work. Diagnose behavior from the supplied
+contract and execution evidence; do not assume a benchmark or domain.
+
+Your output is consumed by an Improver. It must say what was required, what was
+observed, what is known versus hypothesized, and which observable behavior
+should change. A complete-sounding story is not evidence.
+
+## Evidence order
+Use sources in this order:
+1. `authoritative_task_contract` and any explicit benchmark/verifier contract;
+2. verifier results, criterion or dimension feedback, and artifact inspection;
+3. `effective_harness`, which records the active Prompt, Skill, Tool, Rail, and
+   execution-budget surfaces when available;
+4. exact trajectory events and public tool schemas;
+5. paired Source-versus-Candidate feedback;
+6. repository/workspace inspection and bounded discriminating probes;
+7. retrieved experience, only as a hypothesis hint.
+
+Scores establish that an outcome failed; a score alone never establishes why.
+Agent-authored commands, plans, and self-reports show attempted behavior, not
+that the task contract required it or that it succeeded. Never inspect hidden
+answers, evaluator implementation, or gold/solution patches. Do NOT read
+case-root `trace.json` or `result.json`; use the inline causal digest,
+`evidence_summary.md`, and the isolated `repository/` or artifact snapshot when
+provided.
+
+Before recommending a Prompt, Skill, Tool, Rail, or budget change, check
+`effective_harness`. Do not add a rule that is already active. When the desired
+rule is already present, distinguish failure to activate/follow it from missing
+content. If the effective Harness is unavailable and target selection depends
+on its contents, use `unassigned` rather than assuming a missing rule.
+
+## Diagnosis procedure
+For each independent failed requirement, perform these steps in order:
+
+1. Name the failed requirement or check. If the evaluator exposes only an
+   aggregate score, say that the exact failed requirement is unknown. When
+   `judge_breakdown.criteria` is present, use its criterion IDs and rationales
+   as the primary failure anchors; do not replace them with a more salient tool
+   error unless evidence connects that error to the failed criterion.
+2. Name the concrete observed behavior, including its trace pointer or artifact
+   observation. Do not replace this with a capability label.
+3. Compare at least two plausible explanations. Use a repository-grounded,
+   artifact-grounded, cross-trial, or paired-candidate discriminator when one is
+   available. If none separates them, keep them unresolved.
+4. Set `evidence_status`:
+   - `confirmed`: direct evidence links the behavior decision to the failed
+     requirement and separates material alternatives;
+   - `supported_hypothesis`: the behavior gap is observed, but its causal effect
+     or one material alternative remains unverified;
+   - `insufficient`: only the outcome, score, or an ambiguous symptom is known.
+5. Only after the behavior diagnosis, choose a target_ref. Attribution describes
+   the actual failure surface; it must not be chosen merely because the current
+   Improver happens to support that surface.
+6. Produce one intervention contract: trigger, one behavior change, one runtime
+   acceptance observable, and boundaries that prevent over-generalization.
+
+Prefer one concrete diagnosis over several abstract diagnoses. Return at most
+three only when different failed checks or materially different observed
+behaviors require independent interventions.
+
+## Paired candidate feedback
+`prior_candidate_feedback` is an experiment, not another narrative:
+- intended behavior did not occur: diagnose activation or routing;
+- intended behavior occurred and the relevant metric improved: retain the
+  intervention and diagnose only residual or regressed behavior;
+- intended behavior occurred but the relevant metric did not improve: the
+  intervention was not causally sufficient; do not repeat or paraphrase it;
+- outcome is unchanged and activation is unknown: do not invent a new root
+  cause. Preserve uncertainty and request the missing discriminator.
+
+A second diagnosis may replace the first only when new evidence distinguishes
+the mechanisms. The same aggregate score by itself is not new causal evidence.
+
+## Optional workspace investigation
+When `repository/` or an evaluated artifact snapshot exists, inspect only the
+relevant files with read-only operations and bounded probes. Repository
+investigation is one possible discriminator, not a universal requirement.
+Code tasks may use public tests and call chains. Document or spreadsheet tasks
+may use preserved artifact structure, formulas, values, and formatting.
+Search/reasoning tasks may use cited sources and final-answer evidence. If the
+needed artifact or criterion detail is absent, record it as missing evidence
+rather than guessing.
+
+`authoritative_benchmark_test_contract.test_patch`, when supplied, is acceptance
+evidence rather than a solution patch. When local validation passes but the
+authoritative verifier fails, explain the uncovered observable instead of
+claiming validation was skipped. A no-exception smoke probe proves only that an
+exception disappeared, not that the required semantics were preserved.
+
+## Target reference semantics
+Valid values are:
+- `member_harness.<role>.prompt`: wrong or missing instruction, interpretation,
+  decision rule, or verification behavior;
+- `member_harness.<role>.skill`: a reusable multi-step method is missing,
+  misrouted, or incorrectly executed;
+- `member_harness.<role>.tool`: an atomic executable capability, public schema,
+  arguments, implementation, or result handling is wrong;
+- `member_harness.<role>.config`: model, budget, or runtime configuration is the
+  evidenced cause;
+- `team_skill.<role>.role_coordination`, `constraint_violation`,
+  `workflow_inefficiency`, or `capability_gap`: the decisive failure crosses a
+  role boundary or belongs to team control;
+- `unassigned`: evidence cannot yet identify one optimizable surface.
+
+Never output role-less target_ref values. Do not convert a Tool, Skill, Config,
+environment, evaluator, or evidence-pipeline defect into a Prompt defect just
+because prompt editing is available. Missing evidence is not a Harness defect.
+For `evidence_status="insufficient"`, target_ref must be `unassigned` and
+confidence must be `low`.
+
+## Concrete field meanings
+- `summary`: failed requirement plus observed behavior, in one sentence.
+- `root_cause`: the confirmed mechanism, or an explicit supported hypothesis;
+  never a restatement of the score.
+- `critical_mistake`: exact earliest action, omission, or decision visible in
+  evidence.
+- `general_mechanism`: one conditional rule that transfers beyond this case.
+- `recommendation`: one change to the named target_ref, or the exact missing
+  evidence/discriminating experiment when unassigned.
+- `decision_contract`: the compact handoff to the Improver. Keep it concrete:
+  wrong decision, evidence-backed distinction, required action, acceptance
+  observable, scope boundaries, and earliest activation phase.
+
+## Output
+Return one valid JSON object and nothing else. Keep strings concise.
+{
+  "diagnoses": [
+    {
+      "issue_category": "member_harness | team_skill | unassigned",
+      "severity": "high | medium | low",
+      "summary": "<failed requirement plus observed behavior>",
+      "failure_mode": "<short reusable label>",
+      "failure_cluster": {
+        "failed_checks": ["<known failed check; empty if unknown>"],
+        "observable_behavior": "<runtime or artifact observation>"
+      },
+      "evidence_status": "confirmed | supported_hypothesis | insufficient",
+      "failed_requirement": "<known requirement, or explicitly unknown>",
+      "competing_hypotheses": ["<plausible explanation A>", "<plausible explanation B>"],
+      "discriminating_evidence": "<evidence that separates them, or what is missing>",
+      "root_cause": "<confirmed mechanism or explicitly labeled hypothesis>",
+      "critical_mistake": "<earliest observed wrong action or omission>",
+      "general_mechanism": "<trigger -> reusable behavior rule>",
+      "target_ref": "<member_harness.<role>.<variable> | team_skill.<role>.<variable> | unassigned>",
+      "evidence_refs": [
+        {"trace_id": "<id>", "role": "<role>", "message_index": 0, "step_pointer": "<optional>"}
+      ],
+      "affected_components": ["<role>"],
+      "recommendation": "<one concrete modification or missing discriminator>",
+      "decision_contract": {
+        "wrong_decision": "<observed decision>",
+        "causal_distinction": "<when the decision must change>",
+        "required_action": "<one selected action>",
+        "acceptance_observable": "<runtime-visible proof>",
+        "scope_boundary": ["<what must not be generalized>"],
+        "activation_phase": "task_start | during_investigation | post_diagnosis | pre_submission"
+      },
+      "validation_observations": {
+        "project_test_suite_attempted": false,
+        "project_test_suite_result": "not_observed | passed | failed",
+        "authoritative_verifier_result": "passed | failed | unknown",
+        "contradiction_explanation": "<explanation or empty>"
+      },
+      "verifier_observations": {
+        "patch_successfully_applied": true,
+        "failed_fail_to_pass_tests": [],
+        "failed_pass_to_pass_tests": []
+      },
+      "confidence": "high | medium | low"
+    }
+  ]
+}
+
+Hard checks:
+- issue_category must match target_ref scope; unassigned maps to unassigned.
+- Assigned targets require evidence_refs and a concrete acceptance observable.
+- Do not claim `confirmed` when material alternatives remain unresolved.
+- Do not make required_action a menu or make it optional later.
+- Prefer `unassigned` over an elegant but unsupported explanation.
 """
 
 PER_CASE_DIAGNOSIS_TEMPLATE = """\
@@ -463,7 +708,8 @@ PER_CASE_DIAGNOSIS_TEMPLATE = """\
 ### Inline Diagnosis Input JSON
 {diagnosis_input}
 
-Diagnose the root cause and return the JSON object from the system prompt.
+Diagnose the independent root causes and return the wrapped JSON object from
+the system prompt. Return at most {max_diagnoses_per_case} diagnoses.
 """
 
 AGGREGATION_SYSTEM_PROMPT = """\
@@ -484,6 +730,11 @@ list_files. Your only task is to group and synthesize per-case diagnoses.
    issues. Missing/failed-to-read `trajectory_events.jsonl`,
    `normalized_trace.json`, or `evidence_summary.md` must remain
    target_ref="unassigned" with low confidence.
+8. Do not preserve member_harness.<role>.skill merely because a local fix sounds
+   general. A Skill diagnosis must name a public or early-runtime trigger and a
+   method that remains meaningful after removing case IDs, verifier checks,
+   fixed expected counts, known answer values, and observed filenames. The
+   downstream planner will still require independent cross-case support.
 
 ## Target Reference Semantics
 
@@ -596,6 +847,7 @@ def _build_diagnosis_prompt(
     evidence_summary_available: bool,
     source_stage: str = "",
     prior_candidate_feedback: dict[str, Any] | None = None,
+    effective_harness: dict[str, Any] | None = None,
 ) -> str:
     """Build the per-case diagnosis prompt for the DeepAgent.
 
@@ -605,9 +857,14 @@ def _build_diagnosis_prompt(
     """
     if evidence_summary_available:
         evidence_instruction = (
-            "> Use primary_evidence.evidence_summary_text from the inline JSON.\n"
-            "> It contains verifier outcome, judge quality gaps, decisive failed steps, "
-            "and bounded key events.\n"
+            "> Start from primary_evidence.causal_digest in the inline JSON.\n"
+            "> It preserves public tool schemas, separate trial outcomes, exact selected "
+            "actions, output delivery, and cross-trial contrasts. Use "
+            "primary_evidence.evidence_summary_text for verifier and validation evidence.\n"
+            "> Check effective_harness before claiming a rule or surface is missing, and use "
+            "workspace_evidence to locate inspectable files without treating mtime as a change proof.\n"
+            "> Use primary_evidence.evidence_summary_text from the inline JSON as the "
+            "audit summary, not as a flattened substitute for causal_digest.\n"
             "> If repository/ exists, inspect its relevant source and public tests and run "
             "a bounded read-only discriminator before selecting a semantic mechanism.\n"
             "> Do not read trace.json, result.json, hidden tests, gold patches, or paths "
@@ -623,6 +880,7 @@ def _build_diagnosis_prompt(
     return PER_CASE_DIAGNOSIS_TEMPLATE.format(
         stage_instruction=_stage_instruction(source_stage),
         evidence_instruction=evidence_instruction,
+        max_diagnoses_per_case=_MAX_DIAGNOSES_PER_CASE,
         diagnosis_input=_build_diagnosis_input_json(
             case=case,
             signals=signals,
@@ -630,6 +888,7 @@ def _build_diagnosis_prompt(
             evidence_summary_available=evidence_summary_available,
             source_stage=source_stage,
             prior_candidate_feedback=prior_candidate_feedback,
+            effective_harness=effective_harness,
         ),
     )
 
@@ -642,15 +901,24 @@ def _build_diagnosis_input_json(
     evidence_summary_available: bool,
     source_stage: str = "",
     prior_candidate_feedback: dict[str, Any] | None = None,
+    effective_harness: dict[str, Any] | None = None,
 ) -> str:
     """Build bounded inline JSON for a per-case diagnosis prompt."""
     judge_breakdown = _summarize_evaluation_metadata(case.evaluation_metadata)
+    causal_digest = _build_causal_evidence_digest(case)
     evidence_summary_text = (
         _truncate_text(_build_evidence_summary(case), _EVIDENCE_SUMMARY_CHARS) if evidence_summary_available else ""
     )
     validation_inventory = _build_validation_inventory(case)
     verifier_inventory = _build_verifier_inventory(case)
     payload: dict[str, Any] = {
+        "analysis_protocol": {
+            "version": GENERIC_ANALYZER_PROTOCOL_VERSION,
+            "objective": (
+                "Separate observed failure facts from causal hypotheses, then "
+                "handoff one falsifiable behavior intervention."
+            ),
+        },
         "authoritative_task_contract": {
             "provenance": "case.input",
             "input_excerpt": case.input,
@@ -661,22 +929,29 @@ def _build_diagnosis_input_json(
             ),
         },
         "authoritative_benchmark_test_contract": case.benchmark_test_contract,
+        "effective_harness": effective_harness
+        or {
+            "availability": "not_provided",
+            "policy": "Do not assume which prompt, Skill, Tool, Rail, or budget was active.",
+        },
+        "workspace_evidence": _build_workspace_evidence(case),
         "primary_evidence": {
             "evidence_summary_available": evidence_summary_available,
             "evidence_summary_path": "evidence_summary.md" if evidence_summary_available else "",
+            "causal_digest": causal_digest,
             "evidence_summary_text": evidence_summary_text,
         },
         "deterministic_validation_inventory": validation_inventory,
         "deterministic_verifier_inventory": verifier_inventory,
-        "prior_candidate_feedback": _bounded_structured_value(
-            prior_candidate_feedback or {},
-            _CANDIDATE_FEEDBACK_CHARS,
-        ),
+        "prior_candidate_feedback": compact_candidate_feedback(prior_candidate_feedback),
         "prior_candidate_feedback_policy": (
             "Treat paired official test deltas as authoritative experiment "
-            "evidence. Preserve newly passing operations and diagnose only the "
-            "remaining failures; candidate diagnoses are hypotheses unless the "
-            "verifier delta independently supports them."
+            "evidence. Compare predicted behavior with activation and score delta. "
+            "If the intended behavior did not activate, diagnose activation; if it "
+            "activated without improvement, falsify the prior causal hypothesis. "
+            "Preserve newly passing operations and diagnose regressions before "
+            "remaining failures. Candidate diagnoses remain hypotheses unless the "
+            "observed outcome independently supports them."
         ),
         "analysis_stage": source_stage or "unknown",
         "anchor_signals": {
@@ -705,17 +980,262 @@ def _build_diagnosis_input_json(
                 _METADATA_SNIPPET_CHARS,
             ),
         },
-        "fallback_excerpts": {
-            "input_excerpt": case.input,
-            "response_excerpt": _truncate_text(case.response, _TEXT_SNIPPET_CHARS),
-        },
+        "fallback_excerpts": {"input_excerpt": case.input},
         "retrieved_experience": _bounded_structured_value(
             _compact_retrieved_experience(retrieved_experience),
             _EXPERIENCE_SNIPPET_CHARS,
         ),
         "experience_usage_policy": _experience_usage_policy(),
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+    # This payload is sent inline to the model. Pretty printing adds tens of
+    # thousands of whitespace characters for multi-trial tool evidence without
+    # adding information, so keep the audit artifact readable but compact the
+    # wire representation.
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _load_effective_harness_snapshot(harness_refs_path: str) -> dict[str, Any]:
+    """Read a bounded, secret-safe snapshot of the Harness that produced the trace."""
+    if not harness_refs_path:
+        return {"schema_version": 1, "availability": "not_provided", "roles": []}
+    refs_path = Path(harness_refs_path).expanduser()
+    if not refs_path.is_file():
+        return {
+            "schema_version": 1,
+            "availability": "missing",
+            "source": str(refs_path),
+            "roles": [],
+        }
+    try:
+        payload = yaml.safe_load(refs_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return {
+            "schema_version": 1,
+            "availability": "invalid",
+            "source": str(refs_path),
+            "error": _truncate_text(str(exc), 500),
+            "roles": [],
+        }
+    raw_refs = payload.get("harness_refs") if isinstance(payload, dict) else None
+    if not isinstance(raw_refs, dict):
+        return {
+            "schema_version": 1,
+            "availability": "invalid",
+            "source": str(refs_path.resolve()),
+            "roles": [],
+        }
+
+    roles = [
+        _snapshot_harness_role(str(role), str(raw_ref))
+        for role, raw_ref in sorted(raw_refs.items(), key=lambda item: str(item[0]))
+        if str(raw_ref).strip()
+    ]
+    available_count = sum(1 for role in roles if role.get("availability") == "available")
+    availability = (
+        "available" if roles and available_count == len(roles) else "partial" if available_count else "missing"
+    )
+    return {
+        "schema_version": 1,
+        "availability": availability,
+        "source": str(refs_path.resolve()),
+        "policy": (
+            "This is the effective Harness configuration. Check it before claiming a Prompt, Skill, Tool, "
+            "Rail, or budget rule is missing."
+        ),
+        "roles": roles,
+    }
+
+
+def _snapshot_harness_role(role: str, raw_ref: str) -> dict[str, Any]:
+    root = Path(raw_ref).expanduser()
+    if not root.is_absolute():
+        root = root.resolve()
+    if not root.is_dir():
+        return {"role": role, "availability": "missing", "harness_ref_path": str(root)}
+    root = root.resolve()
+
+    config_path = next(
+        (path for name in ("harness.json", "harness.yaml", "harness.yml") if (path := root / name).is_file()),
+        None,
+    )
+    raw_config: dict[str, Any] = {}
+    if config_path is not None:
+        try:
+            if config_path.suffix == ".json":
+                loaded = json.loads(config_path.read_text(encoding="utf-8"))
+            else:
+                loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            raw_config = loaded if isinstance(loaded, dict) else {}
+        except (OSError, json.JSONDecodeError, yaml.YAMLError):
+            raw_config = {}
+
+    config = {
+        str(key): _safe_harness_value(value)
+        for key, value in raw_config.items()
+        if str(key) in _HARNESS_CONFIG_KEYS and not _SENSITIVE_CONFIG_KEY.search(str(key))
+    }
+    prompt_path, prompt_text = _effective_prompt(root, raw_config)
+    skill_entries = []
+    for path in sorted(root.rglob("SKILL.md"))[:12]:
+        if not path.is_file():
+            continue
+        skill_entries.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "sha256": _file_digest(path),
+                "content_excerpt": _truncate_text(
+                    _read_text_if_exists(path, _HARNESS_SKILL_CHARS), _HARNESS_SKILL_CHARS
+                ),
+            }
+        )
+
+    implementation_entries = []
+    implementation_candidates = [root / "harness.py", *sorted((root / "agent").glob("*.py"))[:4]]
+    for path in implementation_candidates:
+        if not path.is_file():
+            continue
+        implementation_entries.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "sha256": _file_digest(path),
+                "content_excerpt": _truncate_text(_read_text_if_exists(path, 6_000), 6_000),
+            }
+        )
+
+    surface_files = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        relative = path.relative_to(root).as_posix()
+        if not (
+            path.name in {"harness.json", "harness.yaml", "harness.yml", "system_prompt.md", "SKILL.md"}
+            or any(part.lower() in {"skills", "tools", "rails"} for part in path.relative_to(root).parts[:-1])
+        ):
+            continue
+        surface_files.append({"path": relative, "size": path.stat().st_size, "sha256": _file_digest(path)})
+        if len(surface_files) >= 80:
+            break
+
+    return {
+        "role": role,
+        "availability": "available",
+        "harness_ref_path": str(root),
+        "config_path": config_path.relative_to(root).as_posix() if config_path else "",
+        "config": config,
+        "effective_system_prompt": {
+            "availability": "available" if prompt_text else "not_found",
+            "path": prompt_path.relative_to(root).as_posix() if prompt_path else "",
+            "sha256": _file_digest(prompt_path) if prompt_path else "",
+            "character_count": len(prompt_text),
+            "content": _truncate_text(prompt_text, _HARNESS_PROMPT_CHARS),
+        },
+        "skills": skill_entries,
+        "implementation": implementation_entries,
+        "surface_files": surface_files,
+    }
+
+
+def _effective_prompt(root: Path, config: dict[str, Any]) -> tuple[Path | None, str]:
+    configured = config.get("system_prompt") or config.get("prompt")
+    if isinstance(configured, str) and configured.strip():
+        candidate = (root / configured).resolve()
+        if candidate.is_relative_to(root) and candidate.is_file():
+            return candidate, _read_text_if_exists(candidate, _HARNESS_PROMPT_CHARS * 2)
+        if "\n" in configured:
+            return None, configured
+    fallback = root / "system_prompt.md"
+    if fallback.is_file():
+        return fallback, _read_text_if_exists(fallback, _HARNESS_PROMPT_CHARS * 2)
+    return None, ""
+
+
+def _safe_harness_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 5:
+        return "[depth-limited]"
+    if isinstance(value, dict):
+        return {
+            str(key): "[redacted]"
+            if _SENSITIVE_CONFIG_KEY.search(str(key))
+            else _safe_harness_value(item, depth=depth + 1)
+            for key, item in list(value.items())[:50]
+        }
+    if isinstance(value, list):
+        return [_safe_harness_value(item, depth=depth + 1) for item in value[:50]]
+    if isinstance(value, str):
+        return _truncate_text(value, 2_000)
+    return value if value is None or isinstance(value, int | float | bool) else str(value)
+
+
+def _file_digest(path: Path | None) -> str:
+    if path is None or not path.is_file():
+        return ""
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
+
+
+def _build_workspace_evidence(case: CaseAnalysisInput) -> dict[str, Any]:
+    """Index inspectable artifacts without claiming which files the agent changed."""
+    result = _load_case_result(case)
+    workspace_value = result.get("workspace_dir")
+    if not isinstance(workspace_value, str) or not workspace_value.strip():
+        return {
+            "availability": "not_provided",
+            "change_attribution": "not_available",
+            "artifact_files": [],
+        }
+    root = Path(workspace_value).expanduser()
+    if not root.is_dir():
+        return {
+            "availability": "missing",
+            "change_attribution": "not_available",
+            "artifact_files": [],
+        }
+
+    artifacts: list[tuple[float, dict[str, Any]]] = []
+    suffix_counts: dict[str, int] = {}
+    try:
+        paths = root.rglob("*")
+        for path in paths:
+            if not path.is_file() or path.suffix.lower() not in _ARTIFACT_SUFFIXES:
+                continue
+            try:
+                stat = path.stat()
+                relative = path.relative_to(root).as_posix()
+            except OSError:
+                continue
+            suffix = path.suffix.lower()
+            suffix_counts[suffix] = suffix_counts.get(suffix, 0) + 1
+            artifacts.append(
+                (
+                    stat.st_mtime,
+                    {
+                        "path": relative,
+                        "type": suffix.lstrip("."),
+                        "size": stat.st_size,
+                        "mtime_utc": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+                    },
+                )
+            )
+    except OSError:
+        pass
+    artifacts.sort(key=lambda item: (-item[0], item[1]["path"]))
+    return {
+        "availability": "available",
+        "repository_snapshot_path": "repository/",
+        "change_attribution": (
+            "post_execution_snapshot_only; mtime ordering does not prove that the evaluated agent created or changed a file"
+        ),
+        "artifact_file_count": len(artifacts),
+        "artifact_type_counts": dict(sorted(suffix_counts.items())),
+        "artifact_files": [item for _, item in artifacts[:40]],
+        "artifact_files_truncated": len(artifacts) > 40,
+    }
 
 
 def _build_aggregation_prompt(
@@ -892,8 +1412,9 @@ def _summarize_evaluation_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     quality_gaps = _compact_quality_gaps(parsed.get("quality_gaps", []))
     dataset_budget = _compact_dataset_budget(parsed.get("dataset_budget", {}))
     dimensions = _compact_judge_dimensions(parsed.get("dimensions", {}))
+    criteria = _compact_judge_criteria(metadata)
 
-    if not any((behaviors, overall_reason, forbidden_hits, quality_gaps)):
+    if not any((behaviors, overall_reason, forbidden_hits, quality_gaps, criteria)):
         return {}
 
     result: dict[str, Any] = {
@@ -907,11 +1428,39 @@ def _summarize_evaluation_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         result["dataset_budget"] = dataset_budget
     if dimensions:
         result["dimensions"] = dimensions
+    if criteria:
+        result["criteria"] = criteria
     if "quality_gap_score_ceiling" in parsed:
         result["quality_gap_score_ceiling"] = parsed.get("quality_gap_score_ceiling")
     if "overall_score" in parsed:
         result["overall_score"] = parsed.get("overall_score")
     return result
+
+
+def _compact_judge_criteria(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    normalized = metadata.get("judge_evidence")
+    raw_criteria = normalized.get("criteria") if isinstance(normalized, dict) else None
+    if not isinstance(raw_criteria, list):
+        raw_detail = metadata.get("judge_detail")
+        raw_criteria = raw_detail.get("criteria") if isinstance(raw_detail, dict) else None
+    if not isinstance(raw_criteria, list):
+        return []
+
+    criteria: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_criteria[:24], start=1):
+        if not isinstance(raw, dict):
+            continue
+        criterion_id = raw.get("criterion_id") or raw.get("verifier_id") or f"criterion_{index}"
+        criteria.append(
+            {
+                "criterion_id": str(criterion_id),
+                "verifier_id": str(raw.get("verifier_id") or ""),
+                "score": raw.get("score"),
+                "status": str(raw.get("status") or ""),
+                "rationale": _truncate_text(raw.get("rationale", ""), _TEXT_SNIPPET_CHARS),
+            }
+        )
+    return criteria
 
 
 def _compact_quality_gaps(value: Any) -> list[dict[str, Any]]:
@@ -1045,6 +1594,208 @@ def _experience_usage_policy() -> dict[str, Any]:
     }
 
 
+def _normalize_case_diagnoses(
+    parsed: dict[str, Any],
+    *,
+    prior_candidate_feedback: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Expand one model response into bounded, independent diagnoses.
+
+    New responses use ``{"diagnoses": [...]}``; a legacy single diagnosis object
+    remains valid. Candidate feedback is used deterministically so regressions and
+    residual failures cannot be displaced by already-fixed checks when the model
+    returns more than the per-case limit.
+    """
+    raw_diagnoses = parsed.get("diagnoses")
+    if raw_diagnoses is None:
+        candidates = [parsed]
+    elif isinstance(raw_diagnoses, list):
+        candidates = [item for item in raw_diagnoses if isinstance(item, dict)]
+    else:
+        candidates = []
+
+    feedback_sets = _candidate_feedback_check_sets(prior_candidate_feedback)
+    ranked: list[tuple[int, int, dict[str, Any]]] = []
+    require_cluster = isinstance(raw_diagnoses, list) and len(candidates) > 1
+    for index, raw in enumerate(candidates):
+        diagnosis = dict(raw)
+        if not _diagnosis_has_semantic_content(diagnosis):
+            continue
+        failure_cluster = _diagnosis_failure_cluster(diagnosis)
+        if require_cluster and not failure_cluster:
+            continue
+        if failure_cluster:
+            diagnosis["failure_cluster"] = failure_cluster
+        priority, fixed_only = _diagnosis_feedback_priority(
+            diagnosis,
+            feedback_sets=feedback_sets,
+        )
+        if fixed_only:
+            continue
+        ranked.append((priority, index, diagnosis))
+
+    normalized: list[dict[str, Any]] = []
+    for _, _, diagnosis in sorted(ranked, key=lambda item: (item[0], item[1])):
+        if any(_diagnoses_are_duplicate(diagnosis, existing) for existing in normalized):
+            continue
+        normalized.append(diagnosis)
+        if len(normalized) >= _MAX_DIAGNOSES_PER_CASE:
+            break
+    return normalized
+
+
+def _diagnosis_has_semantic_content(diagnosis: dict[str, Any]) -> bool:
+    """Reject JSON-shaped placeholders before they bypass the repair turn."""
+    target_ref = str(diagnosis.get("target_ref", "") or "").strip()
+    if not target_ref:
+        return False
+    return any(
+        str(diagnosis.get(key, "") or "").strip()
+        for key in (
+            "summary",
+            "failure_mode",
+            "root_cause",
+            "critical_mistake",
+            "general_mechanism",
+            "recommendation",
+        )
+    )
+
+
+def _candidate_feedback_check_sets(feedback: dict[str, Any] | None) -> dict[str, set[str]]:
+    """Return check sets from the most recent paired candidate experiment."""
+    if not isinstance(feedback, dict):
+        return {"regressed": set(), "remaining": set(), "fixed": set()}
+    experiments = feedback.get("experiments", [])
+    if not isinstance(experiments, list):
+        return {"regressed": set(), "remaining": set(), "fixed": set()}
+    for experiment in reversed(experiments):
+        if not isinstance(experiment, dict):
+            continue
+        delta = experiment.get("verifier_delta", {})
+        if not isinstance(delta, dict):
+            continue
+        regressed = _normalized_check_set(
+            delta,
+            "regressed_fail_to_pass",
+            "regressed_pass_to_pass",
+            "regressed_atomic_checks",
+        )
+        remaining = _normalized_check_set(
+            delta,
+            "remaining_failed_fail_to_pass",
+            "remaining_failed_atomic_checks",
+        )
+        fixed = _normalized_check_set(
+            delta,
+            "newly_passed_fail_to_pass",
+            "newly_passed_atomic_checks",
+        )
+        return {
+            "regressed": regressed,
+            "remaining": remaining,
+            "fixed": fixed - regressed - remaining,
+        }
+    return {"regressed": set(), "remaining": set(), "fixed": set()}
+
+
+def _normalized_check_set(payload: dict[str, Any], *keys: str) -> set[str]:
+    return {
+        normalized
+        for key in keys
+        for value in _string_items(payload.get(key, []))
+        if (normalized := _normalize_cluster_text(value))
+    }
+
+
+def _diagnosis_feedback_priority(
+    diagnosis: dict[str, Any],
+    *,
+    feedback_sets: dict[str, set[str]],
+) -> tuple[int, bool]:
+    checks = {
+        normalized for value in _diagnosis_failed_checks(diagnosis) if (normalized := _normalize_cluster_text(value))
+    }
+    if checks & feedback_sets["regressed"]:
+        return 0, False
+    if checks & feedback_sets["remaining"]:
+        return 1, False
+    fixed_only = bool(checks and checks <= feedback_sets["fixed"])
+    return 2, fixed_only
+
+
+def _diagnosis_failure_cluster(diagnosis: dict[str, Any]) -> dict[str, Any]:
+    raw_cluster = diagnosis.get("failure_cluster", {})
+    cluster = dict(raw_cluster) if isinstance(raw_cluster, dict) else {}
+    checks = _diagnosis_failed_checks(diagnosis)
+    observable = str(cluster.get("observable_behavior", "") or "").strip()
+    if not observable:
+        contract = diagnosis.get("decision_contract", {})
+        if isinstance(contract, dict):
+            observable = str(contract.get("acceptance_observable", "") or "").strip()
+    if not checks and not observable:
+        return {}
+    return {
+        "failed_checks": checks,
+        "observable_behavior": observable,
+    }
+
+
+def _diagnosis_failed_checks(diagnosis: dict[str, Any]) -> list[str]:
+    cluster = diagnosis.get("failure_cluster", {})
+    checks = _string_items(cluster.get("failed_checks", []) if isinstance(cluster, dict) else [])
+    if checks:
+        return list(dict.fromkeys(checks))
+    verifier = diagnosis.get("verifier_observations", {})
+    if not isinstance(verifier, dict):
+        return []
+    return list(
+        dict.fromkeys(
+            [
+                *_string_items(verifier.get("failed_fail_to_pass_tests", [])),
+                *_string_items(verifier.get("failed_pass_to_pass_tests", [])),
+            ]
+        )
+    )
+
+
+def _diagnoses_are_duplicate(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_checks = {_normalize_cluster_text(value) for value in _diagnosis_failed_checks(left)}
+    right_checks = {_normalize_cluster_text(value) for value in _diagnosis_failed_checks(right)}
+    if left_checks and right_checks and left_checks != right_checks:
+        return False
+
+    left_cluster = _diagnosis_failure_cluster(left)
+    right_cluster = _diagnosis_failure_cluster(right)
+    left_observable = _normalize_cluster_text(left_cluster.get("observable_behavior", ""))
+    right_observable = _normalize_cluster_text(right_cluster.get("observable_behavior", ""))
+    if left_observable and right_observable:
+        if not _cluster_texts_are_similar(left_observable, right_observable):
+            return False
+        return True
+    if left_checks and right_checks:
+        return True
+    return _normalize_target_ref(left.get("target_ref", "")) == _normalize_target_ref(
+        right.get("target_ref", "")
+    ) and _normalize_cluster_text(left.get("failure_mode", "")) == _normalize_cluster_text(
+        right.get("failure_mode", "")
+    )
+
+
+def _normalize_cluster_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _cluster_texts_are_similar(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    left_tokens = set(re.findall(r"[\w:.+-]+", left))
+    right_tokens = set(re.findall(r"[\w:.+-]+", right))
+    if not left_tokens or not right_tokens:
+        return False
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens) >= 0.8
+
+
 def _compact_per_case_diagnoses(per_case_diagnoses: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep aggregation inputs concise; group attribution fields into a nested sub-dict.
 
@@ -1056,12 +1807,26 @@ def _compact_per_case_diagnoses(per_case_diagnoses: list[dict[str, Any]]) -> lis
     compact: list[dict[str, Any]] = []
     for item in per_case_diagnoses:
         attribution: dict[str, Any] = {
+            "evidence_status": item.get("evidence_status", ""),
+            "failed_requirement": _truncate_text(item.get("failed_requirement", ""), 500),
+            "competing_hypotheses": _bounded_structured_value(
+                item.get("competing_hypotheses", []),
+                1000,
+            ),
+            "discriminating_evidence": _truncate_text(
+                item.get("discriminating_evidence", ""),
+                500,
+            ),
             "root_cause": _truncate_text(item.get("root_cause", ""), 500),
             "critical_mistake": _truncate_text(item.get("critical_mistake", ""), 500),
             "general_mechanism": _truncate_text(item.get("general_mechanism", ""), 500),
             "decision_contract": _bounded_structured_value(
                 item.get("decision_contract", {}),
                 1400,
+            ),
+            "failure_cluster": _bounded_structured_value(
+                _diagnosis_failure_cluster(item),
+                1000,
             ),
             "target_ref": item.get("target_ref", ""),
             "evidence_refs": item.get("evidence_refs", []),
@@ -1090,16 +1855,30 @@ def _aggregate_structured_diagnoses(
     evidence_limit_per_issue: int,
 ) -> list[TeamIssue]:
     """Group canonical per-case diagnoses without another model call."""
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    base_counts: dict[tuple[str, str, str], int] = {}
     for item in per_case_results:
         if item.get("analysis_failed"):
             continue
         target_ref = _normalize_target_ref(item.get("target_ref", ""))
         if not target_ref or target_ref == "unassigned":
             continue
-        issue_category = str(item.get("issue_category", item.get("category", "")) or "")
         failure_mode = str(item.get("failure_mode", "") or "")
-        groups.setdefault((target_ref, failure_mode), []).append(item)
+        base = (str(item.get("case_id", "") or ""), target_ref, failure_mode)
+        base_counts[base] = base_counts.get(base, 0) + 1
+    collision_bases = {
+        (target_ref, failure_mode) for (_, target_ref, failure_mode), count in base_counts.items() if count > 1
+    }
+
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for item in per_case_results:
+        if item.get("analysis_failed"):
+            continue
+        target_ref = _normalize_target_ref(item.get("target_ref", ""))
+        if not target_ref or target_ref == "unassigned":
+            continue
+        failure_mode = str(item.get("failure_mode", "") or "")
+        discriminator = _diagnosis_group_discriminator(item) if (target_ref, failure_mode) in collision_bases else ""
+        groups.setdefault((target_ref, failure_mode, discriminator), []).append(item)
 
     ranked_groups = sorted(
         groups.items(),
@@ -1108,10 +1887,14 @@ def _aggregate_structured_diagnoses(
             -max(_confidence_rank(item.get("confidence")) for item in entry[1]),
             entry[0][0],
             entry[0][1],
+            entry[0][2],
         ),
     )
     issues: list[TeamIssue] = []
-    for index, ((target_ref, failure_mode), items) in enumerate(ranked_groups[: max(0, max_issues)], start=1):
+    for index, ((target_ref, failure_mode, _), items) in enumerate(
+        ranked_groups[: max(0, max_issues)],
+        start=1,
+    ):
         strongest = max(
             items,
             key=lambda item: (
@@ -1127,6 +1910,7 @@ def _aggregate_structured_diagnoses(
                     "case_id": str(item.get("case_id", "")),
                     "failure_mode": str(item.get("failure_mode", failure_mode)),
                     "affected_component": components[0] if components else "",
+                    "failure_cluster": _diagnosis_failure_cluster(item),
                 }
             )
         affected_components = list(
@@ -1153,6 +1937,14 @@ def _aggregate_structured_diagnoses(
                 "recommendation": str(strongest.get("recommendation", "") or ""),
                 "metadata": {
                     "attribution": {
+                        "evidence_status": str(strongest.get("evidence_status", "") or ""),
+                        "failed_requirement": str(strongest.get("failed_requirement", "") or ""),
+                        "competing_hypotheses": list(
+                            strongest.get("competing_hypotheses", [])
+                            if isinstance(strongest.get("competing_hypotheses"), list)
+                            else []
+                        ),
+                        "discriminating_evidence": str(strongest.get("discriminating_evidence", "") or ""),
                         "root_cause": str(strongest.get("root_cause", "") or ""),
                         "critical_mistake": str(strongest.get("critical_mistake", "") or ""),
                         "general_mechanism": str(strongest.get("general_mechanism", "") or ""),
@@ -1161,6 +1953,7 @@ def _aggregate_structured_diagnoses(
                             if isinstance(strongest.get("decision_contract"), dict)
                             else {}
                         ),
+                        "failure_cluster": _diagnosis_failure_cluster(strongest),
                         "target_ref": target_ref,
                         "evidence_refs": list(strongest.get("evidence_refs") or []),
                         "confidence": str(strongest.get("confidence", "") or ""),
@@ -1172,11 +1965,26 @@ def _aggregate_structured_diagnoses(
     return issues
 
 
+def _diagnosis_group_discriminator(diagnosis: dict[str, Any]) -> str:
+    """Keep distinct diagnoses from one case separate during aggregation."""
+    cluster = _diagnosis_failure_cluster(diagnosis)
+    checks = sorted(_normalize_cluster_text(value) for value in _string_items(cluster.get("failed_checks", [])))
+    observable = _normalize_cluster_text(cluster.get("observable_behavior", ""))
+    if checks or observable:
+        return json.dumps(
+            {"checks": checks, "observable": observable},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    return _normalize_cluster_text(diagnosis.get("root_cause") or diagnosis.get("summary") or "")
+
+
 def _diagnosis_unavailable_result(
     case: CaseAnalysisInput,
     exc: BaseException,
 ) -> dict[str, Any]:
     error = str(exc)
+    output_format_failure = isinstance(exc, _DiagnosisOutputFormatError)
     return {
         "case_id": case.case_id,
         "score": case.score,
@@ -1190,12 +1998,17 @@ def _diagnosis_unavailable_result(
         "failure_mode": "diagnosis_unavailable",
         "root_cause": "Diagnosis model call did not produce usable output for this case.",
         "critical_mistake": "No case-level attribution was produced.",
-        "general_mechanism": "Retryable model-service failure during analyzer diagnosis.",
+        "general_mechanism": (
+            "The diagnosis model exhausted bounded JSON-format repair."
+            if output_format_failure
+            else "Retryable model-service failure during analyzer diagnosis."
+        ),
         "target_ref": "unassigned",
         "evidence_refs": [],
         "affected_components": [],
         "recommendation": "Do not optimize from this case-level diagnosis; rerun analysis or use other case diagnoses.",
         "confidence": "low",
+        "diagnosis_error_type": "output_format" if output_format_failure else "model_service",
         "error": error,
     }
 
@@ -1548,8 +2361,31 @@ def _prepare_diagnosis_evidence(*, case: CaseAnalysisInput, runtime_dir: Path) -
     return True
 
 
+def _build_causal_evidence_digest(case: CaseAnalysisInput) -> dict[str, Any]:
+    """Build one decision-centered digest from the case's canonical artifacts."""
+    case_dir = Path(case.result_path).parent
+    trace_data = _read_json_if_exists(case_dir / "judge" / "normalized_trace.json")
+    task_contract = load_public_task_contract(
+        case_id=case.case_id,
+        result_path=case.result_path,
+        evaluation_metadata=case.evaluation_metadata,
+        task_input=case.input,
+    )
+    return build_causal_evidence_digest(
+        case_id=case.case_id,
+        task_input=case.input,
+        response=case.response,
+        evaluation_passed=case.evaluation_passed,
+        evaluation_score=case.score,
+        evaluation_reason=case.evaluation_reason,
+        evaluation_metadata=case.evaluation_metadata,
+        trace_data=trace_data,
+        task_contract=task_contract,
+    )
+
+
 def _build_evidence_summary(case: CaseAnalysisInput) -> str:
-    """Build a bounded evidence summary from normalized trace and verifier outputs."""
+    """Build an audit summary with deterministic validation and causal evidence."""
     case_dir = Path(case.result_path).parent
     verifier_dir = case_dir / "verifier"
     normalized_trace_path = case_dir / "judge" / "normalized_trace.json"
@@ -1611,6 +2447,19 @@ def _build_evidence_summary(case: CaseAnalysisInput) -> str:
         lines.append(f"- execution_error: {_one_line(case.error, 500)}")
 
     judge_breakdown = _summarize_evaluation_metadata(case.evaluation_metadata)
+    criteria = judge_breakdown.get("criteria", []) if isinstance(judge_breakdown, dict) else []
+    if isinstance(criteria, list) and criteria:
+        lines.extend(["", "## Authoritative Judge Criteria"])
+        for criterion in criteria[:24]:
+            if not isinstance(criterion, dict):
+                continue
+            lines.append(
+                "- "
+                f"criterion_id={_one_line(criterion.get('criterion_id', ''), 120)} "
+                f"score={criterion.get('score')} "
+                f"status={_one_line(criterion.get('status', ''), 80)} "
+                f"rationale={_one_line(criterion.get('rationale', ''), 900)}"
+            )
     quality_gaps = judge_breakdown.get("quality_gaps", []) if isinstance(judge_breakdown, dict) else []
     if isinstance(quality_gaps, list) and quality_gaps:
         lines.extend(["", "## Judge Quality Gaps"])
@@ -1721,22 +2570,60 @@ def _build_evidence_summary(case: CaseAnalysisInput) -> str:
         if stdout:
             lines.extend(["", "### stdout excerpt", "```text", _truncate_text(stdout, 1500), "```"])
 
-    if trace_events:
-        failed = [event for event in trace_events if event.get("error")]
-        lines.extend(["", "## Agent-Generated Execution Evidence"])
-        lines.append("- provenance: evaluated agent trajectory; commands/probes below were agent-authored.")
-        lines.append("- Do not infer original task inputs or expected semantics from these probes.")
-        lines.extend(["", "### Decisive Failed Steps"])
-        if failed:
-            for event in failed[:8]:
-                lines.append(_format_trace_event(event))
-        else:
-            lines.append("- No failed tool call was present in the bounded normalized trace.")
-        lines.extend(["", "### Key Events"])
-        for event in trace_events[-12:]:
-            lines.append(_format_trace_event(event))
+    causal_digest = _build_causal_evidence_digest(case)
+    evidence_index = _causal_digest_evidence_index(causal_digest)
+    lines.extend(
+        [
+            "",
+            "## Decision-Centered Execution Evidence",
+            "- provenance: deterministic compression of the evaluated normalized trajectory.",
+            "- Trial boundaries, selected exact requests, public tool schemas, and raw evidence pointers are preserved.",
+            "- Repeated narration and duplicate payloads are removed; this section does not add model-authored conclusions.",
+            *evidence_index,
+            "```json",
+            json.dumps(causal_digest, ensure_ascii=False, indent=2),
+            "```",
+        ]
+    )
 
     return "\n".join(lines).strip() + "\n"
+
+
+def _causal_digest_evidence_index(digest: dict[str, Any]) -> list[str]:
+    """Render a tiny human-readable pointer index beside the structured digest."""
+    lines = ["", "### Selected Evidence Index"]
+    for trial in digest.get("trials", []):
+        if not isinstance(trial, dict):
+            continue
+        trace_id = str(trial.get("trial_id", ""))
+        role = str(trial.get("role", ""))
+        for action in trial.get("selected_actions", []):
+            if not isinstance(action, dict):
+                continue
+            lines.append(
+                "- "
+                f"trace_id={trace_id} role={role} "
+                f"message_index={action.get('message_index', '')} "
+                f"step={action.get('step_pointer', '')} "
+                f"tool={action.get('tool', '')} "
+                f"error={_one_line(action.get('error', ''), 300)}"
+            )
+        final_output = trial.get("final_output")
+        final_output = final_output if isinstance(final_output, dict) else {}
+        excerpt = _one_line(final_output.get("excerpt", ""), 500)
+        if excerpt:
+            reference = final_output.get("evidence_ref")
+            reference = reference if isinstance(reference, dict) else {}
+            lines.append(
+                "- "
+                f"trace_id={trace_id} role={role} "
+                f"message_index={reference.get('message_index', '')} "
+                f"step={reference.get('step_pointer', '')} "
+                f"final_output={excerpt}"
+            )
+    if len(lines) == 2:
+        lines.append("- No normalized execution event was available.")
+    return lines
 
 
 def _build_validation_inventory(case: CaseAnalysisInput) -> dict[str, Any]:
@@ -1862,6 +2749,25 @@ def _validation_inventory_from_events(
     }
 
 
+def _case_diagnoses_validation_conflicts(
+    diagnoses: list[dict[str, Any]],
+    inventory: dict[str, Any],
+    verifier_inventory: dict[str, Any] | None = None,
+) -> list[str]:
+    """Validate every diagnosis while retaining its position in repair feedback."""
+    conflicts: list[str] = []
+    for index, diagnosis in enumerate(diagnoses, start=1):
+        conflicts.extend(
+            f"diagnosis[{index}]: {error}"
+            for error in _diagnosis_validation_conflicts(
+                diagnosis,
+                inventory,
+                verifier_inventory,
+            )
+        )
+    return conflicts
+
+
 def _diagnosis_validation_conflicts(
     diagnosis: dict[str, Any],
     inventory: dict[str, Any],
@@ -1903,6 +2809,24 @@ def _diagnosis_validation_conflicts(
     decision_contract = diagnosis.get("decision_contract")
     decision_contract = decision_contract if isinstance(decision_contract, dict) else {}
     target_ref = str(diagnosis.get("target_ref") or "").strip()
+    evidence_status = str(diagnosis.get("evidence_status") or "").strip().lower()
+    if evidence_status:
+        if evidence_status not in {"confirmed", "supported_hypothesis", "insufficient"}:
+            errors.append("evidence_status must be confirmed, supported_hypothesis, or insufficient")
+        if evidence_status == "insufficient":
+            if target_ref != "unassigned":
+                errors.append("insufficient evidence must use target_ref=unassigned")
+            if str(diagnosis.get("confidence") or "").strip().lower() != "low":
+                errors.append("insufficient evidence must use confidence=low")
+        if target_ref and target_ref != "unassigned":
+            if not str(diagnosis.get("failed_requirement") or "").strip():
+                errors.append("assigned diagnosis must name failed_requirement")
+            if not str(diagnosis.get("discriminating_evidence") or "").strip():
+                errors.append("assigned diagnosis must name discriminating_evidence")
+            if not list(diagnosis.get("evidence_refs") or []):
+                errors.append("assigned diagnosis must include evidence_refs")
+            if not str(decision_contract.get("acceptance_observable") or "").strip():
+                errors.append("assigned diagnosis must include decision_contract.acceptance_observable")
     if verifier_inventory.get("empty_patch") is True:
         diagnosis_text = _joined_diagnosis_text(diagnosis)
         required_action = str(decision_contract.get("required_action") or "").lower()
@@ -2170,24 +3094,6 @@ def _validation_result_signal(output: str, error: str) -> str:
     return "unknown"
 
 
-def _format_trace_event(event: dict[str, Any]) -> str:
-    status = "err" if event.get("error") else "ok"
-    parts = [
-        f"- [{status}] trace_id={event.get('trace_id', '')}",
-        f"role={event.get('role', '')}",
-        f"message_index={event.get('message_index', '')}",
-        f"step={event.get('step_pointer', '')}",
-        f"tool={event.get('tool', '')}",
-    ]
-    if event.get("input"):
-        parts.append(f"input={event['input']}")
-    if event.get("error"):
-        parts.append(f"error={event['error']}")
-    elif event.get("output"):
-        parts.append(f"output={event['output']}")
-    return " ".join(parts)
-
-
 def _one_line(value: Any, limit: int) -> str:
     return " ".join(_truncate_text(value, limit).split())
 
@@ -2233,23 +3139,96 @@ def _remove_path(path: Path) -> None:
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
-    """Scan for the outermost JSON object in raw agent output."""
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    for i, ch in enumerate(text[start:], start):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    payload_end = i + 1
-                    return json.loads(text[start:payload_end])
-                except json.JSONDecodeError:
-                    return None
+    """Decode the first JSON object, ignoring prose and braces in strings."""
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(text):
+        start = text.find("{", index)
+        if start < 0:
+            return None
+        try:
+            value, _ = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        if isinstance(value, dict):
+            return value
+        index = start + 1
     return None
+
+
+def _contains_incomplete_json_object(text: str) -> bool:
+    """Return whether output contains a JSON object cut off at end of text."""
+    for match in re.finditer(r'\{\s*"', str(text or "")):
+        candidate = text[match.start() :].strip()
+        try:
+            json.JSONDecoder().raw_decode(candidate)
+            continue
+        except json.JSONDecodeError:
+            pass
+
+        stack: list[str] = []
+        in_string = False
+        escaped = False
+        invalid_closer = False
+        for char in candidate:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char in "{[":
+                stack.append(char)
+            elif char in "}]":
+                if not stack:
+                    invalid_closer = True
+                    break
+                opening = stack.pop()
+                if (opening, char) not in {("{", "}"), ("[", "]")}:
+                    invalid_closer = True
+                    break
+        if not invalid_closer and (stack or in_string or escaped):
+            return True
+    return False
+
+
+def _unusable_diagnosis_output_error(case_id: str, outputs: list[str]) -> BaseException:
+    """Classify exhausted malformed output without hiding permanent failures."""
+    latest = next((value for value in reversed(outputs) if value), "")
+    excerpt = _truncate_text(latest, 256)
+    if any(_contains_incomplete_json_object(value) for value in outputs):
+        return RetryableModelOutputError(
+            f"per-case diagnosis output remained incomplete JSON after repair for {case_id}: {excerpt}"
+        )
+    if _contains_model_service_error_text(latest):
+        return ValueError(f"per-case diagnosis output contained a model-service error for {case_id}: {excerpt}")
+    return _DiagnosisOutputFormatError(f"per-case diagnosis output did not contain JSON for {case_id}: {excerpt}")
+
+
+class _DiagnosisOutputFormatError(ValueError):
+    """Raised after bounded JSON repair still returns ordinary prose."""
+
+
+def _contains_model_service_error_text(raw: str) -> bool:
+    """Keep permanent service/auth failures distinct from bad model formatting."""
+    normalized = " ".join(str(raw or "").lower().split())
+    return any(
+        marker in normalized
+        for marker in (
+            "error code:",
+            "invalid_api_key",
+            "authentication failed",
+            "authentication error",
+            "unauthorized",
+            "budget_exceeded",
+            "budget has been exceeded",
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2329,16 +3308,41 @@ class DiagnosisAgentStrategy:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         diagnosis_case_inputs = [case for case in case_inputs if not case.evaluation_passed]
+        effective_harness = _load_effective_harness_snapshot(invocation.harness_refs_path)
+        causal_evidence_path = output_dir / "causal_evidence.json"
+        _write_json(
+            causal_evidence_path,
+            {
+                "schema_version": 1,
+                "effective_harness": effective_harness,
+                "cases": [
+                    {
+                        "case_id": case.case_id,
+                        "causal_digest": _build_causal_evidence_digest(case),
+                        "prior_candidate_feedback": compact_candidate_feedback(
+                            _case_prior_candidate_feedback(
+                                invocation.prior_candidate_feedback,
+                                case.case_id,
+                            )
+                        ),
+                    }
+                    for case in diagnosis_case_inputs
+                ],
+            },
+        )
         per_case_results = await self._per_case_diagnosis(
             diagnosis_case_inputs,
             signals,
             retrieved_experience,
             source_stage=invocation.source_stage,
             prior_candidate_feedback=invocation.prior_candidate_feedback,
+            effective_harness=effective_harness,
         )
         per_case_diagnoses_path = output_dir / "per_case_diagnoses.json"
         _write_json(per_case_diagnoses_path, {"per_case_diagnoses": per_case_results})
-        diagnosis_failed_count = sum(1 for item in per_case_results if item.get("analysis_failed"))
+        diagnosis_failed_count = len(
+            {str(item.get("case_id", "") or "") for item in per_case_results if item.get("analysis_failed")}
+        )
 
         issues = await self._aggregate_diagnosis(
             per_case_results,
@@ -2360,12 +3364,16 @@ class DiagnosisAgentStrategy:
             metadata={
                 "analysis_status": analysis_status,
                 "strategy": self.name,
+                "analyzer_protocol_version": GENERIC_ANALYZER_PROTOCOL_VERSION,
                 "model_config_ref": self._config.diagnosis_agent_model_config_ref or self._config.model_config_ref,
                 "signals_method": signals.method,
                 "per_case_count": len(case_inputs),
                 "diagnosed_case_count": len(diagnosis_case_inputs),
+                "diagnosis_count": len(per_case_results),
                 "diagnosis_failed_count": diagnosis_failed_count,
                 "per_case_diagnoses_path": str(per_case_diagnoses_path),
+                "causal_evidence_path": str(causal_evidence_path),
+                "effective_harness_availability": effective_harness.get("availability", "unknown"),
                 "retrieved_experience": retrieved_experience,
             },
         )
@@ -2408,6 +3416,7 @@ class DiagnosisAgentStrategy:
         *,
         source_stage: str = "",
         prior_candidate_feedback: dict[str, Any] | None = None,
+        effective_harness: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Run diagnosis for each case in a stable deterministic order.
 
@@ -2417,12 +3426,16 @@ class DiagnosisAgentStrategy:
         """
         runtime_root = Path(tempfile.mkdtemp(prefix="ach_analyzer_"))
 
-        async def _diagnose_one(case: CaseAnalysisInput) -> dict[str, Any]:
+        async def _diagnose_one(case: CaseAnalysisInput) -> list[dict[str, Any]]:
             runtime_dir = _make_diagnosis_runtime_dir(runtime_root, case.case_id)
             try:
                 evidence_summary_available = _prepare_diagnosis_evidence(
                     case=case,
                     runtime_dir=runtime_dir,
+                )
+                case_feedback = _case_prior_candidate_feedback(
+                    prior_candidate_feedback,
+                    case.case_id,
                 )
                 prompt = _build_diagnosis_prompt(
                     case=case,
@@ -2430,10 +3443,8 @@ class DiagnosisAgentStrategy:
                     retrieved_experience=retrieved_experience,
                     evidence_summary_available=evidence_summary_available,
                     source_stage=source_stage,
-                    prior_candidate_feedback=_case_prior_candidate_feedback(
-                        prior_candidate_feedback,
-                        case.case_id,
-                    ),
+                    prior_candidate_feedback=case_feedback,
+                    effective_harness=effective_harness,
                 )
                 agent = await self._build_agent(str(runtime_dir))
                 raw = await _run_agent(
@@ -2441,23 +3452,39 @@ class DiagnosisAgentStrategy:
                     prompt,
                     max_retries=self._config.diagnosis_agent_max_retries,
                 )
+                invalid_outputs = [raw]
                 parsed = _extract_json_object(raw)
-                if parsed is None:
+                diagnoses = (
+                    _normalize_case_diagnoses(
+                        parsed,
+                        prior_candidate_feedback=case_feedback,
+                    )
+                    if parsed is not None
+                    else []
+                )
+                if not diagnoses:
                     repair_raw = await _run_agent(
                         agent,
                         _build_json_repair_prompt(prompt, raw),
                         max_retries=0,
                     )
+                    invalid_outputs.append(repair_raw)
                     repair_parsed = _extract_json_object(repair_raw)
                     if repair_parsed is not None:
-                        raw = repair_raw
-                        parsed = repair_parsed
-                if parsed is None:
-                    raise ValueError(f"per-case diagnosis output did not contain JSON for {case.case_id}: {raw[:256]}")
+                        repair_diagnoses = _normalize_case_diagnoses(
+                            repair_parsed,
+                            prior_candidate_feedback=case_feedback,
+                        )
+                        if repair_diagnoses:
+                            raw = repair_raw
+                            parsed = repair_parsed
+                            diagnoses = repair_diagnoses
+                if not diagnoses:
+                    raise _unusable_diagnosis_output_error(case.case_id, invalid_outputs)
                 validation_inventory = _build_validation_inventory(case)
                 verifier_inventory = _build_verifier_inventory(case)
-                validation_conflicts = _diagnosis_validation_conflicts(
-                    parsed,
+                validation_conflicts = _case_diagnoses_validation_conflicts(
+                    diagnoses,
                     validation_inventory,
                     verifier_inventory,
                 )
@@ -2475,17 +3502,28 @@ class DiagnosisAgentStrategy:
                     )
                     repair_parsed = _extract_json_object(repair_raw)
                     if repair_parsed is not None:
-                        repaired_conflicts = _diagnosis_validation_conflicts(
+                        repair_diagnoses = _normalize_case_diagnoses(
                             repair_parsed,
-                            validation_inventory,
-                            verifier_inventory,
+                            prior_candidate_feedback=case_feedback,
                         )
-                        if not repaired_conflicts:
-                            raw = repair_raw
-                            parsed = repair_parsed
-                            validation_conflicts = []
+                        if repair_diagnoses:
+                            repaired_conflicts = _case_diagnoses_validation_conflicts(
+                                repair_diagnoses,
+                                validation_inventory,
+                                verifier_inventory,
+                            )
+                            if not repaired_conflicts:
+                                raw = repair_raw
+                                parsed = repair_parsed
+                                diagnoses = repair_diagnoses
+                                validation_conflicts = []
+                            else:
+                                validation_conflicts = repaired_conflicts
                         else:
-                            validation_conflicts = repaired_conflicts
+                            validation_conflicts = [
+                                *validation_conflicts,
+                                "evidence-conflict repair output contained no diagnoses",
+                            ]
                     else:
                         validation_conflicts = [
                             *validation_conflicts,
@@ -2497,32 +3535,47 @@ class DiagnosisAgentStrategy:
                         case.case_id,
                         "; ".join(validation_conflicts),
                     )
-                    return _diagnosis_evidence_conflict_result(
-                        case,
-                        validation_conflicts,
-                    )
-                return {
-                    "case_id": case.case_id,
-                    "score": case.score,
-                    "evaluation_passed": case.evaluation_passed,
-                    "evaluation_reason": case.evaluation_reason,
-                    **parsed,
-                    "verifier_failure_output_excerpt": str(
-                        verifier_inventory.get(
-                            "verifier_failure_output_excerpt",
-                            "",
+                    return [
+                        _diagnosis_evidence_conflict_result(
+                            case,
+                            validation_conflicts,
                         )
-                        or ""
-                    ),
-                }
+                    ]
+                diagnosis_count = len(diagnoses)
+                return [
+                    {
+                        "case_id": case.case_id,
+                        "diagnosis_index": index,
+                        "diagnosis_count": diagnosis_count,
+                        "score": case.score,
+                        "evaluation_passed": case.evaluation_passed,
+                        "evaluation_reason": case.evaluation_reason,
+                        **diagnosis,
+                        "verifier_failure_output_excerpt": str(
+                            verifier_inventory.get(
+                                "verifier_failure_output_excerpt",
+                                "",
+                            )
+                            or ""
+                        ),
+                    }
+                    for index, diagnosis in enumerate(diagnoses, start=1)
+                ]
             except Exception as exc:
+                if isinstance(exc, _DiagnosisOutputFormatError):
+                    logger.warning(
+                        "per-case diagnosis format unavailable for %s: %s",
+                        case.case_id,
+                        exc,
+                    )
+                    return [_diagnosis_unavailable_result(case, exc)]
                 if is_retryable_model_call_failure(exc):
                     logger.warning(
                         "per-case diagnosis unavailable for %s: %s",
                         case.case_id,
                         exc,
                     )
-                    return _diagnosis_unavailable_result(case, exc)
+                    return [_diagnosis_unavailable_result(case, exc)]
                 logger.exception("per-case diagnosis failed for %s", case.case_id)
                 raise
             finally:
@@ -2531,7 +3584,7 @@ class DiagnosisAgentStrategy:
         try:
             results: list[dict[str, Any]] = []
             for case in case_inputs:
-                results.append(await _diagnose_one(case))
+                results.extend(await _diagnose_one(case))
             return results
         finally:
             _remove_path(runtime_root)
@@ -2606,44 +3659,43 @@ async def _run_agent(
             return str(result.get("output", result.get("answer", fallback)))
         return str(result)
 
-    last_raw = ""
-    attempts = max(1, int(max_retries or 0) + 1)
-    model_call_retries = 1 if attempts > 1 else 0
-    for attempt in range(attempts):
-        retry_after_error = False
-        try:
-            last_raw = await run_model_call_with_retries(
-                call_once,
-                operation_name="diagnosis agent",
-                max_retries=model_call_retries,
-            )
-        except BaseException as exc:
-            if attempt >= attempts - 1 or not is_retryable_model_call_failure(exc):
-                raise
-            retry_after_error = True
-        if retry_after_error:
-            continue
-        if _extract_json_object(last_raw) is not None:
-            return last_raw
-        current_prompt = _build_json_repair_prompt(prompt, last_raw)
-    return last_raw
+    # Service retries and output-format repair are different failure domains.
+    # Replaying a verbose non-JSON answer up to 20 times in one session only
+    # reinforces the prose response and grows context. Retry transient model
+    # failures here, but allow exactly one bounded format-only turn.
+    last_raw = await run_model_call_with_retries(
+        call_once,
+        operation_name="diagnosis agent",
+        max_retries=max(0, int(max_retries or 0)),
+    )
+    if _extract_json_object(last_raw) is not None:
+        return last_raw
+
+    current_prompt = _build_json_repair_prompt(prompt, last_raw)
+    return await run_model_call_with_retries(
+        call_once,
+        operation_name="diagnosis JSON formatter",
+        max_retries=max(0, int(max_retries or 0)),
+    )
 
 
 def _build_json_repair_prompt(original_prompt: str, previous_output: str) -> str:
-    """Build a second-pass prompt that repairs format without changing evidence."""
+    """Build a small format-only turn from the completed semantic analysis."""
+    del original_prompt
     return f"""Previous diagnosis output was not valid JSON.
 
-You must convert the diagnosis into the required single valid JSON object.
-Do not include Markdown, prose, analysis notes, or text before/after the JSON.
-Preserve the original task evidence and target_ref semantics from the original prompt.
+FORMAT-ONLY TASK. Do not analyze the evidence again and do not explain your work.
+Convert only the conclusions already present in PREVIOUS_ANALYSIS into this shape:
+{{"diagnoses":[{{"issue_category":"member_harness|team_skill|unassigned","severity":"high|medium|low","summary":"...","failure_mode":"...","failure_cluster":{{"failed_checks":[],"observable_behavior":"..."}},"root_cause":"...","critical_mistake":"...","general_mechanism":"...","target_ref":"member_harness.<role>.<variable>|team_skill.<role>.<variable>|unassigned","evidence_refs":[],"affected_components":[],"recommendation":"...","decision_contract":{{"wrong_decision":"...","causal_distinction":"...","required_action":"...","acceptance_observable":"...","scope_boundary":[],"activation_phase":"task_start|during_investigation|post_diagnosis|pre_submission"}},"confidence":"high|medium|low"}}]}}
 
-Original diagnosis prompt:
-{_truncate_text(original_prompt, 6000)}
+Rules:
+- Return only the single valid JSON object and nothing else.
+- Preserve concrete evidence pointers and conclusions; do not invent new facts.
+- When the previous analysis does not support an optimizable target, use
+  issue_category="unassigned", target_ref="unassigned", and confidence="low".
 
-Previous invalid output:
-{_truncate_text(previous_output, 2000)}
-
-Return only the single valid JSON object required by the original prompt.
+PREVIOUS_ANALYSIS:
+{_truncate_text(previous_output, 8000)}
 """
 
 
@@ -2697,10 +3749,15 @@ def _dict_to_team_issue(data: dict[str, Any]) -> TeamIssue:
             metadata["attribution"] = nested
         else:
             flat_keys = {
+                "evidence_status",
+                "failed_requirement",
+                "competing_hypotheses",
+                "discriminating_evidence",
                 "root_cause",
                 "critical_mistake",
                 "general_mechanism",
                 "decision_contract",
+                "failure_cluster",
                 "target_ref",
                 "evidence_refs",
                 "confidence",

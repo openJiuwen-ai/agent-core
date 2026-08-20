@@ -27,6 +27,10 @@ from openjiuwen.rsi.evaluator.trajectory_usage import (
     collect_successful_skill_names,
     collect_successful_tool_names,
 )
+from openjiuwen.rsi.improver_evolution.policy import (
+    default_improver_policy,
+    load_improver_policy,
+)
 from openjiuwen.rsi.member_optimizer import MemberOptimizer
 from openjiuwen.rsi.member_optimizer.hypothesis import (
     compile_optimization_hypotheses,
@@ -38,6 +42,11 @@ from openjiuwen.rsi.member_optimizer.path_layout import (
 from openjiuwen.rsi.schema import (
     DatasetArtifact,
     EvaluationResultAnalysisInvocation,
+)
+from openjiuwen.rsi.single_harness.candidate_feedback import (
+    build_candidate_feedback_cohort,
+    canonical_candidate_fingerprint,
+    rank_candidate_proposals,
 )
 
 _ALLOWED_ACTION_GROUPS = ["prompt", "skill", "tool", "rail"]
@@ -53,6 +62,7 @@ class IterativeSingleHarnessRequest:
     output_dir: str
     dataset_id: str = "single_harness_benchmark"
     resume: bool = False
+    baseline_eval_ref_path: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,13 +110,20 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             allowed_prompt_surfaces=list(_ALLOWED_PROMPT_SURFACES),
             candidate_holdout_cases=0,
             max_roles_per_run=1,
-            max_actions_per_plan=1,
+            max_actions_per_plan=(
+                config.member_optimizer.max_actions_per_plan if config.member_optimizer.max_actions_per_plan > 0 else 3
+            ),
         )
         self.config = replace(config, member_optimizer=restricted_member_config)
         self.evaluator = evaluator or TeamEvaluator(self.config.evaluator)
         self.analyzer = analyzer or EvaluationResultAnalyzer(self.config.evaluation_result_analyzer)
         self.member_optimizer = member_optimizer or MemberOptimizer(restricted_member_config)
         self.data_loader = data_loader or DataLoader(self.config.data_loader)
+        policy_ref = restricted_member_config.improver_policy_ref.strip()
+        self.improver_policy = (
+            load_improver_policy(Path(policy_ref).expanduser().resolve()) if policy_ref else default_improver_policy()
+        )
+        self._explicit_improver_policy = bool(policy_ref)
 
     async def run(
         self,
@@ -123,6 +140,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         fingerprint = _request_fingerprint(
             request,
             source_refs,
+            sibling_candidate_count=self.config.member_optimizer.sibling_candidate_count,
+            improver_policy_digest=self.improver_policy.canonical_digest,
         )
         state = _load_or_create_state(
             state_path=state_path,
@@ -131,6 +150,12 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             source_harness_refs_path=source_refs,
             dataset=dataset,
         )
+        state["improver_policy"] = {
+            "version_id": self.improver_policy.version_id,
+            "policy_digest": self.improver_policy.canonical_digest,
+            "policy_ref": self.config.member_optimizer.improver_policy_ref,
+            "explicit": self._explicit_improver_policy,
+        }
         if request.resume and state.get("status") == "completed":
             _ensure_final_publication(state=state, output_dir=output_dir)
             _write_yaml_atomic(state_path, state)
@@ -139,6 +164,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
 
         all_cases = _load_cases(dataset.dataset_files)
         all_case_ids = {str(case.get("case_id", "") or "") for case in all_cases if str(case.get("case_id", "") or "")}
+        _initialize_frozen_baseline(
+            state,
+            baseline_eval_ref_path=request.baseline_eval_ref_path,
+            source_harness_refs_path=source_refs,
+            expected_case_ids=all_case_ids,
+        )
+        _write_yaml_atomic(state_path, state)
         current_refs = str(state["best_harness_refs_path"])
         max_epochs = int(self.config.max_epochs)
         for epoch in range(1, max_epochs + 1):
@@ -208,146 +240,387 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     output_dir=batch_dir / "source",
                     dataset=dataset,
                 )
-                analysis_ref = await self._analyze(
-                    eval_ref_path=source_eval_ref,
-                    harness_refs_path=current_refs,
-                    output_dir=batch_dir / "analysis",
-                    prior_candidate_feedback=_prior_candidate_feedback(
-                        state,
-                        batch,
-                    ),
-                )
-                hypotheses_ref = compile_optimization_hypotheses(
-                    analysis_ref_path=analysis_ref,
-                    cases=batch,
-                    output_path=batch_dir / "analysis" / "optimization_hypotheses.yaml",
-                )
-                hypotheses = load_optimization_hypotheses(hypotheses_ref)
-                issue_attempt_ids: list[str | None] = [
-                    str(item.get("source_issue_id", "")) for item in hypotheses if str(item.get("source_issue_id", ""))
-                ] or [None]
-                issue_case_ids = _analysis_issue_case_ids(analysis_ref)
                 batch_before_refs = current_refs
                 attempt_records: list[dict[str, Any]] = []
                 accepted_target_case_ids: set[str] = set()
                 last_member_ref = ""
                 last_gate: dict[str, Any] | None = None
+                analysis_ref = ""
+                hypotheses_ref = ""
+                analysis_refs: list[str] = []
+                hypotheses_refs: list[str] = []
+                residual_eval_refs: list[str] = []
+                attempted_issue_signatures: set[str] = set()
+                max_issue_attempts = int(self.config.member_optimizer.max_issue_attempts_per_batch)
+                max_repair_rounds = int(self.config.member_optimizer.max_repair_rounds_per_batch)
+                attempt_index = 0
+                issue_attempt_count = 0
+                analysis_round_index = 0
+                repair_stop_reason = "repair_round_limit_reached"
+                current_repair_round = 1
+                attempt_source_eval_ref = source_eval_ref
+                active_cases = _cases_with_ids(batch, _nonpassing_case_ids(source_eval_ref))
+                pending_analysis_ref = ""
 
-                for attempt_index, issue_id in enumerate(issue_attempt_ids, start=1):
-                    attempt_dir = batch_dir / "attempts" / f"a{attempt_index:03d}"
-                    attempt_source_eval_ref = source_eval_ref
-                    if attempt_index > 1:
-                        attempt_source_eval_ref = await self._evaluate(
-                            cases=batch,
-                            harness_refs_path=current_refs,
-                            output_dir=attempt_dir / "source",
-                            dataset=dataset,
-                        )
-                    before_attempt_refs = current_refs
-                    target_case_ids = issue_case_ids.get(issue_id or "", set())
-                    source_case_scores = _eval_case_scores(attempt_source_eval_ref)
-                    target_already_resolved = (
-                        issue_id
-                        and target_case_ids
-                        and target_case_ids.issubset(source_case_scores)
-                        and all(source_case_scores[case_id] >= 1.0 for case_id in target_case_ids)
+                while active_cases:
+                    analysis_round_index += 1
+                    analysis_dir = (
+                        batch_dir / "analysis"
+                        if analysis_round_index == 1
+                        else batch_dir / "residual_analyses" / f"r{analysis_round_index:03d}"
                     )
-                    if target_already_resolved:
-                        reason = "issue_already_resolved_in_latest_source"
-                        attempt_records.append(
-                            {
-                                "attempt_index": attempt_index,
-                                "source_issue_id": issue_id,
-                                "source_eval_ref_path": attempt_source_eval_ref,
-                                "member_optimization_ref_path": "",
-                                "before_harness_refs_path": before_attempt_refs,
-                                "after_harness_refs_path": current_refs,
-                                "candidate_gate_status": "skipped",
-                                "candidate_gate_reason": reason,
-                                "accepted_target_case_ids": [],
-                            }
+                    if pending_analysis_ref:
+                        analysis_ref = pending_analysis_ref
+                        pending_analysis_ref = ""
+                    else:
+                        analysis_ref = await self._analyze(
+                            eval_ref_path=attempt_source_eval_ref,
+                            harness_refs_path=current_refs,
+                            output_dir=analysis_dir,
+                            source_stage=(
+                                "single_harness_batch"
+                                if analysis_round_index == 1
+                                else "single_harness_residual_repair"
+                            ),
+                            prior_candidate_feedback=_prior_candidate_feedback(state, active_cases),
                         )
-                        last_gate = {"status": "skipped", "reason": reason}
-                        continue
-                    rejected_capabilities = _rejected_capability_history(state["candidate_gates"])
-                    member_ref = await self.member_optimizer.optimize(
-                        eval_ref_path=attempt_source_eval_ref,
-                        analysis_result_path=analysis_ref,
-                        harness_refs_path=before_attempt_refs,
-                        output_dir=str(output_dir / "member_optimizations"),
-                        defer_publish=True,
-                        rejected_capabilities=rejected_capabilities,
-                        single_harness=True,
-                        optimization_hypotheses_path=hypotheses_ref,
-                        optimization_issue_ids=([issue_id] if issue_id else None),
-                        optimization_experience={
+                    hypotheses_ref = compile_optimization_hypotheses(
+                        analysis_ref_path=analysis_ref,
+                        cases=active_cases,
+                        output_path=analysis_dir / "optimization_hypotheses.yaml",
+                    )
+                    analysis_refs.append(analysis_ref)
+                    hypotheses_refs.append(hypotheses_ref)
+                    hypotheses = load_optimization_hypotheses(hypotheses_ref)
+                    issue_case_ids = _analysis_issue_case_ids(analysis_ref)
+                    issue_signatures = _analysis_issue_signatures(analysis_ref)
+                    nonpassing_case_ids = _nonpassing_case_ids(attempt_source_eval_ref)
+                    issue_queue: list[tuple[str | None, str]] = []
+                    repeated_issue_ids: list[str] = []
+                    known_issue_signatures = set(attempted_issue_signatures)
+                    for hypothesis in hypotheses:
+                        issue_id = str(hypothesis.get("source_issue_id", "") or "")
+                        if not issue_id:
+                            continue
+                        target_case_ids = issue_case_ids.get(issue_id, set())
+                        if target_case_ids and not (target_case_ids & nonpassing_case_ids):
+                            continue
+                        signature = issue_signatures.get(issue_id, issue_id)
+                        if signature in known_issue_signatures:
+                            repeated_issue_ids.append(issue_id)
+                            continue
+                        issue_queue.append((issue_id, signature))
+                        known_issue_signatures.add(signature)
+                    if not hypotheses:
+                        if "__no_issue__" in attempted_issue_signatures:
+                            repeated_issue_ids.append("__no_issue__")
+                        else:
+                            issue_queue.append((None, "__no_issue__"))
+                    if not issue_queue:
+                        repair_stop_reason = "repeated_issue_detected" if repeated_issue_ids else "no_residual_issues"
+                        break
+
+                    refresh_residual_analysis = False
+                    issue_budget_exhausted = False
+                    repair_budget_exhausted = False
+                    deferred_repairs: list[dict[str, Any]] = []
+                    for issue_id, issue_signature in issue_queue:
+                        if max_issue_attempts and issue_attempt_count >= max_issue_attempts:
+                            issue_budget_exhausted = True
+                            break
+                        attempt_index += 1
+                        issue_attempt_count += 1
+                        attempted_issue_signatures.add(issue_signature)
+                        attempt_dir = batch_dir / "attempts" / f"a{attempt_index:03d}"
+                        before_attempt_refs = current_refs
+                        frozen_target_case_ids = set(issue_case_ids.get(issue_id or "", set()))
+                        frozen_target_case_ids &= nonpassing_case_ids
+                        if not frozen_target_case_ids:
+                            frozen_target_case_ids = {
+                                str(case.get("case_id", "") or "")
+                                for case in active_cases
+                                if str(case.get("case_id", "") or "") in nonpassing_case_ids
+                            }
+                        cohort_id = _improvement_cohort_id(
+                            epoch=epoch,
+                            batch_index=batch_index,
+                            repair_round_index=current_repair_round,
+                            issue_signature=issue_signature,
+                            parent_harness_refs_path=before_attempt_refs,
+                            source_eval_ref_path=attempt_source_eval_ref,
+                            analysis_ref_path=analysis_ref,
+                            frozen_target_case_ids=frozen_target_case_ids,
+                            improver_policy_digest=self.improver_policy.canonical_digest,
+                        )
+                        frozen_experience = {
                             "journal": list(state.get("optimization_journal", [])),
                             "lever_scoreboard": dict(state.get("lever_scoreboard", {})),
-                        },
-                    )
-                    member_info = _read_yaml(member_ref)
-                    candidate_refs = str(member_info.get("optimized_harness_refs_path", "") or before_attempt_refs)
-                    capabilities = _candidate_capabilities(member_info)
-                    gate = await self._candidate_gate(
-                        cases=batch,
-                        source_eval_ref=attempt_source_eval_ref,
-                        analysis_ref=analysis_ref,
-                        before_harness_refs_path=before_attempt_refs,
-                        candidate_harness_refs_path=candidate_refs,
-                        member_status=str(member_info.get("status", "") or ""),
-                        capabilities=capabilities,
-                        output_dir=attempt_dir / "candidate",
-                        dataset=dataset,
-                    )
-                    primary_accepted = bool(gate["accepted"])
-                    gate.update(
-                        {
-                            "epoch": epoch,
-                            "batch_index": batch_index,
-                            "batch_attempt_index": attempt_index,
-                            "source_issue_id": issue_id or "",
-                            "member_optimization_ref_path": member_ref,
-                            "primary_gate_accepted": primary_accepted,
-                            "primary_gate_reason": str(gate.get("reason", "")),
-                            "evaluation_input_mode": "original_task",
                         }
-                    )
-                    if primary_accepted:
-                        gate["status"] = "provisional"
-                        gate["reason"] = "candidate_passed_batch_gate_pending_epoch_checkpoint"
-                        current_refs = candidate_refs
+                        proposals, cohort_manifest_path = await self._generate_sibling_candidate_proposals(
+                            cohort_id=cohort_id,
+                            source_eval_ref=attempt_source_eval_ref,
+                            analysis_ref=analysis_ref,
+                            parent_harness_refs_path=before_attempt_refs,
+                            optimization_hypotheses_path=hypotheses_ref,
+                            source_issue_id=issue_id,
+                            source_issue_signature=issue_signature,
+                            frozen_target_case_ids=frozen_target_case_ids,
+                            frozen_experience=frozen_experience,
+                            rejected_capabilities=_rejected_capability_history(state["candidate_gates"]),
+                            output_dir=output_dir,
+                        )
+                        _verify_frozen_candidate_proposals(proposals)
+                        sibling_gates: list[dict[str, Any]] = []
+                        for proposal in proposals:
+                            candidate_id = str(proposal.get("candidate_id", "") or "")
+                            candidate_index = int(proposal.get("candidate_index", 0) or 0)
+                            candidate_refs = str(proposal.get("candidate_harness_refs_path", "") or before_attempt_refs)
+                            gate = await self._candidate_gate(
+                                cases=active_cases,
+                                source_eval_ref=attempt_source_eval_ref,
+                                analysis_ref=analysis_ref,
+                                before_harness_refs_path=before_attempt_refs,
+                                candidate_harness_refs_path=candidate_refs,
+                                member_status=str(proposal.get("member_status", "") or ""),
+                                capabilities=[
+                                    dict(item) for item in proposal.get("capabilities", []) if isinstance(item, dict)
+                                ],
+                                output_dir=_candidate_evaluation_output_dir(
+                                    optimization_output_dir=output_dir,
+                                    epoch=epoch,
+                                    batch_index=batch_index,
+                                    attempt_index=attempt_index,
+                                    candidate_index=candidate_index,
+                                ),
+                                dataset=dataset,
+                                frozen_target_case_ids=frozen_target_case_ids,
+                            )
+                            primary_accepted = bool(gate["accepted"])
+                            gate.update(
+                                {
+                                    "epoch": epoch,
+                                    "batch_index": batch_index,
+                                    "batch_attempt_index": attempt_index,
+                                    "repair_round_index": current_repair_round,
+                                    "analysis_round_index": analysis_round_index,
+                                    "improvement_cohort_id": cohort_id,
+                                    "cohort_manifest_path": cohort_manifest_path,
+                                    "candidate_id": candidate_id,
+                                    "candidate_index": candidate_index,
+                                    "candidate_fingerprint": str(proposal.get("candidate_fingerprint", "") or ""),
+                                    "predicted_score": _number(proposal.get("predicted_score")),
+                                    "predicted_rank": int(proposal.get("predicted_rank", 0) or 0),
+                                    "ranking_policy": str(proposal.get("ranking_policy", "") or ""),
+                                    "ranking_features": (
+                                        dict(proposal.get("ranking_features", {}))
+                                        if isinstance(proposal.get("ranking_features"), dict)
+                                        else {}
+                                    ),
+                                    "improver_version_id": str(proposal.get("improver_version_id", "") or ""),
+                                    "improver_policy_digest": str(proposal.get("improver_policy_digest", "") or ""),
+                                    "rank_frozen": bool(proposal.get("rank_frozen")),
+                                    "rank_frozen_before_evaluation": True,
+                                    "source_issue_id": issue_id or "",
+                                    "source_issue_signature": issue_signature,
+                                    "member_optimization_ref_path": str(
+                                        proposal.get("member_optimization_ref_path", "") or ""
+                                    ),
+                                    "composition_mode": str(proposal.get("composition_mode", "") or ""),
+                                    "primary_gate_accepted": primary_accepted,
+                                    "primary_gate_reason": str(gate.get("reason", "")),
+                                    "qualified_for_promotion": primary_accepted,
+                                    "selected_for_promotion": False,
+                                    "evaluation_input_mode": "original_task",
+                                }
+                            )
+                            sibling_gates.append(gate)
+
+                        selection_top_m = min(
+                            int(self.improver_policy.budget_policy["top_m"]),
+                            len(sibling_gates),
+                        )
+                        for gate in sibling_gates:
+                            within_budget = int(gate.get("predicted_rank", 0) or 0) <= selection_top_m
+                            gate["selection_top_m"] = selection_top_m
+                            gate["within_selection_budget"] = within_budget
+                            gate["qualified_for_promotion"] = bool(gate.get("primary_gate_accepted") and within_budget)
+                        winner = _select_sibling_winner(
+                            sibling_gates,
+                            top_m=selection_top_m,
+                        )
+                        winner_id = str((winner or {}).get("candidate_id", "") or "")
+                        winner_attempt_record: dict[str, Any] | None = None
+                        for gate in sibling_gates:
+                            selected = bool(winner_id) and gate.get("candidate_id") == winner_id
+                            gate["selected_for_promotion"] = selected
+                            if selected:
+                                gate["status"] = "provisional"
+                                gate["reason"] = "candidate_passed_batch_gate_pending_epoch_checkpoint"
+                            elif gate.get("primary_gate_accepted") and not gate.get("within_selection_budget"):
+                                gate["accepted"] = False
+                                gate["status"] = "shadow_evaluated"
+                                gate["reason"] = "candidate_outside_improver_selection_budget"
+                            elif gate.get("primary_gate_accepted"):
+                                gate["accepted"] = False
+                                gate["status"] = "superseded"
+                                gate["reason"] = "qualified_sibling_not_selected"
+                            member_ref = str(gate.get("member_optimization_ref_path", "") or "")
+                            candidate_refs = str(gate.get("candidate_harness_refs_path", "") or "")
+                            _persist_promotion(
+                                member_ref,
+                                (candidate_refs if candidate_refs != before_attempt_refs else ""),
+                                gate,
+                            )
+                            state["candidate_gates"].append(gate)
+                            attempt_record = {
+                                "attempt_index": attempt_index,
+                                "candidate_index": int(gate.get("candidate_index", 0) or 0),
+                                "candidate_id": str(gate.get("candidate_id", "") or ""),
+                                "improvement_cohort_id": cohort_id,
+                                "analysis_round_index": analysis_round_index,
+                                "source_issue_id": issue_id or "",
+                                "source_issue_signature": issue_signature,
+                                "source_eval_ref_path": attempt_source_eval_ref,
+                                "analysis_ref_path": analysis_ref,
+                                "optimization_hypotheses_path": hypotheses_ref,
+                                "member_optimization_ref_path": member_ref,
+                                "before_harness_refs_path": before_attempt_refs,
+                                "after_harness_refs_path": candidate_refs if selected else before_attempt_refs,
+                                "candidate_gate_status": gate["status"],
+                                "candidate_gate_reason": gate["reason"],
+                                "source_native_target_score": gate.get("source_native_target_score"),
+                                "candidate_native_target_score": gate.get("candidate_native_target_score"),
+                                "native_target_score_delta": gate.get("native_target_score_delta"),
+                                "native_dimension_delta": gate.get("native_dimension_delta"),
+                                "accepted_target_case_ids": (list(gate.get("target_case_ids", [])) if selected else []),
+                                "completed_target_case_ids": [],
+                                "residual_case_ids": [],
+                                "residual_eval_ref_path": "",
+                            }
+                            attempt_records.append(attempt_record)
+                            if selected:
+                                winner_attempt_record = attempt_record
+
+                        cohort_feedback = build_candidate_feedback_cohort(
+                            cohort={
+                                "cohort_id": cohort_id,
+                                "parent_harness_ref": before_attempt_refs,
+                                "source_eval_ref": attempt_source_eval_ref,
+                                "analysis_ref_path": analysis_ref,
+                                "optimization_hypotheses_path": hypotheses_ref,
+                                "source_issue_id": issue_id or "",
+                                "source_issue_signature": issue_signature,
+                                "target_case_ids": sorted(frozen_target_case_ids),
+                                "evaluation_protocol": "single_harness_target_local_v1",
+                                "requested_candidate_count": int(self.config.member_optimizer.sibling_candidate_count),
+                                "rank_frozen": True,
+                                "ranking_policy": self.improver_policy.ranking_policy,
+                                "improver_version_id": self.improver_policy.version_id,
+                                "improver_policy_digest": self.improver_policy.canonical_digest,
+                                "cohort_manifest_path": cohort_manifest_path,
+                            },
+                            candidates=sibling_gates,
+                            selected_candidate_id=winner_id,
+                            top_m=selection_top_m,
+                        )
+                        _attach_native_signal_feedback(cohort_feedback, sibling_gates)
+                        state["improvement_instances"][cohort_id] = cohort_feedback
+                        _write_candidate_feedback_ledger(state, output_dir)
+                        _refresh_optimization_experience(state, output_dir)
+                        last_gate = winner or _best_realized_sibling_gate(sibling_gates)
+                        last_member_ref = str((last_gate or {}).get("member_optimization_ref_path", "") or "")
+                        if winner is None:
+                            repair_pool = [gate for gate in sibling_gates if gate.get("within_selection_budget")]
+                            repair_parent = _best_realized_sibling_gate(repair_pool)
+                            repair_analysis_ref = str(
+                                (repair_parent or {}).get("candidate_failure_analysis_ref_path", "") or ""
+                            )
+                            repair_eval_ref = str((repair_parent or {}).get("candidate_eval_ref_path", "") or "")
+                            repair_refs = str((repair_parent or {}).get("candidate_harness_refs_path", "") or "")
+                            if repair_analysis_ref and repair_eval_ref and repair_refs:
+                                residual_case_ids = _nonpassing_case_ids(repair_eval_ref)
+                                repair_active_cases = _cases_with_ids(active_cases, residual_case_ids)
+                                if repair_active_cases and current_repair_round < max_repair_rounds:
+                                    deferred_repairs.append(
+                                        {
+                                            "gate": repair_parent,
+                                            "harness_refs_path": repair_refs,
+                                            "eval_ref_path": repair_eval_ref,
+                                            "analysis_ref_path": repair_analysis_ref,
+                                            "active_cases": repair_active_cases,
+                                        }
+                                    )
+                                elif repair_active_cases:
+                                    repair_budget_exhausted = True
+                            continue
+
+                        current_refs = str(winner.get("candidate_harness_refs_path", "") or before_attempt_refs)
                         accepted_target_case_ids.update(
-                            str(case_id) for case_id in gate.get("target_case_ids", []) if str(case_id)
+                            str(case_id) for case_id in winner.get("target_case_ids", []) if str(case_id)
                         )
-                        working_retained_case_ids.update(
-                            str(case_id) for case_id in gate.get("target_case_ids", []) if str(case_id)
+
+                        residual_eval_ref = await self._evaluate(
+                            cases=active_cases,
+                            harness_refs_path=current_refs,
+                            output_dir=attempt_dir / "residual_source",
+                            dataset=dataset,
                         )
-                    _persist_promotion(
-                        member_ref,
-                        (candidate_refs if candidate_refs != before_attempt_refs else ""),
-                        gate,
+                        residual_eval_refs.append(residual_eval_ref)
+                        residual_scores = _eval_case_scores(residual_eval_ref)
+                        completed_case_ids = {case_id for case_id, score in residual_scores.items() if score >= 1.0}
+                        _sync_retained_case_ids(working_retained_case_ids, residual_scores)
+                        residual_case_ids = _nonpassing_case_ids(residual_eval_ref)
+                        if winner_attempt_record is not None:
+                            winner_attempt_record.update(
+                                {
+                                    "completed_target_case_ids": sorted(
+                                        set(winner.get("target_case_ids", [])) & completed_case_ids
+                                    ),
+                                    "residual_case_ids": sorted(residual_case_ids),
+                                    "residual_eval_ref_path": residual_eval_ref,
+                                }
+                            )
+                        active_cases = _cases_with_ids(active_cases, residual_case_ids)
+                        attempt_source_eval_ref = residual_eval_ref
+                        current_repair_round = 1
+                        refresh_residual_analysis = True
+                        if not active_cases:
+                            repair_stop_reason = "all_batch_cases_completed"
+                        break
+
+                    if not active_cases:
+                        break
+                    if refresh_residual_analysis:
+                        continue
+                    if deferred_repairs:
+                        selected_repair = max(
+                            deferred_repairs,
+                            key=lambda item: _sibling_realized_sort_key(item["gate"]),
+                        )
+                        selected_repair["gate"]["selected_as_repair_parent"] = True
+                        current_refs = str(selected_repair["harness_refs_path"])
+                        attempt_source_eval_ref = str(selected_repair["eval_ref_path"])
+                        pending_analysis_ref = str(selected_repair["analysis_ref_path"])
+                        active_cases = list(selected_repair["active_cases"])
+                        current_repair_round += 1
+                        continue
+                    if issue_budget_exhausted:
+                        repair_stop_reason = "issue_attempt_limit_reached"
+                        break
+                    if repair_budget_exhausted:
+                        repair_stop_reason = "repair_round_limit_reached"
+                        break
+                    repair_stop_reason = (
+                        "repeated_issue_detected" if repeated_issue_ids else "issue_queue_exhausted_without_acceptance"
                     )
-                    state["candidate_gates"].append(gate)
-                    _refresh_optimization_experience(state, output_dir)
-                    attempt_records.append(
-                        {
-                            "attempt_index": attempt_index,
-                            "source_issue_id": issue_id or "",
-                            "source_eval_ref_path": attempt_source_eval_ref,
-                            "member_optimization_ref_path": member_ref,
-                            "before_harness_refs_path": before_attempt_refs,
-                            "after_harness_refs_path": current_refs,
-                            "candidate_gate_status": gate["status"],
-                            "candidate_gate_reason": gate["reason"],
-                            "accepted_target_case_ids": (
-                                list(gate.get("target_case_ids", [])) if primary_accepted else []
-                            ),
-                        }
-                    )
-                    last_member_ref = member_ref
-                    last_gate = gate
+                    break
+
+                if not active_cases and repair_stop_reason != "all_batch_cases_completed":
+                    repair_stop_reason = "all_batch_cases_completed"
 
                 batch_accepted = bool(accepted_target_case_ids)
+                if not batch_accepted:
+                    current_refs = batch_before_refs
                 batch_gate_status = (
                     "provisional" if batch_accepted else str((last_gate or {}).get("status", "rejected"))
                 )
@@ -363,8 +636,29 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "source_eval_ref_path": source_eval_ref,
                     "analysis_ref_path": analysis_ref,
                     "optimization_hypotheses_path": hypotheses_ref,
+                    "analysis_ref_paths": analysis_refs,
+                    "optimization_hypotheses_paths": hypotheses_refs,
+                    "residual_eval_ref_paths": residual_eval_refs,
+                    "repair_round_count": current_repair_round if attempt_index else 0,
+                    "candidate_cohort_count": attempt_index,
+                    "issue_attempt_count": issue_attempt_count,
+                    "max_issue_attempts": max_issue_attempts,
+                    "max_repair_rounds": max_repair_rounds,
+                    "repair_stop_reason": repair_stop_reason,
+                    "residual_case_ids": sorted(
+                        str(case.get("case_id", "") or "")
+                        for case in active_cases
+                        if str(case.get("case_id", "") or "")
+                    ),
                     "member_optimization_ref_path": last_member_ref,
                     "candidate_attempts": attempt_records,
+                    "improvement_cohort_ids": list(
+                        dict.fromkeys(
+                            str(item.get("improvement_cohort_id", "") or "")
+                            for item in attempt_records
+                            if str(item.get("improvement_cohort_id", "") or "")
+                        )
+                    ),
                     "before_harness_refs_path": batch_before_refs,
                     "after_harness_refs_path": current_refs,
                     "candidate_gate_status": batch_gate_status,
@@ -402,11 +696,46 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             full_case_scores = _eval_case_scores(full_eval_ref)
             full_failed_case_ids = sorted(case_id for case_id, score in full_case_scores.items() if score < 1.0)
             previous_best_eval_ref = str(state.get("best_eval_ref_path", "") or "")
-            previous_best_case_scores = _eval_case_scores(previous_best_eval_ref) if previous_best_eval_ref else {}
+            epoch_source_eval_ref = _epoch_full_source_eval_ref(
+                state,
+                epoch=epoch,
+                expected_case_ids=all_case_ids,
+            )
+            comparison_eval_ref = previous_best_eval_ref or epoch_source_eval_ref
+            previous_best_case_scores = _eval_case_scores(comparison_eval_ref) if comparison_eval_ref else {}
+            current_official_metrics = _eval_official_metrics(full_eval_ref)
+            previous_official_metrics = _eval_official_metrics(comparison_eval_ref) if comparison_eval_ref else {}
+            metric_name_changed = bool(
+                previous_official_metrics
+                and current_official_metrics
+                and previous_official_metrics.get("primary_metric") != current_official_metrics.get("primary_metric")
+            )
+            official_score_regressed = bool(
+                previous_official_metrics
+                and current_official_metrics
+                and (_number(current_official_metrics.get("primary_score")) or 0.0)
+                < (_number(previous_official_metrics.get("primary_score")) or 0.0)
+            )
+            new_infra_failures = bool(
+                current_official_metrics
+                and int(current_official_metrics.get("infra_failures", 0) or 0)
+                > int(previous_official_metrics.get("infra_failures", 0) or 0)
+            )
+            new_policy_violations = bool(
+                current_official_metrics
+                and int(current_official_metrics.get("policy_violations", 0) or 0)
+                > int(previous_official_metrics.get("policy_violations", 0) or 0)
+            )
+            opaque_snapshot_epoch = any(
+                str(gate.get("composition_mode", "") or "") == "opaque_snapshot" for gate in epoch_provisional_gates
+            )
             retained_case_ids = set(state.get("retained_case_ids", []))
+            protected_case_ids = retained_case_ids
+            if opaque_snapshot_epoch and not protected_case_ids:
+                protected_case_ids = {case_id for case_id, score in previous_best_case_scores.items() if score >= 1.0}
             regressed_best_case_ids = []
             for case_id, previous_score in previous_best_case_scores.items():
-                if case_id in retained_case_ids and full_case_scores.get(case_id, 0.0) < previous_score:
+                if case_id in protected_case_ids and full_case_scores.get(case_id, 0.0) < previous_score:
                     regressed_best_case_ids.append(case_id)
             regressed_best_case_ids.sort()
             failed_retention_case_ids = sorted(
@@ -428,6 +757,22 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         machine_evidence_case_ids=_machine_evidence_case_ids(full_failed_machine_evidence),
                     )
                 )
+            checkpoint_blocked = bool(
+                metric_name_changed
+                or official_score_regressed
+                or new_infra_failures
+                or new_policy_violations
+                or regressed_best_case_ids
+            )
+            if checkpoint_blocked:
+                for selection in gate_selections:
+                    selection.update(
+                        {
+                            "retained": False,
+                            "reason": "epoch_full_checkpoint_regressed_or_inconclusive",
+                            "failure_class": "regression_or_retention_failure",
+                        }
+                    )
             retained_gates = []
             removed_gates = []
             for gate, selection in zip(epoch_provisional_gates, gate_selections, strict=True):
@@ -439,7 +784,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 if full_error_case_ids or full_failed_machine_evidence
                 else "verified"
             )
-            if retained_gates and removed_gates:
+            if retained_gates and removed_gates and not opaque_snapshot_epoch:
                 selected_refs = _materialize_checkpoint_filtered_harness(
                     output_dir=output_dir,
                     epoch=epoch,
@@ -450,6 +795,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     full_eval_ref_path=full_eval_ref,
                 )
                 checkpoint_status = "filtered"
+            elif retained_gates and removed_gates and opaque_snapshot_epoch:
+                # A PolicyHarness candidate is one atomic filesystem snapshot.
+                # Never feed it through the ExpertHarness skill/tool composer.
+                checkpoint_status = "verified_opaque_snapshot"
             elif retained_gates and failed_retention_case_ids:
                 checkpoint_status = "verified_with_unrelated_failures"
             elif not retained_gates and epoch_provisional_gates:
@@ -462,12 +811,20 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "status": checkpoint_status,
                     "previous_best_score": best_score,
                     "previous_best_eval_ref_path": previous_best_eval_ref,
+                    "comparison_eval_ref_path": comparison_eval_ref,
                     "regressed_best_case_ids": regressed_best_case_ids,
                     "failed_retention_case_ids": failed_retention_case_ids,
                     "failed_case_ids": full_failed_case_ids,
                     "failed_target_case_ids": failed_target_case_ids,
                     "failed_machine_evidence": full_failed_machine_evidence,
                     "error_case_ids": sorted(full_error_case_ids),
+                    "official_metrics": current_official_metrics,
+                    "previous_official_metrics": previous_official_metrics,
+                    "metric_name_changed": metric_name_changed,
+                    "official_score_regressed": official_score_regressed,
+                    "new_infra_failures": new_infra_failures,
+                    "new_policy_violations": new_policy_violations,
+                    "opaque_snapshot_epoch": opaque_snapshot_epoch,
                     "retained_candidate_action_ids": _capability_action_ids(retained_gates),
                     "removed_candidate_action_ids": _capability_action_ids(removed_gates),
                     "selected_harness_refs_path": (selected_refs if retained_gates else epoch_start_refs),
@@ -475,7 +832,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 }
             )
             state["epoch_checkpoints"].append(checkpoint)
-            if retained_gates or (not epoch_provisional_gates and checkpoint_status == "verified"):
+            if not checkpoint_blocked and (
+                retained_gates or (not epoch_provisional_gates and checkpoint_status == "verified")
+            ):
                 current_refs = selected_refs
                 state["best_score"] = full_score
                 state["best_eval_ref_path"] = full_eval_ref
@@ -569,6 +928,137 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             )
         )
 
+    async def _generate_sibling_candidate_proposals(
+        self,
+        *,
+        cohort_id: str,
+        source_eval_ref: str,
+        analysis_ref: str,
+        parent_harness_refs_path: str,
+        optimization_hypotheses_path: str,
+        source_issue_id: str | None,
+        source_issue_signature: str,
+        frozen_target_case_ids: set[str],
+        frozen_experience: dict[str, Any],
+        rejected_capabilities: list[dict[str, Any]],
+        output_dir: Path,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Materialize and freeze every sibling before any task evaluation."""
+        requested_count = int(self.config.member_optimizer.sibling_candidate_count)
+        cohort_dir = output_dir / "member_optimizations" / "sibling_cohorts" / cohort_id
+        manifest_path = cohort_dir / "cohort_manifest.yaml"
+        existing = _read_yaml(manifest_path) if manifest_path.is_file() else {}
+        expected_identity = {
+            "parent_harness_refs_path": parent_harness_refs_path,
+            "source_eval_ref_path": source_eval_ref,
+            "analysis_ref_path": analysis_ref,
+            "optimization_hypotheses_path": optimization_hypotheses_path,
+            "source_issue_id": source_issue_id or "",
+            "source_issue_signature": source_issue_signature,
+            "frozen_target_case_ids": sorted(frozen_target_case_ids),
+            "requested_candidate_count": requested_count,
+            "improver_version_id": self.improver_policy.version_id,
+            "improver_policy_digest": self.improver_policy.canonical_digest,
+        }
+        if existing and any(existing.get(key) != value for key, value in expected_identity.items()):
+            raise RuntimeError(f"sibling cohort manifest identity changed during resume: {manifest_path}")
+        existing_candidates = {
+            str(item.get("candidate_id", "") or ""): dict(item)
+            for item in existing.get("candidates", [])
+            if isinstance(item, dict) and str(item.get("candidate_id", "") or "")
+        }
+        proposals: list[dict[str, Any]] = []
+        manifest: dict[str, Any] = {
+            "schema_version": 1,
+            "status": "generating",
+            "cohort_id": cohort_id,
+            **expected_identity,
+            "rank_frozen": False,
+            "candidates": [],
+        }
+        for candidate_index in range(1, requested_count + 1):
+            candidate_id = f"{cohort_id}_c{candidate_index:03d}"
+            cached = existing_candidates.get(candidate_id, {})
+            cached_member_ref = str(cached.get("member_optimization_ref_path", "") or "")
+            cached_candidate_refs = str(cached.get("candidate_harness_refs_path", "") or "")
+            if Path(cached_member_ref).is_file() and Path(cached_candidate_refs).is_file():
+                proposal = cached
+            else:
+                sibling_generation = {
+                    "cohort_id": cohort_id,
+                    "candidate_id": candidate_id,
+                    "generation_index": candidate_index,
+                    "candidate_index": candidate_index,
+                    "candidate_count": requested_count,
+                    "prior_proposals": [_candidate_proposal_summary(item) for item in proposals],
+                    "outcomes_available": False,
+                }
+                candidate_experience = {
+                    "journal": list(frozen_experience.get("journal", [])),
+                    "lever_scoreboard": dict(frozen_experience.get("lever_scoreboard", {})),
+                }
+                if requested_count > 1:
+                    candidate_experience["sibling_generation"] = sibling_generation
+                if self._explicit_improver_policy:
+                    policy_payload = self.improver_policy.to_dict()
+                    candidate_experience["improver_policy"] = {
+                        "version_id": self.improver_policy.version_id,
+                        "policy_digest": self.improver_policy.canonical_digest,
+                        "generation_directives": policy_payload["generation_directives"],
+                        "budget_policy": policy_payload["budget_policy"],
+                    }
+                member_ref = await self.member_optimizer.optimize(
+                    eval_ref_path=source_eval_ref,
+                    analysis_result_path=analysis_ref,
+                    harness_refs_path=parent_harness_refs_path,
+                    output_dir=str(cohort_dir / f"c{candidate_index:03d}"),
+                    defer_publish=True,
+                    rejected_capabilities=list(rejected_capabilities),
+                    single_harness=True,
+                    optimization_hypotheses_path=optimization_hypotheses_path,
+                    optimization_issue_ids=([source_issue_id] if source_issue_id else None),
+                    optimization_experience=candidate_experience,
+                )
+                member_info = _read_yaml(member_ref)
+                candidate_refs = str(member_info.get("optimized_harness_refs_path", "") or parent_harness_refs_path)
+                capabilities = _candidate_capabilities(member_info)
+                plan_path = str(member_info.get("plan_path", "") or "")
+                proposal = {
+                    "candidate_id": candidate_id,
+                    "candidate_index": candidate_index,
+                    "generation_order": candidate_index,
+                    "member_optimization_ref_path": member_ref,
+                    "candidate_harness_refs_path": candidate_refs,
+                    "member_status": str(member_info.get("status", "") or ""),
+                    "composition_mode": _member_composition_mode(member_info),
+                    "plan_path": plan_path,
+                    "plan_sha256": _file_sha256(plan_path) if Path(plan_path).is_file() else "",
+                    "capabilities": capabilities,
+                    "candidate_fingerprint": canonical_candidate_fingerprint(capabilities),
+                }
+            proposals.append(proposal)
+            manifest["candidates"] = proposals
+            _write_yaml_atomic(manifest_path, manifest)
+
+        ranked = rank_candidate_proposals(
+            proposals,
+            frozen_target_case_ids=set(frozen_target_case_ids),
+            improver_policy=self.improver_policy,
+        )
+        manifest.update(
+            {
+                "status": "frozen",
+                "rank_frozen": True,
+                "ranking_policy": self.improver_policy.ranking_policy,
+                "improver_version_id": self.improver_policy.version_id,
+                "improver_policy_digest": self.improver_policy.canonical_digest,
+                "generated_candidate_count": len(ranked),
+                "candidates": ranked,
+            }
+        )
+        _write_yaml_atomic(manifest_path, manifest)
+        return ranked, str(manifest_path)
+
     async def _candidate_gate(
         self,
         *,
@@ -581,6 +1071,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         capabilities: list[dict[str, Any]],
         output_dir: Path,
         dataset: DatasetArtifact,
+        frozen_target_case_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         original_source_score = _eval_score(source_eval_ref)
         base = {
@@ -623,7 +1114,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             }
         batch_case_ids = {str(case.get("case_id", "") or "") for case in cases if str(case.get("case_id", "") or "")}
         target_case_ids = (
-            _capability_target_case_ids(
+            set(frozen_target_case_ids) & batch_case_ids
+            if frozen_target_case_ids is not None
+            else _capability_target_case_ids(
                 capabilities,
                 fallback_target_case_ids=fallback_target_case_ids,
             )
@@ -651,6 +1144,18 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             dataset=dataset,
         )
         candidate_case_scores = _eval_case_scores(candidate_eval_ref)
+        source_native_signals = _eval_case_native_signals(paired_source_eval_ref)
+        candidate_native_signals = _eval_case_native_signals(candidate_eval_ref)
+        source_native_case_scores = _native_case_scores(source_native_signals)
+        candidate_native_case_scores = _native_case_scores(candidate_native_signals)
+        source_native_target_score = _average_case_scores(source_native_case_scores, target_case_ids)
+        candidate_native_target_score = _average_case_scores(candidate_native_case_scores, target_case_ids)
+        native_target_score_delta = candidate_native_target_score - source_native_target_score
+        native_dimension_deltas_by_case, native_dimension_delta = _native_dimension_deltas(
+            source_native_signals,
+            candidate_native_signals,
+            target_case_ids,
+        )
         verifier_deltas_by_case = _verifier_deltas_by_case(
             paired_source_eval_ref,
             candidate_eval_ref,
@@ -764,7 +1269,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "retained": True,
         }
         reason = "candidate_improved_target_cases" if accepted else "candidate_did_not_improve_target_cases"
-        if missing_tools:
+        if _eval_has_errors(candidate_eval_ref):
+            reason = "candidate_gate_inconclusive_due_to_error_cases"
+        elif missing_tools:
             if _missing_invocations_were_late(
                 missing_tool_invocations,
                 invoked_tools_by_case,
@@ -784,8 +1291,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 reason = "expected_skill_not_invoked_on_target_case"
         elif failed_machine_evidence:
             reason = "candidate_machine_evidence_failed"
-        elif _eval_has_errors(candidate_eval_ref):
-            reason = "candidate_gate_inconclusive_due_to_error_cases"
         elif not target_improved:
             reason = (
                 "candidate_made_partial_verifier_progress"
@@ -803,7 +1308,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             verifier_deltas_by_case=verifier_deltas_by_case,
         )
         candidate_failure_analysis_ref = ""
-        candidate_failure_diagnoses: dict[str, dict[str, Any]] = {}
+        candidate_failure_diagnoses: dict[str, list[dict[str, Any]]] = {}
         if not accepted and not _eval_has_errors(candidate_eval_ref):
             paired_feedback = {
                 "by_case": {
@@ -812,6 +1317,17 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             "kind": "paired_source_candidate_delta",
                             "verifier_delta": dict(delta),
                             "candidate_patch_excerpt": str(candidate_patch_excerpts_by_case.get(case_id, "")),
+                            "source_native_score": _number(source_native_case_scores.get(case_id)),
+                            "candidate_native_score": _number(candidate_native_case_scores.get(case_id)),
+                            "native_score_delta": _paired_score_delta(
+                                source_native_case_scores,
+                                candidate_native_case_scores,
+                                case_id,
+                            ),
+                            "native_dimension_deltas": dict(native_dimension_deltas_by_case.get(case_id, {})),
+                            "source_native_signal": str(source_native_signals.get(case_id, {}).get("source", "")),
+                            "candidate_native_signal": str(candidate_native_signals.get(case_id, {}).get("source", "")),
+                            "native_signal_role": "sibling_and_repair_ranking_only",
                         }
                     ]
                     for case_id, delta in verifier_deltas_by_case.items()
@@ -844,6 +1360,23 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "source_target_score": source_target_score,
             "candidate_target_score": candidate_target_score,
             "target_score_delta": target_score_delta,
+            # Native EvoBench scores are diagnostic ranking signals only. The
+            # acceptance and epoch-promotion gates above remain on eval-ref
+            # Pass^3 scores and must not be relaxed by this continuous delta.
+            "source_native_target_score": source_native_target_score,
+            "candidate_native_target_score": candidate_native_target_score,
+            "native_target_score_delta": native_target_score_delta,
+            "source_native_case_scores": source_native_case_scores,
+            "candidate_native_case_scores": candidate_native_case_scores,
+            "source_native_signal_sources_by_case": {
+                case_id: str(signal.get("source", "")) for case_id, signal in source_native_signals.items()
+            },
+            "candidate_native_signal_sources_by_case": {
+                case_id: str(signal.get("source", "")) for case_id, signal in candidate_native_signals.items()
+            },
+            "native_dimension_deltas_by_case": native_dimension_deltas_by_case,
+            "native_dimension_delta": native_dimension_delta,
+            "native_signal_role": "sibling_and_repair_ranking_only",
             "failing_target_case_ids": failing_target_case_ids,
             "improved_target_case_ids": improved_target_case_ids,
             "unimproved_target_case_ids": unimproved_target_case_ids,
@@ -946,12 +1479,23 @@ def _validate_single_harness_refs(harness_refs_path: str) -> None:
 def _request_fingerprint(
     request: IterativeSingleHarnessRequest,
     source_harness_refs_path: str,
+    *,
+    sibling_candidate_count: int,
+    improver_policy_digest: str,
 ) -> dict[str, Any]:
     return {
-        "optimization_chain_version": 10,
+        "optimization_chain_version": 17,
         "dataset_files": [str(Path(path).expanduser().resolve()) for path in request.dataset_files],
         "dataset_sha256": [_file_sha256(path) for path in request.dataset_files],
         "source_harness_refs_path": source_harness_refs_path,
+        "baseline_eval_ref_path": (
+            str(Path(request.baseline_eval_ref_path).expanduser().resolve()) if request.baseline_eval_ref_path else ""
+        ),
+        "baseline_eval_ref_sha256": (
+            _file_sha256(request.baseline_eval_ref_path) if request.baseline_eval_ref_path else ""
+        ),
+        "sibling_candidate_count": sibling_candidate_count,
+        "improver_policy_digest": improver_policy_digest,
     }
 
 
@@ -961,6 +1505,184 @@ def _file_sha256(path: str | Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _improvement_cohort_id(
+    *,
+    epoch: int,
+    batch_index: int,
+    repair_round_index: int,
+    issue_signature: str,
+    parent_harness_refs_path: str,
+    source_eval_ref_path: str,
+    analysis_ref_path: str,
+    frozen_target_case_ids: set[str],
+    improver_policy_digest: str,
+) -> str:
+    signature = hashlib.sha256(str(issue_signature).encode("utf-8")).hexdigest()[:8]
+    identity = json.dumps(
+        {
+            "parent_harness_refs_path": parent_harness_refs_path,
+            "source_eval_ref_path": source_eval_ref_path,
+            "analysis_ref_path": analysis_ref_path,
+            "frozen_target_case_ids": sorted(frozen_target_case_ids),
+            "improver_policy_digest": improver_policy_digest,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    identity_digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
+    return f"e{epoch:03d}_b{batch_index:03d}_r{repair_round_index:03d}_{signature}_{identity_digest}"
+
+
+def _candidate_evaluation_output_dir(
+    *,
+    optimization_output_dir: Path,
+    epoch: int,
+    batch_index: int,
+    attempt_index: int,
+    candidate_index: int,
+) -> Path:
+    """Keep candidate case artifacts below the Windows path-length boundary."""
+    return (
+        optimization_output_dir.parent
+        / "ce"
+        / f"e{epoch:03d}"
+        / f"b{batch_index:03d}"
+        / f"a{attempt_index:03d}"
+        / f"c{candidate_index:03d}"
+    )
+
+
+def _candidate_proposal_summary(proposal: dict[str, Any]) -> dict[str, Any]:
+    """Expose only pre-execution proposal semantics to later sibling planners."""
+    capabilities = []
+    for raw in proposal.get("capabilities", []):
+        if not isinstance(raw, dict):
+            continue
+        capabilities.append(
+            {
+                "action_group": str(raw.get("action_group", "") or ""),
+                "operation": str(raw.get("operation", "") or ""),
+                "target_path": str(raw.get("target_path", "") or ""),
+                "expected_effect": str(raw.get("expected_effect", "") or ""),
+                "lever": str((raw.get("lever_decision", {}) or {}).get("selected_lever", "") or ""),
+            }
+        )
+    return {
+        "candidate_id": str(proposal.get("candidate_id", "") or ""),
+        "candidate_fingerprint": str(proposal.get("candidate_fingerprint", "") or ""),
+        "capabilities": capabilities,
+        "execution_status": "not_started",
+    }
+
+
+def _verify_frozen_candidate_proposals(proposals: list[dict[str, Any]]) -> None:
+    """Reject plan drift after pre-execution priority has been frozen."""
+    for proposal in proposals:
+        expected = str(proposal.get("plan_sha256", "") or "")
+        plan_path = str(proposal.get("plan_path", "") or "")
+        if not expected:
+            continue
+        if not Path(plan_path).is_file() or _file_sha256(plan_path) != expected:
+            raise RuntimeError(
+                f"frozen sibling candidate plan changed before evaluation: {proposal.get('candidate_id', '<unknown>')}"
+            )
+
+
+def _sibling_realized_sort_key(
+    gate: dict[str, Any],
+) -> tuple[float, float, float, float, float, int, int, int]:
+    candidate_score = _number(gate.get("candidate_target_score"))
+    target_delta = _number(gate.get("target_score_delta"))
+    native_score = _number(gate.get("candidate_native_target_score"))
+    native_delta = _number(gate.get("native_target_score_delta"))
+    dimension_delta = _number(gate.get("native_dimension_delta"))
+    progress = len(gate.get("verifier_progress_target_case_ids", []) or [])
+    action_count = len(gate.get("capabilities", []) or [])
+    predicted_rank = int(gate.get("predicted_rank", 0) or 0)
+    return (
+        candidate_score if candidate_score is not None else float("-inf"),
+        target_delta if target_delta is not None else float("-inf"),
+        native_score if native_score is not None else float("-inf"),
+        native_delta if native_delta is not None else float("-inf"),
+        dimension_delta if dimension_delta is not None else float("-inf"),
+        progress,
+        -action_count,
+        -predicted_rank,
+    )
+
+
+def _select_sibling_winner(
+    gates: list[dict[str, Any]],
+    *,
+    top_m: int,
+) -> dict[str, Any] | None:
+    qualified = [
+        gate
+        for gate in gates
+        if bool(gate.get("primary_gate_accepted")) and 0 < int(gate.get("predicted_rank", 0) or 0) <= top_m
+    ]
+    return max(qualified, key=_sibling_realized_sort_key) if qualified else None
+
+
+def _best_realized_sibling_gate(gates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    conclusive = [gate for gate in gates if _number(gate.get("candidate_target_score")) is not None]
+    return max(conclusive, key=_sibling_realized_sort_key) if conclusive else (gates[0] if gates else None)
+
+
+def _attach_native_signal_feedback(
+    cohort_feedback: dict[str, Any],
+    gates: list[dict[str, Any]],
+) -> None:
+    """Persist ranking-only continuous outcomes without changing gate metrics."""
+    gates_by_id = {
+        str(gate.get("candidate_id", "") or ""): gate for gate in gates if str(gate.get("candidate_id", "") or "")
+    }
+    for candidate in cohort_feedback.get("candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        gate = gates_by_id.get(str(candidate.get("candidate_id", "") or ""))
+        if gate is None:
+            continue
+        candidate["continuous_outcome"] = {
+            "source_native_target_score": _number(gate.get("source_native_target_score")),
+            "candidate_native_target_score": _number(gate.get("candidate_native_target_score")),
+            "native_target_score_delta": _number(gate.get("native_target_score_delta")),
+            "native_dimension_delta": _number(gate.get("native_dimension_delta")),
+            "source_signal_sources_by_case": dict(
+                gate.get("source_native_signal_sources_by_case", {})
+                if isinstance(gate.get("source_native_signal_sources_by_case"), dict)
+                else {}
+            ),
+            "candidate_signal_sources_by_case": dict(
+                gate.get("candidate_native_signal_sources_by_case", {})
+                if isinstance(gate.get("candidate_native_signal_sources_by_case"), dict)
+                else {}
+            ),
+            "role": "sibling_and_repair_ranking_only",
+            "promotion_authority": "eval_ref_pass_hat_k",
+        }
+    selection = cohort_feedback.get("selection")
+    if isinstance(selection, dict):
+        selection["realized_sort_policy"] = "pass_hat_k_then_native_continuous_v1"
+
+
+def _write_candidate_feedback_ledger(state: dict[str, Any], output_dir: Path) -> str:
+    path = output_dir / "candidate_feedback_ledger.yaml"
+    instances = state.get("improvement_instances", {})
+    cohorts = [instances[key] for key in sorted(instances)] if isinstance(instances, dict) else []
+    _write_yaml_atomic(
+        path,
+        {
+            "schema_version": 1,
+            "ledger_type": "single_harness_sibling_candidate_feedback",
+            "cohorts": cohorts,
+        },
+    )
+    state["candidate_feedback_ledger_path"] = str(path)
+    return str(path)
 
 
 def _result_from_state(
@@ -988,20 +1710,27 @@ def _load_or_create_state(
 ) -> dict[str, Any]:
     if resume and state_path.is_file():
         state = _read_yaml(state_path)
-        if state.get("fingerprint") != fingerprint:
+        stored_fingerprint = state.get("fingerprint")
+        if not _resume_fingerprint_matches(stored_fingerprint, fingerprint):
             raise ValueError("resume inputs do not match single-harness state")
+        if stored_fingerprint != fingerprint:
+            state["fingerprint"] = fingerprint
         state.setdefault(
             "working_harness_refs_path",
             state.get("current_harness_refs_path", source_harness_refs_path),
         )
         state.setdefault("retained_case_ids", [])
         state.setdefault("best_eval_ref_path", "")
+        state.setdefault("baseline_eval_ref_path", "")
+        state.setdefault("baseline_score", None)
         state.setdefault("publication_status", "not_published")
         state.setdefault("optimization_journal", [])
         state.setdefault("lever_scoreboard", {})
+        state.setdefault("improvement_instances", {})
+        state.setdefault("candidate_feedback_ledger_path", "")
         return state
     return {
-        "version": 5,
+        "version": 7,
         "status": "running",
         "mode": "single_harness_benchmark",
         "fingerprint": fingerprint,
@@ -1016,14 +1745,81 @@ def _load_or_create_state(
         "publication_status": "not_published",
         "best_score": None,
         "best_eval_ref_path": "",
+        "baseline_eval_ref_path": "",
+        "baseline_score": None,
         "retained_case_ids": [],
         "batch_plan_paths": {},
         "completed_batches": {},
         "candidate_gates": [],
+        "improvement_instances": {},
         "epoch_checkpoints": [],
         "optimization_journal": [],
         "lever_scoreboard": {},
+        "candidate_feedback_ledger_path": "",
     }
+
+
+def _initialize_frozen_baseline(
+    state: dict[str, Any],
+    *,
+    baseline_eval_ref_path: str,
+    source_harness_refs_path: str,
+    expected_case_ids: set[str],
+) -> None:
+    """Seed global comparison state without changing per-batch execution."""
+    if not baseline_eval_ref_path:
+        return
+
+    baseline_path = Path(baseline_eval_ref_path).expanduser().resolve()
+    if not _eval_ref_complete(baseline_path):
+        raise ValueError(f"baseline eval ref is incomplete: {baseline_path}")
+    baseline = _read_yaml(baseline_path)
+
+    raw_refs_path = str(baseline.get("harness_refs_path", "") or "").strip()
+    if not raw_refs_path:
+        raise ValueError(f"baseline eval ref has no harness_refs_path: {baseline_path}")
+    recorded_refs_path = Path(raw_refs_path).expanduser()
+    if not recorded_refs_path.is_absolute():
+        recorded_refs_path = baseline_path.parent / recorded_refs_path
+    if recorded_refs_path.resolve() != Path(source_harness_refs_path).expanduser().resolve():
+        raise ValueError("baseline eval ref was not produced by the source Harness")
+
+    raw_cases = baseline.get("cases")
+    if not isinstance(raw_cases, list):
+        raise ValueError(f"baseline eval ref has no cases: {baseline_path}")
+    baseline_case_ids = [str(case.get("case_id", "") or "") for case in raw_cases if isinstance(case, dict)]
+    if any(not case_id for case_id in baseline_case_ids) or len(baseline_case_ids) != len(set(baseline_case_ids)):
+        raise ValueError(f"baseline eval ref contains missing or duplicate case ids: {baseline_path}")
+    if set(baseline_case_ids) != expected_case_ids:
+        missing = sorted(expected_case_ids - set(baseline_case_ids))
+        extra = sorted(set(baseline_case_ids) - expected_case_ids)
+        raise ValueError(f"baseline eval ref does not match the frozen dataset: missing={missing}, extra={extra}")
+
+    existing_baseline = str(state.get("baseline_eval_ref_path", "") or "")
+    if existing_baseline and Path(existing_baseline).expanduser().resolve() != baseline_path:
+        raise ValueError("resume baseline eval ref does not match single-harness state")
+    state["baseline_eval_ref_path"] = str(baseline_path)
+    state["baseline_score"] = _eval_score(baseline_path)
+    if not str(state.get("best_eval_ref_path", "") or ""):
+        state["best_eval_ref_path"] = str(baseline_path)
+        state["best_score"] = state["baseline_score"]
+
+
+def _resume_fingerprint_matches(stored: Any, requested: dict[str, Any]) -> bool:
+    if stored == requested:
+        return True
+    if not isinstance(stored, dict):
+        return False
+    if stored.get("optimization_chain_version") != 12:
+        return False
+    if requested.get("optimization_chain_version") != 13:
+        return False
+    if requested.get("improver_policy_digest") != default_improver_policy().canonical_digest:
+        return False
+    migrated = dict(stored)
+    migrated["optimization_chain_version"] = 13
+    migrated["improver_policy_digest"] = requested["improver_policy_digest"]
+    return migrated == requested
 
 
 def _refresh_optimization_experience(
@@ -1060,6 +1856,15 @@ def _refresh_optimization_experience(
                     "epoch": int(gate.get("epoch", 0) or 0),
                     "batch_index": int(gate.get("batch_index", 0) or 0),
                     "action_id": str(capability.get("action_id", "") or ""),
+                    "improvement_cohort_id": str(gate.get("improvement_cohort_id", "") or ""),
+                    "candidate_id": str(gate.get("candidate_id", "") or ""),
+                    "candidate_index": int(gate.get("candidate_index", 0) or 0),
+                    "predicted_rank": int(gate.get("predicted_rank", 0) or 0),
+                    "predicted_score": _number(gate.get("predicted_score")),
+                    "improver_version_id": str(gate.get("improver_version_id", "") or ""),
+                    "improver_policy_digest": str(gate.get("improver_policy_digest", "") or ""),
+                    "selected_for_promotion": bool(gate.get("selected_for_promotion")),
+                    "qualified_for_promotion": bool(gate.get("qualified_for_promotion")),
                     "surface": str(capability.get("action_group", "") or ""),
                     "lever": str(decision.get("selected_lever", "unresolved") or "unresolved"),
                     "lever_decision": decision,
@@ -1067,6 +1872,11 @@ def _refresh_optimization_experience(
                     "source_target_score": _number(gate.get("source_target_score")),
                     "candidate_target_score": _number(gate.get("candidate_target_score")),
                     "target_score_delta": _number(gate.get("target_score_delta")),
+                    "source_native_target_score": _number(gate.get("source_native_target_score")),
+                    "candidate_native_target_score": _number(gate.get("candidate_native_target_score")),
+                    "native_target_score_delta": _number(gate.get("native_target_score_delta")),
+                    "native_dimension_delta": _number(gate.get("native_dimension_delta")),
+                    "native_signal_role": str(gate.get("native_signal_role", "") or ""),
                     "non_target_score_delta": _number(gate.get("non_target_score_delta")),
                     "status": str(gate.get("status", "") or ""),
                     "reason": str(gate.get("reason", "") or ""),
@@ -1119,7 +1929,10 @@ def _refresh_optimization_experience(
         )
         entry["attempts"] += 1
         accepted = record.get("status") == "accepted"
-        entry["accepted" if accepted else "rejected"] += 1
+        if record.get("status") == "superseded":
+            entry["qualified_not_selected"] = int(entry.get("qualified_not_selected", 0)) + 1
+        else:
+            entry["accepted" if accepted else "rejected"] += 1
         target_delta = _number(record.get("target_score_delta")) or 0.0
         entry["total_target_score_delta"] += target_delta
         if target_delta > 0:
@@ -1209,6 +2022,13 @@ def _candidate_capabilities(member_info: dict[str, Any]) -> list[dict[str, Any]]
     return capabilities
 
 
+def _member_composition_mode(member_info: dict[str, Any]) -> str:
+    """Return the candidate package-composition contract, when declared."""
+    metadata = member_info.get("metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return str(member_info.get("composition_mode", metadata.get("composition_mode", "")) or "")
+
+
 def _target_case_ids(
     plan: dict[str, Any],
     member_info: dict[str, Any],
@@ -1253,6 +2073,55 @@ def _analysis_issue_case_ids(analysis_ref: str | Path) -> dict[str, set[str]]:
                 case_ids.add(str(evidence["case_id"]))
         issue_case_ids[issue_id] = case_ids
     return issue_case_ids
+
+
+def _analysis_issue_signatures(analysis_ref: str | Path) -> dict[str, str]:
+    """Build stable semantic keys so a residual loop cannot retry one issue."""
+    analysis = _read_yaml(analysis_ref)
+    signatures: dict[str, str] = {}
+    for issue in analysis.get("issues", []) if isinstance(analysis, dict) else []:
+        if not isinstance(issue, dict):
+            continue
+        issue_id = str(issue.get("issue_id", "") or "")
+        if not issue_id:
+            continue
+        metadata = issue.get("metadata", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        attribution = metadata.get("attribution", {})
+        attribution = attribution if isinstance(attribution, dict) else {}
+        semantic_payload = {
+            "category": str(issue.get("category", "") or "").strip().lower(),
+            "summary": " ".join(str(issue.get("summary", "") or "").lower().split()),
+            "recommendation": " ".join(str(issue.get("recommendation", "") or "").lower().split()),
+            "failure_mode": " ".join(str(issue.get("failure_mode", "") or "").lower().split()),
+            "target_ref": str(attribution.get("target_ref", issue.get("target_ref", "")) or "").strip().lower(),
+            "affected_cases": sorted(str(case_id) for case_id in issue.get("affected_cases", []) if str(case_id)),
+        }
+        if not any(value for key, value in semantic_payload.items() if key != "affected_cases"):
+            signatures[issue_id] = issue_id
+            continue
+        encoded = json.dumps(
+            semantic_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        signatures[issue_id] = hashlib.sha256(encoded).hexdigest()
+    return signatures
+
+
+def _cases_with_ids(cases: list[dict[str, Any]], case_ids: set[str]) -> list[dict[str, Any]]:
+    """Keep source order while selecting active cases by identifier."""
+    return [case for case in cases if str(case.get("case_id", "") or "") in case_ids]
+
+
+def _sync_retained_case_ids(
+    retained_case_ids: set[str],
+    evaluated_case_scores: dict[str, float],
+) -> None:
+    """Replace retention state for every case observed in a fresh evaluation."""
+    retained_case_ids.difference_update(evaluated_case_scores)
+    retained_case_ids.update(case_id for case_id, score in evaluated_case_scores.items() if score >= 1.0)
 
 
 def _rejected_capability_history(candidate_gates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1308,7 +2177,7 @@ def _expected_runtime_names(
 
 def _compact_analysis_diagnoses(
     analysis_ref: str | Path,
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, list[dict[str, Any]]]:
     """Load the candidate analyzer's causal result, not just its score."""
     analysis = _read_yaml(analysis_ref)
     metadata = analysis.get("metadata", {})
@@ -1320,7 +2189,7 @@ def _compact_analysis_diagnoses(
         payload = json.loads(diagnoses_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    compact: dict[str, dict[str, Any]] = {}
+    compact: dict[str, list[dict[str, Any]]] = {}
     for diagnosis in payload.get("per_case_diagnoses", []):
         if not isinstance(diagnosis, dict):
             continue
@@ -1342,7 +2211,7 @@ def _compact_analysis_diagnoses(
         ):
             if key in diagnosis:
                 compact_diagnosis[key] = diagnosis.get(key)
-        compact[case_id] = compact_diagnosis
+        compact.setdefault(case_id, []).append(compact_diagnosis)
     return compact
 
 
@@ -1363,17 +2232,32 @@ def _prior_candidate_feedback(
         diagnoses = diagnoses if isinstance(diagnoses, dict) else {}
         patches = patches if isinstance(patches, dict) else {}
         for case_id in active_case_ids & set(deltas):
+            diagnosis_value = diagnoses.get(case_id, {})
+            if isinstance(diagnosis_value, list):
+                case_diagnoses = [dict(item) for item in diagnosis_value if isinstance(item, dict)]
+            elif isinstance(diagnosis_value, dict):
+                case_diagnoses = [dict(diagnosis_value)]
+            else:
+                case_diagnoses = []
             by_case[case_id].append(
                 {
                     "experiment_id": str(record.get("experiment_id", "") or ""),
                     "surface": str(record.get("surface", "") or ""),
                     "outcome": str(record.get("outcome", "") or ""),
+                    "status": str(record.get("status", "") or ""),
+                    "reason": str(record.get("reason", "") or ""),
                     "failure_class": str(record.get("failure_class", "") or ""),
+                    "predicted_rank": record.get("predicted_rank"),
+                    "predicted_score": record.get("predicted_score"),
+                    "source_target_score": record.get("source_target_score"),
+                    "candidate_target_score": record.get("candidate_target_score"),
+                    "target_score_delta": record.get("target_score_delta"),
+                    "selected_for_promotion": record.get("selected_for_promotion"),
                     "verifier_delta": dict(deltas.get(case_id, {})),
                     "candidate_patch_excerpt": str(patches.get(case_id, "") or ""),
-                    "candidate_failure_diagnosis": dict(
-                        diagnoses.get(case_id, {}) if isinstance(diagnoses.get(case_id), dict) else {}
-                    ),
+                    # Preserve the singular field for older analyzer prompts.
+                    "candidate_failure_diagnosis": (dict(case_diagnoses[0]) if case_diagnoses else {}),
+                    "candidate_failure_diagnoses": case_diagnoses,
                 }
             )
     return {"by_case": {case_id: records[-3:] for case_id, records in by_case.items() if records}}
@@ -1559,6 +2443,11 @@ def _update_batch_attempt_record(
 
 def _eval_score(eval_ref_path: str | Path) -> float:
     payload = _read_yaml(eval_ref_path)
+    official_metrics = payload.get("official_metrics", {})
+    if isinstance(official_metrics, dict):
+        primary_score = _number(official_metrics.get("primary_score"))
+        if primary_score is not None:
+            return primary_score
     scores = [_number(case.get("score")) for case in payload.get("cases", []) if isinstance(case, dict)]
     numeric = [score for score in scores if score is not None]
     return sum(numeric) / len(numeric) if numeric else 0.0
@@ -1575,6 +2464,184 @@ def _eval_case_scores(eval_ref_path: str | Path) -> dict[str, float]:
         if case_id and score is not None:
             scores[case_id] = score
     return scores
+
+
+def _eval_case_native_signals(eval_ref_path: str | Path) -> dict[str, dict[str, Any]]:
+    """Read continuous evaluator signals, falling back to the eval-ref score.
+
+    EvoBench deliberately stores Pass^3 as ``eval_ref.cases[].score`` while its
+    continuous trial mean remains under ``result.evaluation.metadata``. Keeping
+    that distinction here lets search rank equally passing siblings without
+    changing the binary promotion contract.
+    """
+    payload = _read_yaml(eval_ref_path)
+    signals: dict[str, dict[str, Any]] = {}
+    for case in payload.get("cases", []):
+        if not isinstance(case, dict):
+            continue
+        case_id = str(case.get("case_id", "") or "")
+        fallback_score = _number(case.get("score"))
+        if not case_id:
+            continue
+        result = _read_json(str(case.get("result_path", "") or ""))
+        evaluation = result.get("evaluation", {})
+        evaluation = evaluation if isinstance(evaluation, dict) else {}
+        metadata = evaluation.get("metadata", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        dimensions = _native_dimension_scores(metadata)
+        native_score, source = _native_score_from_metadata(metadata)
+        if native_score is None and dimensions:
+            native_score = sum(dimensions.values()) / len(dimensions)
+            source = "dimension_mean"
+        if native_score is None:
+            native_score = fallback_score
+            source = "eval_ref_score_fallback"
+        if native_score is None:
+            continue
+        signals[case_id] = {
+            "score": native_score,
+            "source": source,
+            "dimensions": dimensions,
+        }
+    return signals
+
+
+def _native_score_from_metadata(metadata: dict[str, Any]) -> tuple[float | None, str]:
+    trial_scores = metadata.get("trial_scores")
+    if isinstance(trial_scores, list | tuple):
+        numeric_trials = [score for value in trial_scores if (score := _number(value)) is not None]
+        if numeric_trials:
+            return sum(numeric_trials) / len(numeric_trials), "trial_scores_mean"
+    for key in (
+        "aggregate_mean_score",
+        "native_mean_score",
+        "mean_score",
+        "avg_behavior_score",
+    ):
+        value = _number(metadata.get(key))
+        if value is not None:
+            return value, key
+    parsed = metadata.get("parsed", {})
+    parsed = parsed if isinstance(parsed, dict) else {}
+    dimensions = parsed.get("dimensions", {})
+    dimensions = dimensions if isinstance(dimensions, dict) else {}
+    value = _number(dimensions.get("avg_behavior_score"))
+    return (value, "parsed_dimensions_avg_behavior_score") if value is not None else (None, "")
+
+
+def _native_dimension_scores(metadata: dict[str, Any]) -> dict[str, float]:
+    trial_details = metadata.get("trial_details")
+    if isinstance(trial_details, list):
+        trial_values: dict[str, list[float]] = {}
+        for detail in trial_details:
+            if not isinstance(detail, dict):
+                continue
+            raw_dimensions = detail.get("dimension_scores")
+            if not isinstance(raw_dimensions, dict):
+                continue
+            for name, raw_dimension in raw_dimensions.items():
+                if not isinstance(raw_dimension, dict) or raw_dimension.get("availability") != "available":
+                    continue
+                score = _number(raw_dimension.get("value"))
+                if score is not None:
+                    trial_values.setdefault(str(name), []).append(score)
+        if trial_values:
+            return {name: sum(values) / len(values) for name, values in sorted(trial_values.items()) if values}
+
+    parsed = metadata.get("parsed", {})
+    parsed = parsed if isinstance(parsed, dict) else {}
+    candidates = [parsed.get("dimensions"), metadata.get("dimensions"), metadata.get("judge_dimensions")]
+    scores: dict[str, float] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in ("per_behavior_scores", "dimension_scores", "scores"):
+            values = candidate.get(key)
+            if not isinstance(values, dict):
+                continue
+            for name, raw_score in values.items():
+                score = _number(raw_score)
+                if score is not None:
+                    scores[str(name)] = score
+        for name, raw_score in candidate.items():
+            if not str(name).endswith("_score") or isinstance(raw_score, dict):
+                continue
+            score = _number(raw_score)
+            if score is not None:
+                scores.setdefault(str(name), score)
+        if scores:
+            break
+    return dict(sorted(scores.items()))
+
+
+def _native_case_scores(signals: dict[str, dict[str, Any]]) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for case_id, signal in signals.items():
+        score = _number(signal.get("score"))
+        if score is not None:
+            scores[case_id] = score
+    return scores
+
+
+def _paired_score_delta(
+    source_scores: dict[str, float],
+    candidate_scores: dict[str, float],
+    case_id: str,
+) -> float | None:
+    source_score = _number(source_scores.get(case_id))
+    candidate_score = _number(candidate_scores.get(case_id))
+    if source_score is None or candidate_score is None:
+        return None
+    return candidate_score - source_score
+
+
+def _native_dimension_deltas(
+    source_signals: dict[str, dict[str, Any]],
+    candidate_signals: dict[str, dict[str, Any]],
+    target_case_ids: set[str],
+) -> tuple[dict[str, dict[str, float]], float | None]:
+    by_case: dict[str, dict[str, float]] = {}
+    all_deltas: list[float] = []
+    for case_id in sorted(target_case_ids):
+        source_dimensions = source_signals.get(case_id, {}).get("dimensions", {})
+        candidate_dimensions = candidate_signals.get(case_id, {}).get("dimensions", {})
+        if not isinstance(source_dimensions, dict) or not isinstance(candidate_dimensions, dict):
+            continue
+        case_deltas: dict[str, float] = {}
+        for name in sorted(set(source_dimensions) & set(candidate_dimensions)):
+            source_score = _number(source_dimensions.get(name))
+            candidate_score = _number(candidate_dimensions.get(name))
+            if source_score is None or candidate_score is None:
+                continue
+            delta = candidate_score - source_score
+            case_deltas[str(name)] = delta
+            all_deltas.append(delta)
+        if case_deltas:
+            by_case[case_id] = case_deltas
+    aggregate = sum(all_deltas) / len(all_deltas) if all_deltas else None
+    return by_case, aggregate
+
+
+def _eval_official_metrics(eval_ref_path: str | Path) -> dict[str, Any]:
+    payload = _read_yaml(eval_ref_path)
+    metrics = payload.get("official_metrics", {})
+    return dict(metrics) if isinstance(metrics, dict) else {}
+
+
+def _epoch_full_source_eval_ref(
+    state: dict[str, Any],
+    *,
+    epoch: int,
+    expected_case_ids: set[str],
+) -> str:
+    """Find an epoch source evaluation that covers the full frozen suite."""
+    for key, record in state.get("completed_batches", {}).items():
+        if not key.startswith(f"epoch_{epoch:03d}:") or not isinstance(record, dict):
+            continue
+        candidate = str(record.get("source_eval_ref_path", "") or "")
+        if candidate and set(_eval_case_scores(candidate)) == expected_case_ids:
+            return candidate
+    return ""
 
 
 def _eval_verifier_statuses(
@@ -1881,11 +2948,19 @@ def _nonpassing_case_ids(eval_ref_path: str) -> set[str]:
         case_id = str(case.get("case_id", "") or "")
         score = _number(case.get("score"))
         status = str(case.get("status", "") or "").lower()
+        explicit_passed = _eval_case_explicit_passed(case)
         status_failed = status in {"failed", "error"}
-        score_failed = score is not None and score < 1.0
+        score_failed = explicit_passed is False or (explicit_passed is None and score is not None and score < 1.0)
         if case_id and (status_failed or score_failed):
             case_ids.add(case_id)
     return case_ids
+
+
+def _eval_case_explicit_passed(case: dict[str, Any]) -> bool | None:
+    metadata = case.get("metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    value = metadata.get("evaluation_passed")
+    return value if isinstance(value, bool) else None
 
 
 def _classify_gate_failure(
@@ -2606,6 +3681,8 @@ def _build_report(state: dict[str, Any], dataset: DatasetArtifact) -> dict[str, 
         "completed_batch_count": len(state["completed_batches"]),
         "candidate_count": len(state["candidate_gates"]),
         "accepted_candidate_count": len(accepted),
+        "baseline_score": state.get("baseline_score"),
+        "baseline_eval_ref_path": state.get("baseline_eval_ref_path", ""),
         "best_score": state.get("best_score"),
         "best_eval_ref_path": state.get("best_eval_ref_path", ""),
         "best_harness_refs_path": state.get("best_harness_refs_path"),
@@ -2616,6 +3693,9 @@ def _build_report(state: dict[str, Any], dataset: DatasetArtifact) -> dict[str, 
         "retained_case_ids": state.get("retained_case_ids", []),
         "epoch_checkpoints": state["epoch_checkpoints"],
         "candidate_gates": state["candidate_gates"],
+        "improvement_instances": state.get("improvement_instances", {}),
+        "candidate_feedback_ledger_path": state.get("candidate_feedback_ledger_path", ""),
+        "improver_policy": state.get("improver_policy", {}),
         "optimization_journal_path": state.get("optimization_journal_path", ""),
         "lever_scoreboard_path": state.get("lever_scoreboard_path", ""),
         "lever_scoreboard": state.get("lever_scoreboard", {}),
