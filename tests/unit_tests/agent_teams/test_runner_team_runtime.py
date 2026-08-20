@@ -22,6 +22,7 @@ from openjiuwen.agent_teams.context import (
     reset_session_id,
     set_session_id,
 )
+from openjiuwen.agent_teams.debate import DebateRunState
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     TeamAgentSpec,
@@ -53,6 +54,48 @@ async def _activate_pool_entry(manager, team_name: str, session_id: str, agent) 
             state=RuntimeState.RUNNING,
         )
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("base", [False, True])
+async def test_runner_streaming_facade_closes_inner_stream(monkeypatch, base: bool) -> None:
+    class TrackedStream:
+        def __init__(self) -> None:
+            self.closed = False
+            self._yielded = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._yielded:
+                raise StopAsyncIteration
+            self._yielded = True
+            return "chunk"
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    inner = TrackedStream()
+    fake_runner = SimpleNamespace(
+        run_agent_team_streaming=lambda **_kwargs: inner,
+        _run_base_team_streaming=lambda **_kwargs: inner,
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.team_runner._global_runner",
+        lambda: fake_runner,
+    )
+
+    stream = Runner.run_agent_team_streaming(
+        agent_team="team",
+        inputs={"query": "hello"},
+        base=base,
+    )
+    assert await stream.__anext__() == "chunk"
+
+    await stream.aclose()
+
+    assert inner.closed is True
 
 
 @pytest.fixture
@@ -1280,8 +1323,12 @@ class TestTeamRuntimeManagerInteract:
 
         delivered: list[str] = []
 
+        debate_state = DebateRunState(language="en")
+        debate_state.round_id = "completed-round"
+        debate_state.finalized = True
+
         class _Agent:
-            team_backend = None
+            team_backend = SimpleNamespace(debate_state=debate_state)
 
             async def deliver_input(self, content):
                 delivered.append(content)
@@ -1295,6 +1342,53 @@ class TestTeamRuntimeManagerInteract:
         )
         assert result.ok is True
         assert delivered == ["hi"]
+        assert debate_state.round_id is None
+        assert debate_state.finalized is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    @pytest.mark.parametrize(
+        ("target", "should_reset"),
+        [
+            (None, True),
+            ("team_leader", True),
+            ("peer", False),
+        ],
+    )
+    async def test_operator_resets_finalized_debate_only_when_reaching_leader(
+        self,
+        target,
+        should_reset,
+    ):
+        from openjiuwen.agent_teams.interaction.payload import OperatorMessage
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+
+        debate_state = DebateRunState(language="en")
+        debate_state.round_id = "completed-round"
+        debate_state.finalized = True
+        message_manager = SimpleNamespace(
+            broadcast_message=AsyncMock(return_value="broadcast-id"),
+            send_message=AsyncMock(return_value="direct-id"),
+        )
+        backend = SimpleNamespace(
+            debate_state=debate_state,
+            leader_member_name="team_leader",
+            message_manager=message_manager,
+        )
+        agent = SimpleNamespace(
+            team_backend=backend,
+            auto_start_all=AsyncMock(),
+            auto_start_member=AsyncMock(),
+        )
+
+        result = await TeamRuntimeManager._dispatch_payload(
+            agent,
+            OperatorMessage(body="next user turn", target=target),
+        )
+
+        assert result.ok is True
+        assert (debate_state.round_id is None) is should_reset
+        assert debate_state.finalized is (not should_reset)
 
     @pytest.mark.asyncio
     @pytest.mark.level0

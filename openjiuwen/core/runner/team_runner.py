@@ -569,6 +569,31 @@ class _TeamRunnerMixin:
             force=force,
         )
 
+    async def reset_agent_team_session(
+        self,
+        *,
+        team_name: str,
+        session_id: str,
+        force: bool = True,
+    ) -> bool:
+        """Reset a single team session: drop its task board + release its
+        checkpoint while keeping team_info / roster / team_home / binding.
+
+        Session-scoped counterpart to ``delete_agent_team``: delegates to
+        ``kv_cache_team_actions.reset_session`` (which evicts the captured
+        caches around ``TeamRuntimeManager.reset_session``). Next chat.send on
+        the same session_id hits ``NEW_TEAM_IN_SESSION`` (fresh empty board,
+        members re-dispatched from the preserved roster).
+        """
+        from openjiuwen.agent_teams.kv_cache import kv_cache_team_actions
+
+        return await kv_cache_team_actions.reset_session(
+            self._get_team_runtime_manager(),
+            team_name=team_name,
+            session_id=session_id,
+            force=force,
+        )
+
     # ------------------------------------------------------------------
     # release helper called from _RunnerImpl.release
     # ------------------------------------------------------------------
@@ -958,17 +983,21 @@ class _TeamRunnerClassMixin:
         """
         if base:
             # pylint: disable=protected-access — designated internal facade hook, see module docstring.
-            async for chunk in _global_runner()._run_base_team_streaming(
+            inner_stream = _global_runner()._run_base_team_streaming(
                 base_team=agent_team,
                 inputs=inputs,
                 session=session,
                 context=context,
                 stream_modes=stream_modes,
                 envs=envs,
-            ):
-                yield chunk
+            )
+            try:
+                async for chunk in inner_stream:
+                    yield chunk
+            finally:
+                await inner_stream.aclose()
             return
-        async for chunk in _global_runner().run_agent_team_streaming(
+        inner_stream = _global_runner().run_agent_team_streaming(
             agent_team=agent_team,
             inputs=inputs,
             member=member,
@@ -978,8 +1007,12 @@ class _TeamRunnerClassMixin:
             envs=envs,
             stream_logger=stream_logger,
             background_task_controller=background_task_controller,
-        ):
-            yield chunk
+        )
+        try:
+            async for chunk in inner_stream:
+                yield chunk
+        finally:
+            await inner_stream.aclose()
 
     @classmethod
     async def interact_agent_team(
@@ -1089,6 +1122,24 @@ class _TeamRunnerClassMixin:
         return await _global_runner().delete_agent_team(
             team_name=team_name,
             session_ids=session_ids,
+            force=force,
+        )
+
+    @classmethod
+    async def reset_agent_team_session(
+        cls,
+        *,
+        team_name: str,
+        session_id: str,
+        force: bool = True,
+    ) -> bool:
+        """Reset a single team session (session-scoped counterpart to
+        ``delete_agent_team``). ``force=True`` stops the team's active
+        runtime in-line before the reset.
+        """
+        return await _global_runner().reset_agent_team_session(
+            team_name=team_name,
+            session_id=session_id,
             force=force,
         )
 

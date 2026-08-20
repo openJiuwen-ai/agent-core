@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/interaction/`、`openjiuwen/agent_teams/constants.py`、`openjiuwen/agent_teams/runtime/manager.py`（`_dispatch_payload`）、`openjiuwen/agent_teams/agent/coordination/handlers/message.py`（HITT inbound 钩子）|
-| 最近一次修订日期 | 2026-07-14 |
-| 关联 feature | F_13_human-agent-send-message.md |
+| 最近一次修订日期 | 2026-08-15 |
+| 关联 feature | F_13_human-agent-send-message.md、F_73_team-debate-single-wrapup.md |
 
 ## 范围 / 边界
 
@@ -41,9 +41,9 @@
 3. **保留名不可被普通成员注册**：`TeamAgentSpec.build()` 在 `_validate_reserved_names` 拒绝任何 `predefined_members[*]` 撞 `RESERVED_MEMBER_NAMES`。`HUMAN_AGENT` 角色用 `human_agent` 这个名是框架自己注入的特例，不走用户声明路径。
 4. **`InteractPayload` 是 dispatcher 的唯一入参形状**：`runtime/manager.py:_dispatch_payload` 只 isinstance `GodViewMessage` / `OperatorMessage` / `HumanAgentMessage` 三种。新增视角 = 新增 dataclass + 在 `_dispatch_payload` 加一支；不允许 `dict` / `**kwargs` 形式漏过去。
 5. **三视角到通道的映射唯一**：
-   - `GodViewMessage` → `UserInbox.deliver_to_leader`，落到 leader DeepAgent 的 `deliver_input`，**不**写消息总线；
-   - `OperatorMessage(target=None)` → `auto_start_all()` + `UserInbox.broadcast`（先启动再广播）；
-   - `OperatorMessage(target=<name>)` → `auto_start_member(<name>)` + `UserInbox.direct`（先启动再投递）；
+   - `GodViewMessage` → 若 Leader 上一轮 debate 已 finalized，先重置该状态，再经 `UserInbox.deliver_to_leader` 落到 leader DeepAgent 的 `deliver_input`，**不**写消息总线；
+   - `OperatorMessage(target=None)` → `auto_start_all()`，重置 Leader 已 finalized 的上一轮 debate，再 `UserInbox.broadcast`（先启动再广播）；
+   - `OperatorMessage(target=<Leader name>)` → `auto_start_member(<name>)`，重置 Leader 已 finalized 的上一轮 debate，再 `UserInbox.direct`；定向其他成员时不重置（均为先启动再投递）；
    - `HumanAgentMessage(target=None)` → `HumanAgentInbox._drive_agent`（经 `TeamAgent.interact` 把驱动输入投进该 avatar **自身** coordination 的 `USER_INPUT` 事件，不写消息总线、不 reach-in 未启动的 harness）；
    - `HumanAgentMessage(target in {"all", "*"})` → `HumanAgentInbox` 经 `broadcast_message`；
    - `HumanAgentMessage(target=<name>)` → `HumanAgentInbox` 经 `deliver_direct`。
@@ -251,6 +251,7 @@ async def _dispatch_payload(agent: TeamAgent, payload: InteractPayload) -> Deliv
         return DeliverResult.failure("no_team_backend")
 
     if isinstance(payload, GodViewMessage):
+        await reset_finalized_debate()
         return await UserInbox.deliver_to_leader(agent.deliver_input, payload.body)
     if isinstance(payload, OperatorMessage):
         inbox = UserInbox(backend.message_manager)
@@ -258,10 +259,13 @@ async def _dispatch_payload(agent: TeamAgent, payload: InteractPayload) -> Deliv
             # Start all UNSTARTED members before broadcasting so
             # they subscribe to the event bus before MessageEvent.
             await agent.auto_start_all()
+            await reset_finalized_debate()
             return await inbox.broadcast(payload.body)
         # Start the targeted member before delivering so it
         # subscribes before MessageEvent is published.
         await agent.auto_start_member(payload.target)
+        if payload.target == backend.leader_member_name:
+            await reset_finalized_debate()
         return await inbox.direct(payload.target, payload.body)
     if isinstance(payload, HumanAgentMessage):
         try:

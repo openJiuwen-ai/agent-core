@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-07-28 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md |
+| 最近一次修订日期 | 2026-08-15 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_73_team-debate-single-wrapup.md |
 
 ## 范围 / 边界
 
@@ -191,6 +191,11 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `SendMessageTool` 还在工具边界拒绝 leader `to = "user"`：leader 的普通文本输出
     已直接展示给用户，写入 user pseudo-recipient mailbox 会产生无人标记已读的消息。
     teammate / human_agent 发给 `user` 的既有语义保持不变。
+    autonomous teammate 的 `SendMessageTool` schema 额外带可选 `final_report: boolean=false`；
+    autonomous leader、scheduled teammate/leader 与 human-agent 都不暴露该参数。该标记只声明
+    "这是发给 Leader 的本轮最终汇报"；收件人必须是名册中 Leader 的真实 `member_name` 字符串，`leader` 不作为角色别名（仅在它确实是该 `member_name` 时有效），数组和广播均不算最终汇报。
+    普通发给 Leader 的消息不隐式视为完成；真正的
+    `coordination_meta` 由 debate rail 在当前轮内注入，工具本身不构造协议元数据。
     参数描述的**复用是免费的**（形态同 `name` → `t(tool, "param")` 同 key），
     **扩展就是加 key**；语义变了的同名参数用新的 desc_key 命名空间
     （`send_message_scheduled.to`）。**绝不让 resolver 学会 variant**。

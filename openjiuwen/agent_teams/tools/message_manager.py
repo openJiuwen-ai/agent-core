@@ -7,6 +7,7 @@ This module provides messaging functionality for team members and team leader.
 """
 
 import uuid
+from dataclasses import dataclass
 from typing import (
     List,
     Optional,
@@ -22,6 +23,15 @@ from openjiuwen.agent_teams.schema.events import (
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.tools.database import TeamDatabase, TeamMessageBase
 from openjiuwen.core.common.logging import team_logger
+
+
+@dataclass(frozen=True)
+class DirectMessageOptions:
+    """Optional persistence settings for a direct message."""
+
+    protocol: str = "plain"
+    meta: dict | None = None
+    coordination_meta: dict | None = None
 
 
 class TeamMessageManager:
@@ -62,8 +72,7 @@ class TeamMessageManager:
         content: str,
         to_member_name: str,
         from_member_name: str | None = None,
-        protocol: str = "plain",
-        meta: dict | None = None,
+        options: DirectMessageOptions | None = None,
     ) -> Optional[str]:
         """Send a point-to-point message.
 
@@ -72,13 +81,10 @@ class TeamMessageManager:
                 whose text is rendered from ``meta`` at delivery time.
             to_member_name: Recipient member ID.
             from_member_name: Override sender ID. Defaults to self.member_name.
-            protocol: Message format — ``"plain"`` for normal text,
-                ``"json"`` for structured payloads.
-            meta: Framework-only delivery payload (template key + refs +
-                params). Not reachable from the send_message tool — only the
-                framework (scheduler handoffs) sets it. See
-                ``message_template.py``.
+            options: Optional protocol, delivery-template metadata, and
+                coordination metadata.
         """
+        options = options or DirectMessageOptions()
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
 
@@ -90,8 +96,9 @@ class TeamMessageManager:
             to_member_name=to_member_name,
             broadcast=False,
             is_read=False,
-            protocol=protocol,
-            meta=meta,
+            protocol=options.protocol,
+            meta=options.meta,
+            coordination_meta=options.coordination_meta,
         )
         if not success:
             team_logger.error(f"Failed to create message {message_id}")
@@ -120,6 +127,7 @@ class TeamMessageManager:
         self,
         content: str,
         from_member_name: str | None = None,
+        coordination_meta: dict | None = None,
     ) -> Optional[str]:
         """Send a broadcast message.
 
@@ -127,6 +135,7 @@ class TeamMessageManager:
             content: Message content.
             from_member_name: Override sender ID. Defaults to
                 ``self.member_name``.
+            coordination_meta: Framework-only coordination facts.
         """
         sender = from_member_name or self.member_name
         message_id = str(uuid.uuid4())
@@ -138,6 +147,7 @@ class TeamMessageManager:
             content=content,
             to_member_name=None,
             broadcast=True,
+            coordination_meta=coordination_meta,
         )
         if not success:
             team_logger.error(f"Failed to create broadcast message {message_id}")
@@ -167,6 +177,7 @@ class TeamMessageManager:
         to_member_names: List[str],
         from_member_name: str | None = None,
         protocol: str = "plain",
+        coordination_meta: dict | None = None,
     ) -> List[str]:
         """Send identical content to several members as N point-to-point messages.
 
@@ -184,6 +195,7 @@ class TeamMessageManager:
             from_member_name: Override sender id. Defaults to
                 ``self.member_name``.
             protocol: Message format (``"plain"`` / ``"json"``).
+            coordination_meta: Shared framework-only coordination facts.
 
         Returns:
             The created message ids in recipient order, or an empty list when
@@ -200,6 +212,7 @@ class TeamMessageManager:
             content=content,
             recipients=pairs,
             protocol=protocol,
+            coordination_meta=coordination_meta,
         )
         if created != len(pairs):
             team_logger.error("Failed to batch-create multicast messages from %s", sender)

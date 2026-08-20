@@ -31,12 +31,19 @@ class _SpawnToolBase(TeamTool, ABC):
     construction, and model-facing result mapping.
     """
 
-    def __init__(self, team: TeamBackend, t: Translator, tool_name: str):
+    def __init__(
+        self,
+        team: TeamBackend,
+        t: Translator,
+        tool_name: str,
+        *,
+        desc_key: str | None = None,
+    ):
         super().__init__(
             ToolCard(
                 id=f"team.{tool_name}",
                 name=tool_name,
-                description=t(tool_name),
+                description=t(desc_key or tool_name),
             )
         )
         self.team = team
@@ -112,8 +119,9 @@ class SpawnTeammateTool(_SpawnToolBase):
         t: Translator,
         *,
         model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
+        desc_key: str = "spawn_teammate",
     ):
-        super().__init__(team, t, "spawn_teammate")
+        super().__init__(team, t, "spawn_teammate", desc_key=desc_key)
         self._allocate_model_config = model_config_allocator
         self.card.input_params = {
             "type": "object",
@@ -200,8 +208,8 @@ class SpawnHumanAgentTool(_SpawnToolBase):
     even wired when HITT is disabled (see ``create_team_tools``).
     """
 
-    def __init__(self, team: TeamBackend, t: Translator):
-        super().__init__(team, t, "spawn_human_agent")
+    def __init__(self, team: TeamBackend, t: Translator, *, desc_key: str = "spawn_human_agent"):
+        super().__init__(team, t, "spawn_human_agent", desc_key=desc_key)
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -256,8 +264,8 @@ class SpawnBridgeAgentTool(_SpawnToolBase):
     (see ``create_team_tools``).
     """
 
-    def __init__(self, team: TeamBackend, t: Translator):
-        super().__init__(team, t, "spawn_bridge_agent")
+    def __init__(self, team: TeamBackend, t: Translator, *, desc_key: str = "spawn_bridge_agent"):
+        super().__init__(team, t, "spawn_bridge_agent", desc_key=desc_key)
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -362,8 +370,8 @@ class SpawnExternalCliTool(_SpawnToolBase):
     (see ``create_team_tools``).
     """
 
-    def __init__(self, team: TeamBackend, t: Translator):
-        super().__init__(team, t, "spawn_external_cli")
+    def __init__(self, team: TeamBackend, t: Translator, *, desc_key: str = "spawn_external_cli"):
+        super().__init__(team, t, "spawn_external_cli", desc_key=desc_key)
         self.card.input_params = {
             "type": "object",
             "properties": {

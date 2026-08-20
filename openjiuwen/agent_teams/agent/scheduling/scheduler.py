@@ -43,6 +43,7 @@ from openjiuwen.agent_teams.agent.scheduling.verdict import (
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.agent_teams.tools.message_manager import DirectMessageOptions
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.agent_teams.prompts.loader import load_template
 
@@ -430,7 +431,11 @@ class TeamScheduler:
         if message_manager is None:
             return
         try:
-            message_id = await message_manager.send_message(content="", to_member_name=member_name, meta=meta)
+            message_id = await message_manager.send_message(
+                content="",
+                to_member_name=member_name,
+                options=DirectMessageOptions(meta=meta),
+            )
             if not message_id:
                 team_logger.error("[scheduler] handoff message to %s was not delivered", member_name)
             await self._host.auto_start_member(member_name)

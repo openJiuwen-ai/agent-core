@@ -1006,7 +1006,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                         )
                     )
                     continue
-                generated = await self._evolve_skill_with_sharing(
+                evolved = await self._evolve_skill_with_sharing(
                     skill_name=skill_name,
                     skill_signals=skill_signals,
                     messages=messages,
@@ -1017,14 +1017,23 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     # Same as enterprise-dev: review_status mirrors selfEvolution action.
                     review_status=action,
                 )
-                if not generated:
+                if evolved.status in {"staged", "auto_approved", "persistence_failed"}:
+                    continue
+                if evolved.status == "generation_failed":
                     deferred_cancelled.append(
                         (
                             skill_name,
-                            f"attributed optimizer signal for '{skill_name}' "
-                            "produced no reusable evolution records",
+                            f"generation failed for '{skill_name}'",
                         )
                     )
+                    continue
+                deferred_cancelled.append(
+                    (
+                        skill_name,
+                        f"attributed optimizer signal for '{skill_name}' "
+                        "produced no reusable evolution records",
+                    )
+                )
 
             # Score presented experiences before any terminal cancelled progress
             # (host watcher treats cancelled as cycle end).

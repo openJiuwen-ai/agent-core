@@ -147,6 +147,50 @@ async def delete_team(
     return deleted
 
 
+async def reset_session(
+    manager: "TeamRuntimeManager",
+    *,
+    team_name: str,
+    session_id: str,
+    force: bool,
+) -> bool:
+    """Run a session-scoped reset then evict its captured caches.
+
+    Mirrors ``delete_team`` but scoped to a single ``session_id``: captures
+    the evict plan (``prepare_action``), delegates to
+    ``manager.reset_session`` (which drops the session's dynamic tables and
+    releases its checkpoint while keeping team_info / roster / team_home /
+    binding), then executes the captured evict and discards the manifest.
+    Idempotent: ``manager.reset_session`` no-ops when the checkpoint is
+    already released.
+    """
+    prepared = await prepare_action(
+        manager,
+        action="evict",
+        team_name=team_name,
+        session_id=session_id,
+    )
+
+    reset = await manager.reset_session(
+        team_name=team_name,
+        session_id=session_id,
+        force=force,
+    )
+    if not reset:
+        return reset
+
+    if prepared:
+        await execute_action(
+            manager,
+            action="evict",
+            team_name=team_name,
+            session_id=session_id,
+            reason="session_reset",
+        )
+    _discard(manager, team_name=team_name, session_ids=[session_id])
+    return True
+
+
 async def prepare_session_release(
     manager: "TeamRuntimeManager",
     *,

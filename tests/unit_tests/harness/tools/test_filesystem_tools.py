@@ -1312,3 +1312,16 @@ async def test_write_file_small_file_single_full_read_allows_overwrite(sys_op, t
 
     res = await write_tool.invoke({"file_path": file_path, "content": "x\ny\nz"})
     assert res.success is True
+
+
+@pytest.mark.asyncio
+async def test_read_file_tool_rejects_office_docx_without_utf8_codec(sys_op, temp_dir):
+    file_path = os.path.join(temp_dir, "sample.docx")
+    payload = b"PK\x03\x04" + b"\x00" * 6 + b"\x87\x00" + b"\x00" * 16
+    with open(file_path, "wb") as fh:
+        fh.write(payload)
+
+    res = await ReadFileTool(sys_op).invoke({"file_path": file_path})
+    assert res.success is False
+    assert "codec can't decode" not in (res.error or "")
+    assert "Cannot read" in (res.error or "") or "Office" in (res.error or "") or "binary" in (res.error or "").lower()

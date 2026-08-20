@@ -16,7 +16,7 @@ View team task information.
 - Verify task state after a member reports progress
 
 ### action=claimable
-- Quickly get all pending tasks ready to claim
+- Quickly get pending tasks you can start (assignee is you, or still unassigned)
 - After completing a task, find the next available one
 
 ## Output
@@ -36,7 +36,7 @@ Full single-task detail: includes content, blocked_by (upstream dependencies), b
 
 ## Teammate Workflow
 
-1. After completing your current task, call view_task (default list) to find available work
-2. Look for tasks with status=pending, no assignee, and empty blocked_by
+1. After completing your current task, call view_task (claimable or list) to find available work
+2. Look for tasks with status=pending, assignee is you (or empty), and empty blocked_by
 3. Claim with claim_task(status=claimed), then use action=get to get full requirements
 4. If blocked, focus on unblocking or notify the leader

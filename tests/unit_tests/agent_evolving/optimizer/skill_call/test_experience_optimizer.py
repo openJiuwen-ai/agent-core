@@ -306,6 +306,96 @@ class TestSkillExperienceOptimizerGenerate:
 
     @staticmethod
     @pytest.mark.asyncio
+    async def test_two_stage_cancels_hung_analyzer_then_retries_with_shorter_prompt():
+        candidates = [
+            {"action": "append", "target": "body", "section": "Troubleshooting", "content": "A"},
+        ]
+        patches = [
+            {
+                "action": "append",
+                "target": "body",
+                "section": "Troubleshooting",
+                "content": "A",
+                "merge_target": None,
+            },
+        ]
+        call_count = {"n": 0}
+
+        async def hang_first_then_succeed(**_: object) -> SimpleNamespace:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                await asyncio.sleep(10)
+                return SimpleNamespace(content="too late")
+            if call_count["n"] == 2:
+                return SimpleNamespace(content=_mock_analyzer_json(candidates))
+            return SimpleNamespace(content=_mock_formatter_json(patches))
+
+        llm = MagicMock()
+        llm.invoke = AsyncMock(side_effect=hang_first_then_succeed)
+        optimizer = SkillExperienceOptimizer(
+            llm=llm,
+            model="dummy",
+            language="en",
+            two_stage=True,
+            generate_records_llm_policy=LLMInvokePolicy(
+                attempt_timeout_secs=0.05,
+                total_budget_secs=0.3,
+                max_attempts=2,
+                backoff_base_secs=0,
+            ),
+        )
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "hello"}],
+            existing_desc_records=[],
+            existing_body_records=[],
+        )
+        records = await optimizer.generate_records(ctx)
+        assert len(records) == 1
+        assert records[0].change.content == "A"
+        assert llm.invoke.await_count == 3
+        first_prompt = llm.invoke.await_args_list[0].kwargs["messages"][0]["content"]
+        second_prompt = llm.invoke.await_args_list[1].kwargs["messages"][0]["content"]
+        assert len(second_prompt) <= len(first_prompt)
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_two_stage_raises_when_analyzer_retry_also_times_out():
+        async def always_hang(**_: object) -> SimpleNamespace:
+            await asyncio.sleep(10)
+            return SimpleNamespace(content="too late")
+
+        llm = MagicMock()
+        llm.invoke = AsyncMock(side_effect=always_hang)
+        optimizer = SkillExperienceOptimizer(
+            llm=llm,
+            model="dummy",
+            language="en",
+            two_stage=True,
+            generate_records_llm_policy=LLMInvokePolicy(
+                attempt_timeout_secs=0.05,
+                total_budget_secs=0.3,
+                max_attempts=2,
+                backoff_base_secs=0,
+            ),
+        )
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "hello"}],
+            existing_desc_records=[],
+            existing_body_records=[],
+        )
+        with pytest.raises(BaseError) as exc_info:
+            await optimizer.generate_records(ctx)
+        assert exc_info.value.status == StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR
+        assert llm.invoke.await_count == 2
+
+    @staticmethod
+    @pytest.mark.asyncio
     async def test_generate_reraises_llm_base_error():
         optimizer = SkillExperienceOptimizer(llm=MagicMock(), model="dummy", language="cn", two_stage=False)
         optimizer._generate_drafts_with_retries = AsyncMock(

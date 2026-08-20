@@ -19,6 +19,7 @@ framework swallowing as silent error handling.
 
 from __future__ import annotations
 
+import asyncio
 from typing import (
     Any,
     ClassVar,
@@ -98,8 +99,13 @@ class AgentRoundController(Protocol):
         """Guarantee that content reaches the DeepAgent regardless of state."""
         ...
 
-    async def resume_interrupt(self, user_input: Any) -> None:
-        """Resume a pending HITL interrupt with structured input."""
+    async def resume_interrupt(self, user_input: Any) -> str:
+        """Resume a pending HITL interrupt with structured input.
+
+        Returns ``"delivered"`` (resume started), ``"queued"`` (round in
+        flight; drained when the round settles on the matching interrupt), or
+        ``"dropped"`` (no pending interrupt and no in-flight round).
+        """
         ...
 
 
@@ -201,6 +207,9 @@ class EventDispatcher:
         self._blueprint = blueprint
         self._infra = infra
         self._dispatch_mode = dispatch_mode
+        self._deferred_wakes: list[CoordinationEvent] = []
+        self._startup_ready = False
+        self._startup_lock = asyncio.Lock()
 
         self.lifecycle = AgentLifecycleHandler(host, blueprint, infra, poll_ctrl)
         self.member = MemberHandler(host, blueprint, infra, poll_ctrl)
@@ -274,11 +283,60 @@ class EventDispatcher:
         """The dispatch mode this handler set was assembled for."""
         return self._dispatch_mode
 
+    _DROP_WHEN_NOT_READY: ClassVar[frozenset[InnerEventType]] = frozenset(
+        {
+            InnerEventType.POLL_TASK,
+            InnerEventType.POLL_MAILBOX,
+            InnerEventType.INITIAL_POLL_TASK,
+            InnerEventType.SCHEDULER_SCAN,
+            InnerEventType.SHUTDOWN,
+        }
+    )
+    _MAX_DEFERRED_WAKES: ClassVar[int] = 64
+
+    def _should_defer_when_not_ready(self, event: CoordinationEvent) -> bool:
+        if isinstance(event, InnerEventMessage):
+            return event.event_type not in self._DROP_WHEN_NOT_READY
+        return True
+
+    def _defer_wake(self, event: CoordinationEvent) -> None:
+        if len(self._deferred_wakes) >= self._MAX_DEFERRED_WAKES:
+            dropped = self._deferred_wakes.pop(0)
+            team_logger.warning(
+                "deferred wake buffer full; dropping oldest event type={}",
+                getattr(dropped, "event_type", type(dropped).__name__),
+            )
+        self._deferred_wakes.append(event)
+
+    async def activate_and_flush(self) -> None:
+        """Open dispatch at the final startup boundary after FIFO replay."""
+        async with self._startup_lock:
+            if not self._round.is_agent_ready():
+                return
+            pending = self._deferred_wakes
+            self._deferred_wakes = []
+            for event in pending:
+                await self._dispatch_ready(event)
+            self._startup_ready = True
+
+    async def deactivate(self) -> None:
+        """Close dispatch admission before pausing or stopping a run cycle."""
+        async with self._startup_lock:
+            self._startup_ready = False
+
     async def dispatch(self, event: CoordinationEvent) -> None:
         """Wake-up entry. Applies coarse rules, then triggers framework."""
-        if not self._round.is_agent_ready():
-            team_logger.debug("agent not ready, skipping coordination wake")
-            return
+        async with self._startup_lock:
+            if not self._startup_ready or not self._round.is_agent_ready():
+                if self._should_defer_when_not_ready(event):
+                    self._defer_wake(event)
+                else:
+                    team_logger.debug("agent not ready, skipping coordination wake")
+                return
+            await self._dispatch_ready(event)
+
+    async def _dispatch_ready(self, event: CoordinationEvent) -> None:
+        """Dispatch an event after the readiness gate."""
 
         role = self._blueprint.role
 

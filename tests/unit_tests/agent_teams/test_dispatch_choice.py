@@ -136,6 +136,9 @@ def test_spec_review_knobs_validation():
     assert spec.verify_vote_threshold == pytest.approx(2 / 3)
     assert spec.default_max_review_rounds == 3
     assert spec.review_stall_timeout == 1800
+    assert spec.max_debate_rounds is None
+
+    assert TeamAgentSpec(**base, max_debate_rounds=1).max_debate_rounds == 1
 
     with pytest.raises(ValueError):
         TeamAgentSpec(**base, verify_vote_threshold=0)
@@ -145,6 +148,8 @@ def test_spec_review_knobs_validation():
         TeamAgentSpec(**base, default_max_review_rounds=0)
     with pytest.raises(ValueError):
         TeamAgentSpec(**base, review_stall_timeout=0)
+    with pytest.raises(ValueError):
+        TeamAgentSpec(**base, max_debate_rounds=0)
 
 
 @pytest.mark.level1

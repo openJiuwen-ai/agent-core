@@ -15,7 +15,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.context import get_session_id
-from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamRuntimeContext,
@@ -242,7 +242,24 @@ class SpawnManager:
             team_logger.error("Error cleaning up teammate {}: {}", member_name, e)
 
     async def restart_teammate(self, member_name: str, max_retries: int = 3) -> bool:
-        await self.cleanup_teammate(member_name)
+        if member_name in self._spawning:
+            team_logger.debug("Teammate {} spawn or restart already in progress", member_name)
+            return False
+        self._spawning.add(member_name)
+        try:
+            return await self._restart_teammate_owned(member_name, max_retries=max_retries)
+        finally:
+            self._spawning.discard(member_name)
+
+    async def _restart_teammate_owned(
+        self,
+        member_name: str,
+        *,
+        max_retries: int = 3,
+        cleanup_done: bool = False,
+    ) -> bool:
+        if not cleanup_done:
+            await self.cleanup_teammate(member_name)
 
         ctx = await self.build_context_from_db(member_name)
         if ctx is None:
@@ -252,6 +269,14 @@ class SpawnManager:
         team_backend = self._configurator.team_backend
         if team_backend is None:
             return False
+
+        team_name = self._configurator.team_name
+        if team_name:
+            await team_backend.db.member.reset_member_execution_status(
+                member_name,
+                team_name,
+                ExecutionStatus.IDLE.value,
+            )
 
         # Restart / recover must not replay the member's first-start
         # instruction: ``initial_message`` stays None so no harness.send is
@@ -264,7 +289,7 @@ class SpawnManager:
         for attempt in range(1, max_retries + 1):
             try:
                 team_logger.info("Restarting teammate {} (attempt {}/{})", member_name, attempt, max_retries)
-                await self.spawn_teammate(
+                await self._spawn_teammate_inner(
                     ctx,
                     initial_message=initial_message,
                     session=get_session_id() or None,
@@ -279,37 +304,42 @@ class SpawnManager:
                 if attempt < max_retries:
                     await asyncio.sleep(2**attempt)
 
-        if team_backend:
-            team_name = self._configurator.team_name
-            if team_name:
-                await team_backend.db.member.update_member_status(member_name, team_name, MemberStatus.ERROR.value)
+        if team_name:
+            await team_backend.db.member.update_member_status(member_name, team_name, MemberStatus.ERROR.value)
         return False
 
     async def on_teammate_unhealthy(self, member_name: str) -> None:
         team_logger.warning("Teammate {} detected as unhealthy, initiating restart", member_name)
-        await self.cleanup_teammate(member_name)
-        team_backend = self._configurator.team_backend
-        team_name = self._configurator.team_name
-        if team_backend and team_name:
-            member = await team_backend.db.member.get_member(member_name, team_name)
-            if member is not None:
-                try:
-                    status = MemberStatus(member.status)
-                except ValueError:
-                    status = MemberStatus.ERROR
-                if status in {MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN}:
-                    team_logger.info(
-                        "Teammate {} is {}; skip unhealthy restart",
-                        member_name,
-                        status.value,
-                    )
-                    return
-            await team_backend.db.member.update_member_status(
-                member_name,
-                team_name,
-                MemberStatus.RESTARTING.value,
-            )
-        await self.restart_teammate(member_name)
+        if member_name in self._spawning:
+            team_logger.debug("Teammate {} spawn or restart already in progress", member_name)
+            return
+        self._spawning.add(member_name)
+        try:
+            await self.cleanup_teammate(member_name)
+            team_backend = self._configurator.team_backend
+            team_name = self._configurator.team_name
+            if team_backend and team_name:
+                member = await team_backend.db.member.get_member(member_name, team_name)
+                if member is not None:
+                    try:
+                        status = MemberStatus(member.status)
+                    except ValueError:
+                        status = MemberStatus.ERROR
+                    if status in {MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN}:
+                        team_logger.info(
+                            "Teammate {} is {}; skip unhealthy restart",
+                            member_name,
+                            status.value,
+                        )
+                        return
+                await team_backend.db.member.update_member_status(
+                    member_name,
+                    team_name,
+                    MemberStatus.RESTARTING.value,
+                )
+            await self._restart_teammate_owned(member_name, cleanup_done=True)
+        finally:
+            self._spawning.discard(member_name)
 
     async def build_context_from_db(self, member_name: str) -> Optional[TeamRuntimeContext]:
         from openjiuwen.agent_teams.models.allocator import resolve_member_model

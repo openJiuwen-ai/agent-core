@@ -10,7 +10,10 @@ import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord, EvolutionTarget
-from openjiuwen.agent_evolving.experience.types import ExperienceApprovalRequest, request_for_online_evolution_result
+from openjiuwen.agent_evolving.experience.types import (
+    ExperienceApprovalRequest,
+    OnlineEvolutionResult,
+)
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     GENERATE_RECORDS_LLM_POLICY,
 )
@@ -212,11 +215,11 @@ class SkillEvolutionSharingMixin:
         shared_records: List[EvolutionRecord],
         requires_approval: bool,
         review_status: Optional[str] = None,
-    ) -> bool:
+    ) -> OnlineEvolutionResult:
         if shared_records:
             shared_records = await self._filter_duplicate_shared_records(skill_name, shared_records)
         if not shared_records:
-            result = await self._handle_evolution_from_signals(
+            return await self._handle_evolution_from_signals(
                 skill_name=skill_name,
                 signals=skill_signals,
                 messages=messages,
@@ -225,8 +228,6 @@ class SkillEvolutionSharingMixin:
                 requires_approval=requires_approval,
                 review_status=review_status,
             )
-            request = request_for_online_evolution_result(result)
-            return request is not None
 
         if self._auto_save:
             for record in shared_records:
@@ -254,7 +255,11 @@ class SkillEvolutionSharingMixin:
                 requires_approval=False,
                 review_status=review_status,
             )
-            return True
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="auto_approved",
+                message=f"shared records persisted for skill={skill_name}",
+            )
 
         await self._emit_shared_records_approval(
             ctx=ctx,
@@ -262,7 +267,11 @@ class SkillEvolutionSharingMixin:
             records=shared_records,
             messages=messages,
         )
-        return True
+        return OnlineEvolutionResult(
+            skill_name=skill_name,
+            status="staged",
+            message=f"shared records staged for skill={skill_name}",
+        )
 
     async def _emit_shared_records_approval(
         self: "SkillEvolutionRail",

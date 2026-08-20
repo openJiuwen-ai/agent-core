@@ -190,14 +190,35 @@ class EventBus:
                     self._loop_task,
                     timeout=5.0,
                 )
-            except (
-                asyncio.TimeoutError,
-                asyncio.CancelledError,
-            ):
+            except asyncio.TimeoutError:
+                team_logger.warning(
+                    "EventBus[{}]: loop did not exit within 5s at stop; cancelling",
+                    self._role.value,
+                )
+                self._loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._loop_task
+            except asyncio.CancelledError:
                 self._loop_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._loop_task
             self._loop_task = None
+            # A cancelled loop may leave SHUTDOWN behind. Drain only after
+            # the task has joined so a restart cannot consume stale poison.
+            drained = 0
+            while True:
+                try:
+                    self._event_queue.get_nowait()
+                    self._event_queue.task_done()
+                    drained += 1
+                except asyncio.QueueEmpty:
+                    break
+            if drained:
+                team_logger.warning(
+                    "EventBus[{}]: drained {} undelivered event(s) left by the dead loop",
+                    self._role.value,
+                    drained,
+                )
 
     async def pause_polls(self) -> None:
         """Stop periodic poll tasks but keep the main event loop running.
@@ -242,6 +263,12 @@ class EventBus:
     ) -> None:
         # team_logger.debug("received message {}", event)
         """Push an event into the processing queue."""
+        if not self._running:
+            team_logger.warning(
+                "EventBus[{}]: enqueued {} while the loop is not running",
+                self._role.value,
+                getattr(event, "event_type", type(event).__name__),
+            )
         await self._event_queue.put(event)
 
     # ------------------------------------------------------
@@ -285,6 +312,20 @@ class EventBus:
             try:
                 if self._wake_callback:
                     await self._wake_callback(event)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    team_logger.warning(
+                        "EventBus[{}]: loop cancelled while handling {}",
+                        self._role.value,
+                        getattr(event, "event_type", "unknown"),
+                    )
+                    raise
+                team_logger.warning(
+                    "EventBus[{}]: wake callback raised CancelledError; continuing (event={})",
+                    self._role.value,
+                    getattr(event, "event_type", "unknown"),
+                )
             except Exception:
                 event_type = getattr(event, "event_type", "unknown")
                 team_logger.exception(

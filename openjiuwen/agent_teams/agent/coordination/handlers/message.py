@@ -26,7 +26,13 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
-from openjiuwen.agent_teams.i18n import reply_hint_for, t
+from openjiuwen.agent_teams.debate import (
+    DebateMessageRole,
+    make_debate_invocation_meta,
+    normalize_debate_meta,
+    parse_debate_coordination_meta,
+)
+from openjiuwen.agent_teams.i18n import STRINGS, reply_hint_for, t
 from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_BROADCAST,
     INBOUND_TYPE_DIRECT,
@@ -38,6 +44,7 @@ from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_time_context
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.agent_teams.tools.message_manager import DirectMessageOptions
 from openjiuwen.core.common.logging import team_logger
 
 
@@ -66,6 +73,18 @@ class MessageHandler(BaseCoordinationHandler):
         # messages before the agent tears down.
         TeamEvent.MEMBER_SHUTDOWN: "on_member_shutdown_drain",
     }
+
+    def __init__(self, host, blueprint, infra, poll_ctrl) -> None:
+        super().__init__(host, blueprint, infra, poll_ctrl)
+        debate_state = getattr(infra.team_backend, "debate_state", None)
+        if blueprint.role == TeamRole.LEADER and debate_state is not None:
+            debate_state.bind_leader_wakeup(self._wake_leader_for_debate)
+
+    async def _wake_leader_for_debate(self, prompt: str) -> bool:
+        if self._round.has_pending_interrupt():
+            return False
+        await self._round.deliver_input(prompt, use_steer=True)
+        return True
 
     async def on_message_or_broadcast(self, event: EventMessage) -> None:
         """Handle MESSAGE / BROADCAST events.
@@ -193,8 +212,16 @@ class MessageHandler(BaseCoordinationHandler):
         if self._infra.message_manager is None:
             return
 
-        seen_ids: set[str] = set()
         backend = self._infra.team_backend
+        debate_state = getattr(backend, "debate_state", None)
+        if (
+            self._blueprint.role == TeamRole.LEADER
+            and debate_state is not None
+            and not self._round.has_pending_interrupt()
+        ):
+            await debate_state.retry_finalization()
+
+        seen_ids: set[str] = set()
         is_human_agent = backend is not None and await backend.is_human_agent(member_name)
         is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
 
@@ -221,6 +248,23 @@ class MessageHandler(BaseCoordinationHandler):
             try:
                 for msg in new_messages:
                     seen_ids.add(msg.message_id)
+                    debate_meta = parse_debate_coordination_meta(
+                        getattr(msg, "coordination_meta", None),
+                    )
+                    debate_state = getattr(backend, "debate_state", None)
+                    if await self._is_capped_peer_message(
+                        member_name,
+                        msg,
+                        debate_meta,
+                        debate_state,
+                    ):
+                        if await self._answer_capped_peer_message(
+                            member_name,
+                            msg,
+                            debate_meta,
+                        ):
+                            delivered.append(msg)
+                        continue
                     if self._round.has_pending_interrupt():
                         # Approval messages are admitted to resume_interrupt;
                         # all other messages are deferred until the interrupt clears.
@@ -241,6 +285,26 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                         interrupted = True
                         break
+                    if debate_meta and debate_state is not None:
+                        message_role = debate_meta["message_role"]
+                        if (
+                            self._blueprint.role == TeamRole.TEAMMATE
+                            and message_role == DebateMessageRole.INVITE.value
+                        ):
+                            await debate_state.activate_participant(
+                                debate_meta["round_id"],
+                            )
+                        elif (
+                            self._blueprint.role == TeamRole.LEADER
+                            and message_role == DebateMessageRole.FINAL_REPORT.value
+                        ):
+                            await debate_state.capture_report(
+                                debate_meta["round_id"],
+                                msg.from_member_name,
+                                msg.content,
+                            )
+                            delivered.append(msg)
+                            continue
                     expanded = await self._expand(msg)
                     if is_bridge:
                         text = await self._bridge_deliverable_for(member_name, msg, expanded=expanded)
@@ -250,6 +314,11 @@ class MessageHandler(BaseCoordinationHandler):
                             expanded=expanded,
                             is_human_agent=is_human_agent,
                             now_ms=get_current_time(),
+                            suppress_reply_hint=(
+                                debate_meta is not None
+                                and debate_meta["message_role"]
+                                == DebateMessageRole.CAP_NOTICE.value
+                            ),
                         )
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
@@ -267,6 +336,87 @@ class MessageHandler(BaseCoordinationHandler):
         if team_spec is not None and team_spec.language:
             return team_spec.language
         return "cn"
+
+    async def _is_capped_peer_message(
+        self,
+        member_name: str,
+        msg: Any,
+        debate_meta: dict[str, str] | None,
+        debate_state: Any,
+    ) -> bool:
+        if not (
+            self._blueprint.role == TeamRole.TEAMMATE
+            and debate_meta is not None
+            and debate_meta["message_role"] == DebateMessageRole.PEER.value
+            and debate_state is not None
+            and msg.from_member_name != member_name
+            and await debate_state.is_participant_capped(debate_meta["round_id"])
+        ):
+            return False
+        try:
+            sender = await self._infra.team_backend.get_member(msg.from_member_name)
+        except Exception as exc:  # noqa: BLE001 - uncertain sender identity must fail open
+            team_logger.warning(
+                "[%s] failed to resolve debate peer %s: %s",
+                member_name,
+                msg.from_member_name,
+                exc,
+            )
+            return False
+        return sender is not None and getattr(sender, "role", None) == TeamRole.TEAMMATE.value
+
+    async def _answer_capped_peer_message(
+        self,
+        member_name: str,
+        msg: Any,
+        debate_meta: dict[str, str],
+    ) -> bool:
+        language = "en" if self._language().startswith("en") else "cn"
+        display_name = await self._member_display_name(member_name)
+        content = STRINGS[language]["debate.cap_notice"].format_map(
+            {
+                "member_name": display_name,
+            },
+        )
+        coordination_meta = normalize_debate_meta(
+            make_debate_invocation_meta(
+                debate_meta["round_id"],
+                DebateMessageRole.CAP_NOTICE,
+            ),
+        )
+        try:
+            message_id = await self._infra.message_manager.send_message(
+                content=content,
+                to_member_name=msg.from_member_name,
+                from_member_name=member_name,
+                options=DirectMessageOptions(
+                    coordination_meta=coordination_meta,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - keep the source message unread for retry
+            team_logger.warning(
+                "[%s] failed to send debate cap notice for message %s: %s",
+                member_name,
+                msg.message_id,
+                exc,
+            )
+            return False
+        if message_id is None:
+            team_logger.warning(
+                "[%s] failed to persist debate cap notice for message %s",
+                member_name,
+                msg.message_id,
+            )
+            return False
+        return True
+
+    async def _member_display_name(self, member_name: str) -> str:
+        try:
+            member = await self._infra.team_backend.get_member(member_name)
+        except Exception:  # noqa: BLE001 - presentation falls back to the stable routing name
+            return member_name
+        display_name = str(getattr(member, "display_name", "") or "").strip()
+        return display_name or member_name
 
     async def _expand(self, msg: Any) -> ExpandedMessage:
         """Render a message row's delivery text (F_63 two-phase templating).
@@ -518,7 +668,15 @@ class MessageHandler(BaseCoordinationHandler):
         merged.sort(key=lambda m: m.timestamp, reverse=True)
         return merged
 
-    def _format_message(self, msg: Any, *, expanded: ExpandedMessage, is_human_agent: bool, now_ms: int) -> str:
+    def _format_message(
+        self,
+        msg: Any,
+        *,
+        expanded: ExpandedMessage,
+        is_human_agent: bool,
+        now_ms: int,
+        suppress_reply_hint: bool = False,
+    ) -> str:
         """Render one TeamMessage as ``<team-inbound>`` XML for agent input.
 
         The message body goes verbatim inside the ``<team-inbound>`` element
@@ -561,8 +719,9 @@ class MessageHandler(BaseCoordinationHandler):
                 note_kind="hitt-silence",
                 note_text=t("hitt.silence_note"),
             )
-        note_kind = None if expanded.is_template else "reply-hint"
-        note_text = None if expanded.is_template else reply_hint_for(msg.from_member_name)
+        omit_reply_hint = expanded.is_template or suppress_reply_hint
+        note_kind = None if omit_reply_hint else "reply-hint"
+        note_text = None if omit_reply_hint else reply_hint_for(msg.from_member_name)
         return render_inbound(
             content=expanded.body,
             sender=msg.from_member_name,

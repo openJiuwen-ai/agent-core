@@ -60,7 +60,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamDatabase,
     TeamMember,
 )
-from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+from openjiuwen.agent_teams.tools.message_manager import DirectMessageOptions, TeamMessageManager
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -187,6 +187,8 @@ class TeamBackend:
                 public ``leader_desc`` is supplied separately by the
                 ``build_team`` caller (LLM-filled tool arg).
         """
+        from openjiuwen.agent_teams.debate import DebateRunState
+
         self.team_name = team_name
         self.member_name = member_name
         self.is_leader = is_leader
@@ -197,6 +199,7 @@ class TeamBackend:
         self._leader_name_cache: str | None = None
         self.db = db
         self.messager = messager
+        self.debate_state = DebateRunState()
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator
@@ -606,7 +609,7 @@ class TeamBackend:
         await self.message_manager.send_message(
             content=approval_payload,
             to_member_name=member_name,
-            protocol="json",
+            options=DirectMessageOptions(protocol="json"),
         )
 
         try:

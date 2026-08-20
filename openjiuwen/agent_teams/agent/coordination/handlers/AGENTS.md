@@ -50,7 +50,7 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
 
 | 事件 | 策略 |
 |---|---|
-| `USER_INPUT`（inner） | 直接 `deliver_input`。**路由已经在更上游做完**（`TeamRuntimeManager._dispatch_god_view` 解析 `@member`），到这里的输入必然是给本 agent 的，handler 不再解析 mention |
+| `USER_INPUT`（inner） | Leader 收到真实外部输入时先重置已 `finalized` 的 debate state，再 `deliver_input`；其它角色直接投递。**路由已经在更上游做完**（`TeamRuntimeManager._dispatch_god_view` 解析 `@member`），handler 不再解析 mention |
 | `STANDBY` | `pause_polls()`，仅此 |
 | `CLEANED` | 非 leader → `shutdown_self()`。**leader 分支恒 no-op**：persistent leader 必须活过 `clean_team` 去接下一次交互；temporary leader 的收尾由 `StreamController._on_idle_settled` 查 `state.team_cleaned` 这个 latch 驱动，走总线事件会跟 round-end 抢跑 |
 | `TOOL_APPROVAL_RESULT` | 目标是自己才 `resume_interrupt`，把审批结果包成 `InteractiveInput` 灌回被中断的工具调用 |
@@ -60,7 +60,8 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
 
 `on_member_event` 先按角色分流：
 
-- **leader 分支**：把 6 类 `MEMBER_*` 渲染成一行 `team_logger.debug` —— **纯观测，不唤醒任何人**。
+- **leader 分支**：把 6 类 `MEMBER_*` 渲染成一行 `team_logger.debug`，不直接唤醒成员；若成员进入
+  `ERROR` / `FAILED`，则把它记为当前 debate 的终态，并按统一收束条件尝试唤醒 Leader。
   leader 跨进程催成员那条路已经在 F_53 删掉了。唯一的副作用在 `MEMBER_STATUS_CHANGED` 上：
   `_maybe_clean_team_after_shutdown` 在**每个非 leader 成员都到达终态 SHUTDOWN** 后自动
   `clean_team`，`_team_clean_requested` 保证只做一次。存在理由——自然语言的"解散团队"常常
@@ -81,6 +82,11 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
 （inner，kernel 启动时入队）是同一动作的主动触发入口。见 [[F_70]]。
 
 ### `MessageHandler`（4 个事件，无状态）
+
+Leader 读取 mailbox 时先识别当前 `round_id` 的显式 debate `final_report`：匹配的报告按 sender
+去重并标记已读，不逐条喂 harness；全部参与者终态后才生成一次收束输入。wakeup 回调以 `bool`
+表示是否接受投递，pending interrupt 时返回 `false`、不调用 `deliver_input()`，由 interrupt 后的
+mailbox poll 重试。普通消息仍走下述原路径。
 
 三条投递路径（`on_message_or_broadcast` / `on_poll_mailbox` / `on_member_shutdown_drain`）
 **统一先过 `_harness_input_blocked` 闸门**。这是本目录最重要的一个闸门，**状态驱动而非事件
