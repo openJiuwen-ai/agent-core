@@ -39,7 +39,7 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
 | 模式 | 真实目录 | team 内访问路径 |
 |---|---|---|
 | leader | `team_member_workspace_dir`（team 内，不拉平、不 link） | 就是真实目录 |
-| predefined | `independent_member_workspace(member)`（跨 team 共享） | link → 独立 workspace |
+| predefined | `.agent_teams/<member>`（跨 team 共享，与动态齐平） | link → 真实目录 |
 | dynamic | `.agent_teams/<team>#<member>/`（prefix 开）或 `.agent_teams/<member>/`（prefix 关） | link → 真实目录 |
 
 - link 成功 → team 内路径是 link，透明映射到 team 外。
@@ -53,10 +53,10 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
   （`member_dir_name` / `member_real_dir`），link 路径从不在此转发。
 - **删除缺口 3（`resolve_member_access_root`）**：一旦兜底是"退回 team 内"而不是
   "跑 team 外"，team 内路径永远有效，store 无需感知 link，缺口 3 从根上消失。
-- **refs 定位带 mode**：predefined 成员的真实目录在独立 workspace，refs 查询/释放
-  必须带 `mode` 才能定位 `.refs.json`（`binder.release(..., mode=...)`）。
+- **refs 定位带 mode**：predefined 成员的真实目录在 `.agent_teams/<member>`，refs
+  查询/释放必须带 `mode` 才能定位 `.refs.json`（`binder.release(..., mode=...)`）。
 - **动态成员 per-team 隔离**：`team#member` 是两个 team 各自的真实目录，refs 不跨
-  team 累计；跨 team 共享只发生在 predefined（独立 workspace，refs 累计 teams）。
+  team 累计；跨 team 共享只发生在 predefined（`.agent_teams/<member>`，refs 累计 teams）。
 - **链接感知清理**：junction 若被 `shutil.rmtree` 会下钻删 target 内容（共享资产）。
   `_remove_cleanup_paths` 先 `is_dir_link` → `remove_dir_link`，非链接才 rmtree。
 - **迁移器回滚**：旧布局真实目录 rename 到 team 外后 link 失败，回滚回 team 内。

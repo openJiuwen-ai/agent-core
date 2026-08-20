@@ -59,7 +59,7 @@ def test_predefined_creates_link_to_independent() -> None:
     binder = MemberWorkspaceBinder()
     root = binder.setup(_binding("teamA", "shared", MEMBER_MODE_PREDEFINED))
     assert is_dir_link(root)
-    assert apaths.independent_member_workspace("shared").is_dir()
+    assert (apaths.get_agent_teams_home() / "shared").is_dir()
     refs = MemberRefStore().get_ref_teams("teamA", "shared", mode=MEMBER_MODE_PREDEFINED)
     assert refs == ["teamA"]
 
@@ -98,7 +98,7 @@ def test_link_failure_retreats_into_team(monkeypatch) -> None:
 def test_cleanup_team_links_unlinks_only() -> None:
     binder = MemberWorkspaceBinder()
     binder.setup(_binding("teamA", "shared", MEMBER_MODE_PREDEFINED))
-    indep = apaths.independent_member_workspace("shared")
+    indep = apaths.get_agent_teams_home() / "shared"
     binder.cleanup_team_links("teamA")
     assert not is_dir_link(apaths.team_member_workspace_dir("teamA", "shared"))
     assert indep.is_dir(), "shared asset preserved"

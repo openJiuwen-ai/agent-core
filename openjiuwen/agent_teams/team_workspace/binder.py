@@ -6,7 +6,7 @@
 Creates the on-disk member workspace at spawn time (never at ``build_team``):
 
 - leader:     real directory inside the team, no link
-- predefined: ``independent_member_workspace`` + link ``workspaces/<member>_workspace``
+- predefined: ``.agent_teams/<member>`` + link ``workspaces/<member>_workspace``
 - dynamic:    ``.agent_teams/<team>#<member>/`` (prefix on) or
               ``.agent_teams/<member>/`` (prefix off) + link + refcount
 

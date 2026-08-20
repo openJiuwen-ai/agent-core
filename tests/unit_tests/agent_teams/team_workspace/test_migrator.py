@@ -57,7 +57,7 @@ def test_predefined_member_moves_to_independent() -> None:
     moved = TeamWorkspaceMigrator().migrate("teamA", predefined_members={"shared"})
     assert moved is True
     assert is_dir_link(apaths.team_member_workspace_dir("teamA", "shared"))
-    assert apaths.independent_member_workspace("shared").is_dir()
+    assert (apaths.get_agent_teams_home() / "shared").is_dir()
 
 
 @pytest.mark.level0

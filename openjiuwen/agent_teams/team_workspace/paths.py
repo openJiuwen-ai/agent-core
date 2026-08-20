@@ -22,7 +22,6 @@ from pathlib import Path
 
 from openjiuwen.agent_teams.paths import (
     get_agent_teams_home,
-    independent_member_workspace,
     team_member_workspace_dir,
 )
 
@@ -59,13 +58,13 @@ def member_real_dir(
     """Return the member's real (team-external or in-team) directory.
 
     - leader:     ``team_member_workspace_dir`` (in-team, no link)
-    - predefined: ``independent_member_workspace`` (shared across teams)
+    - predefined: ``.agent_teams/<member>`` (shared across teams, same level as dynamic)
     - dynamic:    ``.agent_teams/<member_dir_name>``
     """
     if mode == MEMBER_MODE_LEADER:
         return team_member_workspace_dir(team_name, member_name)
     if mode == MEMBER_MODE_PREDEFINED:
-        return independent_member_workspace(member_name)
+        return get_agent_teams_home() / member_name
     return get_agent_teams_home() / member_dir_name(
         team_name,
         member_name,
