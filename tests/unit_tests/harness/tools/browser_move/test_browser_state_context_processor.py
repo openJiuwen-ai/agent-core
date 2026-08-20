@@ -305,8 +305,10 @@ async def test_prompt_attachments_remain_before_browser_state_and_progress_tail(
     window = await context.get_context_window()
     messages = window.context_messages
 
-    assert "<system-reminder>" in messages[-3].content
-    assert "runtime attachment" in messages[-3].content
+    # Stable placement puts the attachment ahead of the conversation; the
+    # preserved browser-state messages still close the prompt.
+    assert "<system-reminder>" in messages[0].content
+    assert "runtime attachment" in messages[0].content
     assert messages[-2].name == "current_browser_state"
     assert messages[-1].name == "browser_state_progress"
 

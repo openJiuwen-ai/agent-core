@@ -233,10 +233,17 @@ class PromptAttachmentContextWriter:
 class PromptAttachmentManager:
     """DeepAgent-private in-memory prompt attachment manager."""
 
-    def __init__(self, language: str = "en") -> None:
+    def __init__(self, language: str = "en", placement: str = "stable") -> None:
         self._items: dict[str, dict[str, PromptAttachment]] = {}
         self._lock = asyncio.Lock()
         self.language = language
+        # "stable": insert after the leading system messages, so every
+        # request's prompt stays a prefix of its successor and provider-side
+        # prefix caches keep extending across the conversation.
+        # "tail": legacy end-of-prompt placement, required by the Ascend
+        # KV-cache affinity flow, whose eviction hooks expect the attachment
+        # to be the final message (see kv_cache_hooks).
+        self.placement = placement
 
     def bind_context(self, ctx: Any) -> PromptAttachmentContextWriter:
         """Return a context-aware writer for rail prompt attachment migration."""
@@ -532,31 +539,44 @@ class PromptAttachmentManager:
             )
         return rendered
 
-    @staticmethod
     def inject_messages(
+        self,
         messages: list[BaseMessage],
         rendered_prompt_attachments: str,
     ) -> list[BaseMessage]:
-        """Insert attachments before any explicitly preserved trailing messages."""
+        """Insert attachments at the configured placement.
+
+        "stable" inserts after the leading system messages: the block is
+        re-rendered every request, but its position no longer moves, so each
+        request's prompt remains a prefix of the next and a provider-side
+        prefix cache keeps extending. "tail" preserves the legacy placement
+        before any explicitly preserved trailing messages.
+        """
 
         if not rendered_prompt_attachments:
             return list(messages)
 
-        tail_start = len(messages)
-        while tail_start > 0:
-            metadata = getattr(messages[tail_start - 1], "metadata", {}) or {}
-            if not bool(metadata.get(PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY)):
-                break
-            tail_start -= 1
+        if self.placement == "tail":
+            insert_at = len(messages)
+            while insert_at > 0:
+                metadata = getattr(messages[insert_at - 1], "metadata", {}) or {}
+                if not bool(metadata.get(PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY)):
+                    break
+                insert_at -= 1
+        else:
+            insert_at = 0
+            while insert_at < len(messages) and getattr(
+                messages[insert_at], "role", ""
+            ) == "system":
+                insert_at += 1
 
         # An attachment is request-scoped and not persisted in conversation
-        # history.  Preserve the marker even when upstream requires the
-        # attachment to be inserted before browser-state tail messages.
+        # history.
         attachment_message = UserMessage(
             content=rendered_prompt_attachments,
             metadata={KV_CACHE_EPHEMERAL_TAIL_METADATA: True},
         )
-        return [*messages[:tail_start], attachment_message, *messages[tail_start:]]
+        return [*messages[:insert_at], attachment_message, *messages[insert_at:]]
 
     def make_window_mutator(self, session_id: str) -> WindowMutator:
         """Build the ContextEngine final-window mutator."""

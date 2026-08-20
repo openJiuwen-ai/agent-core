@@ -520,6 +520,7 @@ class DeepAgent(BaseAgent):
             new_react_config.context_engine_config = config.context_engine_config
         if config.kv_cache_affinity_config is not None:
             new_react_config.kv_cache_affinity_config = config.kv_cache_affinity_config
+            self._apply_attachment_placement(config.kv_cache_affinity_config)
         self._react_agent.configure(new_react_config)
         self._sync_prompt_builder_references()
         logger.info("[DeepAgent] Model configuration hot reloaded")
@@ -598,6 +599,16 @@ class DeepAgent(BaseAgent):
         self.system_prompt_builder = prompt_builder
         self._sync_prompt_builder_references()
         logger.info("[DeepAgent] System prompt hot reloaded")
+
+    def _apply_attachment_placement(self, kv_config: Any) -> None:
+        """Keep legacy tail placement when KV-cache affinity manages the tail.
+
+        The Ascend affinity flow evicts the attachment from the KV cache after
+        each request and its hooks expect it to be the final message; every
+        other path uses the cache-stable placement after the system messages.
+        """
+        if getattr(kv_config, "enable_kv_cache_affinity", False) is True:
+            self.prompt_attachment_manager.placement = "tail"
 
     def _sync_prompt_builder_references(self) -> None:
         """Push the current system_prompt_builder reference everywhere.
@@ -992,6 +1003,7 @@ class DeepAgent(BaseAgent):
             react_config.context_engine_config = cfg.context_engine_config
         if cfg.kv_cache_affinity_config is not None:
             react_config.kv_cache_affinity_config = cfg.kv_cache_affinity_config
+            self._apply_attachment_placement(cfg.kv_cache_affinity_config)
         react_config.workspace = cfg.workspace
         if cfg.sys_operation is not None:
             react_config.sys_operation_id = cfg.sys_operation.id
