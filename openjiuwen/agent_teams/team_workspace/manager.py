@@ -122,7 +122,11 @@ class TeamWorkspaceManager:
 
     # ── Initialization ───────────────────────────────────────
 
-    async def initialize(self, *, remote_url: str | None = None) -> None:
+    async def initialize(
+        self,
+        *,
+        remote_url: str | None = None,
+    ) -> None:
         """Initialize workspace directory, Skill visibility metadata, and git repo.
 
         When ``config.version_control`` is False, only the workspace, the

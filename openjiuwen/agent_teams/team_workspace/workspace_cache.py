@@ -11,11 +11,13 @@ One ``WorkspaceCache`` instance carries all three evolvable text classes:
 - C-class tool descriptions (``prompts/tool/<domain>/<key>.<lang>.md``
   tool-level md + ``tool.param.<lang>.md`` JSON dict) → raw body / entry.
 
-Fill model — **lazy get**: a ``get*`` call is a dict lookup; on miss the file
-is read once (via the ``WorkspaceStore``), the value stored in the dict, and
-returned. Subsequent same-key calls are plain dict hits with zero file IO.
-The cache **never** proactively scans / builds: no ``build``, no ``rebuild``,
-no roster argument, no leader-only gate.
+Fill model — **lazy get + write-side priming**: a ``get*`` call is a dict
+lookup; on miss the file is read once (via the ``WorkspaceStore``), the value
+stored in the dict, and returned. The assembler also *primes* the cache from
+the write side (``fill_*``) with the latest body it already holds, so the
+first ``get*`` after a write is a dict hit with zero file IO. The cache
+**never** proactively scans / builds: no ``build``, no ``rebuild``, no roster
+argument, no leader-only gate.
 
 Invalidation — **Runner finally**: ``invalidate()`` drops every resident
 value (clears the dicts) without touching the filesystem. Called from
@@ -33,10 +35,11 @@ the resumed run's first ``get*`` re-reads fresh values. In-process
 teammates share the leader's single manager (and cache) by reference via
 ``share_workspace_cache_with`` — they never build their own.
 
-``evolution_enabled`` + team name + language live on this one instance;
-consumers only talk to this class. When the switch is off no file is read —
-the dict stays empty so callers fall back to code defaults / raw DB columns
-(files are written regardless; the switch only gates the read side).
+Team name + language live on this one instance; consumers only talk to this
+class. The instance exists only when the evolution mechanism is enabled
+(``TeamAgentSpec.evolution_enabled``) — when disabled the assembler never
+writes files and the manager carries no cache, so every read falls back to
+code defaults / raw DB columns directly.
 
 ``display_name`` never rides the overlay — it is not file-evolvable and
 always falls back to the DB column. No inheritance, no generics, no
@@ -66,10 +69,11 @@ class WorkspaceCache:
     ``invalidate()`` is the only drop path. No ``build``, no ``rebuild``,
     no roster — the cache never scans the workspace up front.
 
-    Runtime read priority: the file value wins when the file exists and its
-    body hash diverges from the recorded baseline (evolved); otherwise the
-    code default / raw DB value stands (the cache stores ``None`` for a
-    present-but-un-evolved file so the miss path is not retried per call).
+    The cache stores the *latest* value, not an "evolved overlay": the write
+    side (assembler) primes it with whatever body the file ended up with
+    (framework default or an evolved edit), and the read side serves that body
+    on a dict hit. ``None`` means the file is missing — the caller falls back
+    to the code default / raw DB column.
     """
 
     def __init__(
@@ -78,12 +82,10 @@ class WorkspaceCache:
         team_name: str,
         *,
         language: str = "cn",
-        evolution_enabled: bool = True,
     ) -> None:
         self._store = store
         self._team_name = team_name
         self._lang = language
-        self._enabled = evolution_enabled
         # A-class: template name → PromptTemplate (raw body).
         self._template_values: dict[str, PromptTemplate | None] = {}
         # B-class: (member_name, field) → resident value (str | None).
@@ -100,18 +102,16 @@ class WorkspaceCache:
     # ── A-class ────────────────────────────────────────────────────────────
 
     def get_template(self, name: str) -> PromptTemplate | None:
-        """Return the evolved A-class template for ``name``, or ``None``.
+        """Return the latest A-class template for ``name``, or ``None``.
 
-        ``None`` means "no evolved file value" — the caller falls back to the
+        ``None`` means the file is missing — the caller falls back to the
         framework ``load_template`` (see ``make_template_loader``). Lazy: the
         first call for ``name`` reads ``prompts/system/<name>.<lang>.md``;
         later calls in the same run are dict hits.
         """
-        if not self._enabled:
-            return None
         if name in self._template_values:
             return self._template_values[name]
-        body = self._read_evolved(
+        body = self._read_body(
             WorkspaceLayout.system_file(self._store.team_workspace_root(self._team_name), name, self._lang)
         )
         value = PromptTemplate(name=name, content=body) if body is not None else None
@@ -131,8 +131,6 @@ class WorkspaceCache:
         column. Lazy: first call reads the member's ``card.md`` /
         ``member_prompt.md``; later calls are dict hits.
         """
-        if not self._enabled:
-            return None
         key = (member_name, field)
         if key in self._member_values:
             return self._member_values[key]
@@ -145,8 +143,6 @@ class WorkspaceCache:
 
     def get_team_field(self, field: Literal["desc", "prompt"]) -> str | None:
         """Return the resident file value for a team field. Lazy (same as member)."""
-        if not self._enabled:
-            return None
         if field in self._team_values:
             return self._team_values[field]
         if field == "desc":
@@ -159,26 +155,59 @@ class WorkspaceCache:
     # ── C-class ────────────────────────────────────────────────────────────
 
     def get_tool_md(self, desc_key: str) -> str | None:
-        """Return the evolved tool-level raw body (unrendered), or ``None``.
+        """Return the latest tool-level raw body (unrendered), or ``None``.
 
         ``{{slot}}`` rendering stays in the ``make_translator`` closure at
         read time. Lazy: the first C-class ``get*`` scans ``prompts/tool/``
         once and populates every tool-level md + param entry; later calls
         are dict hits.
         """
-        if not self._enabled:
-            return None
         if not self._tools_loaded:
             self._load_tools()
         return self._tool_md_values.get(desc_key)
 
     def get_tool_param(self, desc_key: str, param: str) -> str | None:
-        """Return the evolved param-level description, or ``None``. Lazy (same scan as ``get_tool_md``)."""
-        if not self._enabled:
-            return None
+        """Return the latest param-level description, or ``None``. Lazy (same scan as ``get_tool_md``)."""
         if not self._tools_loaded:
             self._load_tools()
         return self._tool_params.get((desc_key, param))
+
+    # ── fill (write-side priming) ──────────────────────────────────────────
+    #
+    # The assembler holds the latest body while writing each file (framework
+    # default or the evolved file value), so it fills the cache directly; the
+    # next ``get*`` is a dict hit with zero file IO. ``body=None`` is a valid
+    # prime — it marks "no file value" so the miss path is not retried per
+    # call (the caller falls back to the framework / DB default).
+
+    def fill_template(self, name: str, body: str | None) -> None:
+        """Prime an A-class template with the write-side latest body."""
+        self._template_values[name] = PromptTemplate(name=name, content=body) if body is not None else None
+
+    def fill_member_field(
+        self,
+        member_name: str,
+        field: Literal["desc", "prompt"],
+        body: str | None,
+    ) -> None:
+        """Prime a B-class member field with the write-side latest body."""
+        self._member_values[(member_name, field)] = body
+
+    def fill_team_field(self, field: Literal["desc", "prompt"], body: str | None) -> None:
+        """Prime a B-class team field with the write-side latest body."""
+        self._team_values[field] = body
+
+    def fill_tool_md(self, desc_key: str, body: str | None) -> None:
+        """Prime a C-class tool-level md with the write-side latest body."""
+        self._tool_md_values[desc_key] = body
+
+    def fill_tool_param(self, desc_key: str, param: str, text: str | None) -> None:
+        """Prime a C-class param-level description with the write-side latest text."""
+        self._tool_params[(desc_key, param)] = text
+
+    def mark_tools_loaded(self) -> None:
+        """Mark the C-class scan done — the write side primed every tool entry."""
+        self._tools_loaded = True
 
     def _load_tools(self) -> None:
         """Scan ``prompts/tool/`` once and populate both C-class dicts.
@@ -196,7 +225,7 @@ class WorkspaceCache:
         tools_dir = WorkspaceLayout.tool_dir(self._store.team_workspace_root(self._team_name))
         for path in WorkspaceLayout.iter_tool_md_files(tools_dir, self._lang):
             key = path.stem.removesuffix(f".{self._lang}")
-            body = self._read_evolved(path)
+            body = self._read_body(path)
             if body is not None:
                 self._tool_md_values[key] = body
         for path in WorkspaceLayout.iter_tool_param_file(tools_dir, self._lang):
@@ -209,7 +238,7 @@ class WorkspaceCache:
         ``"<desc_key>.<param>"`` splits on the first dot (nested param names
         like ``task.title`` keep their dots).
         """
-        body = self._read_evolved(path)
+        body = self._read_body(path)
         if body is None:
             return
         try:
@@ -228,16 +257,15 @@ class WorkspaceCache:
     # ── shared: evolution judgement (frontmatter primitives) ───────────────
 
     @staticmethod
-    def _read_evolved(path: Path) -> str | None:
-        """Return the file body iff it is evolved; ``None`` otherwise.
+    def _read_body(path: Path) -> str | None:
+        """Return the file body regardless of evolution; ``None`` only when
+        missing or malformed.
 
-        Evolved = body hash diverges from the recorded ``baseline_sha256``.
-        A hand-written file without frontmatter has no baseline → treated as
-        evolved (its body always wins). A file with malformed frontmatter is
-        *invalid* — never read, the framework default stands.
-
-        Info log per read so the value source is auditable: an ``evolved``
-        line means the workspace value wins over the framework default.
+        The write side has already primed the cache with the latest value (an
+        un-evolved file's body equals the framework default), so the return
+        value no longer depends on evolution — any existing file's body is the
+        latest value. The evolution judgement is still logged for audit: an
+        ``evolved`` line means the workspace value diverged from its baseline.
         """
         try:
             text = path.read_text(encoding="utf-8")
@@ -251,9 +279,9 @@ class WorkspaceCache:
             return None
         if is_evolved(meta, body):
             team_logger.info("[workspace] %s evolved — workspace value wins", path)
-            return body
-        team_logger.info("[workspace] %s un-evolved — framework default stands", path)
-        return None
+        else:
+            team_logger.info("[workspace] %s un-evolved — workspace value served", path)
+        return body
 
     # ── invalidation ───────────────────────────────────────────────────────
 

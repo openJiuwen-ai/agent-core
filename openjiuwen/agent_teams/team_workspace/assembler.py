@@ -34,6 +34,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.team_workspace.frontmatter import (
     atomic_write,
@@ -46,50 +48,75 @@ from openjiuwen.agent_teams.team_workspace.layout import WorkspaceLayout
 from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
 from openjiuwen.core.common.logging import team_logger
 
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
+
 
 class WorkspaceAssembler:
     """Write A/B/C class workspace files into a member/team workspace at spawn time."""
 
-    def __init__(self, store: WorkspaceStore | None = None) -> None:
+    def __init__(
+        self,
+        store: WorkspaceStore | None = None,
+        cache: WorkspaceCache | None = None,
+    ) -> None:
         self._store = store or WorkspaceStore()
+        self._cache = cache
 
     # ── entry ──────────────────────────────────────────────────────────────
 
-    def write_team_workspace(
-        self,
-        *,
-        team_name: str,
-        language: str = "cn",
-        team_desc: str | None = None,
-        team_prompt: str | None = None,
-    ) -> None:
-        """Write team-workspace files (A + C + B team-level) at team build time.
+    def write_system_and_tool_prompts(self, *, team_name: str, language: str = "cn") -> None:
+        """Write the framework-source team-workspace files (A + C class).
 
-        Runs once when the team is established (``build_team`` success /
-        leader recovery) — not tied to any member spawn. Writes:
-          - A-class: scan ``prompts/<lang>/`` fully (no role filter, no
-            hard-coded list — directory is the manifest);
-          - C-class: scan ``descs/<lang>/`` (tool-level domain mirror +
-            param-level JSON dict);
-          - B-class team: ``team_card.md`` + ``team_prompt.md`` — values come
-            from ``team_info`` (via ctx on the async assembly entry, U11) and
-            are only written when a value exists (build_team inserts the row).
-        Idempotent: existing dirs / baselines are reused, evolved files are
-        never overwritten.
+        These are static copies of the framework defaults — system prompt
+        templates (``prompts/system/<name>.<lang>.md``) and tool descriptions
+        / params (``prompts/tool/...``). Their values come from the framework
+        source, not the team DB row, so they do not depend on ``build_team``
+        having run: writing them at ``coordination.start`` (before the first
+        tool call) is safe and lets the read-side cache serve every member
+        that runs in this process without re-writing.
+
+        Idempotent: existing baselines are reused, evolved files are never
+        overwritten, framework defaults that changed since the last write are
+        upgraded in place (see ``_write_baseline``).
         """
-        # A-class: full-directory scan, one file per template.
+        # System prompt templates: full-directory scan, one file per template.
         self._write_prompt_templates(
             team_name=team_name,
             language=language,
         )
-        # C-class: descs/ scan (tool-level) + STRINGS aggregate (param-level).
+        # Tool descriptions: descs/ scan (tool-level) + STRINGS aggregate
+        # (param-level).
         self._write_tool_descs(
             team_name=team_name,
             language=language,
         )
-        # B-class team: values come from the DB row, not the spec (U11).
-        self._store.write_team_card(team_name, team_desc)
-        self._store.write_team_prompt(team_name, team_prompt)
+
+    def write_team_identity(
+        self,
+        *,
+        team_name: str,
+        team_desc: str | None = None,
+        team_prompt: str | None = None,
+    ) -> None:
+        """Write the team-level identity files (B class).
+
+        ``team_card.md`` (body = desc) + ``team_prompt.md`` — values come from
+        the team DB row (``build_team`` writes the row with ``desc``), so this
+        belongs right after ``create_team`` succeeds. ``team_prompt`` is
+        currently a write-only column (``build_team`` has no prompt argument,
+        so the DB column stays NULL and ``write_team_prompt(None)`` is a
+        no-op); the call stays for the day a prompt source is wired in.
+
+        Idempotent and evolution-safe: ``_evolved_body`` never overwrites an
+        evolved file. The final body is primed into the shared cache so the
+        read side does not re-read the file.
+        """
+        desc_body = self._store.write_team_card(team_name, team_desc)
+        prompt_body = self._store.write_team_prompt(team_name, team_prompt)
+        if self._cache is not None:
+            self._cache.fill_team_field("desc", desc_body)
+            self._cache.fill_team_field("prompt", prompt_body)
 
     def write_member_identity(
         self,
@@ -103,10 +130,39 @@ class WorkspaceAssembler:
 
         ``card.md`` (body = desc only) + ``member_prompt.md``, values from the
         member's DB row (ctx.desc / ctx.prompt). ``display_name`` never rides
-        the file.
+        the file. The final body is primed into the shared cache so the read
+        side does not re-read the file.
         """
-        self._store.write_card(team_name, member_name, member_desc)
-        self._store.write_member_prompt(team_name, member_name, member_prompt)
+        desc_body = self._store.write_card(team_name, member_name, member_desc)
+        prompt_body = self._store.write_member_prompt(team_name, member_name, member_prompt)
+        if self._cache is not None:
+            self._cache.fill_member_field(member_name, "desc", desc_body)
+            self._cache.fill_member_field(member_name, "prompt", prompt_body)
+
+    # ── write-side cache priming ──────────────────────────────────────────
+    #
+    # Each write branch already knows the body the file ended up with (the
+    # framework default it just wrote, or the evolved value it kept). Prime the
+    # shared cache with it so the read side never re-reads / re-hashes the same
+    # file. When ``cache`` is None (evolution disabled or single-agent) the
+    # priming is a no-op and the read side falls back to its lazy miss.
+
+    def _fill_template(self, name: str, body: str) -> None:
+        if self._cache is not None:
+            self._cache.fill_template(name, body)
+
+    def _fill_tool_md(self, desc_key: str, body: str) -> None:
+        if self._cache is not None:
+            self._cache.fill_tool_md(desc_key, body)
+
+    def _fill_tool_params(self, data: dict[str, str]) -> None:
+        if self._cache is None:
+            return
+        for str_key, text in data.items():
+            if "." not in str_key or not isinstance(text, str):
+                continue
+            desc_key, param = str_key.split(".", 1)
+            self._cache.fill_tool_param(desc_key, param, text)
 
     # ── A-class writing ────────────────────────────────────────────────────
 
@@ -162,23 +218,28 @@ class WorkspaceAssembler:
                 team_logger.info("[workspace] %s malformed frontmatter — baseline rebuilt", target)
                 meta = self._file_meta(name, body=framework_text, language=language)
                 atomic_write(target, write_frontmatter(meta, framework_text))
+                self._fill_template(name, framework_text)
                 return
             if is_evolved(meta, body):
                 # Hand-written (no baseline) or user-edited (hash diverged):
                 # the evolution party's value wins, never overwrite.
                 team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
+                self._fill_template(name, body)
                 return
             if body_sha256(framework_text) == meta.get("baseline_sha256"):
                 # Framework default unchanged — keep.
+                self._fill_template(name, framework_text)
                 return
             # Framework upgraded, file untouched: write the new default.
             team_logger.info("[workspace] %s framework default upgraded — baseline refreshed", target)
             meta = self._file_meta(name, body=framework_text, language=language)
             atomic_write(target, write_frontmatter(meta, framework_text))
+            self._fill_template(name, framework_text)
             return
         team_logger.info("[workspace] %s missing — baseline seeded", target)
         meta = self._file_meta(name, body=framework_text, language=language)
         atomic_write(target, write_frontmatter(meta, framework_text))
+        self._fill_template(name, framework_text)
 
     @staticmethod
     def _file_meta(name: str, *, body: str, language: str) -> dict:
@@ -220,6 +281,8 @@ class WorkspaceAssembler:
         tools_dir = self._tool_dir(team_name)
         self._write_tool_md(tools_dir, language)
         self._write_tool_params(tools_dir, language)
+        if self._cache is not None:
+            self._cache.mark_tools_loaded()
 
     @staticmethod
     def _tool_dir(team_name: str) -> Path:
@@ -268,19 +331,24 @@ class WorkspaceAssembler:
                 team_logger.info("[workspace] %s malformed frontmatter — baseline rebuilt", target)
                 meta = self._tool_md_meta(desc_key, framework_body, language)
                 atomic_write(target, write_frontmatter(meta, framework_body))
+                self._fill_tool_md(desc_key, framework_body)
                 return  # malformed → invalid file, rebuild baseline
             if is_evolved(meta, body):
                 team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
+                self._fill_tool_md(desc_key, body)
                 return  # hand-written or user-edited → never overwrite
             if body_sha256(framework_body) == meta.get("baseline_sha256"):
+                self._fill_tool_md(desc_key, framework_body)
                 return  # framework unchanged — keep
             team_logger.info("[workspace] %s framework default upgraded — baseline refreshed", target)
             meta = self._tool_md_meta(desc_key, framework_body, language)
             atomic_write(target, write_frontmatter(meta, framework_body))
+            self._fill_tool_md(desc_key, framework_body)
             return
         team_logger.info("[workspace] %s missing — baseline seeded", target)
         meta = self._tool_md_meta(desc_key, framework_body, language)
         atomic_write(target, write_frontmatter(meta, framework_body))
+        self._fill_tool_md(desc_key, framework_body)
 
     @staticmethod
     def _tool_md_meta(desc_key: str, body: str, language: str) -> dict:
@@ -292,13 +360,14 @@ class WorkspaceAssembler:
             "evolved": False,
         }
 
-    @staticmethod
-    def _write_tool_params(tools_dir: Path, language: str) -> None:
+    def _write_tool_params(self, tools_dir: Path, language: str) -> None:
         """Param-level: write the full STRINGS dict into one JSON file.
 
         The dict is written verbatim — dotted keys (``"<desc_key>.<param>"``,
         e.g. ``create_task.task.title``) keep their original form; the read
         side splits on the first dot. One baseline hash for the whole file.
+        The final dict (framework STRINGS, or the evolved JSON when the file is
+        protected) is primed into the cache so the read side does not re-read.
         """
         strings = _load_strings(language)
         body = json.dumps(strings, ensure_ascii=False, indent=2)
@@ -316,9 +385,19 @@ class WorkspaceAssembler:
                 meta = None  # malformed → invalid file, rebuild below
             if meta is not None:
                 if is_evolved(meta, existing_body):
-                    return  # hand-written or user-edited → never overwrite
+                    # hand-written or user-edited → never overwrite
+                    try:
+                        evolved_data = json.loads(existing_body)
+                    except json.JSONDecodeError:
+                        evolved_data = None
+                    if isinstance(evolved_data, dict):
+                        self._fill_tool_params(evolved_data)
+                    team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
+                    return
                 if body_sha256(body) == meta.get("baseline_sha256"):
-                    return  # framework unchanged — keep
+                    # framework unchanged — keep
+                    self._fill_tool_params(strings)
+                    return
         meta = {
             "kind": "tool_params",
             "name": "tool_params",
@@ -327,6 +406,7 @@ class WorkspaceAssembler:
             "evolved": False,
         }
         atomic_write(target, write_frontmatter(meta, body))
+        self._fill_tool_params(strings)
 
 
 def _load_strings(language: str) -> dict[str, str]:

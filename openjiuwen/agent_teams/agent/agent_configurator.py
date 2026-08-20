@@ -935,6 +935,7 @@ class AgentConfigurator:
             dispatch_mode=spec.dispatch_mode,
             enable_task_verification=spec.enable_task_verification,
             enable_fork=spec.enable_fork,
+            evolution_enabled=spec.evolution_enabled,
             external_cli_agents=spec.external_cli_agents,
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
@@ -1072,6 +1073,10 @@ class AgentConfigurator:
         evolution_enabled = True
         if ctx.team_spec is not None:
             evolution_enabled = ctx.team_spec.evolution_enabled
+        if not evolution_enabled:
+            # Evolution disabled: no cache object is built — the manager
+            # carries None and every read falls back to framework / DB.
+            return
 
         # Team-level cache reuse: in-process teammates share
         # the leader's manager by reference via ``share_workspace_cache_with``
@@ -1099,7 +1104,6 @@ class AgentConfigurator:
             store,
             team_name,
             language=resolved_language,
-            evolution_enabled=evolution_enabled,
         )
         # One cache instance lives on the workspace manager — every
         # read-side consumer (backend overlay via the manager delegation,
@@ -1114,52 +1118,47 @@ class AgentConfigurator:
         if self.team_backend is not None:
             self.team_backend.attach_workspace_manager(self.workspace_manager)
 
-    @staticmethod
     def _assemble_member_workspace(
+        self,
         spec: TeamAgentSpec,
         ctx: TeamRuntimeContext,
         resolved_language: str,
     ) -> None:
-        """Seed the evolvable workspace files (write side only).
+        """Seed the evolvable B-class member files (write side only).
 
         Runs on every spawn / session recovery inside ``setup_agent`` and is
         idempotent: existing directories, junctions and baselines are reused.
         The cache attach itself happens earlier in ``setup_agent`` (via
         ``_attach_workspace_cache``, before the harness build) — this method
-        only writes the A/B/C baseline files.
+        only writes the B-class member identity files and primes the shared
+        cache with the final bodies.
 
         Skips silently when the member has no team context (single-agent or
-        external CLI members without a team spec).
+        external CLI members without a team spec) or when the evolution
+        mechanism is disabled.
         """
         team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
         member_name = ctx.member_name
         if not member_name:
             return
+        if not spec.evolution_enabled:
+            # Evolution disabled: the write side is off — no B-class file.
+            return
 
         from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
         from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
 
-        # B-class values come from the runtime context (mirrors the DB row).
+        # B-class member values come from the runtime context (mirrors the DB
+        # row / evolved md). Team-level files (system prompt templates, tool
+        # descriptions, team identity) are written earlier — at
+        # ``coordination.start`` (framework-source A/C baselines) and at
+        # ``build_team`` (team identity) — not in per-member assembly.
         member_desc = ctx.desc or None
         member_prompt = ctx.prompt or None
-        # Team-level B-class values are carried on the context from the async
-        # assembly entry (``build_context_from_db`` reads ``team_info`` — U11);
-        # leader first-assembly has no team row yet, so these stay None there.
-        team_desc = ctx.team_desc or None
-        team_prompt = ctx.team_prompt or None
 
         store = WorkspaceStore()
-        assembler = WorkspaceAssembler(store)
-        # Team-workspace files (A/C are static copies of the framework
-        # defaults — written idempotently on every assembly, no build_team
-        # dependency; B-class team values only when the DB row exists, i.e.
-        # ctx carries a non-None team_desc/team_prompt, U11).
-        assembler.write_team_workspace(
-            team_name=team_name,
-            language=resolved_language,
-            team_desc=team_desc,
-            team_prompt=team_prompt,
-        )
+        cache = self.workspace_manager.workspace_cache if self.workspace_manager else None
+        assembler = WorkspaceAssembler(store, cache=cache)
         # B-class member identity — written on member spawn / recovery.
         assembler.write_member_identity(
             team_name=team_name,

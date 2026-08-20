@@ -114,6 +114,7 @@ class TeamBackend:
         dispatch_mode: str = "autonomous",
         enable_task_verification: bool = False,
         enable_fork: bool = False,
+        evolution_enabled: bool = True,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
@@ -240,6 +241,12 @@ class TeamBackend:
         # flag, mirroring the ``enable_hitt`` pattern.
         self._spec_enable_task_verification: bool = enable_task_verification
         self._enable_task_verification: bool = enable_task_verification
+        # Evolution-mechanism master switch (TeamAgentSpec.evolution_enabled),
+        # immutable from spec: off means the write side never writes workspace
+        # files and the manager carries no cache (the read side falls back to
+        # framework / DB). No runtime override — unlike enable_hitt, build_team
+        # cannot flip it.
+        self._spec_evolution_enabled: bool = evolution_enabled
         # True once build_team took over a team that already existed rather
         # than creating one, so the tool result can say which it was.
         self._team_taken_over: bool = False
@@ -1177,6 +1184,29 @@ class TeamBackend:
         """
         self._workspace_manager = manager
 
+    def _write_team_identity(self, team_name: str, team_desc: Optional[str]) -> None:
+        """Write the team-level identity files (team_card.md, team_prompt.md).
+
+        Called right after the team DB row is created (``build_team``) or
+        taken over (``_reattach_team``): the ``desc`` value comes from that
+        row. ``team_prompt`` is a write-only column today (``build_team`` has
+        no prompt argument), so None is passed and ``write_team_prompt(None)``
+        is a no-op. Idempotent and evolution-safe (``_evolved_body``).
+
+        Skipped when the evolution mechanism is off
+        (``_spec_evolution_enabled`` is False) — no file is written and no
+        cache is primed.
+        """
+        if not self._spec_evolution_enabled:
+            return
+        from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
+
+        WorkspaceAssembler(cache=self.workspace_cache).write_team_identity(
+            team_name=team_name,
+            team_desc=team_desc,
+            team_prompt=None,
+        )
+
     def _overlay_member(self, member: Optional[TeamMember]) -> Optional[TeamMember]:
         """Overlay evolved B-class file values onto a member row in place."""
         if member is None or self.workspace_cache is None:
@@ -1450,6 +1480,11 @@ class TeamBackend:
             self._enable_task_verification,
         )
 
+        # The team row already exists — write its identity files (idempotent:
+        # evolved files are never overwritten). ``desc`` lives on the row;
+        # ``prompt`` is the write-only column.
+        self._write_team_identity(self.team_name, getattr(existing, "desc", None))
+
         if self._on_team_built is not None:
             try:
                 await self._on_team_built()
@@ -1560,6 +1595,11 @@ class TeamBackend:
 
         if not success:
             raise RuntimeError(f"Failed to create team {team_name}")
+
+        # Write the team-level identity files (team_card.md, team_prompt.md)
+        # now that the team row exists — their values come from this row's
+        # desc (the prompt column is currently write-only, see build_team).
+        self._write_team_identity(team_name, desc)
 
         # Register leader as a member — starts busy/running immediately
         leader_card_id = f"{team_name}_{leader_member_name}"

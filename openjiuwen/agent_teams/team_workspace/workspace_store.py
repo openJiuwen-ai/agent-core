@@ -60,19 +60,23 @@ class WorkspaceStore:
         team_name: str,
         member_name: str,
         text: str | None,
-    ) -> None:
+    ) -> str | None:
         """Write ``text`` to ``<member_dir>/prompts/identity/member_prompt.md``.
 
         The file records the body hash as its baseline (``evolved=false`` at
         write time); later edits by the evolution party are detected by hash
-        divergence on restart.
+        divergence on restart. Returns the body the file ended up with: the
+        evolved value when the file was protected, the new ``text`` when
+        written, or ``None`` when ``text`` was empty (nothing written).
         """
         if not text:
-            return
+            return None
         member_dir = team_member_workspace_dir(team_name, member_name)
         target = WorkspaceLayout.member_prompt_file(member_dir)
-        if not self._may_write(target):
-            return
+        evolved_body = self._evolved_body(target)
+        if evolved_body is not None:
+            team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
+            return evolved_body
         meta = {
             "kind": "prompt",
             "name": "member_prompt",
@@ -80,24 +84,29 @@ class WorkspaceStore:
             "evolved": False,
         }
         self._write(target, meta, text)
+        return text
 
     def write_card(
         self,
         team_name: str,
         member_name: str,
         desc: str | None,
-    ) -> None:
+    ) -> str | None:
         """Write the member card to ``prompts/identity/card.md``.
 
         Body is the plain-text ``desc`` (single field — no JSON wrapper;
         ``display_name`` is not file-evolvable and stays in the DB column).
+        Returns the body the file ended up with (evolved value, new ``desc``,
+        or ``None`` when ``desc`` was empty).
         """
         if not desc:
-            return
+            return None
         member_dir = team_member_workspace_dir(team_name, member_name)
         target = WorkspaceLayout.member_card_file(member_dir)
-        if not self._may_write(target):
-            return
+        evolved_body = self._evolved_body(target)
+        if evolved_body is not None:
+            team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
+            return evolved_body
         meta = {
             "kind": "card",
             "name": "member_card",
@@ -105,18 +114,22 @@ class WorkspaceStore:
             "evolved": False,
         }
         self._write(target, meta, desc)
+        return desc
 
-    def write_team_prompt(self, team_name: str, text: str | None) -> None:
+    def write_team_prompt(self, team_name: str, text: str | None) -> str | None:
         """Write ``text`` to ``team-workspace/prompts/identity/team_prompt.md``.
 
         Single file — no ``.<lang>`` suffix: the team prompt is a single
-        user-provided value, not language-mirrored.
+        user-provided value, not language-mirrored. Returns the body the file
+        ended up with (evolved value, new ``text``, or ``None`` when empty).
         """
         if not text:
-            return
+            return None
         target = WorkspaceLayout.team_prompt_file(self.team_workspace_root(team_name))
-        if not self._may_write(target):
-            return
+        evolved_body = self._evolved_body(target)
+        if evolved_body is not None:
+            team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
+            return evolved_body
         meta = {
             "kind": "prompt",
             "name": "team_prompt",
@@ -124,21 +137,26 @@ class WorkspaceStore:
             "evolved": False,
         }
         self._write(target, meta, text)
+        return text
 
     def write_team_card(
         self,
         team_name: str,
         desc: str | None,
-    ) -> None:
+    ) -> str | None:
         """Write the team card to ``team-workspace/prompts/identity/team_card.md``.
 
         Body is the plain-text ``desc`` (``display_name`` stays in the DB).
+        Returns the body the file ended up with (evolved value, new ``desc``,
+        or ``None`` when ``desc`` was empty).
         """
         if not desc:
-            return
+            return None
         target = WorkspaceLayout.team_card_file(self.team_workspace_root(team_name))
-        if not self._may_write(target):
-            return
+        evolved_body = self._evolved_body(target)
+        if evolved_body is not None:
+            team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
+            return evolved_body
         meta = {
             "kind": "team_card",
             "name": "team_card",
@@ -146,6 +164,7 @@ class WorkspaceStore:
             "evolved": False,
         }
         self._write(target, meta, desc)
+        return desc
 
     # ── read side ──────────────────────────────────────────────────────────
 
@@ -205,23 +224,24 @@ class WorkspaceStore:
             team_logger.warning("workspace write %s failed (DB value stands): %s", target, exc)
 
     @staticmethod
-    def _may_write(path: Path) -> bool:
-        """Write-side evolution protection: never clobber an evolved file.
+    def _evolved_body(path: Path) -> str | None:
+        """Write-side evolution protection: return the body to keep, or ``None``.
 
-        Returns False when the target exists and its body hash diverges from
-        its recorded baseline (evolution party edited it) — the new user input
-        does not overwrite the evolved value. Un-evolved or missing files are
-        writable (missing → baseline write; un-evolved → refresh).
+        Returns the file's body when it is evolved (body hash diverges from its
+        recorded baseline — the evolution party edited it) so the caller keeps
+        that value and skips the write. A missing / un-evolved / malformed file
+        is writable and returns ``None`` (missing → baseline write; un-evolved
+        → refresh; malformed → rebuild).
         """
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
-            return True
+            return None  # missing → writable
         try:
             meta, body = read_frontmatter(text)
         except ValueError:
-            return True  # malformed frontmatter → invalid file, freely rewritable
-        return not is_evolved(meta, body)
+            return None  # malformed frontmatter → invalid file, freely rewritable
+        return body if is_evolved(meta, body) else None
 
     @staticmethod
     def _read_body(path: Path) -> str | None:
