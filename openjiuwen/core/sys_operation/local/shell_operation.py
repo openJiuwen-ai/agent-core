@@ -930,7 +930,12 @@ class ShellOperation(BaseShellOperation):
         """Return resolved sandbox roots when restrict_to_sandbox is active, else None."""
         if not getattr(self._run_config, "restrict_to_sandbox", False):
             return None
-        from openjiuwen.core.sys_operation.cwd import get_cwd, get_project_root, get_workspace
+        from openjiuwen.core.sys_operation.cwd import (
+            get_cwd,
+            get_project_root,
+            get_skill_roots,
+            get_workspace,
+        )
 
         configured = getattr(self._run_config, "sandbox_root", None)
         if configured:
@@ -940,7 +945,18 @@ class ShellOperation(BaseShellOperation):
             # member running in the project dir (or a worktree) with a private
             # workspace elsewhere would otherwise be locked out of its own cwd.
             raw_roots = [p for p in (get_workspace(), get_project_root(), get_cwd()) if p]
-        resolved = [pathlib.Path(r).expanduser().resolve() for r in raw_roots]
+            # Skill trees are their own roots: a skill's scripts/ must stay
+            # runnable from an agent whose workspace does not contain the
+            # skill, and a subagent's workspace never does.
+            raw_roots.extend(get_skill_roots())
+        # De-duplicate after resolution: the three fallback layers overlap by
+        # design (project_root defaults to cwd, and a subagent inherits both
+        # from its parent), so the raw list routinely repeats a root.
+        # Repetition changes no decision but is copied verbatim into the
+        # denial message, where a doubled entry reads like a bug.
+        resolved = list(dict.fromkeys(
+            pathlib.Path(r).expanduser().resolve() for r in raw_roots
+        ))
         return resolved or None
 
     def _extract_abs_paths(self, command: str) -> list[pathlib.PurePath]:
