@@ -28,7 +28,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers.agent_lifecycle import (
 from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
 from openjiuwen.agent_teams.agent.coordination.handlers.member import MemberHandler
 from openjiuwen.agent_teams.agent.infra import TeamInfra
-from openjiuwen.agent_teams.debate import DebateRunState
+from openjiuwen.agent_teams.debate import DebateMessageRole, DebateRunState
 from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
@@ -319,6 +319,131 @@ def _debate_message(
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_capped_teammate_auto_answers_peer_before_interrupt_deferral() -> None:
+    state, host, _, infra, handler = _debate_message_handler(TeamRole.TEAMMATE)
+    await state.activate_participant("round-1")
+    await state.mark_participant_capped("round-1")
+    host.has_pending_interrupt.return_value = True
+    infra.message_manager.send_message = AsyncMock(return_value="notice-1")
+    infra.team_backend.get_member.side_effect = lambda member_name: SimpleNamespace(
+        member_name=member_name,
+        display_name="Data Analyst" if member_name == "dev-1" else "Logic Master",
+        role=TeamRole.TEAMMATE.value,
+    )
+    peer = _debate_message(
+        "peer-1",
+        "analyst",
+        round_id="round-1",
+        role="peer",
+        content="Can you respond?",
+    )
+    handler._read_all_unread = AsyncMock(side_effect=[[peer], []])
+
+    await handler._process_unread_messages("dev-1")
+
+    host.deliver_input.assert_not_awaited()
+    infra.message_manager.send_message.assert_awaited_once()
+    call = infra.message_manager.send_message.await_args
+    assert call.kwargs["to_member_name"] == "analyst"
+    assert call.kwargs["from_member_name"] == "dev-1"
+    assert "Data Analyst has reached" in call.kwargs["content"]
+    assert call.kwargs["options"].coordination_meta["message_role"] == "cap_notice"
+    infra.message_manager.mark_messages_read.assert_awaited_once_with([peer], "dev-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_failed_cap_notice_leaves_peer_message_unread() -> None:
+    state, host, _, infra, handler = _debate_message_handler(TeamRole.TEAMMATE)
+    await state.activate_participant("round-1")
+    await state.mark_participant_capped("round-1")
+    infra.message_manager.send_message = AsyncMock(return_value=None)
+    peer = _debate_message(
+        "peer-1",
+        "analyst",
+        round_id="round-1",
+        role="peer",
+        content="Can you respond?",
+    )
+    handler._read_all_unread = AsyncMock(side_effect=[[peer], []])
+
+    await handler._process_unread_messages("dev-1")
+
+    host.deliver_input.assert_not_awaited()
+    infra.message_manager.mark_messages_read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_capped_teammate_does_not_auto_answer_non_teammate_sender() -> None:
+    state, host, _, infra, handler = _debate_message_handler(TeamRole.TEAMMATE)
+    await state.activate_participant("round-1")
+    await state.mark_participant_capped("round-1")
+    infra.team_backend.get_member.return_value = SimpleNamespace(
+        role=TeamRole.LEADER.value,
+    )
+    message = _debate_message(
+        "peer-1",
+        "leader-1",
+        round_id="round-1",
+        role="peer",
+        content="Can you respond?",
+    )
+    handler._read_all_unread = AsyncMock(side_effect=[[message], []])
+    handler._expand = AsyncMock(
+        return_value=ExpandedMessage(body=message.content, is_template=False),
+    )
+
+    await handler._process_unread_messages("dev-1")
+
+    host.deliver_input.assert_awaited_once()
+    infra.message_manager.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("role", "round_id"),
+    [
+        (DebateMessageRole.CAP_NOTICE.value, "round-1"),
+        (DebateMessageRole.PEER.value, "round-2"),
+        (None, "round-1"),
+    ],
+)
+async def test_non_intercepted_debate_messages_reach_model_without_cap_reply_hint(
+    role: str | None,
+    round_id: str,
+) -> None:
+    state, host, _, infra, handler = _debate_message_handler(TeamRole.TEAMMATE)
+    await state.activate_participant("round-1")
+    await state.mark_participant_capped("round-1")
+    message = _debate_message(
+        "message-1",
+        "analyst",
+        round_id=round_id,
+        role=role or "unknown",
+        content="Member analyst has reached the debate limit and cannot reply.",
+    )
+    if role is None:
+        message.coordination_meta = None
+    handler._read_all_unread = AsyncMock(side_effect=[[message], []])
+    handler._expand = AsyncMock(
+        return_value=ExpandedMessage(body=message.content, is_template=False),
+    )
+
+    await handler._process_unread_messages("dev-1")
+
+    host.deliver_input.assert_awaited_once()
+    text = host.deliver_input.await_args.args[0]
+    if role == DebateMessageRole.CAP_NOTICE.value:
+        assert 'kind="reply-hint"' not in text
+    else:
+        assert 'kind="reply-hint"' in text
+    infra.message_manager.send_message.assert_not_awaited()
+
+
 async def _dispatch(agent: TeamAgent, event: EventMessage) -> None:
     """Activate the configured runtime boundary before dispatching an event."""
     dispatcher = agent._coordination.dispatcher
@@ -333,9 +458,13 @@ def _debate_message_handler(
     backend = SimpleNamespace(
         debate_state=state,
         get_member_status=AsyncMock(return_value=MemberStatus.READY.value),
+        get_member=AsyncMock(
+            return_value=SimpleNamespace(role=TeamRole.TEAMMATE.value),
+        ),
         is_human_agent=AsyncMock(return_value=False),
     )
     manager = MagicMock()
+    manager.send_message = AsyncMock(return_value="message-1")
     manager.mark_messages_read = AsyncMock(return_value=1)
     infra = TeamInfra(team_backend=backend, message_manager=manager)
     host = SimpleNamespace(

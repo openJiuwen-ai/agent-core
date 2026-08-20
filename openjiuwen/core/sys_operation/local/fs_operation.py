@@ -32,6 +32,38 @@ from openjiuwen.core.sys_operation.result import (
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 
+# Text-mode read_file cannot decode these as UTF-8. Office/PDF are ZIP or binary
+# containers; callers should use dedicated parsers or mode='bytes'.
+_TEXT_UNSAFE_EXTENSIONS = frozenset({
+    ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".pdf",
+    ".zip", ".gz", ".7z", ".rar",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+    ".exe", ".dll", ".so", ".pyc", ".class",
+})
+_ZIP_MAGIC = b"PK\x03\x04"
+_PDF_MAGIC = b"%PDF"
+
+
+def _text_mode_unsupported_reason(file_path: pathlib.Path) -> Optional[str]:
+    """Return a model-actionable error if *file_path* is not UTF-8 text."""
+    ext = file_path.suffix.lower()
+    try:
+        with open(file_path, "rb") as fh:
+            header = fh.read(8)
+    except OSError:
+        header = b""
+    is_zip = header.startswith(_ZIP_MAGIC)
+    is_pdf = header.startswith(_PDF_MAGIC)
+    if ext not in _TEXT_UNSAFE_EXTENSIONS and not is_zip and not is_pdf:
+        return None
+    kind = ext.lstrip(".") if ext else ("pdf" if is_pdf else "zip")
+    return (
+        f"Cannot read '{file_path.name}' as UTF-8 text. "
+        f"This is a binary/Office file ({kind}). "
+        "Use ReadFileTool's Office/PDF reader, or pptx-craft parse-docs / "
+        "docx-craft / xlsx-craft. To read raw bytes, call read_file with mode='bytes'."
+    )
+
 
 class _ListItemsSpec(BaseModel):
     path: str
@@ -263,6 +295,10 @@ class FsOperation(BaseFsOperation):
 
             # Extract validated parameters
             file_path = validated_params.file_path
+            if mode != "bytes":
+                unsupported = _text_mode_unsupported_reason(file_path)
+                if unsupported:
+                    raise RuntimeError(unsupported)
 
             timeout = self._get_lock_timeout(options)
 
@@ -359,6 +395,10 @@ class FsOperation(BaseFsOperation):
 
             # Extract validated parameters
             file_path = validated_params.file_path
+            if mode == "text":
+                unsupported = _text_mode_unsupported_reason(file_path)
+                if unsupported:
+                    raise RuntimeError(unsupported)
 
             timeout = self._get_lock_timeout(options)
 

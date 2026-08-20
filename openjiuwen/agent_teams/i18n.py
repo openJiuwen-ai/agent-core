@@ -171,6 +171,17 @@ STRINGS: dict[str, dict[str, str]] = {
             "你必须调用 send_message(to=\"user\") 把答复发回用户；"
             "你写在回复正文里的任何文字都不会送达用户，不调用工具就等于没有回复。"
         ),
+        "debate.cap_public_suffix": (
+            "[系统通知] 成员 {member_name} 已达到本轮思辨互发上限（{count}/{max_count}），"
+            "后续无法继续回复消息。"
+        ),
+        "debate.cap_notice": (
+            "[系统通知] 成员 {member_name} 已达到本轮思辨互发上限，无法回复此消息。"
+        ),
+        "debate.cap_private_instruction": (
+            "你已达到本轮思辨互发上限（{count}/{max_count}）。请停止等待和互发，"
+            "立即向 Leader 发送一次 final_report=true 的最终要点。"
+        ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": ("所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"),
         "dispatcher.all_done_temporary": (
@@ -432,6 +443,19 @@ STRINGS: dict[str, dict[str, str]] = {
             'You MUST call send_message(to="user") to deliver your reply; '
             "any text you write in your reply body never reaches the user, "
             "so not calling the tool means you did not reply at all."
+        ),
+        "debate.cap_public_suffix": (
+            "[Framework notice] Member {member_name} has reached this round's debate send limit "
+            "({count}/{max_count}) and cannot reply to further messages."
+        ),
+        "debate.cap_notice": (
+            "[Framework notice] Member {member_name} has reached this round's debate send limit "
+            "and cannot reply to this message."
+        ),
+        "debate.cap_private_instruction": (
+            "You have reached this round's debate send limit ({count}/{max_count}). Stop waiting "
+            "and messaging peers, and immediately send one final report to the Leader with "
+            "final_report=true."
         ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (
