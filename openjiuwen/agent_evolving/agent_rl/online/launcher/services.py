@@ -182,7 +182,19 @@ def start_gateway(
     env['GATEWAY_HOST'] = gateway_cfg.host
     env['GATEWAY_PORT'] = str(gateway_cfg.port)
     env['RECORD_DIR'] = gateway_cfg.record_dir
-    env['REDIS_URL'] = gateway_cfg.redis_url
+    if gateway_cfg.redis_url:
+        env['REDIS_URL'] = gateway_cfg.redis_url
+    env['TRAJECTORY_STORE_BACKEND'] = gateway_cfg.trajectory_store_backend
+    if gateway_cfg.local_trajectory_store_dir:
+        env['LOCAL_TRAJECTORY_STORE_DIR'] = gateway_cfg.local_trajectory_store_dir
+    env['LORA_DEFAULT_POLICY'] = gateway_cfg.lora_default_policy
+    env['TRAIN_BACKEND'] = gateway_cfg.training_backend
+    env['SUPERVISOR_URL'] = gateway_cfg.supervisor_url
+    env['SUPERVISOR_TOKEN'] = gateway_cfg.supervisor_token
+    env['RL_ONLINE_CAPTURE_MODE'] = gateway_cfg.sft_capture_mode
+    env['SFT_SCENARIO'] = gateway_cfg.sft_scenario
+    env['RL_ONLINE_SESSION_DONE_ON_INVOKE_END'] = 'true' if gateway_cfg.session_done_on_invoke_end else 'false'
+    env['TRAJECTORY_SESSION_FLUSH_TOKEN_THRESHOLD_K'] = str(gateway_cfg.session_flush_token_threshold_k)
     if lora_repo_root:
         env['LORA_REPO_ROOT'] = lora_repo_root
     if gateway_cfg.disable_trajectory_collection:
@@ -216,14 +228,18 @@ def start_online_training_scheduler(
     cfg: OnlineRLConfig,
     runtime: LaunchRuntime,
 ):
-    """Start the OnlineTrainingScheduler that polls RedisTrajectoryStore."""
+    """Start the OnlineTrainingScheduler that polls the configured trajectory store."""
+    from openjiuwen.agent_evolving.agent_rl.online.core.scheduler import OnlineTrainingScheduler
     from openjiuwen.agent_evolving.agent_rl.online.inference.notifier import InferenceNotifier
-    from openjiuwen.agent_evolving.agent_rl.online.scheduler.online_training_scheduler import OnlineTrainingScheduler
+    from openjiuwen.agent_evolving.agent_rl.online.scheduler.plugins import load_plugin
     from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
 
     train_gpu_count = len([gpu for gpu in cfg.training.gpu_ids.split(',') if gpu.strip()]) or 1
     scheduler = OnlineTrainingScheduler(
-        redis_url=cfg.gateway.redis_url,
+        redis_url=cfg.gateway.redis_url or "",
+        trajectory_store_backend=cfg.gateway.trajectory_store_backend,
+        local_trajectory_store_dir=cfg.gateway.local_trajectory_store_dir,
+        record_dir=cfg.gateway.record_dir,
         poll_interval=float(cfg.training.scan_interval),
         min_samples_for_training=cfg.training.threshold,
         base_model_path=cfg.inference.model_path,
@@ -232,6 +248,20 @@ def start_online_training_scheduler(
         nproc_per_node=train_gpu_count,
         training_gpu_ids=cfg.training.gpu_ids,
         ppo_config_path=cfg.training.ppo_config,
+        drain_pending_on_train=cfg.training.drain_pending_on_train,
+        max_samples_per_run=cfg.training.max_samples_per_run,
+        ppo_samples_per_step=cfg.training.ppo_samples_per_step,
+        allow_partial_last_step=cfg.training.allow_partial_last_step,
+        rollouter=load_plugin(cfg.training.rollouter),
+        evaler=load_plugin(cfg.training.evaler),
+        train_backend=cfg.training.backend,
+        sft_rollouter=cfg.training.sft_rollouter,
+        supervisor_url=cfg.training.supervisor_url,
+        supervisor_token=cfg.training.supervisor_token,
+        supervisor_model=cfg.training.supervisor_model,
+        target_model_id=cfg.training.target_model_id or cfg.inference.model_name,
+        sft_trainer_command=cfg.training.sft_trainer_command,
+        sft_dry_run=cfg.training.sft_dry_run,
     )
     scheduler.start()
     return scheduler
@@ -249,6 +279,12 @@ def start_jiuwenclaw(
     ws_port: int,
     web_host: str,
     web_port: int,
+    lora_repo_root: str = "",
+    lora_default_policy: str = "disabled",
+    capture_mode: str = "ppo_turn",
+    sft_scenario: str = "multi_turn_supervisor",
+    session_done_on_invoke_end: bool = True,
+    session_flush_token_threshold_k: int = 0,
 ) -> tuple[subprocess.Popen, subprocess.Popen | None]:
     """Start JiuwenClaw app + web frontend (if dist exists)."""
     env = os.environ.copy()
@@ -269,8 +305,15 @@ def start_jiuwenclaw(
             trajectory_batch_size=trajectory_batch_size,
             trajectory_mode=trajectory_mode,
             trajectory_tenant_id=trajectory_tenant_id,
+            capture_mode=capture_mode,
+            sft_scenario=sft_scenario,
+            session_done_on_invoke_end=session_done_on_invoke_end,
+            session_flush_token_threshold_k=session_flush_token_threshold_k,
         )
     )
+    if lora_repo_root:
+        env['LORA_REPO_ROOT'] = lora_repo_root
+    env['LORA_DEFAULT_POLICY'] = lora_default_policy
     env['WEB_HOST'] = app_host
     env['WEB_PORT'] = str(ws_port)
 
@@ -355,18 +398,27 @@ def print_launch_summary(
         lines.append(f'  JiuwenClaw WS:   ws://{ws_display_host}:{cfg.jiuwen.ws_port}/ws')
     else:
         lines.append('  JiuwenClaw:      skipped (jiuwen.enabled=false)')
+    local_store_dir = cfg.gateway.local_trajectory_store_dir or str(Path(cfg.gateway.record_dir) / "local_store")
     lines.extend([
         f'  vLLM Inference:  {runtime.inference_url}',
         f'  vLLM Judge:      {runtime.judge_url} ({runtime.judge_label})',
         f'  Gateway proxy:   {runtime.gateway_base_url}',
-        f'  Redis store:     {cfg.gateway.redis_url}',
+        f'  Store backend:   {cfg.gateway.trajectory_store_backend}',
+        f'  Redis store:     {cfg.gateway.redis_url or "disabled"}',
+        f'  Local store:     {local_store_dir}',
         f'  Trajectory mode: {cfg.trajectory.mode}',
-        f'  Trajectory log:  {cfg.gateway.record_dir}/ (JSONL, per-turn)',
+        f'  Capture mode:    {cfg.trajectory.capture_mode}',
+        f'  SFT scenario:    {cfg.trajectory.sft_scenario}',
+        f'  Flush threshold: {cfg.trajectory.session_flush_token_threshold_k}K tokens',
+        f'  Trajectory log:  {cfg.gateway.record_dir}/ (JSONL)',
         f'  LoRA repo:       {runtime.lora_repo}',
         f'  Train threshold: {cfg.training.threshold} samples',
+        f'  Drain pending:   {cfg.training.drain_pending_on_train}',
+        f'  Max/run:         {cfg.training.max_samples_per_run or "unlimited"} samples',
+        f'  PPO step size:   {cfg.training.ppo_samples_per_step or "all claimed"} samples',
         f'  Collect batch:   {cfg.trajectory.batch_size}',
         f'  Scan interval:   {cfg.training.scan_interval}s',
-        f'  Training mode:   PPO (Ray)',
+        f'  Training mode:   {cfg.training.backend}',
         f'  Train GPUs:      [{cfg.training.gpu_ids}]',
         '',
     ])
@@ -380,7 +432,11 @@ def print_launch_summary(
     lines.extend([
         '  Each turn auto-records token_ids + logprobs,',
         '  next turn triggers delayed Judge scoring,',
-        '  when pending trajectories reach threshold, PPO LoRA training auto-triggers.',
+        '  training task API: POST /v1/training/tasks',
+        '  training is started by POST /v1/training/tasks, then scheduler consumes pending trajectories.',
+        '  PPO mode records token_ids + logprobs for delayed Judge scoring;',
+        '  SFT mode records session raw trajectories and rollouts teacher samples;',
+        '  with drain_pending_on_train=true, LoRA training starts only after the training task API is called.',
         '  Press Ctrl+C to stop all services.',
         '=' * 60,
     ])

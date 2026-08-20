@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """DeepAgent configuration dataclasses."""
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
+from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm.model import Model
 
 from openjiuwen.core.single_agent.rail.base import AgentRail
@@ -166,13 +167,24 @@ class DeepAgentConfig:
     Attributes:
         model: Pre-constructed Model instance for LLM
             calls.
-        card: Agent identity card.
+        card: Agent identity card. Its id is a *persistence* identity: it is the
+            entity segment of every checkpointer key, so it must stay stable
+            across restarts for a session's state to be recoverable.
+        tool_owner_id: Owner id used to qualify this agent's stateful tool
+            registrations in the process-global resource manager. Defaults to
+            ``card.id``. Set it when several agents legitimately share one card
+            identity (e.g. one adapter per session) so their tool instances do
+            not overwrite each other under the same id — the checkpointer key
+            keeps using ``card.id`` and is unaffected.
         system_prompt: System prompt injected into the
             ReAct agent's prompt template.
         context_engine_config: Reserved for P1 context
             engineering configuration. If set, applied
             as the inner ReAct agent's ``ContextEngineConfig``
             when the embedded agent is created.
+        kv_cache_affinity_config: KV cache affinity configuration
+            applied as the inner ReAct agent's
+            ``KVCacheAffinityConfig`` when the embedded agent is created.
         enable_task_loop: Whether to enable the outer
             task loop (P1).
         enable_async_subagent: Enable async subagent mode (default False).
@@ -185,13 +197,24 @@ class DeepAgentConfig:
         subagents: Sub-agent specifications or Sub-agent instance.
         tools: Tool cards mounted on the agent.
         mcps: MCP server configs mounted on the agent.
-        workspace: Workspace path for file operations.
+        workspace: Workspace root for this agent's own artifacts (memory,
+            skills view, produced files). NOT the shell working directory —
+            see ``cwd``.
+        cwd: Working directory shell commands run in and relative paths
+            resolve against. Defaults to the workspace root, which keeps the
+            single-agent case unchanged. Team members point it at the project
+            directory (or their isolated worktree) while keeping their own
+            workspace for artifacts.
+        project_root: Project identity anchor (repo root). Defaults to
+            ``cwd``. Used for access-boundary checks, not for path
+            resolution.
         skills: Skill definitions (P1).
         backend: Backend protocol instance (P2).
         sys_operation: System operation.
         completion_timeout: Max seconds to wait for a
             single task-loop iteration to complete.
             Used by the outer loop's wait_completion().
+            None means no limit.
         enable_plan_mode: Whether to enable plan mode.
         permissions: Tool permission policy dict (enabled, tools, rules, …); when
             enabled, DeepAgent mounts PermissionInterruptRail automatically.
@@ -204,8 +227,10 @@ class DeepAgentConfig:
 
     model: Optional[Model] = None
     card: Optional[AgentCard] = None
+    tool_owner_id: Optional[str] = None
     system_prompt: Optional[str] = None
     context_engine_config: Optional[Any] = None
+    kv_cache_affinity_config: Optional[KVCacheAffinityConfig] = None
     enable_task_loop: bool = False
     enable_async_subagent: bool = False
     add_general_purpose_agent: bool = False
@@ -214,12 +239,14 @@ class DeepAgentConfig:
     tools: Optional[List[ToolCard]] = None
     mcps: Optional[List[McpServerConfig]] = None
     workspace: Optional[Workspace] = None
+    cwd: Optional[str] = None
+    project_root: Optional[str] = None
     skills: Optional[Union[str, List[str]]] = None
     enable_skill_discovery: bool = False
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
     auto_create_workspace: bool = True
-    completion_timeout: float = 600.0
+    completion_timeout: Optional[float] = 600.0
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None
@@ -231,13 +258,6 @@ class DeepAgentConfig:
 
     # Progressive tool exposure config
     progressive_tool_enabled: bool = False
-    progressive_tool_always_visible_tools: List[str] = field(
-        default_factory=list
-    )
-    progressive_tool_default_visible_tools: List[str] = field(
-        default_factory=list
-    )
-    progressive_tool_max_loaded_tools: int = 12
 
     # Plan mode config
     default_mode: AgentMode = AgentMode.NORMAL
@@ -248,6 +268,12 @@ class DeepAgentConfig:
 
     # Whether or not the inner ReactAgent executes tool calls in parallel.
     parallel_tool_calls: bool = True
+
+    # Auto-mount ToolCallResilienceRail: bounded retry of retryable tool-call
+    # failures (transport/timeout markers) via the @rail retry loop. Non-
+    # idempotent tools (write/shell/spawn) are never retried. Turn off for
+    # deployments that supply their own retry rail or want raw exceptions.
+    enable_tool_resilience_rail: bool = True
 
     # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
     # Subagents inherit the stricter of their own spec and this value.
@@ -270,6 +296,9 @@ class SubAgentConfig:
     sys_operation: Optional[SysOperation] = None
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
+    # None inherits the parent DeepAgent setting.  Set explicitly when the
+    # subagent uses a model with different native image capabilities.
+    enable_read_image_multimodal: Optional[bool] = None
     enable_task_loop: bool = False
     max_iterations: Optional[int] = None
     factory_name: Optional[str] = None

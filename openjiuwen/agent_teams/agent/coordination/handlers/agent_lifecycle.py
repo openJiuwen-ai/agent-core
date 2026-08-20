@@ -67,7 +67,7 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         event: persistent leaders have to survive ``clean_team`` to
         accept the next interaction. For a TEMPORARY-team leader the
         round-end teardown is driven NOT by this bus event but by
-        ``StreamController._run_one_round`` checking
+        ``StreamController._on_idle_settled`` checking
         ``state.team_cleaned`` — a latch set synchronously by the
         ``clean_team`` tool's success callback (see
         ``TeamAgent._mark_team_cleaned``) — and closing the stream.

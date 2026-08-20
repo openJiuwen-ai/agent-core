@@ -9,15 +9,53 @@ SESSION_SPAWN / rails / state）。`TeamHarness` 在其上做 team 适配。
 
 ```
 harness/
-├── protocol.py        # HarnessProtocol（结构化契约，isinstance 校验）
+├── protocol.py        # HarnessProtocol（结构化契约，isinstance 校验）：send / abort / pause / resume / stop / outputs
 ├── native_harness.py  # NativeHarness(DeepAgent)：supervisor + round 驱动 + send/steer/follow_up；run_once 非流式单次 invoke（不开 supervisor，返回 Runner.run_agent 格式 dict）
 ├── team_harness.py    # TeamHarness：在 NativeHarness 上做 team 适配（build / role）；run_once 转发（单轮 worker 入口）
-├── control.py         # _CmdSend / _CmdAbort / _CmdPause / _CmdRoundFinished / _CmdStop
-├── state.py           # HarnessInternalState / InboxMessage / ActiveRound / HarnessState
+├── control.py         # _CmdSend / _CmdAbort / _CmdPause / _CmdResume / _CmdRoundFinished / _CmdStop
+├── state.py           # HarnessInternalState / InboxMessage / ActiveRound / HarnessState / RoundPhase
 ├── outputs.py         # _OutputIterator / _END 输出迭代
-├── snapshot_rail.py   # SnapshotRail：round 边界快照（回滚用）
+├── snapshot_rail.py   # PhaseSnapshotRail：inner-loop 阶段追踪 + iteration/round 边界快照 + cooperative stop
 └── async_tools.py     # 异步后台工具框架（AsyncTool / AsyncToolRuntime / render_result_text）
 ```
+
+## 输入队列：steering 与 follow-up
+
+两条队列，同一个语义——**攒住的东西整批喂给下一次模型调用**：
+
+- `send(immediate=True)` 推进当前 round 的 steering 队列，inner loop 在下一次 model call
+  之前 drain；
+- `send(immediate=False)` 进 follow-up 队列，round 结束时**整批** drain 出来驱动下一轮
+  （[[F_71]]）。曾经是 `pop(0)` 一条一轮——两条队列本该同义却不同义，代价是每条排队输入
+  各烧一个完整 round，而且成员对最旧那条动手时看不见后面还排着什么。
+
+**steering 侧每次取多少由 rail 现场定**（[[F_78]]）：drain 之前触发
+`BEFORE_STEERING_DRAIN`（队列为空则不触发），rail 写 `SteeringDrainInputs.limit`；不写就是
+全取，即无 rail 意见时的原行为。team 的非 leader 成员由 `TeamPolicyRail` 限到
+`steer_batch_size` 条（默认 2）——那条队列装的是信箱消息，每条各说各的、一条都不能丢，
+攒多了拼成一个巨型 turn 会把模型顶崩。取不走的原封留在队列里，inner loop 本来就在
+`has_pending_steering()` 为真时继续迭代，后续 model call 依次取完；**队列非空时至少取 1 条**，
+否则 loop 会空转到 `max_iterations` 耗尽。
+
+两条批次都**不在本层拼接**：整批以列表往下走（`InputEvent.input_data` 每条一个 text frame），
+由 inner `ReActAgent._admit_user_message` 先把列表交给 `ON_USER_MESSAGE` rail、rail 增删完
+才拼成一条 user message。拼早了 rail 就只能对着正文做字符串解析——team 侧正是靠这个整条剔除
+被后来者覆盖的任务看板。
+
+## pause / abort / resume（两个正交动词）
+
+停止点一律落在 **inner ReAct iteration 边界**。`abort` 丢弃当前 round（→ IDLE，下次 `send` 起
+全新 round）；`pause` 停在干净边界并**保留 round**（→ PAUSED，`resume` 原地续跑，不追加新的
+user turn）。
+
+`PhaseSnapshotRail` 是正确性权威：它在 `before/after_model_call` 上做 cooperative
+`force_finish`，保证 loop 总能停在边界、**绝不打断运行中的 tool**（副作用不可撤销）；supervisor
+的 hard-cancel 只是及时性优化，且 gated 到 `model_call_in_flight`（只能落在 parked 的 LLM
+`await`）。tool 阶段的 pause 经 `PAUSING` 过渡态等待边界，ack 延迟到 `_on_round_done` resolve。
+
+该 rail 用 **harness back-ref**（公共只读属性 `harness.active_round`）定位活跃 round —— inner loop 跑在
+TaskScheduler 的 exec task 里，ContextVar 读不到。详见 [`S_18`](../docs/specs/S_18_harness-interaction-contract.md)
+与 [`F_60`](../docs/features/F_60_native-harness-pause-abort-resume.md)。
 
 ## 异步工具框架（`async_tools.py`）
 

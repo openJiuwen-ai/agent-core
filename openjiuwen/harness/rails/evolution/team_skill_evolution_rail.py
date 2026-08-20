@@ -14,6 +14,7 @@ import json
 import posixpath
 import re
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -33,21 +34,18 @@ from openjiuwen.agent_evolving.experience.types import (
 )
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
+from openjiuwen.agent_evolving.prompts.sections import build_team_evolution_protocol_section
 from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     SignalDetector,
     make_signal_fingerprint,
 )
-from openjiuwen.agent_evolving.trajectory import (
+from openjiuwen.agent_evolving.trajectory.model import (
     Trajectory,
-    TrajectorySink,
-    TrajectorySource,
-    TrajectoryStore,
-    trajectory_execution_id,
-    trajectory_meta,
-    trajectory_session_id,
-    trajectory_steps,
 )
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.agent_evolving.trajectory.spans import iter_spans, read_tool_call
+from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
@@ -62,14 +60,17 @@ from openjiuwen.harness.rails.evolution.approval_events import (
 from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprovalRuntime
 from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionRequestResult,
-    EvolutionSnapshot,
     SimplifyRequestResult,
 )
-from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionTriggerPoint
+from openjiuwen.harness.rails.evolution.evolution_rail import (
+    EvolutionTriggerPoint,
+    _TeamTrajectoryCaptureMixin,
+)
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
-from openjiuwen.harness.rails.evolution.review.materials import build_swarm_review_scoped_materials
-from openjiuwen.harness.rails.evolution.skill_evolution_rail import EvolutionReviewScopeBuilder, SkillEvolutionRail
-from openjiuwen.agent_evolving.prompts.sections import build_team_evolution_protocol_section
+from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
+    _SkillPreparedEvolutionInput,
+    SkillEvolutionRail,
+)
 
 _TEAM_RECORD_LLM_POLICY = LLMInvokePolicy(
     attempt_timeout_secs=150,
@@ -79,43 +80,22 @@ _TEAM_RECORD_LLM_POLICY = LLMInvokePolicy(
 _DEFAULT_TEAM_EVOLUTION_TOTAL_TIMEOUT_SECS = 720.0
 _TEAM_TASK_NON_TERMINAL_STATES = ("pending", "claimed", "in_progress", "blocked")
 _TEAM_SKILL_KINDS = {"team-skill", "swarm-skill"}
+_AUTO_TEAM_SKILL_EVOLUTION_FOLLOW_UP_TAG = "auto_team_skill_evolution_review_followup"
 _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN = (
-    "团队任务已经完成。请基于完整团队上下文检查 team/swarm skill "
-    "是否有可复用经验线索。\n"
-    "只关注 handoff、delegation、shared context、role confusion、"
-    "leader/member coordination 等团队协议问题。\n"
-    "普通成员局部工具失败或一次性任务事实不自动成为 swarm skill 经验；\n"
-    "只有在失败体现可复用协议或协作问题时再演进。\n"
-    "不要直接写 Skill 文件；未确认时不要提交演进变更。\n"
-    "如果用户用“你应该/应该先/先...再.../确认后再.../不要直接...”等规则化表达，"
-    "且内容是可复用工作流或可复用执行规则，先确认该建议是否要沉淀为\n"
-    "团队协作/交付流程经验（可关联相关 Skill）。\n"
-    "一次性偏好、不可复用、已有经验覆盖或无法归入相关 Skill 场景时，不要询问演进。\n"
-    "如果没有可演进机会，不要打扰用户；如果你需要回复本次自检，"
-    "只能说：本次团队技能演进自检未发现需要更新的团队技能。\n"
-    "如果有可演进机会，用一句话询问：这条反馈可以沉淀为以后处理同类任务时的"
-    "团队协作/交付流程经验，是否需要我发起 Swarm Skill 演进？\n"
-    "用户确认后，按顺序调用 prepare_skill_evolution、evolve_review_task、evolve_skill_experiences，"
-    "完成演进工具流程。"
+    "这是运行时插入的 Team/Swarm Skill 演进自检，不是用户的新需求。\n"
+    "团队任务已完成；参考常驻“团队 Skill 演进自检”规则，只判断本轮是否存在可复用团队更新，不重新判断"
+    "运行时触发门槛。\n"
+    "如需建议，只在普通最终回复末尾追加一至两句，并同时包含可复用团队更新点和是否发起 Team/Swarm Skill "
+    "演进的确认问题；否则自然回复，不提本提醒或内部判断。"
 )
-_TEAM_COMPLETION_FOLLOWUP_PROMPT_EN = """The team task is complete. Review the full team context for reusable
-team/swarm Skill lessons.
-Focus only on team protocol issues such as handoff, delegation, shared context, role confusion, and
-leader/member coordination.
-Use concrete execution failures only when they indicate reusable team protocol, role coordination, or shared-context
-issues.
-Do not edit Skill files directly, and do not submit evolution changes before confirmation.
-If the user gives reusable rule-style guidance (for example “you should”, “should first”, “do X then Y”,
-“confirm before doing”, or “do not do this directly”) and it is about a reusable team workflow or execution
-rule, first confirm whether to distill it as a team collaboration or delivery workflow lesson.
-Do not ask to evolve for one-off preferences, non-reusable feedback, duplicate coverage, or feedback that cannot
-fit any related Skill context.
-If there is no evolution opportunity, do not bother the user; if you need to respond to this self-check, only say:
-This team skill evolution self-check did not find any team skill that needs updating.
-If there is an evolution opportunity, ask this sentence in one line: This feedback can be distilled into a team
-collaboration or delivery workflow lesson. Should I start Swarm Skill evolution?
-Only after user confirmation, call prepare_skill_evolution, evolve_review_task, and evolve_skill_experiences
-in order to complete the evolution tool flow."""
+_TEAM_COMPLETION_FOLLOWUP_PROMPT_EN = (
+    "This runtime-inserted Team/Swarm Skill evolution self-check is not a new user request.\n"
+    'The team task is complete. Refer to the standing "Team Skill Evolution Self-Check" rules and judge only whether '
+    "this round contains a reusable team update; do not re-evaluate the runtime trigger threshold.\n"
+    "If suggesting, append only one or two sentences to the normal final reply and include both the reusable team "
+    "update and the Team/Swarm Skill evolution question; otherwise reply naturally without mentioning this reminder "
+    "or internal judgment."
+)
 
 
 def is_completed_team_task_view(result: Any) -> bool:
@@ -137,14 +117,15 @@ def infer_team_skill_from_trajectory(
     """
     skill_tool_payloads: list[Any] = []
     texts: list[str] = []
-    for step in trajectory_steps(trajectory):
-        if step.kind != "tool" or not step.detail:
+    for span in iter_spans(trajectory):
+        if span_category(span) != "tool":
             continue
-        tool_name = getattr(step.detail, "tool_name", "")
+        tool_call = read_tool_call(span)
+        tool_name = tool_call.get("name", "")
         if tool_name == "skill_tool":
-            skill_tool_payloads.append(getattr(step.detail, "call_args", None))
-        texts.append(str(getattr(step.detail, "call_args", "")))
-        texts.append(str(getattr(step.detail, "call_result", "")))
+            skill_tool_payloads.append(tool_call.get("input"))
+        texts.append(str(tool_call.get("input", "")))
+        texts.append(str(tool_call.get("output", "")))
 
     return infer_skill_from_texts(
         known_team_skills,
@@ -153,7 +134,17 @@ def infer_team_skill_from_trajectory(
     )
 
 
-class TeamSkillEvolutionRail(SkillEvolutionRail):
+class _ReviewFeedbackGlobalSkillEvolutionRail(SkillEvolutionRail):
+    """Regular global-Skill persistence using the existing team approval route."""
+
+    def _online_request_id_prefix(self) -> str | None:
+        return "team_skill_evolve"
+
+    def _online_stage_source(self) -> str:
+        return "scheduler_review_feedback"
+
+
+class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
     """Team skill evolution rail — counterpart of SkillEvolutionRail.
 
     SkillEvolutionRail handles 1D skill experience records;
@@ -175,43 +166,38 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         llm: Model,
         model: str,
         language: str = "cn",
-        trajectory_store: Optional[TrajectoryStore] = None,
-        trajectory_source: Optional[TrajectorySource] = None,
-        trajectory_sink: Optional[TrajectorySink] = None,
+        trajectory_span_processor: TrajectorySpanProcessor,
         member_role: Optional[str] = None,
-        auto_scan: bool = True,
+        signal_trigger: Optional[bool] = None,
         auto_save: bool = False,
         review_runtime: EvolutionReviewRuntime,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,
         team_id: Optional[str] = None,
-        trajectories_dir: Optional[Path] = None,
         record_llm_policy: LLMInvokePolicy = _TEAM_RECORD_LLM_POLICY,
         evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
         eval_interval: int = 5,
         evolution_total_timeout_secs: float = _DEFAULT_TEAM_EVOLUTION_TOTAL_TIMEOUT_SECS,
         disabled_skills: Optional[Union[str, list[str]]] = None,
-        fuzzy_review: bool = False,
-        fuzzy_review_interval: int = 5,
-        completion_followup_enabled: bool = False,
-        review_agent_max_iterations: int = 20,
+        review_trigger: Optional[bool] = None,
+        review_interval: int = 5,
+        review_agent_max_iterations: int = 40,
     ) -> None:
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")
 
         self._record_llm_policy = record_llm_policy
-
         super().__init__(
             skills_dir,
             llm=llm,
             model=model,
-            auto_scan=auto_scan,
+            signal_trigger=signal_trigger,
             auto_save=auto_save,
             review_runtime=review_runtime,
             language=language,
             subject_kind="swarm-skill",
-            trajectory_store=trajectory_store,
+            trajectory_span_processor=trajectory_span_processor,
             eval_interval=eval_interval,
             evolution_total_timeout_secs=evolution_total_timeout_secs,
             generate_records_llm_policy=record_llm_policy,
@@ -221,8 +207,8 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             evolution_trigger=EvolutionTriggerPoint.AFTER_INVOKE,
             async_evolution=async_evolution,
             max_concurrent_evolution=max_concurrent_evolution,
-            fuzzy_review=fuzzy_review,
-            fuzzy_review_interval=fuzzy_review_interval,
+            review_trigger=review_trigger,
+            review_interval=review_interval,
             review_agent_max_iterations=review_agent_max_iterations,
         )
         self._max_concurrent_evolution = max_concurrent_evolution
@@ -231,17 +217,12 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         self._experience_skill_ops = self._skill_ops
         self._passive_evolution_pending = False
         self._host_completion_pending_session_id: Optional[str] = None
-        self._completion_followup_enabled = bool(completion_followup_enabled)
         self._completion_followup_pending_session_id: Optional[str] = None
-        self._team_id = team_id
-        self._trajectory_source = trajectory_source
-        if trajectory_sink is not None:
-            self.set_trajectory_sink(
-                trajectory_sink,
-                team_id=team_id,
-                member_role=member_role,
-            )
-        self._trajectories_dir = trajectories_dir
+        self._review_feedback_coordinator = None
+        self._review_feedback_global_rail: SkillEvolutionRail | None = None
+        self._review_feedback_skill_create_rail = None
+        self._review_feedback_approval_continuations: dict[str, str] = {}
+        self.set_member_role(member_role or self._DEFAULT_MEMBER_ROLE)
         logger.info(
             "[TeamSkillEvolutionRail] initialized: skills_dir=%s, model=%s, auto_save=%s, team_id=%s",
             skills_dir,
@@ -249,6 +230,140 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             auto_save,
             team_id,
         )
+
+    def _prepare_evolution_review_scope(
+        self,
+        *,
+        source: str,
+        subject: dict[str, Any],
+        session_id: str,
+        member_id: str | None = None,
+        team_id: str | None = None,
+        user_intent: str = "",
+    ):
+        """Prepare review against the Team identity captured by the active root."""
+        del member_id, team_id
+        _, root_team_id = self._team_span_identity()
+        return super()._prepare_evolution_review_scope(
+            source=source,
+            subject=subject,
+            session_id=session_id,
+            member_id=None,
+            team_id=root_team_id,
+            user_intent=user_intent,
+        )
+
+    def configure_review_feedback_evolution(
+        self,
+        *,
+        global_skills_dir: str | Path,
+        trajectory_registry: Any,
+        session_id: str,
+        team_id: str,
+        min_confidence: float = 0.7,
+    ) -> None:
+        """Attach reviewer-feedback evolution to this standard team Rail.
+
+        The internal regular-Skill Rail owns global Skill persistence, while
+        this mounted team Rail remains the sole lifecycle and host-event
+        surface. Scheduler feedback therefore follows the same pending-event
+        and approval path as ordinary team evolution.
+        """
+        from openjiuwen.agent_teams.agent.scheduling.review_feedback_evolution import (
+            ReviewFeedbackEvolutionCoordinator,
+        )
+
+        global_rail = _ReviewFeedbackGlobalSkillEvolutionRail(
+            str(global_skills_dir),
+            llm=self.evolver.llm,
+            model=self.evolver.model,
+            review_runtime=EvolutionReviewRuntime(),
+            # The child rail never subscribes on its own; sharing the mounted
+            # rail's processor keeps the whole evolution stack on one instance.
+            trajectory_span_processor=self.trajectory_span_processor,
+            language=self._language,
+            signal_trigger=False,
+            review_trigger=False,
+            auto_save=self.auto_save,
+            disabled_skills=list(getattr(self, "_disabled_skills", set())),
+        )
+        self._review_feedback_global_rail = global_rail
+        self._review_feedback_coordinator = ReviewFeedbackEvolutionCoordinator(
+            session_id=session_id,
+            team_id=team_id,
+            trajectory_registry=trajectory_registry,
+            global_rail_provider=lambda: self._review_feedback_global_rail,
+            skill_create_rail_provider=lambda: self._review_feedback_skill_create_rail,
+            event_sink=self._relay_review_feedback_events,
+            min_confidence=min_confidence,
+        )
+
+    @property
+    def review_feedback_evolution_enabled(self) -> bool:
+        """Whether this mounted Rail accepts scheduler review feedback."""
+        return self._review_feedback_coordinator is not None
+
+    def bind_review_feedback_skill_create_rail(self, rail: Any | None) -> None:
+        """Bind the already-mounted creation Rail used for repeated patterns."""
+        self._review_feedback_skill_create_rail = rail
+
+    async def handle_review_feedback(self, payload: dict[str, Any]) -> None:
+        """Route one settled failed review through the Core coordinator."""
+        if self._review_feedback_coordinator is not None:
+            await self._review_feedback_coordinator(payload)
+
+    async def finalize_review_feedback(
+        self,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        """Run the terminal global aggregation pass for scheduler feedback."""
+        if self._review_feedback_coordinator is None:
+            return False
+        return await self._review_feedback_coordinator.on_team_completed(payload)
+
+    async def _relay_review_feedback_events(
+        self,
+        event_group: str,
+        events: list[Any],
+    ) -> None:
+        """Relay child-Rail events into the mounted Rail's normal host queue."""
+        if event_group == "global_evolution" and self._review_feedback_global_rail is not None:
+            child_snapshots = getattr(
+                self._review_feedback_global_rail,
+                "_pending_approval_snapshots",
+                {},
+            )
+            for request_id, snapshot in child_snapshots.items():
+                self._pending_approval_snapshots[request_id] = snapshot
+        elif event_group == "skill_creation" and self._review_feedback_skill_create_rail is not None:
+            proposals = getattr(
+                self._review_feedback_skill_create_rail,
+                "_pending_external_proposals",
+                {},
+            )
+            for request_id in proposals:
+                # Creation approvals have no experience-record payload, but a
+                # placeholder lets the existing request-owner lookup find this
+                # mounted team Rail.
+                self._pending_approval_snapshots.setdefault(request_id, None)
+        for event in events:
+            self.emit_host_event(event)
+
+    def owns_approval_request(self, request_id: str) -> bool:
+        """Return whether this Rail or one of its Core-owned children owns it."""
+        return request_id in getattr(
+            self,
+            "_pending_approval_snapshots",
+            {},
+        ) or request_id in getattr(self, "_pending_governance", {})
+
+    def pop_approval_continuation(self, request_id: str) -> str | None:
+        """Return a post-approval continuation, if this request created one."""
+        return getattr(
+            self,
+            "_review_feedback_approval_continuations",
+            {},
+        ).pop(request_id, None)
 
     def _make_evolution_store(self, skills_dir: Union[str, list[str]]) -> EvolutionStore:
         """Build and alias the team/swarm skill evolution store."""
@@ -263,6 +378,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         language: str,
         *,
         generate_records_llm_policy: LLMInvokePolicy,
+        two_stage: bool,
     ) -> SkillExperienceOptimizer:
         """Build the team/swarm optimizer used by the shared online pipeline."""
         return SkillExperienceOptimizer(
@@ -270,14 +386,8 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             model,
             language,
             generate_records_llm_policy=generate_records_llm_policy,
+            two_stage=two_stage,
             profile="team",
-        )
-
-    def _make_review_scope_builder(self) -> EvolutionReviewScopeBuilder:
-        """Build the active review material builder for team/swarm subjects."""
-        return EvolutionReviewScopeBuilder(
-            trajectory_provider=lambda: self._build_swarm_review_trajectory(),
-            materials_builder=build_swarm_review_scoped_materials,
         )
 
     def _online_request_id_prefix(self) -> str | None:
@@ -287,17 +397,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
     def _online_stage_source(self) -> str:
         """Return the team/swarm stage source for generated experiences."""
         return "team_skill_experience_updater"
-
-    def _build_swarm_review_trajectory(self) -> Trajectory | None:
-        """Build the team-aggregated trajectory exposed to the restricted review agent."""
-        trajectory = self._build_trajectory()
-        if trajectory is None:
-            return None
-        return self._aggregate_team_trajectory(trajectory)
-
-    def set_trajectory_source(self, source: Optional[TrajectorySource]) -> None:
-        """Bind this rail to a runtime team trajectory source."""
-        self._trajectory_source = source
 
     @property
     def store(self) -> EvolutionStore:
@@ -314,8 +413,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         return self._generator
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject common and team-specific evolution protocol sections."""
-        await super().before_model_call(ctx)
+        """Inject only the team-specific evolution protocol section."""
         builder = getattr(getattr(ctx, "inputs", None), "system_prompt_builder", None)
         if builder is None:
             builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
@@ -353,25 +451,26 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             "eval_interval": self._eval_interval,
             "evolution_total_timeout_secs": self.evolution_total_timeout_secs,
             "max_concurrent_evolution": self._max_concurrent_evolution,
+            "two_stage": self.two_stage,
         }
 
     @property
-    def auto_scan(self) -> bool:
-        """Whether passive team-skill evolution scanning is enabled."""
-        return self._auto_scan
+    def signal_trigger(self) -> bool:
+        """Whether deterministic team-skill signal triggering is enabled."""
+        return self._signal_trigger
 
-    @auto_scan.setter
-    def auto_scan(self, value: bool) -> None:
-        self._auto_scan = bool(value)
+    @signal_trigger.setter
+    def signal_trigger(self, value: bool) -> None:
+        self._signal_trigger = bool(value)
 
     @property
-    def completion_followup_enabled(self) -> bool:
-        """Whether team completion enqueues an agent-driven active review follow-up."""
-        return self._completion_followup_enabled
+    def review_trigger(self) -> bool:
+        """Whether team completion enqueues a review follow-up."""
+        return self._review_trigger
 
-    @completion_followup_enabled.setter
-    def completion_followup_enabled(self, value: bool) -> None:
-        self._completion_followup_enabled = bool(value)
+    @review_trigger.setter
+    def review_trigger(self, value: bool) -> None:
+        self._review_trigger = bool(value)
 
     @property
     def auto_save(self) -> bool:
@@ -428,36 +527,26 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Reset invoke-local passive completion state on each invoke boundary."""
+        await super()._on_before_invoke(ctx)
         self._passive_evolution_pending = False
-        self._skip_auto_scan_this_invoke = False
+        self._skip_signal_trigger_this_invoke = False
 
-    async def _snapshot_for_evolution(
+    async def _prepare_evolution_input(
         self,
         trajectory: Trajectory,
-        ctx: Optional[AgentCallbackContext],
-    ) -> Optional[dict]:
-        """Phase 1: Capture trajectory plus callback-visible messages for async evolution."""
-        if not getattr(self, "_auto_scan", True):
+        ctx: AgentCallbackContext,
+    ) -> Optional[_SkillPreparedEvolutionInput]:
+        """Capture one detached team-skill input while callback state is live."""
+        prepared = await super()._prepare_evolution_input(trajectory, ctx)
+        if prepared is None:
             return None
-        if ctx is None:
-            return EvolutionSnapshot(
-                trajectory=trajectory,
-                messages=[],
-                skill_name=self.subject_kind,
-            ).to_legacy_dict()
-        snapshot = await self.build_base_evolution_snapshot(trajectory, ctx)
-        if snapshot is None:
-            return None
-        base_snapshot = EvolutionSnapshot.from_legacy_dict(snapshot)
-        session = ctx.session if hasattr(ctx, "session") else None
-        presented_entries = self._consume_presented_entries(session)
-        team_snapshot = EvolutionSnapshot(
-            trajectory=base_snapshot.trajectory,
-            messages=list(base_snapshot.messages),
+        return _SkillPreparedEvolutionInput(
+            trajectory=prepared.trajectory,
+            messages=prepared.messages,
             skill_name=self.subject_kind,
-        ).to_legacy_dict()
-        team_snapshot["presented_entries"] = presented_entries
-        return team_snapshot
+            presented_entries=prepared.presented_entries,
+            incremental_messages=prepared.incremental_messages,
+        )
 
     async def request_user_evolution(
         self,
@@ -525,7 +614,11 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             max_context_chars=max_context_chars,
         )
 
-    async def _on_after_tool_call(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_tool_call(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Detect team completion during the invoke and mark the round for after_invoke."""
         inputs = ctx.inputs
         if not isinstance(inputs, ToolCallInputs):
@@ -533,9 +626,9 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
         await self._record_presented_experience_detail(ctx, inputs)
 
-        if not self._auto_scan and not self._completion_followup_enabled:
+        if not self._signal_trigger and not self._review_trigger:
             return
-        if self.builder is None:
+        if trajectory is None:
             return
 
         if inputs.tool_name != "view_task":
@@ -548,7 +641,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         logger.debug(
             "[TeamSkillEvolutionRail] view_task completion check result=%s, session_id=%s",
             completed,
-            self._current_builder_session_id(),
+            self._current_trajectory_session_id(),
         )
         if not completed:
             logger.info("[TeamSkillEvolutionRail] view_task: tasks still in progress, skipping")
@@ -562,25 +655,29 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         ctx: AgentCallbackContext,
     ) -> bool:
         """Trigger passive evolution only if this invoke has observed team completion."""
-        if self._skip_auto_scan_this_invoke:
-            logger.info("[TeamSkillEvolutionRail] active evolution activity detected, skip passive auto_scan")
+        if self._skip_signal_trigger_this_invoke:
+            logger.info("[TeamSkillEvolutionRail] active evolution activity detected, skip passive signal scan")
             return False
-        if self._completion_followup_enabled:
+        if self._review_trigger:
             return False
-        return self._auto_scan and (
+        return self._signal_trigger and (
             self._passive_evolution_pending
-            or self._host_completion_pending_session_id == self._current_builder_session_id()
+            or self._host_completion_pending_session_id == self._current_trajectory_session_id()
         )
 
-    async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_task_iteration(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Enqueue team completion active-review follow-up while the task loop can schedule it."""
-        if not self._completion_followup_enabled:
+        if not self._review_trigger:
             return
         pending_session_id = self._completion_followup_pending_session_id
         if pending_session_id is None:
             return
 
-        session_id = self._current_builder_session_id()
+        session_id = self._resolve_trajectory_session_id(ctx, ctx.inputs)
         if pending_session_id != session_id:
             return
 
@@ -601,7 +698,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         ctx: AgentCallbackContext,
     ) -> None:
         """Consume host completion marks after the after-invoke trigger fires."""
-        if self._host_completion_pending_session_id == trajectory_session_id(trajectory):
+        if self._host_completion_pending_session_id == trajectory.session_id:
             self._host_completion_pending_session_id = None
 
     # ===== Public API: external completion notification =====
@@ -611,28 +708,36 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         ctx: Optional[AgentCallbackContext] = None,
     ) -> bool:
         """Mark the current invoke for configured team completion evolution handling."""
-        if not self._auto_scan and not self._completion_followup_enabled:
-            logger.info("[TeamSkillEvolutionRail] notify_team_completed ignored because auto_scan is disabled")
+        if not self._signal_trigger and not self._review_trigger:
+            logger.info("[TeamSkillEvolutionRail] notify_team_completed ignored because signal_trigger is disabled")
             return False
-        if self.builder is None:
+        capture = self._resolve_capture(ctx=ctx)
+        if capture is None:
             logger.warning(
-                "[TeamSkillEvolutionRail] notify_team_completed: no trajectory available "
-                "(before_invoke may not have fired)"
+                "[TeamSkillEvolutionRail] notify_team_completed: no active trajectory capture "
+                "(before_invoke may not have fired or after_invoke already completed)"
             )
+            return False
+        trajectory = self.get_trajectory(
+            session_id=capture.session_id,
+            member_id=capture.member_id,
+            team_id=capture.team_id,
+        )
+        if trajectory is None:
+            logger.warning("[TeamSkillEvolutionRail] notify_team_completed: no clean trajectory available")
             return False
 
         self._mark_team_completion_pending()
         logger.debug(
             "[TeamSkillEvolutionRail] notify_team_completed marked session_id=%s",
-            self._current_builder_session_id(),
+            self._current_trajectory_session_id(),
         )
         return True
 
-    def _current_builder_session_id(self) -> Optional[str]:
-        """Return the current trajectory builder session id, if available."""
-        if self.builder is None:
-            return None
-        return self.builder.session_id
+    def _current_trajectory_session_id(self) -> Optional[str]:
+        """Return the active trajectory capture session id, if available."""
+        capture = self._current_capture()
+        return capture.session_id if capture is not None else None
 
     async def record_presented_experiences(
         self,
@@ -665,16 +770,10 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
     # ===== EvolutionRail hook =====
 
-    async def run_evolution(
-        self,
-        trajectory: Trajectory,
-        ctx: Optional[AgentCallbackContext] = None,
-        *,
-        snapshot: Optional[dict] = None,
-    ) -> None:
+    async def run_evolution(self, prepared: _SkillPreparedEvolutionInput) -> None:
         """Triggered when view_task shows all member tasks completed."""
-        if not getattr(self, "_auto_scan", True):
-            logger.info("[TeamSkillEvolutionRail] auto_scan disabled, skipping")
+        if not getattr(self, "_signal_trigger", True):
+            logger.info("[TeamSkillEvolutionRail] signal_trigger disabled, skipping")
             return
         t0 = time.time()
         try:
@@ -682,22 +781,9 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
                 "started",
                 "team tasks completed; starting team skill evolution analysis",
             )
-            messages: list[dict] = []
-            presented_entries = []
-            using_async_snapshot = snapshot is not None
-            if using_async_snapshot:
-                messages = list(snapshot["messages"])
-                presented_entries = snapshot.get("presented_entries", [])
-            elif ctx is not None:
-                messages = self._collect_messages_from_trajectory(trajectory)
-                session = ctx.session if hasattr(ctx, "session") else None
-                presented_entries = self._consume_presented_entries(session)
-
-            team_trajectory = self._aggregate_team_trajectory(trajectory)
-            if team_trajectory is not trajectory:
-                trajectory = team_trajectory
-                if not using_async_snapshot:
-                    messages = self._collect_messages_from_trajectory(trajectory)
+            trajectory = prepared.trajectory
+            messages = [deepcopy(message) for message in prepared.messages]
+            presented_entries = [deepcopy(entry) for entry in prepared.presented_entries]
 
             used_skill = self._detect_used_team_skill(trajectory)
             if not used_skill:
@@ -707,7 +793,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
                     "no skill usage of a team/swarm skill detected in trajectory; "
                     "cancelling team skill evolution analysis",
                 )
-                await self._evaluate_presented_entries(presented_entries)
+                await self._evaluate_presented_entries(presented_entries, messages)
                 return
 
             logger.info("[TeamSkillEvolutionRail] detected existing skill '%s'", used_skill)
@@ -722,7 +808,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
                     "cancelling team skill evolution analysis",
                     skill_name=used_skill,
                 )
-                await self._evaluate_presented_entries(presented_entries)
+                await self._evaluate_presented_entries(presented_entries, messages)
                 return
 
             self._emit_progress(
@@ -752,7 +838,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
                     request_id=request.request_id,
                 )
 
-            await self._evaluate_presented_entries(presented_entries)
+            await self._evaluate_presented_entries(presented_entries, messages)
 
             elapsed = time.time() - t0
             logger.info("[TeamSkillEvolutionRail] run_evolution completed in %.1fs", elapsed)
@@ -769,8 +855,8 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
     def _mark_team_completion_pending(self) -> None:
         """Mark team completion for either passive scan or active follow-up mode."""
-        session_id = self._current_builder_session_id()
-        if self._completion_followup_enabled:
+        session_id = self._current_trajectory_session_id()
+        if self._review_trigger:
             self._completion_followup_pending_session_id = session_id
             return
         self._host_completion_pending_session_id = session_id
@@ -778,7 +864,8 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
 
     def _build_team_completion_followup_prompt(self) -> str:
         """Build the active team completion review follow-up prompt."""
-        return _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN if self._language == "en" else _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN
+        prompt = _TEAM_COMPLETION_FOLLOWUP_PROMPT_EN if self._language == "en" else _TEAM_COMPLETION_FOLLOWUP_PROMPT_CN
+        return f"<{_AUTO_TEAM_SKILL_EVOLUTION_FOLLOW_UP_TAG}>\n{prompt}\n</{_AUTO_TEAM_SKILL_EVOLUTION_FOLLOW_UP_TAG}>"
 
     async def _record_presented_experience_detail(
         self,
@@ -798,7 +885,7 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         await self._experience_tracker.record_presented_records(
             session=session,
             skill_name=skill_name,
-            presentation_snippet=content,
+            presentation_snippet="",
             record_ids=record_ids,
         )
 
@@ -808,12 +895,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             return []
         return tracker.consume_eval_state(session)
 
-    async def _evaluate_presented_entries(self, presented_entries: list[tuple[str, Any, str]]) -> None:
-        tracker = getattr(self, "_experience_tracker", None)
-        if tracker is None:
-            return
-        await tracker.evaluate_presented(presented_entries)
-
     async def approve_record(
         self,
         request_id: str,
@@ -821,6 +902,45 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         approved_record_ids: Optional[list[str]] = None,
     ) -> None:
         """Handle approval of staged evolution records."""
+        creation_rail = getattr(self, "_review_feedback_skill_create_rail", None)
+        if creation_rail is not None and creation_rail.owns_external_proposal(request_id):
+            continuation = creation_rail.resolve_external_proposal(
+                request_id,
+                accepted=True,
+            )
+            self._pending_approval_snapshots.pop(request_id, None)
+            if continuation:
+                continuations = getattr(
+                    self,
+                    "_review_feedback_approval_continuations",
+                    None,
+                )
+                if continuations is None:
+                    continuations = {}
+                    self._review_feedback_approval_continuations = continuations
+                continuations[request_id] = continuation
+            return
+
+        global_rail = getattr(self, "_review_feedback_global_rail", None)
+        if global_rail is not None and request_id in getattr(
+            global_rail,
+            "_pending_approval_snapshots",
+            {},
+        ):
+            await global_rail.approve_record(
+                request_id,
+                approved_record_ids=approved_record_ids,
+            )
+            child_snapshots = getattr(global_rail, "_pending_approval_snapshots", {})
+            if request_id in child_snapshots:
+                # A partial approval keeps the remaining records pending. Keep
+                # the mounted Rail's mirror in sync so a later approval/reject
+                # can still be routed through the standard team endpoint.
+                self._pending_approval_snapshots[request_id] = child_snapshots[request_id]
+            else:
+                self._pending_approval_snapshots.pop(request_id, None)
+            return
+
         approve_kwargs: dict[str, list[str]] = {}
         if approved_record_ids is not None:
             approve_kwargs["approved_record_ids"] = approved_record_ids
@@ -842,6 +962,22 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
         )
 
     async def reject_record(self, request_id: str) -> None:
+        creation_rail = getattr(self, "_review_feedback_skill_create_rail", None)
+        if creation_rail is not None and creation_rail.owns_external_proposal(request_id):
+            creation_rail.resolve_external_proposal(request_id, accepted=False)
+            self._pending_approval_snapshots.pop(request_id, None)
+            return
+
+        global_rail = getattr(self, "_review_feedback_global_rail", None)
+        if global_rail is not None and request_id in getattr(
+            global_rail,
+            "_pending_approval_snapshots",
+            {},
+        ):
+            await global_rail.reject_record(request_id)
+            self._pending_approval_snapshots.pop(request_id, None)
+            return
+
         pending, result = await self.approval_runtime.reject_pending_request(
             request_id,
             rail_name="TeamSkillEvolutionRail",
@@ -1039,43 +1175,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
                 return skill_name
         return None
 
-    def _aggregate_team_trajectory(self, trajectory: Trajectory) -> Trajectory:
-        """Return aggregated team trajectory when a runtime source has data."""
-        source = getattr(self, "_trajectory_source", None)
-        if source is None:
-            return trajectory
-
-        team_id = getattr(self, "_team_id", None) or "unknown"
-        fallback = trajectory
-        session_id = trajectory_session_id(trajectory) or ""
-        try:
-            team_traj = source.get_trajectory(
-                team_id=team_id,
-                session_id=session_id,
-                filter_collaborative=True,
-            )
-        except TypeError:
-            try:
-                team_traj = source.get_trajectory(
-                    team_id=team_id,
-                    session_id=session_id,
-                )
-            except TypeError:
-                return fallback
-        if team_traj is None:
-            return fallback
-        team_steps = trajectory_steps(team_traj)
-        if not team_steps:
-            return fallback
-        team_meta = trajectory_meta(team_traj)
-
-        self._emit_progress(
-            "detecting_signals",
-            f"aggregated {team_meta.get('member_count', 0)} members, "
-            f"{len(team_steps)} collaborative steps",
-        )
-        return team_traj
-
     def _detect_rule_signals(self, *, trajectory: Trajectory, skill_name: str) -> list[EvolutionSignal]:
         """Detect deterministic execution/script signals and attribute them to the team skill."""
         try:
@@ -1222,42 +1321,6 @@ class TeamSkillEvolutionRail(SkillEvolutionRail):
             return frontmatter.get("kind") in _TEAM_SKILL_KINDS
         except OSError:
             return False
-
-    def _dump_trajectory_debug(self, trajectory: Trajectory) -> None:
-        """Dump trajectory to a JSON file for debugging."""
-        try:
-            debug_dir = self._store.base_dirs[0].parent / "_debug"
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            execution_id = trajectory_execution_id(trajectory)
-            steps = trajectory_steps(trajectory)
-            path = debug_dir / f"trajectory_{ts}_{execution_id[:8]}.json"
-
-            steps_data = []
-            for step in steps:
-                entry: dict[str, Any] = {"kind": step.kind}
-                if step.detail:
-                    if step.kind == "tool":
-                        entry["tool_name"] = getattr(step.detail, "tool_name", "")
-                        entry["call_args"] = str(getattr(step.detail, "call_args", ""))[:500]
-                        entry["call_result"] = str(getattr(step.detail, "call_result", ""))[:500]
-                    elif step.kind == "llm":
-                        resp = getattr(step.detail, "response", None)
-                        entry["response_preview"] = str(resp)[:300] if resp else ""
-                if step.meta:
-                    entry["meta"] = step.meta
-                steps_data.append(entry)
-
-            dump = {
-                "execution_id": execution_id,
-                "session_id": trajectory_session_id(trajectory),
-                "step_count": len(steps),
-                "steps": steps_data,
-            }
-            path.write_text(json.dumps(dump, ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.info("[TeamSkillEvolutionRail] trajectory dumped to %s", path)
-        except Exception as exc:
-            logger.warning("[TeamSkillEvolutionRail] trajectory dump failed: %s", exc)
 
     def _emit_record_approval_event(
         self,

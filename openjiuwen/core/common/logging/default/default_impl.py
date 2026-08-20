@@ -417,18 +417,27 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 3)
+        # ``exc_info`` is a stdlib logging contract (``Logger.error(msg,
+        # exc_info=True)`` captures the in-flight exception's traceback), not
+        # a structured-log field. Pop it here so it neither leaks into the
+        # structured event payload (where it would be mis-serialised as a
+        # field) nor gets dropped: forward it to the underlying stdlib logger
+        # so tracebacks actually print. Without this, every
+        # ``logger.error(..., exc_info=True)`` call silently lost its stack.
+        exc_info = kwargs.pop("exc_info", None)
+        extra = {"exc_info": exc_info} if exc_info is not None else {}
         formatted_msg = self._auto_format_message(msg, args)
         processed_msg = self._process_log_message(log_level, formatted_msg, event_type, event, **kwargs)
         if is_browser_agent_log_context():
             browser_logger = logging.getLogger("openjiuwen.browser_agent")
-            getattr(browser_logger, level)(processed_msg, stacklevel=stacklevel)
+            getattr(browser_logger, level)(processed_msg, stacklevel=stacklevel, **extra)
             mirror_common = os.getenv(
                 "OPENJIUWEN_BROWSER_AGENT_LOG_MIRROR_COMMON",
                 "0",
             ).strip().lower()
             if mirror_common not in {"1", "true", "yes", "on"}:
                 return
-        getattr(self._logger, level)(processed_msg, stacklevel=stacklevel)
+        getattr(self._logger, level)(processed_msg, stacklevel=stacklevel, **extra)
 
     def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._emit("debug", LogLevel.DEBUG, msg, *args, **kwargs)

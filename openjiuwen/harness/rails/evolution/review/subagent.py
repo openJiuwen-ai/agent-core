@@ -126,7 +126,7 @@ def build_evolution_review_agent_config(
     *,
     runtime: EvolutionReviewRuntime,
     model: Model | None,
-    max_iterations: int = 10,
+    max_iterations: int = 25,
     query_service: Any | None = None,
     store: Any | None = None,
     language: str = "cn",
@@ -160,6 +160,7 @@ def build_evolution_review_agent_config(
         enable_task_loop=False,
         max_iterations=max_iterations,
         restrict_to_work_dir=True,
+        enable_read_image_multimodal=False,
     )
     _set_review_agent_binding(
         config,

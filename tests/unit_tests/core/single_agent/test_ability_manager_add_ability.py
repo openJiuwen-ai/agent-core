@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
+from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
@@ -116,3 +118,162 @@ def test_stateless_add_ability_keeps_bare_id_and_is_shared() -> None:
             await Runner.stop()
 
     asyncio.run(_run())
+
+
+def _file_call(call_id: str, name: str, file_path: str) -> ToolCall:
+    return ToolCall(
+        id=call_id,
+        type="function",
+        name=name,
+        arguments=json.dumps({"file_path": file_path}),
+    )
+
+
+def test_parallel_file_calls_serialize_same_path_and_keep_result_order() -> None:
+    async def _run():
+        calls = [
+            _file_call("c1", "edit_file", "config/settings.json"),
+            _file_call("c2", "edit_file", "config/settings.json"),
+        ]
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+        second_entered = asyncio.Event()
+
+        async def first():
+            first_entered.set()
+            await release_first.wait()
+            return "first"
+
+        async def second():
+            second_entered.set()
+            return "second"
+
+        run_task = asyncio.create_task(
+            AbilityManager._execute_parallel_tool_tasks(calls, [first(), second()])
+        )
+        await first_entered.wait()
+        await asyncio.sleep(0)
+        assert not second_entered.is_set()
+
+        release_first.set()
+        assert await run_task == ["first", "second"]
+        assert second_entered.is_set()
+
+    asyncio.run(_run())
+
+
+def test_parallel_file_calls_keep_different_paths_concurrent() -> None:
+    async def _run():
+        calls = [
+            _file_call("c1", "edit_file", "config/database.yml"),
+            _file_call("c2", "edit_file", "config/settings.json"),
+        ]
+        both_entered = asyncio.Event()
+        entered = 0
+
+        async def edit(marker: str):
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await asyncio.wait_for(both_entered.wait(), timeout=1)
+            return marker
+
+        results = await AbilityManager._execute_parallel_tool_tasks(
+            calls,
+            [edit("database"), edit("settings")],
+        )
+        assert results == ["database", "settings"]
+
+    asyncio.run(_run())
+
+
+def test_parallel_safe_tool_calls_run_concurrently() -> None:
+    async def _run():
+        calls = [
+            ToolCall(id="c1", type="function", name="read_file", arguments="{}"),
+            ToolCall(id="c2", type="function", name="grep", arguments="{}"),
+        ]
+        cards = {
+            "read_file": ToolCard(id="read_file", name="read_file", parallel_safe=True),
+            "grep": ToolCard(id="grep", name="grep", parallel_safe=True),
+        }
+        both_entered = asyncio.Event()
+        entered = 0
+
+        async def tool(marker: str):
+            nonlocal entered
+            entered += 1
+            if entered == 2:
+                both_entered.set()
+            await asyncio.wait_for(both_entered.wait(), timeout=1)
+            return marker
+
+        results = await AbilityManager._execute_parallel_tool_tasks(
+            calls,
+            [tool("read"), tool("grep")],
+            tool_cards=cards,
+        )
+        assert results == ["read", "grep"]
+
+    asyncio.run(_run())
+
+
+def test_non_parallel_safe_tool_call_runs_as_exclusive_barrier() -> None:
+    async def _run():
+        calls = [
+            ToolCall(id="c1", type="function", name="read_file", arguments="{}"),
+            ToolCall(id="c2", type="function", name="write_file", arguments="{}"),
+            ToolCall(id="c3", type="function", name="grep", arguments="{}"),
+        ]
+        cards = {
+            "read_file": ToolCard(id="read_file", name="read_file", parallel_safe=True),
+            "write_file": ToolCard(id="write_file", name="write_file", parallel_safe=False),
+            "grep": ToolCard(id="grep", name="grep", parallel_safe=True),
+        }
+        order = []
+        read_started = asyncio.Event()
+        release_read = asyncio.Event()
+
+        async def read():
+            order.append("read:start")
+            read_started.set()
+            await release_read.wait()
+            order.append("read:end")
+            return "read"
+
+        async def write():
+            order.append("write")
+            return "write"
+
+        async def grep():
+            order.append("grep")
+            return "grep"
+
+        run_task = asyncio.create_task(
+            AbilityManager._execute_parallel_tool_tasks(
+                calls,
+                [read(), write(), grep()],
+                tool_cards=cards,
+            )
+        )
+        await asyncio.wait_for(read_started.wait(), timeout=1)
+        assert order == ["read:start"]
+
+        release_read.set()
+        assert await run_task == ["read", "write", "grep"]
+        assert order == ["read:start", "read:end", "write", "grep"]
+
+    asyncio.run(_run())
+
+
+def test_read_and_edit_equivalent_paths_share_one_execution_lane(tmp_path) -> None:
+    direct_path = tmp_path / "config" / "settings.json"
+    equivalent_path = direct_path.parent / ".." / "config" / "settings.json"
+    read_call = _file_call("c1", "read_file", str(direct_path))
+    edit_call = _file_call("c2", "edit_file", str(equivalent_path))
+
+    assert (
+        AbilityManager._tool_execution_resource_key(read_call)
+        == AbilityManager._tool_execution_resource_key(edit_call)
+    )

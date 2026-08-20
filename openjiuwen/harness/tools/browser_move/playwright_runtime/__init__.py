@@ -24,10 +24,17 @@ sys.modules.setdefault("playwright_runtime", sys.modules[__name__])
 __all__ = [
     "REPO_ROOT",
     "SRC_ROOT",
+    "BrowserStateContextProcessor",
+    "BrowserStateContextProcessorConfig",
+    "BrowserWorkingContextProcessor",
+    "BrowserWorkingContextProcessorConfig",
+    "BrowserWorkingContextRail",
     "build_browser_runtime_mcp_config",
     "browser_tools",
     "controller",
     "register_browser_runtime_mcp_server",
+    "reset_active_browser_runtimes",
+    "reset_managed_browser_runtime",
     "restart_local_browser_runtime_server",
     "service",
     "stop_local_browser_runtime_server",
@@ -35,12 +42,31 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
+    if name in {"BrowserStateContextProcessor", "BrowserStateContextProcessorConfig"}:
+        module = import_module(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.browser_state_context_processor"
+        )
+        return getattr(module, name)
+    if name in {
+        "BrowserWorkingContextProcessor",
+        "BrowserWorkingContextProcessorConfig",
+    }:
+        module = import_module(
+            "openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_processor"
+        )
+        return getattr(module, name)
+    if name == "BrowserWorkingContextRail":
+        module = import_module("openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_rail")
+        return getattr(module, name)
     if name == "controller":
         return import_module("openjiuwen.harness.tools.browser_move.controllers")
     if name == "browser_tools":
         return import_module("openjiuwen.harness.tools.browser_move.playwright_runtime.browser_tools")
     if name == "service":
         return import_module("openjiuwen.harness.tools.browser_move.playwright_runtime.service")
+    if name in {"reset_active_browser_runtimes", "reset_managed_browser_runtime"}:
+        module = import_module("openjiuwen.harness.tools.browser_move.playwright_runtime.runtime")
+        return getattr(module, name)
     if name in {
         "build_browser_runtime_mcp_config",
         "register_browser_runtime_mcp_server",

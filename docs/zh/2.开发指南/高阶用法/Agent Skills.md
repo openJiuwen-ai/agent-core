@@ -84,7 +84,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.skills import GitHubTree
+from openjiuwen.core.single_agent.skills import GitHubTree
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent import ReActAgent, ReActAgentConfig
@@ -132,7 +132,7 @@ async def main():
     )
 ```
 
-SysOperation 用于控制文件系统、代码执行以及 shell 系统。目前仅支持一种 OperationMode - `LOCAL`. `OperationMode.LOCAL` 表示在本地环境中运行代码、执行命令并创建文件。
+SysOperation 用于控制文件系统、代码执行以及 shell 系统。目前支持两种 OperationMode：`LOCAL` 与 `SANDBOX`。`OperationMode.LOCAL` 表示在本地环境中运行代码、执行命令并创建文件；`OperationMode.SANDBOX` 表示在受限沙箱环境中执行（更多沙箱用法见 **沙箱.md**）。
 
 ```python
 async def main():
@@ -140,7 +140,7 @@ async def main():
 
     sysop_card = SysOperationCard(
         mode=OperationMode.LOCAL,
-        work_config=LocalWorkConfig(work_dir=None),
+        work_config=LocalWorkConfig(),
     )
     Runner.resource_mgr.add_sys_operation(sysop_card)
 ```
@@ -280,7 +280,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.skills import GitHubTree
+from openjiuwen.core.single_agent.skills import GitHubTree
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent import ReActAgent, ReActAgentConfig
@@ -313,7 +313,7 @@ async def main():
 
     sysop_card = SysOperationCard(
         mode=OperationMode.LOCAL,
-        work_config=LocalWorkConfig(work_dir=None),
+        work_config=LocalWorkConfig(),
     )
     Runner.resource_mgr.add_sys_operation(sysop_card)
 

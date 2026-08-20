@@ -34,7 +34,6 @@ from openjiuwen.harness.security.models import (
 )
 from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.patterns import (
-    merge_external_directory_allow_into_permissions,
     merge_permission_allow_rule_into_permissions,
     write_permissions_section_to_agent_config_yaml,
 )
@@ -246,14 +245,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             sorted(self._tool_names),
         )
 
-    def _collect_external_directory_persist_paths(
+    def _collect_file_guard_persist_accesses(
         self,
         normalized_name: str,
         tool_args: dict,
         permissions_cfg: dict[str, Any] | PermissionsSection,
-    ) -> list[str]:
-        """若本次调用对外部路径为 ASK，返回应写入白名单的路径列表；否则返回空列表。"""
-        from openjiuwen.harness.security.checker import ExternalDirectoryChecker
+    ) -> list[tuple[str, str]]:
+        """若本次调用路径层为 ASK，返回 ``(path, action)`` 供按轴写入 file_guard。"""
+        from openjiuwen.harness.security.file_guard import build_file_guard_checker
 
         if self._host.resolve_workspace_dir is None:
             return []
@@ -269,26 +268,27 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         # so persist-time external-path detection matches the runtime check.
         trusted_dirs = list(self._engine.trusted_dirs)
         try:
-            checker = ExternalDirectoryChecker(
-                permissions_cfg, workspace_root=workspace,
+            checker = build_file_guard_checker(
+                permissions_cfg,
+                workspace_root=workspace,
                 trusted_dirs=trusted_dirs,
             )
-            ext_result = checker.check_external_paths(normalized_name, tool_args)
+            if checker is None:
+                return []
+            return list(checker.collect_ask_accesses(normalized_name, tool_args))
         except Exception:
             logger.warning(
                 "[PermissionEngine] permission.persist.external.check_failed",
                 exc_info=True,
             )
             return []
-        if ext_result is None or ext_result.permission != PermissionLevel.ASK:
-            return []
-        paths = ext_result.external_paths or []
-        return list(paths) if paths else []
 
     def _persist_allow_always(
         self, normalized_name: str, tool_args: dict
     ) -> bool:
-        """工具级「始终允许」与 external_directory 白名单：先合并磁盘，再写盘。"""
+        """工具级「始终允许」与 file_guard 路径白名单：先合并磁盘，再写盘。"""
+        from openjiuwen.harness.security.patterns import merge_file_guard_access_allows
+
         # Read from on-disk snapshot first (via host callback) so that
         # entries the user already deleted from config.yaml are NOT
         # restored.  Fall back to engine.config only when snapshot is
@@ -310,12 +310,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         cfg, ok_tool = merge_permission_allow_rule_into_permissions(
             base_cfg, normalized_name, tool_args
         )
-        ext_paths = self._collect_external_directory_persist_paths(
+        accesses = self._collect_file_guard_persist_accesses(
             normalized_name, tool_args, cfg
         )
         ok_ext = False
-        if ext_paths:
-            cfg, ok_ext = merge_external_directory_allow_into_permissions(cfg, ext_paths)
+        if accesses:
+            cfg, ok_ext = merge_file_guard_access_allows(cfg, accesses)
         if not ok_tool and not ok_ext:
             return False
 

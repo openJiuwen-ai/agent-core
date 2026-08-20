@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import json
+from contextvars import Context
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -23,24 +26,14 @@ from openjiuwen.agent_evolving.experience import (
 )
 from openjiuwen.agent_evolving.experience.skill_experience_manager import ExperienceManager
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
-from openjiuwen.agent_evolving.prompts.sections import (
-    EVOLUTION_FUZZY_REVIEW_PROMPT_CN,
-    EVOLUTION_FUZZY_REVIEW_PROMPT_EN,
-    EVOLUTION_FUZZY_REVIEW_RULES_CN,
-    EVOLUTION_FUZZY_REVIEW_RULES_EN,
-)
 from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     SignalDetector,
     make_evolution_signal,
 )
-from openjiuwen.agent_evolving.trajectory import (
-    LLMCallDetail,
-    ToolCallDetail,
-    Trajectory,
-    TrajectoryStep,
-    trajectory_from_steps,
-)
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.agent_evolving.types import ApplyResult
 from openjiuwen.core.foundation.llm import SystemMessage
 from openjiuwen.core.single_agent.rail.base import (
@@ -58,15 +51,23 @@ from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionRequestResult,
     SimplifyRequestResult,
 )
-from openjiuwen.harness.rails.evolution.review.materials import build_review_scoped_materials
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
     _FUZZY_REVIEW_PROMPT_CN,
     _FUZZY_REVIEW_PROMPT_EN,
     _MAX_PROCESSED_SIGNAL_KEYS,
+    _SkillPreparedEvolutionInput,
     SkillEvolutionRail,
 )
 from openjiuwen.harness.rails.subagent import SubagentRail
+
+
+_REAL_SKILL_EVOLUTION_RAIL = SkillEvolutionRail
+
+
+def _skill_evolution_rail(*args, **kwargs):
+    kwargs.setdefault("trajectory_span_processor", TrajectorySpanProcessor())
+    return _REAL_SKILL_EVOLUTION_RAIL(*args, **kwargs)
 
 
 def _default_review_runtime() -> EvolutionReviewRuntime:
@@ -76,26 +77,26 @@ def _default_review_runtime() -> EvolutionReviewRuntime:
 def _make_rail(
     tmp_path,
     *,
-    auto_scan: bool = True,
+    signal_trigger: bool = True,
     auto_save: bool = True,
     disabled_skills=None,
     language: str = "cn",
-    review_agent_max_iterations: int = 10,
-    fuzzy_review: bool = True,
-    fuzzy_review_interval: int = 5,
+    review_agent_max_iterations: int = 25,
+    review_trigger: bool = True,
+    review_interval: int = 5,
 ) -> SkillEvolutionRail:
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir=str(tmp_path / "skills"),
         llm=Mock(),
         model="dummy-model",
-        auto_scan=auto_scan,
+        signal_trigger=signal_trigger,
         auto_save=auto_save,
         review_runtime=_default_review_runtime(),
         language=language,
         disabled_skills=disabled_skills,
         review_agent_max_iterations=review_agent_max_iterations,
-        fuzzy_review=fuzzy_review,
-        fuzzy_review_interval=fuzzy_review_interval,
+        review_trigger=review_trigger,
+        review_interval=review_interval,
     )
     rail._evolution_store = Mock()
     rail._evolution_store.read_skill_content = AsyncMock(return_value="# skill")
@@ -193,27 +194,152 @@ def _staged_result(request: Any, skill_name: str = "skill-a") -> OnlineEvolution
     )
 
 
+@dataclass
+class _LLMSpec:
+    model: str = "test-model"
+    messages: list[Any] = field(default_factory=list)
+
+
+@dataclass
+class _ToolSpec:
+    tool_name: str
+    call_args: Any = None
+    call_result: Any = None
+    tool_call_id: str | None = None
+
+
+@dataclass
+class _StepSpec:
+    kind: str
+    detail: Any
+    error: dict[str, Any] | None = None
+    start_time_ms: int = 0
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+def _trajectory_from_steps(
+    *,
+    execution_id: str,
+    steps: list[_StepSpec],
+    session_id: str | None = None,
+    source: str = "offline",
+    meta: dict[str, Any] | None = None,
+) -> Trajectory:
+    """Build canonical OTLP input for Skill rail tests."""
+    from openjiuwen.agent_evolving.trajectory.schema import (
+        MEMBER_ID,
+        SESSION_ID,
+        TEAM_ID,
+        TRAJECTORY_ID,
+        TRAJECTORY_SOURCE,
+    )
+    from openjiuwen.extensions.observability import semconv
+
+    resource_attrs: dict[str, Any] = {TRAJECTORY_ID: execution_id, TRAJECTORY_SOURCE: source}
+    if session_id is not None:
+        resource_attrs[SESSION_ID] = session_id
+    for key, value in (meta or {}).items():
+        resource_attrs[{"member_id": MEMBER_ID, "team_id": TEAM_ID}.get(key, key)] = value
+    spans = []
+    for index, step in enumerate(steps):
+        attrs: dict[str, Any] = {}
+        if step.kind == "llm":
+            all_tool_calls: list[Any] = []
+            prompt_index = 0
+            completion_index = 0
+            for message in step.detail.messages:
+                role = getattr(message, "role", None) if not isinstance(message, dict) else message.get("role")
+                content = getattr(message, "content", None) if not isinstance(message, dict) else message.get("content")
+                if role == "assistant":
+                    message_prefix = f"{semconv.GEN_AI_COMPLETION}.{completion_index}"
+                    completion_index += 1
+                else:
+                    message_prefix = f"{semconv.GEN_AI_PROMPT}.{prompt_index}"
+                    prompt_index += 1
+                attrs[f"{message_prefix}.role"] = role or ""
+                attrs[f"{message_prefix}.content"] = content or ""
+                tool_calls = getattr(message, "tool_calls", None) if not isinstance(message, dict) else message.get("tool_calls")
+                if tool_calls:
+                    all_tool_calls.extend(tool_calls)
+            if all_tool_calls:
+                normalized_tool_calls = []
+                for call in all_tool_calls:
+                    item = dict(call) if isinstance(call, dict) else {"arguments": str(call)}
+                    normalized_tool_calls.append(item)
+                attrs[semconv.GEN_AI_TOOL_CALLS] = json.dumps(
+                    normalized_tool_calls, ensure_ascii=False, default=str
+                )
+            name = "llm.call"
+        else:
+            detail = step.detail
+            attrs[semconv.GEN_AI_TOOL_NAME] = detail.tool_name
+            if detail.call_args is not None:
+                attrs[semconv.GEN_AI_TOOL_INPUT] = json.dumps(detail.call_args, ensure_ascii=False, default=str)
+            if detail.call_result is not None:
+                attrs[semconv.GEN_AI_TOOL_OUTPUT] = json.dumps(detail.call_result, ensure_ascii=False, default=str)
+            if detail.tool_call_id is not None:
+                attrs[semconv.GEN_AI_TOOL_ID] = detail.tool_call_id
+            name = f"tool.{detail.tool_name}"
+        span: dict[str, Any] = {
+            "name": name,
+            "traceId": "trace-test",
+            "spanId": f"span-{index}",
+            "startTimeUnixNano": step.start_time_ms,
+            "endTimeUnixNano": step.start_time_ms + 1,
+            "attributes": attributes_from_map(attrs),
+        }
+        if step.error:
+            span["status"] = {"code": "ERROR", "message": str(step.error.get("message", "error"))}
+        spans.append(span)
+    return Trajectory.from_otlp({
+        "resourceSpans": [{"resource": {"attributes": attributes_from_map(resource_attrs)}, "scopeSpans": [{"scope": {}, "spans": spans}]}]
+    })
+
+
 def _trajectory_with_messages(messages: list[dict]) -> Trajectory:
-    return trajectory_from_steps(
+    steps: list[_StepSpec] = []
+    for message in messages:
+        if message.get("role") == "tool":
+            steps.append(
+                _StepSpec(
+                    kind="tool",
+                    detail=_ToolSpec(
+                        tool_name=str(message.get("name") or ""),
+                        call_result=message.get("content"),
+                        tool_call_id=message.get("tool_call_id"),
+                    ),
+                )
+            )
+        else:
+            steps.append(
+                _StepSpec(
+                    kind="llm",
+                    detail=_LLMSpec(model="test-model", messages=[message]),
+                )
+            )
+    return _trajectory_from_steps(
         execution_id="exec-1",
-        steps=[TrajectoryStep(kind="llm", detail=LLMCallDetail(model="test-model", messages=messages))],
+        steps=steps,
         source="online",
     )
 
 
-def _bind_active_request_evidence(
-    rail: SkillEvolutionRail,
-    messages: list[dict],
+def _prepared_input(
+    trajectory: Trajectory | None,
     *,
-    skill_names: list[str] | None = None,
-) -> Trajectory:
-    trajectory = _trajectory_with_messages(messages)
-    rail._builder = Mock()
-    rail._builder.build.return_value = trajectory
-    rail._evolution_store.list_skill_names = Mock(return_value=skill_names or ["skill-a"])
-    rail._evolution_store.skill_exists = Mock(return_value=True)
-    rail._evolution_store.resolve_skill_dir = Mock(return_value=None)
-    return trajectory
+    messages: list[dict] | None = None,
+    presented_entries: list[tuple[str, Any, str]] | None = None,
+) -> _SkillPreparedEvolutionInput:
+    """Build the frozen hook payload consumed by ``run_evolution``."""
+    if trajectory is None:
+        trajectory = _trajectory_with_messages([])
+    if messages is None:
+        messages = _REAL_SKILL_EVOLUTION_RAIL._trajectory_to_messages(trajectory)
+    return _SkillPreparedEvolutionInput(
+        trajectory=trajectory,
+        messages=tuple(messages),
+        presented_entries=tuple(presented_entries or ()),
+    )
 
 
 def _active_request_detector(
@@ -308,7 +434,7 @@ class _RuntimeAbilityManager:
 
 
 def test_extract_file_path():
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir="skills",
         llm=Mock(),
         model="dummy",
@@ -327,7 +453,7 @@ def test_extract_file_path():
 
 
 def test_parse_messages():
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir="skills",
         llm=Mock(),
         model="dummy",
@@ -351,38 +477,56 @@ def test_parse_messages():
     assert parsed[1]["tool_calls"][0]["name"] == "read_file"
 
 
-def test_trajectory_sink_defaults_member_role_to_teammate(tmp_path):
-    rail = _make_rail(tmp_path)
-
-    rail.set_trajectory_sink(Mock(), team_id="team-a")
-
-    assert rail._member_role == "teammate"
-
-
 def test_properties_and_clear_processed_signals(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     rail.processed_signal_keys.add(("a", "b"))
-    rail.auto_scan = False
+    rail.signal_trigger = False
     rail.auto_save = False
     rail.clear_processed_signals()
 
-    assert rail.auto_scan is False
-    assert rail.fuzzy_review is True
+    assert rail.signal_trigger is False
+    assert rail.review_trigger is True
     assert rail.auto_save is False
     assert rail.processed_signal_keys == set()
 
-    rail.fuzzy_review = False
+    rail.review_trigger = False
 
-    assert rail.auto_scan is False
-    assert rail.fuzzy_review is False
+    assert rail.review_trigger is False
 
-    rail.fuzzy_review = True
+    rail.signal_trigger = True
+    rail.review_trigger = True
 
-    assert rail.fuzzy_review is True
+    assert rail.review_trigger is True
+
+
+def test_signal_and_review_trigger_constructor_values(tmp_path):
+    rail = _skill_evolution_rail(
+        skills_dir=str(tmp_path),
+        llm=Mock(),
+        model="dummy",
+        signal_trigger=False,
+        review_trigger=False,
+        review_runtime=_default_review_runtime(),
+    )
+
+    assert rail.signal_trigger is False
+    assert rail.review_trigger is False
+
+
+def test_signal_and_review_trigger_defaults_off(tmp_path):
+    rail = _skill_evolution_rail(
+        skills_dir=str(tmp_path),
+        llm=Mock(),
+        model="dummy",
+        review_runtime=_default_review_runtime(),
+    )
+
+    assert rail.signal_trigger is False
+    assert rail.review_trigger is False
 
 
 def test_auto_save_defaults_false_and_setter_still_updates(tmp_path):
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir=str(tmp_path),
         llm=Mock(),
         model="dummy",
@@ -539,46 +683,6 @@ def test_skill_rail_init_without_evolution_interrupt_rail_still_registers_tools(
     assert {call.args[0].name for call in ability_manager.add_ability.call_args_list} == tool_names
 
 
-def test_skill_rail_init_refreshes_existing_subagent_rail_after_review_agent_registration(tmp_path):
-    rail = _make_rail(tmp_path)
-    subagent_rail = SubagentRail()
-    subagent_rail.refresh_available_agents = Mock()
-    agent = SimpleNamespace(
-        card=SimpleNamespace(id="agent-1"),
-        deep_config=SimpleNamespace(subagents=[]),
-        ability_manager=SimpleNamespace(add=Mock(), remove=Mock()),
-        find_rails_by_type=_find_rails_by_type(subagent_rail),
-        _registered_rails=[subagent_rail],
-    )
-
-    with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool"):
-        rail.init(agent)
-
-    assert any(
-        getattr(getattr(spec, "agent_card", None), "name", None) == "evolution_reviewer"
-        for spec in agent.deep_config.subagents
-    )
-    subagent_rail.refresh_available_agents.assert_called_once_with(agent)
-
-
-def test_skill_rail_init_does_not_refresh_pending_subagent_rail(tmp_path):
-    rail = _make_rail(tmp_path)
-    subagent_rail = SubagentRail()
-    subagent_rail.refresh_available_agents = Mock()
-    agent = SimpleNamespace(
-        card=SimpleNamespace(id="agent-1"),
-        deep_config=SimpleNamespace(subagents=[]),
-        ability_manager=SimpleNamespace(add=Mock(), remove=Mock()),
-        find_rails_by_type=_find_rails_by_type(subagent_rail),
-        _registered_rails=[],
-    )
-
-    with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool"):
-        rail.init(agent)
-
-    subagent_rail.refresh_available_agents.assert_not_called()
-
-
 def test_skill_rail_init_registers_evolve_review_task_without_subagent_rail(tmp_path):
     rail = _make_rail(tmp_path)
     ability_manager = _RuntimeAbilityManager()
@@ -622,11 +726,11 @@ def test_skill_rail_init_registers_review_agent_with_default_max_iterations(tmp_
         for config in agent.deep_config.subagents
         if getattr(config.agent_card, "name", None) == "evolution_reviewer"
     )
-    assert getattr(configured, "max_iterations", None) == 10
+    assert getattr(configured, "max_iterations", None) == 25
 
 
 def test_skill_rail_init_registers_review_agent_with_custom_max_iterations(tmp_path):
-    rail = _make_rail(tmp_path, fuzzy_review_interval=5, review_agent_max_iterations=7)
+    rail = _make_rail(tmp_path, review_interval=5, review_agent_max_iterations=7)
     agent = SimpleNamespace(
         card=SimpleNamespace(id="agent-1"),
         deep_config=SimpleNamespace(subagents=[]),
@@ -650,7 +754,7 @@ def test_skill_rail_invalid_review_agent_max_iterations_rejected(tmp_path):
     with pytest.raises(ValueError, match="review_agent_max_iterations must be >= 1"):
         _make_rail(
             tmp_path,
-            fuzzy_review_interval=5,
+            review_interval=5,
             review_agent_max_iterations=0,
         )
 
@@ -682,30 +786,51 @@ async def test_evolve_review_task_uses_fixed_evolution_reviewer_subagent(monkeyp
     from openjiuwen.harness.rails.evolution.review.subagent import EVOLUTION_REVIEW_AGENT_NAME
 
     captured = {}
+    runtime = EvolutionReviewRuntime()
+    launch = runtime.create_scope(
+        source="explicit_command",
+        subject={"kind": "skill", "name": "skill-a"},
+        session_id="session-1",
+    )
 
     async def fake_invoke(self, inputs, **kwargs):
         del self
         captured["inputs"] = inputs
         captured["kwargs"] = kwargs
+        runtime.record_review_result(
+            launch.evolution_review_ref,
+            session_id="session-1",
+            result={
+                "subject": {"kind": "skill", "name": "skill-a"},
+                "outcome": "no_evolution",
+                "evidence_refs": [],
+                "proposals": [],
+            },
+        )
         return SimpleNamespace(success=True, data={"output": '{"ok": true}', "agent_id": "subagent-1"})
 
     monkeypatch.setattr("openjiuwen.agent_evolving.tools.skill.TaskTool.invoke", fake_invoke)
-    tool = EvolveReviewTaskTool(parent_agent=Mock(), language="cn", agent_id="agent-1")
+    tool = EvolveReviewTaskTool(
+        parent_agent=Mock(),
+        review_runtime=runtime,
+        language="cn",
+        agent_id="agent-1",
+    )
 
     result = await tool.invoke(
         {
-            "evolution_review_ref": "review-ref-1",
+            "evolution_review_ref": launch.evolution_review_ref,
             "user_intent": "capture parser lesson",
             "subject": {"kind": "skill", "name": "skill-a"},
         },
-        session=object(),
+        conversation_id="session-1",
     )
 
     assert result.success is True
     assert captured["inputs"]["subagent_type"] == EVOLUTION_REVIEW_AGENT_NAME
-    assert "review-ref-1" in captured["inputs"]["task_description"]
+    assert launch.evolution_review_ref in captured["inputs"]["task_description"]
     assert "capture parser lesson" in captured["inputs"]["task_description"]
-    assert captured["kwargs"]["session"] is not None
+    assert captured["kwargs"]["conversation_id"] == "session-1"
 
 
 @pytest.mark.asyncio
@@ -778,135 +903,6 @@ async def test_build_user_evolution_request_resolver_failure_falls_back_to_skill
 
 
 @pytest.mark.asyncio
-async def test_prepare_tool_uses_rail_owned_trajectory_evidence(tmp_path):
-    rail = _make_rail(tmp_path)
-    ability_manager = SimpleNamespace(
-        add=Mock(return_value=SimpleNamespace(added=True)),
-        remove=Mock(),
-    )
-    agent = SimpleNamespace(
-        card=SimpleNamespace(id="agent-1"),
-        ability_manager=ability_manager,
-        find_rails_by_type=_find_rails_by_type(),
-    )
-    trajectory = trajectory_from_steps(
-        execution_id="exec-prepare-review",
-        steps=[
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="bash",
-                    call_result="Error: parser failed",
-                ),
-            )
-        ],
-    )
-    rail._build_trajectory = Mock(return_value=trajectory)
-
-    with patch("openjiuwen.core.runner.Runner.resource_mgr.add_tool"):
-        rail.init(agent)
-
-    prepare_tool = next(tool for tool in rail._evolution_tools if tool.card.name == "prepare_skill_evolution")
-    result = await prepare_tool.invoke(
-        {
-            "subject": {"kind": "skill", "name": "skill-a"},
-            "user_confirmed": True,
-            "user_intent": "capture parser failure",
-        },
-        conversation_id="session-1",
-    )
-
-    assert result.success is True
-    scope = rail._review_runtime.resolve_scope(result.data["evolution_review_ref"], session_id="session-1")
-    index_item = scope.scoped_materials["trajectory_steps"][0]
-    assert index_item["ref"] == "step-1"
-    assert index_item["kind"] == "tool"
-    assert index_item["tool_name"] == "bash"
-    assert index_item["summary"].startswith("tool=bash result_preview=Error: parser failed")
-    detail_item = scope.scoped_materials["trajectory_step_details"]["step-1"]
-    assert detail_item["detail"]["call_result"] == "Error: parser failed"
-
-
-def test_build_review_scoped_materials_keeps_full_trajectory_index():
-    steps = [
-        TrajectoryStep(
-            kind="tool",
-            detail=ToolCallDetail(tool_name="bash", call_result=f"result-{index}"),
-        )
-        for index in range(25)
-    ]
-    trajectory = trajectory_from_steps(execution_id="exec-1", session_id="session-1", steps=steps)
-
-    materials = build_review_scoped_materials(trajectory)
-
-    assert materials["trajectory"]["execution_id"] == "exec-1"
-    assert materials["trajectory"]["session_id"] == "session-1"
-    assert materials["trajectory"]["step_count"] == 25
-    assert [item["ref"] for item in materials["trajectory_steps"]] == [f"step-{index}" for index in range(1, 26)]
-    assert materials["trajectory_steps"][0]["index"] == 0
-    assert materials["trajectory_steps"][-1]["index"] == 24
-
-
-def test_build_review_scoped_materials_tool_detail_is_bounded():
-    long_result = "x" * 5000
-    trajectory = trajectory_from_steps(
-        execution_id="exec-tool",
-        session_id="session-1",
-        steps=[
-            TrajectoryStep(
-                kind="tool",
-                error={"message": "failed"},
-                detail=ToolCallDetail(
-                    tool_name="bash",
-                    call_args={"cmd": "pytest"},
-                    call_result=long_result,
-                    tool_call_id="call-1",
-                ),
-            )
-        ],
-    )
-
-    materials = build_review_scoped_materials(trajectory)
-
-    index_item = materials["trajectory_steps"][0]
-    assert index_item["tool_name"] == "bash"
-    assert index_item["has_error"] is True
-    assert index_item["summary"].startswith("tool=bash result_preview=")
-    detail = materials["trajectory_step_details"]["step-1"]["detail"]
-    assert detail["tool_name"] == "bash"
-    assert detail["call_args"] == {"cmd": "pytest"}
-    assert detail["tool_call_id"] == "call-1"
-    assert len(detail["call_result"]) < len(long_result)
-    assert detail["call_result_truncated"] is True
-    assert detail["call_result_original_chars"] == len(long_result)
-
-
-@pytest.mark.asyncio
-async def test_build_user_evolution_request_defers_scope_creation_to_prepare_tool(tmp_path):
-    rail = _make_rail(tmp_path)
-    rail._ensure_evolve_review_task_available = Mock()
-    trajectory = trajectory_from_steps(
-        execution_id="exec-request-review",
-        steps=[
-            TrajectoryStep(
-                kind="tool",
-                detail=ToolCallDetail(
-                    tool_name="python",
-                    call_result="ValueError: invalid parser state",
-                ),
-            )
-        ],
-    )
-    rail._build_trajectory = Mock(return_value=trajectory)
-
-    result = await rail._build_user_evolution_request("skill-a", "capture parser failure")
-
-    assert result.followup_prompt is not None
-    assert rail._review_runtime._scopes_by_ref == {}
-    rail._build_trajectory.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_list_experiences_is_host_query(tmp_path):
     rail = _make_rail(tmp_path)
     rail._manager.experience_query_service.list_experiences = AsyncMock(return_value={"total_count": 0, "items": []})
@@ -964,8 +960,18 @@ async def test_evolution_protocol_section_is_injected_without_command_parsing(tm
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
     assert section.name == SectionName.EVOLUTION_PROTOCOL
-    assert "当前轮必须立即进入工具流程" in section.content["cn"]
-    assert "最小必要澄清" in section.content["cn"]
+    assert "## 技能演进自检" in section.content["cn"]
+    for heading in ("目标与边界", "决策顺序", "用户可见输出", "用户确认", "能力交接"):
+        assert section.content["cn"].count(f"### {heading}") == 1
+    assert "#### 运行时 follow-up" not in section.content["cn"]
+    assert "过时内容" in section.content["cn"]
+    assert "环境差异" in section.content["cn"]
+    assert "fallback" in section.content["cn"]
+    assert "高优先级用户意图" in section.content["cn"]
+    assert "创建确认不能启动演进" in section.content["cn"]
+    assert "只在普通最终回复末尾追加一至两句" in section.content["cn"]
+    assert "必须同时包含" in section.content["cn"]
+    assert "prepare_skill_evolution" not in section.content["cn"]
     assert ctx.inputs.messages == original_messages
 
 
@@ -981,8 +987,22 @@ async def test_evolution_protocol_section_supports_english(tmp_path):
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
     assert section.name == SectionName.EVOLUTION_PROTOCOL
-    assert "immediately enter the tool" in section.content["en"]
-    assert "minimum necessary clarification" in section.content["en"]
+    assert "## Skill Evolution Self-Check" in section.content["en"]
+    for heading in (
+        "Purpose And Boundaries",
+        "Decision Order",
+        "User-Visible Output",
+        "User Confirmation",
+        "Capability Handoff",
+    ):
+        assert section.content["en"].count(f"### {heading}") == 1
+    assert "Runtime Follow-Up" not in section.content["en"]
+    assert "Skill evolution" in section.content["en"]
+    assert "outdated content" in section.content["en"]
+    assert "environment differences" in section.content["en"]
+    assert "fallback" in section.content["en"]
+    assert "High-priority user intent" in section.content["en"]
+    assert "append only one or two sentences" in section.content["en"]
 
 
 def _make_task_iteration_ctx(
@@ -1015,7 +1035,7 @@ def _make_controller_agent():
 
 
 def test_allow_evolution_trigger_rejects_heartbeat_and_cron_invokes(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True)
+    rail = _make_rail(tmp_path, signal_trigger=True)
 
     for run_kind in (RunKind.HEARTBEAT, RunKind.CRON):
         ctx = AgentCallbackContext(
@@ -1028,7 +1048,7 @@ def test_allow_evolution_trigger_rejects_heartbeat_and_cron_invokes(tmp_path):
 
 
 def test_allow_evolution_trigger_allows_normal_invoke(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True)
+    rail = _make_rail(tmp_path, signal_trigger=True)
     ctx = AgentCallbackContext(
         agent=None,
         inputs=InvokeInputs(query="run", conversation_id="conv-1", run_kind=RunKind.NORMAL),
@@ -1039,51 +1059,52 @@ def test_allow_evolution_trigger_allows_normal_invoke(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_fuzzy_review_enqueues_every_interval_for_non_followup_iterations(tmp_path):
-    rail = _make_rail(tmp_path, fuzzy_review_interval=5)
+async def test_review_trigger_enqueues_every_interval_for_non_followup_iterations(tmp_path):
+    rail = _make_rail(tmp_path, review_interval=5)
     controller = Mock()
     controller.enqueue_follow_up = Mock()
     agent = SimpleNamespace(_loop_controller=controller)
     ctx = _make_task_iteration_ctx(agent=agent)
 
     for _ in range(4):
-        await rail._on_after_task_iteration(ctx)
+        await rail._on_after_task_iteration(ctx, None)
     controller.enqueue_follow_up.assert_not_called()
-    assert rail._fuzzy_review_non_followup_count == 4
+    assert rail._review_non_followup_count == 4
 
-    await rail._on_after_task_iteration(ctx)
+    await rail._on_after_task_iteration(ctx, None)
     controller.enqueue_follow_up.assert_called_once()
-    assert rail._fuzzy_review_non_followup_count == 0
+    assert rail._review_non_followup_count == 0
 
     for _ in range(4):
-        await rail._on_after_task_iteration(ctx)
+        await rail._on_after_task_iteration(ctx, None)
     assert controller.enqueue_follow_up.call_count == 1
-    assert rail._fuzzy_review_non_followup_count == 4
+    assert rail._review_non_followup_count == 4
 
-    await rail._on_after_task_iteration(ctx)
+    await rail._on_after_task_iteration(ctx, None)
     assert controller.enqueue_follow_up.call_count == 2
-    assert rail._fuzzy_review_non_followup_count == 0
+    assert rail._review_non_followup_count == 0
 
 
 @pytest.mark.asyncio
-async def test_fuzzy_review_skips_heartbeat_task_iterations(tmp_path):
-    rail = _make_rail(tmp_path, fuzzy_review_interval=1)
+async def test_review_trigger_skips_heartbeat_task_iterations(tmp_path):
+    rail = _make_rail(tmp_path, review_interval=1)
     agent, controller = _make_controller_agent()
 
     await rail._on_after_task_iteration(
         _make_task_iteration_ctx(
             agent=agent,
             conversation_id="heartbeat_19ed9a89354_a8c29c",
-        )
+        ),
+        None,
     )
 
     controller.enqueue_follow_up.assert_not_called()
-    assert rail._fuzzy_review_non_followup_count == 0
+    assert rail._review_non_followup_count == 0
 
 
 @pytest.mark.asyncio
-async def test_fuzzy_review_skips_cron_task_iterations(tmp_path):
-    rail = _make_rail(tmp_path, fuzzy_review_interval=1)
+async def test_review_trigger_skips_cron_task_iterations(tmp_path):
+    rail = _make_rail(tmp_path, review_interval=1)
     agent, controller = _make_controller_agent()
 
     await rail._on_after_task_iteration(
@@ -1091,66 +1112,83 @@ async def test_fuzzy_review_skips_cron_task_iterations(tmp_path):
             agent=agent,
             conversation_id="cron_19ed9a89354_a8c29c",
             run_kind=RunKind.CRON,
-        )
+        ),
+        None,
     )
 
     controller.enqueue_follow_up.assert_not_called()
-    assert rail._fuzzy_review_non_followup_count == 0
+    assert rail._review_non_followup_count == 0
 
 
 @pytest.mark.asyncio
-async def test_fuzzy_review_followup_iteration_does_not_count_or_recurse(tmp_path):
-    rail = _make_rail(tmp_path, fuzzy_review_interval=1)
+async def test_review_trigger_followup_iteration_does_not_count_or_recurse(tmp_path):
+    rail = _make_rail(tmp_path, review_interval=1)
     controller = Mock()
     controller.enqueue_follow_up = Mock()
     agent = SimpleNamespace(_loop_controller=controller)
 
-    await rail._on_after_task_iteration(_make_task_iteration_ctx(agent=agent, is_follow_up=True))
-    await rail._on_after_task_iteration(_make_task_iteration_ctx(agent=agent))
+    await rail._on_after_task_iteration(_make_task_iteration_ctx(agent=agent, is_follow_up=True), None)
+    await rail._on_after_task_iteration(_make_task_iteration_ctx(agent=agent), None)
 
     controller.enqueue_follow_up.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_fuzzy_review_can_be_disabled(tmp_path):
-    rail = _make_rail(tmp_path, fuzzy_review=False, fuzzy_review_interval=1)
+async def test_review_trigger_can_be_disabled(tmp_path):
+    rail = _make_rail(tmp_path, review_trigger=False, review_interval=1)
     controller = Mock()
     controller.enqueue_follow_up = Mock()
     agent = SimpleNamespace(_loop_controller=controller)
 
-    await rail._on_after_task_iteration(_make_task_iteration_ctx(agent=agent))
+    await rail._on_after_task_iteration(_make_task_iteration_ctx(agent=agent), None)
 
     controller.enqueue_follow_up.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_fuzzy_review_without_task_loop_controller_drops_followup(tmp_path):
-    rail = _make_rail(tmp_path, fuzzy_review_interval=1)
+async def test_review_trigger_without_task_loop_controller_drops_followup(tmp_path):
+    rail = _make_rail(tmp_path, review_interval=1)
     ctx = _make_task_iteration_ctx(agent=SimpleNamespace())
 
-    await rail._on_after_task_iteration(ctx)
+    await rail._on_after_task_iteration(ctx, None)
 
-    assert rail._fuzzy_review_non_followup_count == 0
-
-
-def test_fuzzy_review_interval_must_be_positive(tmp_path):
-    with pytest.raises(ValueError, match="fuzzy_review_interval"):
-        _make_rail(tmp_path, fuzzy_review_interval=0)
+    assert rail._review_non_followup_count == 0
 
 
-def test_cn_fuzzy_review_prompts_share_rule_text():
-    assert EVOLUTION_FUZZY_REVIEW_RULES_CN in EVOLUTION_FUZZY_REVIEW_PROMPT_CN
-    assert EVOLUTION_FUZZY_REVIEW_RULES_CN in _FUZZY_REVIEW_PROMPT_CN
+def test_review_interval_must_be_positive(tmp_path):
+    with pytest.raises(ValueError, match="review_interval"):
+        _make_rail(tmp_path, review_interval=0)
 
 
-def test_en_fuzzy_review_prompts_share_rule_text():
-    assert EVOLUTION_FUZZY_REVIEW_RULES_EN in EVOLUTION_FUZZY_REVIEW_PROMPT_EN
-    assert EVOLUTION_FUZZY_REVIEW_RULES_EN in _FUZZY_REVIEW_PROMPT_EN
+def test_cn_review_trigger_prompt_references_standing_rules():
+    assert "运行时插入的 Skill 演进自检" in _FUZZY_REVIEW_PROMPT_CN
+    assert "参考常驻“技能演进自检”规则" in _FUZZY_REVIEW_PROMPT_CN
+    assert "普通最终回复末尾追加一至两句" in _FUZZY_REVIEW_PROMPT_CN
+    assert "同时包含可复用更新点" in _FUZZY_REVIEW_PROMPT_CN
+    assert "prepare_skill_evolution" not in _FUZZY_REVIEW_PROMPT_CN
+
+
+def test_en_review_trigger_prompt_references_standing_rules():
+    assert "runtime-inserted Skill evolution self-check" in _FUZZY_REVIEW_PROMPT_EN
+    assert 'Refer to the standing "Skill Evolution Self-Check" rules' in _FUZZY_REVIEW_PROMPT_EN
+    assert "append only one or two sentences" in _FUZZY_REVIEW_PROMPT_EN
+    assert "include both the reusable update" in _FUZZY_REVIEW_PROMPT_EN
+    assert "prepare_skill_evolution" not in _FUZZY_REVIEW_PROMPT_EN
+
+
+def test_review_followup_prompt_is_tagged(tmp_path):
+    rail = _make_rail(tmp_path)
+
+    prompt = rail._build_review_followup_prompt()
+
+    assert prompt.startswith("<auto_skill_evolution_review_followup>")
+    assert prompt.endswith("</auto_skill_evolution_review_followup>")
+    assert "技能演进自检" in prompt
 
 
 @pytest.mark.asyncio
-async def test_evolution_protocol_section_omits_fuzzy_review_when_disabled(tmp_path):
-    rail = _make_rail(tmp_path, fuzzy_review=False)
+async def test_evolution_protocol_section_omits_runtime_followup_rules(tmp_path):
+    rail = _make_rail(tmp_path, review_trigger=False)
     builder = SystemPromptBuilder(language="en")
     agent = SimpleNamespace(system_prompt_builder=builder)
     ctx = AgentCallbackContext(agent=agent, inputs=ModelCallInputs(messages=[]))
@@ -1159,11 +1197,13 @@ async def test_evolution_protocol_section_omits_fuzzy_review_when_disabled(tmp_p
 
     section = builder.get_section(SectionName.EVOLUTION_PROTOCOL)
     assert section is not None
+    assert "Runtime Follow-Up" not in section.content["en"]
+    assert "runtime-inserted Skill evolution follow-up" not in section.content["en"]
 
 
 @pytest.mark.asyncio
 async def test_on_approve_simplify_delegates_to_manager(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     with patch.object(
         rail._manager,
         "approve_simplify",
@@ -1177,7 +1217,7 @@ async def test_on_approve_simplify_delegates_to_manager(tmp_path):
 
 @pytest.mark.asyncio
 async def test_on_reject_simplify_delegates_to_manager(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     rail._pending_governance["req-2"] = {"skill_name": "skill-a"}
 
     with patch.object(rail._manager, "reject_simplify", AsyncMock()) as reject_simplify:
@@ -1295,7 +1335,7 @@ async def test_after_tool_call_does_not_inject_body_experience(tmp_path):
     )
     ctx = AgentCallbackContext(agent=None, inputs=inputs, session=None)
 
-    await rail._on_after_tool_call(ctx)
+    await rail._on_after_tool_call(ctx, None)
 
     assert inputs.tool_msg.content == "original"
     rail._evolution_store.format_body_experience_text.assert_not_awaited()
@@ -1312,7 +1352,7 @@ async def test_after_tool_call_does_not_read_experience_text(tmp_path):
     ]
     for item in cases:
         ctx = AgentCallbackContext(agent=None, inputs=item, session=None)
-        await rail._on_after_tool_call(ctx)
+        await rail._on_after_tool_call(ctx, None)
 
     rail._evolution_store.format_body_experience_text.assert_not_awaited()
     assert cases[0].tool_msg.content == "x"
@@ -1324,7 +1364,7 @@ async def test_after_tool_call_does_not_read_experience_text(tmp_path):
         tool_args={"file_path": "/a/demo/SKILL.md"},
         tool_msg=_DummyToolMsg("z"),
     )
-    await rail._on_after_tool_call(AgentCallbackContext(agent=None, inputs=empty_case, session=None))
+    await rail._on_after_tool_call(AgentCallbackContext(agent=None, inputs=empty_case, session=None), None)
     assert empty_case.tool_msg.content == "z"
     rail._evolution_store.format_body_experience_text.assert_not_awaited()
 
@@ -1335,16 +1375,16 @@ async def test_after_tool_call_does_not_read_experience_text(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_returns_immediately_when_auto_scan_disabled(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=False)
+async def test_run_evolution_returns_immediately_when_signal_trigger_disabled(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=False)
     rail._collect_messages = AsyncMock(return_value=[{"role": "user", "content": "x"}])
-    await rail.run_evolution(None, AgentCallbackContext(agent=None, inputs=None, session=None))
+    await rail.run_evolution(_prepared_input(None))
     rail._collect_messages.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_after_invoke_does_not_trigger_evolution_when_auto_scan_disabled(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=False)
+async def test_after_invoke_does_not_trigger_evolution_when_signal_trigger_disabled(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=False)
     rail.run_evolution = AsyncMock()
 
     ctx = AgentCallbackContext(
@@ -1360,23 +1400,30 @@ async def test_after_invoke_does_not_trigger_evolution_when_auto_scan_disabled(t
 
 
 @pytest.mark.asyncio
-async def test_after_invoke_suppresses_auto_scan_during_agent_driven_evolution(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True)
+async def test_after_invoke_suppresses_signal_trigger_during_agent_driven_evolution(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=True)
     rail._async_evolution = False
     rail.run_evolution = AsyncMock()
+    trajectory = _trajectory_with_messages([{"role": "user", "content": "round 1"}])
+    rail._drain_for_hook = Mock(return_value=(trajectory, trajectory, ()))
+    rail._prepare_evolution_input = AsyncMock(
+        return_value=_prepared_input(trajectory, messages=[{"role": "user", "content": "round 1"}])
+    )
     invoke_ctx = AgentCallbackContext(
-        agent=None,
+        agent=SimpleNamespace(card=SimpleNamespace(id="agent-1")),
         inputs=InvokeInputs(query="round 1", conversation_id="conv-1"),
         session=None,
     )
 
     await rail.before_invoke(invoke_ctx)
+    rail.get_trajectory = Mock(return_value=trajectory)
     rail._prepare_evolution_review_scope(
         source="explicit_command",
         subject={"kind": "skill", "name": "skill-a"},
         session_id="conv-1",
         user_intent="capture lesson",
     )
+    rail.get_trajectory.assert_called_once_with(session_id="conv-1", member_id="agent-1", team_id=None)
     await rail.after_invoke(invoke_ctx)
 
     rail.run_evolution.assert_not_awaited()
@@ -1387,9 +1434,85 @@ async def test_after_invoke_suppresses_auto_scan_during_agent_driven_evolution(t
     rail.run_evolution.assert_awaited_once()
 
 
+def test_prepare_evolution_review_scope_requires_active_capture(tmp_path):
+    rail = _make_rail(tmp_path)
+
+    with pytest.raises(RuntimeError, match="active invoke"):
+        rail._prepare_evolution_review_scope(
+            source="explicit_command",
+            subject={"kind": "skill", "name": "skill-a"},
+            session_id="conv-1",
+        )
+
+    assert rail._skip_signal_trigger_this_invoke is False
+
+
+@pytest.mark.asyncio
+async def test_prepare_evolution_review_scope_rejects_mismatched_or_empty_window(tmp_path):
+    rail = _make_rail(tmp_path)
+    ctx = AgentCallbackContext(
+        agent=SimpleNamespace(card=SimpleNamespace(id="agent-1")),
+        inputs=InvokeInputs(query="round 1", conversation_id="conv-1"),
+        session=None,
+    )
+    await rail.before_invoke(ctx)
+
+    with pytest.raises(RuntimeError, match="does not match"):
+        rail._prepare_evolution_review_scope(
+            source="explicit_command",
+            subject={"kind": "skill", "name": "skill-a"},
+            session_id="other-session",
+        )
+    with pytest.raises(RuntimeError, match="no clean trajectory"):
+        rail._prepare_evolution_review_scope(
+            source="explicit_command",
+            subject={"kind": "skill", "name": "skill-a"},
+            session_id="conv-1",
+        )
+
+    assert rail._skip_signal_trigger_this_invoke is False
+
+
+@pytest.mark.asyncio
+async def test_prepare_evolution_review_scope_resolves_detached_invoke_capture(tmp_path):
+    rail = _make_rail(tmp_path)
+    session = SimpleNamespace(
+        get_session_id=lambda: "conv-1",
+        get_agent_id=lambda: "agent-1",
+    )
+    ctx = AgentCallbackContext(
+        agent=SimpleNamespace(card=SimpleNamespace(id="agent-1")),
+        inputs=InvokeInputs(query="round 1", conversation_id="conv-1"),
+        session=session,
+    )
+    await rail.before_invoke(ctx)
+    trajectory = _trajectory_with_messages([{"role": "user", "content": "round 1"}])
+    rail.get_trajectory = Mock(return_value=trajectory)
+
+    scope = Context().run(
+        rail._prepare_evolution_review_scope,
+        source="explicit_command",
+        subject={"kind": "skill", "name": "skill-a"},
+        session_id="conv-1",
+        member_id="agent-1",
+        user_intent="capture lesson",
+    )
+
+    resolved_scope = rail._review_runtime.resolve_scope(
+        scope.evolution_review_ref,
+        session_id="conv-1",
+    )
+    assert resolved_scope.session_id == "conv-1"
+    rail.get_trajectory.assert_called_once_with(
+        session_id="conv-1",
+        member_id="agent-1",
+        team_id=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_evolution_auto_save_commits_via_manager_lifecycle(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     approval_request = SimpleNamespace(request_id="skill_evolve_req")
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/skill-a/SKILL.md"}]},
@@ -1400,16 +1523,16 @@ async def test_run_evolution_auto_save_commits_via_manager_lifecycle(tmp_path):
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._stage_evolution_from_signals = AsyncMock(return_value=_staged_result(approval_request))
     rail._emit_generated_records = AsyncMock()
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
     trajectory = _trajectory_with_messages(messages)
+    normalized_messages = rail._trajectory_to_messages(trajectory)
 
-    await rail.run_evolution(trajectory, ctx)
+    await rail.run_evolution(_prepared_input(trajectory))
 
     signals = rail._stage_evolution_from_signals.await_args.kwargs["signals"]
     rail._stage_evolution_from_signals.assert_awaited_once_with(
         skill_name="skill-a",
         signals=signals,
-        messages=messages,
+        messages=normalized_messages,
         trajectory=trajectory,
         user_query="",
         requires_approval=False,
@@ -1425,7 +1548,7 @@ async def test_run_evolution_auto_save_commits_via_manager_lifecycle(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_uses_online_updater_path_after_init(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._evolution_store.resolve_skill_dir = Mock(return_value=None)
@@ -1447,8 +1570,7 @@ async def test_run_evolution_uses_online_updater_path_after_init(tmp_path):
     ):
         rail.init(agent)
         await rail.run_evolution(
-            _trajectory_with_messages([{"role": "user", "content": "prefer parser fields"}]),
-            AgentCallbackContext(agent=agent, inputs=None, session=None),
+            _prepared_input(_trajectory_with_messages([{"role": "user", "content": "prefer parser fields"}])),
         )
 
     rail._handle_evolution_from_signals.assert_awaited_once()
@@ -1457,7 +1579,7 @@ async def test_run_evolution_uses_online_updater_path_after_init(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_auto_save_false_emits_events(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=False)
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/skill-a/SKILL.md"}]},
         {"role": "tool", "content": "Error: command failed", "name": "bash"},
@@ -1469,20 +1591,20 @@ async def test_run_evolution_auto_save_false_emits_events(tmp_path):
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._stage_evolution_from_signals = AsyncMock(return_value=_staged_result(approval_request))
     rail._emit_generated_records = AsyncMock()
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+    normalized_messages = rail._trajectory_to_messages(trajectory)
 
-    await rail.run_evolution(trajectory, ctx)
+    await rail.run_evolution(_prepared_input(trajectory))
 
     signals = rail._stage_evolution_from_signals.await_args.kwargs["signals"]
     rail._stage_evolution_from_signals.assert_awaited_once_with(
         skill_name="skill-a",
         signals=signals,
-        messages=messages,
+        messages=normalized_messages,
         trajectory=trajectory,
         user_query="",
         requires_approval=True,
     )
-    rail._emit_generated_records.assert_awaited_once_with(ctx, "skill-a", approval_request)
+    rail._emit_generated_records.assert_awaited_once_with(None, "skill-a", approval_request)
     events = _progress_events(await rail.drain_pending_host_events())
     stages = [event.payload["evolution_meta"]["stage"] for event in events]
     assert "signals_attributed" in stages
@@ -1491,7 +1613,7 @@ async def test_run_evolution_auto_save_false_emits_events(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=False)
     record = _make_record("skill-a", content="fresh approval record")
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/skill-a/SKILL.md"}]},
@@ -1508,15 +1630,14 @@ async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path)
         request_id="skill_evolve_req",
     )
     rail._stage_evolution_from_signals = AsyncMock(return_value=_staged_result(approval_request))
-    ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
-
-    await rail.run_evolution(trajectory, ctx)
+    normalized_messages = rail._trajectory_to_messages(trajectory)
+    await rail.run_evolution(_prepared_input(trajectory))
 
     signals = rail._stage_evolution_from_signals.await_args.kwargs["signals"]
     rail._stage_evolution_from_signals.assert_awaited_once_with(
         skill_name="skill-a",
         signals=signals,
-        messages=messages,
+        messages=normalized_messages,
         trajectory=trajectory,
         user_query="",
         requires_approval=True,
@@ -1528,7 +1649,7 @@ async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path)
 
 @pytest.mark.asyncio
 async def test_run_evolution_emits_cancelled_when_attributed_signals_generate_no_records(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=False)
     messages = [{"role": "user", "content": "please review whether this skill learned anything"}]
     trajectory = _trajectory_with_messages(messages)
     signal = _make_signal("skill-a", excerpt="review this conversation")
@@ -1545,7 +1666,7 @@ async def test_run_evolution_emits_cancelled_when_attributed_signals_generate_no
         "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
         return_value=detector,
     ):
-        await rail.run_evolution(trajectory, AgentCallbackContext(agent=None, inputs=None, session=None))
+        await rail.run_evolution(_prepared_input(trajectory))
 
     rail._online_updater.process.assert_awaited_once()
     drained_events = await rail.drain_pending_host_events()
@@ -1566,7 +1687,7 @@ async def test_run_evolution_emits_cancelled_when_attributed_signals_generate_no
 
 @pytest.mark.asyncio
 async def test_handle_evolution_emits_outcome_for_generation_failed(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=False)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=False)
     rail._stage_evolution_from_signals = AsyncMock(return_value=_failed_result("generation_failed"))
 
     result = await rail._handle_evolution_from_signals(
@@ -1590,7 +1711,7 @@ async def test_handle_evolution_emits_outcome_for_generation_failed(tmp_path):
 
 @pytest.mark.asyncio
 async def test_handle_evolution_emits_persistence_failed_without_auto_approved_finalize(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     failed_request = SimpleNamespace(request_id="req-failed")
     rail._stage_evolution_from_signals = AsyncMock(
         return_value=OnlineEvolutionResult(
@@ -1626,7 +1747,7 @@ async def test_handle_evolution_emits_persistence_failed_without_auto_approved_f
 
 @pytest.mark.asyncio
 async def test_run_evolution_filters_empty_skill_name_and_swallow_exceptions(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/skill-a/SKILL.md"}]},
         {"role": "tool", "content": "Error: command failed", "name": "bash"},
@@ -1637,19 +1758,19 @@ async def test_run_evolution_filters_empty_skill_name_and_swallow_exceptions(tmp
     rail._evolution_store.append_record = AsyncMock()
 
     await rail.run_evolution(
-        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+        _prepared_input(_trajectory_with_messages(messages), messages=messages)
     )
     rail._stage_evolution_from_signals.assert_awaited_once()
     assert rail._stage_evolution_from_signals.await_args.kwargs["skill_name"] == "skill-a"
 
-    rail2 = _make_rail(tmp_path, auto_scan=True)
-    rail2._collect_messages = AsyncMock(side_effect=RuntimeError("boom"))
-    await rail2.run_evolution(None, AgentCallbackContext(agent=None, inputs=None, session=None))
+    rail2 = _make_rail(tmp_path, signal_trigger=True)
+    rail2._evolution_store.list_skill_names = Mock(side_effect=RuntimeError("boom"))
+    await rail2.run_evolution(_prepared_input(_trajectory_with_messages([{"role": "user", "content": "x"}])))
 
 
 @pytest.mark.asyncio
 async def test_run_evolution_clears_processed_signal_keys_when_exceed_limit(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/skill-a/SKILL.md"}]},
         {"role": "tool", "content": "Error: command failed", "name": "bash"},
@@ -1662,8 +1783,7 @@ async def test_run_evolution_clears_processed_signal_keys_when_exceed_limit(tmp_
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
 
     await rail.run_evolution(
-        _trajectory_with_messages(messages),
-        AgentCallbackContext(agent=None, inputs=None, session=None),
+        _prepared_input(_trajectory_with_messages(messages), messages=messages),
     )
 
     assert rail._processed_signal_keys == set()
@@ -1755,7 +1875,7 @@ async def test_stage_evolution_from_signals_passes_trajectory_to_orchestrator(tm
             message="none",
         )
     )
-    trajectory = trajectory_from_steps(execution_id="exec-1", session_id="session-1", steps=[])
+    trajectory = _trajectory_from_steps(execution_id="exec-1", session_id="session-1", steps=[])
 
     await rail._stage_evolution_from_signals(
         "skill-a",
@@ -2044,7 +2164,7 @@ def test_infer_primary_skill_prefers_skills_path_over_legacy_skill_md(tmp_path):
 
 
 def test_is_regular_skill_filters_team_and_swarm_skill(tmp_path):
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir=str(tmp_path / "skills"),
         llm=Mock(),
         model="dummy-model",
@@ -2084,7 +2204,7 @@ def test_is_regular_skill_filters_team_and_swarm_skill(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_zero_signals_skips_conversation_review(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
 
     messages = [
         {
@@ -2102,7 +2222,7 @@ async def test_run_evolution_zero_signals_skips_conversation_review(tmp_path):
     rail._evolution_store.append_record = AsyncMock()
 
     await rail.run_evolution(
-        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+        _prepared_input(_trajectory_with_messages(messages), messages=messages)
     )
 
     rail._stage_evolution_from_signals.assert_not_awaited()
@@ -2110,18 +2230,18 @@ async def test_run_evolution_zero_signals_skips_conversation_review(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     rail._evolution_store.list_skill_names = Mock(return_value=[])
     detector = Mock()
     detector.bind_llm.return_value = detector
     detector.detect_trajectory_signals.return_value = []
     detector.detect_user_intent = AsyncMock(return_value=[])
-    trajectory = trajectory_from_steps(
+    trajectory = _trajectory_from_steps(
         execution_id="exec-message-object",
         steps=[
-            TrajectoryStep(
+            _StepSpec(
                 kind="llm",
-                detail=LLMCallDetail(
+                detail=_LLMSpec(
                     model="test-model",
                     messages=[SystemMessage(content="system prompt")],
                 ),
@@ -2129,17 +2249,13 @@ async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_p
         ],
         source="online",
     )
-    snapshot = {
-        "trajectory": trajectory,
-        "messages": [{"role": "system", "content": "system prompt"}],
-        "presented_entries": [],
-    }
-
     with patch(
         "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
         return_value=detector,
     ):
-        await rail.run_evolution(trajectory, ctx=None, snapshot=snapshot)
+        await rail.run_evolution(
+            _prepared_input(trajectory, messages=[{"role": "system", "content": "system prompt"}])
+        )
 
     detector.detect_trajectory_signals.assert_called_once_with(
         trajectory,
@@ -2150,7 +2266,7 @@ async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_p
 
 @pytest.mark.asyncio
 async def test_run_evolution_does_not_use_llm_for_passive_user_messages(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
 
     messages = [
         {
@@ -2168,7 +2284,7 @@ async def test_run_evolution_does_not_use_llm_for_passive_user_messages(tmp_path
         return_value={"content": '{"is_feedback": true, "excerpt": "不对，你应该先检查文件是否存在"}'}
     )
     await rail.run_evolution(
-        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+        _prepared_input(_trajectory_with_messages(messages), messages=messages)
     )
 
     rail._stage_evolution_from_signals.assert_not_awaited()
@@ -2176,8 +2292,8 @@ async def test_run_evolution_does_not_use_llm_for_passive_user_messages(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_auto_scan_consumes_script_artifact_rule_signal(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+async def test_run_evolution_signal_trigger_consumes_script_artifact_rule_signal(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
 
     messages = [
         {
@@ -2222,7 +2338,7 @@ async def test_run_evolution_auto_scan_consumes_script_artifact_rule_signal(tmp_
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
 
     await rail.run_evolution(
-        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+        _prepared_input(_trajectory_with_messages(messages), messages=messages)
     )
 
     rail._stage_evolution_from_signals.assert_awaited_once()
@@ -2231,15 +2347,15 @@ async def test_run_evolution_auto_scan_consumes_script_artifact_rule_signal(tmp_
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_auto_scan_ignores_team_collaboration_activity(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
-    trajectory = trajectory_from_steps(
+async def test_run_evolution_signal_trigger_ignores_team_collaboration_activity(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
+    trajectory = _trajectory_from_steps(
         execution_id="team-collab",
         session_id="session-team",
         steps=[
-            TrajectoryStep(
+            _StepSpec(
                 kind="llm",
-                detail=LLMCallDetail(
+                detail=_LLMSpec(
                     model="test-model",
                     messages=[
                         {
@@ -2257,9 +2373,9 @@ async def test_run_evolution_auto_scan_ignores_team_collaboration_activity(tmp_p
                     ],
                 ),
             ),
-            TrajectoryStep(
+            _StepSpec(
                 kind="tool",
-                detail=ToolCallDetail(
+                detail=_ToolSpec(
                     tool_name="send_message",
                     call_args={"to_member_name": "coder", "message": "please continue"},
                     call_result="sent",
@@ -2273,14 +2389,14 @@ async def test_run_evolution_auto_scan_ignores_team_collaboration_activity(tmp_p
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
 
-    await rail.run_evolution(trajectory, AgentCallbackContext(agent=None, inputs=None, session=None))
+    await rail.run_evolution(_prepared_input(trajectory))
 
     rail._stage_evolution_from_signals.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_run_evolution_zero_signals_no_primary_skill_returns(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
 
     messages = [{"role": "user", "content": "hi"}]
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
@@ -2288,7 +2404,7 @@ async def test_run_evolution_zero_signals_no_primary_skill_returns(tmp_path):
     rail._stage_evolution_from_signals = AsyncMock()
 
     await rail.run_evolution(
-        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+        _prepared_input(_trajectory_with_messages(messages), messages=messages)
     )
 
     rail._stage_evolution_from_signals.assert_not_awaited()
@@ -2296,7 +2412,7 @@ async def test_run_evolution_zero_signals_no_primary_skill_returns(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_emits_started_and_cancelled_when_no_skill_used(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
 
     messages = [{"role": "user", "content": "hi"}]
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
@@ -2304,8 +2420,7 @@ async def test_run_evolution_emits_started_and_cancelled_when_no_skill_used(tmp_
     rail._stage_evolution_from_signals = AsyncMock()
 
     await rail.run_evolution(
-        _trajectory_with_messages(messages),
-        AgentCallbackContext(agent=None, inputs=None, session=None),
+        _prepared_input(_trajectory_with_messages(messages), messages=messages),
     )
 
     events = _progress_events(await rail.drain_pending_host_events())
@@ -2323,7 +2438,7 @@ async def test_run_evolution_emits_started_and_cancelled_when_no_skill_used(tmp_
 
 @pytest.mark.asyncio
 async def test_run_evolution_cancels_when_all_signals_are_unattributed(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     messages = [{"role": "tool", "content": "Error: command failed", "name": "bash"}]
     detector = Mock()
     detector.bind_llm.return_value = detector
@@ -2338,8 +2453,7 @@ async def test_run_evolution_cancels_when_all_signals_are_unattributed(tmp_path)
         return_value=detector,
     ):
         await rail.run_evolution(
-            _trajectory_with_messages(messages),
-            AgentCallbackContext(agent=None, inputs=None, session=None),
+            _prepared_input(_trajectory_with_messages(messages), messages=messages),
         )
 
     events = _progress_events(await rail.drain_pending_host_events())
@@ -2352,11 +2466,11 @@ async def test_run_evolution_cancels_when_all_signals_are_unattributed(tmp_path)
 
 @pytest.mark.asyncio
 async def test_run_evolution_filters_team_and_swarm_skills_from_detection(tmp_path):
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir=str(tmp_path / "skills"),
         llm=Mock(),
         model="dummy-model",
-        auto_scan=True,
+        signal_trigger=True,
         auto_save=True,
         review_runtime=_default_review_runtime(),
     )
@@ -2389,7 +2503,7 @@ async def test_run_evolution_filters_team_and_swarm_skills_from_detection(tmp_pa
     rail._stage_evolution_from_signals = AsyncMock()
 
     await rail.run_evolution(
-        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+        _prepared_input(_trajectory_with_messages(messages), messages=messages)
     )
 
     rail._infer_primary_skill.assert_not_called()
@@ -2397,7 +2511,7 @@ async def test_run_evolution_filters_team_and_swarm_skills_from_detection(tmp_pa
 
 @pytest.mark.asyncio
 async def test_run_evolution_unattributed_signals_get_fallback_skill(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
 
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/skill-a/SKILL.md"}]},
@@ -2411,7 +2525,7 @@ async def test_run_evolution_unattributed_signals_get_fallback_skill(tmp_path):
     rail._evolution_store.append_record = AsyncMock()
 
     await rail.run_evolution(
-        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+        _prepared_input(_trajectory_with_messages(messages), messages=messages)
     )
 
     rail._stage_evolution_from_signals.assert_awaited_once()
@@ -2421,7 +2535,7 @@ async def test_run_evolution_unattributed_signals_get_fallback_skill(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_multiple_attributed_skills_no_fallback(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
 
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/skill-a/SKILL.md"}]},
@@ -2436,7 +2550,7 @@ async def test_run_evolution_multiple_attributed_skills_no_fallback(tmp_path):
     rail._evolution_store.append_record = AsyncMock()
 
     await rail.run_evolution(
-        _trajectory_with_messages(messages), AgentCallbackContext(agent=None, inputs=None, session=None)
+        _prepared_input(_trajectory_with_messages(messages), messages=messages)
     )
 
     assert rail._stage_evolution_from_signals.await_count == 2
@@ -2444,7 +2558,7 @@ async def test_run_evolution_multiple_attributed_skills_no_fallback(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_continues_when_only_some_signals_are_attributed(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     messages = [{"role": "tool", "content": "Error: command failed", "name": "bash"}]
     detector = Mock()
     detector.bind_llm.return_value = detector
@@ -2464,8 +2578,7 @@ async def test_run_evolution_continues_when_only_some_signals_are_attributed(tmp
         return_value=detector,
     ):
         await rail.run_evolution(
-            _trajectory_with_messages(messages),
-            AgentCallbackContext(agent=None, inputs=None, session=None),
+            _prepared_input(_trajectory_with_messages(messages), messages=messages),
         )
 
     assert rail._stage_evolution_from_signals.await_count == 2
@@ -2488,7 +2601,7 @@ async def test_run_evolution_continues_when_only_some_signals_are_attributed(tmp
 
 def test_init_invalid_eval_interval_raises():
     with pytest.raises(ValueError, match="eval_interval"):
-        SkillEvolutionRail(
+        _skill_evolution_rail(
             skills_dir="skills",
             llm=Mock(),
             model="m",
@@ -2497,19 +2610,8 @@ def test_init_invalid_eval_interval_raises():
         )
 
 
-def test_team_trajectory_store_is_not_accepted_by_skill_evolution_rail():
-    with pytest.raises(TypeError, match="team_trajectory_store"):
-        SkillEvolutionRail(
-            skills_dir="skills",
-            llm=Mock(),
-            model="m",
-            review_runtime=_default_review_runtime(),
-            team_trajectory_store=Mock(),
-        )
-
-
 def test_init_valid_params_no_error():
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir="skills",
         llm=Mock(),
         model="m",
@@ -2535,7 +2637,7 @@ def test_init_accepts_custom_policies_and_timeout():
         total_budget_secs=39,
         max_attempts=2,
     )
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir="skills",
         llm=Mock(),
         model="m",
@@ -2627,40 +2729,147 @@ def test_tracker_session_helpers_with_none_session(tmp_path):
 
 
 # =============================================================================
-# Fix #2: Presented records carry per-presentation snippet
+# Async evaluation snippet (rebuilt at after_invoke from full conversation)
 # =============================================================================
 
 
+def test_build_evaluation_snippet_anchors_after_skill_load(tmp_path):
+    """Snippet starts at last SKILL.md load and includes subsequent assistant/tool turns."""
+    messages = [
+        {"role": "user", "content": "before load"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"my_skill","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "skill_tool", "content": "SKILL body for my_skill"},
+        {"role": "assistant", "content": "after load reply"},
+    ]
+    snippet = SkillEvolutionRail._build_evaluation_snippet(messages, "my_skill")
+    assert "after load reply" in snippet
+    assert "before load" not in snippet
+
+
+def test_find_skill_load_anchor_uses_assistant_tool_call_not_substring_tool_content():
+    """tool/function responses must not set anchor via skill_name substring match."""
+    messages = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"test","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "skill_tool",
+            "content": "latest testing results (no exact skill_name field here)",
+        },
+        {"role": "assistant", "content": "done"},
+    ]
+    anchor = SkillEvolutionRail._find_skill_load_anchor(messages, "test")
+    assert anchor == 1
+
+
+def test_find_skill_load_anchor_not_overwritten_by_later_substring_false_positive():
+    """A later tool response containing skill_name as substring must not move the anchor."""
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"test","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "skill_tool", "content": "SKILL body"},
+        {"role": "assistant", "content": "correct post-load context"},
+        {
+            "role": "tool",
+            "name": "skill_tool",
+            "content": "contest leaderboard update",
+        },
+    ]
+    anchor = SkillEvolutionRail._find_skill_load_anchor(messages, "test")
+    assert anchor == 0
+    snippet = SkillEvolutionRail._build_evaluation_snippet(messages, "test")
+    assert "correct post-load context" in snippet
+    assert snippet.index("correct post-load context") < snippet.index("contest")
+
+
+def test_find_skill_load_anchor_read_file_path(tmp_path):
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "read_file",
+                    "arguments": '{"file_path":"/workspace/skills/invoice-parser/SKILL.md"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "read_file", "content": "# Invoice parser"},
+    ]
+    anchor = SkillEvolutionRail._find_skill_load_anchor(messages, "invoice-parser")
+    assert anchor == 0
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["read_all", "file_upload", "bread_crumb", "profile_reader"],
+)
+def test_find_skill_load_anchor_rejects_non_file_read_tools(tool_name):
+    messages = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": tool_name,
+                    "arguments": '{"file_path":"/skills/my-skill/SKILL.md"}',
+                }
+            ],
+        },
+    ]
+    assert SkillEvolutionRail._find_skill_load_anchor(messages, "my-skill") == -1
+
+
 def test_tracker_session_presented_records_store_snippet(tmp_path):
-    """Each entry stored in session must include the presentation-time snippet."""
+    """Session entries may carry placeholder snippets; evaluation rebuilds from messages."""
     rail = _make_rail(tmp_path)
     telemetry = rail._experience_tracker
     session = SimpleNamespace()
 
     record = _make_record("sk")
-    telemetry.set_session_presented_records(session, [("sk", record, "my_snippet")])
+    telemetry.set_session_presented_records(session, [("sk", record, "")])
 
     entries = telemetry.get_session_presented_records(session)
     assert len(entries) == 1
     skill_name, stored_record, snippet = entries[0]
     assert skill_name == "sk"
     assert stored_record is record
-    assert snippet == "my_snippet"
+    assert snippet == ""
 
 
 @pytest.mark.asyncio
-async def test_tracker_evaluation_uses_per_record_snippet(tmp_path):
-    """Scorer must be called with the snippet bound to each record, not current messages."""
+async def test_tracker_evaluation_builds_snippet_from_messages(tmp_path):
+    """Scorer must use snippet rebuilt from messages, not session placeholders."""
     rail = _make_rail(tmp_path)
     telemetry = rail._experience_tracker
 
     record_a = _make_record("skill_a")
     record_b = _make_record("skill_b")
 
-    # Two records from different conversations with different snippets
     presented_entries = [
-        ("skill_a", record_a, "snippet_from_turn_1"),
-        ("skill_b", record_b, "snippet_from_turn_2"),
+        ("skill_a", record_a, ""),
+        ("skill_b", record_b, "stale_snippet_should_be_ignored"),
     ]
 
     captured_snippets: list[str] = []
@@ -2677,61 +2886,32 @@ async def test_tracker_evaluation_uses_per_record_snippet(tmp_path):
         eval_interval=rail._eval_interval,
     )
 
-    await telemetry.evaluate_presented(presented_entries)
+    messages = [
+        {"role": "user", "content": "unrelated preamble"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "name": "skill_tool",
+                    "arguments": '{"skill_name":"skill_a","relative_file_path":"SKILL"}',
+                }
+            ],
+        },
+        {"role": "tool", "name": "skill_tool", "content": "SKILL body skill_a"},
+        {"role": "assistant", "content": "post-present skill_a behavior"},
+    ]
 
-    # Must have evaluated with the stored snippets, not the current messages
-    assert "snippet_from_turn_1" in captured_snippets
-    assert "snippet_from_turn_2" in captured_snippets
-
-
-@pytest.mark.asyncio
-async def test_snapshot_consumes_experience_tracker_state(tmp_path):
-    rail = _make_rail(tmp_path)
-    record = _make_record("skill-a")
-    presented_entries = [("skill-a", record, "snippet")]
-    rail._experience_tracker.consume_eval_state = Mock(return_value=presented_entries)
-    session = SimpleNamespace()
-    ctx = AgentCallbackContext(
-        agent=None,
-        inputs=SimpleNamespace(conversation_id="session-1"),
-        session=session,
-        context=_MsgContext(messages=[{"role": "user", "content": "hello"}]),
+    await telemetry.evaluate_presented(
+        presented_entries,
+        messages=messages,
+        build_snippet=SkillEvolutionRail._build_evaluation_snippet,
     )
 
-    snapshot = await rail._snapshot_for_evolution(
-        _trajectory_with_messages([{"role": "user", "content": "hello"}]),
-        ctx,
-    )
-
-    assert snapshot is not None
-    assert snapshot["presented_entries"] == presented_entries
-    rail._experience_tracker.consume_eval_state.assert_called_once_with(session)
-
-
-@pytest.mark.asyncio
-async def test_run_evolution_evaluates_presented_entries_from_snapshot(tmp_path):
-    rail = _make_rail(tmp_path)
-    record = _make_record("skill-a")
-    presented_entries = [("skill-a", record, "snippet")]
-    rail._experience_tracker.evaluate_presented = AsyncMock()
-    rail._evolution_store.list_skill_names = Mock(return_value=[])
-    rail._infer_primary_skill = Mock(return_value=None)
-
-    detector = Mock()
-    detector.bind_llm.return_value = detector
-    detector.detect_trajectory_signals = Mock(return_value=[])
-    detector.detect_user_intent = AsyncMock(return_value=[])
-    with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector", return_value=detector):
-        await rail.run_evolution(
-            None,
-            snapshot={
-                "trajectory": None,
-                "messages": [{"role": "user", "content": "hello"}],
-                "presented_entries": presented_entries,
-            },
-        )
-
-    rail._experience_tracker.evaluate_presented.assert_awaited_once_with(presented_entries)
+    assert len(captured_snippets) == 2
+    assert not any("stale_snippet" in s for s in captured_snippets)
+    skill_a_snippet = captured_snippets[0]
+    assert "post-present skill_a behavior" in skill_a_snippet
+    assert "unrelated preamble" not in skill_a_snippet
 
 
 # =============================================================================
@@ -2825,7 +3005,7 @@ async def test_tracker_record_presented_records_only_matching_body_ids(tmp_path)
 @pytest.mark.asyncio
 async def test_after_tool_call_does_not_record_experience_tracker(tmp_path):
     """after_tool_call must not record presentation telemetry for SKILL.md reads."""
-    rail = _make_rail(tmp_path, auto_scan=True)
+    rail = _make_rail(tmp_path, signal_trigger=True)
 
     tool_inputs = ToolCallInputs(
         tool_name="read_file",
@@ -2838,7 +3018,7 @@ async def test_after_tool_call_does_not_record_experience_tracker(tmp_path):
     rail._evolution_store.format_body_experience_text = AsyncMock(return_value="")
     rail._experience_tracker.record_presented = AsyncMock()
 
-    await rail._on_after_tool_call(ctx)
+    await rail._on_after_tool_call(ctx, None)
 
     rail._experience_tracker.record_presented.assert_not_awaited()
 
@@ -2846,7 +3026,7 @@ async def test_after_tool_call_does_not_record_experience_tracker(tmp_path):
 @pytest.mark.asyncio
 async def test_after_tool_call_does_not_record_skill_md_index_ids(tmp_path):
     """SKILL.md index visibility must not count as BODY experience presentation."""
-    rail = _make_rail(tmp_path, auto_scan=True)
+    rail = _make_rail(tmp_path, signal_trigger=True)
     rail._experience_tracker.record_presented_records = AsyncMock()
 
     tool_inputs = ToolCallInputs(
@@ -2856,14 +3036,14 @@ async def test_after_tool_call_does_not_record_skill_md_index_ids(tmp_path):
     )
     ctx = AgentCallbackContext(agent=None, inputs=tool_inputs, session=SimpleNamespace())
 
-    await rail._on_after_tool_call(ctx)
+    await rail._on_after_tool_call(ctx, None)
 
     rail._experience_tracker.record_presented_records.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_after_tool_call_records_skill_tool_evolution_detail_read(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True)
+    rail = _make_rail(tmp_path, signal_trigger=True)
     session = SimpleNamespace()
     rail._experience_tracker.record_presented_records = AsyncMock()
 
@@ -2882,19 +3062,19 @@ async def test_after_tool_call_records_skill_tool_evolution_detail_read(tmp_path
     )
     ctx = AgentCallbackContext(agent=None, inputs=tool_inputs, session=session)
 
-    await rail._on_after_tool_call(ctx)
+    await rail._on_after_tool_call(ctx, None)
 
     rail._experience_tracker.record_presented_records.assert_awaited_once_with(
         session=session,
         skill_name="my_skill",
-        presentation_snippet="# Troubleshooting\n\n### [ev_body] Fix the parser\nDetails",
+        presentation_snippet="",
         record_ids=["ev_body"],
     )
 
 
 @pytest.mark.asyncio
 async def test_after_tool_call_records_read_file_evolution_detail_read(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True)
+    rail = _make_rail(tmp_path, signal_trigger=True)
     session = SimpleNamespace()
     skill_dir = tmp_path / "skills" / "my_skill"
     experience_file = skill_dir / "evolution" / "troubleshooting.md"
@@ -2909,19 +3089,19 @@ async def test_after_tool_call_records_read_file_evolution_detail_read(tmp_path)
     )
     ctx = AgentCallbackContext(agent=None, inputs=tool_inputs, session=session)
 
-    await rail._on_after_tool_call(ctx)
+    await rail._on_after_tool_call(ctx, None)
 
     rail._experience_tracker.record_presented_records.assert_awaited_once_with(
         session=session,
         skill_name="my_skill",
-        presentation_snippet="     7\t### [ev_body] Fix the parser\n     8\tDetails",
+        presentation_snippet="",
         record_ids=["ev_body"],
     )
 
 
 @pytest.mark.asyncio
 async def test_after_tool_call_skips_evolution_detail_when_no_record_ids(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True)
+    rail = _make_rail(tmp_path, signal_trigger=True)
     rail._experience_tracker.record_presented_records = AsyncMock()
 
     tool_inputs = ToolCallInputs(
@@ -2934,14 +3114,14 @@ async def test_after_tool_call_skips_evolution_detail_when_no_record_ids(tmp_pat
     )
     ctx = AgentCallbackContext(agent=None, inputs=tool_inputs, session=SimpleNamespace())
 
-    await rail._on_after_tool_call(ctx)
+    await rail._on_after_tool_call(ctx, None)
 
     rail._experience_tracker.record_presented_records.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_record_presented_experiences_delegates_to_tracker(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True)
+    rail = _make_rail(tmp_path, signal_trigger=True)
     session = SimpleNamespace()
     rail._experience_tracker.record_presented = AsyncMock()
 
@@ -2960,7 +3140,7 @@ async def test_record_presented_experiences_delegates_to_tracker(tmp_path):
 
 @pytest.mark.asyncio
 async def test_record_presented_experiences_with_record_ids_delegates_to_tracker(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True)
+    rail = _make_rail(tmp_path, signal_trigger=True)
     session = SimpleNamespace()
     rail._experience_tracker.record_presented_records = AsyncMock()
 
@@ -3313,7 +3493,7 @@ async def test_is_sharing_enabled_requires_both_sharer_and_stager(tmp_path):
 
 
 def test_disabled_skills_constructor_parameter(tmp_path):
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir=str(tmp_path / "skills"),
         llm=Mock(),
         model="dummy-model",
@@ -3324,7 +3504,7 @@ def test_disabled_skills_constructor_parameter(tmp_path):
 
 
 def test_disabled_skills_from_single_string(tmp_path):
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir=str(tmp_path / "skills"),
         llm=Mock(),
         model="dummy-model",
@@ -3335,7 +3515,7 @@ def test_disabled_skills_from_single_string(tmp_path):
 
 
 def test_disabled_skills_defaults_to_empty(tmp_path):
-    rail = SkillEvolutionRail(
+    rail = _skill_evolution_rail(
         skills_dir=str(tmp_path / "skills"),
         llm=Mock(),
         model="dummy-model",
@@ -3347,7 +3527,7 @@ def test_disabled_skills_defaults_to_empty(tmp_path):
 @pytest.mark.asyncio
 async def test_run_evolution_filters_out_disabled_skills(tmp_path):
     """run_evolution should exclude disabled skills from the evolution scope."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True, disabled_skills=["disabled-skill"])
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True, disabled_skills=["disabled-skill"])
 
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/active-skill/SKILL.md"}]},
@@ -3360,7 +3540,7 @@ async def test_run_evolution_filters_out_disabled_skills(tmp_path):
     rail._collect_messages = AsyncMock(return_value=messages)
     rail._handle_evolution_from_signals = AsyncMock(return_value=_no_records_result("active-skill"))
 
-    await rail.run_evolution(trajectory, ctx=None, snapshot={"trajectory": trajectory, "messages": messages})
+    await rail.run_evolution(_prepared_input(trajectory, messages=messages))
 
     rail._handle_evolution_from_signals.assert_awaited_once()
     call_kwargs = rail._handle_evolution_from_signals.call_args
@@ -3370,7 +3550,7 @@ async def test_run_evolution_filters_out_disabled_skills(tmp_path):
 @pytest.mark.asyncio
 async def test_run_evolution_all_skills_disabled(tmp_path):
     """run_evolution should skip when all skills are disabled."""
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True, disabled_skills=["skill-a", "skill-b"])
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True, disabled_skills=["skill-a", "skill-b"])
 
     messages = [{"role": "user", "content": "hello"}]
     trajectory = _trajectory_with_messages(messages)
@@ -3380,8 +3560,46 @@ async def test_run_evolution_all_skills_disabled(tmp_path):
     rail._collect_messages = AsyncMock(return_value=messages)
     rail._handle_evolution_from_signals = AsyncMock(return_value=_no_records_result("skill-a"))
 
-    await rail.run_evolution(trajectory, ctx=None, snapshot={"trajectory": trajectory, "messages": messages})
+    await rail.run_evolution(_prepared_input(trajectory, messages=messages))
 
+    rail._handle_evolution_from_signals.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_external_signal_entry_uses_standard_optimizer_and_approval_path(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=False, auto_save=False)
+    signal = _make_signal("skill-a")
+    expected = _staged_result(SimpleNamespace(request_id="skill_evolve_1"))
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    rail._is_regular_skill = Mock(return_value=True)
+    rail._handle_evolution_from_signals = AsyncMock(return_value=expected)
+
+    result = await rail.evolve_from_external_signals(
+        signals=[signal],
+        messages=[{"role": "user", "content": "review feedback"}],
+        user_query="Add reusable validation guidance.",
+    )
+
+    assert result is expected
+    rail._handle_evolution_from_signals.assert_awaited_once_with(
+        skill_name="skill-a",
+        signals=[signal],
+        messages=[{"role": "user", "content": "review feedback"}],
+        trajectory=None,
+        ctx=None,
+        user_query="Add reusable validation guidance.",
+        requires_approval=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_signal_entry_rejects_ambiguous_skill_scope(tmp_path):
+    rail = _make_rail(tmp_path)
+    rail._handle_evolution_from_signals = AsyncMock()
+
+    result = await rail.evolve_from_external_signals(signals=[_make_signal("skill-a"), _make_signal("skill-b")])
+
+    assert result.status == "skipped_no_input"
     rail._handle_evolution_from_signals.assert_not_awaited()
 
 
@@ -3455,7 +3673,7 @@ def test_skill_evolution_rail_init_replaces_stale_review_subagent(monkeypatch, t
 
 @pytest.mark.asyncio
 async def test_run_evolution_regular_signal_uses_online_updater_without_passive_state(tmp_path):
-    rail = _make_rail(tmp_path, auto_scan=True, auto_save=True)
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True)
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
     rail._evolution_store.skill_exists = Mock(return_value=True)
     rail._evolution_store.resolve_skill_dir = Mock(return_value=None)
@@ -3466,9 +3684,6 @@ async def test_run_evolution_regular_signal_uses_online_updater_without_passive_
     detector.detect_user_intent = AsyncMock(return_value=[])
 
     with patch("openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector", return_value=detector):
-        await rail.run_evolution(
-            _trajectory_with_messages([{"role": "user", "content": "trigger"}]),
-            AgentCallbackContext(agent=None, inputs=None, session=None),
-        )
+        await rail.run_evolution(_prepared_input(_trajectory_with_messages([{"role": "user", "content": "trigger"}])))
 
     rail._stage_evolution_from_signals.assert_awaited_once()

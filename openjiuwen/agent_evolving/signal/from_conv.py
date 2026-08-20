@@ -15,12 +15,13 @@ from openjiuwen.agent_evolving.signal.base import (
     make_evolution_signal,
     make_signal_fingerprint,
 )
-from openjiuwen.agent_evolving.trajectory.types import (
-    LLMCallDetail,
-    ToolCallDetail,
-    Trajectory,
-    trajectory_steps,
+from openjiuwen.agent_evolving.trajectory.messages import (
+    tool_call_arguments,
+    tool_call_id as get_tool_call_id,
+    tool_call_name,
+    trajectory_to_messages,
 )
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.core.common.logging import logger
 
 
@@ -183,9 +184,9 @@ class ConversationSignalDetector:
     ) -> List[EvolutionSignal]:
         try:
             messages = (
-                self.convert_trajectory_to_messages(input_data)
-                if isinstance(input_data, Trajectory)
-                else list(input_data)
+                list(input_data)
+                if isinstance(input_data, list)
+                else trajectory_to_messages(input_data)
             )
             signals = self._detect_from_messages(messages)
         except Exception as exc:
@@ -248,9 +249,9 @@ class ConversationSignalDetector:
         messages: List[dict],
     ) -> List[EvolutionSignal]:
         """Use LLM judgment to turn passive user messages into standard signals."""
-        if isinstance(messages, Trajectory):
+        if hasattr(messages, "to_otlp") or hasattr(messages, "otlp_trace"):
             raise TypeError(
-                "detect_user_intent() expects normalized messages; call convert_trajectory_to_messages() first."
+                "detect_user_intent() expects normalized messages; call trajectory_to_messages() first."
             )
         user_messages = [
             str(_get_field(msg, "content")).strip()
@@ -297,59 +298,6 @@ class ConversationSignalDetector:
         excerpt = str(parsed.get("excerpt") or user_messages[-1]).strip()
         return [self._make_user_feedback_signal(excerpt, skill_name)]
 
-    @staticmethod
-    def convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
-        """Convert trajectory steps (via ``trajectory_steps``) to message list format.
-
-        The message format matches what SignalDetector.detect() expects:
-        - LLM steps: messages from LLMCallDetail, including tool_calls
-        - Tool steps: tool result from ToolCallDetail.call_result
-
-        Args:
-            trajectory: Trajectory object to convert.
-
-        Returns:
-            List of message dicts compatible with signal detection logic.
-        """
-        messages: List[dict] = []
-        tool_call_id_to_name: Dict[str, str] = {}
-
-        for step in trajectory_steps(trajectory):
-            if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
-                for msg in step.detail.messages:
-                    messages.append(msg)
-                    tool_calls = _get_field(msg, "tool_calls", [])
-                    if tool_calls:
-                        for tc in tool_calls:
-                            tc_id = _get_field(tc, "id", "")
-                            tc_name = _get_field(tc, "name", "")
-                            if tc_id and tc_name:
-                                tool_call_id_to_name[tc_id] = tc_name
-
-            elif step.kind == "tool" and isinstance(step.detail, ToolCallDetail):
-                tool_name = step.detail.tool_name
-                tool_call_id = step.detail.tool_call_id or step.meta.get("tool_call_id", "")
-
-                if not tool_name and tool_call_id:
-                    tool_name = tool_call_id_to_name.get(tool_call_id, "")
-
-                result_content = ""
-                if step.detail.call_result is not None:
-                    result_content = str(step.detail.call_result)
-
-                tool_msg = {
-                    "role": "tool",
-                    "content": result_content,
-                }
-                if tool_call_id:
-                    tool_msg["tool_call_id"] = tool_call_id
-                if tool_name:
-                    tool_msg["name"] = tool_name
-
-                messages.append(tool_msg)
-
-        return messages
-
     def _detect_from_messages(self, messages: List[dict]) -> List[EvolutionSignal]:
         """Scan messages and return deduplicated signals.
 
@@ -371,8 +319,8 @@ class ConversationSignalDetector:
                     skill_read_history.append((msg_idx, detected))
 
                 for tc in tool_calls:
-                    tc_id = str(_get_field(tc, "id"))
-                    tc_name = str(_get_field(tc, "name"))
+                    tc_id = str(get_tool_call_id(tc) or "")
+                    tc_name = str(tool_call_name(tc) or "")
                     if tc_id and tc_name:
                         tool_call_id_to_name[tc_id] = tc_name
                     if tc_name.lower() in _CODE_EXEC_TOOLS:
@@ -437,8 +385,8 @@ class ConversationSignalDetector:
     def _detect_skill_from_tool_calls(self, tool_calls: list) -> Optional[str]:
         """Return skill name if any tool call reads a SKILL.md, else None."""
         for tool_call in tool_calls:
-            name = str(_get_field(tool_call, "name")).lower()
-            arguments = str(_get_field(tool_call, "arguments"))
+            name = str(tool_call_name(tool_call) or "").lower()
+            arguments = str(tool_call_arguments(tool_call) or "")
             skill_name: Optional[str] = None
 
             matched = _SKILL_MD_PATTERN.search(arguments)
@@ -497,7 +445,7 @@ class ConversationSignalDetector:
     @staticmethod
     def _extract_code_from_args(tool_call: object) -> str:
         """Extract inline code or command content from a code-execution tool call."""
-        raw_args = _get_field(tool_call, "arguments")
+        raw_args = tool_call_arguments(tool_call)
         if isinstance(raw_args, str):
             try:
                 raw_args = json.loads(raw_args)

@@ -1,9 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
-import httpx
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
@@ -114,9 +114,32 @@ class StreamableHttpClient(McpClient):
             self._is_disconnected = False
             logger.info(f"Streamable-http client connected successfully to {self._server_path}")
             return True
-        except Exception as e:
+        except BaseException as e:
+            # Extract HTTPStatusError from BaseExceptionGroup (caused by GeneratorExit
+            # being BaseException) so real HTTP errors aren't misreported as cancelled.
+            # CancelledError/KeyboardInterrupt propagate.
+            if isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)) \
+                and not isinstance(e, BaseExceptionGroup):
+                raise
             logger.error(f"Streamable-http connection failed to {self._server_path}: {e}")
-            await self.disconnect()
+            real_err: BaseException = e
+            if isinstance(e, BaseExceptionGroup):
+                exc_sub, _ = e.split(Exception)
+                if exc_sub is not None:
+                    subs = list(exc_sub.exceptions)
+                    real_err = subs[0] if len(subs) == 1 else exc_sub
+                else:
+                    real_err = RuntimeError(f"MCP server '{self._name}' connect failed: {e}")
+            if isinstance(real_err, Exception):
+                self._last_connect_error = real_err
+            else:
+                self._last_connect_error = RuntimeError(
+                    f"MCP server '{self._name}' connect failed: {type(e).__name__}: {e}"
+                )
+            try:
+                await self.disconnect()
+            except BaseException as disc_exc:  # noqa: BLE001
+                logger.debug("[StreamableHttpClient] disconnect after connect failure failed: %r", disc_exc)
             return False
 
     async def disconnect(self, *, timeout: float = NO_TIMEOUT) -> bool:
@@ -164,7 +187,11 @@ class StreamableHttpClient(McpClient):
         try:
             logger.info(f"Calling tool '{tool_name}' via streamable-http with arguments: {arguments}")
             tool_result = await self._session.call_tool(tool_name, arguments=arguments)
-            result_content = extract_mcp_tool_result_content(tool_result)
+            result_content = extract_mcp_tool_result_content(
+                tool_result,
+                include_image_content=self._include_image_content,
+                tool_name=tool_name,
+            )
             logger.info(f"Tool '{tool_name}' call completed via streamable-http")
             return result_content
         except Exception as e:

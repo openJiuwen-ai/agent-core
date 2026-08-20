@@ -16,13 +16,13 @@ Promp caching layout:
   3. messages
 """
 
-from typing import TYPE_CHECKING, Any, AsyncIterator, List, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import httpx
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.common.logging import llm_logger, logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.headers_helper import (
@@ -250,12 +250,49 @@ class AnthropicModelClient(BaseModelClient):
     __client_name__ = [ProviderType.Anthropic.value]
     _PROTECTED_HEADERS = PROTECTED_HEADERS
 
+    # Process-wide cache of long-lived ``AsyncAnthropic`` clients, bucketed by
+    # tenant/connection config (mirrors OpenAIModelClient). Each cached client
+    # keeps its own httpx keep-alive connection pool alive so cache hits reuse
+    # connections. This cache is independent from OpenAIModelClient's (different
+    # SDK client type).
+    _client_cache: Dict[Tuple, "anthropic.AsyncAnthropic"] = {}
+
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
         self._base_headers = build_base_headers(custom_headers=model_client_config.custom_headers)
 
     def _get_client_name(self) -> str:
         return "Anthropic client"
+
+    def _use_shared_client(self) -> bool:
+        """Whether to reuse the process-wide cached client (default True).
+
+        Emergency kill-switch: set ``use_shared_llm_http_client=False`` to fall
+        back to per-request clients.
+        """
+        return bool(getattr(self.model_client_config, "use_shared_llm_http_client", True))
+
+    @classmethod
+    def connection_key(cls, model_client_config: ModelClientConfig) -> Tuple:
+        """Connection identity used to bucket/reuse cached clients.
+
+        Uses the normalized base_url (what the SDK actually talks to) and
+        includes api_key so tenants stay isolated. ``api_base`` already
+        determines the proxy, so proxy is not part of the key. Exposed as a
+        classmethod so callers (e.g. config hot-reload reconciliation) can
+        compute the same key to select connections to close via
+        :meth:`aclose_connections`.
+        """
+        cfg = model_client_config
+        return (
+            cfg.api_key,
+            cls._normalize_base_url(cfg.api_base),
+            cfg.verify_ssl,
+            cfg.ssl_cert,
+        )
+
+    def _client_cache_key(self) -> Tuple:
+        return self.connection_key(self.model_client_config)
 
     @classmethod
     def _build_request_headers(
@@ -283,14 +320,56 @@ class AnthropicModelClient(BaseModelClient):
         return b or None
 
     def _create_async_anthropic_client(self, timeout: Optional[float] = None) -> "anthropic.AsyncAnthropic":
+        """Acquire an ``AsyncAnthropic`` client for a request.
+
+        Default (shared) path returns a long-lived, cached client whose httpx
+        keep-alive pool reuses established connections; the caller MUST NOT close
+        it on the hot path. Emergency fallback (``use_shared_llm_http_client=False``)
+        builds a fresh per-request client that the caller owns and must close.
+
+        ``timeout`` is only baked into the client in the fallback path; the
+        shared path applies it per request via ``create(..., timeout=...)``.
+        """
+        if not self._use_shared_client():
+            return self._build_async_anthropic_client(timeout=timeout)
+
+        # Shared path: build once per tenant/connection identity and reuse.
+        # Building is fully synchronous (no ``await``), so under a single-threaded
+        # asyncio event loop the get/build/set below is atomic and needs no lock.
+        key = self._client_cache_key()
+        client = self._client_cache.get(key)
+        if client is None:
+            client = self._build_async_anthropic_client()
+            self._client_cache[key] = client
+            llm_logger.info(
+                "Created shared long-lived AsyncAnthropic client.",
+                event_type=LogEventType.LLM_CALL_START,
+                timeout=self.model_client_config.timeout,
+                max_retries=self.model_client_config.max_retries,
+                metadata={"base_url": self._normalize_base_url(self.model_client_config.api_base)},
+            )
+        return client
+
+    def _build_async_anthropic_client(self, timeout: Optional[float] = None) -> "anthropic.AsyncAnthropic":
+        """Build a fresh ``AsyncAnthropic`` client with its own httpx connection pool."""
         from anthropic import AsyncAnthropic
 
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
+        # httpx defaults keepalive_expiry to 5s, which drops idle keep-alive
+        # connections between calls spaced >5s apart, forcing a rebuild. Bump to
+        # 60s to keep connections warm across typical inter-request gaps while
+        # staying at/under common upstream/LB idle timeouts (avoids reusing a
+        # server-closed "dead" connection).
         http_client = httpx.AsyncClient(
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
             verify=verify,
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=60.0,
+            ),
         )
 
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
@@ -310,6 +389,51 @@ class AnthropicModelClient(BaseModelClient):
             timeout=final_timeout,
             max_retries=self.model_client_config.max_retries,
         )
+
+    @classmethod
+    async def aclose(cls) -> None:
+        """Close all cached clients and their underlying connection pools.
+
+        Intended for agent/process teardown only. NEVER call this on the request
+        hot path: it tears down the shared client other in-flight calls rely on.
+        """
+        clients = list(cls._client_cache.values())
+        cls._client_cache.clear()
+
+        for client in clients:
+            try:
+                await client.close()
+            except Exception as e:  # pragma: no cover - defensive cleanup
+                logger.warning(f"Error closing cached AsyncAnthropic client: {e}")
+
+    @classmethod
+    async def aclose_connections(cls, configs: Iterable[ModelClientConfig]) -> None:
+        """Close and drop cached clients for exactly the given connection identities.
+
+        Only the connections whose identity matches one of ``configs`` are
+        closed; everything else is left untouched. Intended for delta-based
+        eviction on config hot-reload (close just the credentials that were
+        removed/changed), so unrelated cached clients (used by other components
+        sharing this process-wide cache) are never disturbed.
+
+        Closing is immediate even if a call is in flight: a model the user
+        removed should stop consuming tokens at once. An in-flight request on a
+        closed client surfaces as a normal model-call failure (not retried by
+        LLMRetryRail, which only retries repetition/stream-timeout markers).
+        """
+        keys = {cls.connection_key(cfg) for cfg in configs}
+        closed = 0
+        for key in keys:
+            client = cls._client_cache.pop(key, None)
+            if client is None:
+                continue
+            try:
+                await client.close()
+                closed += 1
+            except Exception as e:
+                logger.warning(f"Error closing AsyncAnthropic client: {e}")
+        if closed:
+            logger.info(f"Closed {closed} AsyncAnthropic client(s) for removed/updated model config")
 
     def _build_anthropic_params(
             self,
@@ -359,10 +483,23 @@ class AnthropicModelClient(BaseModelClient):
             params["system"] = system_blocks
         if anthropic_tools:
             params["tools"] = anthropic_tools
-        if openai_params.get("temperature") is not None:
-            params["temperature"] = openai_params["temperature"]
-        if openai_params.get("top_p") is not None:
-            params["top_p"] = openai_params["top_p"]
+        # Anthropic rejects temperature and top_p together (400 invalid_request
+        # for models such as Claude Haiku 4.5). Both carry non-None defaults in
+        # ModelRequestConfig, so we cannot rely on the caller to unset one:
+        # prefer temperature and only forward top_p when temperature is absent.
+        temperature = openai_params.get("temperature")
+        top_p = openai_params.get("top_p")
+        if temperature is not None:
+            params["temperature"] = temperature
+            if top_p is not None:
+                llm_logger.debug(
+                    "Anthropic: dropping top_p because temperature is set "
+                    "(the API forbids specifying both)."
+                )
+        elif top_p is not None and top_p != 1.0:
+            # top_p=1.0 is the default (no nucleus truncation); skip it so we
+            # send the API only meaningful overrides.
+            params["top_p"] = top_p
         if openai_params.get("stop"):
             stop_val = openai_params["stop"]
             params["stop_sequences"] = stop_val if isinstance(stop_val, list) else [stop_val]
@@ -425,6 +562,12 @@ class AnthropicModelClient(BaseModelClient):
             )
 
             async_client = self._create_async_anthropic_client(timeout=timeout)
+
+            # Per-request timeout override; cached shared client is never rebuilt
+            # just to change the timeout.
+            if timeout is not None:
+                params["timeout"] = timeout
+
             response = await async_client.messages.create(**params)
 
             llm_logger.info(
@@ -471,7 +614,10 @@ class AnthropicModelClient(BaseModelClient):
                 error_msg=f"Anthropic API async invoke error: {str(e)}",
             ) from e
         finally:
-            if async_client is not None:
+            # Only close clients we own (fallback path). Shared/pooled clients
+            # are long-lived; closing them on the hot path would tear down the
+            # shared transport.
+            if async_client is not None and not self._use_shared_client():
                 await async_client.close()
 
     async def stream(
@@ -525,6 +671,11 @@ class AnthropicModelClient(BaseModelClient):
             )
 
             async_client = self._create_async_anthropic_client(timeout=timeout)
+
+            # Per-request timeout override; cached shared client is never rebuilt
+            # just to change the timeout.
+            if timeout is not None:
+                params["timeout"] = timeout
 
             # Accumulator state across the stream
             current_text = ""
@@ -581,7 +732,10 @@ class AnthropicModelClient(BaseModelClient):
                 error_msg=f"Anthropic API async stream error: {str(e)}",
             ) from e
         finally:
-            if async_client is not None:
+            # Only close clients we own (fallback path). Shared/pooled clients
+            # are long-lived; closing them on the hot path would tear down the
+            # shared transport.
+            if async_client is not None and not self._use_shared_client():
                 await async_client.close()
 
     # ------------------------------------------------------------------

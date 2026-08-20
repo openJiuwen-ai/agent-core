@@ -3,10 +3,11 @@
 
 """Manifest declarations for the built-in team rails.
 
-The six team rails (tool / policy / workspace / tool-approval / plan-mode /
-reliability) are declared here as ``@harness_element`` factories so they
-assemble through the same provider path as every other DeepAgent capability —
-no more hand-``new`` + ``TeamHarness.build`` named params + closure ``add_rail``.
+The seven team rails (tool / policy / workspace / tool-approval / plan-mode /
+reliability / skill-use) plus ``core.observability`` are declared here as
+``@harness_element`` factories so they assemble through the same provider
+path as every other DeepAgent capability — no more hand-``new`` +
+``TeamHarness.build`` named params + closure ``add_rail``.
 
 Construction split (mirrors swarm's param-vs-context convention):
 - **params** (``param_field``): serializable static config the configurator
@@ -24,9 +25,9 @@ cached. State that must survive a rebuild lives in a reused object injected on
 the build context (e.g. ``reliability_components``) and passed into the fresh
 rail's constructor. Returning ``None`` gates the rail out for this member.
 """
-
 from __future__ import annotations
 
+from importlib.util import find_spec
 from typing import Any, Optional
 
 from openjiuwen.agent_teams.harness.manifest import (
@@ -41,6 +42,7 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_model_allocator,
     get_on_teammate_created,
     get_reliability_components,
+    get_swarmflow_budget,
     get_swarmflow_concurrency_governor,
     get_swarmflow_human_base_spec,
     get_swarmflow_model_resolver,
@@ -51,13 +53,37 @@ from openjiuwen.agent_teams.rails.team_context import (
 
 # Element names (the RailSpec ``type`` values). The team rails live under the
 # ``core.team.*`` namespace — the ``core.`` layer prefix plus a ``team`` group —
-# parallel to a platform's ``swarm.*`` namespace.
+# parallel to a platform's ``swarm.*`` namespace. ``core.observability`` is a
+# team-layer rail (team_name / TeamRole / session_id) declared alongside them.
 TEAM_TOOL = "core.team.tool"
 TEAM_POLICY = "core.team.policy"
 TEAM_WORKSPACE = "core.team.workspace"
 TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
 TEAM_RELIABILITY = "core.team.reliability"
+TEAM_SKILL_USE = "core.team.skill_use"
+OBSERVABILITY = "core.observability"
+
+
+def observability_dependency_installed() -> bool:
+    """Report whether the optional ``observability`` extra is importable.
+
+    ``opentelemetry`` ships only in the ``observability`` extra, so a
+    default install has no tracing stack at all. Every module of the
+    observability package imports it at module scope — including
+    ``maybe_observability_rail``, the "is observability on" guard itself —
+    so the dependency must be probed *before* the package is touched;
+    catching the failure inside it is not possible. Probing the SDK covers
+    the API too (the SDK depends on it) and matches what
+    ``setup.is_initialized`` needs.
+
+    Returns:
+        True when the tracing stack can be imported, False otherwise.
+    """
+    try:
+        return find_spec("opentelemetry.sdk") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +98,9 @@ class TeamToolInput(ConstructionInput):
     member_name: str = context_field(attr="member_name", default="", description="Member name.")
     language: str = context_field(attr="language", default="cn", description="Resolved language code.")
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
+    dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle (temporary / persistent).")
+    team_mode: str = param_field(default="default", description="Team operating mode.")
     exclude_tools: list[str] = param_field(default_factory=list, description="Tool names to exclude.")
     qualify_ids: bool = param_field(default=False, description="Suffix tool ids per member (inprocess spawn).")
     team_name: str = param_field(default="default", description="Team name.")
@@ -102,7 +130,9 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         team_backend=backend,
         role=inp.role,
         teammate_mode=inp.teammate_mode,
+        dispatch_mode=inp.dispatch_mode,
         lifecycle=inp.lifecycle,
+        team_mode=inp.team_mode,
         language=inp.language,
         on_teammate_created=get_on_teammate_created(context),
         model_config_allocator=model_config_allocator,
@@ -116,6 +146,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         swarmflow_worker_base_spec=get_swarmflow_worker_base_spec(context),
         swarmflow_human_base_spec=get_swarmflow_human_base_spec(context),
         swarmflow_concurrency_governor=get_swarmflow_concurrency_governor(context),
+        swarmflow_budget=get_swarmflow_budget(context),
         team_permissions_enabled=inp.team_permissions_enabled,
     )
 
@@ -131,16 +162,30 @@ class TeamPolicyInput(ConstructionInput):
     role: str = context_field(attr="role", default="leader", description="Team role value.")
     member_name: str = context_field(attr="member_name", default="", description="Member name.")
     language: str = context_field(attr="language", default="cn", description="Resolved language code.")
-    persona: str = param_field(default="", description="Member persona.")
+    display_name: str = param_field(default="", description="Human-readable member label (own identity).")
+    member_workspace_path: Optional[str] = param_field(
+        default=None,
+        description="The member's own artifact directory (own identity).",
+    )
+    prompt: str = param_field(default="", description="Member-private working agreement (own prompt only).")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle.")
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
     team_mode: str = param_field(default="default", description="Team operating mode.")
+    dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
     base_prompt: Optional[str] = param_field(default=None, description="User-supplied base system prompt.")
     team_workspace_mount: Optional[str] = param_field(default=None, description="Team workspace mount path.")
     team_workspace_path: Optional[str] = param_field(default=None, description="Team workspace root path.")
     expose_human_agents_to_teammates: bool = param_field(
         default=False,
         description="Whether teammates see the concrete human-agent roster.",
+    )
+    steer_batch_size: int = param_field(
+        default=2,
+        description="Queued steering inputs a non-leader member takes per model call.",
+    )
+    fork_source: str = param_field(
+        default="",
+        description="Fork source member name when this member inherited context (else '').",
     )
 
 
@@ -158,17 +203,26 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
     inp = TeamPolicyInput.resolve(params, context)
     return TeamPolicyRail(
         role=TeamRole(inp.role),
-        persona=inp.persona,
+        member_prompt=inp.prompt,
         member_name=inp.member_name or None,
+        display_name=inp.display_name,
+        member_workspace_path=inp.member_workspace_path,
         lifecycle=inp.lifecycle,
         teammate_mode=inp.teammate_mode,
         language=inp.language,
         team_mode=inp.team_mode,
+        dispatch_mode=inp.dispatch_mode,
         base_prompt=inp.base_prompt,
         team_workspace_mount=inp.team_workspace_mount,
         team_workspace_path=inp.team_workspace_path,
         team_backend=get_team_backend(context),
         expose_human_agents_to_teammates=inp.expose_human_agents_to_teammates,
+        steer_batch_size=inp.steer_batch_size,
+        fork_source=inp.fork_source or None,
+        # Same signal the tool factory gates the ``swarmflow`` tool on, so the
+        # prompt that describes the mechanism and the tool that runs it appear
+        # and disappear together.
+        swarmflow_enabled=get_swarmflow_model_resolver(context) is not None,
     )
 
 
@@ -315,6 +369,99 @@ def build_team_reliability_rail(params: dict[str, Any], context: Any) -> Any:
     return reliability_rail_from_components(components)
 
 
+# ---------------------------------------------------------------------------
+# team.skill_use — TeamSkillUseRail
+# ---------------------------------------------------------------------------
+
+
+class TeamSkillUseInput(ConstructionInput):
+    """Construction inputs for the team Skill rail."""
+
+    member_name: str = context_field(attr="member_name", default="", description="Member name.")
+    team_name: str = param_field(default="default", description="Team name.")
+    skills_dir: list[str] = param_field(
+        default_factory=list,
+        description="Shared Skill library roots; empty resolves the single global library.",
+    )
+    member_visibility_path: str = param_field(
+        default="",
+        description="Member Skill visibility declaration path (at the member workspace root).",
+    )
+    team_visibility_path: str = param_field(
+        default="",
+        description="Team Skill visibility declaration path; empty composes the member document alone.",
+    )
+    bootstrap_allow: list[str] = param_field(
+        default_factory=list,
+        description="Seed allow-list taken from agents.<role>.skills, applied only once.",
+    )
+    skill_mode: str = param_field(default="all", description="Skill expose mode (all / auto_list).")
+    include_tools: bool = param_field(
+        default=False,
+        description="Whether the rail registers its own read_file / bash fallback tools.",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_SKILL_USE,
+    description="Skill rail over the single shared library, narrowed by member + team visibility.",
+    input_model=TeamSkillUseInput,
+)
+def build_team_skill_use_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build the team Skill rail (gated on a member declaration path).
+
+    The declaration path is what makes a member addressable. Without one there
+    is nothing to compose, and an unnarrowed rail over the shared library would
+    be a grant by itself — so the rail is gated out instead.
+    """
+    inp = TeamSkillUseInput.resolve(params, context)
+    if not inp.member_visibility_path or not inp.member_name:
+        return None
+    from openjiuwen.agent_teams.paths import global_skills_dir
+    from openjiuwen.agent_teams.rails.team_skill_use_rail import create_team_skill_use_rail
+
+    skills_dir = [str(path) for path in inp.skills_dir] or [str(global_skills_dir())]
+    return create_team_skill_use_rail(
+        member_name=inp.member_name,
+        team_name=inp.team_name,
+        member_visibility_path=inp.member_visibility_path,
+        team_visibility_path=inp.team_visibility_path or None,
+        skills_dir=skills_dir,
+        bootstrap_allow=list(inp.bootstrap_allow),
+        skill_mode=inp.skill_mode,
+        include_tools=inp.include_tools,
+    )
+
+
+# ---------------------------------------------------------------------------
+# core.observability — ObservabilityRail
+# ---------------------------------------------------------------------------
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=OBSERVABILITY,
+    description="Creates per-iteration agent spans for observability tracing.",
+)
+def build_observability_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build an ObservabilityRail when observability is available and on.
+
+    Two gates, in order: the optional ``observability`` extra must be
+    installed (``observability_dependency_installed``), and observability
+    must be initialized (``maybe_observability_rail``, the shared guard).
+    Returns ``None`` for either, making this a safe unconditional addition
+    to any spec's ``rails`` list — the provider handles the on/off logic
+    itself.
+    """
+    if not observability_dependency_installed():
+        return None
+
+    from openjiuwen.agent_teams.observability.rail import maybe_observability_rail
+
+    return maybe_observability_rail()
+
+
 __all__ = [
     "TEAM_TOOL",
     "TEAM_POLICY",
@@ -322,4 +469,7 @@ __all__ = [
     "TEAM_TOOL_APPROVAL",
     "TEAM_PLAN_MODE",
     "TEAM_RELIABILITY",
+    "TEAM_SKILL_USE",
+    "OBSERVABILITY",
+    "observability_dependency_installed",
 ]

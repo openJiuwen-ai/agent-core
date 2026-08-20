@@ -5,6 +5,7 @@
 
 import asyncio
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,10 +14,12 @@ from openjiuwen.agent_teams.external.cli_agent.spawn import (
     build_cli_runtime,
     descriptor_from_context,
 )
+from openjiuwen.agent_teams.external.cli_agent.codex.runtime import CodexSdkRuntime
 from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
+from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
+from openjiuwen.core.common.exception.errors import BaseError
 
 # A streaming stand-in CLI: read a line from stdin, echo it, then emit the
 # generic adapter's turn-completion marker. Exercises the real subprocess +
@@ -49,6 +52,7 @@ def _ctx(
     cli_agent: str = "generic",
     messager_config: MessagerTransportConfig | None = None,
     use_external_transport: bool = True,
+    teammate_mode: str = "build_mode",
 ) -> TeamRuntimeContext:
     external_messager_config = None
     if use_external_transport:
@@ -58,16 +62,17 @@ def _ctx(
             external_publish_url=_EVENT_WS_URL,
         )
     return TeamRuntimeContext(
-        role=TeamRole.TEAMMATE,
+        role=TeamRole.EXTERNAL_CLI,
         member_name=member,
         cli_agent=cli_agent,
         team_spec=TeamSpec(
             team_name="ext_team",
             display_name="Ext",
             language="en",
+            teammate_mode=teammate_mode,
             external_messager_config=external_messager_config,
         ),
-        db_config=MemoryDatabaseConfig(),
+        db_config=DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"),
         messager_config=messager_config
         or MessagerTransportConfig(
             backend="inprocess",
@@ -87,8 +92,9 @@ def test_descriptor_from_context_carries_identity():
     assert descriptor.session_id == "sess-1"
     assert descriptor.team_name == "ext_team"
     assert descriptor.member_name == "dev-1"
-    assert descriptor.role == "teammate"
+    assert descriptor.role == "external_cli"
     assert descriptor.language == "en"
+    assert descriptor.teammate_mode == "build_mode"
     transport = descriptor.transport_config
     assert transport.backend == "hybrid"
     assert transport.external_publish_url == _EVENT_WS_URL
@@ -98,6 +104,18 @@ def test_descriptor_from_context_carries_identity():
     assert transport.pubsub_subscribe_addr is None
     assert transport.listen_addrs == []
     assert transport.metadata == {}
+
+
+@pytest.mark.level0
+def test_descriptor_from_context_carries_teammate_mode():
+    ctx = _ctx(member="dev-1", teammate_mode="plan_mode")
+    token = set_session_id("sess-1")
+    try:
+        descriptor = descriptor_from_context(ctx)
+    finally:
+        reset_session_id(token)
+
+    assert descriptor.teammate_mode == "plan_mode"
 
 
 @pytest.mark.level0
@@ -210,3 +228,89 @@ async def test_reinvoke_surfaces_chunks_live_during_turn():
     # are bridged live through the queue, not batched at turn end.
     early_at = arrivals[0][1]
     assert early_at < 0.3, f"first chunk arrived at {early_at:.2f}s: not surfaced live"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
+    class FakeCodexConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    sdk = SimpleNamespace(
+        CodexConfig=FakeCodexConfig,
+        AsyncCodex=object,
+        ApprovalMode=SimpleNamespace(deny_all="deny-all"),
+        Sandbox=SimpleNamespace(full_access="full-access"),
+    )
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.external.cli_agent.codex.runtime.load_codex_sdk",
+        lambda: sdk,
+    )
+    token = set_session_id("sess-1")
+    try:
+        runtime = await build_cli_runtime(
+            _ctx(member="dev-1", cli_agent="codex"),
+            cwd="/workspace",
+            cli_path="/opt/codex-cli",
+            codex_bin="/opt/codex",
+            inject_mcp=True,
+            mcp_default_tools_approval_mode="approve",
+            codex_bypass_approvals_and_sandbox=True,
+            codex_turn_idle_timeout_s=45.0,
+            codex_turn_idle_retries=2,
+            system_prompt="ROLE: isolated developer",
+            member_agent_id="ext_team_dev-1",
+        )
+    finally:
+        reset_session_id(token)
+
+    assert isinstance(runtime, CodexSdkRuntime)
+    assert runtime._thread_options == {
+        "ephemeral": False,
+        "config": {"model_reasoning_summary": "detailed"},
+        "cwd": "/workspace",
+        "developer_instructions": "ROLE: isolated developer",
+        "approval_mode": "deny-all",
+        "sandbox": "full-access",
+    }
+    assert runtime._config.kwargs["cwd"] == "/workspace"
+    assert runtime._config.kwargs["codex_bin"] == "/opt/codex-cli"
+    assert (
+        'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"'
+        in runtime._config.kwargs["config_overrides"]
+    )
+    assert runtime._member_agent_id == "ext_team_dev-1"
+    assert runtime._turn_idle_timeout_s == 45.0
+    assert runtime._turn_idle_retries == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_codex_requires_stable_member_agent_id():
+    token = set_session_id("sess-1")
+    try:
+        with pytest.raises(BaseError, match="stable member_agent_id"):
+            await build_cli_runtime(
+                _ctx(member="dev-1", cli_agent="codex"),
+                inject_mcp=False,
+                resume_external_backend=True,
+            )
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_codex_rejects_full_command_override():
+    token = set_session_id("sess-1")
+    try:
+        with pytest.raises(BaseError, match="configure cli_path instead"):
+            await build_cli_runtime(
+                _ctx(member="dev-1", cli_agent="codex"),
+                command_override=("codex", "app-server", "--listen", "stdio://"),
+                inject_mcp=False,
+                member_agent_id="ext_team_dev-1",
+            )
+    finally:
+        reset_session_id(token)

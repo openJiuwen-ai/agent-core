@@ -52,6 +52,15 @@ class MemberInfo(BaseModel):
     execution_status: str | None = Field(default=None, description="ExecutionStatus value")
     mode: str = Field(description="MemberMode value")
     role: str = Field(description="TeamRole value (leader/teammate/human_agent)")
+    cli_agent: str | None = Field(
+        default=None,
+        description=(
+            "External CLI backend name ('claude' / 'codex' / ...) for members "
+            "spawned by spawn_external_cli; None for ordinary members. Such a "
+            "member's role is plain TEAMMATE, so this is the only field that "
+            "identifies it as CLI-backed."
+        ),
+    )
 
     @classmethod
     def from_internal(cls, member) -> MemberInfo:
@@ -60,6 +69,8 @@ class MemberInfo(BaseModel):
         Args:
             member: A ``TeamMember`` database row object.
         """
+        from openjiuwen.agent_teams.tools.member_options import load_member_options
+
         return cls(
             member_name=member.member_name,
             team_name=member.team_name,
@@ -69,6 +80,7 @@ class MemberInfo(BaseModel):
             execution_status=member.execution_status,
             mode=member.mode,
             role=member.role,
+            cli_agent=load_member_options(getattr(member, "options", None)).cli_agent,
         )
 
 
@@ -166,9 +178,15 @@ class MonitorEventType(str, Enum):
     TASK_PLAN_RESPONSE = "task_plan_response"
     TASK_UPDATED = "task_updated"
     TASK_CLAIMED = "task_claimed"
+    TASK_STARTED = "task_started"
     TASK_COMPLETED = "task_completed"
     TASK_CANCELLED = "task_cancelled"
     TASK_UNBLOCKED = "task_unblocked"
+    TASK_RELEASED = "task_released"
+    TASK_REVOKED = "task_revoked"
+    TASK_SUBMITTED_FOR_REVIEW = "task_submitted_for_review"
+    TASK_VERIFIED = "task_verified"
+    TASK_REVISION_REQUESTED = "task_revision_requested"
 
     # Message
     MESSAGE = "message"
@@ -203,6 +221,8 @@ class MonitorEvent(BaseModel):
         TASK_CREATED: task_id, status
         TASK_PLAN_REQUEST: task_id, status, plan_id, member_plan_md
         TASK_PLAN_RESPONSE: task_id, status, plan_id, approved
+        TASK_SUBMITTED_FOR_REVIEW: task_id, reviewer
+        TASK_REVISION_REQUESTED: task_id, feedback
 
     Message event fields:
         MESSAGE: message_id, from_member_name, to_member_name
@@ -232,6 +252,11 @@ class MonitorEvent(BaseModel):
     plan_id: str | None = None
     member_plan_md: str | None = None
     approved: bool | None = None
+    # Reviewer member names to notify when a task enters the verify gate
+    # (TASK_SUBMITTED_FOR_REVIEW).
+    reviewer: list[str] | None = None
+    # Reviewer feedback directing the rework loop (TASK_REVISION_REQUESTED).
+    feedback: str | None = None
 
     # -- Message fields --
     message_id: str | None = None

@@ -18,6 +18,7 @@
 * **worktree**(WorktreeConfig, 可选): 队友 worktree 隔离配置。默认值：`None`。
 * **workspace**(TeamWorkspaceConfig, 可选): 团队共享工作空间配置。默认值：`None`。
 * **metadata**(dict[str, Any], 可选): 附加元数据。默认值：`{}`。
+* **enable_permissions**(bool, 可选): 是否启用 Team 权限审批链路。启用后由 `TeamPermissionRail` 处理 Teammate 工具权限，并由 Leader 审批 `ask` 决策。默认值：`False`。详见 [Team 权限护栏](./rails/team_permission_rail.md)。
 
 ### model_validate
 
@@ -96,7 +97,7 @@ build() -> TeamAgent
 * **enable_task_planning**(bool, 可选): 启用任务规划护栏。默认值：`False`。
 * **restrict_to_sandbox**(bool, 可选): 限制文件操作到沙箱目录。默认值：`False`。
 * **auto_create_workspace**(bool, 可选): 自动创建工作空间目录。默认值：`True`。
-* **completion_timeout**(float, 可选): 完成超时时间（秒）。默认值：`600.0`。
+* **completion_timeout**(Optional[float], 可选): 慢轮次告警阈值（秒）。默认值：`600.0`；`None` 表示禁用告警。
 * **progressive_tool**(ProgressiveToolSpec, 可选): 渐进式工具加载配置。默认值：`None`。
 * **approval_required_tools**(list[str], 可选): 需要 Leader 审批的工具名称（仅队友）。默认值：`None`。
 

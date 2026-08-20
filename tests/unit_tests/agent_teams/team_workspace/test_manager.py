@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.agent_teams.paths import SKILL_VISIBILITY_FILENAME
 from openjiuwen.agent_teams.team_workspace.manager import (
     ERROR_PRIVILEGE_NOT_HELD,
     TeamWorkspaceManager,
@@ -283,7 +284,10 @@ async def test_initialize_without_version_control_skips_git(monkeypatch, tmp_pat
     assert not os.path.isdir(os.path.join(manager.workspace_path, ".git"))
     for d in manager.config.artifact_dirs:
         assert os.path.isdir(os.path.join(manager.workspace_path, d))
-    assert os.path.isdir(os.path.join(manager.workspace_path, "skills"))
+    # No shared skills/ directory: Skills live in one global library and the
+    # team workspace only declares which of them it may see.
+    assert not os.path.exists(os.path.join(manager.workspace_path, "skills"))
+    assert os.path.isfile(os.path.join(manager.workspace_path, SKILL_VISIBILITY_FILENAME))
 
 
 @pytest.mark.asyncio

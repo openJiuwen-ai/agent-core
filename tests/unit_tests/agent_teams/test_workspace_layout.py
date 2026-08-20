@@ -12,7 +12,10 @@ from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace
 
 
 @pytest.mark.level0
-def test_ensure_team_member_workspace_link_falls_back_to_copy(monkeypatch, tmp_path: Path):
+def test_ensure_team_member_workspace_link_keeps_independent_workspace_without_symlinks(
+    monkeypatch,
+    tmp_path: Path,
+):
     independent_workspace = tmp_path / "independent"
     independent_workspace.mkdir()
     (independent_workspace / "README.md").write_text("hello", encoding="utf-8")
@@ -36,10 +39,10 @@ def test_ensure_team_member_workspace_link_falls_back_to_copy(monkeypatch, tmp_p
 
     resolved = ensure_team_member_workspace_link("team-alpha", "alice")
 
-    assert Path(resolved) == team_workspace
-    assert team_workspace.is_dir()
-    assert not team_workspace.is_symlink()
-    assert (team_workspace / "README.md").read_text(encoding="utf-8") == "hello"
+    # No copytree of the whole workspace into the team tree: the member simply
+    # keeps running where it already lives.
+    assert Path(resolved) == independent_workspace
+    assert not team_workspace.exists()
 
 
 @pytest.mark.level0

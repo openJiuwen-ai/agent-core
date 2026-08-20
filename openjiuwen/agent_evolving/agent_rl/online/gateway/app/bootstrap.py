@@ -13,8 +13,16 @@ from typing import Any, Optional
 import httpx
 from fastapi import FastAPI
 
-from ..config import GatewayConfig
+from openjiuwen.agent_evolving.agent_rl.online.gateway.collector.ports import GatewayCollector
+from openjiuwen.agent_evolving.agent_rl.online.gateway.collector.runtime import GatewayTrajectoryCollector
+
+from ...core.store_factory import (
+    backend_from_env,
+    build_gateway_store_bundle,
+    local_store_dir_from_env,
+)
 from ...judge.judge_scorer import JudgeScorer
+from ..config import GatewayConfig
 from ..trajectory import GatewayTrajectoryRuntime
 from ..upstream import Forwarder, HTTPXUpstreamGatewayClient, RetryPolicy
 from .server import build_gateway_app
@@ -51,10 +59,23 @@ def _build_config_from_env() -> GatewayConfig:
         log_level=_env("LOG_LEVEL", "INFO"),
         dump_token_ids=_env("DUMP_TOKEN_IDS", "").lower() in ("1", "true"),
         lora_repo_root=_env("LORA_REPO_ROOT", ""),
+        lora_default_policy=_env("LORA_DEFAULT_POLICY", "disabled"),
         redis_url=_env("REDIS_URL", ""),
+        trajectory_store_backend=_env("TRAJECTORY_STORE_BACKEND", "auto"),
+        local_trajectory_store_dir=_env("LOCAL_TRAJECTORY_STORE_DIR", ""),
+        training_backend=_env("TRAIN_BACKEND", "PPO"),
+        supervisor_url=_env("SUPERVISOR_URL", ""),
+        supervisor_token=_env("SUPERVISOR_TOKEN", ""),
+        sft_capture_mode=_env("RL_ONLINE_CAPTURE_MODE", "ppo_turn"),
+        sft_scenario=_env("SFT_SCENARIO", "multi_turn_supervisor"),
+        session_done_on_invoke_end=_env("RL_ONLINE_SESSION_DONE_ON_INVOKE_END", "true").lower()
+        in ("1", "true", "yes", "on"),
+        session_flush_token_threshold_k=int(_env("TRAJECTORY_SESSION_FLUSH_TOKEN_THRESHOLD_K", "0")),
         upstream_max_retries=int(_env("UPSTREAM_MAX_RETRIES", "2")),
         upstream_retry_backoff_sec=float(_env("UPSTREAM_RETRY_BACKOFF_SEC", "0.2")),
         upstream_retry_max_backoff_sec=float(_env("UPSTREAM_RETRY_MAX_BACKOFF_SEC", "2.0")),
+        anthropic_max_completion_tokens=int(_env("ANTHROPIC_MAX_COMPLETION_TOKENS", "0")),
+        tool_parser_name=_env("TOOL_PARSER_NAME", ""),
         disable_gateway_trajectory_collection=_env(
             "DISABLE_GATEWAY_TRAJECTORY_COLLECTION", "",
         ).lower() in ("1", "true"),
@@ -66,6 +87,7 @@ def build_app_from_config(
     *,
     http_client: Any = None,
     redis_client: Any = None,
+    collector: GatewayCollector | None = None,
 ) -> FastAPI:
     """Assemble gateway app from config and injectable dependencies."""
     logging.basicConfig(
@@ -73,17 +95,20 @@ def build_app_from_config(
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    owns_redis_client = redis_client is None
-    if redis_client is None and config.redis_url:
-        try:
-            from redis.asyncio import from_url as redis_from_url
-            redis_client = redis_from_url(config.redis_url, decode_responses=False)
-            logger.info("Redis client created: %s", config.redis_url)
-        except Exception:
-            logger.warning("Failed to create Redis client from %s", config.redis_url)
-            raise
-    if redis_client is None:
-        raise ValueError("gateway requires redis_url or injected redis_client")
+    store_bundle = build_gateway_store_bundle(
+        backend=getattr(config, "trajectory_store_backend", None) or backend_from_env(),
+        redis_url=config.redis_url,
+        local_store_dir=getattr(config, "local_trajectory_store_dir", "") or local_store_dir_from_env(),
+        record_dir=config.record_dir,
+        redis_client=redis_client,
+    )
+    redis_client = store_bundle.redis_client
+    logger.info(
+        "Gateway trajectory store backend=%s local_dir=%s redis_url=%s",
+        store_bundle.backend,
+        getattr(config, "local_trajectory_store_dir", "") or "",
+        config.redis_url,
+    )
 
     owns_http_client = http_client is None
     http_client = http_client or httpx.AsyncClient(timeout=config.request_timeout)
@@ -102,8 +127,12 @@ def build_app_from_config(
     )
     trajectory_runtime = GatewayTrajectoryRuntime(
         config,
-        redis=redis_client,
+        trajectory_store=store_bundle.trajectory_store,
+        sft_store=store_bundle.sft_store,
+        pending_judge_store=store_bundle.pending_judge_store,
+        task_reward_redis=redis_client,
     )
+    training_task_store = store_bundle.training_task_store
 
     judge_scorer: Optional[JudgeScorer] = None
     if config.judge_url:
@@ -127,15 +156,30 @@ def build_app_from_config(
     async def close_resources() -> None:
         if owns_http_client:
             await http_client.aclose()
-        if owns_redis_client and hasattr(redis_client, "aclose"):
+        if store_bundle.owns_redis_client and redis_client is not None and hasattr(redis_client, "aclose"):
             with suppress(Exception):
                 await redis_client.aclose()
+
+    gateway_collection_enabled = _env("ENABLE_GATEWAY_TRAJECTORY_COLLECTION", "").lower() in ("1", "true", "yes", "on")
+    if (
+        collector is None
+        and gateway_collection_enabled
+        and not getattr(config, "disable_gateway_trajectory_collection", False)
+    ):
+        if redis_client is None:
+            raise ValueError("gateway trajectory collection requires a Redis storage backend")
+        collector = GatewayTrajectoryCollector(
+            redis=redis_client,
+            sample_pipeline=trajectory_runtime,
+        )
 
     return build_gateway_app(
         config=config,
         forwarder=forwarder,
         upstream_client=upstream_client,
         trajectory_runtime=trajectory_runtime,
+        training_task_store=training_task_store,
         close_resources=close_resources,
         lora_repo=lora_repo,
+        collector=collector,
     )

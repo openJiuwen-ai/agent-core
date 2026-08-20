@@ -3,11 +3,11 @@
 """In-memory prompt attachment management for DeepAgent prompt assembly."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import json
 import re
-import threading
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Awaitable, Callable, Iterable
@@ -16,7 +16,13 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
+from openjiuwen.core.foundation.kv_cache import (
+    KV_CACHE_EPHEMERAL_TAIL_METADATA,
+)
 from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
+from openjiuwen.harness.prompts.sections.prompt_attachments import (
+    get_prompt_attachment_guidance,
+)
 
 
 class PromptAttachmentKind(str, Enum):
@@ -69,6 +75,7 @@ WindowMutator = Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]
 
 _DEFAULT_MAX_PROMPT_ATTACHMENT_CHARS = 12000
 _DEFAULT_MAX_RENDERED_CHARS = 48000
+PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY = "prompt_attachment_preserve_tail"
 
 
 def _utc_now() -> str:
@@ -226,9 +233,10 @@ class PromptAttachmentContextWriter:
 class PromptAttachmentManager:
     """DeepAgent-private in-memory prompt attachment manager."""
 
-    def __init__(self) -> None:
+    def __init__(self, language: str = "en") -> None:
         self._items: dict[str, dict[str, PromptAttachment]] = {}
-        self._lock = threading.RLock()
+        self._lock = asyncio.Lock()
+        self.language = language
 
     def bind_context(self, ctx: Any) -> PromptAttachmentContextWriter:
         """Return a context-aware writer for rail prompt attachment migration."""
@@ -272,7 +280,7 @@ class PromptAttachmentManager:
 
     async def clear_section(self, *, session_id: str, section: str) -> int:
         section_id = _section_value(section)
-        with self._lock:
+        async with self._lock:
             bucket = self._items.get(session_id)
             if not bucket or section_id not in bucket:
                 return 0
@@ -286,7 +294,7 @@ class PromptAttachmentManager:
         return item.model_copy(deep=True) if item is not None else None
 
     async def update_by_id(self, prompt_attachment_id: str, update: PromptAttachmentUpdate) -> PromptAttachment:
-        with self._lock:
+        async with self._lock:
             location = self._find_location_by_id_unlocked(prompt_attachment_id)
             if location is None:
                 raise KeyError(f"prompt attachment not found: {prompt_attachment_id}")
@@ -312,7 +320,7 @@ class PromptAttachmentManager:
             return updated.model_copy(deep=True)
 
     async def remove_by_id(self, prompt_attachment_id: str, *, session_id: str | None = None) -> bool:
-        with self._lock:
+        async with self._lock:
             location = self._find_location_by_id_unlocked(prompt_attachment_id)
             if location is None:
                 return False
@@ -334,7 +342,7 @@ class PromptAttachmentManager:
     ) -> list[PromptAttachment]:
         section_id = _section_value(section) if section is not None else None
         kind_value = _kind_value(kind) if kind is not None else None
-        with self._lock:
+        async with self._lock:
             candidates = [item.model_copy(deep=True) for item in self._iter_items_unlocked(session_id=session_id)]
         items = []
         for item in candidates:
@@ -371,12 +379,12 @@ class PromptAttachmentManager:
         return count
 
     async def clear_session(self, session_id: str) -> int:
-        with self._lock:
+        async with self._lock:
             bucket = self._items.pop(session_id, {})
             return len(bucket)
 
     async def clear_all(self) -> int:
-        with self._lock:
+        async with self._lock:
             count = sum(len(bucket) for bucket in self._items.values())
             self._items.clear()
             return count
@@ -462,7 +470,7 @@ class PromptAttachmentManager:
         result: list[PromptAttachment] = []
         now = _utc_now()
         expired: list[tuple[str, str]] = []
-        with self._lock:
+        async with self._lock:
             for item in self._iter_items_unlocked(session_id=session_id):
                 if self._is_expired(item, now):
                     expired.append((item.session_id, item.section))
@@ -491,8 +499,7 @@ class PromptAttachmentManager:
 
         truncated_ids: list[str] = []
         blocks = [
-            "The following context is automatically attached for this model call only.",
-            "It may or may not be relevant to your tasks. Do not respond to it unless it highly relevant to your task.",
+            get_prompt_attachment_guidance(self.language),
             "",
         ]
         for item in items:
@@ -530,14 +537,26 @@ class PromptAttachmentManager:
         messages: list[BaseMessage],
         rendered_prompt_attachments: str,
     ) -> list[BaseMessage]:
-        """Append rendered prompt attachment text as a standalone user message."""
+        """Insert attachments before any explicitly preserved trailing messages."""
 
         if not rendered_prompt_attachments:
             return list(messages)
 
-        new_messages = list(messages)
-        new_messages.append(UserMessage(content=rendered_prompt_attachments))
-        return new_messages
+        tail_start = len(messages)
+        while tail_start > 0:
+            metadata = getattr(messages[tail_start - 1], "metadata", {}) or {}
+            if not bool(metadata.get(PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY)):
+                break
+            tail_start -= 1
+
+        # An attachment is request-scoped and not persisted in conversation
+        # history.  Preserve the marker even when upstream requires the
+        # attachment to be inserted before browser-state tail messages.
+        attachment_message = UserMessage(
+            content=rendered_prompt_attachments,
+            metadata={KV_CACHE_EPHEMERAL_TAIL_METADATA: True},
+        )
+        return [*messages[:tail_start], attachment_message, *messages[tail_start:]]
 
     def make_window_mutator(self, session_id: str) -> WindowMutator:
         """Build the ContextEngine final-window mutator."""
@@ -564,7 +583,7 @@ class PromptAttachmentManager:
         return mutator
 
     async def _add(self, prompt_attachment: PromptAttachment) -> PromptAttachment:
-        with self._lock:
+        async with self._lock:
             section = _section_value(prompt_attachment.section)
             item = prompt_attachment.model_copy(deep=True)
             item.section = section
@@ -624,14 +643,13 @@ class PromptAttachmentManager:
         return f"session.{_safe_id_part(session_id, fallback='session')}.{_section_value(section)}"
 
     def _find_by_id(self, prompt_attachment_id: str, *, session_id: str | None = None) -> PromptAttachment | None:
-        with self._lock:
-            location = self._find_location_by_id_unlocked(prompt_attachment_id)
-            if location is None:
-                return None
-            found_session_id, section = location
-            if session_id is not None and found_session_id != session_id:
-                return None
-            return self._items[found_session_id][section]
+        location = self._find_location_by_id_unlocked(prompt_attachment_id)
+        if location is None:
+            return None
+        found_session_id, section = location
+        if session_id is not None and found_session_id != session_id:
+            return None
+        return self._items[found_session_id][section]
 
     def _find_location_by_id_unlocked(self, prompt_attachment_id: str) -> tuple[str, str] | None:
         for session_id, bucket in self._items.items():
@@ -661,6 +679,7 @@ class PromptAttachmentManager:
             raise ValueError("destructive prompt attachment operation requires at least one filter")
 
 __all__ = [
+    "PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY",
     "PromptAttachment",
     "PromptAttachmentContextWriter",
     "PromptAttachmentKind",

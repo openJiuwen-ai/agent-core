@@ -119,11 +119,39 @@ async def test_enter_rejects_invalid_slug(bad_name):
     assert "Invalid worktree name" in (result.error or "")
 
 
-@pytest.mark.parametrize("bad_name", ["../escape", r"..\escape", r"C:\escape"])
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "",
+        ".",
+        "..",
+        "safe/../escape",
+        "safe//escape",
+        "../escape",
+        r"..\escape",
+        r"C:\escape",
+        "a" * 65,
+    ],
+)
 def test_enter_schema_rejects_invalid_slug(bad_name):
     schema = get_enter_worktree_input_params("en")
     with pytest.raises(JsonSchemaValidationError):
         validate_json_schema({"name": bad_name}, schema)
+
+
+@pytest.mark.parametrize(
+    "valid_name",
+    ["valid", "user/feature-login", ".hidden", "trailing.", "...", "a/.../b"],
+)
+def test_enter_schema_accepts_valid_slug(valid_name):
+    schema = get_enter_worktree_input_params("en")
+    validate_json_schema({"name": valid_name}, schema)
+
+
+def test_enter_schema_pattern_avoids_regex_lookaround():
+    schema = get_enter_worktree_input_params("en")
+    pattern = schema["properties"]["name"]["pattern"]
+    assert all(token not in pattern for token in ("(?=", "(?!", "(?<=", "(?<!"))
 
 
 def test_enter_schema_rejects_unknown_fields():
@@ -337,6 +365,7 @@ async def test_enter_existing_worktree_by_name(tmp_path, monkeypatch):
     assert os.path.normcase(result.data["worktree_path"]) == os.path.normcase(worktree)
     assert result.data["worktree_branch"] == "worktree-bold-elm-1732"
     assert os.path.normcase(get_cwd()) == os.path.normcase(worktree)
+
 
 @pytest.mark.asyncio
 async def test_unnamed_enter_reuses_session_default_after_keep(tmp_path, monkeypatch):

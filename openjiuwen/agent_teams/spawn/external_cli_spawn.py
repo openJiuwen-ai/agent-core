@@ -15,37 +15,42 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import os
 from typing import TYPE_CHECKING, Any, Optional
 
-from openjiuwen.agent_teams.external.cli_agent.adapters import build_adapter
+from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
+from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.schema.team import TeamAgentSpec, TeamRuntimeContext
+    from openjiuwen.agent_teams.team_context import TeamContextTracker
+    from openjiuwen.agent_teams.tools.team import TeamBackend
 
 
 async def _build_member_system_prompt(
-    team_agent: "TeamAgent",
     spec: "TeamAgentSpec",
     ctx: "TeamRuntimeContext",
     member_name: str | None,
+    *,
+    hitt_enabled: bool,
 ) -> str | None:
     """Build the external CLI member's system prompt from team-rail sections.
 
     Gives the member the same team sections an in-process DeepAgent member gets
-    (role / workflow / lifecycle / persona / ...), built the same way, but
+    (role / workflow / lifecycle / private prompt / ...), built the same way, but
     excluding the other DeepAgent rails (safety, workspace, memory, ...) that
     do not apply to a CLI whose brain is not a local DeepAgent.
 
     Args:
-        team_agent: The leader TeamAgent (source of the team backend roster).
-        spec: The team spec carrying lifecycle / teammate_mode / team_mode.
-        ctx: The external CLI member's runtime context (role / persona / language).
+        spec: The team spec carrying lifecycle / teammate_mode / team_mode /
+            dispatch_mode.
+        ctx: The external CLI member's runtime context (role / desc / language).
         member_name: The member's semantic identifier.
+        hitt_enabled: Effective HITT flag for the team instance.
 
     Returns:
         The rendered system prompt, or ``None`` when no section had content.
@@ -53,38 +58,141 @@ async def _build_member_system_prompt(
     from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
 
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
-    backend = team_agent.team_backend
-    human_names = sorted(await backend.human_agent_names()) if backend is not None else []
-    bridge_names = sorted(backend.bridge_agent_names()) if backend is not None else []
     prompt = build_team_member_system_prompt(
         role=ctx.role,
-        persona=ctx.persona,
+        member_prompt=ctx.prompt,
         member_name=member_name,
+        display_name=ctx.display_name or "",
         lifecycle=spec.lifecycle,
         teammate_mode=spec.teammate_mode,
         team_mode=_resolve_team_mode(spec),
+        dispatch_mode=spec.dispatch_mode,
         language=language,
-        human_agent_names=human_names,
+        hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
-        bridge_agent_names=bridge_names,
+        workspace_prompt_variant="external",
     )
     return prompt or None
 
 
-async def external_cli_spawn(
-    team_agent: "TeamAgent",
+def _build_team_context_tracker(
+    team_backend: "TeamBackend | None",
+    spec: "TeamAgentSpec",
+    ctx: "TeamRuntimeContext",
+    member_name: str | None,
+    team_name: str,
+) -> "TeamContextTracker":
+    """Build the tracker feeding team state into this CLI member's messages.
+
+    An external CLI has no rail, so the runtime folds the tracker's output into
+    the next message it sends. Unlike an in-process member, an external CLI has
+    no ``.team/{team}`` mount in its cwd (``setup_agent`` short-circuits before
+    ``mount_into_workspace`` is ever called), so the agent-relative mount string
+    would be a path the member cannot reach. We therefore expose only the
+    shared workspace's absolute path — the member writes there directly.
+
+    Args:
+        team_backend: The external member's own TeamBackend.
+        spec: The team spec carrying workspace + HITT exposure config.
+        ctx: The member's runtime context (role / private prompt / language).
+        member_name: The member's semantic identifier.
+        team_name: The team this member belongs to.
+
+    Returns:
+        A tracker scoped to this member.
+    """
+    from openjiuwen.agent_teams.team_context import TeamContextTracker
+
+    language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
+    workspace = spec.workspace
+    workspace_enabled = workspace is not None and workspace.enabled
+    return TeamContextTracker(
+        team_backend=team_backend,
+        member_name=member_name,
+        role=ctx.role,
+        display_name=ctx.display_name or "",
+        member_prompt=ctx.prompt or "",
+        team_workspace_mount=None,
+        team_workspace_path=_team_workspace_path(spec, team_name) if workspace_enabled else None,
+        expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
+        language=language,
+    )
+
+
+def _path_value(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _same_path(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+
+def _append_extra_dir(result: list[str], path: str | None, *, cwd: str | None) -> None:
+    if path is None:
+        return
+    if cwd is not None and _same_path(path, cwd):
+        return
+    if any(_same_path(path, existing) for existing in result):
+        return
+    result.append(path)
+
+
+def _team_workspace_path(spec: "TeamAgentSpec", team_name: str) -> str:
+    workspace = spec.workspace
+    if workspace is not None and workspace.root_path:
+        return workspace.root_path
+    return str(team_home(team_name) / "team-workspace")
+
+
+def _build_context_project_dir(spec: "TeamAgentSpec") -> str | None:
+    build_context = spec.build_context
+    if build_context is None:
+        return None
+    return _path_value(getattr(build_context, "project_dir", None))
+
+
+def _resolve_external_paths(
+    spec: "TeamAgentSpec",
     ctx: "TeamRuntimeContext",
     *,
+    configured_cwd: str | None,
+    team_name: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Resolve cwd and extra Claude-accessible directories for an external member."""
+    explicit_cwd = _path_value(configured_cwd)
+    worktree_path = _path_value(ctx.worktree_path)
+    project_dir = _build_context_project_dir(spec)
+    team_workspace = _team_workspace_path(spec, team_name)
+    cwd = explicit_cwd or worktree_path or project_dir or team_workspace
+
+    extra_dirs: list[str] = []
+    for path in (explicit_cwd, worktree_path, project_dir, team_workspace):
+        _append_extra_dir(extra_dirs, path, cwd=cwd)
+    return cwd, tuple(extra_dirs)
+
+
+async def external_cli_spawn(
+    *,
+    spec: "TeamAgentSpec",
+    ctx: "TeamRuntimeContext",
+    hitt_enabled: bool,
     initial_message: Optional[str] = None,
     session_id: Optional[str] = None,
+    resume_external_backend: bool = False,
 ) -> InProcessSpawnHandle:
     """Launch the CLI for ``ctx.cli_agent`` and run it as a team member.
 
     Args:
-        team_agent: The leader TeamAgent that owns the team spec.
+        spec: Team spec used to configure this external member shell.
         ctx: Runtime context for the external CLI member.
+        hitt_enabled: Effective HITT flag from the caller's team instance.
         initial_message: First prompt delivered to the CLI.
         session_id: Session id propagated via contextvars.
+        resume_external_backend: Whether the backend should resume its derived
+            native session instead of starting a fresh one.
 
     Returns:
         An :class:`InProcessSpawnHandle` wrapping the member task.
@@ -94,20 +202,24 @@ async def external_cli_spawn(
     from openjiuwen.core.runner.runner import Runner
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
-    spec = team_agent.spec
     team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
     member_name = ctx.member_name
     card_id = f"{team_name}_{member_name}" if member_name else "unknown"
     card = AgentCard(
         id=card_id,
         name=member_name or "unknown",
-        description=f"External CLI member: {ctx.persona}" if ctx.persona else "External CLI member",
+        description=f"External CLI member: {ctx.desc}" if ctx.desc else "External CLI member",
     )
 
+    backend = backend_for(ctx.cli_agent) if ctx.cli_agent else None
     # Build the member's system prompt from the team-rail sections (the same
     # sections an in-process member gets), excluding the other DeepAgent rails.
-    system_prompt = await _build_member_system_prompt(team_agent, spec, ctx, member_name)
-    adapter = build_adapter(ctx.cli_agent) if ctx.cli_agent else None
+    system_prompt = await _build_member_system_prompt(
+        spec,
+        ctx,
+        member_name,
+        hitt_enabled=hitt_enabled,
+    )
 
     # Resolve the static launch config declared on the spec for this CLI kind.
     # The member was registered through ``spawn_external_cli_agent`` which
@@ -120,37 +232,81 @@ async def external_cli_spawn(
             break
 
     if cli_cfg is not None:
+        cwd, add_dirs = _resolve_external_paths(
+            spec,
+            ctx,
+            configured_cwd=cli_cfg.cwd,
+            team_name=team_name,
+        )
         runtime = await build_cli_runtime(
             ctx,
-            cwd=cli_cfg.cwd,
+            cwd=cwd,
+            add_dirs=add_dirs,
             command_override=tuple(cli_cfg.command) if cli_cfg.command else None,
+            cli_path=cli_cfg.cli_path,
+            codex_bin=cli_cfg.codex_bin,
             inject_mcp=cli_cfg.inject_mcp,
+            mcp_default_tools_approval_mode=cli_cfg.mcp_default_tools_approval_mode,
+            codex_bypass_approvals_and_sandbox=cli_cfg.codex_bypass_approvals_and_sandbox,
+            codex_turn_idle_timeout_s=cli_cfg.codex_turn_idle_timeout_s,
+            codex_turn_idle_retries=cli_cfg.codex_turn_idle_retries,
             mcp_server_command=tuple(cli_cfg.mcp_server_command),
             system_prompt=system_prompt,
             extra_env=cli_cfg.env or None,
             ssh_transport=cli_cfg.ssh_transport,
+            resume_external_backend=resume_external_backend,
+            member_agent_id=card.id,
         )
     else:
-        runtime = await build_cli_runtime(ctx, system_prompt=system_prompt)
+        cwd, add_dirs = _resolve_external_paths(
+            spec,
+            ctx,
+            configured_cwd=None,
+            team_name=team_name,
+        )
+        runtime = await build_cli_runtime(
+            ctx,
+            cwd=cwd,
+            add_dirs=add_dirs,
+            system_prompt=system_prompt,
+            resume_external_backend=resume_external_backend,
+            member_agent_id=card.id,
+        )
 
     teammate = _TeamAgent(card)
     teammate.configure(spec, ctx, member_runtime=runtime)
-
-    # The default join prompt must NOT tell the member to "wait": a streaming
-    # CLI (e.g. claude) takes that literally and holds the turn open polling,
-    # which idles the whole round until the leader's first task arrives. Tell
-    # it to check once and end the turn promptly when there is no work yet —
-    # the team will message it when a task is assigned.
-    base_query = initial_message or (
-        "You have joined the team. Call read_inbox once now. If you already have "
-        "an assigned task, complete it fully: claim_task to take it, do the work, "
-        "then claim_task again with status=\"completed\" and send_message to report. "
-        "If there is no task yet, just acknowledge briefly and END YOUR TURN now — "
-        "do NOT wait, poll, or loop; the team will message you when there is work."
+    teammate_backend = teammate.team_backend
+    runtime.bind_team_context_tracker(
+        _build_team_context_tracker(
+            teammate_backend,
+            spec,
+            ctx,
+            member_name,
+            team_name,
+        ),
     )
-    # CLIs that accept the system prompt as a launch arg (claude) already carry
-    # it; CLIs without such a flag get it prepended to their first user message.
-    if system_prompt and adapter is not None and not adapter.injects_system_prompt_via_arg():
+    from openjiuwen.agent_teams.external.cli_agent.claude import ClaudeSdkRuntime
+
+    if isinstance(runtime, ClaudeSdkRuntime) and teammate_backend is not None:
+        runtime.bind_team_tools(
+            team_backend=teammate_backend,
+            role=ctx.role.value,
+            teammate_mode=spec.teammate_mode,
+            dispatch_mode=spec.dispatch_mode,
+            lifecycle=spec.lifecycle,
+            language=(ctx.team_spec.language if ctx.team_spec else None) or "cn",
+            workspace_manager=teammate.infra.workspace_manager,
+            messager=teammate.infra.messager,
+            team_name=team_name,
+            team_permissions_enabled=spec.enable_permissions,
+        )
+
+    base_query = initial_message or ""
+    # Backends that accept the system prompt as a launch arg already carry it;
+    # others get it prepended to their first user message.
+    has_launch_prompt = bool(base_query and system_prompt)
+    needs_prompt_prepend = backend is not None and not backend.injects_system_prompt_via_arg
+    if has_launch_prompt and needs_prompt_prepend:
         query = f"{system_prompt}\n\n---\n\n{base_query}"
     else:
         query = base_query
@@ -167,10 +323,10 @@ async def external_cli_spawn(
             team_logger.info("[external-cli] member {} cancelled", member_name)
             raise
         except Exception:
-            team_logger.error("[external-cli] member {} crashed", member_name, exc_info=True)
+            team_logger.exception("[external-cli] member {} crashed", member_name)
             raise
         finally:
-            await runtime.aclose()
+            await runtime.stop()
 
     task = run_ctx.run(asyncio.get_running_loop().create_task, _run())
     handle = InProcessSpawnHandle(

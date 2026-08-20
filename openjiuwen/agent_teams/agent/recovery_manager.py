@@ -44,7 +44,8 @@ class RecoveryManager:
 
         member_name = self._configurator.member_name
         team_logger.info("[{}] recovering team", member_name or "?")
-        all_members = await team_backend.list_members()
+        await team_backend.restore_external_cli_specs_from_db()
+        all_members = await team_backend.list_member_roster()
         restarted: list[str] = []
 
         for member in all_members:
@@ -77,8 +78,10 @@ class RecoveryManager:
 
     def persist_leader_config(self, session) -> None:
         from openjiuwen.agent_teams.runtime.metadata import (
+            TEAM_CHECKPOINTS_KEY,
             TEAM_DB_STATE_KEY,
             TEAM_DB_STATE_PENDING_CREATE,
+            read_team_checkpoints,
             read_team_db_state,
             write_team_namespace,
         )
@@ -93,6 +96,9 @@ class RecoveryManager:
             "spec": spec.model_dump(mode="json"),
             "context": ctx.model_dump(mode="json"),
             TEAM_DB_STATE_KEY: read_team_db_state(session, team_name) or TEAM_DB_STATE_PENDING_CREATE,
+            # Preserve already-persisted named checkpoints: this full overwrite
+            # must not drop snapshots taken in a prior round.
+            TEAM_CHECKPOINTS_KEY: read_team_checkpoints(session, team_name) or {},
         }
         allocator = self._configurator.model_allocator
         if allocator is not None:
@@ -176,7 +182,7 @@ class RecoveryManager:
         if self._configurator.role != TeamRole.LEADER or not team_backend:
             return []
 
-        members = await team_backend.list_members()
+        members = await team_backend.list_member_roster()
         leader_member_name = self._configurator.member_name
         spawned = self._spawn_manager.spawned_handles
         live_teammates = {

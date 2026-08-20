@@ -29,6 +29,8 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
+from openjiuwen.agent_teams.rails.elements import observability_dependency_installed
+from openjiuwen.harness.schema.build_context import parent_sys_operation
 from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
@@ -75,12 +77,27 @@ class SubAgentInput(ConstructionInput):
     )
 
 
-def _common_kwargs(inp: SubAgentInput) -> dict[str, Any]:
-    """Build the shared ``build_*_agent_config`` kwargs from resolved inputs."""
+def _common_kwargs(inp: SubAgentInput, context: Any) -> dict[str, Any]:
+    """Build the shared ``build_*_agent_config`` kwargs from resolved inputs.
+
+    ``sys_operation`` comes from the member agent so its sub-agents stay inside
+    the same filesystem boundary (member sandbox / worktree) instead of getting
+    a fresh LOCAL one from ``create_deep_agent``. A member rebuilt from a
+    serializable seed publishes no live handle, so this is None there and the
+    previous behaviour stands.
+
+    Args:
+        inp: Resolved construction inputs for this sub-agent.
+        context: Build context carrying the member's published handles.
+
+    Returns:
+        Keyword arguments shared by every ``build_*_agent_config`` call.
+    """
     return {
         "workspace": inp.workspace_root,
         "language": inp.language,
         "max_iterations": inp.max_iterations,
+        "sys_operation": parent_sys_operation(context),
     }
 
 
@@ -94,13 +111,18 @@ def _attach_observability_rail(spec: Any) -> Any:
     implements ``before_invoke``/``after_invoke`` precisely to cover this
     single-round path.
 
-    The "is observability initialized → build one rail" guard is shared
-    with ``_build_observability_rail`` via ``maybe_observability_rail``;
-    only the idempotent-append tail is specific to this sub-agent path.
-    Returns the spec unchanged when observability is off or a rail is
-    already attached. Confined to the team package — the harness sub-agent
-    builders are not modified.
+    Both guards are shared with ``build_observability_rail``: the optional
+    ``observability`` extra must be installed
+    (``observability_dependency_installed``) and observability must be
+    initialized (``maybe_observability_rail``); only the idempotent-append
+    tail is specific to this sub-agent path. Returns the spec unchanged
+    when the extra is absent, observability is off, or a rail is already
+    attached. Confined to the team package — the harness sub-agent builders
+    are not modified.
     """
+    if not observability_dependency_installed():
+        return spec
+
     from openjiuwen.agent_teams.observability.rail import (
         ObservabilityRail,
         maybe_observability_rail,
@@ -181,7 +203,7 @@ def _browser_instance_dict(inp: BrowserSubAgentInput) -> dict[str, Any] | None:
 def build_explore_agent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     """Build the explore sub-agent config (parent model reused when present)."""
     inp = SubAgentInput.resolve(factory_kwargs, context)
-    spec = build_explore_agent_config(model=_parent_model(context), **_common_kwargs(inp))
+    spec = build_explore_agent_config(model=_parent_model(context), **_common_kwargs(inp, context))
     spec.factory_kwargs = {"auto_create_workspace": False}
     return _attach_observability_rail(spec)
 
@@ -195,7 +217,7 @@ def build_explore_agent(factory_kwargs: dict[str, Any], context: Any) -> Any:
 def build_plan_agent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     """Build the plan sub-agent config (parent model reused when present)."""
     inp = SubAgentInput.resolve(factory_kwargs, context)
-    spec = build_plan_agent_config(model=_parent_model(context), **_common_kwargs(inp))
+    spec = build_plan_agent_config(model=_parent_model(context), **_common_kwargs(inp, context))
     spec.factory_kwargs = {"auto_create_workspace": False}
     return _attach_observability_rail(spec)
 
@@ -213,7 +235,7 @@ def build_browser_agent(factory_kwargs: dict[str, Any], context: Any) -> Any:
     if model is None:
         logger.warning("[browser_agent] skipped: no parent model on build context")
         return None
-    spec = build_browser_agent_config(model, **_common_kwargs(inp))
+    spec = build_browser_agent_config(model, **_common_kwargs(inp, context))
     instance_dict = _browser_instance_dict(inp)
     if instance_dict is None:
         # Legacy single shared-browser behavior: managed driver via global env.

@@ -1,13 +1,17 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import TYPE_CHECKING, List, Optional, AsyncIterator, Union, Any, Mapping
+from collections.abc import Mapping as MappingABC
+from copy import deepcopy
+from dataclasses import dataclass
+import inspect
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import httpx
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.common.logging import llm_logger, logger, LogEventType
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
@@ -36,16 +40,366 @@ if TYPE_CHECKING:
     import openai
 
 
+@dataclass(frozen=True)
+class ModelParamRule:
+    name: str
+    predicate: Callable[[str], bool]
+    extra_body_fields: Mapping[str, object]
+
+
+_DEFAULT_MODEL_PARAM_RULES: tuple[ModelParamRule, ...] = (
+    ModelParamRule(
+        name="minimax_reasoning_split",
+        predicate=lambda m: m.startswith("MiniMax-M"),
+        extra_body_fields={"reasoning_split": True},
+    ),
+)
+_DISABLED_THINKING_TYPES = {"disabled"}
+_DISABLED_REASONING_EFFORTS = {"off", "none"}
+_DISABLED_THINKING_NON_RETRY_STATUSES = {401, 403, 408, 429}
+_UNSUPPORTED_DISABLED_THINKING_MARKERS = (
+    "unsupported",
+    "not support",
+    "does not support",
+    "doesn't support",
+    "cannot disable",
+    "can't disable",
+    "不支持",
+    "不能关闭",
+    "不允许关闭",
+)
+_DISABLED_THINKING_VALUE_MARKERS = (
+    "disabled",
+    "disable",
+    "off",
+    "关闭",
+)
+
+
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
     __client_name__ = [ProviderType.OpenAI.value]
     _PROTECTED_HEADERS = PROTECTED_HEADERS
+    _MODEL_PARAM_RULES: tuple[ModelParamRule, ...] = _DEFAULT_MODEL_PARAM_RULES
+
+    # Process-wide cache of long-lived ``AsyncOpenAI`` clients, bucketed by
+    # tenant/connection config so different api_key/api_base never share a
+    # client. Each cached client keeps its own httpx keep-alive connection pool
+    # alive, so cache hits reuse established connections (no per-request
+    # build/close). Shared across subclasses (OpenRouter/DashScope/DeepSeek) on
+    # purpose: one cache per process.
+    _client_cache: Dict[Tuple, "openai.AsyncOpenAI"] = {}
 
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
         self._base_headers = build_base_headers(
             custom_headers=model_client_config.custom_headers,
         )
+        self._models_rejecting_disabled_thinking: set[str] = set()
+
+    def _use_shared_client(self) -> bool:
+        """Whether to reuse the process-wide cached client (default True).
+
+        Emergency kill-switch: set ``use_shared_llm_http_client=False`` to fall
+        back to per-request clients.
+        """
+        return bool(getattr(self.model_client_config, "use_shared_llm_http_client", True))
+
+    @classmethod
+    def connection_key(cls, model_client_config: ModelClientConfig) -> Tuple:
+        """Connection identity used to bucket/reuse cached clients.
+
+        Includes ``api_key``/``api_base`` so different tenants never share a
+        client. ``api_base`` already determines the proxy, so proxy is not part
+        of the key. Exposed as a classmethod so callers (e.g. config hot-reload
+        reconciliation) can compute the same key to select connections to close
+        via :meth:`aclose_connections`.
+        """
+        cfg = model_client_config
+        return (
+            cfg.api_key,
+            cfg.api_base,
+            cfg.verify_ssl,
+            cfg.ssl_cert,
+        )
+
+    def _apply_model_specific_params(self, model: Optional[str], params: dict) -> None:
+        """Apply provider-specific ``extra_body`` fields based on model name.
+
+        Mutates ``params`` in place: for each matching ``ModelParamRule`` the
+        rule's ``extra_body_fields`` are merged into ``params['extra_body']``.
+        Existing caller-provided fields are preserved; later rules override
+        earlier ones on key collision.
+        """
+        if not model:
+            return
+        for rule in self._MODEL_PARAM_RULES:
+            if not rule.predicate(model) or not rule.extra_body_fields:
+                continue
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body.update(rule.extra_body_fields)
+            params["extra_body"] = extra_body
+
+    @staticmethod
+    def _is_disabled_thinking_type(value: Any) -> bool:
+        return isinstance(value, str) and value.strip().lower() in _DISABLED_THINKING_TYPES
+
+    @staticmethod
+    def _is_false_flag(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value is False
+        if isinstance(value, str):
+            return value.strip().lower() in {"false", "0", "no"}
+        return False
+
+    @staticmethod
+    def _is_disabled_reasoning_effort(value: Any) -> bool:
+        return isinstance(value, str) and value.strip().lower() in _DISABLED_REASONING_EFFORTS
+
+    @classmethod
+    def _mapping_has_disabled_thinking_params(cls, value: Any) -> bool:
+        if not isinstance(value, MappingABC):
+            return False
+
+        thinking = value.get("thinking")
+        if isinstance(thinking, MappingABC) and cls._is_disabled_thinking_type(thinking.get("type")):
+            return True
+
+        if cls._is_false_flag(value.get("enable_thinking")):
+            return True
+
+        chat_template_kwargs = value.get("chat_template_kwargs")
+        if (
+                isinstance(chat_template_kwargs, MappingABC)
+                and cls._is_false_flag(chat_template_kwargs.get("enable_thinking"))
+        ):
+            return True
+
+        reasoning = value.get("reasoning")
+        if isinstance(reasoning, MappingABC) and cls._is_false_flag(reasoning.get("enabled")):
+            return True
+
+        return cls._is_disabled_reasoning_effort(value.get("reasoning_effort"))
+
+    @classmethod
+    def _has_disabled_thinking_params(cls, params: Mapping[str, Any]) -> bool:
+        if cls._mapping_has_disabled_thinking_params(params):
+            return True
+        return cls._mapping_has_disabled_thinking_params(params.get("extra_body"))
+
+    @classmethod
+    def _strip_disabled_thinking_fields(cls, params: dict[str, Any]) -> None:
+        thinking = params.get("thinking")
+        if isinstance(thinking, MappingABC) and cls._is_disabled_thinking_type(thinking.get("type")):
+            thinking_params = dict(thinking)
+            thinking_params.pop("type", None)
+            if thinking_params:
+                params["thinking"] = thinking_params
+            else:
+                params.pop("thinking", None)
+
+        if cls._is_false_flag(params.get("enable_thinking")):
+            params.pop("enable_thinking", None)
+
+        chat_template_kwargs = params.get("chat_template_kwargs")
+        if (
+                isinstance(chat_template_kwargs, MappingABC)
+                and cls._is_false_flag(chat_template_kwargs.get("enable_thinking"))
+        ):
+            chat_template_params = dict(chat_template_kwargs)
+            chat_template_params.pop("enable_thinking", None)
+            if chat_template_params:
+                params["chat_template_kwargs"] = chat_template_params
+            else:
+                params.pop("chat_template_kwargs", None)
+
+        reasoning = params.get("reasoning")
+        if isinstance(reasoning, MappingABC) and cls._is_false_flag(reasoning.get("enabled")):
+            reasoning_params = dict(reasoning)
+            reasoning_params.pop("enabled", None)
+            if reasoning_params:
+                params["reasoning"] = reasoning_params
+            else:
+                params.pop("reasoning", None)
+
+        if cls._is_disabled_reasoning_effort(params.get("reasoning_effort")):
+            params.pop("reasoning_effort", None)
+
+    @classmethod
+    def _without_disabled_thinking_params(cls, params: Mapping[str, Any]) -> dict[str, Any]:
+        cleaned = deepcopy(dict(params))
+        cls._strip_disabled_thinking_fields(cleaned)
+
+        extra_body = cleaned.get("extra_body")
+        if isinstance(extra_body, MappingABC):
+            cleaned_extra_body = dict(extra_body)
+            cls._strip_disabled_thinking_fields(cleaned_extra_body)
+            if cleaned_extra_body:
+                cleaned["extra_body"] = cleaned_extra_body
+            else:
+                cleaned.pop("extra_body", None)
+        return cleaned
+
+    @staticmethod
+    def _disabled_thinking_model_key(params: Mapping[str, Any]) -> Optional[str]:
+        model_name = params.get("model")
+        if model_name is None:
+            return None
+        model_key = str(model_name).strip()
+        return model_key or None
+
+    def _apply_disabled_thinking_cache(self, params: dict[str, Any]) -> dict[str, Any]:
+        model_key = self._disabled_thinking_model_key(params)
+        if model_key not in self._models_rejecting_disabled_thinking:
+            return params
+        if not self._has_disabled_thinking_params(params):
+            return params
+        return self._without_disabled_thinking_params(params)
+
+    @classmethod
+    def _iter_exception_chain(cls, exc: BaseException) -> Iterable[BaseException]:
+        seen: set[int] = set()
+        current: Optional[BaseException] = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            yield current
+            current = current.__cause__ or current.__context__
+
+    @staticmethod
+    def _optional_int(value: Any) -> Optional[int]:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _exception_attr(value: Any, attr: str) -> Any:
+        instance_dict = getattr(value, "__dict__", None)
+        if isinstance(instance_dict, MappingABC) and attr in instance_dict:
+            return instance_dict[attr]
+        try:
+            return inspect.getattr_static(value, attr)
+        except AttributeError:
+            return None
+
+    @classmethod
+    def _exception_status_code(cls, exc: BaseException) -> Optional[int]:
+        for item in cls._iter_exception_chain(exc):
+            candidates = (item, cls._exception_attr(item, "response"))
+            for candidate in candidates:
+                if candidate is None:
+                    continue
+                for attr in ("status_code", "status"):
+                    status_code = cls._optional_int(cls._exception_attr(candidate, attr))
+                    if status_code is not None:
+                        return status_code
+        return None
+
+    @classmethod
+    def _collect_exception_text_parts(cls, value: Any, seen: set[int]) -> list[str]:
+        if value is None:
+            return []
+        if id(value) in seen:
+            return []
+        seen.add(id(value))
+
+        if isinstance(value, (str, int, float, bool)):
+            return [str(value)]
+        if isinstance(value, MappingABC):
+            parts: list[str] = []
+            for key, item in value.items():
+                parts.extend(cls._collect_exception_text_parts(key, seen))
+                parts.extend(cls._collect_exception_text_parts(item, seen))
+            return parts
+        if isinstance(value, (list, tuple, set, frozenset)):
+            parts = []
+            for item in value:
+                parts.extend(cls._collect_exception_text_parts(item, seen))
+            return parts
+
+        parts = [str(value)]
+        for attr in ("message", "body", "code", "type", "param", "status_code", "response"):
+            attr_value = cls._exception_attr(value, attr)
+            if attr_value is value:
+                continue
+            parts.extend(cls._collect_exception_text_parts(attr_value, seen))
+        return parts
+
+    @classmethod
+    def _exception_text(cls, exc: BaseException) -> str:
+        parts: list[str] = []
+        seen: set[int] = set()
+        for item in cls._iter_exception_chain(exc):
+            parts.extend(cls._collect_exception_text_parts(item, seen))
+        return "\n".join(part for part in parts if part)
+
+    @classmethod
+    def _is_disabled_thinking_rejection(cls, exc: BaseException) -> bool:
+        status_code = cls._exception_status_code(exc)
+        if (
+                status_code in _DISABLED_THINKING_NON_RETRY_STATUSES
+                or (status_code is not None and status_code >= 500)
+        ):
+            return False
+
+        error_text = cls._exception_text(exc).lower()
+        if "1210" in error_text:
+            return True
+
+        mentions_thinking = "thinking" in error_text or "reasoning" in error_text or "思考" in error_text
+        if not mentions_thinking:
+            return False
+
+        mentions_unsupported = any(marker in error_text for marker in _UNSUPPORTED_DISABLED_THINKING_MARKERS)
+        if not mentions_unsupported:
+            return False
+
+        mentions_disable = any(marker in error_text for marker in _DISABLED_THINKING_VALUE_MARKERS)
+        return mentions_disable or "parameter" in error_text or "参数" in error_text
+
+    def _retry_params_without_disabled_thinking(
+            self,
+            params: dict[str, Any],
+            exc: BaseException,
+    ) -> Optional[dict[str, Any]]:
+        if not self._has_disabled_thinking_params(params):
+            return None
+        if not self._is_disabled_thinking_rejection(exc):
+            return None
+        return self._without_disabled_thinking_params(params)
+
+    async def _create_chat_completion_with_disabled_thinking_fallback(
+            self,
+            async_client: "openai.AsyncOpenAI",
+            params: dict[str, Any],
+            *,
+            is_stream: bool,
+    ) -> Any:
+        request_params = self._apply_disabled_thinking_cache(params)
+        try:
+            return await async_client.chat.completions.create(**request_params)
+        except Exception as exc:
+            retry_params = self._retry_params_without_disabled_thinking(request_params, exc)
+            if retry_params is None:
+                raise
+
+            model_key = self._disabled_thinking_model_key(request_params)
+            if model_key:
+                self._models_rejecting_disabled_thinking.add(model_key)
+
+            llm_logger.warning(
+                "OpenAI-compatible model rejected disabled thinking; retrying with model defaults.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=model_key,
+                model_provider=self.model_client_config.client_provider,
+                is_stream=is_stream,
+            )
+            return await async_client.chat.completions.create(**retry_params)
+
+    def _client_cache_key(self) -> Tuple:
+        return self.connection_key(self.model_client_config)
 
     def _get_client_name(self) -> str:
         """Get client name."""
@@ -108,20 +462,60 @@ class OpenAIModelClient(BaseModelClient):
         return params
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
-        """
-        Create an OpenAI Async client with configured SSL/proxy/http client settings.
-        
+        """Acquire an ``AsyncOpenAI`` client for a request.
+
+        Default (shared) path returns a long-lived, cached client whose httpx
+        keep-alive pool reuses established connections. The caller MUST NOT close
+        it on the hot path.
+
+        Emergency fallback path (``use_shared_llm_http_client=False``) builds a
+        fresh per-request client that the caller owns and must close.
+
         Args:
-            timeout: Optional timeout override for this specific request
+            timeout: Optional per-request timeout. Only baked into the client in
+                the fallback path; in the shared path it is applied per request
+                via ``create(..., timeout=...)`` so the cached client is never
+                rebuilt just to change the timeout.
         """
+        if not self._use_shared_client():
+            return self._build_async_openai_client(timeout=timeout)
+
+        # Shared path: build once per tenant/connection identity and reuse.
+        # Building is fully synchronous (no ``await``), so under a single-threaded
+        # asyncio event loop the get/build/set below is atomic and needs no lock.
+        key = self._client_cache_key()
+        client = self._client_cache.get(key)
+        if client is None:
+            client = self._build_async_openai_client()
+            self._client_cache[key] = client
+            llm_logger.info(
+                "Created shared long-lived AsyncOpenAI client.",
+                event_type=LogEventType.LLM_CALL_START,
+                timeout=self.model_client_config.timeout,
+                max_retries=self.model_client_config.max_retries,
+            )
+        return client
+
+    def _build_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
+        """Build a fresh ``AsyncOpenAI`` client with its own httpx connection pool."""
         from openai import AsyncOpenAI
 
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
+        # httpx defaults keepalive_expiry to 5s, which drops idle keep-alive
+        # connections between calls spaced >5s apart, forcing a rebuild. Bump to
+        # 60s to keep connections warm across typical inter-request gaps while
+        # staying at/under common upstream/LB idle timeouts (avoids reusing a
+        # server-closed "dead" connection).
         http_client = httpx.AsyncClient(
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
-            verify=verify
+            verify=verify,
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=60.0,
+            ),
         )
 
         # Use method-level timeout if provided, otherwise use config timeout
@@ -140,6 +534,52 @@ class OpenAIModelClient(BaseModelClient):
             timeout=final_timeout,
             max_retries=self.model_client_config.max_retries
         )
+
+    @classmethod
+    async def aclose(cls) -> None:
+        """Close all cached clients and their underlying connection pools.
+
+        Intended for agent/process teardown only. NEVER call this on the request
+        hot path: it tears down the shared client that other in-flight calls
+        rely on.
+        """
+        clients = list(cls._client_cache.values())
+        cls._client_cache.clear()
+
+        for client in clients:
+            try:
+                await client.close()
+            except Exception as e:  # pragma: no cover - defensive cleanup
+                logger.warning(f"Error closing cached AsyncOpenAI client: {e}")
+
+    @classmethod
+    async def aclose_connections(cls, configs: Iterable[ModelClientConfig]) -> None:
+        """Close and drop cached clients for exactly the given connection identities.
+
+        Only the connections whose identity matches one of ``configs`` are
+        closed; everything else is left untouched. Intended for delta-based
+        eviction on config hot-reload (close just the credentials that were
+        removed/changed), so unrelated cached clients (used by other components
+        sharing this process-wide cache) are never disturbed.
+
+        Closing is immediate even if a call is in flight: a model the user
+        removed should stop consuming tokens at once. An in-flight request on a
+        closed client surfaces as a normal model-call failure (not retried by
+        LLMRetryRail, which only retries repetition/stream-timeout markers).
+        """
+        keys = {cls.connection_key(cfg) for cfg in configs}
+        closed = 0
+        for key in keys:
+            client = cls._client_cache.pop(key, None)
+            if client is None:
+                continue
+            try:
+                await client.close()
+                closed += 1
+            except Exception as e:  # pragma: no cover - defensive cleanup
+                logger.warning(f"Error closing AsyncOpenAI client: {e}")
+        if closed:
+            logger.info(f"Closed {closed} AsyncOpenAI client(s) for removed/updated model config")
 
     async def invoke(
             self,
@@ -201,6 +641,8 @@ class OpenAIModelClient(BaseModelClient):
             extra_body["return_token_ids"] = params.pop("return_token_ids")
             params["extra_body"] = extra_body
 
+        self._apply_model_specific_params(model, params)
+        params = self._apply_disabled_thinking_cache(params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -221,8 +663,17 @@ class OpenAIModelClient(BaseModelClient):
 
             async_client = self._create_async_openai_client(timeout=timeout)
 
+            # Per-request timeout override; cached shared client is never rebuilt
+            # just to change the timeout.
+            if timeout is not None:
+                params["timeout"] = timeout
+
             # Call API
-            response = await async_client.chat.completions.create(**params)
+            response = await self._create_chat_completion_with_disabled_thinking_fallback(
+                async_client,
+                params,
+                is_stream=False,
+            )
             llm_logger.info(
                 "OpenAI API response received.",
                 event_type=LogEventType.LLM_CALL_END,
@@ -256,6 +707,7 @@ class OpenAIModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 response=assistant_message.content,
+                reasoning_content=assistant_message.reasoning_content,
                 usage=assistant_message.usage_metadata,
                 tool_calls=assistant_message.tool_calls)
 
@@ -286,7 +738,10 @@ class OpenAIModelClient(BaseModelClient):
                 error_msg=f"openAI API async invoke error: {str(e)}"
             ) from e
         finally:
-            if async_client is not None:
+            # Only close clients we own (fallback path). Shared/pooled clients
+            # are long-lived; closing them on the hot path would tear down the
+            # shared transport.
+            if async_client is not None and not self._use_shared_client():
                 await async_client.close()
 
     async def stream(
@@ -355,6 +810,8 @@ class OpenAIModelClient(BaseModelClient):
             extra_body = dict(params.get("extra_body") or {})
             extra_body["return_token_ids"] = params.pop("return_token_ids")
             params["extra_body"] = extra_body
+        self._apply_model_specific_params(model, params)
+        params = self._apply_disabled_thinking_cache(params)
 
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
@@ -377,8 +834,17 @@ class OpenAIModelClient(BaseModelClient):
 
             async_client = self._create_async_openai_client(timeout=timeout)
 
+            # Per-request timeout override; cached shared client is never rebuilt
+            # just to change the timeout.
+            if timeout is not None:
+                params["timeout"] = timeout
+
             # Call API with streaming
-            response_stream = await async_client.chat.completions.create(**params)
+            response_stream = await self._create_chat_completion_with_disabled_thinking_fallback(
+                async_client,
+                params,
+                is_stream=True,
+            )
 
             final_message = None
             if output_parser:
@@ -416,6 +882,7 @@ class OpenAIModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
                 response=final_message.content if final_message else None,
+                reasoning_content=final_message.reasoning_content if final_message else None,
                 usage=final_message.usage_metadata if final_message else None,
                 tool_calls=final_message.tool_calls if final_message else None)
 
@@ -449,7 +916,10 @@ class OpenAIModelClient(BaseModelClient):
                 error_msg=f"openAI API async stream error: {error_detail}"
             ) from e
         finally:
-            if async_client is not None:
+            # Only close clients we own (fallback path). Shared/pooled clients
+            # are long-lived; closing them on the hot path would tear down the
+            # shared transport.
+            if async_client is not None and not self._use_shared_client():
                 await async_client.close()
 
     async def generate_image(
@@ -555,7 +1025,18 @@ class OpenAIModelClient(BaseModelClient):
 
     @staticmethod
     def _extract_reasoning_content(msg_or_delta: Any) -> Optional[str]:
-        return getattr(msg_or_delta, 'reasoning_content', None)
+        reasoning_details = getattr(msg_or_delta, "reasoning_details", None)
+        if isinstance(reasoning_details, list) and reasoning_details:
+            first = reasoning_details[0]
+            if isinstance(first, dict):
+                text = first.get("text")
+                if text:
+                    return text
+        for attr in ("reasoning_content", "reasoning"):
+            value = getattr(msg_or_delta, attr, None)
+            if isinstance(value, str) and value:
+                return value
+        return None
 
     async def _parse_response(
             self,
@@ -572,9 +1053,11 @@ class OpenAIModelClient(BaseModelClient):
             AssistantMessage: Parsed assistant message
             
         Note:
-            Non-streaming finish_reason can only be "stop" or "tool_calls":
-            - stop: Model generation completed without tool calls
-            - tool_calls: Model generation completed with tool calls
+            Non-streaming finish_reason is normalized as follows:
+            - If the provider returns a value, it is preserved as-is (e.g. "stop",
+              "tool_calls", "length", "content_filter", etc.).
+            - If the provider returns None or an empty string, it defaults to
+              "tool_calls" when tool_calls are present, otherwise "stop".
         """
         choice = response.choices[0]
         message = choice.message
@@ -613,6 +1096,7 @@ class OpenAIModelClient(BaseModelClient):
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cache_tokens=self._extract_cache_tokens(response.usage),
+                reasoning_tokens=self._extract_reasoning_tokens(response.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,
@@ -664,12 +1148,14 @@ class OpenAIModelClient(BaseModelClient):
         prompt_token_ids = getattr(response, 'prompt_token_ids', None) or None
         completion_token_ids = getattr(choice, 'token_ids', None) or None
         logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
-
+        finish_reason = getattr(choice, 'finish_reason', None) or None
+        if not finish_reason:
+            finish_reason = "tool_calls" if tool_calls else "stop"
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
-            finish_reason="tool_calls" if tool_calls else "stop",
+            finish_reason=finish_reason,
             reasoning_content=reasoning_content,
             parser_content=parser_content,
             prompt_token_ids=prompt_token_ids,
@@ -712,6 +1198,7 @@ class OpenAIModelClient(BaseModelClient):
                 output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                 total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
                 cache_tokens=self._extract_cache_tokens(chunk.usage),
+                reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
                 total_cost=total_cost,

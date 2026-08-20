@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
 from contextlib import AsyncExitStack
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
@@ -53,6 +53,7 @@ class StdioClient(McpClient):
             return True
         except Exception as e:
             logger.error(f"Stdio connection failed: {e}")
+            self._last_connect_error = e
             await self.disconnect()
             return False
 
@@ -111,7 +112,11 @@ class StdioClient(McpClient):
         try:
             logger.info(f"Calling tool '{tool_name}' via Stdio with arguments: {arguments}")
             tool_result = await self._session.call_tool(tool_name, arguments=arguments)
-            result_content = extract_mcp_tool_result_content(tool_result)
+            result_content = extract_mcp_tool_result_content(
+                tool_result,
+                include_image_content=self._include_image_content,
+                tool_name=tool_name,
+            )
             logger.info(f"Tool '{tool_name}' call completed via Stdio")
             return result_content
         except Exception as e:

@@ -23,7 +23,7 @@ class ListSkillTool(Tool):
 
     def __init__(
         self,
-        get_skills: Callable[[], List[Skill]],
+        get_skills: Callable[..., List[Skill]],
         list_skill_model: Optional[Model] = None,
         language: str = "cn",
         agent_id: Optional[str] = None,
@@ -46,13 +46,14 @@ class ListSkillTool(Tool):
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         """Invoke list_skill tool."""
         query = str(inputs.get("query", "") or "").strip()
+        session = kwargs.get("session")
 
         try:
             if not query:
                 return ToolOutput(
                     success=True,
                     data={
-                        "skills": self._dump_all_skills(),
+                        "skills": self._dump_all_skills(session),
                         "mode": "all",
                     },
                 )
@@ -61,14 +62,14 @@ class ListSkillTool(Tool):
                 return ToolOutput(
                     success=True,
                     data={
-                        "skills": self._dump_all_skills(),
+                        "skills": self._dump_all_skills(session),
                         "mode": "all",
                         "message": "list_skill_model is not configured, fallback to all skills.",
                     },
                 )
 
-            selected_names = await self._route_skills(query)
-            selected_skills = self._select_skills_by_names(selected_names)
+            selected_names = await self._route_skills(query, session)
+            selected_skills = self._select_skills_by_names(selected_names, session)
 
             return ToolOutput(
                 success=True,
@@ -88,9 +89,16 @@ class ListSkillTool(Tool):
         if False:
             yield None
 
-    def _dump_all_skills(self) -> List[Dict[str, Any]]:
+    def _dump_all_skills(self, session: Any = None) -> List[Dict[str, Any]]:
         """Dump all current enabled skills."""
-        return self._dump_skills(self.get_skills() or [])
+        return self._dump_skills(self._resolve_skills(session))
+
+    def _resolve_skills(self, session: Any = None) -> List[Skill]:
+        """Resolve skills while supporting legacy no-argument callbacks."""
+        try:
+            return self.get_skills(session=session) or []
+        except TypeError:
+            return self.get_skills() or []
 
     def _dump_skills(self, skills: List[Skill]) -> List[Dict[str, Any]]:
         """Dump skill objects into serializable dicts."""
@@ -101,9 +109,9 @@ class ListSkillTool(Tool):
             results.append(skill_dict)
         return results
 
-    async def _route_skills(self, query: str) -> List[str]:
+    async def _route_skills(self, query: str, session: Any = None) -> List[str]:
         """Route skills with list_skill_model."""
-        payload = self._dump_all_skills()
+        payload = self._dump_all_skills(session)
 
         response = await self.list_skill_model.invoke(
             messages=[
@@ -147,12 +155,12 @@ class ListSkillTool(Tool):
 
         return [str(item).strip() for item in skills if str(item).strip()]
 
-    def _select_skills_by_names(self, names: List[str]) -> List[Skill]:
+    def _select_skills_by_names(self, names: List[str], session: Any = None) -> List[Skill]:
         """Select skill objects by names."""
         if not names:
             return []
 
-        skills = self.get_skills() or []
+        skills = self._resolve_skills(session)
         skill_map = {skill.name: skill for skill in skills}
 
         selected: List[Skill] = []

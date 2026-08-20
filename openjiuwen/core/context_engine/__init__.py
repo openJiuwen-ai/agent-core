@@ -1,8 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.context_engine.base import ModelContext, ContextStats, ContextWindow
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
+from openjiuwen.core.context_engine.base import ContextWindowChange, ModelContext, ContextStats, ContextWindow
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 
 from openjiuwen.core.context_engine.token.base import TokenCounter
@@ -45,15 +45,13 @@ from openjiuwen.core.context_engine.processor.compressor.full_compact_processor 
     FullCompactProcessor,
     FullCompactProcessorConfig,
 )
-from openjiuwen.core.context_engine.processor.compressor.reasoning_tool_loop_compact_processor import (
-    ReasoningToolLoopCompactProcessor,
-    ReasoningToolLoopCompactProcessorConfig,
-)
 
 # context base classes
 _CORE_CLASSES = [
+    "CompressionRecallConfig",
     "ContextEngineConfig",
     "ContextWindow",
+    "ContextWindowChange",
     "ModelContext",
     "ContextStats",
     "ContextEngine"
@@ -95,9 +93,6 @@ _PROCESSORS_CLASSES = [
     # full compact processor
     "FullCompactProcessor",
     "FullCompactProcessorConfig",
-    # reasoning + tool-call loop compact
-    "ReasoningToolLoopCompactProcessor",
-    "ReasoningToolLoopCompactProcessorConfig",
 ]
 
 

@@ -61,7 +61,7 @@ class TeamMember:
             display_name: Optional human-readable display label.
                 Defaults to ``member_name``.
             prompt: Optional startup prompt.
-            desc: Optional persona description.
+            desc: Optional public member description.
         """
         self.member_name = member_name
         self.team_name = team_name

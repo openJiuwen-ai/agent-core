@@ -7,20 +7,15 @@ import pytest
 
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+from openjiuwen.core.foundation.kv_cache import KV_CACHE_EPHEMERAL_TAIL_METADATA
 from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
-from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY,
     PromptAttachment,
     PromptAttachmentKind,
     PromptAttachmentManager,
     PromptAttachmentUpdate,
 )
-from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.prompts.sections.prompt_attachments import (
-    build_prompt_attachments_section,
-)
-
-
 @pytest.mark.asyncio
 async def test_prompt_attachment_manager_collect_render_inject_and_update():
     manager = PromptAttachmentManager()
@@ -291,6 +286,10 @@ def test_prompt_attachment_manager_appends_attachment_message_after_multimodal_u
     assert injected[-2].content == original[-1].content
     assert isinstance(injected[-1], UserMessage)
     assert injected[-1].content == "<system-reminder>attached</system-reminder>"
+    assert (
+        injected[-1].metadata[KV_CACHE_EPHEMERAL_TAIL_METADATA]
+        is True
+    )
 
 
 def test_prompt_attachment_manager_appends_attachment_message_after_image_only_user_message():
@@ -308,32 +307,56 @@ def test_prompt_attachment_manager_appends_attachment_message_after_image_only_u
     assert injected[-1].content == "<system-reminder>attached</system-reminder>"
 
 
-def test_prompt_attachments_section_explains_system_reminder_tags():
-    builder = SystemPromptBuilder(language="en")
-    builder.add_section(build_prompt_attachments_section())
+def test_prompt_attachment_manager_inserts_attachment_before_preserved_tail():
+    manager = PromptAttachmentManager()
+    state = UserMessage(
+        content="<browser_state>current</browser_state>",
+        metadata={PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY: True},
+    )
+    progress = UserMessage(
+        content='<browser_state_progress>{"page_change":"unchanged"}</browser_state_progress>',
+        metadata={PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY: True},
+    )
+    original = [UserMessage(content="query"), state, progress]
 
-    section = builder.get_section(SectionName.PROMPT_ATTACHMENTS)
-    assert section is not None
-    prompt = builder.build()
-    assert "<system-reminder>" in prompt
-    assert "<prompt-attachment>" in prompt
-    assert "bear no direct relation" in prompt
+    injected = manager.inject_messages(original, "<system-reminder>attached</system-reminder>")
+
+    assert [message.content for message in injected] == [
+        "query",
+        "<system-reminder>attached</system-reminder>",
+        state.content,
+        progress.content,
+    ]
+    assert injected[-2] is state
+    assert injected[-1] is progress
+
+
+def test_prompt_attachment_guidance_is_rendered_only_with_attachments():
+    manager = PromptAttachmentManager(language="en")
+    assert manager.render([]) == ""
+
+    rendered = manager.render([
+        PromptAttachment(
+            id="session.sess1.runtime",
+            section="runtime",
+            session_id="sess1",
+            content="runtime context",
+        )
+    ])
+
+    guidance_index = rendered.index("The following dynamic context")
+    attachment_index = rendered.index('<prompt-attachment type="generic">')
+    assert guidance_index < attachment_index
+    assert "Do not expose its tags" in rendered
 
 
 @pytest.mark.asyncio
-async def test_context_window_mutator_runs_before_kv_release():
-    released_messages = []
-
+async def test_context_window_mutator_runs_before_window_statistics():
     async def mutator(context, window):
         del context
         messages = list(window.context_messages)
         messages[-1] = UserMessage(content=f"{messages[-1].content}\n\nattached")
         return window.model_copy(update={"context_messages": messages})
-
-    class FakeKVCacheManager:
-        async def release(self, window, **kwargs):
-            del kwargs
-            released_messages.extend(window.get_messages())
 
     context = SessionModelContext(
         "ctx",
@@ -343,10 +366,8 @@ async def test_context_window_mutator_runs_before_kv_release():
         processors=[],
         window_mutators=[mutator],
     )
-    context._kv_cache_manager = FakeKVCacheManager()
 
     window = await context.get_context_window(system_messages=[SystemMessage(content="sys")])
 
     assert window.get_messages()[-1].content == "query\n\nattached"
-    assert released_messages[-1].content == "query\n\nattached"
     assert window.statistic.total_messages == 2

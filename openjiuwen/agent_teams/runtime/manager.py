@@ -21,6 +21,10 @@ from typing import (
     Optional,
 )
 
+from openjiuwen.agent_teams.context import (
+    reset_session_id,
+    set_session_id,
+)
 from openjiuwen.agent_teams.interaction import (
     DeliverResult,
     ExternalTeamEvent,
@@ -59,6 +63,7 @@ from openjiuwen.agent_teams.runtime.pool import (
     RuntimeState,
     TeamRuntimePool,
 )
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
@@ -274,6 +279,10 @@ class TeamRuntimeManager:
             already_finalized = (
                 current_status is not None and current_status in TeamRuntimeManager._MEMBER_FINALIZED_STATUSES
             )
+
+            async def _evict_member() -> None:
+                await kv_cache_hooks.evict_member(agent, reason="member-shutdown")
+
             if already_finalized:
                 # External party (leader stop/pause, shutdown_self) already
                 # wrote a terminal/quiescent status. Just close the kernel.
@@ -282,14 +291,23 @@ class TeamRuntimeManager:
                     member_name,
                     current_status.value if current_status is not None else None,
                 )
-                await agent.stop_coordination()
+                if (
+                    current_status is MemberStatus.SHUTDOWN
+                    and await kv_cache_hooks.has_manageable_member_binding(agent)
+                ):
+                    await agent.stop_coordination(on_quiesced=_evict_member)
+                else:
+                    await agent.stop_coordination()
                 return
             if current_status == MemberStatus.SHUTDOWN_REQUESTED:
                 team_logger.info(
                     "finalize_member: shutting down team member {} on request",
                     member_name,
                 )
-                await agent.stop_coordination()
+                if await kv_cache_hooks.has_manageable_member_binding(agent):
+                    await agent.stop_coordination(on_quiesced=_evict_member)
+                else:
+                    await agent.stop_coordination()
                 if member is not None:
                     await member.update_status(MemberStatus.SHUTDOWN)
                 return
@@ -298,6 +316,7 @@ class TeamRuntimeManager:
                 member_name,
             )
             await agent.pause_coordination()
+            await kv_cache_hooks.mark_ready_resident(agent)
             if member is not None:
                 await member.update_status(MemberStatus.READY)
         except Exception as exc:
@@ -409,7 +428,9 @@ class TeamRuntimeManager:
         # the interact gate (a lightweight publish, not a leader round).
         reply = self._as_swarmflow_human_reply(payloads)
         if reply is not None:
-            return await self._route_swarmflow_human_reply(entry, reply[0], reply[1])
+            return await self._route_swarmflow_human_reply(
+                entry, reply[0], reply[1], reply[2]
+            )
 
         ticket = await entry.interact_gate.admit()
         if ticket is None:
@@ -425,13 +446,16 @@ class TeamRuntimeManager:
             await entry.interact_gate.consume_done(ticket)
 
     @staticmethod
-    def _as_swarmflow_human_reply(payloads: list[InteractPayload]) -> Optional[tuple[str, str]]:
-        """Detect a swarmflow human-session reply, returning ``(corr, answer)`` or None.
+    def _as_swarmflow_human_reply(
+        payloads: list[InteractPayload],
+    ) -> Optional[tuple[str | None, str, str]]:
+        """Detect a swarmflow human-session reply, returning ``(run_id, corr, answer)`` or None.
 
         A reply is a single ``HumanAgentMessage`` whose ``target`` is
-        ``"swarmflow:<correlation_id>"`` — the convention a UI uses to answer a
-        pending swarmflow human turn (the correlation id rode out on the
-        ``human_prompt`` progress event).
+        ``"swarmflow:<correlation_id>"`` (legacy) or
+        ``"swarmflow:<run_id>:<correlation_id>"`` (run-scoped). Engine-style
+        correlation ids contain colons; colon-count rules in
+        ``parse_swarmflow_human_reply_target`` keep the two formats distinct.
         """
         prefix = "swarmflow:"
         if len(payloads) != 1:
@@ -441,12 +465,18 @@ class TeamRuntimeManager:
             return None
         if not item.target.startswith(prefix):
             return None
-        corr = item.target[len(prefix):]
-        return (corr, item.body) if corr else None
+        rest = item.target[len(prefix):]
+        if not rest:
+            return None
+        from openjiuwen.agent_teams.schema.events import parse_swarmflow_human_reply_target
+
+        run_id, corr = parse_swarmflow_human_reply_target(rest)
+        return (run_id, corr, item.body) if corr else None
 
     @staticmethod
     async def _route_swarmflow_human_reply(
         entry: "ActiveTeam",
+        run_id: str | None,
         correlation_id: str,
         answer: str,
     ) -> DeliverResult:
@@ -461,7 +491,9 @@ class TeamRuntimeManager:
         messager = getattr(backend, "messager", None) if backend is not None else None
         if messager is None:
             return DeliverResult.failure("no_messager")
-        topic = swarmflow_human_reply_topic(entry.current_session_id, entry.team_name)
+        topic = swarmflow_human_reply_topic(
+            entry.current_session_id, entry.team_name, run_id
+        )
         message = EventMessage(
             event_type=TeamEvent.WORKFLOW_HUMAN_REPLY,
             payload={"correlation_id": correlation_id, "answer": answer},
@@ -524,7 +556,7 @@ class TeamRuntimeManager:
 
         async def _member_exists(name: str) -> bool:
             """Roster predicate backed by the live team backend."""
-            return await backend.get_member(name) is not None
+            return await backend.member_exists(name)
 
         return await resolve_targets(payloads, member_exists=_member_exists)
 
@@ -564,6 +596,8 @@ class TeamRuntimeManager:
                         await agent.auto_start_all()
                     else:
                         await agent.auto_start_member(payload.target)
+                elif payload.sender is not None:
+                    await agent.auto_start_member(payload.sender)
                 inbox = HumanAgentInbox(
                     backend,
                     backend.message_manager,
@@ -653,7 +687,15 @@ class TeamRuntimeManager:
         entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
         if entry is None:
             return None
-        return create_monitor(entry.agent, hide_dm=hide_dm)
+        # SDK/CLI consumers may call this from an asyncio task whose inherited
+        # context belongs to another session. Bind the already-resolved target
+        # session while the factory captures it; TeamMonitor rebinds that
+        # captured value around each later database query.
+        token = set_session_id(session_id)
+        try:
+            return create_monitor(entry.agent, hide_dm=hide_dm)
+        finally:
+            reset_session_id(token)
 
     async def list_active_teams(self) -> list["ActiveTeamInfo"]:
         """Return read-only snapshots of every team currently in the pool.
@@ -741,6 +783,14 @@ class TeamRuntimeManager:
 
         db = get_shared_db(db_config)
         await db.initialize()
+        from openjiuwen.agent_teams.external.cli_agent.session_cleanup import cleanup_external_cli_backend_sessions
+
+        for session_id in session_ids:
+            await cleanup_external_cli_backend_sessions(
+                session_id=session_id,
+                team_names=[team_name],
+                db=db,
+            )
         for session_id in session_ids:
             await db.drop_session_tables_by_id(session_id)
             if not await remove_session_worktrees(team_name, session_id):
@@ -750,6 +800,8 @@ class TeamRuntimeManager:
             await checkpointer.release(session_id)
 
         deleted = await db.team.delete_team(team_name)
+        if not deleted:
+            team_logger.info("Team {} already absent from team_info during delete", team_name)
 
         # Remove team filesystem directory (team_home) after database cleanup.
         # This covers the case where the caller has already stopped the runtime
@@ -763,7 +815,7 @@ class TeamRuntimeManager:
             except Exception as exc:
                 team_logger.warning("Failed to remove team directory {}: {}", team_dir, exc)
 
-        return deleted
+        return True
 
     async def release_session(
         self,
@@ -806,6 +858,13 @@ class TeamRuntimeManager:
 
         db = get_shared_db(release_info.db_config)
         await db.initialize()
+        from openjiuwen.agent_teams.external.cli_agent.session_cleanup import cleanup_external_cli_backend_sessions
+
+        await cleanup_external_cli_backend_sessions(
+            session_id=session_id,
+            team_names=release_info.team_names,
+            db=db,
+        )
         await db.drop_session_tables_by_id(session_id)
         for team_name in release_info.team_names:
             if not await remove_session_worktrees(team_name, session_id):

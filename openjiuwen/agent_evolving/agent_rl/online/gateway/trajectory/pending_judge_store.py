@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Pending delayed-judge store for rail-v1 samples."""
+"""Redis-backed delayed-judge store for online per-call samples."""
 
 from __future__ import annotations
 
@@ -92,10 +92,3 @@ class PendingJudgeStore:
             if popped is not None:
                 out.append(popped)
         return out
-
-    @staticmethod
-    def _sort_key(sample: dict[str, Any]) -> tuple[float, int]:
-        return (
-            float(sample.get("_pending_created_at") or 0.0),
-            int(sample.get("step_index") or 0),
-        )

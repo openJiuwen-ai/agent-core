@@ -35,7 +35,7 @@ def _make_member_ctx(member_name: str) -> TeamRuntimeContext:
     return TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name=member_name,
-        persona="worker persona",
+        desc="worker persona",
         team_spec=team_spec,
     )
 
@@ -64,7 +64,7 @@ def test_spawn_payload_coordination_keys_are_frozen():
         "leader_member_name",
         "member_name",
         "role",
-        "persona",
+        "desc",
         "transport",
     }
     assert coordination["team_name"] == "t"
@@ -72,7 +72,7 @@ def test_spawn_payload_coordination_keys_are_frozen():
     assert coordination["leader_member_name"] == "leader"
     assert coordination["member_name"] == "worker_a"
     assert coordination["role"] == "teammate"
-    assert coordination["persona"] == "worker persona"
+    assert coordination["desc"] == "worker persona"
     assert coordination["transport"] is None  # no messager_config in this builder
     assert payload["query"] == "hello"
 
@@ -154,3 +154,26 @@ def test_worktree_spawn_context_only_carries_cwd_override():
         "worktree_head_commit",
     ):
         assert key not in context
+
+
+def test_fork_source_round_trips_through_spawn_payload():
+    """fork_source must survive the cross-process payload serialization."""
+    pytest.importorskip("openjiuwen.core.runner.runner")
+    builder = _make_builder()
+    ctx = _make_member_ctx("worker_a").model_copy(update={"fork_source": "reader"})
+
+    spawn_config = builder.build_spawn_config(ctx)
+
+    restored = TeamRuntimeContext.model_validate(spawn_config.payload["context"])
+    assert restored.fork_source == "reader"
+
+
+def test_fork_source_defaults_to_none():
+    """A plain spawn leaves fork_source unset (None), not an empty string."""
+    builder = _make_builder()
+    ctx = _make_member_ctx("worker_a")
+
+    spawn_config = builder.build_spawn_config(ctx)
+
+    restored = TeamRuntimeContext.model_validate(spawn_config.payload["context"])
+    assert restored.fork_source is None

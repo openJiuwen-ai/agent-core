@@ -24,7 +24,7 @@ no-ops (the configurator skips those features for external CLI members).
 Both flavours implement the :class:`MemberRuntime` interaction surface
 (``start`` / ``stop`` / ``outputs`` / ``send`` / ``abort`` / ``pause`` /
 ``subscribe`` / ``state`` / ``session_id``) through the
-shared :class:`_CliRuntimeBase` adapter, which wraps each flavour's single-turn
+shared :class:`CliRuntimeBase` adapter, which wraps each flavour's single-turn
 ``_drive`` async generator: ``send`` starts a turn when IDLE (or steers /
 buffers a follow-up when RUNNING), ``outputs`` exposes the turn's narration
 chunks via a queue-backed iterator, and phase/round events are mapped onto the
@@ -48,6 +48,7 @@ from openjiuwen.agent_teams.external.cli_agent.injector import Injector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import ProcessLike, ProcessTransport, StreamReaderLike
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
@@ -122,7 +123,7 @@ async def _terminate(process: ProcessLike | None) -> None:
         await process.wait()
 
 
-class _CliRuntimeBase(ABC):
+class CliRuntimeBase(ABC):
     """Shared :class:`MemberRuntime` surface for CLI-backed members.
 
     Adapts each flavour's single-turn ``_drive`` async generator into the
@@ -132,9 +133,20 @@ class _CliRuntimeBase(ABC):
     event bus a NativeHarness uses.
     """
 
-    def __init__(self, *, member_name: str, adapter: CliAgentAdapter):
+    def __init__(
+        self,
+        *,
+        member_name: str,
+        member_agent_id: str | None = None,
+        team_context_tracker: "TeamContextTracker | None" = None,
+    ):
         self._member_name = member_name
-        self._adapter = adapter
+        # Stable TeamAgent card id addressing this member's own checkpoint. The
+        # member AgentSession derived from it is where backend-native resume
+        # state (Codex thread id) and the team-context delivery baseline live.
+        self._member_agent_id = member_agent_id
+        self._team_context_tracker = team_context_tracker
+        self._member_session: Any = None
         # Lifecycle phase mapped onto the team's HarnessState vocabulary so the
         # StreamController treats a CLI runtime exactly like a NativeHarness.
         self._phase = HarnessState.IDLE
@@ -157,16 +169,43 @@ class _CliRuntimeBase(ABC):
     # ------------------------------------------------------------------
 
     async def start(self, *, team_session: Optional[Any] = None) -> None:
-        """Prepare the runtime for one run cycle (the subprocess owns its session).
+        """Prepare the CLI runtime for one run cycle and open its member session.
 
-        ``team_session`` is ignored: a CLI subprocess manages its own session,
-        so cross-cycle state lives in the subprocess, not a shared team session.
-        Resets the output channel + phase so a reused instance starts clean.
+        The member AgentSession is derived from the team session and restored
+        here, before any turn runs, so both the team-context delivery baseline
+        and (for SDK subclasses) backend-native resume state are available from
+        the first message onward.
         """
-        _ = team_session
+        await self._ensure_member_session(team_session)
         self._output_queue = asyncio.Queue()
         self._turn_aborted = False
         self._phase = HarnessState.IDLE
+
+    def bind_team_context_tracker(self, tracker: "TeamContextTracker | None") -> None:
+        """Bind the tracker that injects pending team state into outbound messages."""
+        self._team_context_tracker = tracker
+
+    async def _ensure_member_session(self, team_session: Optional[Any]) -> Any:
+        """Open this member's stable child AgentSession once.
+
+        Keyed by ``member_agent_id`` so the checkpoint is this member's own and
+        cannot collide with a sibling's. Absent a team session (standalone unit
+        tests, or a caller that never wired one) the runtime simply runs without
+        persisted per-member state.
+        """
+        if self._member_session is not None:
+            return self._member_session
+        if team_session is None or not self._member_agent_id:
+            return None
+        if not hasattr(team_session, "create_agent_session"):
+            return None
+        member_session = team_session.create_agent_session(
+            agent_id=self._member_agent_id,
+            share_stream_writer=False,
+        )
+        await member_session.pre_run()
+        self._member_session = member_session
+        return member_session
 
     async def stop(self) -> None:
         """Stop the in-flight turn, release the CLI transport, close outputs.
@@ -190,6 +229,10 @@ class _CliRuntimeBase(ABC):
         self._output_queue.put_nowait(_END)
         await self._events.unregister_namespace(_EVENT_NAMESPACE)
 
+    async def dispose(self) -> None:
+        """Permanently dispose this CLI-backed runtime."""
+        await self.stop()
+
     @property
     def state(self) -> HarnessState:
         """Return the current lifecycle phase."""
@@ -209,23 +252,73 @@ class _CliRuntimeBase(ABC):
         return _OutputIterator(self._output_queue)
 
     async def send(self, content: Any, *, immediate: bool = False) -> Any:
-        """Submit input: start a turn when IDLE, else steer / buffer a follow-up.
+        """Submit input, folding any pending team state into the same message.
 
-        - IDLE: start a new turn driving ``content`` (transition RUNNING, fire
-          ``started``); the turn runs in a background task so ``send`` returns
+        An external CLI has no rail and no reachable context, so team state has
+        to travel inside a user message. Every coordination path already ends in
+        a message being sent here, so checking on the way out is enough — no
+        polling. The state goes to the very front of the message, ahead of
+        whatever prompted it, and the baseline advances only once delivery
+        succeeded.
+
+        Returns None (CLI runtimes have no monotonic sequence id to surface).
+        """
+        text = content if isinstance(content, str) else str(content)
+        pending = await self._pending_team_context()
+        if pending:
+            text = f"{pending}\n\n{text}" if text else pending
+        result = await self._send_raw(text, immediate=immediate)
+        if pending:
+            await self._commit_team_context()
+        return result
+
+    async def announce_team_context(self) -> None:
+        """Deliver pending team state as a message of its own.
+
+        The piggyback in :meth:`send` only reaches the member when something
+        else is being sent, which can lag a roster change by a whole turn. Member
+        lifecycle events call this so the announcement goes out on its own
+        instead. A no-op when there is nothing new, so the caller can fire it on
+        every event.
+        """
+        pending = await self._pending_team_context()
+        if not pending:
+            return
+        await self._send_raw(pending, immediate=False)
+        await self._commit_team_context()
+
+    async def _pending_team_context(self) -> str | None:
+        """Render team state this member has not been told about yet."""
+        if self._team_context_tracker is None or self._member_session is None:
+            return None
+        return await self._team_context_tracker.pending_text(self._member_session)
+
+    async def _commit_team_context(self) -> None:
+        """Advance the delivery baseline after a successful send."""
+        if self._team_context_tracker is None or self._member_session is None:
+            return
+        await self._team_context_tracker.commit(self._member_session)
+
+    async def _send_raw(self, text: str, *, immediate: bool = False) -> Any:
+        """Drive the CLI with one message: start a turn, steer, or follow up.
+
+        The single delivery path — both :meth:`send` and
+        :meth:`announce_team_context` funnel through it, so there is exactly one
+        place that reaches the CLI and exactly one team-context check per
+        message.
+
+        - IDLE: start a new turn driving ``text`` (transition RUNNING, fire
+          ``started``); the turn runs in a background task so this returns
           without blocking, mirroring the NativeHarness supervisor.
         - RUNNING + immediate: steer the in-flight turn (or buffer it for the
           re-invoke flavour, which cannot steer).
         - RUNNING + non-immediate: buffer as a follow-up handled after the turn.
-
-        Returns None (CLI runtimes have no monotonic sequence id to surface).
         """
         if self._phase is HarnessState.TERMINATED:
             raise_error(
                 StatusCode.AGENT_TEAM_EXECUTION_ERROR,
                 error_msg=f"external CLI member '{self._member_name}' runtime already stopped.",
             )
-        text = content if isinstance(content, str) else str(content)
         if self._phase is HarnessState.RUNNING:
             if immediate:
                 await self.steer(text)
@@ -414,7 +507,7 @@ class _CliRuntimeBase(ABC):
         return None
 
 
-class ExternalCliRuntime(_CliRuntimeBase):
+class ExternalCliRuntime(CliRuntimeBase):
     """Streaming runtime: one long-lived CLI subprocess driven via stdin."""
 
     def __init__(
@@ -426,9 +519,16 @@ class ExternalCliRuntime(_CliRuntimeBase):
         output_lines: AsyncIterator[str],
         process: ProcessLike | None = None,
         transport: ProcessTransport | None = None,
+        member_agent_id: str | None = None,
+        team_context_tracker: TeamContextTracker | None = None,
     ):
         """Bind to a launched CLI subprocess's input/output channels."""
-        super().__init__(member_name=member_name, adapter=adapter)
+        super().__init__(
+            member_name=member_name,
+            member_agent_id=member_agent_id,
+            team_context_tracker=team_context_tracker,
+        )
+        self._adapter = adapter
         self._injector = injector
         self._output_lines = output_lines
         self._process = process
@@ -545,7 +645,7 @@ class ExternalCliRuntime(_CliRuntimeBase):
                 await self._transport.aclose()
 
 
-class ReinvokeCliRuntime(_CliRuntimeBase):
+class ReinvokeCliRuntime(CliRuntimeBase):
     """One-shot runtime: a fresh CLI subprocess per turn (prompt as argv).
 
     Messages that arrive mid-turn (via steer/follow_up) cannot interrupt a
@@ -565,6 +665,8 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
         launch_extra_args: tuple[str, ...] = (),
         inactivity_timeout_s: float = _DEFAULT_INACTIVITY_TIMEOUT_S,
         turn_timeout_s: Optional[float] = None,
+        member_agent_id: str | None = None,
+        team_context_tracker: TeamContextTracker | None = None,
     ):
         """Hold the launch config; subprocesses are created per turn.
 
@@ -586,7 +688,12 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
                 "active" forever by dribbling output just under the inactivity
                 window.
         """
-        super().__init__(member_name=member_name, adapter=adapter)
+        super().__init__(
+            member_name=member_name,
+            member_agent_id=member_agent_id,
+            team_context_tracker=team_context_tracker,
+        )
+        self._adapter = adapter
         self._env = env
         self._cwd = cwd
         self._cli_session_id = cli_session_id or uuid.uuid4().hex
@@ -815,4 +922,4 @@ class ReinvokeCliRuntime(_CliRuntimeBase):
         await _terminate(self._current)
 
 
-__all__ = ["ExternalCliRuntime", "ReinvokeCliRuntime"]
+__all__ = ["CliRuntimeBase", "ExternalCliRuntime", "ReinvokeCliRuntime"]

@@ -1,135 +1,107 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""
-TrajectoryCollector
--------------------
+"""Run one offline agent invocation and return its canonical trajectory."""
 
-Collects agent execution trajectory for RL training.
+from typing import Any, Dict, Optional
 
-Uses EvolutionRail-based RLRail which provides:
-- Automatic trajectory collection via EvolutionRail base class
-- RL-specific state tracking (LLM step counts, case_id)
-
-Usage::
-
-    collector = TrajectoryCollector()
-    trajectory = await collector.collect(agent, inputs={"query": "..."})
-"""
-
-from typing import Any, Dict, List, Optional
-
-from openjiuwen.agent_evolving.trajectory import (
-    InMemoryTrajectoryStore,
-    Trajectory,
-    set_trajectory_resource_attributes,
-)
-from openjiuwen.agent_evolving.trajectory.semconv import CASE_ID, OJ_SESSION_ID, TRAJECTORY_SOURCE
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionTriggerPoint
 
 
-class TrajectoryCollector:
-    """Run an agent and collect trajectory data.
+async def run_agent_and_collect_trajectory(
+    agent: Any,
+    inputs: Dict[str, Any],
+    *,
+    trajectory_span_processor: TrajectorySpanProcessor,
+    session_id: str = "",
+    source: str = "offline",
+    case_id: Optional[str] = None,
+) -> Optional[Trajectory]:
+    """Run the agent and read its trajectory before unregistering the rail."""
 
-    Returns a Trajectory object assembled by TrajectoryBuilder.
-
-    Usage::
-
-        collector = TrajectoryCollector()
-        trajectory = await collector.collect(agent, inputs={"query": "..."})
-    """
-
-    async def collect(
-        self,
-        agent: Any,
-        inputs: Dict[str, Any],
-        *,
-        session_id: str = "",
-        source: str = "offline",
-        case_id: Optional[str] = None,
-    ) -> Optional[Trajectory]:
-        """Run agent and return a Trajectory object.
-
-        Args:
-            agent: A DeepAgent (or any agent supporting register_rail).
-            inputs: Agent input dict (must contain 'query').
-            session_id: Session identifier for the Trajectory.
-            source: Source type - "online" or "offline".
-            case_id: Optional case ID for offline scenarios.
-
-        Returns:
-            Trajectory object collected during the run, or None if none was saved.
-        """
-        if not hasattr(agent, "register_rail"):
-            raise ValueError(
-                "Agent does not support rail-based trajectory collection. "
-                "Use a DeepAgent with register_rail()."
-            )
-
-        effective_session_id = session_id or inputs.get("conversation_id", "")
-        effective_case_id = case_id or inputs.get("conversation_id", None)
-
-        # Import here to avoid circular dependency
-        from openjiuwen.agent_evolving.agent_rl.rl_rail import RLRail
-
-        # Create a store to capture the trajectory (base class will save to it)
-        store = InMemoryTrajectoryStore()
-
-        rail = RLRail(
-            session_id=effective_session_id,
-            source=source,
-            case_id=effective_case_id,
-            trajectory_store=store,
+    if not isinstance(trajectory_span_processor, TrajectorySpanProcessor):
+        raise TypeError("trajectory_span_processor must be a TrajectorySpanProcessor")
+    if not hasattr(agent, "register_rail"):
+        raise ValueError(
+            "Agent does not support rail-based trajectory collection. Use a DeepAgent with register_rail()."
         )
-        await agent.register_rail(rail)
 
-        # Create session for the agent
-        session = None
-        from openjiuwen.core.session.agent import create_agent_session
+    effective_session_id = str(session_id or inputs.get("conversation_id") or "default")
+    effective_case_id = case_id or inputs.get("conversation_id")
 
+    from openjiuwen.agent_evolving.agent_rl.rl_rail import RLRail
+
+    rail = RLRail(
+        session_id=effective_session_id,
+        source=source,
+        case_id=effective_case_id,
+        evolution_trigger=EvolutionTriggerPoint.NONE,
+        trajectory_span_processor=trajectory_span_processor,
+    )
+    await agent.register_rail(rail)
+
+    from openjiuwen.core.common.logging import logger
+    from openjiuwen.core.session.agent import create_agent_session
+
+    session = None
+    session_ready = False
+    trajectory: Trajectory | None = None
+    try:
         session = create_agent_session(
-            session_id=effective_session_id
-            or inputs.get("conversation_id", "default"),
+            session_id=effective_session_id,
             card=agent.card if hasattr(agent, "card") else None,
         )
         await session.pre_run(inputs=inputs)
-
+        session_ready = True
         try:
             if hasattr(agent, "invoke"):
                 await agent.invoke(inputs, session=session)
             else:
                 from openjiuwen.core.runner.runner import Runner
+
                 await Runner.run_agent(agent=agent, inputs=inputs, session=session)
-        except Exception as e:
-            from openjiuwen.core.common.logging import logger
-
+        except Exception as exc:
             logger.warning(
-                "Agent invoke raised exception during trajectory collection, "
-                "returning partial trajectory. error=%s",
-                e,
+                "Agent invoke raised exception during trajectory collection, returning partial trajectory. error=%s",
+                exc,
             )
-        finally:
-            if hasattr(agent, "unregister_rail"):
+    finally:
+        # Read the clean window while its processor subscription is still
+        # active, including the invoke-failure path.
+        if session_ready:
+            member_id = None
+            get_agent_id = getattr(session, "get_agent_id", None)
+            if callable(get_agent_id):
+                try:
+                    candidate = get_agent_id()
+                except Exception:
+                    candidate = None
+                if isinstance(candidate, str) and candidate:
+                    member_id = candidate
+            try:
+                trajectory = rail.get_trajectory(session_id=effective_session_id, member_id=member_id)
+            except Exception as exc:
+                logger.warning("Failed to read collected trajectory: %s", exc)
+
+        if hasattr(agent, "unregister_rail"):
+            try:
                 await agent.unregister_rail(rail)
-            if session is not None:
+            except Exception as exc:
+                logger.warning("Failed to unregister trajectory collection rail: %s", exc)
+        if session is not None:
+            try:
                 await session.close_stream()
-                await session.commit()
+            except Exception as exc:
+                logger.warning("Failed to close trajectory collection session: %s", exc)
+            if session_ready:
+                try:
+                    await session.commit()
+                except Exception as exc:
+                    logger.warning("Failed to commit trajectory collection session: %s", exc)
 
-        # Retrieve trajectory from store (base class after_invoke() saves it there)
-        trajectories: List[Trajectory] = store.query()
-        if not trajectories:
-            return None
+    return trajectory
 
-        # Return the last trajectory (most recent by insertion order)
-        # InMemoryTrajectoryStore stores in dict, so we get the last saved one
-        trajectory = trajectories[-1]
 
-        set_trajectory_resource_attributes(
-            trajectory,
-            {
-                TRAJECTORY_SOURCE: source,
-                OJ_SESSION_ID: effective_session_id,
-                CASE_ID: effective_case_id,
-            },
-        )
-
-        return trajectory
+__all__ = ["run_agent_and_collect_trajectory"]

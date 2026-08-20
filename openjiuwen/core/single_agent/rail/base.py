@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Rail & Callback base definitions for Agent lifecycle hooks.
 
 Main classes included:
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from abc import ABC
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -39,12 +40,95 @@ from openjiuwen.core.session.agent import Session
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.base import BaseAgent
 
+# Above this, a rail chain is reported at INFO so a slow hook shows up without
+# having to enable debug logging. A chain that does real work -- memory
+# prefetch, context processing -- routinely runs for a few hundred
+# milliseconds, so the bar sits well above that: an INFO line here means
+# something is wrong, not that the agent is busy. Everything below still gets a
+# DEBUG line for profiling runs.
+SLOW_RAIL_CHAIN_SECONDS = 1.0
+
+# Above this, a single rail's init is reported at INFO. Init is one-off setup
+# rather than per-round glue, so the bar is lower than the rail-chain one: a
+# rail that spends 100ms building tools or loading skills is worth naming even
+# on a healthy start-up.
+SLOW_RAIL_INIT_SECONDS = 0.1
+
+# Above this, a whole batch of rail inits is reported at INFO. A dozen-plus
+# rails each doing modest setup add up without any one of them being at fault,
+# so the batch bar sits higher than the per-rail one.
+SLOW_RAIL_INIT_BATCH_SECONDS = 0.25
+
+
+def init_rail(rail_instance: "AgentRail", agent: Any) -> float:
+    """Run one rail's ``init`` and report what it cost.
+
+    ``init`` is a plain synchronous call rather than a callback-framework
+    hook, and necessarily so: it takes the agent itself (not a context), and
+    it is the step that registers the rail's hooks *into* that framework, so
+    it has to run before the framework knows the rail exists. That leaves it
+    outside the chain timing in :meth:`AgentCallbackContext.fire` even though
+    init is where rails do their heaviest work — building tools, loading
+    skills, assembling prompt sections. This is the matching half of that
+    timing, and the single place every init call site should go through.
+
+    The elapsed time is recorded even when ``init`` raises, so a rail that
+    fails slowly is still attributable.
+
+    Args:
+        rail_instance: Rail whose ``init`` should run. Named this way rather
+            than ``rail`` so it does not shadow the module-level ``@rail``
+            decorator.
+        agent: Agent handed to ``init``; also the owner the rail registers
+            its tools and prompt sections against.
+
+    Returns:
+        Elapsed seconds, so a batch caller can assemble a breakdown.
+    """
+    started_at = time.monotonic()
+    try:
+        rail_instance.init(agent)
+    finally:
+        elapsed = time.monotonic() - started_at
+        log = logger.info if elapsed >= SLOW_RAIL_INIT_SECONDS else logger.debug
+        log(
+            "[RailInit] %s finished, elapsed_ms=%.1f",
+            type(rail_instance).__name__,
+            elapsed * 1000,
+        )
+    return elapsed
+
+
+def log_rail_init_breakdown(entries: List[tuple]) -> None:
+    """Report what a batch of rail inits cost, slowest rail first.
+
+    A single total across a dozen-plus rails says nothing about which one to
+    look at, so the per-rail split is the point of this line.
+
+    Args:
+        entries: ``(rail class name, elapsed seconds)`` in initialization
+            order; an empty list logs nothing.
+    """
+    if not entries:
+        return
+    total = sum(elapsed for _, elapsed in entries)
+    ranked = sorted(entries, key=lambda item: item[1], reverse=True)
+    breakdown = " ".join("%s=%.1f" % (name, elapsed * 1000) for name, elapsed in ranked)
+    log = logger.info if total >= SLOW_RAIL_INIT_BATCH_SECONDS else logger.debug
+    log(
+        "[RailInit] %d rails initialized, total_ms=%.1f %s",
+        len(entries),
+        total * 1000,
+        breakdown,
+    )
+
 
 class RunKind(Enum):
     """Run kind enumeration for different execution modes."""
     NORMAL = "normal"
     HEARTBEAT = "heartbeat"
     CRON = "cron"
+    GOAL = "goal"
 
 
 class HeartbeatReason(Enum):
@@ -78,12 +162,14 @@ class InvokeInputs:
         result: Agent invoke result (filled after invoke)
         run_kind: Run kind (normal or heartbeat)
         run_context: Structured runtime context
+        parent_session_id: Optional parent session id for lineage-aware runtimes
     """
     query: Optional[str, InteractiveInput]
     conversation_id: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     run_kind: Optional[RunKind] = None
     run_context: Optional[RunContext] = None
+    parent_session_id: Optional[str] = None
 
     def is_heartbeat(self) -> bool:
         """Check if this is a heartbeat run."""
@@ -153,6 +239,13 @@ class TaskIterationInputs:
             a controller follow-up rather than the original user
             query.  ``task_instruction`` templates should not be
             applied to follow-up queries.
+        run_kind: Run kind propagated from task metadata
+            (e.g. ``RunKind.GOAL``).  Set by the executor so
+            that rails like ``TaskCompletionRail`` can identify
+            goal rounds without reading task metadata directly.
+        run_context: Structured runtime context propagated from
+            task metadata.  May be a ``RunContext`` dataclass or
+            a plain dict depending on the caller.
     """
     iteration: int
     loop_event: Any
@@ -160,6 +253,61 @@ class TaskIterationInputs:
     result: Optional[Dict[str, Any]] = None
     query: Optional[str] = None
     is_follow_up: bool = False
+    run_kind: Any = None
+    run_context: Any = None
+
+
+@dataclass
+class UserMessageInputs:
+    """Input data for the ON_USER_MESSAGE event.
+
+    Fired once per batch of consumed inputs, *before* they are joined into the
+    single ``UserMessage`` that enters the conversation. This is the only point
+    at which a rail can act on inputs *as inputs*: afterwards they are one
+    ordinary history message that may be compacted, summarized or dropped, and
+    reaching back to it by position is not safe.
+
+    Attributes:
+        parts: The queued inputs, oldest first, as a **mutable** list. Rails
+            edit it in place: drop an entry that a later one supersedes, or
+            ``insert(0, ...)`` context the model should read first. Whatever
+            survives is joined with newlines into the message body, so an entry
+            is a whole input — dropping one costs nothing to the rest.
+        source: Where the batch came from — ``"query"`` (a new round or a
+            follow-up), ``"steering"`` (injected mid-round), or ``"resume"``
+            (a workflow interrupt being resumed).
+    """
+    parts: list[str] = field(default_factory=list)
+    source: str = "query"
+
+
+@dataclass
+class SteeringDrainInputs:
+    """Input data for the BEFORE_STEERING_DRAIN event.
+
+    Fired before each model call that has steering waiting, and *only* then —
+    an empty queue skips the event entirely. It asks the rails one question:
+    how much of the backlog does this model call absorb? Whatever a rail does
+    not let through stays queued in order, and the loop keeps running while the
+    queue is non-empty, so the rest arrives at the following model calls.
+
+    This is deliberately the moment *before* the queue is touched. Capping the
+    batch afterwards would mean draining everything and pushing the surplus
+    back, and the surplus would then sit behind whatever arrived meanwhile.
+
+    Attributes:
+        pending: How many messages are queued right now. Read-only context for
+            the decision — a rail that only caps large bursts reads it.
+        limit: The most this drain may take. ``None`` (the default) takes
+            everything, which is what a run with no opinion on the matter does.
+            Rails run in priority order and each sees what the previous one
+            left, so the value standing at the end is the one that applies.
+            A non-empty queue always yields at least one message regardless:
+            consumption has to make progress or the loop would spin on a
+            backlog it refuses to touch.
+    """
+    pending: int = 0
+    limit: int | None = None
 
 
 @dataclass
@@ -182,6 +330,8 @@ EventInputs = Union[
     ModelCallInputs,
     ToolCallInputs,
     TaskIterationInputs,
+    UserMessageInputs,
+    SteeringDrainInputs,
     Dict[str, Any],
 ]
 
@@ -201,6 +351,15 @@ class AgentCallbackEvent(str, Enum):
             (LLM + all tool calls + ToolMessage writes). Only fires on
             fully successful iterations, not on any break path.
 
+    Input Callbacks:
+        ON_USER_MESSAGE: Before one consumed input (a new round's query, a
+            follow-up, a steering message, or a resumed workflow interrupt)
+            is written into the conversation. Rails may rewrite its content;
+            see :class:`UserMessageInputs`.
+        BEFORE_STEERING_DRAIN: Before pending steering messages are taken off
+            the queue, and only when some are pending. Rails cap how many this
+            model call absorbs; see :class:`SteeringDrainInputs`.
+
     Model Interaction Callbacks:
         BEFORE_MODEL_CALL: Before LLM is called
         AFTER_MODEL_CALL: After LLM response is received
@@ -216,12 +375,29 @@ class AgentCallbackEvent(str, Enum):
     BEFORE_TASK_ITERATION = "before_task_iteration"
     AFTER_TASK_ITERATION = "after_task_iteration"
     AFTER_REACT_ITERATION = "after_react_iteration"
+    ON_USER_MESSAGE = "on_user_message"
+    BEFORE_STEERING_DRAIN = "before_steering_drain"
     BEFORE_MODEL_CALL = "before_model_call"
     AFTER_MODEL_CALL = "after_model_call"
     ON_MODEL_EXCEPTION = "on_model_exception"
     BEFORE_TOOL_CALL = "before_tool_call"
     AFTER_TOOL_CALL = "after_tool_call"
     ON_TOOL_EXCEPTION = "on_tool_exception"
+
+
+@dataclass
+class RetryRecord:
+    """Immutable record of a single failed attempt inside the @rail retry loop.
+
+    Collected on ``AgentCallbackContext.retry_history`` so the final
+    error message can tell the LLM (and the operator) exactly how many
+    times the call was retried, what failed each time, and how long
+    the whole sequence took.
+    """
+    attempt_index: int
+    exception_type: str
+    exception_message: str
+    timestamp: float
 
 
 # ================================================================
@@ -242,6 +418,8 @@ class AgentCallbackContext:
             across events within a single invoke)
         exception: Exception object (set on error events)
         retry_attempt: Current failed-attempt index
+        retry_history: Chronological list of every failed attempt
+            inside the @rail retry loop for this invoke.
     """
     agent: 'BaseAgent'
     event: Optional[AgentCallbackEvent] = None
@@ -252,6 +430,8 @@ class AgentCallbackContext:
     extra: Dict[str, Any] = field(default_factory=dict)
     exception: Optional[Exception] = None
     retry_attempt: int = 0
+    retry_history: List[RetryRecord] = field(default_factory=list)
+    invoke_start_time: float = 0.0
     _retry_request: Optional[RetryRequest] = field(
         default=None, init=False, repr=False
     )
@@ -271,9 +451,28 @@ class AgentCallbackContext:
             event: The event to fire
         """
         self.event = event
-        await self.agent.agent_callback_manager.execute(
-            event, self
-        )
+        logger.debug("[RailChain] %s started", event)
+        started_at = time.monotonic()
+        try:
+            await self.agent.agent_callback_manager.execute(
+                event, self
+            )
+        finally:
+            elapsed = time.monotonic() - started_at
+            # A rail chain is expected to be cheap glue around the model call;
+            # anything slower is worth surfacing without turning on debug logs.
+            if elapsed >= SLOW_RAIL_CHAIN_SECONDS:
+                logger.info(
+                    "[RailChain] %s finished, elapsed_ms=%.1f",
+                    event,
+                    elapsed * 1000,
+                )
+            else:
+                logger.debug(
+                    "[RailChain] %s finished, elapsed_ms=%.1f",
+                    event,
+                    elapsed * 1000,
+                )
 
     def request_retry(self, delay_seconds: float = 0.0) -> None:
         """Request the wrapped rail method to retry once more.
@@ -344,8 +543,20 @@ class AgentCallbackContext:
         if self._steering_queue is not None:
             self._steering_queue.put_nowait(msg)
 
-    def drain_steering(self) -> List[str]:
-        """Drain all pending steering messages.
+    def drain_steering(
+        self, limit: int | None = None,
+    ) -> List[str]:
+        """Drain pending steering messages, oldest first.
+
+        What is not taken stays queued in order, so the next drain resumes
+        where this one stopped. A non-empty queue always yields at least one
+        message: consumption has to make progress, or ``has_pending_steering``
+        would keep the loop going over a backlog nothing ever consumes.
+
+        Args:
+            limit: The most this call may take. ``None`` (the default) takes
+                everything, which is the behaviour of a loop with no rail
+                policy on the matter.
 
         Returns:
             List of steering message strings,
@@ -353,8 +564,11 @@ class AgentCallbackContext:
         """
         if self._steering_queue is None:
             return []
+        take = None if limit is None else max(1, limit)
         msgs: List[str] = []
         while not self._steering_queue.empty():
+            if take is not None and len(msgs) >= take:
+                break
             try:
                 msgs.append(
                     self._steering_queue.get_nowait()
@@ -447,6 +661,8 @@ EVENT_METHOD_MAP: Dict[AgentCallbackEvent, str] = {
     AgentCallbackEvent.BEFORE_TASK_ITERATION: "before_task_iteration",
     AgentCallbackEvent.AFTER_TASK_ITERATION: "after_task_iteration",
     AgentCallbackEvent.AFTER_REACT_ITERATION: "after_react_iteration",
+    AgentCallbackEvent.ON_USER_MESSAGE: "on_user_message",
+    AgentCallbackEvent.BEFORE_STEERING_DRAIN: "before_steering_drain",
 }
 
 
@@ -459,10 +675,16 @@ class AgentRail(ABC):
     Rails provide class-based lifecycle hooks with:
     - State management across callback invocations
     - Tools/skills that are auto-registered on the agent
-    - Priority-based execution ordering (higher = first)
+    - Priority-based ordering, for both ``init`` and callbacks (higher = first)
 
     Attributes:
-        priority: Execution priority (higher runs first)
+        priority: Execution priority (higher runs first). It orders two things
+            that are really one question: when this rail's ``init`` runs
+            relative to other rails', and when its callbacks run within a hook
+            chain. ``init`` is where a rail registers its tools and prompt
+            sections, so "my hook runs after that rail's" and "that rail's
+            tools exist when I initialize" both follow from one number. Rails
+            sharing a priority keep the order they were added in.
 
     Example::
 
@@ -484,7 +706,7 @@ class AgentRail(ABC):
     def uninit(self, agent):
         pass
 
-    # -- 8 hook methods (override to activate) --
+    # -- hook methods (override to activate) --
 
     async def before_invoke(
         self, ctx: AgentCallbackContext
@@ -496,6 +718,26 @@ class AgentRail(ABC):
         self, ctx: AgentCallbackContext
     ) -> None:
         """Called after agent.invoke() completes."""
+        pass
+
+    async def on_user_message(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Called before one consumed input is written into the conversation.
+
+        ``ctx.inputs`` is a :class:`UserMessageInputs`; rails may rewrite
+        ``ctx.inputs.message.content`` in place.
+        """
+        pass
+
+    async def before_steering_drain(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Called before pending steering messages leave the queue.
+
+        ``ctx.inputs`` is a :class:`SteeringDrainInputs`; rails cap the batch
+        by writing ``ctx.inputs.limit``.
+        """
         pass
 
     async def before_model_call(
@@ -606,6 +848,7 @@ def rail(
     def decorator(fn):
         @wraps(fn)
         async def wrapper(self, ctx, *args, **kwargs):
+            ctx.invoke_start_time = time.monotonic()
             attempt = 0
             while True:
                 # Drop stale requests from previous attempts.
@@ -613,6 +856,7 @@ def rail(
                 ctx.retry_attempt = attempt
                 ctx.exception = None
                 exc_to_raise = None
+                will_retry = False
                 try:
                     if before:
                         await ctx.fire(before)
@@ -624,6 +868,16 @@ def rail(
                 except Exception as e:
                     exc_to_raise = e
                     ctx.exception = e
+                    # Record this failed attempt so the final error message
+                    # can tell the LLM how many retries happened and why.
+                    ctx.retry_history.append(
+                        RetryRecord(
+                            attempt_index=attempt,
+                            exception_type=type(e).__name__,
+                            exception_message=str(e),
+                            timestamp=time.monotonic(),
+                        )
+                    )
                     if on_exception:
                         try:
                             await ctx.fire(on_exception)
@@ -644,17 +898,24 @@ def rail(
                             retry_request.delay_seconds
                         )
                     exc_to_raise = None
+                    will_retry = True
                     attempt += 1
                 finally:
-                    # 跳过 after 回调当函数被 asyncio.CancelledError 中断时。
+                    # 跳过 after 回调当：
+                    # 1. 函数被 asyncio.CancelledError 中断时；
+                    # 2. tool call 即将进入重试时（避免 on_tool_exception 写入的
+                    #    中间态 tool_result 被 after 回调当作最终结果消费）。
+                    # model call 重试时不跳过 —— after_model_call 契约要求每次
+                    # model 调用后（含失败+即将重试）都触发，CancellationRail
+                    # 等回调依赖此做取消检测。
                     # CancelledError 是 BaseException 不是 Exception（Python 3.9+），
                     # 会跳过上面的 except 块直接进入 finally。
-                    # 此时触发 after_tool_call 会发出虚假的空结果事件。
                     is_cancelled = isinstance(
                         sys.exc_info()[1] if sys.exc_info()[1] is not None else None,
                         asyncio.CancelledError,
                     )
-                    if after and not is_cancelled:
+                    skip_after = will_retry and after is AgentCallbackEvent.AFTER_TOOL_CALL
+                    if after and not is_cancelled and not skip_after:
                         try:
                             await ctx.fire(after)
                         except Exception as callback_exc:

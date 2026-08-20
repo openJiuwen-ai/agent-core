@@ -4,20 +4,19 @@
 """
 Unit tests for ReActAgent KV cache release behavior at the agent entry point.
 
-**Scope**: ReActAgent invoke-stage wiring (context window + invoke kwargs).
+**Scope**: ReActAgent invoke-stage wiring (context window + invoke kwargs + release management).
 
 Verifies:
 - When `enable_kv_cache_release=True` and llm is `InferenceAffinity`:
-  `get_context_window(model=llm)` is called, and `llm.invoke/stream` receives
+  ReActAgent owns release management, and `llm.invoke/stream` receives
   `session_id` and `enable_cache_sharing=True`.
 - When `enable_kv_cache_release=True` but llm is NOT `InferenceAffinity`:
-  `get_context_window()` must NOT receive `model=llm`.
+  unsupported warning is logged once.
 - When `enable_kv_cache_release=False`:
-  `model` must NOT be passed to `get_context_window()`.
+  release path is not enabled.
 
 Does NOT cover:
-full invoke flow, actual KVCacheManager.release() behavior, or processor logic
-(those are in test_kv_cache_manager.py and test_inference_affinity_kv_cache_release_with_processors.py).
+full invoke flow or processor logic.
 """
 
 from __future__ import annotations
@@ -27,8 +26,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from openjiuwen.core.context_engine.base import ContextWindow
+from openjiuwen.core.context_engine.base import ContextWindow, ContextWindowChange
 from openjiuwen.core.foundation.llm import AssistantMessage
+from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
@@ -38,7 +38,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 pytestmark = pytest.mark.asyncio
 
-_WARNING_SUBSTR = "ContextEngineConfig.enable_kv_cache_release is True"
+_WARNING_SUBSTR = "KVCacheAffinityConfig.enable_kv_cache_release is True"
 _KV_NOT_TAKE_EFFECT_SUBSTR = "KV cache release will not take effect."
 
 
@@ -70,7 +70,7 @@ async def test_kv_release_warning_once_when_not_supported_and_enabled(caplog, pr
         verify_ssl=False,
     )
     config.configure_context_engine(max_context_message_num=100)
-    config.context_engine_config.enable_kv_cache_release = True
+    config.configure_kv_cache_affinity(enable_kv_cache_release=True)
     card = AgentCard(name="test", id="test")
     agent = _TestableReActAgent(card=card)
     agent.configure(config)
@@ -84,6 +84,7 @@ async def test_kv_release_warning_once_when_not_supported_and_enabled(caplog, pr
     model_context.get_context_window = AsyncMock(
         return_value=ContextWindow(system_messages=[], context_messages=[], tools=[])
     )
+    model_context.detect_context_window_change = MagicMock(return_value=None)
 
     fake_llm = MagicMock()
     fake_llm.supports_kv_cache_release = MagicMock(return_value=False)
@@ -123,6 +124,7 @@ async def test_kv_release_warning_again_after_switch_provider(caplog):
     model_context.get_context_window = AsyncMock(
         return_value=ContextWindow(system_messages=[], context_messages=[], tools=[])
     )
+    model_context.detect_context_window_change = MagicMock(return_value=None)
     ctx.context = model_context
 
     fake_llm = MagicMock()
@@ -142,7 +144,7 @@ async def test_kv_release_warning_again_after_switch_provider(caplog):
         verify_ssl=False,
     )
     config_openai.configure_context_engine(max_context_message_num=100)
-    config_openai.context_engine_config.enable_kv_cache_release = True
+    config_openai.configure_kv_cache_affinity(enable_kv_cache_release=True)
     agent.configure(config_openai)
     agent.set_llm(fake_llm)
     await agent.call_model_for_test(ctx=ctx, context=model_context)
@@ -161,7 +163,7 @@ async def test_kv_release_warning_again_after_switch_provider(caplog):
         verify_ssl=False,
     )
     config_sf.configure_context_engine(max_context_message_num=100)
-    config_sf.context_engine_config.enable_kv_cache_release = True
+    config_sf.configure_kv_cache_affinity(enable_kv_cache_release=True)
     agent.configure(config_sf)
     agent.set_llm(fake_llm)
     caplog.clear()
@@ -186,7 +188,7 @@ async def test_kv_release_no_warning_when_release_disabled(caplog):
         verify_ssl=False,
     )
     config.configure_context_engine(max_context_message_num=100)
-    config.context_engine_config.enable_kv_cache_release = False
+    config.configure_kv_cache_affinity(enable_kv_cache_release=False)
     card = AgentCard(name="test", id="test")
     agent = _TestableReActAgent(card=card)
     agent.configure(config)
@@ -200,6 +202,7 @@ async def test_kv_release_no_warning_when_release_disabled(caplog):
     model_context.get_context_window = AsyncMock(
         return_value=ContextWindow(system_messages=[], context_messages=[], tools=[])
     )
+    model_context.detect_context_window_change = MagicMock(return_value=None)
     ctx.context = model_context
     fake_llm = MagicMock()
     fake_llm.supports_kv_cache_release = MagicMock(return_value=False)
@@ -214,10 +217,10 @@ async def test_kv_release_no_warning_when_release_disabled(caplog):
 
 
 @pytest.mark.asyncio
-async def test_kv_release_model_passed_when_inference_affinity_and_enabled(caplog):
+async def test_kv_release_model_not_passed_to_context_when_inference_affinity_and_enabled(caplog):
     """
     When enable_kv_cache_release=True and llm is InferenceAffinity,
-    get_context_window receives model=llm and invoke receives session/cache flags.
+    ReActAgent keeps model out of ContextWindow construction and invoke receives session/cache flags.
     """
     from openjiuwen.core.foundation.llm.inference_affinity_model import InferenceAffinityModel
 
@@ -230,7 +233,7 @@ async def test_kv_release_model_passed_when_inference_affinity_and_enabled(caplo
         verify_ssl=False,
     )
     config.configure_context_engine(max_context_message_num=100)
-    config.context_engine_config.enable_kv_cache_release = True
+    config.configure_kv_cache_affinity(enable_kv_cache_release=True)
 
     agent = _TestableReActAgent(card=AgentCard(name="test", id="test"))
     agent.configure(config)
@@ -256,6 +259,7 @@ async def test_kv_release_model_passed_when_inference_affinity_and_enabled(caplo
     mock_model_context = MagicMock()
     mock_model_context.get_messages = MagicMock(return_value=[])
     mock_model_context.get_context_window = AsyncMock(return_value=mock_window)
+    mock_model_context.detect_context_window_change = MagicMock(return_value=None)
     ctx.context = mock_model_context
 
     caplog.set_level(logging.WARNING)
@@ -263,9 +267,8 @@ async def test_kv_release_model_passed_when_inference_affinity_and_enabled(caplo
     await agent.call_model_for_test(ctx=ctx, context=mock_model_context)
 
     call_kwargs = mock_model_context.get_context_window.call_args.kwargs
-    assert call_kwargs["model"] is affinity_llm, (
-        "When enable_kv_cache_release=True and llm is InferenceAffinity, "
-        "model must be passed to get_context_window"
+    assert "model" not in call_kwargs, (
+        "ContextWindow construction must not receive model; ReActAgent owns KV release management"
     )
 
     llm_kwargs = affinity_llm.invoke.call_args.kwargs
@@ -277,3 +280,59 @@ async def test_kv_release_model_passed_when_inference_affinity_and_enabled(caplo
     assert len(warnings) == 0, (
         f"Did not expect KV-cache-release warning for InferenceAffinity, got: {[r.message for r in caplog.records]}"
     )
+
+
+@pytest.mark.asyncio
+async def test_kv_release_called_by_react_agent_when_context_window_changes():
+    config = ReActAgentConfig()
+    config.configure_model_client(
+        provider="InferenceAffinity",
+        api_key="dummy-key",
+        api_base="http://test:8111",
+        model_name="test-model",
+        verify_ssl=False,
+    )
+    config.configure_context_engine(max_context_message_num=100)
+    config.configure_kv_cache_affinity(enable_kv_cache_release=True)
+
+    agent = _TestableReActAgent(card=AgentCard(name="test", id="test"))
+    agent.configure(config)
+
+    fake_llm = MagicMock()
+    fake_llm.supports_kv_cache_release = MagicMock(return_value=True)
+    fake_llm.supports_kv_cache_affinity = MagicMock(return_value=False)
+    fake_llm.build_kv_cache_invoke_kwargs = MagicMock(
+        return_value={"session_id": "sess-1", "enable_cache_sharing": True}
+    )
+    fake_llm.release = AsyncMock(return_value=True)
+    fake_llm.invoke = AsyncMock(return_value=AssistantMessage(content="ok"))
+    agent.set_llm(fake_llm)
+
+    session = MagicMock(spec=Session)
+    session.get_session_id = MagicMock(return_value="sess-1")
+    ctx = AgentCallbackContext(agent=agent, session=session, inputs={}, extra={})
+
+    old_messages = [UserMessage(content="old"), UserMessage(content="removed")]
+    mock_window = ContextWindow(system_messages=[], context_messages=[UserMessage(content="old")], tools=[])
+    mock_model_context = MagicMock()
+    mock_model_context.get_messages = MagicMock(return_value=[])
+    mock_model_context.get_context_window = AsyncMock(return_value=mock_window)
+    mock_model_context.detect_context_window_change = MagicMock(
+        return_value=ContextWindowChange(
+            old_messages=old_messages,
+            old_tools=[],
+            msg_start=1,
+            tools_start=None,
+        )
+    )
+    ctx.context = mock_model_context
+
+    await agent.call_model_for_test(ctx=ctx, context=mock_model_context)
+
+    fake_llm.release.assert_awaited_once_with(
+        session_id="sess-1",
+        messages=old_messages,
+        messages_released_index=1,
+        model="test-model",
+    )
+    fake_llm.invoke.assert_awaited_once()

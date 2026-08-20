@@ -140,6 +140,8 @@ def test_agent_session_schema_turn_mounts_and_unmounts_tool(monkeypatch):
     assert isinstance(res.structured, dict)
     assert res.structured["echo"].startswith("structured please")
     assert "structured_output" in res.structured["echo"]  # the nudge was appended
+    # Natural-language round output wins over JSON dump of the capture.
+    assert res.text.startswith("echo:structured please")
     h = harnesses[0]
     # The tool was removed at turn end (mounted only for the schema turn).
     assert h.removed == ["structured_output"] and h.tools == []

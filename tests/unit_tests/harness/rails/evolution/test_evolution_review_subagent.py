@@ -33,13 +33,13 @@ def test_build_evolution_review_agent_config_is_stable_and_restricted():
     assert config.mcps == []
     assert config.skills is None
     assert config.rails == []
-    assert config.max_iterations == 10
+    assert config.max_iterations == 25
     tool_names = [tool.card.name for tool in config.tools]
     assert tool_names == [
         "list_skill_experiences",
         "read_skill_experiences",
-        "list_trajectory_steps",
-        "read_trajectory_steps",
+        "list_trajectory_spans",
+        "read_trajectory_spans",
         "submit_evolution_review",
     ]
     assert "evolve_skill_experiences" not in tool_names
@@ -70,6 +70,16 @@ def test_build_evolution_review_agent_config_accepts_custom_max_iterations():
     )
 
     assert config.max_iterations == 18
+
+
+def test_build_evolution_review_agent_config_disables_image_modality_probe():
+    config = build_evolution_review_agent_config(
+        runtime=EvolutionReviewRuntime(),
+        query_service=DummyQueryService(),
+        model=None,
+    )
+
+    assert config.enable_read_image_multimodal is False
 
 
 def test_build_evolution_review_agent_prompt_supports_cn_and_en():

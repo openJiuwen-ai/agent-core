@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import pathlib
 import time
 from dataclasses import dataclass
 from typing import (
@@ -125,8 +124,8 @@ class PowerShellTool(Tool):
         )
 
     def _build_history_path(self, session: Any) -> str:
-        from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
-        base_dir = get_workspace() or str(pathlib.Path(get_cwd()).expanduser().resolve())
+        from openjiuwen.core.sys_operation.cwd import get_agent_history_root
+        base_dir = get_agent_history_root()
         return os.path.join(
             base_dir, ".agent_history",
             f"file_ops_{self._agent_id}_{session.get_session_id()}.json",
@@ -185,6 +184,7 @@ class PowerShellTool(Tool):
             if res.data is not None:
                 partial = render_partial_on_failure(
                     CommandOutput(
+                        command=p.command,
                         stdout=res.data.stdout or "",
                         stderr=res.data.stderr or "",
                         exit_code=res.data.exit_code if res.data.exit_code is not None else -1,
@@ -209,6 +209,7 @@ class PowerShellTool(Tool):
 
         content, is_error = render_tool_content(
             CommandOutput(
+                command=p.command,
                 stdout=stdout,
                 stderr=stderr,
                 exit_code=exit_code,
@@ -301,6 +302,7 @@ class PowerShellTool(Tool):
 
         content, is_error = render_tool_content(
             CommandOutput(
+                command=p.command,
                 stdout=accumulated_stdout,
                 stderr=accumulated_stderr,
                 exit_code=final_exit_code,

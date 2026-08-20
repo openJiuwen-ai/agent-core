@@ -1,24 +1,41 @@
-# openjiuwen.core.context_engine.processor.offloader.message_summary_offloader
+# openjiuwen.core.context_engine.processor.forked.offloader.message_offloader
 
-## class openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.MessageSummaryOffloaderConfig
+> **Migration note**: This page documents the implementation used by the default
+> processor chain. The same-named class under the old module path
+> `openjiuwen.core.context_engine.processor.offloader.message_summary_offloader`
+> still exists, but its configuration fields and behavior differ (the old
+> implementation summarizes via an LLM before offloading, using fields such as
+> `large_message_threshold` and `offload_message_type`), and the two are not
+> interchangeable. When migrating from the old version, import from the module
+> path shown on this page and reconfigure with the new
+> `MessageSummaryOffloaderConfig` fields.
 
-Configuration class for `MessageSummaryOffloader`. For each newly added eligible message whose size exceeds `large_message_threshold`, generates a summary via LLM before offloading, preserving more semantics compared to [MessageOffloader](./message_offloader.md).
+## class openjiuwen.core.context_engine.processor.forked.offloader.message_offloader.MessageSummaryOffloaderConfig
 
-* **large_message_threshold** (int, optional): Messages with token count exceeding this value are considered "large messages" and can be offloaded. Default value: `1000`.
-* **offload_message_type** (list[Literal["user", "assistant", "tool"]], optional): List of message roles that can be offloaded. Default value: `["tool"]`.
-* **model** (ModelRequestConfig | None, optional): Model request configuration for performing summarization. Default value: `None`.
-* **model_client** (ModelClientConfig | None, optional): Model service configuration for performing summarization. Default value: `None`.
-* **customized_summary_prompt** (str | None, optional): Custom summary prompt; uses built-in prompt when `None`. Default value: `None`.
+Configuration class for `MessageSummaryOffloader`. This processor does not rely on an LLM: when a tool message is too large, it first applies built-in rule-based compression, then offloads the original content to the filesystem, keeping only a head/tail preview plus an `[[OFFLOAD: ...]]` placeholder in the context; the original content can be retrieved later via the handle/path in the placeholder.
 
-**Constraints**: `model` and `model_client` must be configured when performing summarization.
+* **add_message_threshold_ratio** (float, optional): When adding messages, a single tool message whose token count exceeds context capacity × this ratio is processed. Default value: `0.1`.
+* **ttl_seconds** (int, optional): TTL processing becomes eligible only after this many seconds have passed since the last context-window request; `0` disables TTL processing. Default value: `300`.
+* **ttl_context_occupancy_ratio** (float, optional): TTL processing becomes eligible only when the context token occupancy reaches context capacity × this ratio. Default value: `0.5`.
+* **ttl_message_threshold_ratio** (float, optional): During TTL processing, a single historical tool message whose token count exceeds context capacity × this ratio is processed. Default value: `0.05`.
+* **protected_tool_names** (list[str], optional): Tools whose results are always kept inline and never compressed or offloaded; each entry is either `"tool_name"` or `"tool_name:argument-glob-pattern"`. Default value: `["read_file"]`.
+* **enable_debug_dump** (bool, optional): Whether to persist rule-compression and offload debug records to disk. Default value: `False`.
+* **debug_dump_dir** (str | None, optional): Directory for debug records, supporting `{session_id}` and `{context_id}` placeholders; uses the default directory when `None`. Default value: `None`.
 
-## class openjiuwen.core.context_engine.processor.offloader.message_summary_offloader.MessageSummaryOffloader
+**Constraints**: Offloaded files are written under `{workspace}/context/{session_id}_context/offload/` by default; when the context is not associated with a workspace, offloading does not take effect and messages are kept as-is.
+
+## class openjiuwen.core.context_engine.processor.forked.offloader.message_offloader.MessageSummaryOffloader
 
 ```python
 MessageSummaryOffloader(config: MessageSummaryOffloaderConfig)
 ```
 
-`MessageSummaryOffloader` inherits from [MessageOffloader](./message_offloader.md#class-openjiuwencorecontext_engineprocessoroffloadermessage_offloadermessageoffloader), generating a 2–4 sentence summary via LLM for large messages before offloading, then replacing the original text with summary + placeholder. Interface is consistent with the base class, see [MessageOffloader](./message_offloader.md#class-openjiuwencorecontext_engineprocessoroffloadermessage_offloadermessageoffloader).
+`MessageSummaryOffloader` inherits from [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor) and intervenes at two points:
+
+1. Adding messages (`on_add_messages`): newly added tool messages exceeding `add_message_threshold_ratio` are rule-compressed and offloaded;
+2. Materializing the context window (`on_get_context_window`): once the context has been idle for more than `ttl_seconds` and its occupancy reaches `ttl_context_occupancy_ratio`, historical tool messages exceeding `ttl_message_threshold_ratio` are processed the same way.
+
+Interface is consistent with the base class, see [ContextProcessor](base.md#class-openjiuwencorecontext_engineprocessorbasecontextprocessor).
 
 **Parameters**:
 
@@ -27,10 +44,10 @@ MessageSummaryOffloader(config: MessageSummaryOffloaderConfig)
 **Example**:
 
 ```python
->>> import os
 >>> import asyncio
 >>> from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig
->>> from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
+>>> from openjiuwen.core.context_engine.processor import forked
+>>> from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
 ...     MessageSummaryOffloader,
 ...     MessageSummaryOffloaderConfig,
 ... )
@@ -38,28 +55,14 @@ MessageSummaryOffloader(config: MessageSummaryOffloaderConfig)
 ...     UserMessage,
 ...     AssistantMessage,
 ...     ToolMessage,
-...     ModelRequestConfig,
-...     ModelClientConfig,
 ... )
 >>>
->>> API_BASE = os.getenv("API_BASE", "your api base")
->>> API_KEY = os.getenv("API_KEY", "your api key")
->>> MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
->>> MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "OpenAI")
->>>
 >>> async def main():
-...     model_config = ModelRequestConfig(model=MODEL_NAME)
-...     model_client_config = ModelClientConfig(
-...         client_provider=MODEL_PROVIDER,
-...         api_base=API_BASE,
-...         api_key=API_KEY,
-...     )
 ...     offloader_config = MessageSummaryOffloaderConfig(
-...         large_message_threshold=50,
-...         offload_message_type=["tool"],
-...         model=model_config,
-...         model_client=model_client_config,
+...         add_message_threshold_ratio=0.1,
+...         protected_tool_names=["read_file"],
 ...     )
+...     forked.activate()  # register the processors so they can be referenced by name
 ...     engine_config = ContextEngineConfig(default_window_message_num=100)
 ...     engine = ContextEngine(engine_config)
 ...     ctx = await engine.create_context(
@@ -71,18 +74,17 @@ MessageSummaryOffloader(config: MessageSummaryOffloaderConfig)
 ...     await ctx.add_messages([
 ...         UserMessage(content="Call tool to query data"),
 ...         AssistantMessage(content="", tool_calls=[{"id": "1", "name": "query", "type": "function", "arguments": "{}"}]),
-...         ToolMessage(
-...             content="Query result: Q1 2024 revenue increased 15% year-over-year, net profit was 120 million yuan, mainly from cloud services. "
-...             + "Detailed data includes: cloud service revenue accounted for 60%, enterprise customer renewal rate increased to 92%.",
-...             tool_call_id="1",
-...         ),
-...         UserMessage(content="Continue"),
+...         ToolMessage(content="Query result: revenue increased 15%", tool_call_id="1"),
 ...     ])
-...     msgs = ctx.get_messages()
-...     tool_msg = next(m for m in msgs if m.role == "tool")
-...     assert "[[OFFLOAD:" in tool_msg.content
-...     return len(msgs)
+...     # Below add_message_threshold_ratio, no offload happens
+...     return len(ctx.get_messages())
 >>>
 >>> asyncio.run(main())
 3
 ```
+
+> The example output `3` is the original message count when offload does not
+> trigger. When a tool message exceeds `add_message_threshold_ratio`, it is
+> rule-compressed and offloaded to the filesystem, replaced in the context by a
+> head/tail preview plus an `[[OFFLOAD: ...]]` placeholder (message count stays
+> the same, content gets shorter).

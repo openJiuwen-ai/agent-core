@@ -75,7 +75,7 @@ class ExternalTeamEvent:
     event: EventMessage
 
     def to_wire(self) -> dict[str, Any]:
-        """Return the JSON-safe payload carried by a normal ``chat.send`` request."""
+        """Return the JSON-safe payload carried by ``team.mq.publish``."""
         return {
             "type": _EXTERNAL_TEAM_EVENT_TYPE,
             "topic": self.topic.value,

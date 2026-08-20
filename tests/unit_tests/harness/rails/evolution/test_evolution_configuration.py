@@ -24,6 +24,10 @@ from openjiuwen.harness.rails import (
     configure_skill_evolution_runtime as exported_configure_runtime,
     unconfigure_skill_evolution as exported_unconfigure,
 )
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+
+
+_PROCESSOR = TrajectorySpanProcessor()
 
 
 def _skills_dir(tmp_path) -> str:
@@ -53,6 +57,7 @@ def test_configure_skill_evolution_regular_adds_rails_in_order(tmp_path):
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         team=False,
         auto_save=True,
         language="en",
@@ -71,6 +76,7 @@ def test_configure_skill_evolution_regular_adds_rails_in_order(tmp_path):
     assert len(skill_rails) == 1
     assert skill_rails[0].auto_save is True
     assert skill_rails[0]._language == "en"
+    assert skill_rails[0].trajectory_span_processor is _PROCESSOR
 
     assert agent.add_rail.call_count == 2
     assert [type(call.args[0]) for call in agent.add_rail.call_args_list] == [
@@ -88,6 +94,7 @@ def test_configure_skill_evolution_team_adds_team_evolution_rail(tmp_path):
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         team=True,
         auto_save=True,
         language="en",
@@ -109,6 +116,7 @@ def test_configure_skill_evolution_team_adds_team_evolution_rail(tmp_path):
         EvolutionInterruptRail,
         TeamSkillEvolutionRail,
     ]
+    assert team_rails[0].trajectory_span_processor is _PROCESSOR
 
 
 def test_configure_does_not_add_subagent_rail_when_already_present(tmp_path):
@@ -119,6 +127,7 @@ def test_configure_does_not_add_subagent_rail_when_already_present(tmp_path):
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
     )
 
     subagent_calls = [call.args[0] for call in agent.add_rail.call_args_list if isinstance(call.args[0], SubagentRail)]
@@ -239,6 +248,7 @@ def test_configure_twice_regular_is_idempotent(tmp_path):
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
     )
     interrupt_rail = EvolutionInterruptRail(
@@ -262,6 +272,7 @@ def test_configure_twice_regular_is_idempotent(tmp_path):
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         team=False,
         review_runtime=runtime,
     )
@@ -277,6 +288,7 @@ def test_configure_twice_team_is_idempotent(tmp_path):
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
     )
     interrupt_rail = EvolutionInterruptRail(
@@ -300,6 +312,7 @@ def test_configure_twice_team_is_idempotent(tmp_path):
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         team=True,
         review_runtime=runtime,
     )
@@ -313,6 +326,7 @@ def test_configure_regular_config_mismatch_fails(tmp_path):
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=EvolutionReviewRuntime(),
         auto_save=False,
         language="cn",
@@ -331,9 +345,101 @@ def test_configure_regular_config_mismatch_fails(tmp_path):
             skills_dir=_skills_dir(tmp_path),
             llm=_mock_llm(),
             model="dummy-model",
+            trajectory_span_processor=_PROCESSOR,
             team=False,
             review_runtime=evolution_rail._review_runtime,
             auto_save=True,  # different from existing (False)
+        )
+
+
+def test_configure_reuse_requires_same_processor_identity(tmp_path):
+    runtime = EvolutionReviewRuntime()
+    evolution_rail = SkillEvolutionRail(
+        _skills_dir(tmp_path),
+        llm=_mock_llm(),
+        model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
+        review_runtime=runtime,
+    )
+
+    def _finder(types):
+        if SkillEvolutionRail in types:
+            return [evolution_rail]
+        return []
+
+    agent = _typed_agent(find_rails_by_type=_finder)
+
+    with pytest.raises(RuntimeError, match="trajectory_span_processor"):
+        configure_skill_evolution(
+            agent,
+            skills_dir=_skills_dir(tmp_path),
+            llm=_mock_llm(),
+            model="dummy-model",
+            trajectory_span_processor=TrajectorySpanProcessor(),
+            team=False,
+            review_runtime=runtime,
+        )
+
+
+def test_configure_regular_trigger_config_mismatch_fails(tmp_path):
+    evolution_rail = SkillEvolutionRail(
+        _skills_dir(tmp_path),
+        llm=_mock_llm(),
+        model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
+        review_runtime=EvolutionReviewRuntime(),
+        signal_trigger=False,
+        review_trigger=False,
+    )
+
+    def _finder(types):
+        if SkillEvolutionRail in types:
+            return [evolution_rail]
+        return []
+
+    agent = _typed_agent(find_rails_by_type=_finder)
+
+    with pytest.raises(RuntimeError, match="signal_trigger"):
+        configure_skill_evolution(
+            agent,
+            skills_dir=_skills_dir(tmp_path),
+            llm=_mock_llm(),
+            model="dummy-model",
+            trajectory_span_processor=_PROCESSOR,
+            team=False,
+            review_runtime=evolution_rail._review_runtime,
+            signal_trigger=True,
+        )
+
+
+def test_configure_team_review_trigger_config_mismatch_fails(tmp_path):
+    evolution_rail = TeamSkillEvolutionRail(
+        _skills_dir(tmp_path),
+        llm=_mock_llm(),
+        model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
+        review_runtime=EvolutionReviewRuntime(),
+        signal_trigger=False,
+        review_trigger=False,
+    )
+
+    def _finder(types):
+        if TeamSkillEvolutionRail in types:
+            return [evolution_rail]
+        return []
+
+    agent = _typed_agent(find_rails_by_type=_finder)
+
+    with pytest.raises(RuntimeError, match="review_trigger"):
+        configure_skill_evolution(
+            agent,
+            skills_dir=_skills_dir(tmp_path),
+            llm=_mock_llm(),
+            model="dummy-model",
+            trajectory_span_processor=_PROCESSOR,
+            team=True,
+            review_runtime=evolution_rail._review_runtime,
+            review_trigger=True,
         )
 
 
@@ -342,12 +448,14 @@ def test_configure_regular_then_team_fails(tmp_path):
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=EvolutionReviewRuntime(),
     )
     team_rail = TeamSkillEvolutionRail(
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=EvolutionReviewRuntime(),
     )
 
@@ -366,6 +474,7 @@ def test_configure_regular_then_team_fails(tmp_path):
             skills_dir=_skills_dir(tmp_path),
             llm=_mock_llm(),
             model="dummy-model",
+            trajectory_span_processor=_PROCESSOR,
             team=False,
             review_runtime=evolution_rail._review_runtime,
         )
@@ -376,12 +485,14 @@ def test_configure_team_then_regular_fails(tmp_path):
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=EvolutionReviewRuntime(),
     )
     team_rail = TeamSkillEvolutionRail(
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=EvolutionReviewRuntime(),
     )
 
@@ -400,6 +511,7 @@ def test_configure_team_then_regular_fails(tmp_path):
             skills_dir=_skills_dir(tmp_path),
             llm=_mock_llm(),
             model="dummy-model",
+            trajectory_span_processor=_PROCESSOR,
             team=True,
             review_runtime=team_rail._review_runtime,
         )
@@ -410,6 +522,7 @@ def test_configure_binds_unbound_interrupt_rail(tmp_path):
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=EvolutionReviewRuntime(),
     )
     # Create an unbound interrupt rail (no review_runtime set)
@@ -434,6 +547,7 @@ def test_configure_binds_unbound_interrupt_rail(tmp_path):
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         team=False,
         review_runtime=evolution_rail._review_runtime,
     )
@@ -458,6 +572,7 @@ def test_configure_fails_on_bound_interrupt_submission_mismatch(tmp_path):
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
     )
     interrupt_rail = EvolutionInterruptRail(
@@ -480,6 +595,7 @@ def test_configure_fails_on_bound_interrupt_submission_mismatch(tmp_path):
             skills_dir=_skills_dir(tmp_path),
             llm=_mock_llm(),
             model="dummy-model",
+            trajectory_span_processor=_PROCESSOR,
             team=False,
             review_runtime=runtime,
         )
@@ -492,6 +608,7 @@ def test_configure_ignores_existing_subagent_rail(tmp_path):
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=EvolutionReviewRuntime(),
     )
     interrupt_rail = EvolutionInterruptRail(
@@ -515,6 +632,7 @@ def test_configure_ignores_existing_subagent_rail(tmp_path):
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         team=False,
         review_runtime=evolution_rail._review_runtime,
     )
@@ -534,6 +652,7 @@ def test_first_configure_does_not_add_subagent_rail(tmp_path):
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         team=False,
     )
 
@@ -552,6 +671,7 @@ async def test_configure_skill_evolution_runtime_first_config_registers_new_rail
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
     )
 
@@ -576,6 +696,7 @@ async def test_configure_skill_evolution_runtime_team_config_registers_new_rails
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         team=True,
         review_runtime=runtime,
     )
@@ -618,6 +739,7 @@ async def test_configure_skill_evolution_runtime_second_consistent_config_does_n
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
     )
     agent.register_rail.reset_mock()
@@ -627,6 +749,7 @@ async def test_configure_skill_evolution_runtime_second_consistent_config_does_n
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
     )
 
@@ -644,6 +767,7 @@ async def test_configure_skill_evolution_runtime_reuses_existing_runtime_when_ru
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
     )
     agent.register_rail.reset_mock()
 
@@ -652,6 +776,7 @@ async def test_configure_skill_evolution_runtime_reuses_existing_runtime_when_ru
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
     )
 
     assert result is agent
@@ -666,6 +791,7 @@ async def test_configure_skill_evolution_runtime_binds_existing_unbound_interrup
         _skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
     )
     interrupt_rail = EvolutionInterruptRail(
@@ -679,6 +805,7 @@ async def test_configure_skill_evolution_runtime_binds_existing_unbound_interrup
         skills_dir=_skills_dir(tmp_path),
         llm=_mock_llm(),
         model="dummy-model",
+        trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
     )
 

@@ -18,7 +18,8 @@ free of any agent_teams import so it can be unit-tested in isolation with the
 from __future__ import annotations
 
 from .backends import SKIP, AgentBackend, AgentResult, MockBackend
-from .errors import LintError, MetaError, SchemaError, WorkflowError
+from .budget import BudgetLedger
+from .errors import BudgetExhausted, LintError, MetaError, SchemaError, WorkflowError
 from .journal import Journal
 from .loader import LoadedWorkflow, load_workflow_source
 from .primitives import (
@@ -78,6 +79,8 @@ __all__ = [
     "AgentResult",
     "MockBackend",
     "SKIP",
+    # budget
+    "BudgetLedger",
     # progress observability
     "PhasePlan",
     "ProgressKind",
@@ -89,4 +92,5 @@ __all__ = [
     "MetaError",
     "LintError",
     "SchemaError",
+    "BudgetExhausted",
 ]

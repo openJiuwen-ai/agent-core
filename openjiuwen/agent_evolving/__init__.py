@@ -8,7 +8,7 @@ Includes:
 - BaseEvaluator, DefaultEvaluator, MetricEvaluator: Evaluation interfaces
 - BaseOptimizer, TextualParameter, InstructionOptimizer: Optimization
 - Case, EvaluatedCase, CaseLoader: Dataset handling
-- Trajectory, TrajectoryStep: Execution trace types
+- Trajectory: Canonical execution trace model
 - SingleDimUpdater, MultiDimUpdater: Update generation
 - Checkpointing: State persistence
 - Signal: Evolution signal detection and conversion
@@ -50,13 +50,7 @@ from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimi
 from openjiuwen.agent_evolving.trainer import Trainer, Progress, Callbacks
 
 # trajectory
-from openjiuwen.agent_evolving.trajectory import (
-    Trajectory,
-    TrajectoryStep,
-    UpdateKey,
-    Updates,
-    TracerTrajectoryExtractor,
-)
+from openjiuwen.agent_evolving.trajectory import Trajectory
 
 # updater
 from openjiuwen.agent_evolving.updater import Updater, SingleDimUpdater, MultiDimUpdater
@@ -80,65 +74,46 @@ from openjiuwen.agent_evolving.signal import (
     EvolutionSignal,
     EvolutionCategory,
     EvolutionTarget,
+    REVIEW_FEEDBACK_SIGNAL,
+    REVIEW_FEEDBACK_SOURCE,
+    ReviewFeedbackAction,
+    ReviewFeedbackAttribution,
+    ReviewFeedbackAttributor,
+    ReviewFeedbackClassification,
+    ReviewFeedbackContext,
+    ReviewFeedbackContextBuilder,
+    attribution_to_evolution_signal,
     make_signal_fingerprint,
     from_evaluated_case,
     from_evaluated_cases,
 )
 
-_CONSTANTS = [
+__all__ = [
     "TuneConstant",
-]
-
-_CHECKPOINTING = [
     "EvolveCheckpoint",
     "FileCheckpointStore",
     "DefaultCheckpointManager",
     "CheckpointManager",
-]
-
-_DATASET = [
     "Case",
     "EvaluatedCase",
     "CaseLoader",
-]
-
-_EVALUATOR = [
     "BaseEvaluator",
     "DefaultEvaluator",
     "MetricEvaluator",
     "Metric",
     "ExactMatchMetric",
     "LLMAsJudgeMetric",
-]
-
-_OPTIMIZER = [
     "BaseOptimizer",
     "TextualParameter",
     "InstructionOptimizer",
     "SkillExperienceOptimizer",
-]
-
-_TRAINER = [
     "Trainer",
     "Progress",
     "Callbacks",
-]
-
-_TRAJECTORY = [
     "Trajectory",
-    "TrajectoryStep",
-    "UpdateKey",
-    "Updates",
-    "TracerTrajectoryExtractor",
-]
-
-_UPDATER = [
     "Updater",
     "SingleDimUpdater",
     "MultiDimUpdater",
-]
-
-_AGENT_RL = [
     "RLConfig",
     "OfflineRLOptimizer",
     "OnlineRLOptimizer",
@@ -147,28 +122,21 @@ _AGENT_RL = [
     "Rollout",
     "RolloutMessage",
     "RolloutWithReward",
-]
-
-_SIGNAL = [
     "ConversationSignalDetector",
     "SignalDetector",
     "EvolutionSignal",
     "EvolutionCategory",
     "EvolutionTarget",
+    "REVIEW_FEEDBACK_SIGNAL",
+    "REVIEW_FEEDBACK_SOURCE",
+    "ReviewFeedbackAction",
+    "ReviewFeedbackAttribution",
+    "ReviewFeedbackAttributor",
+    "ReviewFeedbackClassification",
+    "ReviewFeedbackContext",
+    "ReviewFeedbackContextBuilder",
+    "attribution_to_evolution_signal",
     "make_signal_fingerprint",
     "from_evaluated_case",
     "from_evaluated_cases",
 ]
-
-__all__ = (
-    _CONSTANTS
-    + _CHECKPOINTING
-    + _DATASET
-    + _EVALUATOR
-    + _OPTIMIZER
-    + _TRAINER
-    + _TRAJECTORY
-    + _UPDATER
-    + _AGENT_RL
-    + _SIGNAL
-)

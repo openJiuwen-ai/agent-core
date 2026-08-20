@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
@@ -89,11 +90,12 @@ async def build_configs_async(
     configs: list[ScopedLspServerConfig] = []
 
     for server_id, server_def in BUILTIN_SERVERS.items():
-        spawn_result = server_def.spawn(cwd)
-        if asyncio.iscoroutine(spawn_result):
-            spawn_handle = await spawn_result
+        if asyncio.iscoroutinefunction(server_def.spawn):
+            spawn_handle = await server_def.spawn(cwd)
         else:
-            spawn_handle = spawn_result
+            spawn_handle = await asyncio.to_thread(server_def.spawn, cwd)
+            if inspect.isawaitable(spawn_handle):
+                spawn_handle = await spawn_handle
 
         if spawn_handle is None:
             # Server binary not found — keep placeholder config

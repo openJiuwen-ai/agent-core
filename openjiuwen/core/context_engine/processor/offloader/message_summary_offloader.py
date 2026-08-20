@@ -23,16 +23,16 @@ from openjiuwen.core.context_engine.processor.budget_guard import (
 )
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 
-# Keywords used to detect "context overflow" errors from LLM responses
-# Different providers use different error formats, so we use string matching for unified detection
-# Examples: OpenAI says "maximum context length", Anthropic says "prompt is too long"
+# Kept for compatibility with callers that imported the old keyword list.
+# Actual matching is centralized in ContextEngine so wrapped provider errors
+# are handled consistently by active recovery and offloader fallback paths.
 CONTEXT_OVERFLOW_KEYWORDS = (
-    "context length",  # Context length (common in OpenAI/Azure)
-    "token limit",  # Token limit
-    "too long",  # Too long (common in Anthropic)
-    "exceeds",  # Exceeds
-    "maximum context",  # Maximum context
-    "context window",  # Context window (common in local models)
+    "context length",
+    "token limit",
+    "too long",
+    "exceeds",
+    "maximum context",
+    "context window",
 )
 
 TRUNCATED_MARKER = "...[TRUNCATED]..."
@@ -811,22 +811,8 @@ class MessageSummaryOffloader(MessageOffloader):
         return result
 
     def _is_context_overflow_error(self, exc: Exception) -> bool:
-        """Detect if an exception is caused by LLM context overflow.
-
-        Different model providers report this error differently (some throw exceptions,
-        some return HTTP errors, some return error messages directly). We use
-        "keyword containment in string" approach for detection. While not precise,
-        it covers the vast majority of real-world scenarios.
-
-        Args:
-            exc: The caught exception.
-
-        Returns:
-            True - Likely a context overflow error, should attempt fallback retry.
-            False - Other types of errors, should be raised directly.
-        """
-        error_message = str(exc).lower()
-        return any(keyword in error_message for keyword in CONTEXT_OVERFLOW_KEYWORDS)
+        """Detect a provider context overflow using the shared matcher."""
+        return ContextEngine.is_context_overflow_error(exc)
 
     def _validate_config(self):
         """Skip truncation-specific parent validation."""

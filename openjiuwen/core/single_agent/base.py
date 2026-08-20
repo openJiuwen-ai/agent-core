@@ -37,6 +37,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
     AnyAgentCallback,
+    init_rail,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutput
@@ -178,7 +179,7 @@ class BaseAgent(metaclass=_AgentMeta):
         Args:
             event: agent callback event type
             callback: Callback function (sync or async)
-            priority: Execution priority (lower = runs first)
+            priority: Execution priority (higher = runs first)
 
         Returns:
             self for chaining
@@ -195,7 +196,7 @@ class BaseAgent(metaclass=_AgentMeta):
         Returns:
             self for chaining
         """
-        rail.init(self)
+        init_rail(rail, self)
         await self._agent_callback_manager.register_rail(rail, self)
         return self
 

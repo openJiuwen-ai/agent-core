@@ -25,11 +25,14 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
+from openjiuwen.agent_teams.paths import SKILL_VISIBILITY_FILENAME
 from openjiuwen.agent_teams.schema.events import (
     BaseEventMessage,
     WorkspaceLockRequestEvent,
     WorkspaceLockResponseEvent,
 )
+from openjiuwen.agent_teams.skill.file_lock import lock_path_for
+from openjiuwen.agent_teams.skill.visibility import SCOPE_TEAM, bootstrap_skill_visibility
 from openjiuwen.agent_teams.team_workspace.models import (
     TeamWorkspaceConfig,
     WorkspaceFileLock,
@@ -44,6 +47,16 @@ except ImportError:  # pragma: no cover - unavailable outside Windows
     ERROR_PRIVILEGE_NOT_HELD = 1314
 else:
     ERROR_PRIVILEGE_NOT_HELD = winerror.ERROR_PRIVILEGE_NOT_HELD
+
+# Workspace-managed files a stale mount directory must never hand back to the
+# canonical workspace: the Skill visibility declaration is authority state, not
+# a user artifact, and its lock sidecar is meaningless outside its own directory.
+_MOUNT_MERGE_SKIP_NAMES = frozenset(
+    {
+        SKILL_VISIBILITY_FILENAME,
+        lock_path_for(SKILL_VISIBILITY_FILENAME).name,
+    }
+)
 
 
 class TeamWorkspaceManager:
@@ -88,11 +101,12 @@ class TeamWorkspaceManager:
     # ── Initialization ───────────────────────────────────────
 
     async def initialize(self, *, remote_url: str | None = None) -> None:
-        """Initialize workspace directory and git repo.
+        """Initialize workspace directory, Skill visibility metadata, and git repo.
 
-        When ``config.version_control`` is False, only the workspace and
-        artifact directories are created — no git repo, no remote, no
-        initial commit. The workspace behaves as a plain shared directory.
+        When ``config.version_control`` is False, only the workspace, the
+        artifact directories and the team Skill visibility declaration are
+        created — no git repo, no remote, no initial commit. The workspace
+        behaves as a plain shared directory.
 
         When ``config.version_control`` is True:
         - LOCAL mode: git init a fresh repo with an empty initial commit.
@@ -110,10 +124,7 @@ class TeamWorkspaceManager:
         for d in self.config.artifact_dirs:
             os.makedirs(os.path.join(self.workspace_path, d), exist_ok=True)
 
-        # Shared skills directory; each member agent's SkillUseRail picks
-        # this up via the ``.team/{team_name}`` mount so team-authored
-        # skills are visible everywhere.
-        os.makedirs(os.path.join(self.workspace_path, "skills"), exist_ok=True)
+        self._seed_team_skill_visibility()
 
         if not self.config.version_control:
             team_logger.info(
@@ -156,6 +167,44 @@ class TeamWorkspaceManager:
                 )
                 team_logger.info("Added remote origin %s", remote_url)
 
+    def _seed_team_skill_visibility(self) -> None:
+        """Create the team-wide Skill visibility declaration when it is missing.
+
+        The team workspace holds no ``skills/`` directory. Skills live in one
+        physical library and which of them the team may see is recorded in this
+        declaration at the workspace root. Seeding writes a fully permissive
+        document (an empty allow-list means "inherit the whole library") and
+        never overwrites an existing one, so an operator's grants survive every
+        restart.
+
+        This is the *only* seeder of the team-scope declaration. An embedder
+        (team assembly, a team lifecycle manager, a channel adapter) may resolve
+        this path and read it, but must not add a second writer: several writers
+        stay harmless only while every one of them seeds an empty allow-list,
+        and the moment one seeds a real grant the outcome starts depending on
+        call order, which is not a contract anywhere. Pre-granting belongs
+        either here or on the explicit authorization path
+        (``AUTHORITY_EXPLICIT``), which no seed can override.
+
+        A seeding failure is logged and swallowed: a missing declaration reads
+        back as "no restriction", which beats refusing to start the workspace.
+        """
+        visibility_path = os.path.join(self.workspace_path, SKILL_VISIBILITY_FILENAME)
+        try:
+            bootstrap_skill_visibility(
+                visibility_path,
+                scope=SCOPE_TEAM,
+                entity_id=self.team_name,
+                allow=None,
+                bootstrapped_from="team_workspace:initialize",
+            )
+        except OSError as exc:
+            team_logger.warning(
+                "Failed to seed team Skill visibility declaration at %s: %s",
+                visibility_path,
+                exc,
+            )
+
     # ── Workspace / worktree mount ─────────────────────────────
 
     def _mount_directory(self, target_path: str, link_path: str) -> None:
@@ -165,6 +214,11 @@ class TeamWorkspaceManager:
         symlinks. When that privilege is unavailable, fall back to a junction.
         On other restricted runtimes where symlink creation is forbidden, fall
         back to copying the directory so the mount remains usable.
+
+        The copy fallback is deliberately kept for shared team artifacts, which
+        must reach the agent even across a restricted-runtime boundary. It no
+        longer carries Skills: those live in one physical library and are never
+        distributed by mounting or copying a second view of them.
 
         Args:
             target_path: Existing directory to expose.
@@ -253,6 +307,11 @@ class TeamWorkspaceManager:
         tools write before the mount exists.  Merge missing files so user
         artifacts are not stranded before the directory is replaced by a mount.
         Existing canonical files win to avoid overwriting newer workspace data.
+
+        Only user artifacts are merged. The Skill visibility declaration and its
+        lock sidecar are workspace-managed authority state: a copy stranded in a
+        stale mount must never be promoted into the canonical workspace, or a
+        forgotten allow-list would silently become the team's grant set.
         """
         if not os.path.isdir(link_path) or os.path.islink(link_path):
             return
@@ -263,6 +322,8 @@ class TeamWorkspaceManager:
             for dirname in dirs:
                 os.makedirs(os.path.join(dst_root, dirname), exist_ok=True)
             for filename in files:
+                if rel_root == "." and filename in _MOUNT_MERGE_SKIP_NAMES:
+                    continue
                 src = os.path.join(root, filename)
                 dst = os.path.join(dst_root, filename)
                 if not os.path.exists(dst):

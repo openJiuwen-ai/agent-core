@@ -14,6 +14,14 @@ from openjiuwen.core.workflow import ComponentComposable, ComponentExecutable, W
 from openjiuwen.core.workflow.components import Session
 from openjiuwen.core.workflow.components.condition.condition import Condition
 
+# Pacing between emitted stream frames. These mocks stand in for components
+# that produce chunks over time; what the workflow tests assert on is the
+# chunks and their order, never how long a frame took, so this only needs to
+# be a real suspension point that lets the consumer interleave. ``SlowNode``
+# is deliberately not routed through here: its wait is chosen per test to
+# outlast a timeout under test.
+_FRAME_DELAY = 0.005
+
 
 class MockNodeBase(WorkflowComponent):
     def __init__(self, node_id: str = ''):
@@ -76,7 +84,7 @@ class StreamNode(MockNodeBase):
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         for data in self._datas:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_FRAME_DELAY)
             logger.info(f"StreamNode[{self._node_id}], stream frame: {data}")
             await session.write_custom_stream(data)
         logger.info(f"StreamNode[{self._node_id}], batch output: {inputs}")
@@ -358,20 +366,20 @@ class ComputeExecutor2(ComponentExecutable):
 
         inputs_a = inputs.get("a")
         if isinstance(inputs_a, list):
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_FRAME_DELAY)
             yield {'b': inputs.get("b")}
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_FRAME_DELAY)
             yield {'op': '+'}
             for a in inputs_a:
                 yield {'a': a}
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(_FRAME_DELAY)
                 yield {'result': int(a) + int(inputs.get("b"))}
         else:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_FRAME_DELAY)
             yield {'a': inputs_a}
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_FRAME_DELAY)
             yield {'op': '+'}
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(_FRAME_DELAY)
             yield {'b': inputs.get("b")}
             yield {'result': int(inputs_a) + int(inputs.get("b"))}
         logger.info(f"{exec_id} stream done")

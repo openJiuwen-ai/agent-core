@@ -49,6 +49,7 @@ from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
     ExternalCliAgentSpec,
     MemberOpResult,
+    MemberRosterEntry,
     TeamCompletionSnapshot,
     TeamMemberSpec,
     TeamRole,
@@ -69,12 +70,16 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 class CapabilityOverrides:
     """Runtime capability overrides for a single build_team call.
 
-    Both flags default to None, meaning "inherit the spec ceiling".
-    Pass True/False to explicitly enable or disable the capability for this run.
+    Flags default to None, meaning "inherit the spec ceiling". Pass
+    True/False to explicitly enable or disable the capability for this run.
+    The dispatch mode is NOT overridable here — it is static spec
+    configuration (F_62): prompts and tool shapes are assembled per mode at
+    build time, so one team instance never changes mode at runtime.
     """
 
     enable_hitt: bool | None = None
     enable_bridge: bool | None = None
+    enable_task_verification: bool | None = None
 
 
 class TeamBackend:
@@ -104,6 +109,9 @@ class TeamBackend:
         enable_hitt: bool = False,
         enable_bridge: bool = False,
         *,
+        dispatch_mode: str = "autonomous",
+        enable_task_verification: bool = False,
+        enable_fork: bool = False,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
@@ -111,6 +119,7 @@ class TeamBackend:
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
         leader_member_name: str | None = None,
+        leader_prompt: str = "",
     ):
         """Initialize agent team manager.
 
@@ -144,6 +153,20 @@ class TeamBackend:
                 When False, ``spawn_bridge_agent`` returns failure and
                 predefined BRIDGE_AGENT members are skipped at
                 ``build_team`` time.
+            dispatch_mode: The team's dispatch mode, straight from
+                ``TeamAgentSpec.dispatch_mode`` (F_62). Static configuration —
+                identical on every member process; selects ``verify_task``'s
+                verdict policy through the task manager.
+            enable_task_verification: Spec-level "verification expected"
+                ceiling (F_62); ``build_team`` may override the runtime
+                instance flag, mirroring ``enable_hitt``.
+            enable_fork: Spec-level context-inheritance capability gate
+                (``TeamAgentSpec.enable_fork``). When False the
+                ``checkpoint`` tool is not wired and ``spawn_teammate``
+                carries neither the fork properties nor the fork prose.
+                Unlike ``enable_hitt``, there is no ``build_team`` override:
+                fork is an execution-time optimization, not a team-shape
+                decision the leader gets to make per instance.
             external_cli_agents: Static launch configs for external CLI
                 agents (``TeamAgentSpec.external_cli_agents``). The
                 non-empty set of declared ``cli_agent`` names is the
@@ -165,17 +188,31 @@ class TeamBackend:
                 is deleted, before best-effort cleanup and event publishing.
             on_team_built: Optional async callback fired exactly once after
                 ``build_team`` creates the team row and initial members.
+            leader_prompt: The leader's private prompt (``LeaderSpec.prompt``
+                via ``ctx.prompt``). Persisted on the leader's DB row at
+                ``build_team`` so cold-recovery — which rebuilds the leader
+                context from the DB — restores the same private prompt. The
+                public ``leader_desc`` is supplied separately by the
+                ``build_team`` caller (LLM-filled tool arg).
         """
         self.team_name = team_name
         self.member_name = member_name
         self.is_leader = is_leader
         self.leader_member_name = str(leader_member_name or (member_name if is_leader else "")).strip()
+        # Lazily-resolved leader name for members that were not handed one at
+        # construction. The leader is fixed for a team's life, so the DB row is
+        # queried once and cached. See ``resolve_leader_member_name``.
+        self._leader_name_cache: str | None = None
         self.db = db
         self.messager = messager
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator
         self.leader_allocation = leader_allocation
+        # Leader's private prompt (LeaderSpec.prompt via ctx.prompt). Persisted
+        # on the leader's DB row at build_team so cold-recovery, which rebuilds
+        # the leader context from the DB, restores the same private prompt.
+        self._leader_prompt = leader_prompt
         # HITT capability ceiling (immutable, from spec) and the runtime
         # effective flag that ``build_team`` may downgrade. All human-agent
         # creation paths gate on ``_enable_hitt``; the spec ceiling is
@@ -189,6 +226,21 @@ class TeamBackend:
         # on the same flag for dynamic spawn.
         self._spec_enable_bridge: bool = enable_bridge
         self._enable_bridge: bool = enable_bridge
+        # Dispatch mode (F_62): static spec configuration, identical on every
+        # member process. Prompts and tool shapes are assembled per mode at
+        # build time; nothing flips it at runtime.
+        self.dispatch_mode: str = dispatch_mode
+        # Verification expectation (F_62): spec ceiling + runtime effective
+        # flag, mirroring the ``enable_hitt`` pattern.
+        self._spec_enable_task_verification: bool = enable_task_verification
+        self._enable_task_verification: bool = enable_task_verification
+        # True once build_team took over a team that already existed rather
+        # than creating one, so the tool result can say which it was.
+        self._team_taken_over: bool = False
+        # True when this run restored a conversation that already contains the
+        # build_team result -- a cold recovery. Set by
+        # ``TeamAgent.recover_from_session``; see ``rejects_rebuild``.
+        self._history_restored: bool = False
         # Fired once on the build_team / clean_team success paths so the
         # hosting TeamAgent can persist DB lifecycle state and latch
         # state.team_cleaned deterministically inside the leader's round.
@@ -204,6 +256,7 @@ class TeamBackend:
             plans_dir=plan_storage_dir,
             team_plan_id=plan_id,
             leader_member_name=self.leader_member_name,
+            dispatch_mode=dispatch_mode,
         )
         # Per-human-agent callback fired by the leader's dispatcher when
         # a team-side message reaches the avatar — see
@@ -228,13 +281,10 @@ class TeamBackend:
         # ``REMOTE_UNAVAILABLE_SENTINEL`` so the bridge degrades to a
         # normal teammate.
         self._bridge_adapters: dict[str, BridgeProtocolAdapter] = {}
-        # External-CLI member registry: member_name -> cli_agent adapter
-        # name. A member listed here is driven by a third-party CLI
-        # subprocess (ExternalCliRuntime) instead of a local DeepAgent.
-        # Consulted by ``SpawnManager.build_context_from_db`` to set
-        # ``ctx.cli_agent`` so the spawn path picks the external-CLI route.
-        # In-memory (per-process), mirroring the bridge spec registry; a
-        # cross-process cold recovery re-seeds from predefined declarations.
+        # External-CLI member registry: member_name -> cli_agent backend name.
+        # A member listed here is driven by an external backend instead of a
+        # local DeepAgent. Runtime recovery restores this process-local index
+        # from ``TeamMember.options["cli_agent"]``.
         self._external_cli_specs: dict[str, str] = {}
         # Static per-CLI launch configs from the spec, keyed by cli_agent
         # name. The non-empty key set is the capability ceiling: spawning an
@@ -258,6 +308,17 @@ class TeamBackend:
         # only the default ones.
         self._cleanup_paths: set[str] = set()
 
+        # Fork / checkpoint support. ``_enable_fork`` is the capability gate:
+        # the tool factory reads it to decide whether ``checkpoint`` is wired
+        # and whether ``spawn_teammate`` exposes the fork properties at all,
+        # so everything below stays dormant when fork is off.
+        self._enable_fork: bool = enable_fork
+        self._pending_forks: dict[str, dict] = {}    # member_name → {fork, since, source}
+        self._checkpoints: dict[str, dict] = {}      # name → {count, description, created_by}
+        self._snapshot_length: Callable[[], int] | None = None
+        self._store_checkpoint_fn: Callable[..., dict | None] | None = None
+        self._checkpoint_list_fn: Callable[[], dict] | None = None
+
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
 
     def register_cleanup_path(self, path: Optional[str]) -> None:
@@ -269,6 +330,167 @@ class TeamBackend:
         if not path:
             return
         self._cleanup_paths.add(str(Path(path).expanduser()))
+
+    # ------------------------------------------------------------------
+    # Fork / checkpoint support
+    # ------------------------------------------------------------------
+
+    def fork_enabled(self) -> bool:
+        """Whether context inheritance (fork) is open for this team.
+
+        Straight from ``TeamAgentSpec.enable_fork`` — no ``build_team``
+        override, unlike ``hitt_enabled`` / ``bridge_enabled``. Single gate
+        signal for all three fork surfaces: the ``checkpoint`` tool, the
+        fork properties on ``spawn_teammate``'s schema, and the fork section
+        of its description.
+        """
+        return self._enable_fork
+
+    def set_snapshot_length(self, fn) -> None:
+        """Register the callback that returns this member's message count."""
+        self._snapshot_length = fn
+
+    def set_store_checkpoint_fn(self, fn) -> None:
+        """Register the callback for persisting a named checkpoint.
+
+        ``fn(name, count, *, description, created_by)`` — the record fields
+        are passed through so the authoritative namespace can store them.
+        """
+        self._store_checkpoint_fn = fn
+
+    def set_checkpoint_list_fn(self, fn) -> None:
+        """Register the callback returning the authoritative checkpoint mapping."""
+        self._checkpoint_list_fn = fn
+
+    def mark_fork_on_spawn(
+        self,
+        member: str,
+        fork_value,
+        *,
+        fork_source: str | None = None,
+        compact: bool = False,
+    ) -> None:
+        self._pending_forks[member] = {
+            "fork": fork_value,
+            "since": None,
+            "source": fork_source,
+            "compact": compact,
+        }
+        team_logger.debug(
+            "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s "
+            "compact=%s team_name=%s pending_keys=%s",
+            member, fork_value, fork_source, compact,
+            self.team_name, list(self._pending_forks.keys()),
+        )
+
+    def consume_fork_on_spawn(self, member: str) -> dict | None:
+        result = self._pending_forks.pop(member, None)
+        team_logger.debug(
+            "[fork] consume_fork_on_spawn: member=%s result=%s "
+            "remaining_pending=%s team_name=%s",
+            member, result, list(self._pending_forks.keys()),
+            self.team_name,
+        )
+        return result
+
+    def snapshot_context_length(self) -> int:
+        if self._snapshot_length is not None:
+            result = self._snapshot_length()
+            team_logger.debug(
+                "[fork] snapshot_context_length: member=%s len=%d",
+                self.member_name, result,
+            )
+            return result
+        team_logger.debug(
+            "[fork] snapshot_context_length: member=%s NO callback",
+            self.member_name,
+        )
+        return 0
+
+    def store_checkpoint(
+        self,
+        name: str,
+        count: int,
+        *,
+        description: str = "",
+        created_by: str | None = None,
+    ) -> dict | None:
+        """Store a named checkpoint, or return the conflicting record.
+
+        Checkpoint names are team-globally unique. Returns ``None`` on
+        success; on a name conflict the existing record (with its
+        ``created_by`` / ``description``) is returned so the caller can build
+        an actionable error message.
+        """
+        team_logger.debug(
+            "[fork] store_checkpoint: member=%s name=%s count=%d "
+            "has_store_fn=%s",
+            self.member_name, name, count,
+            self._store_checkpoint_fn is not None,
+        )
+        created_by = created_by or self.member_name
+        if self._store_checkpoint_fn is not None:
+            return self._store_checkpoint_fn(name, count, description=description, created_by=created_by)
+        existing = self._checkpoints.get(name)
+        if existing is not None:
+            return existing
+        self._checkpoints[name] = {
+            "count": count,
+            "description": description or "",
+            "created_by": created_by,
+        }
+        return None
+
+    def get_checkpoints(self) -> dict[str, dict]:
+        return {name: dict(record) for name, record in self._checkpoints.items()}
+
+    def list_checkpoints(self) -> dict[str, dict]:
+        """Return the authoritative checkpoint mapping for this team.
+
+        Prefers the callback-wired namespace (the leader's in-memory dict,
+        which in-process members write into); falls back to the local dict
+        when no callback is wired.
+        """
+        if self._checkpoint_list_fn is not None:
+            return {name: dict(record) for name, record in self._checkpoint_list_fn().items()}
+        return self.get_checkpoints()
+
+    async def publish_checkpoint_created(
+        self,
+        name: str,
+        count: int,
+        description: str = "",
+    ) -> None:
+        """Publish a ``CHECKPOINT_CREATED`` event so the leader can announce
+        the snapshot name as a framework note.
+
+        The event replaces a ``send_message`` notification: it carries only
+        structured fields (name / count / creator / description) and is
+        rendered on the leader side as a ``<team-event kind="checkpoint">``
+        with an ``announcement-only`` note — no reply is prompted.
+        """
+        from openjiuwen.agent_teams.schema.events import CheckpointCreatedEvent
+
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(
+                    CheckpointCreatedEvent(
+                        team_name=self.team_name,
+                        member_name=self.member_name,
+                        name=name,
+                        message_count=count,
+                        description=description,
+                    ),
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort, never break the tool call
+            team_logger.warning(
+                "[checkpoint] failed to publish checkpoint_created event '%s': %s",
+                name, exc,
+            )
+
+    # ------------------------------------------------------------------
 
     async def _remove_cleanup_paths(self) -> None:
         """Remove every registered cleanup path with ``shutil.rmtree``.
@@ -310,6 +532,7 @@ class TeamBackend:
         allocation: Optional["Allocation"] = None,
         role: TeamRole = TeamRole.TEAMMATE,
         isolation: Optional[str] = None,
+        cli_agent: Optional[str] = None,
         permissions_override: Optional[dict[str, str]] = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
@@ -321,7 +544,7 @@ class TeamBackend:
             member_name: Unique member identifier (semantic slug, e.g. "backend-dev-1").
             display_name: Human-readable display label for the member.
             agent_card: Agent card defining the agent.
-            desc: Member persona description.
+            desc: Public member description.
             prompt: Startup instruction for the member.
             status: Initial member status.
             execution_status: Initial execution status.
@@ -335,6 +558,9 @@ class TeamBackend:
                 Defaults to ``TEAMMATE`` for the ordinary teammate
                 spawn paths; ``spawn_human_agent`` overrides with
                 ``HUMAN_AGENT`` so the role survives cold recovery.
+            cli_agent: External CLI backend name for external members.
+                Persisted so stopped or cold-recovered teams can rebuild
+                member runtime routing without relying on process memory.
             permissions_override: Flat ``{tool_name: level_string}`` dict
                 from ``spawn_teammate.permissions``.  Only tightening
                 rules are valid (see ``narrow_permissions``).  Persisted
@@ -351,10 +577,16 @@ class TeamBackend:
         if isolation is not None and isolation != "worktree":
             return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
 
+        if not await self.db.team.team_exists(self.team_name):
+            return MemberOpResult.fail(
+                f"Team {self.team_name} does not exist; call build_team first"
+            )
+
         from openjiuwen.agent_teams.tools.member_options import build_member_options
 
         options = build_member_options(
             model_ref=allocation.to_db_ref() if allocation is not None else None,
+            cli_agent=cli_agent,
             worktree_isolation=isolation,
             permissions_override=permissions_override,
         )
@@ -637,6 +869,28 @@ class TeamBackend:
             )
             return MemberOpResult.success()
 
+        # Guard: reject shutdown of a live human agent who still holds active
+        # tasks, unless force=True. Models sometimes confuse "cancel this
+        # human's task" with "shutdown the human" — without this guard the
+        # mistake silently succeeds and the tasks are orphaned.  Regular
+        # teammates are intentionally not gated here: their shutdown is a
+        # normal lifecycle operation and the leader already expects to
+        # manage any leftover tasks afterwards.
+        if not force and await self.is_live_human_agent(member_name):
+            active_statuses = {
+                TaskStatus.PLANNING.value,
+                TaskStatus.IN_PROGRESS.value,
+                TaskStatus.IN_REVIEW.value,
+            }
+            owned_tasks = await self.task_manager.get_tasks_by_assignee(member_name=member_name)
+            active_tasks = [t for t in owned_tasks if t.status in active_statuses]
+            if active_tasks:
+                task_ids = ", ".join(t.task_id for t in active_tasks)
+                return MemberOpResult.fail(
+                    t("team.shutdown_human_active_tasks",
+                      member_name=member_name, count=str(len(active_tasks)), task_ids=task_ids)
+                )
+
         # Validate state transition
         from openjiuwen.agent_teams.schema.status import (
             MEMBER_TRANSITIONS,
@@ -718,12 +972,18 @@ class TeamBackend:
 
         team_logger.info(f"Cancelling execution for member {member_name}")
 
-        # Reset all CLAIMED tasks assigned to this member
-        claimed_tasks = await self.task_manager.get_tasks_by_assignee(
-            member_name=member_name, status=TaskStatus.CLAIMED.value
-        )
+        # Reset all active (PLANNING / IN_PROGRESS / IN_REVIEW) tasks held by
+        # this member back into the claimable pool.
+        active_statuses = {
+            TaskStatus.PLANNING.value,
+            TaskStatus.IN_PROGRESS.value,
+            TaskStatus.IN_REVIEW.value,
+        }
+        owned_tasks = await self.task_manager.get_tasks_by_assignee(member_name=member_name)
         reset_count = 0
-        for task in claimed_tasks:
+        for task in owned_tasks:
+            if task.status not in active_statuses:
+                continue
             if await self.task_manager.reset(task.task_id):
                 reset_count += 1
                 team_logger.info(f"Reset task {task.task_id} from member {member_name}")
@@ -867,6 +1127,41 @@ class TeamBackend:
         """
         return await self.db.member.get_member(member_name, self.team_name)
 
+    async def member_exists(self, member_name: str) -> bool:
+        """Check whether a member exists without loading its full row.
+
+        For callers that only need presence (recipient validation, roster
+        membership tests). Avoids ``get_member`` pulling ``agent_card`` /
+        ``prompt`` / ``options`` just to test for ``None``.
+
+        Args:
+            member_name: Member identifier.
+
+        Returns:
+            True when the member exists in this team.
+        """
+        return await self.db.member.member_exists(member_name, self.team_name)
+
+    async def resolve_leader_member_name(self) -> str:
+        """Return the team's leader member_name, from the DB row when needed.
+
+        The leader is a persistent property of the team — ``build_team`` writes
+        it to the ``team_info`` row — so it is the single source of truth and
+        does not need threading through spawn / descriptor plumbing. A leader
+        (or a backend handed the name at construction) already knows it and
+        skips the query; a plain member resolves it from the row and caches the
+        result, since the leader never changes for the life of a team.
+
+        Returns:
+            The leader member_name, or ``""`` when the team row is absent.
+        """
+        if self.leader_member_name:
+            return self.leader_member_name
+        if self._leader_name_cache is None:
+            team = await self.db.team.get_team(self.team_name)
+            self._leader_name_cache = (team.leader_member_name if team else "") or ""
+        return self._leader_name_cache
+
     async def list_members(self) -> List[TeamMember]:
         """List all team members
 
@@ -875,6 +1170,25 @@ class TeamBackend:
         """
         members = await self.db.member.get_team_members(self.team_name)
         return [member for member in members if member.member_name != self.member_name]
+
+    async def list_member_roster(self) -> List[MemberRosterEntry]:
+        """List the roster (name / display name / status) excluding self.
+
+        Backs the ``list_members`` tool. Uses a narrow column projection
+        (``member.get_member_roster``) instead of loading full
+        ``TeamMember`` rows, since the roster view only needs these three
+        fields — avoids pulling every member's ``agent_card`` / ``prompt`` /
+        ``options`` out of the DB on each call.
+
+        Returns:
+            One ``MemberRosterEntry`` per member, the calling member removed.
+        """
+        rows = await self.db.member.get_member_roster(self.team_name)
+        return [
+            MemberRosterEntry(member_name=name, display_name=display_name, status=status)
+            for name, display_name, status in rows
+            if name != self.member_name
+        ]
 
     async def get_team_info(self) -> Optional[Team]:
         """Get team information
@@ -1030,6 +1344,48 @@ class TeamBackend:
         team_logger.info(f"Cancelled {len(cancelled_tasks)} tasks in team {self.team_name}")
         return len(cancelled_tasks)
 
+    async def _reattach_team(self, existing: Any) -> None:
+        """Take over a team that already exists instead of creating one.
+
+        Reached when the leader calls ``build_team`` against a team whose row is
+        already in the static table — in practice a fresh session inheriting a
+        running team (``NEW_TEAM_IN_SESSION``). The row, the roster and the
+        members' own configuration are all standing facts by then — the
+        teammates are re-spawned from that roster by ``recover_team``, not from
+        anything decided here — so this path writes no rows and re-registers
+        nobody.
+
+        **The capability arguments of this call do not apply.** The team was
+        configured when it was built, its members already run under that
+        configuration, and its tasks may already be shaped by it (reviewers on a
+        verify-gated board). So the effective verification flag is read back off
+        the row rather than recomputed, and the leader learns what it actually
+        got from the tool result — the same way it learns a narrowed ceiling on
+        the create path.
+
+        ``on_team_built`` still fires: the checkpoint of *this* session has to
+        record that the team DB row exists, or a later run would dispatch on a
+        state that does not match the database. No ``TeamCreated`` event is
+        published — nothing was created, and members that acted on it would be
+        reacting to an event about a team they are already part of.
+
+        Args:
+            existing: The team row read from the static table.
+        """
+        self._enable_task_verification = bool(existing.enable_task_verification)
+        self._team_taken_over = True
+        team_logger.info(
+            "Team %s already exists; taking it over (task_verification=%s)",
+            self.team_name,
+            self._enable_task_verification,
+        )
+
+        if self._on_team_built is not None:
+            try:
+                await self._on_team_built()
+            except Exception as e:
+                team_logger.error(f"on_team_built callback failed for team {self.team_name}: {e}")
+
     async def build_team(
         self,
         display_name: str,
@@ -1043,18 +1399,44 @@ class TeamBackend:
         Creates team in database, writes the leader into the member table,
         then publishes TeamEvent.Created.
 
+        **Idempotent against an existing team**: when the row is already there
+        the call takes the team over (see :meth:`_reattach_team`) instead of
+        failing, because this is also the one call that hands the leader its
+        collaboration policy — and a leader inheriting a team needs that policy
+        at least as much as one that just built it.
+
         Args:
             display_name: Human-readable team label.
             desc: Team goal, scope, and directives.
             leader_display_name: Human-readable display label for the leader member.
-            leader_desc: Persona description of the leader member.
+            leader_desc: Public description of the leader member (shown in
+                peers' roster; the private prompt is passed via the
+                ``leader_prompt`` constructor arg, not here).
             overrides: Optional runtime capability overrides. Use
                 ``CapabilityOverrides(enable_hitt=True/False)`` to override
-                the HITT or bridge capability ceiling for this run. None
-                means each flag inherits its spec ceiling.
+                the HITT or bridge capability ceiling for this run; None means
+                each flag inherits its spec ceiling. ``dispatch_mode`` follows
+                the F_62 rule instead: None -> "autonomous", "scheduled" must
+                be explicit and requires the spec ceiling.
         """
+        # Step 0: a team that already exists is taken over, not rebuilt. The
+        # case this exists for is NEW_TEAM_IN_SESSION -- a fresh session
+        # inheriting a team that is already running. A child agent session
+        # shares the team session id, so a new session means an empty history:
+        # the build_team tool result that carries the collaboration policy is
+        # gone, while the team, its roster and its tasks are all still there.
+        # Since that call is the single place the policy is handed over (F_76),
+        # failing here would leave that leader with the bootstrap alone.
+        # (COLD_RECOVER keeps its history and normally does not call build_team
+        # again; idempotence is just harmless insurance for it.)
+        existing = await self.db.team.get_team(self.team_name)
+        if existing is not None:
+            await self._reattach_team(existing)
+            return
+
         enable_hitt = overrides.enable_hitt if overrides is not None else None
         enable_bridge = overrides.enable_bridge if overrides is not None else None
+        enable_task_verification = overrides.enable_task_verification if overrides is not None else None
         # Step A: enforce spec ceiling
         if enable_hitt is True and not self._spec_enable_hitt:
             from openjiuwen.core.common.exception.codes import StatusCode
@@ -1087,8 +1469,15 @@ class TeamBackend:
         self._enable_hitt = effective_enable_hitt
         effective_enable_bridge = self._spec_enable_bridge if enable_bridge is None else enable_bridge
         self._enable_bridge = effective_enable_bridge
+        effective_task_verification = (
+            self._spec_enable_task_verification
+            and (enable_task_verification if enable_task_verification is not None else True)
+        )
+        self._enable_task_verification = effective_task_verification
 
-        # Create team in database
+        # Create team in database. dispatch_mode is recorded from the spec
+        # (informational — the spec is the runtime source of truth, F_62);
+        # the effective verification flag is persisted alongside.
         team_name = self.team_name
         leader_member_name = self.member_name
         success = await self.db.team.create_team(
@@ -1096,6 +1485,8 @@ class TeamBackend:
             display_name=display_name,
             leader_member_name=leader_member_name,
             desc=desc,
+            dispatch_mode=self.dispatch_mode,
+            enable_task_verification=effective_task_verification,
         )
 
         if not success:
@@ -1113,6 +1504,7 @@ class TeamBackend:
             display_name=leader_display_name,
             agent_card=leader_card,
             desc=leader_desc,
+            prompt=self._leader_prompt,
             status=MemberStatus.BUSY,
             execution_status=ExecutionStatus.RUNNING,
             mode=MemberMode.BUILD_MODE,
@@ -1139,15 +1531,15 @@ class TeamBackend:
             member_card = AgentCard(
                 id=member_card_id,
                 name=member_spec.display_name,
-                description=member_spec.persona,
+                description=member_spec.desc,
             )
             allocation = self._allocate_model_config(member_spec.model_name) if self._allocate_model_config else None
             await self.spawn_member(
                 member_name=member_spec.member_name,
                 display_name=member_spec.display_name,
                 agent_card=member_card,
-                desc=member_spec.persona,
-                prompt=member_spec.prompt_hint,
+                desc=member_spec.desc,
+                prompt=member_spec.prompt,
                 status=MemberStatus.UNSTARTED,
                 execution_status=ExecutionStatus.IDLE,
                 mode=self.teammate_mode,
@@ -1173,8 +1565,8 @@ class TeamBackend:
                 await self.spawn_human_agent(
                     member_name=human_spec.member_name,
                     display_name=human_spec.display_name,
-                    desc=human_spec.persona,
-                    prompt=human_spec.prompt_hint,
+                    desc=human_spec.desc,
+                    prompt=human_spec.prompt,
                 )
         elif human_specs:
             team_logger.warning(
@@ -1239,7 +1631,7 @@ class TeamBackend:
             member_name: Unique member identifier for the human.
             display_name: Optional display label; falls back to the
                 framework-managed default when omitted.
-            desc: Optional persona description; falls back to the
+            desc: Optional member description; falls back to the
                 framework default.
             prompt: Optional startup hint forwarded to the avatar.
 
@@ -1255,7 +1647,7 @@ class TeamBackend:
             )
 
         resolved_display_name = display_name or t("hitt.human_agent_display_name")
-        resolved_desc = desc or t("hitt.human_agent_default_persona")
+        resolved_desc = desc or t("hitt.human_agent_default_desc")
         member_card = AgentCard(
             id=f"{self.team_name}_{member_name}",
             name=resolved_display_name,
@@ -1294,6 +1686,48 @@ class TeamBackend:
         if member_dao is None:
             return False
         return await member_dao.is_human_agent(self.team_name, member_name)
+
+    async def is_live_human_agent(self, member_name: str | None) -> bool:
+        """Whether ``member_name`` is a human-agent member still on the team.
+
+        Narrower than :meth:`is_human_agent`: a member whose status is in
+        ``MEMBER_DEPARTED_STATUSES`` (shutdown requested / shut down) answers
+        False. The HITT task lock in ``UpdateTaskTool`` keys on this, so
+        shutting a human down releases the tasks it still holds back to the
+        leader instead of stranding them.
+        """
+        if not member_name:
+            return False
+        member_dao = self.db.member
+        if member_dao is None:
+            return False
+        return await member_dao.is_live_human_agent(self.team_name, member_name)
+
+    async def is_reachable_human_agent(self, member_name: str | None) -> bool:
+        """Whether ``member_name`` is a human-agent member that can still be delivered to.
+
+        Looser than :meth:`is_live_human_agent`: only a fully SHUTDOWN member is
+        excluded. A member with shutdown merely *requested* is still reachable,
+        and has to be — ``shutdown_member`` flips the status before it sends the
+        notice, so cutting delivery at the request would drop the very message
+        telling that member's controller it was removed.
+        """
+        if not member_name:
+            return False
+        member_dao = self.db.member
+        if member_dao is None:
+            return False
+        return await member_dao.is_reachable_human_agent(self.team_name, member_name)
+
+    async def get_member_status(self, member_name: str) -> str | None:
+        """Current persisted status of ``member_name``, or None if unknown.
+
+        Narrow projection used by the coordination layer's harness-input gate.
+        """
+        member_dao = self.db.member
+        if member_dao is None:
+            return None
+        return await member_dao.get_member_status(self.team_name, member_name)
 
     async def register_human_agent_inbound(
         self,
@@ -1335,6 +1769,32 @@ class TeamBackend:
         names = await member_dao.list_human_agent_names(self.team_name)
         return frozenset(names)
 
+    async def live_human_agent_names(self) -> frozenset[str]:
+        """Snapshot of human-agent members that have not left the team.
+
+        Batch counterpart of :meth:`is_live_human_agent`; members that have
+        been shut down are excluded. Used by the cancel-all path so the
+        leftovers of a departed human are cancelled like any other member's.
+        """
+        member_dao = self.db.member
+        if member_dao is None:
+            return frozenset()
+        names = await member_dao.list_live_human_agent_names(self.team_name)
+        return frozenset(names)
+
+    async def reachable_human_agent_names(self) -> frozenset[str]:
+        """Snapshot of human-agent members that can still be delivered to.
+
+        Batch counterpart of :meth:`is_reachable_human_agent`; only fully
+        SHUTDOWN members are excluded. Used to fan a broadcast out to human
+        controllers.
+        """
+        member_dao = self.db.member
+        if member_dao is None:
+            return frozenset()
+        names = await member_dao.list_reachable_human_agent_names(self.team_name)
+        return frozenset(names)
+
     def hitt_enabled(self) -> bool:
         """Whether the HITT capability is currently engaged for this team.
 
@@ -1346,6 +1806,57 @@ class TeamBackend:
         off" while ``spawn_human_agent`` waits to be called.
         """
         return self._enable_hitt
+
+    def mark_history_restored(self) -> None:
+        """Record that this run restored a conversation containing the policy.
+
+        Called on the cold-recovery path (``TeamAgent.recover_from_session``),
+        which continues the *same* session: the child agent session shares the
+        team session id, so the leader's history comes back with the original
+        ``build_team`` result -- and therefore the collaboration policy -- still
+        in it. See :meth:`rejects_rebuild`.
+        """
+        self._history_restored = True
+
+    async def rejects_rebuild(self) -> bool:
+        """Whether ``build_team`` must refuse to run on this team.
+
+        A cold recovery already holds the policy in its restored history, and
+        that result is never compacted away, so calling ``build_team`` again
+        buys nothing and costs a round -- and a leader that does it is usually
+        confused about whether its team exists, which the refusal corrects.
+
+        Both conditions are required. ``_history_restored`` alone is not
+        enough: a recovered leader whose team was disbanded mid-run (the
+        all-teammates-SHUTDOWN path in ``CoordinationKernel.start`` calls
+        ``clean_team``) has no team row left and genuinely does need to build
+        one. The team row is what says a team is there to be rejoined.
+
+        Returns:
+            True when the leader is already attached, with history, to a team
+            that still exists.
+        """
+        if not self._history_restored:
+            return False
+        return await self.db.team.team_exists(self.team_name)
+
+    def team_taken_over(self) -> bool:
+        """Whether ``build_team`` took over an existing team instead of creating one.
+
+        Read by ``BuildTeamTool`` so the result says which happened: a leader
+        that inherited a running team must not go on to spawn the members that
+        are already on its roster.
+        """
+        return self._team_taken_over
+
+    def task_verification_enabled(self) -> bool:
+        """Whether task verification is expected for this team instance.
+
+        Prompt-level guidance flag (F_62): the leader is asked to assign
+        reviewers when creating tasks. The reviewer machinery itself works
+        regardless of this flag.
+        """
+        return self._enable_task_verification
 
     # ------------------------------------------------------------------
     # Bridge-agent surface
@@ -1411,8 +1922,8 @@ class TeamBackend:
         *,
         member_name: str,
         display_name: str,
-        persona: str,
-        desc: Optional[str] = None,
+        desc: str = "",
+        prompt: str,
         model_name: Optional[str] = None,
         mailbox_inject_mode: BridgeMailboxInjectMode = BridgeMailboxInjectMode.PASSTHROUGH,
         protocol: str = "",
@@ -1433,11 +1944,11 @@ class TeamBackend:
         Args:
             member_name: Unique member identifier.
             display_name: Human-readable label.
-            persona: Persona text — same field the local teammate
-                LLM uses as identity AND the briefing string the
-                remote agent receives at ``adapter.connect``. Required.
-            desc: Optional persona override stored on the DB row;
-                defaults to ``persona`` when omitted.
+            desc: Public description — the field peers see in the roster
+                and ``list_members``. Optional; defaults to empty.
+            prompt: Private briefing the remote agent adopts as its own
+                system prompt via ``adapter.connect``. Required — it is
+                what makes the remote act as this member.
             model_name: Optional model pool hint forwarded to the
                 allocator (``None`` falls back to per-agent default).
             mailbox_inject_mode: Outbound wrap format for inbound
@@ -1457,25 +1968,24 @@ class TeamBackend:
                 "(enable_bridge=False on TeamAgentSpec or build_team)"
             )
 
-        if not persona:
+        if not prompt:
             return MemberOpResult.fail(
-                "spawn_bridge_agent requires non-empty 'persona' — it is the "
+                "spawn_bridge_agent requires non-empty 'prompt' — it is the "
                 "briefing the remote agent adopts via adapter.connect"
             )
 
-        resolved_desc = desc or persona
         member_card = AgentCard(
             id=f"{self.team_name}_{member_name}",
             name=display_name,
-            description=resolved_desc,
+            description=desc,
         )
         allocation = self._allocate_model_config(model_name) if self._allocate_model_config else None
         result = await self.spawn_member(
             member_name=member_name,
             display_name=display_name,
             agent_card=member_card,
-            desc=resolved_desc,
-            prompt=None,
+            desc=desc,
+            prompt=prompt,
             status=MemberStatus.UNSTARTED,
             execution_status=ExecutionStatus.IDLE,
             mode=self.teammate_mode,
@@ -1494,7 +2004,8 @@ class TeamBackend:
         self._bridge_member_specs[member_name] = BridgeMemberSpec(
             member_name=member_name,
             display_name=display_name,
-            persona=persona,
+            desc=desc,
+            prompt=prompt,
             model_name=model_name,
             mailbox_inject_mode=mailbox_inject_mode,
             protocol=protocol,
@@ -1506,12 +2017,46 @@ class TeamBackend:
     # External-CLI member support
     # ------------------------------------------------------------------
 
-    def is_external_cli_agent(self, member_name: str) -> bool:
-        """Return whether ``member_name`` is driven by an external CLI."""
-        return member_name in self._external_cli_specs
+    async def restore_external_cli_specs_from_db(self) -> None:
+        """Restore external CLI member routing from persisted member options."""
+        from openjiuwen.agent_teams.tools.member_options import get_member_cli_agent
+
+        members = await self.db.member.get_team_members(self.team_name)
+        restored: dict[str, str] = {}
+        for member in members:
+            cli_agent = get_member_cli_agent(member)
+            if cli_agent:
+                restored[member.member_name] = cli_agent
+        self._external_cli_specs.update(restored)
+
+    async def is_external_cli_agent(self, member_name: str) -> bool:
+        """Whether ``member_name`` is driven by an external CLI.
+
+        Queries ``member_options.cli_agent`` from DB on every call — no
+        in-memory cache, so the answer is always current regardless of when
+        the member was spawned or whether
+        :meth:`restore_external_cli_specs_from_db` has run yet. Mirrors
+        :meth:`is_human_agent`: a role probe used outside the hot spawn
+        path must read the persistent truth, because the in-memory
+        ``_external_cli_specs`` is only repopulated by
+        ``restore_external_cli_specs_from_db`` inside ``recover_team``; a
+        caller reaching this before that restore (fresh build, post-
+        ``clean_team`` rebuild, or any path that skips recover) would
+        otherwise get a stale ``False`` for a real external-CLI member.
+        """
+        if not member_name:
+            return False
+        if self.db is None:
+            return False
+        from openjiuwen.agent_teams.tools.member_options import get_member_cli_agent
+
+        row = await self.db.member.get_member(member_name, self.team_name)
+        if row is None:
+            return False
+        return bool(get_member_cli_agent(row))
 
     def get_external_cli_agent(self, member_name: str) -> Optional[str]:
-        """Return the cli_agent adapter name for a member, or ``None``."""
+        """Return the cli_agent backend name for a member, or ``None``."""
         return self._external_cli_specs.get(member_name)
 
     def external_cli_agent_names(self) -> frozenset[str]:
@@ -1532,8 +2077,8 @@ class TeamBackend:
         member_name: str,
         display_name: str,
         cli_agent: str,
-        persona: str,
-        desc: Optional[str] = None,
+        desc: str = "",
+        prompt: str,
         model_name: Optional[str] = None,
     ) -> MemberOpResult:
         """Register an external-CLI teammate dynamically.
@@ -1548,21 +2093,23 @@ class TeamBackend:
         Args:
             member_name: Unique member identifier.
             display_name: Human-readable label.
-            cli_agent: Adapter name (``"claude"`` / ``"codex"`` / ...); see
+            cli_agent: External CLI backend name (``"claude"`` / ``"codex"`` / ...); see
                 ``agent_teams/external/cli_agent/adapters.py``.
-            persona: Persona text stored on the member row.
-            desc: Optional persona override (defaults to ``persona``).
+            desc: Public description stored on the member row (roster view).
+                Optional; defaults to empty.
+            prompt: Private system prompt the CLI adopts to act as this
+                member. Required.
             model_name: Ignored for external-CLI members (the model lives in
                 the external CLI); accepted for signature symmetry.
 
         Returns:
-            ``MemberOpResult`` — failure if the adapter is unknown or the
+            ``MemberOpResult`` — failure if the backend name is unknown or the
             underlying ``spawn_member`` rejects the registration.
         """
-        from openjiuwen.agent_teams.external.cli_agent.adapters import available_adapters
+        from openjiuwen.agent_teams.external.cli_agent.backends import available_backends, is_known_backend
 
-        if not persona:
-            return MemberOpResult.fail("spawn_external_cli_agent requires non-empty 'persona'")
+        if not prompt:
+            return MemberOpResult.fail("spawn_external_cli_agent requires non-empty 'prompt'")
         # Capability ceiling: the CLI kind must be pre-declared in
         # ``TeamAgentSpec.external_cli_agents`` (all launch knowledge is
         # static there; the spawn call only names the kind).
@@ -1572,14 +2119,13 @@ class TeamBackend:
                 f"cli_agent '{cli_agent}' is not declared in TeamAgentSpec.external_cli_agents "
                 f"(declared: {declared}); add a static config entry for it first"
             )
-        if cli_agent not in available_adapters():
-            return MemberOpResult.fail(f"Unknown cli_agent '{cli_agent}'; known: {', '.join(available_adapters())}")
+        if not is_known_backend(cli_agent):
+            return MemberOpResult.fail(f"Unknown cli_agent '{cli_agent}'; known: {', '.join(available_backends())}")
 
-        resolved_desc = desc or persona
         member_card = AgentCard(
             id=f"{self.team_name}_{member_name}",
             name=display_name,
-            description=resolved_desc,
+            description=desc,
         )
         # Record the mapping before spawn_member so the later startup ->
         # build_context_from_db pass routes this member to the CLI path.
@@ -1588,12 +2134,13 @@ class TeamBackend:
             member_name=member_name,
             display_name=display_name,
             agent_card=member_card,
-            desc=resolved_desc,
-            prompt=None,
+            desc=desc,
+            prompt=prompt,
             status=MemberStatus.UNSTARTED,
             execution_status=ExecutionStatus.IDLE,
             mode=self.teammate_mode,
-            role=TeamRole.TEAMMATE,
+            role=TeamRole.EXTERNAL_CLI,
+            cli_agent=cli_agent,
         )
         if not result.ok:
             self._external_cli_specs.pop(member_name, None)

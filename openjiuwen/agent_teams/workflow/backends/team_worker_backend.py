@@ -11,10 +11,12 @@ For every ``agent(prompt, schema=...)`` the engine issues, the backend:
    executors, NOT teammates, so they get no team-DB roster row);
 2. derives a worker ``DeepAgentSpec`` from the team's *teammate* spec (or the
    leader spec when no teammate is configured) — so a worker is "a teammate
-   without team tools": it keeps teammate capabilities (model / tools / skills /
-   workspace / sys_operation / todo planning) but, being built straight from the
-   raw spec, carries none of the team collaboration tools (those are injected
-   per-member by the configurator, not present on the raw spec);
+   without team tools": it keeps teammate capabilities (model / tools / Skill
+   view / workspace / sys_operation / todo planning) but, being built straight
+   from the raw spec, carries none of the team collaboration tools (those are
+   injected per-member by the configurator, not present on the raw spec). Its
+   Skill view is the one shared library narrowed by its own visibility
+   declaration, mounted here rather than inherited from the raw spec;
 3. builds a :class:`TeamHarness` over that spec and runs it for ONE non-streaming
    execution via :meth:`TeamHarness.run_once` (a plain ``DeepAgent.invoke`` — no
    supervisor, no steer); the worker ends by calling ``structured_output``, whose
@@ -33,10 +35,10 @@ override it without standing up a real LLM.
 """
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Callable, Sequence
 
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.tools.locales import make_translator
@@ -45,12 +47,33 @@ from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
 )
+from openjiuwen.agent_teams.workflow.backends._result_text import (
+    prefer_natural_or_structured_text,
+)
+from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
 from openjiuwen.core.common.logging import team_logger
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _text_from_invoke_result(result: Any, *, member_name: str) -> str:
+    """Map a DeepAgent ``invoke`` / task-loop result dict to worker output text.
+
+    Task-loop failures resolve ``wait_completion()`` with ``{"error": "..."}``
+    (no ``output``). Treat that as a backend error so SwarmFlow emits
+    ``agent_failed`` instead of ``agent_completed`` with an empty outcome.
+    A bare empty ``output`` with no error remains a valid success.
+    """
+    if isinstance(result, dict):
+        err = result.get("error")
+        if err or result.get("result_type") == "error":
+            msg = str(err or result.get("output") or "worker task failed")
+            raise BackendError(f"worker '{member_name}' failed: {msg}")
+        return str(result.get("output", ""))
+    return str(result)
 
 
 class TeamWorkerBackend(AgentBackend):
@@ -91,9 +114,10 @@ class TeamWorkerBackend(AgentBackend):
         messager: Any = None,
         session_id: str | None = None,
         on_human_prompt: Callable[[str, str, str], None] | None = None,
-        on_human_replied: Callable[[str, str], None] | None = None,
+        on_human_replied: Callable[[str, str, str | None], None] | None = None,
         run_id: str | None = None,
     ) -> None:
+        super().__init__()
         self._model = model
         self._team_name = team_name
         self._language = language
@@ -122,6 +146,10 @@ class TeamWorkerBackend(AgentBackend):
     async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
         member_name = self._next_member_name(opts)
         model = self._resolve_model(opts.get("model"))
+        # One rail per call: it bills this worker's model calls to the run's
+        # shared ledger (and cuts the worker short once that ledger is dry),
+        # while its own tally is what this ``agent()`` call reports as its cost.
+        budget_rail = SwarmflowBudgetRail(self.budget)
         try:
             await self._worktrees.ensure(member_name, opts)
             if schema_json is not None:
@@ -135,15 +163,18 @@ class TeamWorkerBackend(AgentBackend):
                     member_name=member_name,
                     has_schema=True,
                     model=model,
+                    budget_rail=budget_rail,
                 )
                 if not (submit_tool.called and submit_tool.captured is not None):
                     raise BackendError(
                         f"worker '{member_name}' did not submit a structured result via structured_output"
                     )
+                # Prefer free-text narration; fall back to JSON of the capture.
+                text = prefer_natural_or_structured_text(text, submit_tool.captured)
                 return AgentResult(
                     text=text,
                     structured=submit_tool.captured,
-                    tokens=self._estimate_tokens(prompt, submit_tool.captured),
+                    tokens=budget_rail.call_tokens,
                 )
             text = await self._execute_worker(
                 prompt,
@@ -151,8 +182,22 @@ class TeamWorkerBackend(AgentBackend):
                 member_name=member_name,
                 has_schema=False,
                 model=model,
+                budget_rail=budget_rail,
             )
-            return AgentResult(text=text, tokens=self._estimate_tokens(prompt, text))
+            return AgentResult(text=text, tokens=budget_rail.call_tokens)
+        except Exception as e:
+            # Attach this call's rail tally so a failed/budget-exhausted agent's
+            # real consumption still reaches the AGENT_FAILED event tokens (the
+            # ledger already billed it; without this the run's token sum would
+            # drop it while Team budget stayed correct).
+            call_tokens = budget_rail.call_tokens or None
+            if isinstance(e, BackendError):
+                if e.tokens is None:
+                    e.tokens = call_tokens
+            elif call_tokens is not None:
+                # Wrap a non-backend error so _attempt_calls can still read .tokens
+                e = BackendError(str(e), tokens=call_tokens)
+            raise
         finally:
             await self._worktrees.finalize(member_name)
 
@@ -175,8 +220,10 @@ class TeamWorkerBackend(AgentBackend):
                 model_resolver=self._model_resolver,
                 build_context=self._build_context,
                 t=self._t,
+                budget=self.budget,
                 messager=self._messager,
                 session_id=self._session_id,
+                run_id=self._run_id,
                 on_human_prompt=self._on_human_prompt,
                 on_human_replied=self._on_human_replied,
             )
@@ -249,6 +296,7 @@ class TeamWorkerBackend(AgentBackend):
         member_name: str,
         has_schema: bool,
         model: Any,
+        budget_rail: SwarmflowBudgetRail | None = None,
     ) -> str:
         """Build a worker ``TeamHarness`` and run it for one execution.
 
@@ -261,6 +309,9 @@ class TeamWorkerBackend(AgentBackend):
                 required.
             model: The resolved ``TeamModelConfig`` for this worker, or ``None``
                 to inherit the base spec's model (see :meth:`_resolve_model`).
+            budget_rail: This call's token rail, mounted on the worker harness so
+                the run's ceiling binds the worker's own loop. ``None`` (tests
+                overriding this method) leaves the worker unmetered.
 
         Returns:
             The worker's final free-text output (only meaningful when no schema
@@ -297,8 +348,11 @@ class TeamWorkerBackend(AgentBackend):
                 description="swarmflow worker",
             )
             # Worker gets its own workspace, not the teammate's.
-            worker_workspace = self._setup_worker_workspace(member_name)
-            worker_spec = worker_spec.model_copy(update={"workspace": worker_workspace})
+            worker_workspace, worker_cwd = self._setup_worker_workspace(member_name)
+            worker_spec = worker_spec.model_copy(
+                update={"workspace": worker_workspace, "cwd": worker_cwd}
+            )
+            worker_spec = self._apply_worker_skill_visibility(worker_spec, member_name)
             worker_build_context = derive_member_build_context(
                 self._build_context,
                 team_name=self._team_name,
@@ -310,6 +364,15 @@ class TeamWorkerBackend(AgentBackend):
                 role=TeamRole.WORKER,
                 member_name=member_name,
                 build_context=worker_build_context,
+            )
+            if budget_rail is not None:
+                harness.add_rail(budget_rail)
+            kv_cache_hooks.configure_harness_session_hooks(
+                harness,
+                product_session_id=self._session_id,
+                evict_on_finish=True,
+                reason="swarmflow-worker-finish",
+                owner_id=member_name,
             )
             if has_schema:
                 # End the round as soon as structured_output is captured, so the
@@ -339,15 +402,15 @@ class TeamWorkerBackend(AgentBackend):
                 await harness.dispose()
             except Exception:
                 team_logger.debug("worker harness dispose failed for %s", member_name)
-        if isinstance(result, dict):
-            return str(result.get("output", ""))
-        return str(result)
+            finally:
+                kv_cache_hooks.clear_harness_session_hooks(harness)
+        return _text_from_invoke_result(result, member_name=member_name)
 
     # ------------------------------------------------------------------
     # Worker workspace setup
     # ------------------------------------------------------------------
 
-    def _setup_worker_workspace(self, member_name: str) -> WorkspaceSpec:
+    def _setup_worker_workspace(self, member_name: str) -> tuple[WorkspaceSpec, str | None]:
         """Compute, link, and mount the worker's independent workspace.
 
         Mirrors the layout used by ``agent_configurator`` for stable_base
@@ -358,30 +421,31 @@ class TeamWorkerBackend(AgentBackend):
         the team and needs no per-worker cleanup registration. Also mounts the
         team shared workspace into the worker's tree (``.team/{team_name}/``).
 
+        The workspace is always the worker's own directory. With
+        ``agent(options={"isolation": "worktree"})`` only the *cwd* moves into
+        the owner-scoped worktree — otherwise the worker's artifacts and its
+        Skill visibility declaration would live inside an ephemeral checkout and
+        vanish with it.
+
         Returns:
-            A ``WorkspaceSpec`` with the worker's resolved root_path.
+            The worker's ``WorkspaceSpec`` and its cwd (the worktree path when
+            isolated, else ``None`` meaning "use the workspace root").
         """
         worktree = self._worktrees.get(member_name)
-        workspace_is_worktree = worktree is not None
-        # Compute worker's workspace path. With ``agent(options={"isolation": "worktree"})``,
-        # the worker starts directly inside the owner-scoped worktree.
-        ws_root = (
-            worktree.worktree_path
-            if worktree is not None
-            else ensure_team_member_workspace_link(self._team_name, member_name)
-        )
+        worker_cwd = worktree.worktree_path if worktree is not None else None
+        ws_root = ensure_team_member_workspace_link(self._team_name, member_name)
 
         if self._worker_base_spec.workspace is not None:
             # Inherit language / stable_base from the base spec, only override root_path.
             worker_workspace = self._worker_base_spec.workspace.model_copy(
-                update={"root_path": ws_root, "stable_base": not workspace_is_worktree}
+                update={"root_path": ws_root, "stable_base": True}
             )
         else:
             # Base spec has no workspace — create a fresh one for this worker.
             worker_workspace = WorkspaceSpec(
                 root_path=ws_root,
                 language=self._language,
-                stable_base=not workspace_is_worktree,
+                stable_base=True,
             )
 
         # Mount team workspace into worker workspace so it can access shared
@@ -391,7 +455,68 @@ class TeamWorkerBackend(AgentBackend):
         if workspace_manager is not None:
             workspace_manager.mount_into_workspace(ws_root)
 
-        return worker_workspace
+        return worker_workspace, worker_cwd
+
+    def _apply_worker_skill_visibility(self, worker_spec: Any, member_name: str) -> Any:
+        """Give the worker the team Skill rail instead of the generic one.
+
+        A worker derives from the raw teammate spec, so it inherits that spec's
+        ``skills`` list and would have the DeepAgent factory auto-add the
+        generic ``SkillUseRail`` over its own workspace ``skills/`` node plus
+        every mounted team directory. Workers own no Skill library either: they
+        read the one shared library narrowed by their own visibility
+        declaration, exactly like a teammate. The inherited ``skills`` names are
+        not lost — they seed that declaration the first time it is written.
+
+        Args:
+            worker_spec: The derived worker ``DeepAgentSpec``.
+            member_name: The minted worker identity.
+
+        Returns:
+            A spec copy with Skill discovery replaced by the team Skill rail.
+        """
+        from openjiuwen.agent_teams.skill.rail_spec import (
+            build_team_skill_rail_spec,
+            complete_declared_team_skill_rails,
+        )
+
+        team_workspace_path = self._team_workspace_path()
+        # The base spec may already declare a bare team Skill rail (an embedder
+        # blueprint owns the exposure mode but cannot know the minted worker
+        # identity); complete it before deciding whether one has to be added.
+        declared_rails = complete_declared_team_skill_rails(
+            list(worker_spec.rails or []),
+            team_name=self._team_name,
+            member_name=member_name,
+            config_skills=worker_spec.skills,
+            team_workspace_path=team_workspace_path,
+        )
+        declared_rails = list(declared_rails)
+        skill_rail_spec = build_team_skill_rail_spec(
+            team_name=self._team_name,
+            member_name=member_name,
+            config_skills=worker_spec.skills,
+            declared_rails=declared_rails,
+            team_workspace_path=team_workspace_path,
+        )
+        if skill_rail_spec is not None:
+            declared_rails.append(skill_rail_spec)
+        return worker_spec.model_copy(
+            update={
+                "rails": declared_rails,
+                "skills": [],
+                "enable_skill_discovery": False,
+            },
+        )
+
+    def _team_workspace_path(self) -> str | None:
+        """Return the shared team workspace root, or None when there is none."""
+        from openjiuwen.agent_teams.rails.team_context import get_workspace_manager
+
+        workspace_manager = get_workspace_manager(self._build_context)
+        if workspace_manager is None:
+            return None
+        return workspace_manager.workspace_path
 
     # ------------------------------------------------------------------
     # Helpers
@@ -414,14 +539,6 @@ class TeamWorkerBackend(AgentBackend):
         if self._run_prefix:
             return f"{self._run_prefix}-{slug}-{n}"
         return f"wf-{slug}-{n}"
-
-    @staticmethod
-    def _estimate_tokens(prompt: str, result: Any) -> int:
-        try:
-            payload = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-        except Exception:
-            payload = str(result)
-        return len(prompt) // 4 + len(payload) // 4
 
     @staticmethod
     def _run_id_prefix(run_id: str | None) -> str | None:

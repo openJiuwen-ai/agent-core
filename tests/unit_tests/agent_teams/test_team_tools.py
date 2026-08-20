@@ -13,6 +13,7 @@ from openjiuwen.agent_teams.context import (
     set_session_id,
 )
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import (
     MemberMode,
     MemberStatus,
@@ -24,8 +25,10 @@ from openjiuwen.agent_teams.tools.database import (
     DatabaseType,
     TeamDatabase,
 )
+from openjiuwen.agent_teams.tools import locales as team_locales
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
+from openjiuwen.agent_teams.tools.tool_member import ListCheckpointsTool
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApprovePlanTool,
@@ -171,6 +174,182 @@ class TestBuildTeamTool:
         team_info = await db.team.get_team("test_team")
         assert team_info.display_name == "Minimal Team"
         assert team_info.desc == "A minimal team"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_existing_team_is_taken_over_not_rebuilt(self, agent_team_without_team, t, db, message_bus):
+        """A leader inheriting a team calls build_team like any other (F_76).
+
+        A new session on the same team, or a cold recovery, reaches build_team
+        with the row already there. That call is the one place the collaboration
+        policy is handed over, so it must succeed -- failing it would leave that
+        leader with the bootstrap alone.
+        """
+        args = {
+            "display_name": "My Team",
+            "team_desc": "d",
+            "leader_display_name": "Lead",
+            "leader_desc": "PM",
+        }
+        first = await BuildTeamTool(agent_team_without_team, t).invoke(args)
+        assert first.success is True
+        roster_after_create = [m.member_name for m in await db.member.get_team_members("test_team")]
+
+        # A fresh backend, exactly as a new session / recovery builds one.
+        reattached = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        second = await BuildTeamTool(reattached, t).invoke(args)
+
+        assert second.success is True, second.error
+        # Nothing was rebuilt: no duplicate rows, no second leader registration.
+        assert [m.member_name for m in await db.member.get_team_members("test_team")] == roster_after_create
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_take_over_discloses_the_same_policy(self, agent_team_without_team, t, db, message_bus):
+        """Both paths hand over byte-identical policy text."""
+        args = {
+            "display_name": "My Team",
+            "team_desc": "d",
+            "leader_display_name": "Lead",
+            "leader_desc": "PM",
+        }
+        create_tool = BuildTeamTool(agent_team_without_team, t)
+        created = create_tool.map_result(await create_tool.invoke(args))
+
+        reattached = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        take_over_tool = BuildTeamTool(reattached, t)
+        taken_over = take_over_tool.map_result(await take_over_tool.invoke(args))
+
+        assert "# 团队角色" in taken_over
+        # Same policy body; only the outcome lines differ.
+        assert taken_over.split("\n\n", 1)[1] == created.split("\n\n", 1)[1]
+        # And the outcome must say which of the two happened: a leader that
+        # inherited a roster must not re-spawn the members already on it.
+        assert created.startswith("Team created:")
+        assert taken_over.startswith("Existing team taken over:")
+        assert "do not re-spawn" in taken_over
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_cold_recovery_is_refused_not_served(self, agent_team_without_team, t, db, message_bus):
+        """A recovered leader must not rebuild: it already holds the policy.
+
+        Cold recovery continues the same session, so the history comes back
+        with the original build_team result in it -- and that result is never
+        compacted away. Serving the call idempotently would cost a round and
+        say nothing new, so it is refused.
+        """
+        args = {
+            "display_name": "My Team",
+            "team_desc": "d",
+            "leader_display_name": "Lead",
+            "leader_desc": "PM",
+        }
+        assert (await BuildTeamTool(agent_team_without_team, t).invoke(args)).success is True
+
+        recovered = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        recovered.mark_history_restored()
+
+        result = await BuildTeamTool(recovered, t).invoke(args)
+
+        assert result.success is False
+        assert "do not call build_team again" in result.error
+        # Refused before anything was touched.
+        assert recovered.team_taken_over() is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_recovered_leader_may_rebuild_a_disbanded_team(self, agent_team_without_team, t, db, message_bus):
+        """The refusal keys on the team row, not on the recovery alone.
+
+        A recovered leader whose team was disbanded mid-run (the
+        all-teammates-SHUTDOWN path calls clean_team) has no team left and
+        genuinely needs to build one.
+        """
+        args = {
+            "display_name": "My Team",
+            "team_desc": "d",
+            "leader_display_name": "Lead",
+            "leader_desc": "PM",
+        }
+        recovered = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        recovered.mark_history_restored()
+        assert await db.team.team_exists("test_team") is False
+
+        result = await BuildTeamTool(recovered, t).invoke(args)
+
+        assert result.success is True, result.error
+        assert await db.team.team_exists("test_team") is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_take_over_reads_the_effective_flag_off_the_row(self, db, message_bus):
+        """The team's own configuration wins over this call's arguments.
+
+        The team was configured when it was built and its members already run
+        under that configuration, so a take-over reports what the team actually
+        has -- not what this call asked for.
+        """
+        from openjiuwen.agent_teams.tools.locales import make_translator
+
+        translator = make_translator("cn")
+        builder = TeamBackend(
+            team_name="verified_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            dispatch_mode="scheduled",
+            enable_task_verification=True,
+        )
+        args = {
+            "display_name": "T",
+            "team_desc": "d",
+            "leader_display_name": "L",
+            "leader_desc": "PM",
+        }
+        await BuildTeamTool(builder, translator, dispatch_mode="scheduled").invoke(args)
+        assert builder.task_verification_enabled() is True
+
+        # A fresh backend whose spec ceiling would say False on its own.
+        reattached = TeamBackend(
+            team_name="verified_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            dispatch_mode="scheduled",
+            enable_task_verification=False,
+        )
+        result = await BuildTeamTool(reattached, translator, dispatch_mode="scheduled").invoke(args)
+
+        assert result.success is True
+        assert reattached.task_verification_enabled() is True
+        assert result.data["enable_task_verification"] is True
 
 
 class TestCleanTeamTool:
@@ -379,7 +558,7 @@ class TestSpawnTools:
         """A cli_agent absent from external_cli_agents is rejected (capability ceiling)."""
         tool = SpawnExternalCliTool(agent_team, t)
         result = await tool.invoke(
-            {"member_name": "cli-2", "display_name": "CLI Two", "desc": "worker", "cli_agent": "claude"}
+            {"member_name": "cli-2", "display_name": "CLI Two", "prompt": "worker", "cli_agent": "claude"}
         )
         assert result.success is False
         assert "not declared" in (result.error or "")
@@ -399,12 +578,12 @@ class TestSpawnTools:
         )
         tool = SpawnExternalCliTool(team, t)
         result = await tool.invoke(
-            {"member_name": "claude-1", "display_name": "Claude One", "desc": "reviewer", "cli_agent": "claude"}
+            {"member_name": "claude-1", "display_name": "Claude One", "prompt": "reviewer", "cli_agent": "claude"}
         )
         assert result.success is True, result.error
         assert result.data["role_type"] == "external_cli"
         assert result.data["cli_agent"] == "claude"
-        assert team.is_external_cli_agent("claude-1")
+        assert await team.is_external_cli_agent("claude-1")
 
 
 class TestSpawnToolCapabilityGate:
@@ -569,7 +748,7 @@ class TestApprovePlanTool:
         assert result.success is True
         assert result.error is None
         approved_task = await agent_team.task_manager.get(task.task_id)
-        assert approved_task.status == TaskStatus.PLAN_APPROVED.value
+        assert approved_task.status == TaskStatus.IN_PROGRESS.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -588,7 +767,7 @@ class TestApprovePlanTool:
 
         assert result.success is False
         approved_task = await agent_team.task_manager.get(task.task_id)
-        assert approved_task.status == TaskStatus.CLAIMED.value
+        assert approved_task.status == TaskStatus.PLANNING.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -607,7 +786,7 @@ class TestApprovePlanTool:
 
         assert result.success is True
         rejected_task = await agent_team.task_manager.get(task.task_id)
-        assert rejected_task.status == TaskStatus.CLAIMED.value
+        assert rejected_task.status == TaskStatus.PLANNING.value
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -691,6 +870,93 @@ class TestListMembersTool:
         assert "member1" in member_ids
         assert "member2" in member_ids
 
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_projects_roster_columns_only(self, agent_team, t, sample_agent_card):
+        """Roster entries carry only name/display_name/status, no heavy columns."""
+        await agent_team.spawn_member(member_name="member1", display_name="Member One", agent_card=sample_agent_card)
+
+        tool = ListMembersTool(agent_team, t)
+        result = await tool.invoke({})
+
+        assert result.success is True
+        member = result.data["members"][0]
+        assert set(member) == {"member_name", "display_name", "status"}
+
+
+# ========== Checkpoint listing ==========
+
+
+class TestListCheckpointsTool:
+    """Test ListCheckpointsTool"""
+
+    @pytest.mark.level0
+    def test_initialization(self, agent_team, t):
+        """Test tool initialization"""
+        tool = ListCheckpointsTool(agent_team, t)
+        assert tool.card.name == "list_checkpoints"
+        assert tool.card.id == "team.list_checkpoints"
+        assert tool.team == agent_team
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_empty(self, agent_team, t):
+        """Test invoking list checkpoints when empty"""
+        tool = ListCheckpointsTool(agent_team, t)
+        result = await tool.invoke({})
+
+        assert result.success is True
+        assert result.data["count"] == 0
+        assert result.data["checkpoints"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_with_checkpoints(self, agent_team, t):
+        """Records surface name / message_count / description / created_by."""
+        agent_team.set_checkpoint_list_fn(
+            lambda: {
+                "code-ready": {"count": 5, "description": "base done", "created_by": "dev-1"},
+                "refactor-done": {"count": 12, "description": "", "created_by": "dev-2"},
+            }
+        )
+        tool = ListCheckpointsTool(agent_team, t)
+        result = await tool.invoke({})
+
+        assert result.success is True
+        assert result.data["count"] == 2
+        items = result.data["checkpoints"]
+        by_name = {item["name"]: item for item in items}
+        assert by_name["code-ready"] == {
+            "name": "code-ready",
+            "message_count": 5,
+            "description": "base done",
+            "created_by": "dev-1",
+        }
+        assert by_name["refactor-done"]["message_count"] == 12
+
+    @pytest.mark.level1
+    def test_map_result_renders_rows(self, agent_team, t):
+        tool = ListCheckpointsTool(agent_team, t)
+        out = ToolOutput(
+            success=True,
+            data={
+                "checkpoints": [
+                    {"name": "code-ready", "message_count": 5, "description": "base done", "created_by": "dev-1"},
+                    {"name": "refactor-done", "message_count": 12, "description": "", "created_by": "dev-2"},
+                ],
+                "count": 2,
+            },
+        )
+        text = tool.map_result(out)
+        assert "code-ready" in text and "message_count=5" in text and "base done" in text
+        assert "refactor-done" in text and "message_count=12" in text
+
+    @pytest.mark.level1
+    def test_map_result_empty(self, agent_team, t):
+        tool = ListCheckpointsTool(agent_team, t)
+        text = tool.map_result(ToolOutput(success=True, data={"checkpoints": [], "count": 0}))
+        assert text == "No checkpoints"
+
 
 # ========== Task Management Tools (V2) ==========
 
@@ -732,8 +998,45 @@ class TestTaskCreateTool:
 
         assert result.success is True
         assert result.data["count"] == 3
-        assert result.data["skipped"] == 0
         assert len(result.data["tasks"]) == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_batch_with_forward_references(self, agent_team, t):
+        """depends_on may reference tasks created later in the same call."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "final", "title": "Final", "content": "c", "depends_on": ["a1", "a2"]},
+                    {"task_id": "a1", "title": "A1", "content": "c"},
+                    {"task_id": "a2", "title": "A2", "content": "c"},
+                ]
+            }
+        )
+
+        assert result.success is True, result.error
+        statuses = {task["task_id"]: task["status"] for task in result.data["tasks"]}
+        assert statuses["final"] == TaskStatus.BLOCKED.value
+        assert statuses["a1"] == TaskStatus.PENDING.value
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_create_batch_atomic_failure(self, agent_team, t):
+        """A bad reference fails the whole call; nothing is created."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "good", "title": "Good", "content": "c"},
+                    {"task_id": "bad", "title": "Bad", "content": "c", "depends_on": ["ghost"]},
+                ]
+            }
+        )
+
+        assert result.success is False
+        assert "ghost" in result.error
+        assert await agent_team.task_manager.get("good") is None
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -767,6 +1070,41 @@ class TestTaskCreateTool:
 
         assert result.success is True
         assert result.data["title"] == "Priority Task"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_create_task_rejects_in_batch_depended_by(self, agent_team, t):
+        """depended_by pointing at a task of the same call is rejected."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "up", "title": "Up", "content": "c"},
+                    {"task_id": "down", "title": "Down", "content": "c", "depended_by": ["up"]},
+                ]
+            }
+        )
+
+        assert result.success is False
+        assert "depends_on" in result.error
+        assert await agent_team.task_manager.get("up") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_create_task_rejects_duplicate_ids_in_call(self, agent_team, t):
+        """Duplicate task_id within one call is rejected at the boundary."""
+        tool = TaskCreateTool(agent_team, t)
+        result = await tool.invoke(
+            {
+                "tasks": [
+                    {"task_id": "same", "title": "First", "content": "c"},
+                    {"task_id": "same", "title": "Second", "content": "c"},
+                ]
+            }
+        )
+
+        assert result.success is False
+        assert "same" in result.error
 
 
 class TestUpdateTaskTool:
@@ -827,7 +1165,7 @@ class TestUpdateTaskTool:
     async def test_cancel_all_tasks(self, agent_team, t, db):
         """Test cancel all tasks via task_id='*'"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke({"task_id": "*", "status": "cancelled"})
@@ -866,7 +1204,9 @@ class TestUpdateTaskTool:
     @pytest.mark.asyncio
     @pytest.mark.level1
     async def test_assign_reassigns_to_new_member(self, agent_team, t, sample_agent_card, db):
-        """Reassigning a claimed task cancels the old owner and binds the new one."""
+        """Reassigning a claimed task moves it to the new member without a
+        member-wide cancel: the former owner is notified via a targeted
+        TASK_REVOKED event, and cancel_member is never called."""
         for member_name in ("dev-1", "dev-2"):
             await db.member.create_member(
                 member_name=member_name,
@@ -877,6 +1217,7 @@ class TestUpdateTaskTool:
             )
         task = await agent_team.task_manager.add(title="Task", content="Content")
         await db.task.claim_task(task.task_id, "dev-1")
+        agent_team.cancel_member = AsyncMock()
 
         tool = UpdateTaskTool(agent_team, t)
         result = await tool.invoke(
@@ -890,6 +1231,18 @@ class TestUpdateTaskTool:
         assert "assignee" in result.data["updated_fields"]
         updated = await agent_team.task_manager.get(task.task_id)
         assert updated.assignee == "dev-2"
+
+        # The former owner is not force-cancelled — only the one task moves.
+        agent_team.cancel_member.assert_not_awaited()
+        # A targeted TASK_REVOKED notifies the former assignee (dev-1).
+        revoked = [
+            call.kwargs["message"]
+            for call in agent_team.messager.publish.call_args_list
+            if call.kwargs.get("message") is not None
+            and call.kwargs["message"].event_type == TeamEvent.TASK_REVOKED
+        ]
+        assert len(revoked) == 1
+        assert revoked[0].payload["member_name"] == "dev-1"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1043,7 +1396,7 @@ class TestViewTaskToolV2:
     async def test_invoke_list_tasks_by_status(self, agent_team, t, db):
         """Test list action returns summary with blocked_by, no content"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -1062,7 +1415,7 @@ class TestViewTaskToolV2:
     async def test_invoke_default_action_is_list(self, agent_team, t, db):
         """Test default action is list (returns all tasks, not just pending)"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -1076,7 +1429,7 @@ class TestViewTaskToolV2:
     async def test_invoke_claimable(self, agent_team, t, db):
         """Test claimable action returns only pending tasks"""
         await db.task.create_task("task1", "test_team", "Task 1", "Content 1", "pending")
-        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "claimed")
+        await db.task.create_task("task2", "test_team", "Task 2", "Content 2", "in_progress")
         await db.task.create_task("task3", "test_team", "Task 3", "Content 3", "completed")
 
         tool = ViewTaskToolV2(agent_team.task_manager, t)
@@ -1123,7 +1476,7 @@ class TestClaimTaskTool:
 
         assert result.success is True
         assert "status" in result.data["updated_fields"]
-        assert result.data["status_change"]["to"] == "claimed"
+        assert result.data["status_change"]["to"] == "in_progress"
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1271,7 +1624,7 @@ class TestMappedToolOutput:
             success=True,
             data={"type": "message", "from": "leader", "to": "dev-1", "summary": None},
         )
-        assert tool.map_result(output) == "Message sent from leader to dev-1"
+        assert tool.map_result(output) == "Message Already sent from leader to dev-1 Success"
 
     @pytest.mark.level1
     def test_send_message_map_result_broadcast(self, agent_team, t):
@@ -1281,7 +1634,7 @@ class TestMappedToolOutput:
             success=True,
             data={"type": "broadcast", "from": "leader", "summary": None},
         )
-        assert tool.map_result(output) == "Broadcast sent from leader"
+        assert tool.map_result(output) == "Broadcast Already sent from leader Success"
 
     @pytest.mark.level1
     def test_default_map_result_json(self, agent_team, t):
@@ -1774,7 +2127,7 @@ class TestTranslator:
     def test_missing_desc_raises_file_not_found(self):
         """Unknown tool: no markdown and no STRINGS entry → FileNotFoundError.
 
-        Protects against silent KeyError if a descs/<lang>/<tool>.md
+        Protects against silent KeyError if a descs/<lang>/<domain>/<tool>.md
         is deleted or mis-named.
         """
         translate = make_translator("cn")
@@ -1785,6 +2138,55 @@ class TestTranslator:
         msg = str(excinfo.value)
         assert "nonexistent_tool_for_translator_test" in msg
         assert "cn" in msg
+
+
+# ========== Descriptions resolve through a domain-grouped index ==========
+
+
+@pytest.mark.level1
+def test_desc_index_maps_flat_keys_to_domain_subdirectories():
+    """Files sit under domain dirs while desc_key stays flat and prefix-free."""
+    index = team_locales._desc_index("cn")
+
+    assert index["build_team"].parent.name == "team"
+    assert index["create_task"].parent.name == "task"
+    assert index["send_message_scheduled"].parent.name == "message"
+    assert index["structured_output"].parent.name == "common"
+    assert all("/" not in key for key in index)
+
+
+@pytest.mark.level1
+def test_desc_index_excludes_fragments_and_is_language_symmetric():
+    """Slot names are a separate namespace, and both languages carry the same keys."""
+    cn_index = team_locales._desc_index("cn")
+    en_index = team_locales._desc_index("en")
+
+    assert "fork_usage" not in cn_index
+    assert "artifact_handoff_policy" not in cn_index
+    assert set(cn_index) == set(en_index)
+
+
+@pytest.mark.level1
+def test_duplicate_desc_key_across_domains_raises(tmp_path, monkeypatch):
+    """The same key filed under two domains fails loudly at index time.
+
+    Picking one would make the description a model reads depend on directory
+    walk order, which is invisible until a model behaves oddly in production.
+    """
+    for domain in ("task", "message"):
+        domain_dir = tmp_path / "cn" / domain
+        domain_dir.mkdir(parents=True)
+        (domain_dir / "duplicated_tool.md").write_text("desc", encoding="utf-8")
+    monkeypatch.setattr(team_locales, "_DESCS_DIR", tmp_path)
+
+    team_locales._desc_index.cache_clear()
+    try:
+        with pytest.raises(ValueError) as excinfo:
+            team_locales._desc_index("cn")
+    finally:
+        team_locales._desc_index.cache_clear()
+
+    assert "duplicated_tool" in str(excinfo.value)
 
 
 # ========== Team rails are provider-built fresh each cycle (never cached) ==========
@@ -1886,3 +2288,145 @@ async def test_reliability_factory_reuses_injected_components_across_cycles(agen
     # ...wrapping the one reused stateful core.
     assert rail_cycle1._monitor is rail_cycle2._monitor
     assert rail_cycle1._monitor is components.monitor
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_rejects_assign_to_member_with_active_claim(agent_team, t, sample_agent_card, db):
+    """One active claim per member: assigning a second task to a member who
+    already holds a CLAIMED task is refused, leaving both tasks untouched."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task_a = await agent_team.task_manager.add(title="A", content="c")
+    task_b = await agent_team.task_manager.add(title="B", content="c")
+    await db.task.claim_task(task_a.task_id, "dev-1")
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task_b.task_id, "assignee": "dev-1"})
+
+    assert result.success is False
+    assert task_a.task_id in result.error
+    # task_b stays unassigned; task_a still held by dev-1.
+    assert (await agent_team.task_manager.get(task_b.task_id)).assignee is None
+    assert (await agent_team.task_manager.get(task_a.task_id)).assignee == "dev-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claim_task_rejects_second_concurrent_claim(agent_team, t, sample_agent_card, db):
+    """A teammate holding a CLAIMED task cannot claim a second one."""
+    await db.member.create_member(
+        member_name="leader1",
+        team_name="test_team",
+        display_name="leader1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task_a = await agent_team.task_manager.add(title="A", content="c")
+    task_b = await agent_team.task_manager.add(title="B", content="c")
+    await db.task.claim_task(task_a.task_id, "leader1")
+
+    tool = ClaimTaskTool(agent_team.task_manager, t)
+    result = await tool.invoke({"task_id": task_b.task_id, "status": "claimed"})
+
+    assert result.success is False
+    assert task_a.task_id in result.error
+    assert (await agent_team.task_manager.get(task_b.task_id)).status == TaskStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_claimed_task_does_not_cancel_member(agent_team, t, sample_agent_card, db):
+    """Cancelling a claimed task no longer force-cancels its member; the member
+    is steered off via a targeted TASK_CANCELLED event instead."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="Content")
+    await db.task.claim_task(task.task_id, "dev-1")
+    agent_team.cancel_member = AsyncMock()
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "status": "cancelled"})
+
+    assert result.success is True
+    agent_team.cancel_member.assert_not_awaited()
+    cancelled = [
+        call.kwargs["message"]
+        for call in agent_team.messager.publish.call_args_list
+        if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_CANCELLED
+    ]
+    assert any(m.payload["member_name"] == "dev-1" for m in cancelled)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_edit_claimed_task_keeps_claim_without_cancel_member(agent_team, t, sample_agent_card, db):
+    """Editing a claimed task's content keeps it claimed by the same member
+    (no reset, no member-wide cancel); the member is told to re-read via a
+    targeted TASK_UPDATED event."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="old")
+    await db.task.claim_task(task.task_id, "dev-1")
+    agent_team.cancel_member = AsyncMock()
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "content": "new content"})
+
+    assert result.success is True
+    agent_team.cancel_member.assert_not_awaited()
+    updated = await agent_team.task_manager.get(task.task_id)
+    assert updated.status == TaskStatus.IN_PROGRESS.value
+    assert updated.assignee == "dev-1"
+    assert updated.content == "new content"
+    events = [
+        call.kwargs["message"]
+        for call in agent_team.messager.publish.call_args_list
+        if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_UPDATED
+    ]
+    assert any(m.payload["member_name"] == "dev-1" for m in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_edit_human_locked_task_is_refused(agent_team, t, sample_agent_card, db):
+    """A task held by a human still on the team is leader-immutable — editing its
+    content is refused, same lock as cancel / reassign.
+
+    The member is created with a real ``human_agent`` role rather than stubbing
+    the backend probe, so the lock resolves through the DB exactly as it does in
+    production (role + not-departed status).
+    """
+    await db.member.create_member(
+        member_name="human-1",
+        team_name="test_team",
+        display_name="human-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+        role=TeamRole.HUMAN_AGENT.value,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="old")
+    await db.task.claim_task(task.task_id, "human-1")
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "content": "new content"})
+
+    assert result.success is False
+    assert task.task_id in (result.error or "")
+    # Content unchanged since the edit was refused.
+    assert (await agent_team.task_manager.get(task.task_id)).content == "old"

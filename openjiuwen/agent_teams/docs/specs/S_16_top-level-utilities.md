@@ -11,7 +11,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/paths.py` · `context.py` · `i18n.py` · `timefmt.py` · `constants.py` · `worktree_remote.py` · `harness.py` |
-| 最近一次修订日期 | 2026-06-05 |
+| 最近一次修订日期 | 2026-07-03 |
 | 关联 feature | F_24_agent-time-awareness.md |
 
 ## 范围 / 边界
@@ -75,7 +75,7 @@
 ### i18n.py
 
 10. **进 `i18n.py` 的字符串必须满足两个条件**：
-    - 在运行时代码路径中硬编码（dispatcher 通知、backend 默认 persona、HITT 默认描述等）；
+    - 在运行时代码路径中硬编码（dispatcher 通知、backend 默认 desc、HITT 默认描述等）；
     - 短串，不是模板长正文。
     长正文（system_prompt / 工具描述）走 `prompts/<lang>/*.md` 与
     `tools/locales/descs/<lang>/*.md`，由各自模块按 `lang` 入参加载。
@@ -396,8 +396,8 @@ tool_approval?。Optional 字段缺省 = 该 rail 当前装配未启用，不是
 - **`i18n.py` 的下游消费者**：
   - `agent/dispatcher.py`：成员事件、催促、idle 通知文案。
   - `tools/team.py`：shutdown / cancel 默认请求文案。
-  - `schema/blueprint.py`：默认 persona。
-  - HITT 默认 display name / persona / spawn 通知。
+  - `schema/blueprint.py`：默认 desc。
+  - HITT 默认 display name / desc / spawn 通知。
   - 长正文（`prompts/<lang>/*.md`、`tools/locales/descs/<lang>/*.md`）**不走** 本模块，由
     各自模块按 `lang` 参数加载——这两条路径与 i18n.py 严格分隔，互不污染。
 - **`constants.py` 的下游消费者**：

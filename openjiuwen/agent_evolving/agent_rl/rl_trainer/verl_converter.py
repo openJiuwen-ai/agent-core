@@ -103,6 +103,12 @@ class VerlDataProtoConverter:
         token_level_scores = torch.zeros((bs, response_max), dtype=torch.float32)
         prompts = torch.full((bs, prompt_max), self.pad_token_id, dtype=torch.long)
         responses = torch.full((bs, response_max), self.pad_token_id, dtype=torch.long)
+        routed_experts = self._build_routed_experts_tensor(
+            rows=rows,
+            input_max=input_max,
+            prompt_max=prompt_max,
+            torch=torch,
+        )
 
         for row_idx, row in enumerate(rows):
             pl = len(row["prompt_ids"])
@@ -119,7 +125,10 @@ class VerlDataProtoConverter:
                 responses[row_idx, :rl] = response_tensor
                 input_ids[row_idx, prompt_max:prompt_max + rl] = response_tensor
                 attention_mask[row_idx, prompt_max:prompt_max + rl] = 1
-                response_mask[row_idx, :rl] = 1
+                response_mask[row_idx, :rl] = torch.tensor(
+                    row["response_mask"],
+                    dtype=torch.long,
+                )
                 old_log_probs[row_idx, :rl] = torch.tensor(
                     row["response_logprobs"], dtype=torch.float32,
                 )
@@ -138,6 +147,8 @@ class VerlDataProtoConverter:
             "old_log_probs": old_log_probs,
             "token_level_scores": token_level_scores,
         }
+        if routed_experts is not None:
+            tensors["routed_experts"] = routed_experts
         sample_ids = [r["sample_id"] for r in rows]
         non_tensors = {
             "sample_id": sample_ids,
@@ -212,6 +223,24 @@ class VerlDataProtoConverter:
         if not input_ids:
             raise ValueError(f"sample[{idx}] has no valid token ids")
 
+        routed_experts = self._coerce_routed_experts(trajectory.get("routed_experts"), idx=idx)
+        if routed_experts is not None and len(routed_experts) != len(input_ids):
+            raise ValueError(
+                f"sample[{idx}].trajectory.routed_experts must align with input_ids",
+            )
+
+        original_prompt_len = len(prompt_ids)
+        original_response_len = len(response_ids)
+        canonical_response_mask = self._coerce_int_list(trajectory.get("response_mask"))
+        if canonical_response_mask:
+            if len(canonical_response_mask) != len(input_ids):
+                raise ValueError(
+                    f"sample[{idx}].trajectory.response_mask must align with input_ids",
+                )
+            response_token_mask = canonical_response_mask[original_prompt_len:]
+        else:
+            response_token_mask = [1] * original_response_len
+
         prompt_truncated = False
         response_truncated = False
         if self.max_prompt_length is not None and len(prompt_ids) > self.max_prompt_length:
@@ -222,8 +251,17 @@ class VerlDataProtoConverter:
             prompt_truncated = True
         if self.max_response_length is not None and len(response_ids) > self.max_response_length:
             response_ids = response_ids[:self.max_response_length]
+            response_token_mask = response_token_mask[: self.max_response_length]
             response_truncated = True
         input_ids = prompt_ids + response_ids
+        if routed_experts is not None:
+            prompt_routing = routed_experts[:original_prompt_len]
+            response_routing = routed_experts[slice(original_prompt_len, original_prompt_len + original_response_len)]
+            if prompt_truncated:
+                prompt_routing = prompt_routing[slice(-len(prompt_ids), None)]
+            if response_truncated:
+                response_routing = response_routing[: len(response_ids)]
+            routed_experts = prompt_routing + response_routing
 
         response_len = len(response_ids)
         response_logprobs = self._coerce_float_list(trajectory.get("response_logprobs"))
@@ -252,6 +290,8 @@ class VerlDataProtoConverter:
             "prompt_ids": prompt_ids,
             "response_ids": response_ids,
             "response_logprobs": response_logprobs,
+            "response_mask": response_token_mask,
+            "routed_experts": routed_experts,
             "judge_score": judge_score,
             "_prompt_truncated": prompt_truncated,
             "_response_truncated": response_truncated,
@@ -278,3 +318,71 @@ class VerlDataProtoConverter:
         if not isinstance(value, list):
             return []
         return [float(x) for x in value if isinstance(x, (int, float))]
+
+    @staticmethod
+    def _coerce_routed_experts(value: Any, *, idx: int) -> Optional[list[list[list[int]]]]:
+        if value is None:
+            return None
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"sample[{idx}].trajectory.routed_experts must be rank 3")
+
+        normalized: list[list[list[int]]] = []
+        expected_layers: Optional[int] = None
+        expected_topk: Optional[int] = None
+        for token_routes in value:
+            if not isinstance(token_routes, (list, tuple)):
+                raise ValueError(f"sample[{idx}].trajectory.routed_experts must be rank 3")
+            layers: list[list[int]] = []
+            for layer_routes in token_routes:
+                if not isinstance(layer_routes, (list, tuple)):
+                    raise ValueError(f"sample[{idx}].trajectory.routed_experts must be rank 3")
+                experts = [int(expert) for expert in layer_routes]
+                if expected_topk is None:
+                    expected_topk = len(experts)
+                if not experts or len(experts) != expected_topk:
+                    raise ValueError(
+                        f"sample[{idx}].trajectory.routed_experts must be rectangular",
+                    )
+                layers.append(experts)
+            if expected_layers is None:
+                expected_layers = len(layers)
+            if not layers or len(layers) != expected_layers:
+                raise ValueError(
+                    f"sample[{idx}].trajectory.routed_experts must be rectangular",
+                )
+            normalized.append(layers)
+        return normalized
+
+    @staticmethod
+    def _build_routed_experts_tensor(
+        *,
+        rows: Sequence[dict[str, Any]],
+        input_max: int,
+        prompt_max: int,
+        torch: Any,
+    ) -> Any:
+        routed_rows = [row["routed_experts"] for row in rows]
+        if any(routes is None for routes in routed_rows):
+            return None
+
+        first = routed_rows[0]
+        if not first:
+            return None
+        num_layers = len(first[0])
+        topk = len(first[0][0])
+        for row_idx, routes in enumerate(routed_rows):
+            if any(len(token) != num_layers or any(len(layer) != topk for layer in token) for token in routes):
+                raise ValueError(f"sample[{row_idx}].trajectory.routed_experts shape differs across batch")
+
+        tensor = torch.zeros((len(rows), input_max, num_layers, topk), dtype=torch.long)
+        for row_idx, (row, routes) in enumerate(zip(rows, routed_rows)):
+            prompt_len = len(row["prompt_ids"])
+            response_len = len(row["response_ids"])
+            if prompt_len:
+                tensor[row_idx, :prompt_len] = torch.tensor(routes[:prompt_len], dtype=torch.long)
+            if response_len:
+                tensor[row_idx, slice(prompt_max, prompt_max + response_len)] = torch.tensor(
+                    routes[slice(prompt_len, prompt_len + response_len)],
+                    dtype=torch.long,
+                )
+        return tensor

@@ -160,6 +160,10 @@ class AsyncProcessHandler:
         try:
             await asyncio.wait_for(self._process.wait(), timeout=self._overall_timeout)
         except asyncio.CancelledError:
+            # WARNING: Do NOT swallow CancelledError here.
+            # Outer anyio.fail_after relies on CancelledError propagation
+            # to correctly convert it to TimeoutError. Swallowing it would
+            # break the timeout contract for callers (e.g. AbilityManager).
             sys_operation_logger.warning(
                 "Process cancelled by user, killing subprocess tree",
                 event_type=LogEventType.SYS_OP_ERROR,

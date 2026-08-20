@@ -59,8 +59,14 @@ def _make_manager(
     event_handler: AsyncMock | None = None,
     rails: list | None = None,
 ) -> WorktreeManager:
+    # repo_lock=False: these tests mock find_canonical_git_root to return a
+    # non-existent path ("/repo"), so the cross-process filelock layer would
+    # try to mkdir("/repo") and hit PermissionError on CI. These are unit
+    # tests of manager business logic, not cross-process locking — that is
+    # covered by test_concurrency_lock.py against a real tmp_git_repo.
+    default = WorktreeConfig(enabled=True, repo_lock=False)
     return WorktreeManager(
-        config=config or WorktreeConfig(enabled=True),
+        config=config or default,
         backend=backend,
         event_handler=event_handler,
         rails=rails,

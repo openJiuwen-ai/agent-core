@@ -2,6 +2,8 @@
 
 Built-in tools available to `DeepAgent`. Tools are registered via `ToolCard` entries in [`DeepAgentConfig.tools`](../schema/config.md#class-openjiuwenharnessschemadeepagentconfig) or through the `tools` parameter in [`create_deep_agent`](../factory.md#function-openjiuwenharnesscreate_deep_agent).
 
+The tools of the [browser sub-agent](../subagents/browser_agent.md) (Playwright MCP tools, page probes, batch interaction, custom actions) are documented separately in [`browser_tools`](./browser_tools.md).
+
 ## Overview
 
 ### File System
@@ -60,8 +62,7 @@ Built-in tools available to `DeepAgent`. Tools are registered via `ToolCard` ent
 
 | Tool | Description |
 |---|---|
-| `SearchToolsTool` | Search for available tools by keyword. |
-| `LoadToolsTool` | Load additional tools into the active tool set. |
+| `ToolSearchTool` | Search deferred tools and return their complete schemas. |
 
 ### Skills
 

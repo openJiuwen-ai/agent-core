@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.external import (
     ExternalTeamClient,
     TeamJoinDescriptor,
 )
+from openjiuwen.agent_teams.fork import ForkContext
 from openjiuwen.agent_teams.interaction import (
     HumanAgentInbox,
     HumanAgentNotEnabledError,
@@ -65,12 +66,12 @@ from openjiuwen.agent_teams.tiny_agent import (
     generate_summary,
     generate_title,
 )
-from openjiuwen.agent_teams.tools.memory_database import MemoryDatabaseConfig
 
 __all__ = [
     "DEFAULT_LEADER_MEMBER_NAME",
     "DeepAgentSpec",
     "ExternalTeamClient",
+    "ForkContext",
     "HUMAN_AGENT_MEMBER_NAME",
     "TEAM_JOIN_ENV",
     "TeamJoinDescriptor",
@@ -106,7 +107,6 @@ __all__ = [
     "PyZmqMessager",
     "create_messager",
     "InProcessSpawnHandle",
-    "MemoryDatabaseConfig",
     "ReliabilityConfig",
     "TinyAgent",
     "TinyAgentSpec",

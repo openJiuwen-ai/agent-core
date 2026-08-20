@@ -15,17 +15,15 @@ same database engine and the same runtime to avoid duplicated state.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.database import TeamDatabase
-    from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
     from openjiuwen.core.multi_agent.team_runtime.team_runtime import TeamRuntime
 
 # ---- process-global singletons ------------------------------------------
 
 _runtime: "TeamRuntime | None" = None
-_memory_db: "InMemoryTeamDatabase | None" = None
 # Database instances keyed by normalized db_type + connection_string.
 _db_instances: dict[str, "TeamDatabase"] = {}
 
@@ -42,25 +40,20 @@ def get_shared_runtime() -> "TeamRuntime":
     return _runtime
 
 
-def get_shared_db(config: Any) -> Union["TeamDatabase", "InMemoryTeamDatabase"]:
+def get_shared_db(config: Any) -> "TeamDatabase":
     """Return a process-global database instance matching *config*.
 
-    * ``db_type == "memory"`` → single global InMemoryTeamDatabase.
-    * ``db_type != "memory"``  → one TeamDatabase per db_type+connection_string.
-
-    Multiple teams and sessions share the same instance; row-level
-    isolation is provided by team_name / session_id columns.
+    One TeamDatabase is cached per db_type+connection_string. Multiple
+    teams and sessions share the same instance; row-level isolation is
+    provided by team_name / session_id columns.
     """
-    if config.db_type == "memory":
-        return _get_shared_memory_db()
     return _get_shared_db_instance(config)
 
 
 def cleanup_shared_resources() -> None:
     """Reset all process-global singletons (e.g. between test runs)."""
-    global _runtime, _memory_db
+    global _runtime
     _runtime = None
-    _memory_db = None
     _db_instances.clear()
 
     from openjiuwen.agent_teams.messager.inprocess import cleanup_inprocess_bus
@@ -69,15 +62,6 @@ def cleanup_shared_resources() -> None:
 
 
 # ---- internals -----------------------------------------------------------
-
-def _get_shared_memory_db() -> "InMemoryTeamDatabase":
-    global _memory_db
-    if _memory_db is None:
-        from openjiuwen.agent_teams.tools.memory_database import InMemoryTeamDatabase
-
-        _memory_db = InMemoryTeamDatabase()
-    return _memory_db
-
 
 def _get_shared_db_instance(config: Any) -> "TeamDatabase":
     db_type = config.db_type

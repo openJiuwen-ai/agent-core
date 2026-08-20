@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.harness.rails.evolution.review.result_schema import (
     EvolutionReviewResult,
     normalize_review_result,
@@ -20,7 +21,6 @@ ScopeStatus = Literal[
     "review_completed",
     "submitted",
     "no_evolution",
-    "expired",
     "cancelled",
     "failed",
 ]
@@ -41,14 +41,13 @@ class EvolutionReviewScope:
     session_id: str
     evolution_review_ref: str
     user_intent: str = ""
-    scoped_materials: dict[str, Any] = field(default_factory=dict)
+    trajectory: Trajectory | None = None
     status: ScopeStatus = "review_required"
     proposal_ids: set[str] = field(default_factory=set)
     proposal_drafts: dict[str, dict[str, Any]] = field(default_factory=dict)
     read_trace: set[str] = field(default_factory=set)
     result: dict[str, Any] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
-    expires_at: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc) + timedelta(minutes=30))
     consumed_at: datetime | None = None
 
 
@@ -85,14 +84,11 @@ class EvolutionReviewRuntime:
         self._submitted_scope_retention = timedelta(seconds=max(0.0, submitted_scope_retention_secs))
 
     def prune_scopes(self) -> None:
-        """Remove expired scopes and submitted scopes past the replay window."""
+        """Remove submitted scopes past the replay window."""
         now = datetime.now(tz=timezone.utc)
         submitted_cutoff = now - self._submitted_scope_retention
         refs_to_delete = []
         for ref, scope in self._scopes_by_ref.items():
-            if scope.status == "expired" or scope.expires_at <= now:
-                refs_to_delete.append(ref)
-                continue
             if scope.status == "submitted" and scope.consumed_at is not None and scope.consumed_at <= submitted_cutoff:
                 refs_to_delete.append(ref)
         for ref in refs_to_delete:
@@ -105,7 +101,7 @@ class EvolutionReviewRuntime:
         subject: dict[str, Any],
         session_id: str,
         user_intent: str = "",
-        scoped_materials: dict[str, Any] | None = None,
+        trajectory: Trajectory | None = None,
     ) -> EvolutionReviewLaunch:
         self.prune_scopes()
         normalized_subject = self._normalize_subject(subject).to_payload()
@@ -118,7 +114,7 @@ class EvolutionReviewRuntime:
             session_id=session_id,
             evolution_review_ref=ref,
             user_intent=user_intent,
-            scoped_materials=dict(scoped_materials or {}),
+            trajectory=Trajectory.from_otlp(trajectory.to_otlp()) if trajectory is not None else None,
         )
         self._scopes_by_ref[ref] = scope
         return EvolutionReviewLaunch(
@@ -133,10 +129,6 @@ class EvolutionReviewRuntime:
         if scope.session_id == "" and session_id:
             scope.session_id = session_id
         if not self._session_matches_scope(scope.session_id, session_id):
-            raise KeyError(evolution_review_ref)
-        if scope.expires_at <= datetime.now(tz=timezone.utc):
-            scope.status = "expired"
-            self._scopes_by_ref.pop(evolution_review_ref, None)
             raise KeyError(evolution_review_ref)
         return scope
 

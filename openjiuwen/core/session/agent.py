@@ -11,6 +11,12 @@ from typing import (
 from openjiuwen.core.session import (
     Config,
 )
+from openjiuwen.core.foundation.kv_cache.kv_cache_metadata import (
+    KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
+    KV_CACHE_AFFINITY_SESSION_ID_ENV,
+    KVCacheIdentity,
+    team_member_cache_identity,
+)
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.interaction.interaction import SimpleAgentInteraction
 from openjiuwen.core.session.internal.agent import AgentSession
@@ -30,7 +36,8 @@ class Session:
                  *,
                  stream_writer_manager: StreamWriterManager | None = None,
                  close_stream_on_post_run: bool = True,
-                 source_metadata: dict[str, Any] | None = None):
+                 source_metadata: dict[str, Any] | None = None,
+                 parent_session_id: str | None = None):
         if session_id is None:
             session_id = str(uuid.uuid4())
         self._session_id = session_id
@@ -49,9 +56,42 @@ class Session:
         self._interaction = None
         self._close_stream_on_post_run = close_stream_on_post_run
         self._source_metadata = source_metadata or {}
+        self._parent_session_id = (
+            parent_session_id.strip()
+            if isinstance(parent_session_id, str) and parent_session_id.strip()
+            else None
+        )
+        self._team_cache_scope: tuple[str, str] | None = None
 
     def get_session_id(self) -> str:
         return self._session_id
+
+    def get_parent_session_id(self) -> str | None:
+        """Return the optional product Session that owns this child Session."""
+        return self._parent_session_id
+
+    def bind_parent_session_id(self, parent_session_id: str) -> None:
+        """Bind this child to one product Session before it starts running.
+
+        Session lineage is immutable once set. Rebinding the same parent is
+        idempotent; attempting to move a live child to another parent is an
+        ownership error.
+        """
+        normalized = (
+            parent_session_id.strip()
+            if isinstance(parent_session_id, str)
+            else ""
+        )
+        if not normalized:
+            return
+        if self._parent_session_id is None:
+            self._parent_session_id = normalized
+            return
+        if self._parent_session_id != normalized:
+            raise ValueError(
+                "Session parent is already bound to "
+                f"{self._parent_session_id!r}; cannot rebind to {normalized!r}"
+            )
 
     def get_env(self, key: str, default: Any = None) -> Any:
         return self._inner.config().get_env(key, default)
@@ -67,6 +107,60 @@ class Session:
 
     def get_agent_description(self):
         return self._card.description
+
+    def set_team_cache_scope(self, *, team_id: str, agent_id: str) -> None:
+        """Bind the Team scope used to derive this member Session's cache id."""
+        if not team_id or not agent_id:
+            return
+        self._team_cache_scope = (team_id, agent_id)
+
+    def get_cache_identity(self) -> KVCacheIdentity:
+        """Return the provider-facing identity owned by this Session.
+
+        Team child sessions need an explicit member scope because all members
+        share the product session id. Standalone child sessions, including
+        Swarmflow workers, use their runtime session id as ``cache_id`` and may
+        point at an explicit product-session parent.
+        """
+        if self._team_cache_scope is not None:
+            team_id, agent_id = self._team_cache_scope
+            return KVCacheIdentity(
+                cache_id=team_member_cache_identity(
+                    self._session_id,
+                    team_id,
+                    agent_id,
+                ),
+                parent_cache_id=self._session_id,
+            )
+        source_agent_id = self._source_metadata.get("source_agent_id")
+        source_team_id = self._source_metadata.get("source_team_id")
+        if source_team_id and source_agent_id:
+            return KVCacheIdentity(
+                cache_id=team_member_cache_identity(
+                    self._session_id,
+                    source_team_id,
+                    source_agent_id,
+                ),
+                parent_cache_id=self._session_id,
+            )
+        cache_id = self.get_env(KV_CACHE_AFFINITY_SESSION_ID_ENV)
+        parent_cache_id = self.get_env(KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV)
+        has_cache_id = isinstance(cache_id, str) and bool(cache_id.strip())
+        has_parent_cache_id = (
+            isinstance(parent_cache_id, str) and bool(parent_cache_id.strip())
+        )
+        if has_cache_id or has_parent_cache_id or self._parent_session_id:
+            cache_id = cache_id or self._session_id
+            return KVCacheIdentity(
+                cache_id=cache_id,
+                parent_cache_id=(
+                    parent_cache_id or self._parent_session_id or cache_id
+                ),
+            )
+        return KVCacheIdentity(
+            cache_id=self._session_id,
+            parent_cache_id=self._session_id,
+        )
 
     def tracer(self):
         """Return the tracer bound to this session."""
@@ -185,6 +279,7 @@ def create_agent_session(session_id: str = None,
                          *,
                          stream_writer_manager: StreamWriterManager | None = None,
                          source_metadata: dict[str, Any] | None = None,
+                         parent_session_id: str | None = None,
                          **kwargs) -> Session:
     close_stream_on_post_run = kwargs.get("close_stream_on_post_run", True)
     session = Session(
@@ -194,5 +289,6 @@ def create_agent_session(session_id: str = None,
         stream_writer_manager=stream_writer_manager,
         close_stream_on_post_run=close_stream_on_post_run,
         source_metadata=source_metadata,
+        parent_session_id=parent_session_id,
     )
     return session

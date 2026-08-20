@@ -9,6 +9,8 @@ from pydantic import ConfigDict, Field, BaseModel
 
 class Span(BaseModel):
     trace_id: str = Field(alias="traceId")
+    # Optional: only populated when the tracer was created from a Session.
+    session_id: Optional[str] = Field(default=None, alias="sessionId")
     start_time: Optional[datetime] = Field(default=None, alias="startTime")
     end_time: Optional[datetime] = Field(default=None, alias="endTime")
     inputs: Optional[dict] = Field(default=None, alias="inputs")
@@ -82,9 +84,10 @@ class TraceWorkflowSpan(Span):
 class SpanManager:
     """Managing spans during tracer handler session"""
 
-    def __init__(self, trace_id: str, parent_node_id: str = ""):
+    def __init__(self, trace_id: str, parent_node_id: str = "", session_id: Optional[str] = None):
         self._trace_id = trace_id
         self._parent_node_id = parent_node_id
+        self._session_id = session_id
         self._order = []
         self._session_spans = {}
 
@@ -113,14 +116,15 @@ class SpanManager:
     def create_agent_span(self, parent_span: Optional[TraceAgentSpan] = None) -> TraceAgentSpan:
         invoke_id = str(uuid.uuid4())
         span = TraceAgentSpan(invoke_id=invoke_id, parent_invoke_id=parent_span.invoke_id if parent_span else None,
-                              trace_id=self._trace_id)
+                              trace_id=self._trace_id, session_id=self._session_id)
         self._refresh_parent_child_span(span, parent_span)
         return span
 
     def create_workflow_span(self, invoke_id: str,
                              parent_span: Optional[TraceWorkflowSpan] = None) -> TraceWorkflowSpan:
         span = TraceWorkflowSpan(invoke_id=invoke_id, parent_invoke_id=parent_span.invoke_id if parent_span else None,
-                                 trace_id=self._trace_id, parent_node_id=self._parent_node_id,
+                                 trace_id=self._trace_id, session_id=self._session_id,
+                                 parent_node_id=self._parent_node_id,
                                  execution_id=self._trace_id)
         self._refresh_parent_child_span(span, parent_span)
         return span

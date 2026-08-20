@@ -1,13 +1,16 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """AbilityManager Class Definition
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
-from typing import List, Any, Union, Optional, Tuple, Dict
+from typing import List, Any, Union, Optional, Tuple, Dict, Iterable
+
+import anyio
 from pydantic import BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -16,8 +19,9 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage, ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import Tool
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import ToolCard, ToolExposure
 from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.core.foundation.tool.mcp.base import mcp_model_tool_name, mcp_model_tool_prefix
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -30,6 +34,7 @@ from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
@@ -66,6 +71,19 @@ class AbilityExecutionError(AgentError):
         self.tool_message = tool_message
 
 
+# 单次 tool.invoke 的默认调用级超时上限(秒)。作为"工具自身无超时"时的
+# 兜底,防止卡死的 tool.invoke 永久阻塞整轮 task_loop。工具可在
+# ``ToolCard.properties["resilience"]["timeout_s"]`` 声明覆盖;声明 ``None``
+# 表示豁免外层超时(完全交给工具内部超时管控)。
+DEFAULT_TOOL_CALL_TIMEOUT: float = float(os.getenv("DEFAULT_TOOL_CALL_TIMEOUT", 300.0))
+
+#: 全局绝对硬上限(秒)。即使工具被声明为非幂等或显式豁免(timeout_s=None)，
+#: 也不能超过此上限，防止"合法挂起"。
+MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT: float = float(
+    os.getenv("MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT", "3600.0")
+)
+
+
 class AbilityManager:
     """Agent Ability Manager
 
@@ -76,19 +94,118 @@ class AbilityManager:
     - Execute ability calls (get instances from ResourceManager)
     """
 
+    # File operations targeting the same path form one ordered execution lane.
+    # This prevents read-modify-write tools such as edit_file from losing
+    # updates when an LLM emits multiple calls for one file in a single turn.
+    _FILE_PATH_TOOL_NAMES = frozenset({"read_file", "write_file", "edit_file"})
+
     def __init__(self, owner_id: Optional[str] = None):
         self._tools: Dict[str, ToolCard] = {}
         self._workflows: Dict[str, WorkflowCard] = {}
         self._agents: Dict[str, AgentCard] = {}
         self._mcp_servers: Dict[str, McpServerConfig] = {}
+        self._mcp_tool_allowlists: Dict[str, frozenset[str]] = {}
         self._context_engine = None
+        # Monotonic registry revision used by startup-built indexes. A rail can
+        # compare this value without rebuilding its index on every model call.
+        self._registry_revision = 0
+        # Progressive disclosure is an agent-level registration policy.  It is
+        # deliberately kept here instead of changing ToolCard's global default:
+        # a normal (non-progressive) agent must continue to expose new tools
+        # directly unless a card explicitly says otherwise.
+        self._progressive_tool_enabled = False
+        self._direct_tool_names = {"tool_search"}
         # Owner agent id used to qualify stateful tool ids on registration so
         # each agent owns an exclusive resource-manager entry.
         self._owner_id: Optional[str] = owner_id
 
+    @property
+    def registry_revision(self) -> int:
+        """Return the revision of the registered ability-card catalog."""
+        return self._registry_revision
+
+    def _mark_registry_changed(self) -> None:
+        self._registry_revision += 1
+
+    def set_tool_exposure_policy(
+            self,
+            progressive_tool_enabled: bool,
+            direct_tool_names: Optional[Iterable[str]] = None,
+    ) -> None:
+        """Set the default exposure policy used by subsequent registrations.
+
+        Explicit ``ToolCard(exposure=...)`` values always win.  Existing cards
+        are intentionally not rewritten: exposure is a registration-time
+        decision, so a hot-reconfigure only affects cards registered after the
+        new policy is applied.
+        """
+        self._progressive_tool_enabled = bool(progressive_tool_enabled)
+        if direct_tool_names is not None:
+            self._direct_tool_names = {
+                str(name).strip()
+                for name in direct_tool_names
+                if str(name).strip()
+            }
+
+    def _apply_tool_exposure_policy(self, card: ToolCard) -> ToolExposure:
+        """Resolve and assign the card's exposure at registration time."""
+        name = str(getattr(card, "name", "") or "")
+        current = getattr(card, "exposure", ToolExposure.DIRECT)
+        declared_marker = card.get_exposure_declared()
+        if declared_marker is None:
+            declared_marker = "exposure" in getattr(card, "model_fields_set", set())
+            card.set_exposure_declared(declared_marker)
+        # Identify an explicitly supplied value before this registration policy
+        # mutates the card. The resolved value is stored on ToolCard itself so
+        # every later consumer reads the same registration-time decision.
+        if declared_marker:
+            return current
+
+        if name in self._direct_tool_names:
+            resolved = ToolExposure.DIRECT
+        else:
+            resolved = (
+                ToolExposure.DEFERRED
+                if self._progressive_tool_enabled
+                else ToolExposure.DIRECT
+            )
+
+        card.exposure = resolved
+        # Treat the resolved value as fixed for this card. This keeps a shared
+        # stateless card stable if another agent registers the same instance.
+        card.set_exposure_declared(True)
+        return resolved
+
     def set_owner_id(self, owner_id: Optional[str]) -> None:
         """Set the owner agent id used to qualify stateful tool ids."""
         self._owner_id = owner_id
+
+    def set_mcp_tool_allowlist(
+            self,
+            mcp_server: McpServerConfig,
+            tool_names: Optional[Iterable[str]],
+    ) -> None:
+        """Set a model-facing and execution allowlist for one MCP server.
+
+        Tool names are the underlying MCP names, before AbilityManager adds
+        its ``mcp_<server_name>_`` model-facing prefix. ``None`` removes the
+        policy and restores the legacy unrestricted behavior; an empty
+        iterable permits no tools from the server.
+        """
+        server_id = str(mcp_server.server_id or "").strip()
+        if not server_id:
+            raise ValueError("MCP server_id is required for a tool allowlist")
+
+        if tool_names is None:
+            self._mcp_tool_allowlists.pop(server_id, None)
+            return
+
+        normalized_names = frozenset(
+            str(tool_name).strip()
+            for tool_name in tool_names
+            if str(tool_name).strip()
+        )
+        self._mcp_tool_allowlists[server_id] = normalized_names
 
     @staticmethod
     def _build_tool_message_content(result: Any) -> str:
@@ -128,6 +245,123 @@ class AbilityManager:
                 f"execute ability input tool call is invalid, {type(tool_call)}!"
             )
         return tool_calls
+
+    @classmethod
+    def _tool_execution_resource_key(cls, tool_call: ToolCall) -> Optional[str]:
+        """Return the resource that must be accessed in tool-call order.
+
+        Calls without a known resource return ``None`` and remain independently
+        parallel.  File paths are normalized so equivalent spellings (case on
+        Windows, ``..`` components, and slash variants) share one lane.
+        """
+        if tool_call.name not in cls._FILE_PATH_TOOL_NAMES:
+            return None
+
+        try:
+            arguments, _ = cls._parse_tool_arguments_with_repair(tool_call.arguments)
+        except ValueError:
+            # Let normal tool execution surface the malformed-arguments error.
+            return None
+        if not isinstance(arguments, dict):
+            return None
+
+        file_path = arguments.get("file_path")
+        if not isinstance(file_path, str) or not file_path.strip():
+            return None
+
+        normalized_path = os.path.normcase(
+            os.path.abspath(os.path.expanduser(file_path.strip()))
+        )
+        return f"file:{normalized_path}"
+
+    @staticmethod
+    def _is_parallel_safe_tool_call(
+            tool_call: ToolCall,
+            tool_cards: Optional[Dict[str, ToolCard]] = None,
+    ) -> bool:
+        """Return whether a tool call may share an execution batch."""
+        if tool_cards is None:
+            return True
+        tool_card = tool_cards.get(tool_call.name)
+        if tool_card is None:
+            return True
+        return bool(getattr(tool_card, "parallel_safe", True))
+
+    @classmethod
+    async def _execute_resource_ordered_tool_tasks(
+            cls,
+            tool_calls: List[ToolCall],
+            tasks: List[Any],
+    ) -> List[Any]:
+        """Run independent resources concurrently and each resource in order."""
+        lanes: Dict[str, List[int]] = {}
+        for index, single_tool_call in enumerate(tool_calls):
+            resource_key = cls._tool_execution_resource_key(single_tool_call)
+            # Unknown resources get a private lane and retain full parallelism.
+            lane_key = resource_key or f"independent:{index}"
+            lanes.setdefault(lane_key, []).append(index)
+
+        async def _run_lane(indices: List[int]) -> List[Tuple[int, Any]]:
+            lane_results: List[Tuple[int, Any]] = []
+            for index in indices:
+                try:
+                    result = await tasks[index]
+                except BaseException as exc:  # Match gather(return_exceptions=True).
+                    result = exc
+                lane_results.append((index, result))
+            return lane_results
+
+        lane_results = await asyncio.gather(
+            *(_run_lane(indices) for indices in lanes.values()),
+        )
+        results: List[Any] = [None] * len(tasks)
+        for lane_result in lane_results:
+            for index, result in lane_result:
+                results[index] = result
+        return results
+
+    @classmethod
+    async def _execute_parallel_tool_tasks(
+            cls,
+            tool_calls: List[ToolCall],
+            tasks: List[Any],
+            tool_cards: Optional[Dict[str, ToolCard]] = None,
+    ) -> List[Any]:
+        """Run parallel-safe tools concurrently and non-safe tools exclusively.
+
+        Parallel-safe batches still preserve the existing per-resource ordering
+        rule, so repeated file operations for one path execute in model-emitted
+        order while different resources can overlap. A non-parallel-safe tool
+        forms a single-call barrier: earlier safe calls finish before it starts,
+        and later calls wait until it completes.
+        """
+        results: List[Any] = [None] * len(tasks)
+        batch_call_indices: List[int] = []
+
+        async def _flush_parallel_batch() -> None:
+            if not batch_call_indices:
+                return
+            batch_results = await cls._execute_resource_ordered_tool_tasks(
+                [tool_calls[index] for index in batch_call_indices],
+                [tasks[index] for index in batch_call_indices],
+            )
+            for index, result in zip(batch_call_indices, batch_results):
+                results[index] = result
+            batch_call_indices.clear()
+
+        for index, single_tool_call in enumerate(tool_calls):
+            if cls._is_parallel_safe_tool_call(single_tool_call, tool_cards):
+                batch_call_indices.append(index)
+                continue
+
+            await _flush_parallel_batch()
+            try:
+                results[index] = await tasks[index]
+            except BaseException as exc:  # Match gather(return_exceptions=True).
+                results[index] = exc
+
+        await _flush_parallel_batch()
+        return results
 
     @staticmethod
     def _repair_tool_arguments_json(arguments: str) -> Optional[str]:
@@ -219,6 +453,45 @@ class AbilityManager:
         )
 
     @staticmethod
+    def _resolve_call_timeout(
+            tool_card: Optional[ToolCard],
+    ) -> Optional[float]:
+        """Resolve the per-call timeout for ``tool.invoke``.
+
+        Override order:
+
+        1. ``ToolCard.properties["resilience"]["timeout_s"]`` declared:
+           ``None`` or non-positive → ``None`` (exempt, internal timeout governs);
+           a positive number → that many seconds.
+        2. absent / no ``resilience`` block → ``DEFAULT_TOOL_CALL_TIMEOUT``.
+
+        ``ToolCard.idempotent`` is no longer consulted here. Whether a tool
+        is retried on failure is owned by ``ToolCallResilienceRail``; the
+        call-level timeout applies uniformly. An exempt (``None``) result
+        is still bounded by ``MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT`` at the call
+        site to prevent indefinite hangs.
+
+        Returning ``None`` means the caller passes it to
+        ``anyio.fail_after(None)``, which is a no-op deadline.
+        """
+        properties = getattr(tool_card, "properties", None) if tool_card else None
+        if not isinstance(properties, dict):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        resilience = properties.get("resilience")
+        if not isinstance(resilience, dict):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        declared = resilience.get("timeout_s", "unset")
+        if declared == "unset":
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        if declared is None:
+            return None
+        try:
+            value = float(declared)
+        except (TypeError, ValueError):
+            return DEFAULT_TOOL_CALL_TIMEOUT
+        return value if value > 0 else None
+
+    @staticmethod
     def _get_stream_writer_manager(session: Session) -> Any:
         try:
             return session._inner.stream_writer_manager()  # pylint: disable=protected-access
@@ -241,12 +514,12 @@ class AbilityManager:
 
         def add_single_ability(_ability: Ability) -> AddAbilityResult:
             if isinstance(_ability, ToolCard):
-                existing = self._tools.get(_ability.name)
-                if existing is not None:
+                old_registered = self._tools.get(_ability.name)
+                if old_registered is not None and old_registered.id != _ability.id:
                     logger.warning(
                         f"Duplicate tool ability detected: "
                         f"name='{_ability.name}', "
-                        f"existing_id='{existing.id}', "
+                        f"existing_id='{old_registered.id}', "
                         f"new_id='{_ability.id}'. "
                         f"Keep existing ability and skip new one."
                     )
@@ -255,7 +528,31 @@ class AbilityManager:
                         added=False,
                         reason="duplicate_tool",
                     )
+                self._apply_tool_exposure_policy(_ability)
+                existing = self._tools.get(_ability.name)
+                if existing is not None and existing.id == _ability.id:
+                    # Same registry id: this is a re-registration of one logical
+                    # tool (a rail rebinding its own instance after a
+                    # reconfigure, or two rails contributing the same ability),
+                    # not an ambiguous name conflict. ``add_ability`` binds the
+                    # resource with ``refresh=True``, so the newest instance
+                    # already won; store its card too, otherwise the exposed
+                    # description would describe a different object than the one
+                    # that executes.
+                    logger.debug(
+                        f"Tool ability re-registered: "
+                        f"name='{_ability.name}', id='{_ability.id}'. "
+                        f"Rebind to the new ability."
+                    )
+                    self._tools[_ability.name] = _ability
+                    self._mark_registry_changed()
+                    return AddAbilityResult(
+                        name=_ability.name,
+                        added=True,
+                        reason="refreshed_tool",
+                    )
                 self._tools[_ability.name] = _ability
+                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
                     added=True,
@@ -278,6 +575,7 @@ class AbilityManager:
                         reason="duplicate_workflow",
                     )
                 self._workflows[_ability.name] = _ability
+                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
                     added=True,
@@ -300,6 +598,7 @@ class AbilityManager:
                         reason="duplicate_agent",
                     )
                 self._agents[_ability.name] = _ability
+                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.name,
                     added=True,
@@ -322,6 +621,7 @@ class AbilityManager:
                         reason="duplicate_mcp_server",
                     )
                 self._mcp_servers[_ability.server_name] = _ability
+                self._mark_registry_changed()
                 return AddAbilityResult(
                     name=_ability.server_name,
                     added=True,
@@ -339,6 +639,20 @@ class AbilityManager:
             return [add_single_ability(item) for item in ability]
 
         return add_single_ability(ability)
+
+    @staticmethod
+    def qualify_tool_id(card: ToolCard, owner_id: Optional[str]) -> str:
+        """Return the registry id for a tool given its card and owning agent id.
+
+        Stateless tools keep their bare ``card.id`` (shared singleton across
+        agents). Stateful tools are qualified as ``f"{card.name}_{owner_id}"``
+        so each agent owns an independent registration. Falls back to
+        ``card.name`` when ``card.id`` is empty, and to the bare id when
+        ``owner_id`` is missing (no per-agent qualification).
+        """
+        if card.stateless or not owner_id:
+            return card.id or card.name
+        return f"{card.name}_{owner_id}"
 
     def add_ability(self, card: ToolCard, resource: Tool) -> AddAbilityResult:
         """Register an executable tool ability (card + concrete instance).
@@ -372,7 +686,7 @@ class AbilityManager:
             return self.add(card)
 
         if self._owner_id:
-            card.id = f"{card.name}_{self._owner_id}"
+            card.id = self.qualify_tool_id(card, self._owner_id)
         Runner.resource_mgr.add_tool(resource, refresh=True)
         return self.add(card)
 
@@ -446,8 +760,11 @@ class AbilityManager:
                         if tool_card.id and tool_card.id.startswith(f"{server_id}.")
                     ]
                     for tool_name in tools_to_remove:
-                        self._tools.pop(tool_name, None)
+                        removed_card = self._tools.pop(tool_name, None)
+                    self._mcp_tool_allowlists.pop(server_id, None)
                 removed = mcp_server
+            if removed is not None:
+                self._mark_registry_changed()
             return removed
         elif isinstance(name, list):
             result = []
@@ -470,9 +787,12 @@ class AbilityManager:
                             if tool_card.id and tool_card.id.startswith(f"{server_id}.")
                         ]
                         for tool_name in tools_to_remove:
-                            self._tools.pop(tool_name, None)
+                            removed_card = self._tools.pop(tool_name, None)
+                        self._mcp_tool_allowlists.pop(server_id, None)
                     removed = mcp_server
                 result.append(removed)
+            if any(item is not None for item in result):
+                self._mark_registry_changed()
             return result
         else:
             return None
@@ -614,13 +934,28 @@ class AbilityManager:
             from openjiuwen.core.runner import Runner
             if names is None:
                 mcp_tool_infos = await Runner.resource_mgr.get_mcp_tool_infos(server_id=mcp_server_id)
+                allowed_tool_names = self._mcp_tool_allowlists.get(mcp_server_id)
                 for mcp_tool in mcp_tool_infos:
-                    mcp_tool_name = f"mcp_{mcp_server_name}_{mcp_tool.name}"
-                    mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{mcp_tool.name}'
+                    underlying_tool_name = mcp_tool.name
+                    if allowed_tool_names is not None and underlying_tool_name not in allowed_tool_names:
+                        continue
+                    mcp_tool_name = mcp_model_tool_name(mcp_server_name, underlying_tool_name)
+                    mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{underlying_tool_name}'
                     mcp_tool.name = mcp_tool_name
-                    self._tools[mcp_tool_name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
-                                                          description=mcp_tool.description,
-                                                          input_params=mcp_tool.parameters or {})
+                    existing_card = self._tools.get(mcp_tool_name)
+                    if existing_card is None or existing_card.id != mcp_tool_id:
+                        # MCP tool cards are materialized lazily when the
+                        # server's schemas are first fetched. Route this path
+                        # through the same registration policy as ordinary
+                        # tools so progressive agents mark them deferred and
+                        # advance the ordinary registry revision through add().
+                        existing_card = ToolCard(
+                            id=mcp_tool_id,
+                            name=mcp_tool_name,
+                            description=mcp_tool.description,
+                            input_params=mcp_tool.parameters or {},
+                        )
+                        self.add(existing_card)
                     tool_infos.append(mcp_tool)
 
         return tool_infos
@@ -684,8 +1019,14 @@ class AbilityManager:
 
         results = []
         if parallel_tool_calls:
-            # Execute all tool calls in parallel.
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Preserve parallelism across independent resources while executing
+            # calls for the same file in model-emitted order. Tools marked as
+            # non-parallel-safe execute as exclusive barriers within the turn.
+            results = await self._execute_parallel_tool_tasks(
+                tool_calls,
+                tasks,
+                tool_cards=self._tools,
+            )
         else:
             # Execute all tool calls in sequence.
             for task in tasks:
@@ -906,6 +1247,16 @@ class AbilityManager:
                                         tag=None) -> Tuple[Any, ToolMessage]:
         tool_name = tool_call.name
 
+        mcp_tool_scope = self._resolve_mcp_tool_scope(tool_name)
+        if mcp_tool_scope is not None:
+            mcp_server_id, underlying_tool_name = mcp_tool_scope
+            allowed_tool_names = self._mcp_tool_allowlists.get(mcp_server_id)
+            if allowed_tool_names is not None and underlying_tool_name not in allowed_tool_names:
+                raise self._build_execution_error(
+                    tool_call,
+                    f"MCP tool '{underlying_tool_name}' is not allowed for server '{mcp_server_id}'",
+                )
+
         # Parse arguments
         try:
             tool_args, repaired_arguments = self._parse_tool_arguments_with_repair(tool_call.arguments)
@@ -927,8 +1278,26 @@ class AbilityManager:
                     tool_call,
                     f"Tool instance not found in resource_mgr: {tool_id}",
                 )
+            call_timeout = self._resolve_call_timeout(tool_card)
+            # Global hard limit: even exempt tools (None) get a ceiling so they
+            # cannot hang the round indefinitely.
+            if call_timeout is None:
+                call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
-                result = await tool.invoke(tool_args, session=session)
+                with anyio.fail_after(call_timeout):
+                    result = await tool.invoke(tool_args, session=session)
+            except TimeoutError as e:
+                error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
+                logger.warning(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
+            except asyncio.CancelledError:
+                # Do not swallow cancellation; let outer scopes (e.g. DeepAgent
+                # round cancellation) propagate correctly through anyio CancelScope.
+                logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
+                raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)
@@ -968,13 +1337,16 @@ class AbilityManager:
                 tool_args["conversation_id"] = child_session_id
 
                 stream_writer_manager = self._get_stream_writer_manager(session)
-                child_session_kwargs = {}
+                child_session_kwargs = kv_cache_hooks.build_child_session_kwargs(
+                    agent,
+                    session,
+                )
                 if stream_writer_manager is not None:
-                    child_session_kwargs = {
+                    child_session_kwargs.update({
                         "stream_writer_manager": stream_writer_manager,
                         "close_stream_on_post_run": False,
                         "source_metadata": {"source_agent_id": agent.card.id},
-                    }
+                    })
 
                 child_session = create_agent_session(
                     session_id=child_session_id,
@@ -1009,8 +1381,27 @@ class AbilityManager:
                     tool_call,
                     f"Ability not found in resource_mgr: {tool_name}",
                 )
+            # Resolve timeout from the tool's own card so non-idempotent
+            # tools are exempt on this path too (Layer 0 reads
+            # ``ToolCard.idempotent``); the name kwarg is no longer used.
+            call_timeout = self._resolve_call_timeout(tool.card)
+            # Global hard limit: even exempt tools (None) get a ceiling.
+            if call_timeout is None:
+                call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
-                result = await tool.invoke(tool_args, session=session)
+                with anyio.fail_after(call_timeout):
+                    result = await tool.invoke(tool_args, session=session)
+            except TimeoutError as e:
+                error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
+                logger.warning(error_msg)
+                raise self._build_execution_error(
+                    tool_call,
+                    error_msg,
+                ) from e
+            except asyncio.CancelledError:
+                # Do not swallow cancellation; let outer scopes propagate correctly.
+                logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
+                raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)
@@ -1031,3 +1422,27 @@ class AbilityManager:
     def _is_tool_in_mcp_server(self, id_in_tool_card):
         mcp_server_id = [mcp_server.server_id for _, mcp_server in self._mcp_servers.items()]
         return any([id_in_tool_card.startswith(f"{mid}.") for mid in mcp_server_id])
+
+    def _resolve_mcp_tool_scope(self, tool_name: str) -> Optional[Tuple[str, str]]:
+        """Return ``(server_id, underlying_name)`` for an MCP tool call."""
+        tool_card = self._tools.get(tool_name)
+        if tool_card is not None:
+            tool_id = str(tool_card.id or "")
+            for server_name, mcp_server in self._mcp_servers.items():
+                id_prefix = f"{mcp_server.server_id}.{server_name}."
+                if tool_id.startswith(id_prefix):
+                    return mcp_server.server_id, tool_id.removeprefix(id_prefix)
+
+        servers_by_prefix_length = sorted(
+            self._mcp_servers.items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        )
+        for server_name, mcp_server in servers_by_prefix_length:
+            resource_prefix = f"{mcp_server.server_id}.{server_name}."
+            if tool_name.startswith(resource_prefix):
+                return mcp_server.server_id, tool_name.removeprefix(resource_prefix)
+            model_prefix = mcp_model_tool_prefix(server_name)
+            if tool_name.startswith(model_prefix):
+                return mcp_server.server_id, tool_name.removeprefix(model_prefix)
+        return None

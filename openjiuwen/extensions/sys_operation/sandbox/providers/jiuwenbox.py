@@ -10,10 +10,27 @@ import logging
 import os
 import re
 import shlex
+import shutil
+import signal
 import subprocess
+import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple, TypeVar
+from typing import (
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    ClassVar,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+)
 
 import httpx
 
@@ -286,9 +303,45 @@ def _is_sandbox_exec_delivered(
     return not _is_daemon_ipc_unavailable_for_sandbox(result, sandbox_id=sandbox_id)
 
 
+_ENV_API_TOKEN = "JIUWENBOX_API_TOKEN"
+
+
+def _resolve_api_token(api_token: str | None) -> str | None:
+    """Resolve Bearer token from explicit arg or ``JIUWENBOX_API_TOKEN`` env."""
+    raw = api_token if api_token is not None else os.environ.get(_ENV_API_TOKEN)
+    if raw is None:
+        return None
+    token = raw.strip()
+    return token or None
+
+
+def build_jiuwenbox_http_client(
+    base_url: str,
+    timeout_seconds: float = 30.0,
+    api_token: str | None = None,
+) -> httpx.Client:
+    """Build an httpx client for the jiuwenbox HTTP API with optional Bearer auth."""
+    token = _resolve_api_token(api_token)
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    return httpx.Client(
+        base_url=base_url.rstrip("/"),
+        timeout=timeout_seconds,
+        headers=headers,
+    )
+
+
 class _JiuwenBoxClient:
-    def __init__(self, base_url: str, timeout_seconds: float = 30.0) -> None:
-        self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout_seconds)
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = 30.0,
+        api_token: str | None = None,
+    ) -> None:
+        self._client = build_jiuwenbox_http_client(
+            base_url,
+            timeout_seconds=timeout_seconds,
+            api_token=api_token,
+        )
 
     def create_sandbox(
         self,
@@ -331,6 +384,12 @@ class _JiuwenBoxClient:
         if response.status_code == 404:
             return
         _raise_for_status(response)
+
+    def get_sandbox(self, sandbox_id: str) -> dict[str, Any]:
+        """GET /api/v1/sandboxes/{id}; raise on missing/error."""
+        response = self._client.get(f"/api/v1/sandboxes/{sandbox_id}")
+        _raise_for_status(response)
+        return dict(response.json())
 
     def exec(
         self,
@@ -494,7 +553,7 @@ _T = TypeVar("_T")
 class _JiuwenBoxProviderMixin:
     _shared_lock = threading.Lock()
     _shared_sandbox_ids: Dict[str, str] = {}
-    # Cache base_url -> lifecycle_hook captured at create time, so teardown
+    # Cache shared_scope_key -> lifecycle_hook captured at create time, so teardown
     # (delete_jiuwenbox_sandbox) can fire delete hooks without being passed them.
     _lifecycle_hooks: ClassVar[Dict[str, Callable[[str, dict], None]]] = {}
     # Lazy class-level asyncio.Lock serializes sandbox recreate under concurrent ops.
@@ -563,15 +622,14 @@ class _JiuwenBoxProviderMixin:
         base_url = _endpoint_value(self.endpoint, self.config, "base_url")
         if not base_url:
             raise ValueError("jiuwenbox provider requires endpoint.base_url")
-        # Use base_url as the cross-process sharing key. In practice, different
-        # operation providers (fs/shell/code) may get rebuilt with different
-        # isolation metadata, but they still need to target the same remote sandbox.
-        key = str(base_url).rstrip("/")
-        create_options = self._sandbox_create_options_from_launcher_extra_params()
-        if not create_options:
-            return key
-        options_key = json.dumps(create_options, sort_keys=True, separators=(",", ":"))
-        return f"{key}|{options_key}"
+        # Share sandbox across fs/shell/code for the same isolation, not across
+        # different agents that share the same base_url. isolation_key is the
+        # resolved key from SysOperation (via gateway SandboxEndpoint).
+        parts = [str(base_url).rstrip("/")]
+        isolation_key = getattr(self.endpoint, "isolation_key", None)
+        if isinstance(isolation_key, str) and isolation_key:
+            parts.append(isolation_key)
+        return "|".join(parts)
 
     def _sandbox_id_from_launcher_extra_params(self) -> Optional[str]:
         extra_params = self._launcher_extra_params()
@@ -647,19 +705,26 @@ class _JiuwenBoxProviderMixin:
 
     @classmethod
     def register_lifecycle_hook(
-        cls, base_url: str, hook: Optional[Callable[[str, dict], None]]
+        cls, shared_key: str, hook: Optional[Callable[[str, dict], None]]
     ) -> None:
-        """Cache the lifecycle hook for base_url so teardown can reuse it."""
+        """Cache the lifecycle hook for shared_scope_key so teardown can reuse it."""
         if hook is None:
             return
         with cls._shared_lock:
-            cls._lifecycle_hooks[base_url.rstrip("/")] = hook
+            cls._lifecycle_hooks[shared_key] = hook
 
     @classmethod
-    def pop_lifecycle_hook(cls, base_url: str) -> Optional[Callable[[str, dict], None]]:
-        """Pop the cached lifecycle hook for base_url (None if absent)."""
+    def pop_lifecycle_hook(cls, shared_key: str) -> Optional[Callable[[str, dict], None]]:
+        """Pop the cached lifecycle hook for shared_scope_key (None if absent)."""
         with cls._shared_lock:
-            return cls._lifecycle_hooks.pop(base_url.rstrip("/"), None)
+            return cls._lifecycle_hooks.pop(shared_key, None)
+
+    @classmethod
+    def clear_shared_sandbox_for_key(cls, shared_key: str) -> Optional[str]:
+        """Remove one cached sandbox_id entry; return the removed id if any."""
+        with cls._shared_lock:
+            value = cls._shared_sandbox_ids.pop(shared_key, None)
+        return value if isinstance(value, str) and value else None
 
     @classmethod
     def cached_base_urls(cls) -> list[str]:
@@ -683,6 +748,47 @@ class _JiuwenBoxProviderMixin:
                     removed.append(value)
         return removed
 
+    @classmethod
+    def pop_cached_sandbox_for_shared_key(
+        cls,
+        shared_key: str,
+    ) -> Optional[tuple[str, Optional[Callable[[str, dict], None]]]]:
+        """Remove and return (sandbox_id, lifecycle_hook) for one shared_scope_key."""
+        with cls._shared_lock:
+            sandbox_id = cls._shared_sandbox_ids.pop(shared_key, None)
+            hook = cls._lifecycle_hooks.pop(shared_key, None)
+        if isinstance(sandbox_id, str) and sandbox_id:
+            return sandbox_id, hook
+        return None
+
+    @classmethod
+    def pop_cached_sandbox_by_sandbox_id(
+        cls,
+        sandbox_id: str,
+    ) -> Optional[tuple[str, str, Optional[Callable[[str, dict], None]]]]:
+        """Remove and return (shared_key, sandbox_id, lifecycle_hook) by sandbox_id."""
+        with cls._shared_lock:
+            for shared_key, cached_id in list(cls._shared_sandbox_ids.items()):
+                if cached_id == sandbox_id:
+                    cls._shared_sandbox_ids.pop(shared_key, None)
+                    hook = cls._lifecycle_hooks.pop(shared_key, None)
+                    return shared_key, sandbox_id, hook
+        return None
+
+    @classmethod
+    def drain_all_cached_sandboxes(
+        cls,
+    ) -> list[tuple[str, str, Optional[Callable[[str, dict], None]]]]:
+        """Atomically pop every cached sandbox entry and its lifecycle hook."""
+        with cls._shared_lock:
+            entries = [
+                (shared_key, sandbox_id, cls._lifecycle_hooks.pop(shared_key, None))
+                for shared_key, sandbox_id in list(cls._shared_sandbox_ids.items())
+                if isinstance(sandbox_id, str) and sandbox_id
+            ]
+            cls._shared_sandbox_ids.clear()
+        return entries
+
     def _get_sandbox_id(self) -> str:
         env_sandbox_id = os.environ.get("JIUWENBOX_SANDBOX_ID")
         if env_sandbox_id and self._sandbox_id != env_sandbox_id:
@@ -698,9 +804,7 @@ class _JiuwenBoxProviderMixin:
         if self._sandbox_id is None:
             lifecycle_hook = self._lifecycle_hook()
             shared_key = self._shared_scope_key()
-            self.register_lifecycle_hook(
-                _endpoint_value(self.endpoint, self.config, "base_url"), lifecycle_hook
-            )
+            self.register_lifecycle_hook(shared_key, lifecycle_hook)
             with self._shared_lock:
                 self._sandbox_id = self._shared_sandbox_ids.get(shared_key)
                 newly_created = False
@@ -810,6 +914,7 @@ class _JiuwenBoxProviderMixin:
 
             new_id = await force_recreate_jiuwenbox_sandbox(
                 base_url,
+                shared_key=shared_key,
                 **create_options,
                 timeout_seconds=float(self._timeout_seconds),
                 preserve_files_upload=preserve_files_upload,
@@ -909,6 +1014,11 @@ def clear_jiuwenbox_shared_sandbox(base_url: str) -> list[str]:
         Removed sandbox_id list (deduplicated).
     """
     return _JiuwenBoxProviderMixin.clear_shared_sandbox(base_url)
+
+
+def build_jiuwenbox_shared_scope_key(base_url: str, isolation_key: str) -> str:
+    """Build the provider shared-cache key for a base_url + isolation_key pair."""
+    return f"{base_url.rstrip('/')}|{isolation_key}"
 
 
 def _iter_host_files_for_upload(
@@ -1061,6 +1171,7 @@ def _try_upload_preserve_files(
 async def force_recreate_jiuwenbox_sandbox(
     base_url: str,
     *,
+    shared_key: str | None = None,
     policy: dict | None = None,
     policy_mode: str | None = None,
     timeout_seconds: float = 30.0,
@@ -1075,6 +1186,8 @@ async def force_recreate_jiuwenbox_sandbox(
 
     Args:
         base_url: jiuwenbox service base URL.
+        shared_key: Scoped cache key (base_url|isolation). When set, only that
+            entry is cleared; other agents' sandboxes are untouched.
         policy / policy_mode: Security policy for the new sandbox.
         timeout_seconds: HTTP client timeout.
         preserve_files_upload: Files/dirs to re-upload in copy mode.
@@ -1085,25 +1198,26 @@ async def force_recreate_jiuwenbox_sandbox(
     Returns:
         New sandbox_id to write back to launcher_config.extra_params["sandbox_id"].
     """
-    # Pop stale IDs from shared cache before create; server-side cleanup follows.
-    stale_sandbox_ids = clear_jiuwenbox_shared_sandbox(base_url)
+    create_options: dict[str, Any] = {}
+    if policy is not None:
+        create_options["policy"] = policy
+    if policy_mode is not None:
+        create_options["policy_mode"] = policy_mode
+
+    if shared_key is None:
+        # Legacy single-tenant path: clear every cached sandbox under base_url.
+        stale_sandbox_ids = clear_jiuwenbox_shared_sandbox(base_url)
+        shared_key = base_url.rstrip("/")
+    else:
+        stale_id = _JiuwenBoxProviderMixin.clear_shared_sandbox_for_key(shared_key)
+        stale_sandbox_ids = [stale_id] if stale_id else []
+
     if extra_stale_sandbox_ids:
         seen = set(stale_sandbox_ids)
         for extra in extra_stale_sandbox_ids:
             if isinstance(extra, str) and extra and extra not in seen:
                 stale_sandbox_ids.append(extra)
                 seen.add(extra)
-
-    # Register new id in shared cache before deleting stale sandboxes.
-    shared_key = base_url.rstrip("/")
-    create_options: dict[str, Any] = {}
-    if policy is not None:
-        create_options["policy"] = policy
-    if policy_mode is not None:
-        create_options["policy_mode"] = policy_mode
-    if create_options:
-        options_key = json.dumps(create_options, sort_keys=True, separators=(",", ":"))
-        shared_key = f"{shared_key}|{options_key}"
 
     for old_id in stale_sandbox_ids:
         _invoke_lifecycle_hook(
@@ -1120,7 +1234,7 @@ async def force_recreate_jiuwenbox_sandbox(
             await _upload_preserve_files(client, sandbox_id, preserve_files_upload)
 
         _JiuwenBoxProviderMixin.register_shared_sandbox_id(shared_key, sandbox_id)
-        _JiuwenBoxProviderMixin.register_lifecycle_hook(base_url, lifecycle_hook)
+        _JiuwenBoxProviderMixin.register_lifecycle_hook(shared_key, lifecycle_hook)
         for old_id in stale_sandbox_ids:
             _invoke_lifecycle_hook(
                 lifecycle_hook,
@@ -1155,34 +1269,53 @@ async def force_recreate_jiuwenbox_sandbox(
 
 async def delete_jiuwenbox_sandbox(
     *,
+    sandbox_id: Optional[str] = None,
+    shared_key: Optional[str] = None,
+    delete_all: bool = False,
     reason: str = "teardown",
     timeout_seconds: float = 30.0,
 ) -> list[str]:
-    """Delete all cached remote jiuwenbox sandboxes on sysoperation teardown.
+    """Delete cached remote jiuwenbox sandbox(es) on sysoperation teardown.
 
-    base_url and lifecycle_hook are taken from the process-wide cache populated
-    when sandboxes were created (``register_lifecycle_hook`` /
-    ``register_shared_sandbox_id``), so callers only pass the teardown reason.
-    Each cached base_url's sandboxes are deleted remotely and fire ``before_delete``
-    then ``after_delete`` (strict hooks; ctx ``{"reason", "sandbox_id"}``).
+    By default only the sandbox matching ``shared_key`` or ``sandbox_id`` is
+    removed. Pass ``delete_all=True`` to drain the entire process-wide cache
+    (intended for explicit bulk cleanup, not per-agent gateway release).
 
     Args:
+        sandbox_id: Remote sandbox id to delete when ``shared_key`` cache miss.
+        shared_key: Scoped cache key (``base_url|isolation_key``).
+        delete_all: When True, delete every cached sandbox in this process.
         reason: Passed to delete hook context; default "teardown".
         timeout_seconds: HTTP client timeout.
 
     Returns:
         sandbox_ids successfully deleted, in order.
     """
+    entries: list[tuple[str, str, Optional[Callable[[str, dict], None]]]] = []
+    if delete_all:
+        entries = _JiuwenBoxProviderMixin.drain_all_cached_sandboxes()
+    elif shared_key:
+        popped = _JiuwenBoxProviderMixin.pop_cached_sandbox_for_shared_key(shared_key)
+        if popped is not None:
+            resolved_id, hook = popped
+            entries = [(shared_key, resolved_id, hook)]
+        elif isinstance(sandbox_id, str) and sandbox_id:
+            hook = _JiuwenBoxProviderMixin.pop_lifecycle_hook(shared_key)
+            entries = [(shared_key, sandbox_id, hook)]
+    elif isinstance(sandbox_id, str) and sandbox_id:
+        popped = _JiuwenBoxProviderMixin.pop_cached_sandbox_by_sandbox_id(sandbox_id)
+        if popped is not None:
+            entries = [popped]
+
     deleted: list[str] = []
-    for base_url in _JiuwenBoxProviderMixin.cached_base_urls():
-        lifecycle_hook = _JiuwenBoxProviderMixin.pop_lifecycle_hook(base_url)
-        sandbox_ids = clear_jiuwenbox_shared_sandbox(base_url)
-        if not sandbox_ids:
-            continue
+    by_base_url: Dict[str, list[tuple[str, Optional[Callable[[str, dict], None]]]]] = {}
+    for entry_shared_key, entry_sandbox_id, lifecycle_hook in entries:
+        base_url = entry_shared_key.split("|", 1)[0]
+        by_base_url.setdefault(base_url, []).append((entry_sandbox_id, lifecycle_hook))
+
+    for base_url, items in by_base_url.items():
         with _JiuwenBoxClient(base_url=base_url, timeout_seconds=timeout_seconds) as client:
-            for sandbox_id in sandbox_ids:
-                if not sandbox_id:
-                    continue
+            for sandbox_id, lifecycle_hook in items:
                 _invoke_lifecycle_hook(
                     lifecycle_hook,
                     "before_delete",
@@ -1215,6 +1348,14 @@ def _decode_subprocess_stream(value: Any) -> str:
     return value or ""
 
 
+def _merge_local_env(env: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    if env is None:
+        return None
+    merged = dict(os.environ)
+    merged.update({str(k): str(v) for k, v in env.items()})
+    return merged
+
+
 async def _run_local_subprocess(
     argv: list[str],
     *,
@@ -1225,10 +1366,7 @@ async def _run_local_subprocess(
 ) -> dict[str, Any]:
     """Run argv locally; return dict matching jiuwenbox exec shape."""
     def _run() -> dict[str, Any]:
-        merged_env = None
-        if env is not None:
-            merged_env = dict(os.environ)
-            merged_env.update({str(k): str(v) for k, v in env.items()})
+        merged_env = _merge_local_env(env)
         try:
             completed = subprocess.run(
                 argv,
@@ -1263,6 +1401,632 @@ async def _run_local_subprocess(
             }
 
     return await asyncio.to_thread(_run)
+
+
+def _kill_process_group(proc: subprocess.Popen[Any]) -> None:
+    """Best-effort terminate a process group started with start_new_session."""
+    if proc.pid is None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        try:
+            proc.terminate()
+        except Exception:  # noqa: BLE001
+            return
+    try:
+        proc.wait(timeout=2)
+        return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            return
+    try:
+        proc.wait(timeout=1)
+    except Exception:  # noqa: BLE001
+        return
+
+
+async def _run_local_subprocess_process_group(
+    argv: list[str],
+    *,
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    timeout: Optional[int] = None,
+    stdin: Optional[str] = None,
+) -> dict[str, Any]:
+    """Run argv in a new process group; kill the group on timeout."""
+
+    def _run() -> dict[str, Any]:
+        merged_env = _merge_local_env(env)
+        proc: subprocess.Popen[Any] | None = None
+        try:
+            proc = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                env=merged_env,
+                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = proc.communicate(
+                    input=stdin,
+                    timeout=timeout if (timeout and timeout > 0) else None,
+                )
+            except subprocess.TimeoutExpired:
+                _kill_process_group(proc)
+                stdout, stderr = proc.communicate()
+                return {
+                    "stdout": stdout or "",
+                    "stderr": (stderr or "") + f"\n[local timeout after {timeout}s]",
+                    "exit_code": 124,
+                    "local": True,
+                }
+            return {
+                "stdout": stdout or "",
+                "stderr": stderr or "",
+                "exit_code": int(proc.returncode if proc.returncode is not None else 1),
+                "local": True,
+            }
+        except Exception as exc:  # noqa: BLE001
+            if proc is not None and proc.poll() is None:
+                _kill_process_group(proc)
+            return {
+                "stdout": "",
+                "stderr": f"local subprocess error: {exc}",
+                "exit_code": 1,
+                "local": True,
+            }
+
+    return await asyncio.to_thread(_run)
+
+
+# ---------------------------------------------------------------------------
+# Hybrid shell rewrite for excluded_commands
+# ---------------------------------------------------------------------------
+
+RewriteMode = Literal["local_all", "remote_all", "hybrid", "unsupported", "legacy"]
+
+# AST node types treated as one executable leaf for exclude matching / rewrite.
+_SEGMENT_NODE_TYPES = frozenset({
+    "command",
+    "redirected_statement",
+    "declaration_command",
+    "negated_command",
+    "test_command",
+    "variable_assignment",
+})
+
+_DEFAULT_MAX_ARGV_BYTES = 64 * 1024
+_REQUIRED_CLI_FLAGS = ("--stdin", "--cwd", "--env", "--timeout-seconds")
+
+_TREE_SITTER_READY: bool | None = None
+_TREE_SITTER_PARSER: Any | None = None
+_CLI_PROBE_LOCK = threading.Lock()
+_CLI_PROBE_CACHE: dict[str, tuple[bool, str | None]] = {}
+
+
+@dataclass(frozen=True)
+class RewriteLeaf:
+    """One executable segment eligible for local/remote classification."""
+
+    text: str
+    source_span: tuple[int, int]  # UTF-8 byte offsets into normalized buffer
+    local: bool
+    receives_pipe_stdin: bool
+    command_name: str
+
+
+@dataclass(frozen=True)
+class RewritePlan:
+    """Routing decision for one shell command string."""
+
+    mode: RewriteMode
+    rewritten: str | None = None
+    reason: str | None = None
+    leaves: tuple[RewriteLeaf, ...] = ()
+    normalized_command: str = ""
+
+
+@dataclass(frozen=True)
+class _RawSegment:
+    text: str
+    source_span: tuple[int, int]
+    receives_pipe_stdin: bool
+    command_name: str
+
+
+@dataclass(frozen=True)
+class _ParseResult:
+    segments: tuple[_RawSegment, ...]
+    reason: str | None = None
+
+
+def _get_tree_sitter_bash_parser() -> Any | None:
+    global _TREE_SITTER_READY, _TREE_SITTER_PARSER
+    if _TREE_SITTER_READY is False:
+        return None
+    if _TREE_SITTER_PARSER is not None:
+        return _TREE_SITTER_PARSER
+    try:
+        from tree_sitter import Language, Parser
+        import tree_sitter_bash
+
+        language = Language(tree_sitter_bash.language())
+        try:
+            parser = Parser(language)
+        except TypeError:  # pragma: no cover - older tree-sitter API
+            parser = Parser()
+            parser.language = language
+        _TREE_SITTER_PARSER = parser
+        _TREE_SITTER_READY = True
+        return _TREE_SITTER_PARSER
+    except Exception:
+        _TREE_SITTER_READY = False
+        logger.info("[jiuwenbox] shell rewrite backend unavailable: no tree-sitter")
+        return None
+
+
+def reset_rewrite_caches_for_tests() -> None:
+    """Clear parser/CLI probe caches (tests only)."""
+    global _TREE_SITTER_READY, _TREE_SITTER_PARSER
+    with _CLI_PROBE_LOCK:
+        _CLI_PROBE_CACHE.clear()
+    _TREE_SITTER_READY = None
+    _TREE_SITTER_PARSER = None
+
+
+def _node_text(node: Any, source: bytes) -> str:
+    return source[int(node.start_byte):int(node.end_byte)].decode("utf-8", errors="replace")
+
+
+def _find_child(node: Any, type_name: str) -> Any | None:
+    for child in getattr(node, "children", []) or []:
+        if child is not None and str(getattr(child, "type", "")) == type_name:
+            return child
+    return None
+
+
+def _extract_command_name(node: Any, source: bytes) -> str:
+    node_type = str(getattr(node, "type", ""))
+    if node_type == "negated_command":
+        inner = None
+        for child in getattr(node, "children", []) or []:
+            if child is not None and str(getattr(child, "type", "")) in _SEGMENT_NODE_TYPES:
+                inner = child
+                break
+        return _extract_command_name(inner, source) if inner is not None else ""
+    if node_type == "redirected_statement":
+        inner = _find_child(node, "command") or _find_child(node, "declaration_command")
+        return _extract_command_name(inner, source) if inner is not None else ""
+    if node_type == "declaration_command":
+        for child in getattr(node, "children", []) or []:
+            if child is None:
+                continue
+            ctype = str(getattr(child, "type", ""))
+            if ctype in {"export", "declare", "readonly", "local", "typeset", "unset"}:
+                return ctype
+            if ctype == "command_name":
+                return _node_text(child, source).strip()
+        return ""
+    if node_type == "variable_assignment":
+        return ""
+    name_node = _find_child(node, "command_name")
+    if name_node is not None:
+        return _node_text(name_node, source).strip()
+    for child in getattr(node, "children", []) or []:
+        if child is None:
+            continue
+        ctype = str(getattr(child, "type", ""))
+        if ctype in {"variable_assignment", "file_redirect", "heredoc_redirect"}:
+            continue
+        if ctype in {"command_name", "word", "string", "raw_string", "number"}:
+            return _node_text(child, source).strip()
+    return ""
+
+
+def _make_segment(node: Any, source: bytes, *, receives_pipe_stdin: bool) -> _RawSegment:
+    return _RawSegment(
+        text=_node_text(node, source),
+        source_span=(int(node.start_byte), int(node.end_byte)),
+        receives_pipe_stdin=receives_pipe_stdin,
+        command_name=_extract_command_name(node, source),
+    )
+
+
+def _collect_from_pipeline(node: Any, source: bytes, out: list[_RawSegment]) -> None:
+    pipe_seen = False
+    for child in getattr(node, "children", []) or []:
+        if child is None:
+            continue
+        ctype = str(getattr(child, "type", ""))
+        if ctype in {"|", "|&"}:
+            pipe_seen = True
+            continue
+        if ctype == "pipeline":
+            _collect_from_pipeline(child, source, out)
+            continue
+        if ctype == "list":
+            _collect_from_list(child, source, out)
+            continue
+        if ctype in _SEGMENT_NODE_TYPES:
+            out.append(_make_segment(child, source, receives_pipe_stdin=pipe_seen))
+            continue
+        if ctype not in {"\"", "'"}:
+            _collect_segments(child, source, out, receives_pipe_stdin=pipe_seen)
+
+
+def _collect_from_list(node: Any, source: bytes, out: list[_RawSegment]) -> None:
+    for child in getattr(node, "children", []) or []:
+        if child is None:
+            continue
+        ctype = str(getattr(child, "type", ""))
+        if ctype in {"&&", "||", ";", "&", "\n"}:
+            continue
+        if ctype == "pipeline":
+            _collect_from_pipeline(child, source, out)
+            continue
+        if ctype == "list":
+            _collect_from_list(child, source, out)
+            continue
+        if ctype in _SEGMENT_NODE_TYPES:
+            out.append(_make_segment(child, source, receives_pipe_stdin=False))
+            continue
+        _collect_segments(child, source, out, receives_pipe_stdin=False)
+
+
+def _collect_segments(
+    node: Any,
+    source: bytes,
+    out: list[_RawSegment],
+    *,
+    receives_pipe_stdin: bool = False,
+) -> None:
+    ctype = str(getattr(node, "type", ""))
+    if ctype == "pipeline":
+        _collect_from_pipeline(node, source, out)
+        return
+    if ctype == "list":
+        _collect_from_list(node, source, out)
+        return
+    if ctype in _SEGMENT_NODE_TYPES:
+        out.append(_make_segment(node, source, receives_pipe_stdin=receives_pipe_stdin))
+        return
+    if ctype == "program":
+        for child in getattr(node, "children", []) or []:
+            if child is None:
+                continue
+            child_type = str(getattr(child, "type", ""))
+            if child_type in {";", "&", "\n"}:
+                continue
+            _collect_segments(child, source, out, receives_pipe_stdin=False)
+        return
+    for child in getattr(node, "children", []) or []:
+        if child is not None:
+            _collect_segments(child, source, out, receives_pipe_stdin=False)
+
+
+def _parse_for_rewrite(command: str) -> _ParseResult | None:
+    """Parse command into rewrite segments. None => backend unavailable."""
+    parser = _get_tree_sitter_bash_parser()
+    if parser is None:
+        return None
+    normalized = (command or "").strip()
+    if not normalized:
+        return _ParseResult(segments=(), reason="empty command")
+    source = normalized.encode("utf-8")
+    try:
+        tree = parser.parse(source)
+    except Exception as exc:  # pragma: no cover - defensive
+        return _ParseResult(segments=(), reason=f"tree-sitter parse failed: {exc}")
+    root = getattr(tree, "root_node", None)
+    if root is None:
+        return _ParseResult(segments=(), reason="tree-sitter returned no root node")
+    if getattr(root, "has_error", False):
+        return _ParseResult(segments=(), reason="tree-sitter reported parse errors")
+
+    segments: list[_RawSegment] = []
+    _collect_segments(root, source, segments)
+    if not segments:
+        return _ParseResult(segments=(), reason="no executable segments extracted")
+    uniq: list[_RawSegment] = []
+    seen: set[tuple[int, int]] = set()
+    for seg in segments:
+        if seg.source_span in seen:
+            continue
+        seen.add(seg.source_span)
+        uniq.append(seg)
+    return _ParseResult(segments=tuple(uniq))
+
+
+def leaf_matches_exclude(leaf_text: str, command_name: str, patterns: Sequence[str] | None) -> bool:
+    """Match exclude patterns against leaf text and command name (after assignments)."""
+    if not patterns:
+        return False
+    stripped = (leaf_text or "").strip()
+    if not stripped:
+        return False
+    name = (command_name or "").strip()
+    base_name = Path(name).name if name else ""
+    for pattern in patterns:
+        if not isinstance(pattern, str) or not pattern:
+            continue
+        if fnmatch.fnmatchcase(stripped, pattern):
+            return True
+        if name and fnmatch.fnmatchcase(name, pattern):
+            return True
+        if base_name and fnmatch.fnmatchcase(base_name, pattern):
+            return True
+        try:
+            first_token = shlex.split(stripped, posix=True)[0]
+        except ValueError:
+            parts = stripped.split()
+            first_token = parts[0] if parts else stripped
+        if fnmatch.fnmatchcase(first_token, pattern):
+            return True
+    return False
+
+
+def resolve_jiuwenbox_cli_bin() -> str | None:
+    """Resolve a trusted absolute path to the jiuwenbox CLI."""
+    found = shutil.which("jiuwenbox")
+    if found:
+        path = Path(found).resolve()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    py_dir = Path(sys.executable).resolve().parent
+    for candidate in (py_dir / "jiuwenbox", py_dir / "jiuwenbox.exe"):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+    return None
+
+
+def probe_jiuwenbox_cli(cli_bin: str) -> tuple[bool, str | None]:
+    """Check that CLI supports required sandbox exec flags. Cached per binary path."""
+    key = str(Path(cli_bin).resolve()) if cli_bin else ""
+    if not key:
+        return False, "jiuwenbox CLI path is empty"
+    with _CLI_PROBE_LOCK:
+        cached = _CLI_PROBE_CACHE.get(key)
+        if cached is not None:
+            return cached
+    try:
+        completed = subprocess.run(
+            [cli_bin, "sandbox", "exec", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result = (False, f"jiuwenbox CLI probe failed: {exc}")
+        with _CLI_PROBE_LOCK:
+            _CLI_PROBE_CACHE[key] = result
+        return result
+    help_text = (completed.stdout or "") + (completed.stderr or "")
+    if completed.returncode not in (0, 2):  # argparse may exit 0/2 for --help
+        if not help_text.strip():
+            result = (False, f"jiuwenbox CLI probe exit {completed.returncode}")
+            with _CLI_PROBE_LOCK:
+                _CLI_PROBE_CACHE[key] = result
+            return result
+    missing = [flag for flag in _REQUIRED_CLI_FLAGS if flag not in help_text]
+    if missing:
+        result = (False, f"jiuwenbox CLI missing flags: {', '.join(missing)}")
+    else:
+        result = (True, None)
+    with _CLI_PROBE_LOCK:
+        _CLI_PROBE_CACHE[key] = result
+    return result
+
+
+def wrap_remote_leaf(
+    leaf_text: str,
+    *,
+    sandbox_id: str,
+    base_url: str,
+    cli_bin: str,
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    timeout: Optional[int] = None,
+    receives_pipe_stdin: bool = False,
+    http_timeout: Optional[float] = None,
+) -> str:
+    """Build a shell-safe remote wrapper for one leaf (no api token in argv)."""
+    parts: list[str] = [shlex.quote(cli_bin)]
+    if http_timeout is not None and http_timeout > 0:
+        parts.extend(["--timeout", shlex.quote(str(http_timeout))])
+    parts.extend(["--base-url", shlex.quote(base_url)])
+    parts.extend(["sandbox", "exec", shlex.quote(sandbox_id)])
+    if cwd:
+        parts.extend(["--cwd", shlex.quote(cwd)])
+    if env:
+        for key, value in env.items():
+            parts.extend(["--env", shlex.quote(f"{key}={value}")])
+    if timeout is not None and timeout > 0:
+        parts.extend(["--timeout-seconds", shlex.quote(str(int(timeout)))])
+    if receives_pipe_stdin:
+        parts.extend(["--stdin", "-"])
+    parts.extend(["--", "bash", "-lc", shlex.quote(leaf_text)])
+    return " ".join(parts)
+
+
+def _rewrite_bytes(normalized: str, leaves: Sequence[RewriteLeaf], wrappers: Dict[tuple[int, int], str]) -> str:
+    source = normalized.encode("utf-8")
+    ordered = sorted(leaves, key=lambda leaf: leaf.source_span[0], reverse=True)
+    buf = source
+    for leaf in ordered:
+        if leaf.local:
+            continue
+        replacement = wrappers.get(leaf.source_span)
+        if replacement is None:
+            continue
+        start, end = leaf.source_span
+        buf = buf[:start] + replacement.encode("utf-8") + buf[end:]
+    return buf.decode("utf-8")
+
+
+def classify_leaves(
+    command: str,
+    patterns: Sequence[str] | None,
+) -> tuple[list[RewriteLeaf] | None, str | None, _ParseResult | None]:
+    """Classify rewrite leaves.
+
+    Returns:
+        (leaves, reason, parse):
+        - leaves is None when backend unavailable or parse failed hard
+        - reason explains None / empty cases
+    """
+    parse = _parse_for_rewrite(command)
+    if parse is None:
+        return None, "rewrite_unavailable: no tree-sitter", None
+    if parse.reason and not parse.segments:
+        return None, parse.reason, parse
+    leaves = [
+        RewriteLeaf(
+            text=seg.text,
+            source_span=seg.source_span,
+            local=leaf_matches_exclude(seg.text, seg.command_name, patterns),
+            receives_pipe_stdin=seg.receives_pipe_stdin,
+            command_name=seg.command_name,
+        )
+        for seg in parse.segments
+    ]
+    return leaves, None, parse
+
+
+def plan_command_rewrite(
+    command: str,
+    patterns: Sequence[str] | None,
+    *,
+    sandbox_id: Optional[str] = None,
+    base_url: Optional[str] = None,
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    timeout: Optional[int] = None,
+    cli_bin: Optional[str] = None,
+    http_timeout: Optional[float] = None,
+    max_argv_bytes: int = _DEFAULT_MAX_ARGV_BYTES,
+    build_hybrid: bool = True,
+) -> RewritePlan:
+    """Plan local/remote/hybrid routing for ``command`` under exclude ``patterns``."""
+    normalized = (command or "").strip()
+    if not normalized:
+        return RewritePlan(mode="unsupported", reason="empty command", normalized_command="")
+
+    if not patterns:
+        return RewritePlan(mode="remote_all", normalized_command=normalized, reason="no excluded_commands")
+
+    leaves, classify_reason, _parse = classify_leaves(normalized, patterns)
+    if leaves is None:
+        return RewritePlan(
+            mode="legacy",
+            reason=classify_reason or "rewrite unavailable",
+            normalized_command=normalized,
+        )
+    if not leaves:
+        return RewritePlan(
+            mode="legacy",
+            reason=classify_reason or "no leaves",
+            normalized_command=normalized,
+        )
+
+    local_count = sum(1 for leaf in leaves if leaf.local)
+    leaf_tuple = tuple(leaves)
+
+    if local_count == len(leaves):
+        return RewritePlan(
+            mode="local_all",
+            leaves=leaf_tuple,
+            normalized_command=normalized,
+        )
+    if local_count == 0:
+        return RewritePlan(
+            mode="remote_all",
+            leaves=leaf_tuple,
+            normalized_command=normalized,
+        )
+
+    if not build_hybrid:
+        return RewritePlan(
+            mode="hybrid",
+            reason="hybrid classified; rewrite deferred",
+            leaves=leaf_tuple,
+            normalized_command=normalized,
+        )
+
+    if not sandbox_id or not base_url or not cli_bin:
+        return RewritePlan(
+            mode="unsupported",
+            reason="hybrid rewrite requires sandbox_id, base_url, and cli_bin",
+            leaves=leaf_tuple,
+            normalized_command=normalized,
+        )
+
+    workdir = None if not cwd or cwd == "." else cwd
+    wrappers: Dict[tuple[int, int], str] = {}
+    total_argv = 0
+    for leaf in leaves:
+        if leaf.local:
+            continue
+        wrapper = wrap_remote_leaf(
+            leaf.text,
+            sandbox_id=sandbox_id,
+            base_url=base_url,
+            cli_bin=cli_bin,
+            cwd=workdir,
+            env=env,
+            timeout=timeout,
+            receives_pipe_stdin=leaf.receives_pipe_stdin,
+            http_timeout=http_timeout,
+        )
+        total_argv += len(wrapper.encode("utf-8"))
+        if total_argv > max_argv_bytes:
+            return RewritePlan(
+                mode="unsupported",
+                reason=f"hybrid rewrite argv exceeds limit ({max_argv_bytes} bytes)",
+                leaves=leaf_tuple,
+                normalized_command=normalized,
+            )
+        wrappers[leaf.source_span] = wrapper
+
+    return RewritePlan(
+        mode="hybrid",
+        rewritten=_rewrite_bytes(normalized, leaves, wrappers),
+        leaves=leaf_tuple,
+        normalized_command=normalized,
+    )
+
+
+def build_orchestration_env(
+    *,
+    base_url: str,
+    api_token: Optional[str],
+    http_timeout: Optional[float],
+    caller_env: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Merge caller env with reserved jiuwenbox orchestration keys (forced)."""
+    merged: Dict[str, str] = {}
+    if caller_env:
+        merged.update({str(k): str(v) for k, v in caller_env.items()})
+    # Reserved keys cannot be overridden by caller-provided environment.
+    merged.pop("JIUWENBOX_URL", None)
+    merged.pop("JIUWENBOX_API_TOKEN", None)
+    merged.pop("JIUWENBOX_TIMEOUT", None)
+    merged["JIUWENBOX_URL"] = base_url
+    if api_token:
+        merged["JIUWENBOX_API_TOKEN"] = api_token
+    if http_timeout is not None and http_timeout > 0:
+        merged["JIUWENBOX_TIMEOUT"] = str(http_timeout)
+    return merged
 
 
 def _read_excluded_commands(extra: Any) -> list[str] | None:
@@ -1697,10 +2461,25 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         exclude_patterns = _read_excluded_commands(extra)
         fallback_on_failure = bool(extra.get("fallback_on_failure", False)) if isinstance(extra, dict) else False
 
-        # (a) Pre-route excluded commands to local execution
-        if _command_matches_exclude(command, exclude_patterns):
+        if exclude_patterns:
+            routed = await self._execute_cmd_with_exclude_routing(
+                command,
+                cwd=cwd,
+                workdir=workdir,
+                exec_timeout=exec_timeout,
+                timeout=timeout,
+                environment=environment,
+                exclude_patterns=exclude_patterns,
+                fallback_on_failure=fallback_on_failure,
+            )
+            if routed is not None:
+                return routed
+
+        # No exclude patterns, or rewrite unavailable -> existing remote pipeline
+        # (legacy whole-command local pre-route when rewrite unavailable and exclude hits).
+        if exclude_patterns and _command_matches_exclude(command, exclude_patterns):
             logger.info(
-                "[jiuwenbox] shell pre-routed to local (exclude pattern hit): %s",
+                "[jiuwenbox] shell rewrite unavailable legacy_route=true pre-routed to local: %s",
                 command,
             )
             local_result = await _run_local_subprocess(
@@ -1711,6 +2490,27 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
             )
             return self._wrap_shell_local_result(command, cwd, timeout, local_result)
 
+        return await self._execute_cmd_remote_pipeline(
+            command,
+            cwd=cwd,
+            workdir=workdir,
+            exec_timeout=exec_timeout,
+            timeout=timeout,
+            environment=environment,
+            fallback_on_failure=fallback_on_failure,
+        )
+
+    async def _execute_cmd_remote_pipeline(
+        self,
+        command: str,
+        *,
+        cwd: Optional[str],
+        workdir: Optional[str],
+        exec_timeout: Optional[int],
+        timeout: Optional[int],
+        environment: Optional[Dict[str, str]],
+        fallback_on_failure: bool,
+    ) -> ExecuteCmdResult:
         result, pipeline_error = await self._run_exec_pipeline(
             sandbox_op=lambda sid: self._get_client().exec(
                 sid,
@@ -1750,6 +2550,198 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
                 data=data,
             )
         return ExecuteCmdResult(code=StatusCode.SUCCESS.code, message=StatusCode.SUCCESS.errmsg, data=data)
+
+    async def _execute_cmd_with_exclude_routing(
+        self,
+        command: str,
+        *,
+        cwd: Optional[str],
+        workdir: Optional[str],
+        exec_timeout: Optional[int],
+        timeout: Optional[int],
+        environment: Optional[Dict[str, str]],
+        exclude_patterns: list[str],
+        fallback_on_failure: bool,
+    ) -> Optional[ExecuteCmdResult]:
+        """Route via leaf rewrite when possible.
+
+        Returns None when caller should use legacy whole-command routing.
+        """
+        plan = plan_command_rewrite(
+            command,
+            exclude_patterns,
+            build_hybrid=False,
+        )
+        if plan.mode == "legacy":
+            logger.info(
+                "[jiuwenbox] shell rewrite unavailable legacy_route=true reason=%s",
+                plan.reason,
+            )
+            return None
+
+        if plan.mode == "local_all":
+            logger.info(
+                "[jiuwenbox] shell rewrite mode=local_all leaves=%d",
+                len(plan.leaves),
+            )
+            local_result = await _run_local_subprocess(
+                ["bash", "-lc", command],
+                cwd=workdir,
+                env=environment,
+                timeout=exec_timeout,
+            )
+            return self._wrap_shell_local_result(command, cwd, timeout, local_result)
+
+        if plan.mode == "remote_all":
+            logger.info(
+                "[jiuwenbox] shell rewrite mode=remote_all leaves=%d",
+                len(plan.leaves),
+            )
+            return await self._execute_cmd_remote_pipeline(
+                command,
+                cwd=cwd,
+                workdir=workdir,
+                exec_timeout=exec_timeout,
+                timeout=timeout,
+                environment=environment,
+                fallback_on_failure=fallback_on_failure,
+            )
+
+        if plan.mode == "unsupported":
+            # Classification declined hybrid rewrite: run the original command wholly in sandbox.
+            logger.info(
+                "[jiuwenbox] shell rewrite unsupported remote_all=true reason=%s",
+                plan.reason,
+            )
+            return await self._execute_cmd_remote_pipeline(
+                command,
+                cwd=cwd,
+                workdir=workdir,
+                exec_timeout=exec_timeout,
+                timeout=timeout,
+                environment=environment,
+                fallback_on_failure=fallback_on_failure,
+            )
+
+        if plan.mode != "hybrid":
+            return None
+
+        return await self._execute_cmd_hybrid(
+            command,
+            cwd=cwd,
+            workdir=workdir,
+            exec_timeout=exec_timeout,
+            timeout=timeout,
+            environment=environment,
+            exclude_patterns=exclude_patterns,
+        )
+
+    async def _ensure_sandbox_for_hybrid(self) -> str:
+        """Return a live sandbox id; recreate once if preflight finds it missing."""
+        sandbox_id = self._get_sandbox_id()
+        try:
+            await asyncio.to_thread(self._get_client().get_sandbox, sandbox_id)
+            return sandbox_id
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            # GET /sandboxes/{id} 404 means missing; also accept message-shaped 404s.
+            if status != 404 and not _is_sandbox_not_found_error(exc):
+                raise
+            logger.warning(
+                "[jiuwenbox] hybrid preflight sandbox %s missing; recreating before exec",
+                sandbox_id,
+            )
+            return await self._recreate_sandbox_after_loss(stale_sandbox_id=sandbox_id)
+
+    async def _execute_cmd_hybrid(
+        self,
+        command: str,
+        *,
+        cwd: Optional[str],
+        workdir: Optional[str],
+        exec_timeout: Optional[int],
+        timeout: Optional[int],
+        environment: Optional[Dict[str, str]],
+        exclude_patterns: list[str],
+    ) -> ExecuteCmdResult:
+        cli_bin = resolve_jiuwenbox_cli_bin()
+        if not cli_bin:
+            return _build_shell_error_result(
+                "execute_cmd",
+                "hybrid shell rewrite requires jiuwenbox CLI on PATH or venv bin",
+                ExecuteCmdResult,
+            )
+        ok, probe_error = probe_jiuwenbox_cli(cli_bin)
+        if not ok:
+            return _build_shell_error_result(
+                "execute_cmd",
+                probe_error or "jiuwenbox CLI capability probe failed",
+                ExecuteCmdResult,
+            )
+
+        try:
+            sandbox_id = await self._ensure_sandbox_for_hybrid()
+        except Exception as exc:  # noqa: BLE001
+            return _build_shell_error_result(
+                "execute_cmd",
+                f"hybrid sandbox preflight failed: {exc}",
+                ExecuteCmdResult,
+            )
+
+        base_url = str(_endpoint_value(self.endpoint, self.config, "base_url") or "").rstrip("/")
+        if not base_url:
+            return _build_shell_error_result(
+                "execute_cmd",
+                "hybrid shell rewrite requires sandbox base_url",
+                ExecuteCmdResult,
+            )
+
+        http_timeout = float(self._timeout_seconds or 30)
+        if exec_timeout and exec_timeout > 0:
+            http_timeout = max(http_timeout, float(exec_timeout) + 5.0)
+
+        plan = plan_command_rewrite(
+            command,
+            exclude_patterns,
+            sandbox_id=sandbox_id,
+            base_url=base_url,
+            cwd=workdir,
+            env=environment,
+            timeout=exec_timeout,
+            cli_bin=cli_bin,
+            http_timeout=http_timeout,
+            build_hybrid=True,
+        )
+        if plan.mode != "hybrid" or not plan.rewritten:
+            return _build_shell_error_result(
+                "execute_cmd",
+                f"hybrid shell rewrite failed: {plan.reason or plan.mode}",
+                ExecuteCmdResult,
+            )
+
+        local_count = sum(1 for leaf in plan.leaves if leaf.local)
+        remote_count = len(plan.leaves) - local_count
+        logger.info(
+            "[jiuwenbox] shell rewrite mode=hybrid leaves=local:%d,remote:%d sandbox=%s",
+            local_count,
+            remote_count,
+            sandbox_id[:8] if sandbox_id else "",
+        )
+
+        api_token = _resolve_api_token(None)
+        orchestration_env = build_orchestration_env(
+            base_url=base_url,
+            api_token=api_token,
+            http_timeout=http_timeout,
+            caller_env=environment,
+        )
+        local_result = await _run_local_subprocess_process_group(
+            ["bash", "-lc", plan.rewritten],
+            cwd=workdir,
+            env=orchestration_env,
+            timeout=exec_timeout,
+        )
+        return self._wrap_shell_local_result(command, cwd, timeout, local_result)
 
     @staticmethod
     def _wrap_shell_local_result(

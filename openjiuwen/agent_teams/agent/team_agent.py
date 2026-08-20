@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -19,18 +21,25 @@ from openjiuwen.agent_teams.agent.coordination import (
     EventBus,
 )
 from openjiuwen.agent_teams.agent.member import TeamMember
+from openjiuwen.agent_teams.agent.member_activity import (
+    IdleSignal,
+    MemberActivityRegistry,
+    parse_member_status,
+)
 from openjiuwen.agent_teams.agent.member_factory import create_member_handle
 from openjiuwen.agent_teams.agent.recovery_manager import RecoveryManager
 from openjiuwen.agent_teams.agent.session_manager import SessionManager
 from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
 from openjiuwen.agent_teams.agent.state import TeamAgentState
 from openjiuwen.agent_teams.agent.stream_controller import StreamController
+from openjiuwen.agent_teams.fork import ForkContext
 from openjiuwen.agent_teams.interaction.payload import GodViewMessage
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
 )
+from openjiuwen.agent_teams.schema.stream import is_team_event_marker
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
@@ -69,6 +78,7 @@ class TeamAgent(BaseAgent):
         super().__init__(card)
         self._configurator = AgentConfigurator(card)
         self._state = TeamAgentState()
+        self._named_checkpoints: dict[str, dict] = {}  # name → {count, description, created_by}
 
         self._spawn_manager = SpawnManager(
             state=self._state,
@@ -92,6 +102,8 @@ class TeamAgent(BaseAgent):
             execution_updater=self._update_execution,
             wake_mailbox_callback=self._wake_mailbox_if_interrupt_cleared,
             request_completion_poll_callback=self._request_completion_poll,
+            member_startup_reconciler=self._reconcile_member_startup,
+            task_board_probe=self.is_task_board_settled,
         )
         self._coordination = CoordinationKernel(self)
 
@@ -118,6 +130,14 @@ class TeamAgent(BaseAgent):
     def resources(self):
         """Return the per-instance runtime resources container."""
         return self._configurator.resources
+
+    @property
+    def build_context(self):
+        """Return the assembly BuildContext, or None before configure()."""
+        harness = self.harness
+        if harness is not None:
+            return harness.build_context
+        return None
 
     @property
     def tiny_agent_model_resolver(self):
@@ -168,6 +188,7 @@ class TeamAgent(BaseAgent):
             name=tiny_spec.name,
             language=language,
             max_iterations=tiny_spec.max_iterations,
+            enable_security_rail=tiny_spec.enable_security_rail,
         )
         infra.tiny_agents[name] = agent
         return agent
@@ -369,6 +390,34 @@ class TeamAgent(BaseAgent):
     def is_agent_running(self) -> bool:
         return self._is_agent_running()
 
+    def idle_seconds(self) -> float | None:
+        """Return seconds this member has been continuously idle, or None.
+
+        Reads the process-local idle clock stamped by
+        ``StreamController._map_state`` when the runtime settled into IDLE.
+        ``None`` means the member is mid-round (BUSY) or has never settled,
+        which is exactly what callers want: a busy member is by definition
+        not stalled.
+        """
+        idle_since = self._state.idle_since
+        if idle_since is None:
+            return None
+        return time.monotonic() - idle_since
+
+    def refresh_idle_baseline(self) -> None:
+        """Re-base the idle clock so a pause window is not counted as idle.
+
+        A member that was already idle when the team paused keeps its
+        ``idle_since`` stamp while the monotonic clock advances across the
+        whole pause — and, being idle, it has no paused round to resume, so
+        it never re-enters IDLE to re-stamp itself. Without this re-base the
+        first poll after resume would see a huge fabricated idle span. A busy
+        member holds ``idle_since is None`` and is left alone; a cold start
+        begins with ``None`` too, making this a no-op there.
+        """
+        if self._state.idle_since is not None:
+            self._state.idle_since = time.monotonic()
+
     def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()
 
@@ -514,6 +563,16 @@ class TeamAgent(BaseAgent):
             on_team_cleaned=self._mark_team_cleaned,
             on_team_built=self._mark_team_built,
         )
+        # Route the leader's own ``checkpoint()`` tool into the leader-visible
+        # namespace. ``set_store_checkpoint_fn`` is otherwise only wired for
+        # in-process teammates (see ``inprocess_spawn``); without this the
+        # leader's snapshots land in the backend fallback dict and fork
+        # resolution never sees them.
+        if self.role == TeamRole.LEADER:
+            team_backend = self._configurator.team_backend
+            if team_backend is not None:
+                team_backend.set_store_checkpoint_fn(self.set_checkpoint)
+                team_backend.set_checkpoint_list_fn(lambda: self._named_checkpoints)
 
     def _setup_agent(
         self,
@@ -547,6 +606,12 @@ class TeamAgent(BaseAgent):
                 infra=self._configurator.infra,
                 agent_card=self.card,
             )
+
+        # Only the leader keeps the team-wide activity view: it is the one
+        # role that observes every member's transitions, and the one whose
+        # stream the team-idle marker belongs on.
+        if ctx.role == TeamRole.LEADER and ctx.member_name:
+            self._state.member_registry = MemberActivityRegistry(ctx.member_name)
 
         self._coordination.setup(role=ctx.role)
         self._register_team_completion_callbacks()
@@ -659,11 +724,17 @@ class TeamAgent(BaseAgent):
                 if raw_query:
                     await self._coordination.enqueue_user_input(inputs)
                 await self._coordination.enqueue_initial_mailbox_poll()
+                await self._coordination.enqueue_initial_task_poll()
             last_result = None
             while True:
                 chunk = await self._stream_controller.stream_queue.get()
                 if chunk is None:
                     break
+                # Team markers (team.idle / team.completed / ...) carry no
+                # agent content; a non-streaming caller wants the last thing
+                # the agent actually produced, not the framework's bookkeeping.
+                if is_team_event_marker(chunk):
+                    continue
                 last_result = chunk
             return last_result
         finally:
@@ -715,6 +786,7 @@ class TeamAgent(BaseAgent):
                 if raw_query:
                     await self._coordination.enqueue_user_input(inputs)
                 await self._coordination.enqueue_initial_mailbox_poll()
+                await self._coordination.enqueue_initial_task_poll()
             while True:
                 chunk = await self._stream_controller.stream_queue.get()
                 if chunk is None:
@@ -741,12 +813,24 @@ class TeamAgent(BaseAgent):
         """Pause coordination without tearing down teammate processes."""
         await self._pause_coordination()
 
-    async def _stop_coordination(self) -> None:
-        await self._coordination.stop()
+    async def _stop_coordination(
+        self,
+        *,
+        on_quiesced: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        await self._coordination.stop(on_quiesced=on_quiesced)
 
-    async def stop_coordination(self) -> None:
-        """Stop coordination and shut down all spawned teammates."""
-        await self._stop_coordination()
+    async def stop_coordination(
+        self,
+        *,
+        on_quiesced: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        """Stop coordination and shut down all spawned teammates.
+
+        ``on_quiesced`` is forwarded to the coordination kernel and runs
+        before the kernel and tiny-agent resources are torn down.
+        """
+        await self._stop_coordination(on_quiesced=on_quiesced)
         await self._dispose_tiny_agents()
 
     def _close_stream(self) -> None:
@@ -861,6 +945,97 @@ class TeamAgent(BaseAgent):
     async def _update_status(self, status: MemberStatus) -> None:
         if self._state.team_member:
             await self._state.team_member.update_status(status)
+        # The leader's own transitions never come back as events (the
+        # messager self-filter drops them), so this is the only place they
+        # can enter the activity view. Fold them in even when the DB write
+        # above was a no-op: before ``build_team`` the leader has no row, but
+        # it is still a member of its own team as far as idleness goes.
+        await self.observe_member_status(self._member_name() or "", status)
+
+    async def observe_member_status(self, member_name: str, status: MemberStatus) -> None:
+        """Record a member's status and drive the debounced team-idle marker.
+
+        The single decision point for team idleness, fed from two sides: this
+        agent's own status transitions (``_update_status``) and every other
+        member's ``MEMBER_*`` events (``MemberHandler``). The registry decides
+        whether a marker is owed; the stream controller owns the timer that
+        delivers it after the quiet has held. No-op on non-leader roles, which
+        hold no registry.
+
+        Args:
+            member_name: The member whose status is being observed.
+            status: Its current status.
+        """
+        registry = self._state.member_registry
+        if registry is None or not member_name:
+            return
+        signal = registry.record(member_name, status)
+        if signal is IdleSignal.SCHEDULE:
+            self._stream_controller.schedule_team_idle()
+        elif signal is IdleSignal.CANCEL:
+            self._stream_controller.cancel_team_idle()
+
+    async def is_task_board_settled(self) -> bool:
+        """Return whether the team's task board holds no open task.
+
+        The second half of the team-idle judgement: members having stopped
+        only says nobody is moving *right now*, which a team mid-handoff also
+        satisfies. A board whose every task is terminal (completed or
+        cancelled), or that has no task at all, is what makes the quiet mean
+        "there is nothing left to move".
+
+        One aggregate COUNT, not a full task load — this runs on every idle
+        edge that survives the debounce window. A member with no backend has
+        no board either, so its board is trivially settled; a database error
+        answers False, which merely holds the marker back rather than
+        announcing an idleness this process could not confirm.
+
+        Returns:
+            True when no non-terminal task exists, False otherwise.
+        """
+        backend = self.team_backend
+        if backend is None:
+            return True
+        try:
+            _, non_terminal = await backend.db.task.count_tasks_terminality(backend.team_name)
+        except Exception as e:
+            team_logger.warning(
+                "[{}] failed to probe the task board for team idleness: {}",
+                self._member_name() or "?",
+                e,
+            )
+            return False
+        return non_terminal == 0
+
+    async def seed_member_registry(self) -> None:
+        """Re-baseline the leader's activity view from the team database.
+
+        Called once per run cycle before this agent reports itself READY, so
+        a cold start, a resume and a recover all begin from what the database
+        actually holds rather than from whatever the previous cycle left in
+        memory. A team that has not been built yet, or one with no member rows,
+        seeds an empty roster — that is an ordinary state, not an error, and
+        the leader itself is kept in the roster regardless.
+        """
+        registry = self._state.member_registry
+        backend = self.team_backend
+        if registry is None or backend is None:
+            return
+        try:
+            rows = await backend.db.member.get_team_members(backend.team_name)
+        except Exception as e:
+            team_logger.warning(
+                "[{}] failed to seed member activity registry: {}",
+                self._member_name() or "?",
+                e,
+            )
+            return
+        seeded: dict[str, MemberStatus] = {}
+        for row in rows:
+            status = parse_member_status(row.status)
+            if status is not None:
+                seeded[row.member_name] = status
+        registry.seed(seeded)
 
     async def _update_execution(self, status: ExecutionStatus) -> None:
         if self._state.team_member:
@@ -888,6 +1063,37 @@ class TeamAgent(BaseAgent):
         await self._coordination.enqueue(
             InnerEventMessage(event_type=InnerEventType.POLL_TASK),
         )
+
+    async def _reconcile_member_startup(self) -> None:
+        """Start members the board has work for but nobody ever launched.
+
+        Runs on the leader's round-idle edge: whatever the round intended is
+        now fully expressed, so a roster still parked at UNSTARTED while the
+        board holds open work is a gap the code closes rather than one the
+        model has to notice. Registration and startup are deliberately
+        separate (``spawn_teammate`` only writes a DB row), which leaves
+        exactly this window open when nothing on the round happened to walk
+        the startup funnel.
+
+        Leader-only: nobody else owns a roster. The board is probed first
+        because a team with no open task has nothing to be started *for* —
+        a leader may well register members ahead of the work. That probe is
+        one aggregate COUNT, and ``auto_start_all`` is a no-op once the
+        UNSTARTED set is empty, so a settled team pays almost nothing per
+        round. Best-effort throughout: this runs on a teardown-adjacent edge,
+        and a failure here must not stop the completion poll behind it.
+        """
+        if self.role != TeamRole.LEADER:
+            return
+        if await self.is_task_board_settled():
+            return
+        started = await self.auto_start_all()
+        if started:
+            team_logger.info(
+                "[{}] round-idle reconcile started members: {}",
+                self._member_name() or "?",
+                started,
+            )
 
     def _member_name(self) -> Optional[str]:
         return self._configurator.member_name
@@ -948,24 +1154,266 @@ class TeamAgent(BaseAgent):
         card = agent_spec.card or AgentCard(
             id=card_id,
             name=context.member_name or "unknown",
-            description=f"Teammate: {context.persona}" if context.persona else "Teammate",
+            description=f"Teammate: {context.desc}" if context.desc else "Teammate",
         )
         agent = cls(card)
         agent.configure(spec, context)
         return agent
 
     async def _on_teammate_created(self, teammate_id: str):
-        team_logger.info("[{}] on_teammate_created: {}", self._member_name() or "?", teammate_id)
+        team_logger.info("[%s] on_teammate_created: %s",
+                         self._member_name() or "?", teammate_id)
+
+        # ── Resolve fork context ──
+        fork_ctx: ForkContext | None = None
+        if self.team_backend is not None:
+            fork_info = self.team_backend.consume_fork_on_spawn(teammate_id)
+            team_logger.debug(
+                "[fork] _on_teammate_created: member=%s fork_info=%s "
+                "checkpoints=%s spawned_handles=%s",
+                teammate_id,
+                fork_info,
+                list(self._named_checkpoints.keys()),
+                list(self._spawn_manager.spawned_handles.keys()),
+            )
+            if fork_info:
+                try:
+                    native = self._resolve_fork_native(fork_info.get("source"))
+                    team_logger.debug(
+                        "[fork] resolve_fork_native: source=%s native=%s",
+                        fork_info.get("source"), type(native).__name__ if native else "None",
+                    )
+                    if native is not None:
+                        fork_value = fork_info["fork"]
+                        compact = fork_info.get("compact", False)
+                        is_named = (
+                            isinstance(fork_value, str)
+                            and fork_value not in ("true", "false")
+                        )
+                        ckpt_record = self._named_checkpoints.get(fork_value) if is_named else None
+                        ckpt_idx = ckpt_record["count"] if ckpt_record else None
+
+                        if ckpt_record is not None:
+                            source_name = fork_info.get("source") or self._member_name()
+                            creator = ckpt_record.get("created_by") or ""
+                            if creator and creator != source_name:
+                                team_logger.warning(
+                                    "[fork] checkpoint '%s' created by '%s' but "
+                                    "fork_source='%s'; the index belongs to another "
+                                    "member and may not fit this source's context",
+                                    fork_value, creator, source_name,
+                                )
+                                # The recorded count is only meaningful for its
+                                # creator's context. Falling back to full keeps the
+                                # behaviour consistent with the leader notification.
+                                ckpt_idx = None
+                                from openjiuwen.agent_teams.i18n import t
+                                await self._notify_fork_name_not_found(
+                                    teammate_id, fork_value,
+                                    detail=t(
+                                        "checkpoint.fork_source_mismatch",
+                                        creator=creator,
+                                        source=source_name,
+                                    ),
+                                )
+
+                        if compact:
+                            if not is_named:
+                                team_logger.warning(
+                                    "[fork] compact=true ignored for member=%s: "
+                                    "requires a named checkpoint fork", teammate_id,
+                                )
+                                compact = False
+                            elif ckpt_idx is None:
+                                team_logger.warning(
+                                    "[fork] checkpoint '%s' not found for "
+                                    "member=%s; falling back to full context",
+                                    fork_value, teammate_id,
+                                )
+                                compact = False
+
+                        # Default is a live fork (fork="true"/True): full
+                        # injection. Named branches override the capture below.
+                        fork_ctx = ForkContext.from_agent(native)
+                        if compact:
+                            if ckpt_idx is not None and 0 <= ckpt_idx < len(fork_ctx.messages):
+                                fork_ctx.compact_split = ckpt_idx
+                            else:
+                                fork_ctx.compact_split = len(fork_ctx.messages)
+                        elif is_named and ckpt_idx is None:
+                            if ckpt_record is None:
+                                # Genuinely unknown name: warn + notify. A
+                                # creator/fork_source mismatch also lands here
+                                # (ckpt_idx cleared above) but has already been
+                                # warned and notified with the detail.
+                                team_logger.warning(
+                                    "[fork] checkpoint '%s' not found for "
+                                    "member=%s; falling back to full context",
+                                    fork_value, teammate_id,
+                                )
+                                await self._notify_fork_name_not_found(teammate_id, fork_value)
+                        elif is_named:
+                            fork_ctx = ForkContext.from_agent(
+                                native, checkpoint=ckpt_idx,
+                            )
+                        team_logger.debug(
+                            "[fork] ForkContext created: msgs=%d empty=%s",
+                            len(fork_ctx.messages), fork_ctx.is_empty(),
+                        )
+                        team_logger.info(
+                            "[fork] %s into %s (msgs=%d)%s",
+                            "compacted fork" if compact else
+                            "checkpoint fork" if is_named else "live fork",
+                            teammate_id,
+                            len(fork_ctx.messages),
+                            f" split_at={fork_ctx.compact_split}" if fork_ctx.compact_split is not None else "",
+                        )
+                except Exception as exc:  # noqa: BLE001 - never let fork capture block the spawn
+                    team_logger.warning(
+                        "[fork] fork capture failed for member=%s: %s; "
+                        "spawning without inherited context",
+                        teammate_id, exc,
+                    )
+                    fork_ctx = None
+
         ctx = await self._spawn_manager.build_context_from_db(teammate_id)
         if ctx is None:
             return
-        teammate = await self._configurator.team_backend.get_member(teammate_id)
+        # Record who this member inherited its context from, so the target's
+        # identity block can carry a conversion notice (rendered by
+        # ``TeamContextTracker``). Only meaningful when fork inheritance
+        # actually delivered messages — an empty fork context (capture yielded
+        # nothing) means nothing was inherited, so no notice.
+        if fork_ctx is not None and not fork_ctx.is_empty():
+            ctx.fork_source = fork_info.get("source") or self._member_name()
+        # No first-start message: a member's DB ``prompt`` is its private
+        # system-prompt addendum (carried on ``ctx.member_prompt``), not a
+        # startup instruction. Members come up subscribed-only and receive
+        # real work from the leader via send_message / task assignment.
         await self.spawn_teammate(
             ctx,
-            initial_message=teammate.prompt if teammate else None,
+            initial_message=None,
             session=self.session_id,
             spawn_config=SpawnConfig(health_check_timeout=30, health_check_interval=50),
+            fork_from=fork_ctx,
         )
+
+    def _resolve_fork_native(self, source_name: str | None):
+        """Return the DeepAgent of a named member, or leader's own."""
+        if source_name is None or source_name == self._member_name():
+            return self.resources.harness.get_deep_agent()
+
+        handle = self._spawn_manager.spawned_handles.get(source_name)
+        if handle and hasattr(handle, "agent_ref"):
+            agent = handle.agent_ref
+            if hasattr(agent, "resources") and agent.resources.harness:
+                return agent.resources.harness.get_deep_agent()
+
+        team_logger.warning(
+            "[fork] fork source '%s' not found or not in-process "
+            "(leader=%s, spawned=%s); fork inheritance will be SKIPPED — "
+            "member starts without inherited context",
+            source_name,
+            self._member_name() or "?",
+            list(self._spawn_manager.spawned_handles.keys()),
+        )
+        return None
+
+    async def _notify_fork_name_not_found(
+        self,
+        member: str,
+        fork_name: str,
+        *,
+        detail: str = "",
+    ) -> None:
+        """Surface a wrong fork checkpoint name to the leader.
+
+        The spawn still proceeds with a full-context fallback, but the
+        leader is told which name was requested and which names actually
+        exist, so a naming mismatch (missing name, or a name whose creator
+        does not match ``fork_source``) is no longer silent.
+        """
+        from openjiuwen.agent_teams.i18n import t
+
+        available = ", ".join(sorted(self._named_checkpoints)) or "（无）"
+        try:
+            await self.message_manager.send_message(
+                content=t(
+                    "checkpoint.fork_not_found",
+                    fork=fork_name,
+                    member=member,
+                    available=available,
+                    detail=detail,
+                ),
+                to_member_name=self._member_name(),
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort, never block the spawn
+            team_logger.warning(
+                "[fork] failed to notify leader about missing checkpoint '%s': %s",
+                fork_name, exc,
+            )
+
+    def share_checkpoints_with(self, other: "TeamAgent") -> None:
+        """Share the leader's checkpoint namespace with another agent."""
+        other.set_checkpoints_from(self._named_checkpoints)
+
+    def set_checkpoint(
+        self,
+        name: str,
+        count: int,
+        *,
+        description: str = "",
+        created_by: str | None = None,
+    ) -> dict | None:
+        """Store a named checkpoint.
+
+        Checkpoint names are **team-globally unique**: a name that already
+        exists — regardless of who created it — is rejected and the existing
+        record is returned (``None`` on success). The leader also mirrors the
+        full mapping into the session's per-team namespace so it survives
+        process restart. Persistence is deferred to the run cycle's
+        ``post_run`` (no explicit flush), matching allocator / lifecycle /
+        pending_resume semantics.
+
+        Returns:
+            ``None`` when stored; the existing record on a name conflict.
+        """
+        existing = self._named_checkpoints.get(name)
+        if existing is not None:
+            return existing
+        self._named_checkpoints[name] = {
+            "count": count,
+            "description": description or "",
+            "created_by": created_by or "",
+        }
+        if self.role == TeamRole.LEADER:
+            self._merge_checkpoints_into_session()
+        return None
+
+    def _merge_checkpoints_into_session(self) -> None:
+        """Mirror the current checkpoint mapping into the bound team session.
+
+        Sync-only and best-effort: a failure must never break a model call.
+        The durable write happens at run-cycle ``post_run``.
+        """
+        session = self._session_manager.team_session
+        team_name = self._configurator.team_name
+        if session is None or team_name is None:
+            return
+        from openjiuwen.agent_teams.runtime.metadata import merge_team_checkpoints
+
+        try:
+            merge_team_checkpoints(session, team_name, dict(self._named_checkpoints))
+        except Exception as exc:  # noqa: BLE001 - never break a model call over a mirror write
+            team_logger.warning(
+                "[{}] failed to mirror checkpoints into session: {}",
+                self._member_name() or "?",
+                exc,
+            )
+
+    def set_checkpoints_from(self, source: dict[str, dict]) -> None:
+        """Replace this agent's checkpoint namespace with *source*."""
+        self._named_checkpoints = source
 
     async def _mark_team_cleaned(self) -> None:
         """Latch ``state.team_cleaned`` from the ``clean_team`` success path.
@@ -974,8 +1422,8 @@ class TeamAgent(BaseAgent):
         ``setup_team_backend(on_team_cleaned=...)``. ``clean_team`` runs
         synchronously inside the leader's DeepAgent round, so setting the
         flag here guarantees it is visible before
-        ``StreamController._run_one_round``'s finally block evaluates
-        terminal conditions — no reliance on the racy ``TeamCleanedEvent``
+        ``StreamController._on_idle_settled`` evaluates terminal
+        conditions — no reliance on the racy ``TeamCleanedEvent``
         bus handler, which the leader deliberately ignores (see
         ``coordination/handlers/agent_lifecycle.py::on_cleaned``).
         """
@@ -992,6 +1440,9 @@ class TeamAgent(BaseAgent):
 
         self._state.team_cleaned = False
         await self._persist_team_db_state(TEAM_DB_STATE_CREATED)
+        # F_62: build_team may have chosen scheduled dispatch — arm the
+        # scheduler now, before any teammate spawn or task creation.
+        await self._coordination.notify_team_built()
 
     async def _persist_team_db_state(self, db_state: str) -> None:
         """Persist the team DB lifecycle state into the active checkpoint."""
@@ -1011,12 +1462,14 @@ class TeamAgent(BaseAgent):
         initial_message: Optional[str] = None,
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
+        fork_from: ForkContext | None = None,
     ):
         return await self._spawn_manager.spawn_teammate(
             ctx,
             initial_message=initial_message,
             session=session,
             spawn_config=spawn_config,
+            fork_from=fork_from,
         )
 
     async def auto_start_member(self, member_name: str) -> bool:
@@ -1114,7 +1567,10 @@ class TeamAgent(BaseAgent):
             ValueError: When the session has no bucket for ``team_name`` or
                 the bucket is missing the leader spec.
         """
-        from openjiuwen.agent_teams.runtime.metadata import read_team_namespace
+        from openjiuwen.agent_teams.runtime.metadata import (
+            read_team_checkpoints,
+            read_team_namespace,
+        )
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
         bucket = read_team_namespace(session, team_name)
@@ -1149,6 +1605,11 @@ class TeamAgent(BaseAgent):
         allocator_state = bucket.get("model_allocator_state")
         if allocator_state:
             agent.restore_allocator_state(allocator_state)
+        # Restore named checkpoints so a cold-recovered leader can still
+        # resolve ``fork="<checkpoint>"`` for teammates spawned later.
+        checkpoints = read_team_checkpoints(session, team_name)
+        if checkpoints:
+            agent.set_checkpoints_from(checkpoints)
         # Inject session_id into the agent_teams contextvar so the immediately
         # following ``recover_team`` flow (and its restart_teammate -> spawn
         # chain) can read it via ``get_session_id``. We deliberately do NOT
@@ -1160,6 +1621,13 @@ class TeamAgent(BaseAgent):
         from openjiuwen.agent_teams.context import set_session_id
 
         set_session_id(session.get_session_id())
+        # This is the cold-recovery path: the same session continues, so the
+        # leader's conversation -- including the build_team result that carries
+        # its collaboration policy -- comes back with it. Mark the backend so
+        # build_team refuses a redundant second call (F_76).
+        backend = agent.team_backend
+        if backend is not None:
+            backend.mark_history_restored()
         return agent
 
 

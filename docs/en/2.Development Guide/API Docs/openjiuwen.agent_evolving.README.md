@@ -11,11 +11,11 @@
 | [experience](openjiuwen.agent_evolving/experience.md) | Online experience lifecycle orchestration (OnlineEvolutionOrchestrator, ExperienceManager, ExperienceTracker, ExperienceScorer) |
 | [signal](openjiuwen.agent_evolving/signal.md) | Evolution signal detection and fingerprint utilities (EvolutionSignal, SignalDetector, TeamSignalDetector) |
 | [trainer](openjiuwen.agent_evolving/trainer.md) | Training orchestration (Trainer, Progress,Callbacks) |
-| [trajectory](openjiuwen.agent_evolving/trajectory.md) | Trajectory types, extraction, stores, and runtime aggregation registry (Trajectory, TrajectoryExtractor, InMemoryTrajectoryRegistry, etc.) |
+| [trajectory](openjiuwen.agent_evolving/trajectory.md) | Canonical OTLP trajectory values, in-process span capture, synchronous stores, stateless accessors, and offline conversion tools. |
 | [updater](openjiuwen.agent_evolving/updater.md) | Updaters (`Updater`, `SingleDimUpdater`, `MultiDimUpdater`) |
 | [checkpointing](openjiuwen.agent_evolving/checkpointing.md) | Checkpoint and restore (`EvolveCheckpoint`, `FileCheckpointStore`, `CheckpointManager`) |
 | [optimizer](openjiuwen.agent_evolving/optimizer/optimizer.md) | Optimizer base classes (BaseOptimizer, TextualParameter, InstructionOptimizer) |
-| [optimizer/skill_call/team_skill_experience_optimizer](openjiuwen.agent_evolving/optimizer/skill_call/team_skill_experience_optimizer.md) | Team skill optimizer (TeamSkillExperienceOptimizer, experience record generation) |
+| [optimizer/skill_call/experience_optimizer](openjiuwen.agent_evolving/optimizer/skill_call/experience_optimizer.md) | Shared regular/team Skill experience optimizer (`SkillExperienceOptimizer`) |
 | [evaluator](openjiuwen.agent_evolving/evaluator/evaluator.md) | Evaluation interfaces and metrics (BaseEvaluator, DefaultEvaluator, MetricEvaluator, Metric) |
 | [evaluator/evaluator_pipeline](openjiuwen.agent_evolving/evaluator/evaluator_pipeline/README.md) | Skill evaluation and evolution pipeline (EvolutionPipeline, BaseAgentAdapter, BaseBenchAdapter, SkillManager) |
 | [agent_rl](openjiuwen.agent_evolving/agent_rl/agent_rl.README.md) | VERL-based RL training (`RLConfig`, `OfflineRLOptimizer`, rollout coordination, reward registry) |
