@@ -98,7 +98,7 @@ def _read_budget_snapshot(path: str | None) -> dict | None:
         return None
 
 
-def _write_budget_snapshot(path: str | None, ledger: BudgetLedger) -> None:
+def _write_budget_snapshot(path: str | None, ledger: BudgetLedger, *, terminal: bool = False) -> None:
     """Atomically overwrite the ``<journal>.budget`` sidecar with the ledger state.
 
     Temp file + ``os.replace`` (the same atomic-commit trick :meth:`Journal.save`
@@ -108,6 +108,11 @@ def _write_budget_snapshot(path: str | None, ledger: BudgetLedger) -> None:
     microseconds — and synchronous-ness is the point, giving the emit hook a
     durable point-in-time snapshot before the run moves on. A failure is
     swallowed (soft ceiling): the run continues, only resume-fidelity degrades.
+
+    ``terminal`` marks whether the run had already reached a terminal state
+    (normal completion, or the ``BudgetExhausted`` gate) when this snapshot was
+    written — the mid-run emit hooks always leave it ``False``. See
+    :func:`_persist_budget_final` for what the flag changes on the next launch.
     """
     if not path:
         return
@@ -115,6 +120,7 @@ def _write_budget_snapshot(path: str | None, ledger: BudgetLedger) -> None:
         "total": ledger.total,
         "spent": ledger.spent,
         "phase_tokens": dict(ledger.phase_tokens),
+        "terminal": terminal,
     }
     tmp = f"{path}.tmp"
     try:
@@ -129,18 +135,21 @@ def _write_budget_snapshot(path: str | None, ledger: BudgetLedger) -> None:
 
 def _persist_budget_final(rt) -> None:
     """Seal the budget sidecar at a terminal point (normal completion or the
-    ``BudgetExhausted`` branch of ``_exec_loaded``).
+    ``BudgetExhausted`` branch of ``_exec_loaded``), marking it ``terminal``.
 
     The emit-hook writes are best-effort (a soft ceiling tolerates a missed one
-    mid-run), so this durable write is what makes a *completed* run's later
-    resume read the true final tally — otherwise the sidecar would lag by the
-    last agent whose emit write happened to land. No-op when there is no ceiling
-    (unbounded) or no persistence path (offline preview).
+    mid-run), so this durable write is what makes a *completed* run's tally
+    final. The ``terminal`` flag tells the next same-name launch that the prior
+    run *ended* rather than was interrupted: the relaunch then starts from a
+    fresh per-run ceiling — the "新 run 的额度会重置" the exhausted / over-budget
+    feedback promises the leader — while only a non-terminal sidecar (crash /
+    pause / stop — no final seal) resumes its tally. No-op when there is no
+    ceiling (unbounded) or no persistence path (offline preview).
     """
     wb = rt.workflow_budget
     fn = rt.persist_workflow_budget
     if wb.total is not None and fn is not None:
-        fn(wb)
+        fn(wb, terminal=True)
 
 
 def _resolve_workflow_budget(
@@ -167,7 +176,9 @@ def _resolve_workflow_budget(
 
     ``resume_spent`` / ``resume_phase_tokens`` restore the ledger's prior tally
     on a resume (read by :func:`_read_budget_snapshot` from the
-    ``<journal>.budget`` sidecar). They are **only** meaningful with a declared
+    ``<journal>.budget`` sidecar; a *terminal* sidecar — the prior run completed
+    or was gate-stopped — is filtered out before this call, so a relaunch starts
+    fresh). They are **only** meaningful with a declared
     ceiling (an unbounded ledger has no ceiling to count toward, so the resumed
     tally would never trigger — keeping it 0 is correct). A first run (no
     sidecar) passes the 0 / ``None`` defaults.
@@ -231,10 +242,11 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
         ))
         return result
     except BudgetExhausted as exc:
-        # Seal the budget sidecar at the exhaustion point so a later resume
-        # reads the true spent (otherwise the sidecar lags by the in-flight
-        # agent's emit write that never landed). The run is terminal — there is
-        # no finalize (the WAL stays for recovery), so this is the durable write.
+        # Seal the budget sidecar at the exhaustion point, marked ``terminal``:
+        # the run is over (no finalize — the WAL stays for cache replay), and the
+        # next same-name launch starts from a fresh per-run ceiling instead of
+        # resuming a tally that is already over the line, so the leader's
+        # redesigned script can actually rerun.
         _persist_budget_final(rt)
         rt.progress_sink(WorkflowProgressEvent(
             kind=ProgressKind.WORKFLOW_FAILED,
@@ -305,6 +317,15 @@ async def run_workflow(
     # tally forward; an unbounded ledger has no ceiling to count toward.
     budget_sidecar = _budget_sidecar_path(journal_path)
     resume_snap = _read_budget_snapshot(budget_sidecar)
+    if resume_snap and resume_snap.get("terminal"):
+        # The prior run reached a terminal state (completed, or stopped by the
+        # BudgetExhausted gate), so this launch is a fresh attempt — not the
+        # resume of an interrupted run. Start the per-run ceiling from zero (the
+        # "新 run 的额度会重置" the exhausted / over-budget feedback promises);
+        # unchanged agents still replay from the journal cache for free, so only
+        # the redesigned parts are billed. A non-terminal sidecar (crash / pause
+        # / stop — no final seal) keeps the carry-forward resume semantics.
+        resume_snap = None
     rt = Runtime(
         backend=backend or MockBackend(),
         journal=journal,
@@ -327,7 +348,7 @@ async def run_workflow(
         # only degrades resume fidelity, not the run). None disables persistence
         # (offline preview path with no journal).
         persist_workflow_budget=(
-            (lambda wb, _p=budget_sidecar: _write_budget_snapshot(_p, wb))
+            (lambda wb, terminal=False, _p=budget_sidecar: _write_budget_snapshot(_p, wb, terminal=terminal))
             if budget_sidecar else None
         ),
     )
