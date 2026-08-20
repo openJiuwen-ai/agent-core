@@ -246,9 +246,9 @@ class ReviewFeedbackEvolutionCoordinator:
 
         async with self._team_evolution_lock:
             end = len(self._observations)
-            observations = self._observations[self._team_observation_cursor : end]
+            observations = self._observations[self._team_observation_cursor:end]
             pattern_end = len(self._new_skill_patterns)
-            pattern_observations = self._new_skill_patterns[self._new_skill_pattern_cursor : pattern_end]
+            pattern_observations = self._new_skill_patterns[self._new_skill_pattern_cursor:pattern_end]
             if not observations and not pattern_observations:
                 return False
 
