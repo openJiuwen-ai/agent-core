@@ -207,7 +207,7 @@ leader 全板巡视 nudge 关闭（见 §4）。
   同样只在 leader 侧消费。
 - **`TeamAgentSpec.review_stall_timeout: int = 1800`**（秒）：单轮评审停摆升级阈值
   （§1 停摆升级）。10min 的未投票 reviewer 重发提醒沿用 stale 常量风格做包内常量，不进 spec。
-- **`TeamAgentSpec.enable_task_verification: bool = False`**：团队级"强制任务校验"开关
+- **`TeamAgentSpec.enable_task_verification: bool = True`**：团队级"强制任务校验"开关
   （类比 plan 闸的 team 级形态）。纯提示词驱动——开启时 leader 的任务创建指引要求按判断
   为每个任务指派 0~N 个 reviewer（不做硬校验）；进 `CapabilityOverrides` 允许 build_team
   时显式覆盖。reviewer 指派机制本身（列、校验、不自审）沿用 F_59 Phase 2，零改动。
@@ -268,7 +268,7 @@ handler 类，选择只发生在装配点：
 | D | **投递即启动，启动幂等**：调度器不做在线过滤，DM 路径复用 `_auto_start_members` 的 `UNSTARTED→STARTING` CAS，已启动成员跳过 | §1 开工/送审派发 |
 | E | **评审轮数上限**：per-task `max_review_rounds`（create_task 设，默认 `spec.default_max_review_rounds = 3`）；超限不再自动打回，任务留 `IN_REVIEW`，升级消息**直接注入 leader** 作 user message，由 leader 调整任务规划与成员配置 | §1 验票扫描 escalate 分支 + §3 两列 |
 | F | **评审停摆超时也升级 leader**：单轮开启超 `review_stall_timeout`（默认 1800s）仍未产生判定（含整轮无票），与轮数升级同路径注入 leader，附票况与未投票名单 | §1 验票扫描停摆分支；轮开启时刻复用任务行 `updated_at` |
-| G | 配置命名/默认值确认：`enable_task_verification = False`、`verify_vote_threshold = 2/3`、`default_max_review_rounds = 3`、`review_stall_timeout = 1800` | §3 配置 |
+| G | 配置命名/默认值确认：`dispatch_mode = "scheduled"`、`enable_task_verification = True`、`verify_vote_threshold = 2/3`、`default_max_review_rounds = 3`、`review_stall_timeout = 1800` | §3 配置 |
 
 ## 实现补充（与设计稿的三处偏差）
 

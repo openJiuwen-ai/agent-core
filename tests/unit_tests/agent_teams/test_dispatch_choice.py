@@ -132,6 +132,8 @@ async def test_build_team_tool_has_no_dispatch_choice(db):
 def test_spec_review_knobs_validation():
     base = {"agents": {"leader": DeepAgentSpec()}, "spawn_mode": "inprocess"}
     spec = TeamAgentSpec(**base)
+    assert spec.dispatch_mode == "scheduled"
+    assert spec.enable_task_verification is True
     assert spec.default_max_review_rounds == 3
     assert spec.review_stall_timeout == 1800
 
