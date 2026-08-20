@@ -1401,9 +1401,18 @@ class TeamAgent(BaseAgent):
         own. Must run **before** ``teammate.configure(...)``:
         afterwards the teammate has already created its own manager.
         """
-        own = self._configurator.infra.workspace_manager
+        own = self._configurator.workspace_manager
         if own is not None:
-            other._configurator.infra.workspace_manager = own
+            other.attach_workspace_manager(own)
+
+    def attach_workspace_manager(self, manager: TeamWorkspaceManager | None) -> None:
+        """Adopt a shared workspace manager (in-process member share).
+
+        Called by the leader's ``share_workspace_cache_with`` — the teammate
+        reuses the leader's manager (and its resident ``WorkspaceCache``) by
+        reference instead of building its own.
+        """
+        self._configurator.workspace_manager = manager
 
     def invalidate_workspace_cache(self) -> None:
         """Drop resident evolvable-workspace values so the next run re-reads.

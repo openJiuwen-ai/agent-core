@@ -153,7 +153,7 @@ class TeamWorkerBackend(AgentBackend):
                 cache = ws_mgr.workspace_cache
         self._t = make_translator(
             language if language in ("cn", "en") else "cn",
-            cache=cache,
+            ws_cache=cache,
         )
         self._counter = 0
         # Stateful agent_session / human_session manager, built on first use so a

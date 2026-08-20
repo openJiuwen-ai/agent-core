@@ -181,7 +181,7 @@ def _render_desc(tmpl: PromptTemplate, desc_key: str, lang: str, omit: frozenset
     return rendered
 
 
-def make_translator(lang: str = "cn", cache: "WorkspaceCache | None" = None) -> Translator:
+def make_translator(lang: str = "cn", ws_cache: "WorkspaceCache | None" = None) -> Translator:
     """Create a language-bound translator closure.
 
     Each call returns an independent closure — safe for concurrent use
@@ -189,11 +189,11 @@ def make_translator(lang: str = "cn", cache: "WorkspaceCache | None" = None) -> 
 
     Args:
         lang: Language code; anything other than ``"en"`` resolves to ``cn``.
-        cache: The team's resident ``WorkspaceCache``. When set, tool
+        ws_cache: The team's resident ``WorkspaceCache``. When set, tool
             descriptions consult the team's evolved ``prompts/tool/`` files
             first: tool-level md via
-            ``cache.get_tool_md`` (rendered ``{{slot}}`` fragments), param-level
-            via ``cache.get_tool_param``. ``None`` (unit tests /
+            ``ws_cache.get_tool_md`` (rendered ``{{slot}}`` fragments),
+            param-level via ``ws_cache.get_tool_param``. ``None`` (unit tests /
             ``evolution_enabled=false`` / single agent) resolves straight from
             the framework defaults — exactly the pre-evolvable behaviour.
 
@@ -204,8 +204,8 @@ def make_translator(lang: str = "cn", cache: "WorkspaceCache | None" = None) -> 
         fragments and take no ``kwargs``. ``omit`` names capability slots to
         collapse to empty (``_desc`` only) — see the module docstring.
 
-    Read order (cache set): tool-level ``cache.get_tool_md`` → descs/ md →
-    STRINGS ``_desc``; param-level ``cache.get_tool_param`` → STRINGS.
+    Read order (ws_cache set): tool-level ``ws_cache.get_tool_md`` → descs/ md →
+    STRINGS ``_desc``; param-level ``ws_cache.get_tool_param`` → STRINGS.
     """
     if lang == "en":
         from openjiuwen.agent_teams.tools.locales import en as mod
@@ -215,9 +215,9 @@ def make_translator(lang: str = "cn", cache: "WorkspaceCache | None" = None) -> 
 
     def t(desc_key: str, key: str = "_desc", *, omit: frozenset[str] | None = None, **kwargs: str) -> str:
         # Consult the team workspace first when a cache is bound.
-        if cache is not None:
+        if ws_cache is not None:
             if key == "_desc":
-                evolved = cache.get_tool_md(desc_key)
+                evolved = ws_cache.get_tool_md(desc_key)
                 if evolved is not None:
                     return _render_desc(
                         PromptTemplate(name=f"{desc_key}._desc", content=evolved),
@@ -226,7 +226,7 @@ def make_translator(lang: str = "cn", cache: "WorkspaceCache | None" = None) -> 
                         omit or frozenset(),
                     )
             else:
-                evolved = cache.get_tool_param(desc_key, key)
+                evolved = ws_cache.get_tool_param(desc_key, key)
                 if evolved is not None:
                     return evolved.format_map(kwargs) if kwargs else evolved
         # Framework fallback — the original resolution path.

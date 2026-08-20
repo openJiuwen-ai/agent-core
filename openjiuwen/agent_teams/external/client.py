@@ -278,7 +278,7 @@ class ExternalTeamClient:
         # description.
         return WorkspaceMetaTool(
             self._workspace_manager,
-            make_translator(self._descriptor.language, cache=self._workspace_manager.workspace_cache),
+            make_translator(self._descriptor.language, ws_cache=self._workspace_manager.workspace_cache),
         )
 
     async def __aenter__(self) -> "ExternalTeamClient":

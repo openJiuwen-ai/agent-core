@@ -156,7 +156,7 @@ class TeamToolRail(DeepAgentRail):
             # (None keeps the framework default).
             ws_t = make_translator(
                 self._language,
-                cache=self._team_backend.workspace_cache,
+                ws_cache=self._team_backend.workspace_cache,
             )
             tools.append(WorkspaceMetaTool(self._workspace_manager, ws_t))
 

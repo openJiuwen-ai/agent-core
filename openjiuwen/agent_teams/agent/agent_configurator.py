@@ -1114,8 +1114,8 @@ class AgentConfigurator:
         if self.team_backend is not None:
             self.team_backend.attach_workspace_manager(self.workspace_manager)
 
+    @staticmethod
     def _assemble_member_workspace(
-        self,
         spec: TeamAgentSpec,
         ctx: TeamRuntimeContext,
         resolved_language: str,

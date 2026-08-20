@@ -145,7 +145,7 @@ class TinyAgent:
         self._spec = spec
         self._default_schema = default_schema
         self._language = _normalize_language(language)
-        self._t: Translator = make_translator(self._language, cache=cache)
+        self._t: Translator = make_translator(self._language, ws_cache=cache)
         # Per-call card-id suffix so concurrent run() harnesses never share an
         # owner id (the ability manager qualifies tool ids per owner).
         self._run_seq = itertools.count()

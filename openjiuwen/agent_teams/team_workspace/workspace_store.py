@@ -179,7 +179,8 @@ class WorkspaceStore:
         """Read the team prompt body (``team_prompt.md``)."""
         return self._read_body(WorkspaceLayout.team_prompt_file(self.team_workspace_root(team_name)))
 
-    def team_workspace_root(self, team_name: str) -> Path:
+    @staticmethod
+    def team_workspace_root(team_name: str) -> Path:
         """Return the team's evolvable workspace root (``team-workspace/``).
 
         A/C-class files live under ``prompts/system/`` and ``prompts/tool/``;
@@ -190,7 +191,8 @@ class WorkspaceStore:
 
     # ── helpers ────────────────────────────────────────────────────────────
 
-    def _write(self, target: Path, meta: dict, body: str) -> None:
+    @staticmethod
+    def _write(target: Path, meta: dict, body: str) -> None:
         """Write one file, degrading on failure instead of raising.
 
         Class contract (see module docstring): a failed write degrades to
@@ -202,7 +204,8 @@ class WorkspaceStore:
         except OSError as exc:
             team_logger.warning("workspace write %s failed (DB value stands): %s", target, exc)
 
-    def _may_write(self, path: Path) -> bool:
+    @staticmethod
+    def _may_write(path: Path) -> bool:
         """Write-side evolution protection: never clobber an evolved file.
 
         Returns False when the target exists and its body hash diverges from
@@ -220,7 +223,8 @@ class WorkspaceStore:
             return True  # malformed frontmatter → invalid file, freely rewritable
         return not is_evolved(meta, body)
 
-    def _read_body(self, path: Path) -> str | None:
+    @staticmethod
+    def _read_body(path: Path) -> str | None:
         """Read the B-class body iff evolved; info-log the value source.
 
         ``None`` means "no file value" — the caller falls back to the raw DB

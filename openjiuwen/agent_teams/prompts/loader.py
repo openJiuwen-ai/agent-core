@@ -90,8 +90,8 @@ def bind_template_loader(infra: "TeamInfra") -> TemplateLoader:
     the loader is bound once per member life, not once per property access.
     """
     backend = infra.team_backend
-    cache = backend.workspace_cache if backend is not None else None
-    return make_template_loader(cache)
+    ws_cache = backend.workspace_cache if backend is not None else None
+    return make_template_loader(ws_cache)
 
 
 __all__ = ["TemplateLoader", "bind_template_loader", "load_template", "make_template_loader"]

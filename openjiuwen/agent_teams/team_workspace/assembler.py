@@ -13,7 +13,8 @@ Layout:
     <team>/team-workspace/prompts/system/<name>.<lang>.md   # A-class (role subset + team shared, flattened)
     <team>/team-workspace/prompts/identity/team_card.md     # B-class team desc (no lang)
     <team>/team-workspace/prompts/identity/team_prompt.md   # B-class team prompt (no lang)
-    <team>/team-workspace/prompts/tool/<domain>/<key>.<lang>.md  # C-class tool-level (domain mirrors descs/<lang>/<domain>/)
+    <team>/team-workspace/prompts/tool/<domain>/<key>.<lang>.md
+        # C-class tool-level (domain mirrors descs/<lang>/<domain>/)
     <team>/team-workspace/prompts/tool/tool.param.<lang>.md # C-class param-level (JSON dict, flat at tool/ root)
     <member_dir>/prompts/identity/card.md                   # B-class member desc
     <member_dir>/prompts/identity/member_prompt.md          # B-class member prompt
@@ -127,7 +128,8 @@ class WorkspaceAssembler:
             target = self._system_target(team_name, name, language)
             self._write_baseline(name, language, target)
 
-    def _system_target(self, team_name: str, name: str, language: str) -> Path:
+    @staticmethod
+    def _system_target(team_name: str, name: str, language: str) -> Path:
         """A-class target path: ``team-workspace/prompts/system/<name>.<lang>.md``."""
         return WorkspaceLayout.system_file(team_workspace_dir(team_name), name, language)
 
@@ -178,7 +180,8 @@ class WorkspaceAssembler:
         meta = self._file_meta(name, body=framework_text, language=language)
         atomic_write(target, write_frontmatter(meta, framework_text))
 
-    def _file_meta(self, name: str, *, body: str, language: str) -> dict:
+    @staticmethod
+    def _file_meta(name: str, *, body: str, language: str) -> dict:
         """Build the frontmatter meta for one A-class workspace file.
 
         ``language`` is stamped per A-class file (A/C classes split files
@@ -192,7 +195,8 @@ class WorkspaceAssembler:
             "evolved": False,
         }
 
-    def _framework_body(self, name: str, language: str) -> str | None:
+    @staticmethod
+    def _framework_body(name: str, language: str) -> str | None:
         path = WorkspaceLayout.framework_prompt_file(name, language)
         try:
             return path.read_text(encoding="utf-8").strip()
@@ -217,7 +221,8 @@ class WorkspaceAssembler:
         self._write_tool_md(tools_dir, language)
         self._write_tool_params(tools_dir, language)
 
-    def _tool_dir(self, team_name: str) -> Path:
+    @staticmethod
+    def _tool_dir(team_name: str) -> Path:
         return WorkspaceLayout.tool_dir(team_workspace_dir(team_name))
 
     def _write_tool_md(self, tools_dir: Path, language: str) -> None:
@@ -287,7 +292,8 @@ class WorkspaceAssembler:
             "evolved": False,
         }
 
-    def _write_tool_params(self, tools_dir: Path, language: str) -> None:
+    @staticmethod
+    def _write_tool_params(tools_dir: Path, language: str) -> None:
         """Param-level: write the full STRINGS dict into one JSON file.
 
         The dict is written verbatim — dotted keys (``"<desc_key>.<param>"``,
@@ -303,6 +309,7 @@ class WorkspaceAssembler:
             except OSError as exc:
                 team_logger.warning("workspace file read %s failed: %s", target, exc)
                 return
+            existing_body = ""
             try:
                 meta, existing_body = read_frontmatter(text)
             except ValueError:

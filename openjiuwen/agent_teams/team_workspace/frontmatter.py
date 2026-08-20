@@ -82,8 +82,11 @@ def read_frontmatter(text: str) -> tuple[dict, str]:
     meta_text = "\n".join(lines[1:end])
     # ``splitlines(keepends=True)`` preserves every byte after the closing
     # delimiter (trailing newline included) — ``splitlines()`` alone would
-    # drop a body-final ``\n`` and break the sha256 round-trip.
-    body = "".join(text.splitlines(keepends=True)[end + 1 :])
+    # drop a body-final ``\n`` and break the sha256 round-trip. (``start`` is
+    # pre-computed: ruff/black force spaces around ``:`` in expression slices,
+    # which the codecheck G.FMT.04 rule rejects.)
+    start = end + 1
+    body = "".join(text.splitlines(keepends=True)[start:])
     try:
         meta = yaml.safe_load(meta_text) or {}
     except yaml.YAMLError as exc:

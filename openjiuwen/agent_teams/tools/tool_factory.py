@@ -180,7 +180,7 @@ def create_team_tools(
     # ``None`` (no manager attached yet / evolution disabled / unit tests)
     # → identical to the pre-evolvable ``make_translator`` closure.
     cache = agent_team.workspace_cache
-    t = make_translator(lang, cache=cache)
+    t = make_translator(lang, ws_cache=cache)
     loader = make_template_loader(cache)
     task_mgr = agent_team.task_manager
     msg_mgr = agent_team.message_manager

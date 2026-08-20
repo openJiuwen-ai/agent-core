@@ -511,7 +511,7 @@ class TeamScheduler:
         # default.
         backend = self._infra.team_backend
         cache = backend.workspace_cache if backend is not None else None
-        tr = make_translator(language, cache=cache)
+        tr = make_translator(language, ws_cache=cache)
 
         verify_tool = VerifyTaskTool(reviewer_tm, tr, desc_key="verify_task_scheduled")
         view_tool = ViewTaskToolV2(backend, tr)

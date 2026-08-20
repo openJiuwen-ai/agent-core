@@ -120,7 +120,7 @@ def build_claude_sdk_mcp_tool_set(
         team_permissions_enabled=team_permissions_enabled,
     )
     if workspace_manager is not None:
-        tools.append(WorkspaceMetaTool(workspace_manager, make_translator(language, cache=workspace_cache)))
+        tools.append(WorkspaceMetaTool(workspace_manager, make_translator(language, ws_cache=workspace_cache)))
 
     tools_by_name = {tool.card.name: tool for tool in tools}
     sdk = load_claude_sdk()
