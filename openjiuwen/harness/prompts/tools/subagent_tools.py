@@ -10,13 +10,13 @@ from openjiuwen.harness.prompts.tools.base import ToolMetadataProvider
 
 SUBAGENT_SPAWN_DESCRIPTION: Dict[str, str] = {
     "cn": (
-        "为具体、有界、可独立执行的子任务创建常驻子代理并投递首轮任务，立即返回 subagent_id 与 task_id。"
+        "为目标具体、范围清晰、可独立完成的子任务创建常驻子代理并下发首轮任务，立即返回 subagent_id 与 task_id。"
         "仅当用户或 AGENTS.md/skill 明确要求委派/并行子代理时使用；"
-        "深度调研或细读代码库本身不构成 spawn 授权。"
-        "spawn 不含最终 output，必须在同一 turn 内调用 subagent_wait。"
-        "调用时必须提供 display_name（UI 展示昵称）和 role（本次子任务角色）。"
-        "优先委派可与本地工作并行的侧车子任务，勿把关键路径阻塞项 spawn 后空等。"
-        "\n\n可用子代理类型（仅用于选择 subagent_type，不单独构成 spawn 授权）：\n{available_agents}"
+        "用户要求深度调研或细读代码库，本身不构成 spawn 条件。"
+        "spawn 不返回最终 output，必须在同一 turn 内调用 subagent_wait。"
+        "调用时必须提供 display_name（界面展示名）和 role（本轮子任务角色）。"
+        "优先委派可与本地工作并行的子任务；不要把必须先等结果才能继续的工作 spawn 出去后空等。"
+        "\n\n可用子代理类型（仅用于选择 subagent_type，不能单凭此列表 spawn）：\n{available_agents}"
     ),
     "en": (
         "Create a persistent subagent for a concrete, bounded, self-contained subtask; "

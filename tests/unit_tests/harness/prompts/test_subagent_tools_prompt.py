@@ -14,10 +14,10 @@ def test_subagent_system_prompt_includes_spawn_trigger_rules_cn() -> None:
     prompt = build_subagent_tools_system_prompt("cn")
 
     assert "何时委派" in prompt
-    assert "关键路径" in prompt
+    assert "并行" in prompt
     assert "同一 turn 内 spawn 后必须 subagent_wait" in prompt
-    assert "深度、细致、调研" in prompt
-    assert "不构成" in prompt and "spawn 授权" in prompt
+    assert "调研" in prompt
+    assert "不能" in prompt and "单凭" in prompt
 
 
 def test_subagent_system_prompt_includes_spawn_trigger_rules_en() -> None:
@@ -33,9 +33,9 @@ def test_spawn_description_states_delegation_authorization_cn() -> None:
     desc = SUBAGENT_SPAWN_DESCRIPTION["cn"]
 
     assert "AGENTS.md" in desc
-    assert "不构成 spawn 授权" in desc or "spawn 授权" in desc
+    assert "spawn 条件" in desc or "不能单凭" in desc
     assert "同一 turn" in desc
-    assert "关键路径" in desc
+    assert "干等" in desc or "并行" in desc
 
 
 def test_spawn_description_states_delegation_authorization_en() -> None:
