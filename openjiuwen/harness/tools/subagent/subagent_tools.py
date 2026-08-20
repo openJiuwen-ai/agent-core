@@ -71,6 +71,18 @@ def _validate_spawn_payload(payload: dict[str, Any]) -> None:
     )
 
 
+def _parse_subagent_ids(payload: dict[str, Any]) -> list[str]:
+    """Normalize wait inputs; models often pass subagent_id instead of subagent_ids."""
+    raw = payload.get("subagent_ids")
+    if raw is None:
+        raw = payload.get("subagent_id")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if isinstance(item, str) and item.strip()]
+
+
 class SubagentSpawnTool(Tool):
     """Spawn a persistent subagent and enqueue the first turn without blocking."""
 
@@ -134,16 +146,11 @@ class SubagentWaitTool(Tool):
         payload = _require_dict_inputs(inputs)
         control = get_subagent_control(self._parent_agent, kwargs.get("session"))
 
-        subagent_ids = payload.get("subagent_ids")
-        if not isinstance(subagent_ids, list) or not subagent_ids:
+        subagent_ids = _parse_subagent_ids(payload)
+        if not subagent_ids:
             raise build_error(
                 StatusCode.TOOL_SESSION_TOOL_INVOKED,
                 reason="'subagent_ids' must be a non-empty list",
-            )
-        if not all(isinstance(item, str) for item in subagent_ids):
-            raise build_error(
-                StatusCode.TOOL_SESSION_TOOL_INVOKED,
-                reason="'subagent_ids' must contain strings",
             )
 
         timeout_ms = payload.get("timeout_ms", WAIT_TIMEOUT_MS_DEFAULT)

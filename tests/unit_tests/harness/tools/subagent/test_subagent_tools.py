@@ -279,6 +279,31 @@ async def test_subagent_wait_returns_statuses_and_results() -> None:
 
 
 @pytest.mark.asyncio
+async def test_subagent_wait_accepts_subagent_id_alias() -> None:
+    tool = _wait_tool()
+    session = Session(session_id="parent_sess")
+    control = _control_mock(
+        wait=AsyncMock(
+            return_value=WaitResult(
+                statuses={"sub1": SubagentStatus.completed("answer")},
+                results={"sub1": "answer"},
+                output_files={},
+                timed_out=False,
+            ),
+        ),
+    )
+
+    with patch(
+        "openjiuwen.harness.tools.subagent.subagent_tools.get_subagent_control",
+        return_value=control,
+    ):
+        result = await tool.invoke({"subagent_id": "sub1"}, session=session)
+
+    control.wait.assert_awaited_once_with(["sub1"], timeout_ms=WAIT_TIMEOUT_MS_DEFAULT)
+    assert result.success is True
+
+
+@pytest.mark.asyncio
 async def test_subagent_wait_rejects_empty_subagent_ids() -> None:
     tool = _wait_tool()
     session = Session(session_id="parent_sess")
