@@ -19,6 +19,34 @@ import pytest
 pytestmark = pytest.mark.level0
 
 
+def test_agent_template_manifest_accepts_flat_identity(tmp_path: Path) -> None:
+    """Top-level name/description derive the runtime card from the directory."""
+    from openjiuwen.harness.resources import load_agent_template_package
+
+    package_dir = tmp_path / "member1"
+    persona_dir = package_dir / "persona"
+    persona_dir.mkdir(parents=True)
+    (persona_dir / "member1.md").write_text("# Member 1\n", encoding="utf-8")
+    manifest = package_dir / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "packageType": "agent_template",
+                "name": "方案分析专家",
+                "description": "负责主要专业分析",
+                "persona": {"dir": "./persona"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_agent_template_package(manifest)
+
+    assert spec.agent_card.id == "member1"
+    assert spec.agent_card.name == "方案分析专家"
+    assert spec.agent_card.description == "负责主要专业分析"
+
+
 def test_legacy_yaml_tool_aliases_remap_to_rails(tmp_path: Path) -> None:
     """Legacy tools short names become rails before PluginSpec resolve."""
     from openjiuwen.harness.resources.extension_loader import load_plugin_package

@@ -191,7 +191,11 @@ def load_plugin_package(manifest_path: str | Path) -> PluginSpec:
 
 
 def load_agent_template_package(manifest_path: str | Path) -> AgentTemplateSpec:
-    """Parse a root ``packageType=agent_template`` ``manifest.json`` into an ``AgentTemplateSpec``.
+    """Parse a root ``packageType=agent_template`` manifest.
+
+    Identity may use the legacy nested ``agentCard`` object or top-level
+    ``name`` and ``description`` fields.  The flat form derives the stable
+    runtime card id from the package directory name.
     """
     manifest = Path(manifest_path).expanduser().resolve(strict=True)
     if manifest.name != _PACKAGE_MANIFEST_NAME:
@@ -203,7 +207,22 @@ def load_agent_template_package(manifest_path: str | Path) -> AgentTemplateSpec:
 
     agent_card_payload = payload.get("agentCard")
     if not agent_card_payload:
-        raise ValueError(f"AgentTemplate manifest {manifest} is missing required 'agentCard'")
+        name = payload.get("name")
+        description = payload.get("description")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                f"AgentTemplate manifest {manifest} is missing required 'name'"
+            )
+        if not isinstance(description, str):
+            raise ValueError(
+                f"AgentTemplate manifest {manifest} is missing required "
+                "'description'"
+            )
+        agent_card_payload = {
+            "id": package_root.name,
+            "name": name.strip(),
+            "description": description.strip(),
+        }
 
     base_dir = manifest.parent
     subagents = [

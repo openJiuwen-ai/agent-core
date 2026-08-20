@@ -110,7 +110,7 @@ class MemorySpec(_ExtensionSpecModel):
 class AgentTemplateSpec(_ExtensionSpecModel):
     """Declarative template for one AgentTemplate role."""
 
-    # Static agent identity parsed from manifest.agentcard
+    # Static identity normalized from nested agentCard or flat manifest fields.
     agent_card: AgentCard
 
     # Optional model definitions loaded from model.json
