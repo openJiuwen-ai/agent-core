@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Bilingual description and input params for the Bash (shell) tool.
 
-Prompt design and parameter schema fully aligned with Claude Code's
+Prompt design and parameter schema are derived from Claude Code's
 BashTool (see ``claude-code/src/tools/BashTool/prompt.ts`` and
 ``BashTool.tsx`` for the reference implementation).
 """
@@ -47,10 +47,7 @@ DESCRIPTION: Dict[str, str] = {
         "（例如 cd \"path with spaces/file.txt\"）\n"
         " - 尽量使用绝对路径维持当前工作目录，避免使用 `cd`；"
         "除非用户明确要求\n"
-        " - 可通过 timeout 参数指定超时（秒），默认 300 秒，上限 3600 秒\n"
-        " - 可将 run_in_background 设为 true 来后台运行命令。"
-        "仅在不需要立即获取结果时使用，命令完成后会收到通知。"
-        "使用该参数时无需在命令末尾加 `&`\n"
+        " - 可通过 timeout 参数指定超时（秒），默认 1800 秒，上限 3600 秒\n"
         " - 发出多条命令时：\n"
         "   - 独立命令：在同一消息中多次并行调用本工具。"
         "例如需要同时运行 \"git status\" 和 \"git diff\"，"
@@ -76,10 +73,8 @@ DESCRIPTION: Dict[str, str] = {
         "base 分支未指定时用当前分支（`HEAD`），不要臆测 `main`。\n"
         " - 避免不必要的 `sleep` 命令：\n"
         "   - 能立即执行的命令之间不要 sleep\n"
-        "   - 长时间运行的命令使用 `run_in_background: true`，"
-        "无需 sleep 等待\n"
+        "   - 长时间运行的命令应根据需要增大 timeout\n"
         "   - 不要在 sleep 循环中重试失败命令——排查根本原因\n"
-        "   - 等待后台任务完成时会自动通知——不要轮询\n"
         "   - 如必须轮询外部进程，使用检查命令（如 `gh run view`）"
         "而非先 sleep\n"
         "   - 如必须 sleep，保持短时间（1-5 秒）"
@@ -125,12 +120,7 @@ DESCRIPTION: Dict[str, str] = {
         "session by using absolute paths and avoiding usage of `cd`. "
         "You may use `cd` if the user explicitly requests it.\n"
         " - You may specify an optional timeout in seconds (up to 3600s / 60 minutes). "
-        "By default, your command will timeout after 300s.\n"
-        " - You can use the `run_in_background` parameter to run the "
-        "command in the background. Only use this if you don't need the "
-        "result immediately and are OK being notified when the command "
-        "completes later. You do not need to use '&' at the end of the "
-        "command when using this parameter.\n"
+        "By default, your command will timeout after 1800s.\n"
         " - When issuing multiple commands:\n"
         "   - If the commands are independent and can run in parallel, "
         "make multiple bash tool calls in a single message. Example: if "
@@ -171,14 +161,9 @@ DESCRIPTION: Dict[str, str] = {
         " - Avoid unnecessary `sleep` commands:\n"
         "   - Do not sleep between commands that can run immediately "
         "-- just run them.\n"
-        "   - If your command is long running and you would like to be "
-        "notified when it finishes -- use `run_in_background: true`. "
-        "No sleep needed.\n"
+        "   - For a long-running command, increase timeout as needed.\n"
         "   - Do not retry failing commands in a sleep loop -- diagnose "
         "the root cause.\n"
-        "   - If waiting for a background task you started with "
-        "`run_in_background: true`, you will be notified when it "
-        "completes -- do not poll.\n"
         "   - If you must poll an external process, use a check command "
         "(e.g. `gh run view`) rather than sleeping first.\n"
         "   - If you must sleep, keep the duration short (1-5 seconds) "
@@ -234,24 +219,13 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
         "en": "The command to execute",
     },
     "timeout": {
-        "cn": "可选超时时间（秒），默认 300，上限 3600。对于长时间运行的任务，建议适当增大该值以避免任务被提前中断",
-        "en": "Optional timeout in seconds, default 300, max 3600. For long-running tasks, it is recommended to "
+        "cn": "可选超时时间（秒），默认 1800，上限 3600。对于长时间运行的任务，建议适当增大该值以避免任务被提前中断",
+        "en": "Optional timeout in seconds, default 1800, max 3600. For long-running tasks, it is recommended to "
               "increase this value to avoid premature termination"
     },
     "description": {
         "cn": _DESCRIPTION_PARAM_CN,
         "en": _DESCRIPTION_PARAM_EN,
-    },
-    "run_in_background": {
-        "cn": (
-            "设为 true 以后台运行命令。"
-            "仅在不需要立即获取结果时使用，命令完成后会收到通知"
-        ),
-        "en": (
-            "Set to true to run this command in the background. "
-            "Only use this if you don't need the result immediately "
-            "and are OK being notified when the command completes later"
-        ),
     },
     "workdir": {
         "cn": "执行目录（相对或绝对路径），默认为工作区根目录；不能越出工作区沙箱",
@@ -286,8 +260,8 @@ def get_bash_input_params(language: str = "cn") -> Dict[str, Any]:
     """Return the full JSON Schema for bash tool input_params.
 
     Property order follows Claude Code convention: core params first
-    (command, timeout, description, run_in_background), then
-    project-specific params (workdir, max_output_chars, shell_type).
+    (command, timeout, description), then project-specific params
+    (workdir, max_output_chars, shell_type).
     """
     p = BASH_PARAMS
     lang = language if language in ("cn", "en") else "cn"
@@ -298,7 +272,6 @@ def get_bash_input_params(language: str = "cn") -> Dict[str, Any]:
             "timeout": {
                 "type": "integer", "description": p["timeout"][lang]},
             "description": {"type": "string", "description": p["description"][lang]},
-            "run_in_background": {"type": "boolean", "description": p["run_in_background"][lang]},
             "workdir": {"type": "string", "description": p["workdir"][lang]},
             "max_output_chars": {"type": "integer", "description": p["max_output_chars"][lang]},
             "shell_type": {
