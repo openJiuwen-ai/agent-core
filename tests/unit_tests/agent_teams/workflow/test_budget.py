@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.workflow.engine import run_workflow, runner
 from openjiuwen.agent_teams.workflow.engine import primitives as _p
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+from openjiuwen.agent_teams.workflow.engine.journal import Journal
 from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 from openjiuwen.agent_teams.workflow.engine.runtime import Runtime
 from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
@@ -242,82 +243,113 @@ def test_mock_backend_bills_the_ledger(tmp_path):
     assert ledger.spent > 0
 
 
-# ---------------------------------------------------------------- sidecar / relaunch
+# ---------------------------------------------------------------- journal seal / resume
 
 
-def _sidecar_json(journal_path: str) -> dict:
-    return json.loads(Path(f"{journal_path}.budget").read_text(encoding="utf-8"))
+def _seal_record(journal_path: str, run_id: str) -> dict | None:
+    """Load the journal and find the seal record for ``run_id``."""
+    j = asyncio.run(Journal.load(journal_path, wal_path=f"{journal_path}.wal"))
+    return j.find_run_record(run_id, "seal")
 
 
-def test_completed_run_seals_a_terminal_sidecar(tmp_path):
-    """A run that finishes normally seals its sidecar with terminal=True."""
+def _pause_record(journal_path: str, run_id: str) -> dict | None:
+    """Load the journal and find the pause record for ``run_id``."""
+    j = asyncio.run(Journal.load(journal_path, wal_path=f"{journal_path}.wal"))
+    return j.find_run_record(run_id, "pause")
+
+
+def test_completed_run_writes_a_seal_record(tmp_path):
+    """A run that finishes normally writes a seal record (terminal_status=completed)."""
     journal = str(tmp_path / "j.jsonl")
     script = tmp_path / "flow.py"
     script.write_text(_LIMIT_SCRIPT, encoding="utf-8")
 
     backend = _DualLedgerBackend(cost=10)  # 5 x 10 = 50, under the 100 ceiling
-    asyncio.run(run_workflow(str(script), backend=backend, journal_path=journal))
+    run_id = "run-A"
+    asyncio.run(run_workflow(str(script), backend=backend, journal_path=journal, run_id=run_id))
 
-    snap = _sidecar_json(journal)
-    assert snap["terminal"] is True
-    assert snap["spent"] == 50
-    assert snap["total"] == 100
+    seal = _seal_record(journal, run_id)
+    assert seal is not None
+    assert seal["terminal_status"] == "completed"
+    assert seal["final_spent"] == 50
 
 
-def test_relaunch_after_a_terminal_run_resets_the_per_run_ceiling(tmp_path):
-    """A gate-failed run is terminal: the relaunch starts from a fresh ceiling.
+def test_workflow_budget_hit_writes_pause_and_resume_rebills(tmp_path):
+    """A workflow (per-run) ceiling hit is a pause, not a terminal seal.
 
-    Run 1 burns past the declared per-run limit (30/call vs 100) and fails with
-    BudgetExhausted. Without the reset, run 2's first agent() would find the
-    ledger still exhausted (120/100) and fail identically — the leader's
-    "redesign and relaunch" loop would be dead on arrival. The terminal seal is
-    what lets the redesigned, cheaper script actually rerun.
+    Run 1 hits the per-run limit (scope="workflow") → pause record (not seal),
+    resumable by editing the script. Run 2 resumes the SAME run_id with a cheaper
+    script: the changed prompts miss the cache and rebill from zero, so the
+    redesigned script completes instead of re-hitting the stale tally.
     """
     journal = str(tmp_path / "j.jsonl")
     expensive = tmp_path / "expensive.py"
     expensive.write_text(_LIMIT_SCRIPT, encoding="utf-8")
     cheap = tmp_path / "cheap.py"
     cheap.write_text(_REDESIGNED_SCRIPT, encoding="utf-8")
+    run_id = "run-1"
 
     # Run 1: calls 1-4 land (120 >= 100), call 5 is refused by the gate.
     backend = _DualLedgerBackend(cost=30)
     with pytest.raises(BudgetExhausted):
-        asyncio.run(run_workflow(str(expensive), backend=backend, journal_path=journal))
+        asyncio.run(run_workflow(str(expensive), backend=backend, journal_path=journal, run_id=run_id))
     assert backend.calls == 4
-    snap = _sidecar_json(journal)
-    assert snap["terminal"] is True
-    assert snap["spent"] == 120
+    assert _pause_record(journal, run_id) is not None          # workflow hit → pause
+    assert _pause_record(journal, run_id)["pause_reason"] == "workflow_budget_exhausted"
+    assert _seal_record(journal, run_id) is None               # NOT sealed
 
-    # Run 2 (same journal stem = the relaunch path): fresh ceiling, so the
-    # cheaper script completes; its two new calls miss the cache and rebill.
+    # Run 2 (same run_id, cheaper script): prompts changed → cache miss → rebill from zero.
     backend2 = _DualLedgerBackend(cost=30)
-    asyncio.run(run_workflow(str(cheap), backend=backend2, journal_path=journal, resume=journal))
-    assert backend2.calls == 2
-    snap2 = _sidecar_json(journal)
-    assert snap2["terminal"] is True
-    assert snap2["spent"] == 60  # 2 x 30 from zero, not 120 + 60
+    asyncio.run(run_workflow(str(cheap), backend=backend2, journal_path=journal, resume=journal, run_id=run_id))
+    assert backend2.calls == 2  # both miss, rebilled from zero (60 < 100 → completes)
+    assert _seal_record(journal, run_id) is not None           # completed → seal
 
 
-def test_interrupted_sidecar_still_carries_its_tally(tmp_path):
-    """No final seal (crash / pause / stop): the tally still carries on relaunch.
+def test_session_budget_hit_writes_seal(tmp_path):
+    """A session (team-wide) ceiling hit is terminal: seal, not pause.
 
-    A mid-run snapshot is written without the terminal flag; the next run must
-    resume from that spent tally — the crash-recovery semantics the sidecar was
-    built for — and hit the gate immediately rather than re-spending the ceiling.
+    The session ceiling cannot be recovered by editing the script, so the run is
+    sealed (terminal) rather than pausable.
+    """
+    journal = str(tmp_path / "j.jsonl")
+    script = tmp_path / "flow.py"
+    script.write_text(_LIMIT_SCRIPT, encoding="utf-8")  # has workflow_token_limit=100
+    run_id = "run-s"
+
+    # Session ledger already exhausted → the very first gate raises scope="session".
+    session_ledger = BudgetLedger(total=100, spent=100)
+    backend = _DualLedgerBackend(cost=30)
+    with pytest.raises(BudgetExhausted):
+        asyncio.run(run_workflow(
+            str(script), backend=backend, journal_path=journal, budget=session_ledger, run_id=run_id,
+        ))
+    assert _seal_record(journal, run_id) is not None           # session hit → seal
+    assert _pause_record(journal, run_id) is None              # NOT pausable
+
+
+def test_resume_rebuilds_spent_from_cache_hits(tmp_path):
+    """Same run_id resume re-bills the per-run ledger by replaying cache hits.
+
+    Run 1 completes 5 agents (cost=10 each, spent=50). Run 2 with the SAME
+    run_id replays all 5 as cache hits — each adds its stored token back, so the
+    ledger is rebuilt to spent=50 without a single backend call, not restored
+    from a stale snapshot (there is none).
     """
     journal = str(tmp_path / "j.jsonl")
     script = tmp_path / "flow.py"
     script.write_text(_LIMIT_SCRIPT, encoding="utf-8")
+    run_id = "run-R"
 
-    runner._write_budget_snapshot(
-        f"{journal}.budget", BudgetLedger(total=100, spent=100)
-    )
-    assert _sidecar_json(journal)["terminal"] is False
+    backend1 = _DualLedgerBackend(cost=10)  # 5 x 10 = 50
+    asyncio.run(run_workflow(str(script), backend=backend1, journal_path=journal, run_id=run_id))
+    assert backend1.calls == 5
 
-    backend = _DualLedgerBackend(cost=30)
-    with pytest.raises(BudgetExhausted):
-        asyncio.run(run_workflow(str(script), backend=backend, journal_path=journal))
-    assert backend.calls == 0  # the very first agent() is refused: 100/100 carried
+    # Run 2, same run_id → every agent is a cache hit, rebilled from its record.
+    backend2 = _DualLedgerBackend(cost=10)
+    asyncio.run(run_workflow(str(script), backend=backend2, journal_path=journal, resume=journal, run_id=run_id))
+    assert backend2.calls == 0  # all 5 replayed from cache
+    seal = _seal_record(journal, run_id)
+    assert seal["final_spent"] == 50  # rebuilt 5 x 10 from cache-hit tokens
 
 
 # ---------------------------------------------------------------- rail

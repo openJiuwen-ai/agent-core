@@ -889,6 +889,7 @@ class AvatarSessionManager:
                     default_schema=_INTENT_SCHEMA,
                     language=self._language,
                     max_iterations=3,
+                    budget=self._budget,
                 ) as classifier:
                     return await classifier.run(
                         user_prompt,
@@ -912,7 +913,7 @@ class AvatarSessionManager:
                 prompt_mode=PromptMode.NONE.value,
                 enable_sys_operation=False,
             )
-            classifier = TinyAgent(spec, default_schema=_INTENT_SCHEMA, language=self._language)
+            classifier = TinyAgent(spec, default_schema=_INTENT_SCHEMA, language=self._language, budget=self._budget)
             async with classifier:
                 return await classifier.run(
                     user_prompt,

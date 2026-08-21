@@ -69,7 +69,7 @@ def _write(tmp_path, name: str, src: str) -> str:
 
 
 def _wal_labels(journal_path: str) -> list[str]:
-    """Labels persisted in the WAL sidecar, in append order."""
+    """Labels persisted in the WAL sidecar, in append order (call records only)."""
     wal = Path(f"{journal_path}.wal")
     if not wal.exists():
         return []
@@ -78,7 +78,10 @@ def _wal_labels(journal_path: str) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        labels.append(json.loads(line).get("label"))
+        rec = json.loads(line)
+        if rec.get("type") in ("pause", "seal"):
+            continue  # run-level record, not an agent call
+        labels.append(rec.get("label"))
     return labels
 
 

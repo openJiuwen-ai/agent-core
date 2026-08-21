@@ -842,6 +842,17 @@ class AgentConfigurator:
             build_context=member_build_context,
         )
 
+        # Leader's own model calls (decision / tool use / script generation) bill
+        # the session budget — NOT the per-run budget. Only when swarmflow is
+        # enabled (swarmflow_budget is a real ledger) does the leader carry this
+        # rail; the per-run ledger is passed as None so the rail only adds to the
+        # session pool. TinyAgent intent classify gets the same treatment in
+        # avatar_session_backend.
+        if swarmflow_budget is not None and ctx.role == TeamRole.LEADER:
+            from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
+
+            self.harness.add_rail(SwarmflowBudgetRail(swarmflow_budget, workflow_budget=None))
+
         # Team memory manager (only when explicitly enabled in the spec).
         self.memory_manager = self._build_memory_manager(spec, ctx, agent_spec, resolved_language, member_name)
 

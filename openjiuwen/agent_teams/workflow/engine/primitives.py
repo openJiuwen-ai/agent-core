@@ -320,24 +320,6 @@ def _wf_budget_snapshot(rt) -> dict | None:
     return _budget_snapshot(wb, scope="workflow")
 
 
-def _persist_workflow_budget(rt) -> None:
-    """Durably snapshot ``workflow_budget`` to the ``<journal>.budget`` sidecar.
-
-    Called by the emit hooks at agent boundaries so a later resume recovers
-    ``spent`` instead of resetting to 0 (the per-run ceiling binds to ``run_id``,
-    and ``_relaunch`` reuses it — see §4.4.5). Only persisted when a ceiling is
-    declared (an unbounded ledger has no ceiling to count toward, so a sidecar
-    is pointless). Synchronous + best-effort: a soft ceiling tolerates a missed
-    write mid-run; the terminal ``finalize`` write is the durable one.
-    """
-    wb = rt.workflow_budget
-    if wb.total is None:
-        return  # unbounded — no ceiling, no sidecar worth keeping
-    fn = rt.persist_workflow_budget
-    if fn is not None:
-        fn(wb)
-
-
 def _resolved_nested_phase(explicit: str | None = None) -> str | None:
     """Return ``explicit`` nested phase, or the per-task display name when inside a sub-workflow."""
     return explicit if explicit is not None else _wf_display_name.get()
@@ -365,6 +347,11 @@ def _emit_agent_started(
     correlation_id: str | None = None,
     nested_phase: str | None = None,
 ) -> None:
+    rt.current_agent = {
+        "agent_id": agent_id,
+        "label": opts.get("label"),
+        "started_spent": rt.workflow_budget.spent,
+    }
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_STARTED,
@@ -393,7 +380,7 @@ def _emit_agent_completed(
     ``nested_phase``: defaults to ``_wf_display_name`` when inside a sub-workflow.
     """
     rt.workflow_budget.add_phase(opts.get("phase") or _current_phase.get() or "?", tokens)
-    _persist_workflow_budget(rt)
+    rt.current_agent = None
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_COMPLETED,
@@ -415,7 +402,7 @@ def _emit_agent_failed(
     nested_phase: str | None = None,
 ) -> None:
     rt.workflow_budget.add_phase(opts.get("phase") or _current_phase.get() or "?", tokens)
-    _persist_workflow_budget(rt)
+    rt.current_agent = None
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_FAILED,
@@ -542,7 +529,7 @@ async def agent(
 
     _emit_agent_started(rt, opts, prompt, node_type="agent", agent_id=ks)
 
-    cached = rt.journal.get_cached(ks, sig)
+    cached = rt.journal.get_cached(ks, sig, rt.run_id)
     if cached is not None:  # resume hit — no semaphore, no backend
         rt.log_sink(f"[wf] agent {opts.get('label') or 'agent'!r} key={ks} CACHE_HIT sig={sig[:12]}")
         await rt.journal.use(ks, cached)
@@ -550,9 +537,16 @@ async def agent(
         # Prefer stored raw_text; if absent (old journal), fall back to
         # preamble + structured data via _preview()
         outcome_text = _outcome_from_result(cached.get("raw_text"), result)
+        # Re-bill the per-run ledger from the record's stored tokens so a
+        # resume rebuilds spent by replaying cache hits — the run's tally is
+        # recomputed agent-by-agent, not restored from a stale snapshot.
+        cached_tokens = cached.get("tokens")
+        if isinstance(cached_tokens, int) and cached_tokens > 0:
+            rt.workflow_budget.add(cached_tokens)
         _emit_agent_completed(
             rt, opts, outcome_text, agent_id=ks,
-            tokens=None, budget_snapshot=_budget_snapshot(rt.budget),
+            tokens=cached_tokens if isinstance(cached_tokens, int) else None,
+            budget_snapshot=_budget_snapshot(rt.budget),
         )
         return result
 
@@ -600,6 +594,8 @@ async def agent(
                 result=call_result.result,
                 model=model_cls,
                 raw_text=call_result.raw_text,
+                run_id=rt.run_id,
+                tokens=call_result.tokens,
             )
         ),
     )
@@ -707,6 +703,14 @@ class _JournalRecordInput:
     result: Any
     model: Any
     raw_text: str | None = None
+    run_id: str | None = None
+    """Run identifier stamped into the record for cache isolation (see
+    ``Journal.get_cached``'s ``run_id`` check). Fresh records carry the current
+    run's id; cache hits reuse the prior record's id verbatim."""
+    tokens: int | None = None
+    """Tokens billed by this call (``AgentResult.tokens``); ``None`` on skip /
+    cache-hit / failure. Persisted so an over-budget relaunch can recover
+    per-agent consumption from the journal."""
 
 
 def _make_record(spec: _JournalRecordInput) -> dict:
@@ -721,6 +725,8 @@ def _make_record(spec: _JournalRecordInput) -> dict:
     return {
         "key": spec.key,
         "sig": spec.sig,
+        "run_id": spec.run_id,
+        "tokens": spec.tokens,
         "label": spec.opts.get("label"),
         "phase": spec.opts.get("phase"),
         "kind": kind,
@@ -1025,6 +1031,7 @@ class AgentSession:
                 correlation_id=correlation_id,
             )
 
+            cached = rt.journal.get_cached(ks, sig, rt.run_id)
             # Reserve the member identity on the FIRST turn regardless of cache
             # hit, so a fully-hit resume still knows this session's member name
             # (fork() needs it to locate the parent's persisted context). Only
@@ -1039,9 +1046,13 @@ class AgentSession:
                 result = _rehydrate(cached, model_cls)
                 self._append_history(prompt, result, model_cls)
                 outcome_text = _outcome_from_result(cached.get("raw_text"), result)
+                cached_tokens = cached.get("tokens")
+                if isinstance(cached_tokens, int) and cached_tokens > 0:
+                    rt.workflow_budget.add(cached_tokens)
                 _emit_agent_completed(
                     rt, opts, outcome_text, agent_id=ks,
-                    tokens=None, budget_snapshot=_budget_snapshot(rt.budget),
+                    tokens=cached_tokens if isinstance(cached_tokens, int) else None,
+                    budget_snapshot=_budget_snapshot(rt.budget),
                 )
                 return None if notify else result
 
@@ -1082,6 +1093,8 @@ class AgentSession:
                         result=result,
                         model=model_cls,
                         raw_text=call_result.raw_text,
+                        run_id=rt.run_id,
+                        tokens=call_result.tokens,
                     )
                 ),
             )

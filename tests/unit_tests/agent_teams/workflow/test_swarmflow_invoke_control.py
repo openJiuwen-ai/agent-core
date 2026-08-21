@@ -45,9 +45,12 @@ async def test_stop_action_calls_controller():
 
 
 @pytest.mark.asyncio
-async def test_resume_id_without_action_errors():
+async def test_resume_id_without_action_requires_a_script_source():
+    """resume_id without action is a re-launch — it still needs script_path/script."""
     ctl = _FakeController()
     tool = _make_tool(ctl)
     out = await tool.invoke({"resume_id": "wf_1"})
     assert not out.success
-    assert "action" in out.error
+    # Falls through to the launch path, which requires a script source (not
+    # "action is required" — that gate is gone).
+    assert "script" in out.error.lower()
