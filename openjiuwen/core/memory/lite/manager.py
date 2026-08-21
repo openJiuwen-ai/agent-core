@@ -239,6 +239,8 @@ class MemoryIndexManager:
 
         self.provider: Optional[EmbeddingProvider] = None
         self.provider_key: str = ""
+        self.embedding_available: bool = False
+        self.embedding_error: Optional[str] = None
 
         self.dirty = True
         self.sessions_dirty = False
@@ -641,6 +643,8 @@ class MemoryIndexManager:
         if self.embedding_config is None or not getattr(self.embedding_config, "api_key", None):
             self.provider = None
             self.provider_key = "none:no-embedding"
+            self.embedding_available = False
+            self.embedding_error = "embedding configuration is missing"
             logger.info(
                 "Embedding provider not configured (no embedding_config / api_key); "
                 "memory will use FTS5 keyword search only."
@@ -656,10 +660,31 @@ class MemoryIndexManager:
             # key: this both drives _should_full_reindex detection and isolates
             # embedding_cache entries per config.
             self.provider_key = self.provider.config_fingerprint
+            await self._validate_embedding_provider()
             logger.info(f"Embedding provider: {self.provider.id} / {self.provider.model}")
         except Exception as e:
-            logger.error(f"Failed to initialize embedding provider: {e}")
-            raise
+            self._disable_embedding(f"embedding validation failed: {type(e).__name__}")
+            logger.warning("Embedding provider unavailable; memory will use FTS5 keyword search only")
+
+    async def _validate_embedding_provider(self) -> None:
+        """Verify the configured embedding endpoint and model before use."""
+        if self.provider is None:
+            return
+        embedding = await asyncio.wait_for(
+            self.provider.embed_query("memory availability check"),
+            timeout=10.0,
+        )
+        if not embedding:
+            raise RuntimeError("embedding endpoint returned an empty vector")
+        self.embedding_available = True
+        self.embedding_error = None
+
+    def _disable_embedding(self, reason: str) -> None:
+        """Switch to keyword-only memory search after an embedding failure."""
+        self.provider = None
+        self.provider_key = "none:embedding-unavailable"
+        self.embedding_available = False
+        self.embedding_error = reason
 
     async def _load_vector_extension(self) -> None:
         """Load sqlite-vec extension."""
@@ -1186,6 +1211,7 @@ class MemoryIndexManager:
 
         except Exception as e:
             logger.error(f"Failed to get embedding: {e}")
+            self._disable_embedding(f"embedding request failed: {type(e).__name__}")
             return None
 
     async def search(
@@ -1514,9 +1540,11 @@ class MemoryIndexManager:
             )
         except asyncio.TimeoutError:
             logger.warning("Embedding query timed out")
+            self._disable_embedding("embedding request timed out")
             return []
         except Exception as e:
             logger.error(f"Embedding query failed: {e}")
+            self._disable_embedding(f"embedding request failed: {type(e).__name__}")
             return []
 
     async def read_file(
@@ -1608,6 +1636,10 @@ class MemoryIndexManager:
             "available": True,
             "provider": self.provider.id if self.provider else None,
             "model": self.provider.model if self.provider else None,
+            "embedding": {
+                "available": self.embedding_available,
+                "error": self.embedding_error,
+            },
             "files": int(file_count),
             "chunks": int(chunk_count),
             "sourceCounts": source_counts,
