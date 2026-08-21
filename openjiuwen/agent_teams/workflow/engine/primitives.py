@@ -33,6 +33,7 @@ Observability hooks (the one divergence from a pure port): ``phase`` / ``log``
 and ``agent`` start/end emit structured :class:`WorkflowProgressEvent`s to
 ``rt.progress_sink``; internal diagnostics go to ``rt.log_sink``.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -214,9 +215,7 @@ def _check_budget(rt) -> None:
     stop an agent mid-loop; this stops the *next* one from starting.
     """
     if rt.budget.exhausted:
-        raise BudgetExhausted(
-            f"token budget exhausted: {rt.budget.spent}/{rt.budget.total}"
-        )
+        raise BudgetExhausted(f"token budget exhausted: {rt.budget.spent}/{rt.budget.total}")
 
 
 def _branch_disambig(path: tuple) -> str:
@@ -307,8 +306,13 @@ def _emit_agent_started(
 
 
 def _emit_agent_completed(
-    rt, opts: dict, outcome_text: str | None, *, agent_id: str | None = None,
-    tokens: int | None = None, budget_snapshot: dict | None = None,
+    rt,
+    opts: dict,
+    outcome_text: str | None,
+    *,
+    agent_id: str | None = None,
+    tokens: int | None = None,
+    budget_snapshot: dict | None = None,
     nested_phase: str | None = None,
 ) -> None:
     """Emit an AGENT_COMPLETED progress event.
@@ -333,8 +337,13 @@ def _emit_agent_completed(
 
 
 def _emit_agent_failed(
-    rt, opts: dict, message: str, *, agent_id: str | None = None,
-    tokens: int | None = None, budget_snapshot: dict | None = None,
+    rt,
+    opts: dict,
+    message: str,
+    *,
+    agent_id: str | None = None,
+    tokens: int | None = None,
+    budget_snapshot: dict | None = None,
     nested_phase: str | None = None,
 ) -> None:
     rt.progress_sink(
@@ -354,9 +363,7 @@ def _emit_agent_failed(
 # ─────────────────────────── options bag ───────────────────────────
 #: Engine-owned ``options`` keys. A backend may widen this via its
 #: ``KNOWN_OPTIONS``; anything outside the union is a typo and fails fast.
-_ENGINE_OPTIONS = frozenset(
-    {"label", "phase", "schema", "model", "timeout", "isolation", "agent_type"}
-)
+_ENGINE_OPTIONS = frozenset({"label", "phase", "schema", "model", "timeout", "isolation", "agent_type"})
 
 
 def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
@@ -389,9 +396,7 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
     allowed = _ENGINE_OPTIONS | getattr(rt.backend, "KNOWN_OPTIONS", frozenset())
     unknown = sorted(k for k in merged if k not in allowed)
     if unknown:
-        raise WorkflowError(
-            f"unknown option(s) {unknown}; allowed: {sorted(allowed)}"
-        )
+        raise WorkflowError(f"unknown option(s) {unknown}; allowed: {sorted(allowed)}")
     return merged
 
 
@@ -411,8 +416,11 @@ def _resolve_agent_gate(rt):
 #   schema=None                -> str | None
 @overload
 async def agent(
-    prompt: str, *, schema: type[M],
-    label: str | None = ..., phase: str | None = ...,
+    prompt: str,
+    *,
+    schema: type[M],
+    label: str | None = ...,
+    phase: str | None = ...,
     options: dict | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
@@ -421,8 +429,11 @@ async def agent(
 
 @overload
 async def agent(
-    prompt: str, *, schema: dict,
-    label: str | None = ..., phase: str | None = ...,
+    prompt: str,
+    *,
+    schema: dict,
+    label: str | None = ...,
+    phase: str | None = ...,
     options: dict | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
@@ -431,8 +442,11 @@ async def agent(
 
 @overload
 async def agent(
-    prompt: str, *, schema: None = ...,
-    label: str | None = ..., phase: str | None = ...,
+    prompt: str,
+    *,
+    schema: None = ...,
+    label: str | None = ...,
+    phase: str | None = ...,
     options: dict | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the agent's raw text."""
@@ -470,8 +484,12 @@ async def agent(
         # preamble + structured data via _preview()
         outcome_text = _outcome_from_result(cached.get("raw_text"), result)
         _emit_agent_completed(
-            rt, opts, outcome_text, agent_id=ks,
-            tokens=None, budget_snapshot=_budget_snapshot(rt.budget),
+            rt,
+            opts,
+            outcome_text,
+            agent_id=ks,
+            tokens=None,
+            budget_snapshot=_budget_snapshot(rt.budget),
         )
         return result
 
@@ -481,8 +499,12 @@ async def agent(
     if rt.spawn_count >= rt.spawn_limit:
         rt.log_sink(f"[wf] spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
         _emit_agent_failed(
-            rt, opts, f"spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}",
-            agent_id=ks, tokens=None, budget_snapshot=_budget_snapshot(rt.budget),
+            rt,
+            opts,
+            f"spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}",
+            agent_id=ks,
+            tokens=None,
+            budget_snapshot=_budget_snapshot(rt.budget),
         )
         return None
 
@@ -490,9 +512,7 @@ async def agent(
 
     async with gate.acquire():
         rt.spawn_count += 1
-        call_result = await _call_backend(
-            rt, prompt, opts, json_schema, model_cls
-        )
+        call_result = await _call_backend(rt, prompt, opts, json_schema, model_cls)
 
     if not call_result.succeeded:
         attempts = rt.retries + 1
@@ -501,8 +521,12 @@ async def agent(
         if call_result.error_detail:
             msg = f"{msg}: {call_result.error_detail}"
         _emit_agent_failed(
-            rt, opts, msg, agent_id=ks,
-            tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
+            rt,
+            opts,
+            msg,
+            agent_id=ks,
+            tokens=call_result.tokens,
+            budget_snapshot=_budget_snapshot(rt.budget),
         )
         return None
 
@@ -523,8 +547,12 @@ async def agent(
     )
     outcome_text = _outcome_from_result(call_result.raw_text, call_result.result)
     _emit_agent_completed(
-        rt, opts, outcome_text, agent_id=ks,
-        tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
+        rt,
+        opts,
+        outcome_text,
+        agent_id=ks,
+        tokens=call_result.tokens,
+        budget_snapshot=_budget_snapshot(rt.budget),
     )
     return call_result.result
 
@@ -532,7 +560,10 @@ async def agent(
 async def _call_backend(rt, prompt, opts, json_schema, model) -> _BackendCallResult:
     """Run the single-shot ``agent()`` call (``backend.run``) with retries."""
     return await _attempt_calls(
-        rt, opts, json_schema, model,
+        rt,
+        opts,
+        json_schema,
+        model,
         lambda: rt.backend.run(prompt, opts, json_schema),
     )
 
@@ -569,9 +600,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
             # backend error, etc.). Accumulate so the final failed result can
             # attribute the agent's full cost, not just the last attempt's.
             burned_tokens += getattr(e, "tokens", 0) or 0
-            rt.log_sink(
-                f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}"
-            )
+            rt.log_sink(f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}")
             continue
         # Token accounting here: the backend already billed this call to the
         # shared ledger as its model calls returned (``AgentBackend.bind_budget``);
@@ -586,23 +615,18 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
         if json_schema is not None:
             try:
                 coerced = coerce(res.structured, json_schema, model)
-                return _BackendCallResult(
-                    result=coerced, succeeded=True, raw_text=res.text, tokens=res.tokens
-                )
+                return _BackendCallResult(result=coerced, succeeded=True, raw_text=res.text, tokens=res.tokens)
             except Exception as e:  # validation failure -> retry
                 last_err = e
-                rt.log_sink(
-                    f"[wf] agent {label!r} attempt {attempt}/{attempts} "
-                    f"validation failed: {str(e)}"
-                )
+                rt.log_sink(f"[wf] agent {label!r} attempt {attempt}/{attempts} validation failed: {str(e)}")
                 continue
-        return _BackendCallResult(
-            result=res.text, succeeded=True, raw_text=res.text, tokens=res.tokens
-        )
+        return _BackendCallResult(result=res.text, succeeded=True, raw_text=res.text, tokens=res.tokens)
     detail = str(last_err) if last_err else "unknown error"
     rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")
     return _BackendCallResult(
-        result=None, succeeded=False, error_detail=detail,
+        result=None,
+        succeeded=False,
+        error_detail=detail,
         tokens=burned_tokens if burned_tokens > 0 else None,
     )
 
@@ -700,8 +724,17 @@ class AgentSession:
     """
 
     __slots__ = (
-        "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
-        "_history", "_sid", "_in_flight",
+        "_label",
+        "_phase",
+        "_instructions",
+        "_options",
+        "_human",
+        "_node_type",
+        "_history",
+        "_sid",
+        "_member_name",
+        "_in_flight",
+        "_fork_data",
     )
 
     def __init__(
@@ -713,6 +746,8 @@ class AgentSession:
         options: dict | None = None,
         _human: bool = False,
         _node_type: str = "agent_session",
+        _fork_data: dict | None = None,
+        _history: list[dict] | None = None,
     ) -> None:
         self._label = label
         self._phase = phase
@@ -720,9 +755,11 @@ class AgentSession:
         self._options = dict(options or {})
         self._human = _human
         self._node_type = _node_type
-        self._history: list[dict] = []
+        self._history: list[dict] = list(_history) if _history else []
         self._sid: str | None = None
+        self._member_name: str | None = None
         self._in_flight = False
+        self._fork_data = _fork_data
 
     @overload
     async def send(self, prompt: str, *, notify: Literal[True], options: dict | None = ...) -> None:
@@ -775,11 +812,20 @@ class AgentSession:
         self._in_flight = True
         try:
             _emit_agent_started(
-                rt, opts, prompt,
+                rt,
+                opts,
+                prompt,
                 node_type=self._node_type,
                 agent_id=ks,
                 correlation_id=correlation_id,
             )
+
+            # Reserve the member identity on the FIRST turn regardless of cache
+            # hit, so a fully-hit resume still knows this session's member name
+            # (fork() needs it to locate the parent's persisted context). Only
+            # runs once — no avatar, no LLM, no spawn/budget slot.
+            if self._member_name is None and not self._human:
+                await self._ensure_member_name(rt, opts)
 
             cached = rt.journal.get_cached(ks, sig)
             if cached is not None:  # resume hit — no backend, no harness, no person
@@ -788,8 +834,12 @@ class AgentSession:
                 self._append_history(prompt, result, model_cls)
                 outcome_text = _outcome_from_result(cached.get("raw_text"), result)
                 _emit_agent_completed(
-                    rt, opts, outcome_text, agent_id=ks,
-                    tokens=None, budget_snapshot=_budget_snapshot(rt.budget),
+                    rt,
+                    opts,
+                    outcome_text,
+                    agent_id=ks,
+                    tokens=None,
+                    budget_snapshot=_budget_snapshot(rt.budget),
                 )
                 return None if notify else result
 
@@ -812,8 +862,12 @@ class AgentSession:
                 if call_result.error_detail:
                     msg = f"{msg}: {call_result.error_detail}"
                 _emit_agent_failed(
-                    rt, opts, msg, agent_id=ks,
-                    tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
+                    rt,
+                    opts,
+                    msg,
+                    agent_id=ks,
+                    tokens=call_result.tokens,
+                    budget_snapshot=_budget_snapshot(rt.budget),
                 )
                 return None
 
@@ -835,8 +889,12 @@ class AgentSession:
             self._append_history(prompt, result, model_cls)
             outcome_text = _outcome_from_result(call_result.raw_text, result)
             _emit_agent_completed(
-                rt, opts, outcome_text, agent_id=ks,
-                tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
+                rt,
+                opts,
+                outcome_text,
+                agent_id=ks,
+                tokens=call_result.tokens,
+                budget_snapshot=_budget_snapshot(rt.budget),
             )
             return None if notify else result
         finally:
@@ -849,6 +907,64 @@ class AgentSession:
         rt = _rt.get()
         sid, self._sid = self._sid, None
         await rt.backend.close_session(sid)
+
+    async def fork(
+        self,
+        *,
+        fork_mode: str = "full",
+        keep_rounds: int | None = None,
+        label: str | None = None,
+        phase: str | None = None,
+        instructions: str | None = None,
+        options: dict | None = None,
+    ) -> "AgentSession":
+        """Fork this session into a fresh, independent session (context inherited).
+
+        The five ``fork_mode`` values mirror the team fork modes (``full`` /
+        ``before`` / ``after`` / ``keep_before_compact_after`` /
+        ``keep_after_compact_before``); ``keep_rounds`` is the split point in
+        **rounds** (each prior ``send()`` is one round) for the truncating /
+        compacting modes. Every mode but ``full`` requires ``keep_rounds`` —
+        omitting it raises (there is no truncation without a split point).
+        ``keep_rounds`` beyond the parent's actual round count is not an error;
+        the backend warns and silently falls back to a full-context fork (the
+        team fork's "wrong name → full" guard). The parent context is captured
+        **eagerly** here (the fork point), so later ``send()``s on this session
+        do not affect the child.
+
+        The child inherits this session's ``_history`` mirror (resume-signature
+        consistency) and, when the backend returns a ``fork_data`` snapshot, a
+        full context including ToolMessage. A fork of a ``human_session`` is
+        rejected. The child is ``_node_type="agent_session_fork"`` when the
+        parent has history (so a fork turn is observable as a branch), else a
+        plain ``agent_session`` (a parent that never sent has nothing to
+        inherit).
+        """
+        if self._human:
+            raise WorkflowError("fork() is only supported on agent_session")
+        if fork_mode != "full" and keep_rounds is None:
+            raise WorkflowError(
+                "fork() requires keep_rounds unless fork_mode='full'"
+                f" (fork_mode={fork_mode!r} has no split point without it)"
+            )
+        fork_data = None
+        if self._member_name is not None:
+            rt = _rt.get()
+            fork_data = await rt.backend.capture_fork(
+                self._member_name,
+                keep_rounds=keep_rounds,
+                fork_mode=fork_mode,
+            )
+        return AgentSession(
+            label=label if label is not None else self._label,
+            phase=phase if phase is not None else self._phase,
+            instructions=instructions if instructions is not None else self._instructions,
+            options={**self._options, **(options or {})},
+            _human=False,
+            _node_type="agent_session_fork" if self._history else "agent_session",
+            _history=[dict(m) for m in self._history],
+            _fork_data=fork_data,
+        )
 
     async def _drive(self, rt, req: _TurnRequest):
         """Open the session lazily, then run one turn through the retry helper.
@@ -873,7 +989,10 @@ class AgentSession:
         hist = list(self._history)
         sid = self._sid
         return await _attempt_calls(
-            rt, req.opts, req.json_schema, req.model_cls,
+            rt,
+            req.opts,
+            req.json_schema,
+            req.model_cls,
             lambda: rt.backend.send_turn(
                 sid,
                 req.prompt,
@@ -898,16 +1017,37 @@ class AgentSession:
         phase_seg = f"{phase}#{disambig}" if disambig else phase
         return f"{phase_seg}:{label}:{turn}"
 
+    async def _ensure_member_name(self, rt, opts) -> None:
+        """Reserve this session's member identity (once), no avatar built.
+
+        Runs on the first turn regardless of cache hit so a fully-hit resume
+        still knows the member name ``fork()`` needs to locate the parent's
+        persisted context. Pure in-process backend bookkeeping (a counter
+        increment) — no harness, no LLM, no spawn/budget slot.
+        """
+        if self._member_name is not None:
+            return
+        self._member_name = await rt.backend.ensure_member_name(
+            kind="agent",
+            opts=opts,
+        )
+
     async def _ensure_open(self, rt, opts) -> None:
         """Open the backend session on the first real turn (one avatar per session)."""
         if self._sid is not None:
             return
         if not self._human:
             rt.spawn_count += 1  # the avatar is this session's one spawned agent
+        # Reuse the identity already reserved on the first turn (cache-hit or
+        # miss) so we never re-mint a name and drift the counter across a resume.
+        if not self._human:
+            await self._ensure_member_name(rt, opts)
         self._sid = await rt.backend.open_session(
             kind="human" if self._human else "agent",
             instructions=self._instructions,
             opts=opts,
+            fork_data=self._fork_data,
+            member_name=self._member_name,
         )
 
     def _append_history(self, prompt: str, result: Any, model_cls) -> None:
@@ -957,8 +1097,12 @@ HumanSession = AgentSession
 
 @overload
 async def human(
-    prompt: str, *, schema: type[M],
-    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+    prompt: str,
+    *,
+    schema: type[M],
+    label: str | None = ...,
+    phase: str | None = ...,
+    options: dict | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the answer to that model."""
     ...
@@ -966,8 +1110,12 @@ async def human(
 
 @overload
 async def human(
-    prompt: str, *, schema: dict,
-    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+    prompt: str,
+    *,
+    schema: dict,
+    label: str | None = ...,
+    phase: str | None = ...,
+    options: dict | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
@@ -975,8 +1123,12 @@ async def human(
 
 @overload
 async def human(
-    prompt: str, *, schema: None = ...,
-    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
+    prompt: str,
+    *,
+    schema: None = ...,
+    label: str | None = ...,
+    phase: str | None = ...,
+    options: dict | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the person's answer as raw text."""
     ...
@@ -1157,13 +1309,15 @@ async def workflow(name_or_path: str, args: Any = None) -> Any:
     # is the script's original phase name; ``nested_phase`` carries the display
     # name; ``parent_phase`` links back to the enclosing author phase.
     rt.log_sink(f"[wf] child phase declared: {display_name}, parent: {parent_phase}, name: {name}")
-    rt.progress_sink(WorkflowProgressEvent(
-        kind=ProgressKind.PHASE,
-        phase=name,
-        phase_type="child",
-        nested_phase=display_name,
-        parent_phase=parent_phase,
-    ))
+    rt.progress_sink(
+        WorkflowProgressEvent(
+            kind=ProgressKind.PHASE,
+            phase=name,
+            phase_type="child",
+            nested_phase=display_name,
+            parent_phase=parent_phase,
+        )
+    )
     tok_d = _wf_depth.set(depth + 1)
     tok_p = _path.set(_path.get() + (("wf", k, name),))
     tok_s = _seq.set(_fresh_holder())
