@@ -196,7 +196,6 @@ def build_candidate_feedback_cohort(
     )
     search_metrics = _search_metrics(
         candidate_records,
-        selected_candidate_id=selected_candidate_id,
         top_m=top_m,
         unavailable_reason=unavailable_reason,
     )
@@ -224,6 +223,8 @@ def build_candidate_feedback_cohort(
                 item["candidate_id"] == selected_candidate_id for item in candidate_records
             ),
             "top_m": top_m,
+            "promotion_policy": "best_realized_qualified_candidate",
+            "top_m_role": "counterfactual_metric_only",
         },
         "metrics": search_metrics,
     }
@@ -374,6 +375,7 @@ def _candidate_feedback_record(
             "reason": _text(candidate.get("reason")),
             "failure_class": _text(candidate.get("failure_class")),
         },
+        "causal_experiment": _causal_experiment_summary(candidate, target_case_ids),
         "activation": _activation_summary(candidate, capabilities, target_case_ids),
         "regression": {
             "target": _target_regression(candidate, target_case_ids),
@@ -394,6 +396,34 @@ def _candidate_feedback_record(
             "total_cost": None,
         },
         "evidence_refs": _evidence_refs(candidate),
+    }
+
+
+def _causal_experiment_summary(candidate: dict[str, Any], target_case_ids: set[str]) -> dict[str, Any]:
+    contracts = [
+        dict(item)
+        for item in candidate.get("causal_intervention_contracts", [])
+        if isinstance(item, dict)
+        and (not item.get("target_case_ids") or target_case_ids & _case_ids(item.get("target_case_ids", [])))
+    ]
+    diagnoses = candidate.get("candidate_failure_diagnoses", {})
+    diagnoses = diagnoses if isinstance(diagnoses, dict) else {}
+    assessments: dict[str, list[dict[str, Any]]] = {}
+    for case_id in sorted(target_case_ids):
+        raw = diagnoses.get(case_id, [])
+        raw = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+        values = [
+            dict(item.get("prior_experiment_assessment", {}))
+            for item in raw
+            if isinstance(item, dict) and isinstance(item.get("prior_experiment_assessment"), dict)
+        ]
+        if values:
+            assessments[case_id] = values
+    return {
+        "availability": "observed" if contracts else "not_instrumented",
+        "prediction_recorded_before_evaluation": bool(contracts),
+        "intervention_contracts": contracts,
+        "assessment_by_case": assessments,
     }
 
 
@@ -600,7 +630,6 @@ def _search_metric_unavailable_reason(
 def _search_metrics(
     candidates: list[dict[str, Any]],
     *,
-    selected_candidate_id: str,
     top_m: int,
     unavailable_reason: str,
 ) -> dict[str, Any]:
@@ -631,19 +660,13 @@ def _search_metrics(
             item["candidate_index"],
         ),
     )[0]
-    selected = next(
-        (item for item in candidates if item["candidate_id"] == selected_candidate_id),
-        None,
-    )
-    selection_regret = (
-        {
-            "status": "available",
-            "value": float(best["outcome"]["target_gain"]) - float(selected["outcome"]["target_gain"]),
-            "selected_candidate_id": selected_candidate_id,
-        }
-        if selected is not None
-        else _unavailable_metric("selected_candidate_not_in_cohort")
-    )
+    predicted_top1 = next(item for item in candidates if int(item["proposal_rank"]["predicted_rank"]) == 1)
+    selection_regret = {
+        "status": "available",
+        "value": float(best["outcome"]["target_gain"]) - float(predicted_top1["outcome"]["target_gain"]),
+        "best_candidate_id": best["candidate_id"],
+        "predicted_top1_candidate_id": predicted_top1["candidate_id"],
+    }
     return {
         "best_of_k_gain": {
             "status": "available",

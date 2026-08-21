@@ -146,18 +146,12 @@ def _validate_action_bundle_cohesion(plan_data: dict[str, Any]) -> list[str]:
     """Require related multi-action repairs to stay inside one issue bundle."""
     actions = [action for action in plan_data.get("actions", []) if isinstance(action, dict)]
     actions_by_id = {
-        str(action.get("action_id", "") or ""): action
-        for action in actions
-        if str(action.get("action_id", "") or "")
+        str(action.get("action_id", "") or ""): action for action in actions if str(action.get("action_id", "") or "")
     }
     bundle_by_action_id: dict[str, tuple[str, str]] = {}
     actions_by_bundle: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for action in actions:
-        issue_ids = [
-            str(issue_id)
-            for issue_id in action.get("attributed_issue_ids", [])
-            if str(issue_id)
-        ]
+        issue_ids = [str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)]
         action_id = str(action.get("action_id", "") or "")
         role = str(action.get("role", "") or "")
         if action_id and role and len(issue_ids) == 1:
@@ -444,15 +438,11 @@ def _validate_skill_search_add_fallback(plan_data: dict[str, Any]) -> list[str]:
     search_action_ids = {
         action_id
         for action_id, action in actions.items()
-        if str(action.get("action_group", "") or "") == "skill"
-        and str(action.get("operation", "") or "") == "search"
+        if str(action.get("action_group", "") or "") == "skill" and str(action.get("operation", "") or "") == "search"
     }
     errors: list[str] = []
     for action_id, action in actions.items():
-        if (
-            str(action.get("action_group", "") or "") != "skill"
-            or str(action.get("operation", "") or "") != "add"
-        ):
+        if str(action.get("action_group", "") or "") != "skill" or str(action.get("operation", "") or "") != "add":
             continue
         depends_on = {str(dependency_id) for dependency_id in action.get("depends_on", [])}
         if not (depends_on & search_action_ids):
@@ -460,8 +450,7 @@ def _validate_skill_search_add_fallback(plan_data: dict[str, Any]) -> list[str]:
         run_if = str(action.get("run_if", "dependency_succeeded") or "dependency_succeeded")
         if run_if != "dependency_failed":
             errors.append(
-                f"action {action_id}: skill/add fallback after skill/search "
-                "must set run_if=dependency_failed"
+                f"action {action_id}: skill/add fallback after skill/search must set run_if=dependency_failed"
             )
     return errors
 
@@ -892,6 +881,8 @@ evidence-backed surface and repair the causal discriminator instead.
                     "public_trigger": item.get("public_trigger", []),
                     "decisive_probe": item.get("decisive_probe", {}),
                     "decision_contract": item.get("decision_contract", {}),
+                    "supported_causal_hypothesis_ids": item.get("supported_causal_hypothesis_ids", []),
+                    "falsified_causal_hypothesis_ids": item.get("falsified_causal_hypothesis_ids", []),
                 }
                 for item in optimization_hypotheses
                 if isinstance(item, dict)
@@ -906,6 +897,8 @@ one allowed runtime surface, but do not weaken, reverse, or paraphrase away its
 required_behavior or decision_contract. Attribute each action only to the
 source_issue_id it fixes. The action must teach the selected required_action;
 do not turn it back into a menu containing the recorded wrong_decision.
+Every action is controller-bound to supported_causal_hypothesis_ids. Never use,
+rename, or combine a hypothesis listed in falsified_causal_hypothesis_ids.
 """
         experience_context = ""
         if optimization_experience:
@@ -997,9 +990,7 @@ def _build_improver_policy_context(
             else {}
         ),
         "budget_policy": (
-            dict(raw_policy.get("budget_policy", {}))
-            if isinstance(raw_policy.get("budget_policy"), dict)
-            else {}
+            dict(raw_policy.get("budget_policy", {})) if isinstance(raw_policy.get("budget_policy"), dict) else {}
         ),
     }
     return f"""
@@ -1027,11 +1018,7 @@ def _build_sibling_generation_context(
     prior_proposals = sibling_generation.get("prior_proposals", [])
     if not isinstance(prior_proposals, list):
         prior_proposals = []
-    compact_proposals = [
-        _compact_sibling_proposal(item)
-        for item in prior_proposals
-        if isinstance(item, dict)
-    ]
+    compact_proposals = [_compact_sibling_proposal(item) for item in prior_proposals if isinstance(item, dict)]
     compact_proposals = [item for item in compact_proposals if item]
     generation_position = {
         "candidate_id": candidate_id,
@@ -1107,27 +1094,17 @@ def _compact_sibling_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
         "target_case_ids",
         "action_count",
     )
-    compact = {
-        key: proposal[key]
-        for key in static_keys
-        if key in proposal and proposal[key] not in (None, "", [], {})
-    }
+    compact = {key: proposal[key] for key in static_keys if key in proposal and proposal[key] not in (None, "", [], {})}
     raw_actions = proposal.get("actions", [])
     if isinstance(raw_actions, list):
-        actions = [
-            _compact_sibling_action(action)
-            for action in raw_actions
-            if isinstance(action, dict)
-        ]
+        actions = [_compact_sibling_action(action) for action in raw_actions if isinstance(action, dict)]
         actions = [action for action in actions if action]
         if actions:
             compact["actions"] = actions
     raw_capabilities = proposal.get("capabilities", [])
     if isinstance(raw_capabilities, list):
         capabilities = [
-            _compact_sibling_action(capability)
-            for capability in raw_capabilities
-            if isinstance(capability, dict)
+            _compact_sibling_action(capability) for capability in raw_capabilities if isinstance(capability, dict)
         ]
         capabilities = [capability for capability in capabilities if capability]
         if capabilities:
@@ -1151,11 +1128,7 @@ def _compact_sibling_action(action: dict[str, Any]) -> dict[str, Any]:
         "optimization_hypothesis_ids",
         "target_case_ids",
     )
-    compact = {
-        key: action[key]
-        for key in static_keys
-        if key in action and action[key] not in (None, "", [], {})
-    }
+    compact = {key: action[key] for key in static_keys if key in action and action[key] not in (None, "", [], {})}
     lever_decision = action.get("lever_decision")
     if not isinstance(lever_decision, dict):
         constraints = action.get("constraints")
@@ -1227,6 +1200,10 @@ def _bind_immutable_hypotheses(
                 "public_trigger": item.get("public_trigger", []),
                 "decisive_probe": item.get("decisive_probe", {}),
             }
+            if item.get("supported_causal_hypothesis_ids"):
+                contract["supported_causal_hypothesis_ids"] = item["supported_causal_hypothesis_ids"]
+            if item.get("falsified_causal_hypothesis_ids"):
+                contract["falsified_causal_hypothesis_ids"] = item["falsified_causal_hypothesis_ids"]
             if isinstance(item.get("decision_contract"), dict) and item.get("decision_contract"):
                 contract["decision_contract"] = item["decision_contract"]
             if isinstance(item.get("lever_policy"), dict) and item.get("lever_policy"):
@@ -1240,6 +1217,26 @@ def _bind_immutable_hypotheses(
             contracts.append(contract)
         constraints = dict(action.get("constraints") or {})
         constraints["optimization_contracts"] = contracts
+        supported_causal_ids = list(
+            dict.fromkeys(
+                str(hypothesis_id)
+                for item in selected
+                for hypothesis_id in item.get("supported_causal_hypothesis_ids", [])
+                if str(hypothesis_id)
+            )
+        )
+        falsified_causal_ids = {
+            str(hypothesis_id)
+            for item in selected
+            for hypothesis_id in item.get("falsified_causal_hypothesis_ids", [])
+            if str(hypothesis_id)
+        }
+        if set(supported_causal_ids) & falsified_causal_ids:
+            raise RuntimeError("optimization hypothesis marks one causal hypothesis both supported and falsified")
+        if any(item.get("hypothesis_assessment") for item in selected) and not supported_causal_ids:
+            raise RuntimeError("optimization hypothesis has no supported causal hypothesis")
+        if supported_causal_ids:
+            constraints["source_causal_hypothesis_ids"] = supported_causal_ids
         policies = [
             dict(item.get("lever_policy", {}))
             for item in selected
@@ -1288,11 +1285,7 @@ def _annotate_action_bundles(
     for action in plan_data.get("actions", []):
         if not isinstance(action, dict):
             continue
-        issue_ids = [
-            str(issue_id)
-            for issue_id in action.get("attributed_issue_ids", [])
-            if str(issue_id)
-        ]
+        issue_ids = [str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)]
         if len(issue_ids) != 1:
             continue
         key = (str(action.get("role", "") or ""), issue_ids[0])
@@ -1368,11 +1361,7 @@ def _attach_improvement_briefs(
             continue
 
         role = str(action.get("role", ""))
-        action_issue_ids = {
-            str(issue_id)
-            for issue_id in action.get("attributed_issue_ids", [])
-            if str(issue_id)
-        }
+        action_issue_ids = {str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)}
         candidate_issue_ids = action_issue_ids or issue_ids_by_role.get(role, set())
         for issue_id in candidate_issue_ids:
             brief = brief_by_issue.get(issue_id)
@@ -1680,11 +1669,7 @@ def _adapt_surface_for_new_skill_qualification(
             continue
         issue_ids = {str(issue_id).strip() for issue_id in target.attributed_issue_ids if str(issue_id).strip()}
         support_case_ids = sorted(
-            {
-                case_id
-                for issue_id in issue_ids
-                for case_id in support_by_issue.get(issue_id, set())
-            }
+            {case_id for issue_id in issue_ids for case_id in support_by_issue.get(issue_id, set())}
         )
         if len(support_case_ids) != 1:
             adapted_targets.append(target)
@@ -1719,11 +1704,7 @@ def _adapt_surface_for_new_skill_qualification(
         )
     if not adaptations:
         return targets, mechanism_report, []
-    adapted_issue_ids = {
-        issue_id
-        for adaptation in adaptations
-        for issue_id in adaptation["issue_ids"]
-    }
+    adapted_issue_ids = {issue_id for adaptation in adaptations for issue_id in adaptation["issue_ids"]}
     role_mechanisms = {
         role: [
             replace(

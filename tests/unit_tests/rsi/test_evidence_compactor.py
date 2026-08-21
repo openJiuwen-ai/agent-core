@@ -423,6 +423,73 @@ class TestCausalEvidenceDigest:
         assert coverage["content_evidence_call_count"] == coverage["selected_content_evidence_call_count"] == 2
         assert coverage["selected_count"] > 8
 
+    def test_compaction_marker_cannot_hide_failed_requirement_linked_source_text(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+            build_causal_evidence_digest,
+        )
+
+        clause = (
+            "Exercise. Written notice must be provided no earlier than twelve (12) months "
+            "and no later than nine (9) months prior to the expiration of the previous Term."
+        )
+        raw_output = "document preface\n" + "x" * 3_000 + "\n" + clause + "\n" + "signature " + "y" * 2_000
+        trace = {
+            "trace_id": "trial_1",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "message_index": 15,
+                    "content": "Read the controlling lease clause.",
+                    "tool_calls": [
+                        {
+                            "name": "bash",
+                            "input": json.dumps({"command": "pdftotext amendment.pdf -"}),
+                            "output": raw_output,
+                            "error": "",
+                            "step_pointer": "trial_1:message_15",
+                        }
+                    ],
+                }
+            ],
+        }
+        digest = build_causal_evidence_digest(
+            case_id="lease",
+            task_input="Read the lease and report the notice window.",
+            response="nine months prior",
+            evaluation_passed=False,
+            evaluation_score=0.0,
+            evaluation_reason="one criterion failed",
+            evaluation_metadata={
+                "trial_scores": [0.0],
+                "trial_passed": [False],
+                "judge_evidence": {
+                    "availability": "available",
+                    "criteria": [
+                        {
+                            "criterion_id": "notice-window",
+                            "score": 0.0,
+                            "rationale": (
+                                "The response says nine months prior, while the criterion expects "
+                                "nine months following November 1, 2030."
+                            ),
+                        }
+                    ],
+                },
+            },
+            trace_data={"traces": [trace]},
+            task_contract={"task_id": "lease", "prompt": "Read the lease", "tool_schemas": []},
+        )
+
+        action = digest["trials"][0]["selected_actions"][0]
+        assert "ANALYZER_EVIDENCE_COMPACTION" in action["response"]
+        evidence = action["response_evidence"]
+        assert evidence["task_agent_observed_display_omission_marker"] is False
+        assert evidence["display_omission_origin"] == "analyzer_evidence_compactor"
+        exact_spans = "\n".join(span["text"] for span in evidence["critical_spans"])
+        assert clause in exact_spans
+        assert "following" in digest["critical_evidence_terms"]
+        assert "prior" in digest["critical_evidence_terms"]
+
 
 class TestCandidateFeedbackCompression:
     def test_preserves_prediction_activation_and_observed_score_delta(self) -> None:
@@ -446,7 +513,21 @@ class TestCandidateFeedbackCompression:
                         "target_score_delta": 0.2,
                         "selected_for_promotion": False,
                         "activation": {"state": "observed"},
+                        "causal_intervention_contracts": [
+                            {
+                                "predicted_behavior_and_outcome": "behavior changes and target passes",
+                                "prediction_recorded_before_evaluation": True,
+                            }
+                        ],
                         "verifier_delta": {"partial_progress": True},
+                        "candidate_failure_diagnoses": [
+                            {
+                                "prior_experiment_assessment": {
+                                    "availability": "available",
+                                    "causal_hypothesis_status": "falsified",
+                                }
+                            }
+                        ],
                     }
                 ],
             }
@@ -458,6 +539,11 @@ class TestCandidateFeedbackCompression:
         assert experiment["observed_outcome"]["source_target_score"] == 0.4
         assert experiment["observed_outcome"]["candidate_target_score"] == 0.6
         assert experiment["observed_outcome"]["target_score_delta"] == 0.2
+        assert experiment["causal_intervention_contracts"][0]["prediction_recorded_before_evaluation"] is True
+        assert (
+            experiment["candidate_failure_diagnoses"][0]["prior_experiment_assessment"]["causal_hypothesis_status"]
+            == "falsified"
+        )
 
 
 class TestAnalyzerIntegration:

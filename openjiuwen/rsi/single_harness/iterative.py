@@ -258,6 +258,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 analysis_round_index = 0
                 repair_stop_reason = "repair_round_limit_reached"
                 current_repair_round = 1
+                repair_resume_contexts: list[dict[str, Any]] = []
                 attempt_source_eval_ref = source_eval_ref
                 active_cases = _cases_with_ids(batch, _nonpassing_case_ids(source_eval_ref))
                 pending_analysis_ref = ""
@@ -295,7 +296,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     issue_case_ids = _analysis_issue_case_ids(analysis_ref)
                     issue_signatures = _analysis_issue_signatures(analysis_ref)
                     nonpassing_case_ids = _nonpassing_case_ids(attempt_source_eval_ref)
-                    issue_queue: list[tuple[str | None, str]] = []
+                    issue_queue: list[tuple[str | None, str, set[str]]] = []
                     repeated_issue_ids: list[str] = []
                     known_issue_signatures = set(attempted_issue_signatures)
                     for hypothesis in hypotheses:
@@ -309,14 +310,29 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         if signature in known_issue_signatures:
                             repeated_issue_ids.append(issue_id)
                             continue
-                        issue_queue.append((issue_id, signature))
+                        issue_queue.append((issue_id, signature, set()))
                         known_issue_signatures.add(signature)
-                    if not hypotheses:
-                        if "__no_issue__" in attempted_issue_signatures:
-                            repeated_issue_ids.append("__no_issue__")
-                        else:
-                            issue_queue.append((None, "__no_issue__"))
+                    if not hypotheses and not _analysis_uses_strict_causal_protocol(analysis_ref):
+                        for case_id in sorted(
+                            _fallback_analysis_case_ids(
+                                analysis_ref,
+                                nonpassing_case_ids=nonpassing_case_ids,
+                            )
+                        ):
+                            signature = f"__legacy_no_issue__:{case_id}"
+                            if signature in attempted_issue_signatures:
+                                repeated_issue_ids.append(signature)
+                                continue
+                            issue_queue.append((None, signature, {case_id}))
                     if not issue_queue:
+                        if repair_resume_contexts:
+                            resume = repair_resume_contexts.pop()
+                            current_refs = str(resume["harness_refs_path"])
+                            attempt_source_eval_ref = str(resume["eval_ref_path"])
+                            pending_analysis_ref = str(resume["analysis_ref_path"])
+                            active_cases = list(resume["active_cases"])
+                            current_repair_round = int(resume["repair_round_index"])
+                            continue
                         repair_stop_reason = "repeated_issue_detected" if repeated_issue_ids else "no_residual_issues"
                         break
 
@@ -324,7 +340,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     issue_budget_exhausted = False
                     repair_budget_exhausted = False
                     deferred_repairs: list[dict[str, Any]] = []
-                    for issue_id, issue_signature in issue_queue:
+                    for issue_id, issue_signature, fallback_target_case_ids in issue_queue:
                         if max_issue_attempts and issue_attempt_count >= max_issue_attempts:
                             issue_budget_exhausted = True
                             break
@@ -335,6 +351,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         before_attempt_refs = current_refs
                         frozen_target_case_ids = set(issue_case_ids.get(issue_id or "", set()))
                         frozen_target_case_ids &= nonpassing_case_ids
+                        if not frozen_target_case_ids:
+                            frozen_target_case_ids = set(fallback_target_case_ids) & nonpassing_case_ids
                         if not frozen_target_case_ids:
                             frozen_target_case_ids = {
                                 str(case.get("case_id", "") or "")
@@ -384,6 +402,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                 member_status=str(proposal.get("member_status", "") or ""),
                                 capabilities=[
                                     dict(item) for item in proposal.get("capabilities", []) if isinstance(item, dict)
+                                ],
+                                causal_intervention_contracts=[
+                                    dict(item)
+                                    for item in proposal.get("causal_intervention_contracts", [])
+                                    if isinstance(item, dict)
                                 ],
                                 output_dir=_candidate_evaluation_output_dir(
                                     optimization_output_dir=output_dir,
@@ -443,11 +466,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             within_budget = int(gate.get("predicted_rank", 0) or 0) <= selection_top_m
                             gate["selection_top_m"] = selection_top_m
                             gate["within_selection_budget"] = within_budget
-                            gate["qualified_for_promotion"] = bool(gate.get("primary_gate_accepted") and within_budget)
-                        winner = _select_sibling_winner(
-                            sibling_gates,
-                            top_m=selection_top_m,
-                        )
+                            gate["selection_budget_role"] = "counterfactual_metric_only"
+                            gate["qualified_for_promotion"] = bool(gate.get("primary_gate_accepted"))
+                        winner = _select_sibling_winner(sibling_gates)
                         winner_id = str((winner or {}).get("candidate_id", "") or "")
                         winner_attempt_record: dict[str, Any] | None = None
                         for gate in sibling_gates:
@@ -456,10 +477,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             if selected:
                                 gate["status"] = "provisional"
                                 gate["reason"] = "candidate_passed_batch_gate_pending_epoch_checkpoint"
-                            elif gate.get("primary_gate_accepted") and not gate.get("within_selection_budget"):
-                                gate["accepted"] = False
-                                gate["status"] = "shadow_evaluated"
-                                gate["reason"] = "candidate_outside_improver_selection_budget"
                             elif gate.get("primary_gate_accepted"):
                                 gate["accepted"] = False
                                 gate["status"] = "superseded"
@@ -530,8 +547,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         last_gate = winner or _best_realized_sibling_gate(sibling_gates)
                         last_member_ref = str((last_gate or {}).get("member_optimization_ref_path", "") or "")
                         if winner is None:
-                            repair_pool = [gate for gate in sibling_gates if gate.get("within_selection_budget")]
-                            repair_parent = _best_realized_sibling_gate(repair_pool)
+                            repair_parent = _best_realized_sibling_gate(sibling_gates)
                             repair_analysis_ref = str(
                                 (repair_parent or {}).get("candidate_failure_analysis_ref_path", "") or ""
                             )
@@ -548,8 +564,18 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                             "eval_ref_path": repair_eval_ref,
                                             "analysis_ref_path": repair_analysis_ref,
                                             "active_cases": repair_active_cases,
+                                            "resume_context": {
+                                                "harness_refs_path": before_attempt_refs,
+                                                "eval_ref_path": attempt_source_eval_ref,
+                                                "analysis_ref_path": analysis_ref,
+                                                "active_cases": list(active_cases),
+                                                "repair_round_index": current_repair_round,
+                                            },
                                         }
                                     )
+                                    # Repair the newly exposed causal layer before
+                                    # spending another candidate on a sibling issue.
+                                    break
                                 elif repair_active_cases:
                                     repair_budget_exhausted = True
                             continue
@@ -583,6 +609,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         active_cases = _cases_with_ids(active_cases, residual_case_ids)
                         attempt_source_eval_ref = residual_eval_ref
                         current_repair_round = 1
+                        repair_resume_contexts.clear()
                         refresh_residual_analysis = True
                         if not active_cases:
                             repair_stop_reason = "all_batch_cases_completed"
@@ -598,16 +625,25 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             key=lambda item: _sibling_realized_sort_key(item["gate"]),
                         )
                         selected_repair["gate"]["selected_as_repair_parent"] = True
+                        repair_resume_contexts.append(dict(selected_repair["resume_context"]))
                         current_refs = str(selected_repair["harness_refs_path"])
                         attempt_source_eval_ref = str(selected_repair["eval_ref_path"])
                         pending_analysis_ref = str(selected_repair["analysis_ref_path"])
-                        active_cases = list(selected_repair["active_cases"])
+                        active_cases = list(selected_repair["resume_context"]["active_cases"])
                         current_repair_round += 1
                         continue
                     if issue_budget_exhausted:
                         repair_stop_reason = "issue_attempt_limit_reached"
                         break
                     if repair_budget_exhausted:
+                        if repair_resume_contexts:
+                            resume = repair_resume_contexts.pop()
+                            current_refs = str(resume["harness_refs_path"])
+                            attempt_source_eval_ref = str(resume["eval_ref_path"])
+                            pending_analysis_ref = str(resume["analysis_ref_path"])
+                            active_cases = list(resume["active_cases"])
+                            current_repair_round = int(resume["repair_round_index"])
+                            continue
                         repair_stop_reason = "repair_round_limit_reached"
                         break
                     repair_stop_reason = (
@@ -996,6 +1032,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 candidate_experience = {
                     "journal": list(frozen_experience.get("journal", [])),
                     "lever_scoreboard": dict(frozen_experience.get("lever_scoreboard", {})),
+                    "frozen_target_case_ids": sorted(frozen_target_case_ids),
                 }
                 if requested_count > 1:
                     candidate_experience["sibling_generation"] = sibling_generation
@@ -1034,6 +1071,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "plan_path": plan_path,
                     "plan_sha256": _file_sha256(plan_path) if Path(plan_path).is_file() else "",
                     "capabilities": capabilities,
+                    "causal_intervention_contracts": _causal_intervention_contracts(capabilities),
                     "candidate_fingerprint": canonical_candidate_fingerprint(capabilities),
                 }
             proposals.append(proposal)
@@ -1069,10 +1107,14 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         candidate_harness_refs_path: str,
         member_status: str,
         capabilities: list[dict[str, Any]],
+        causal_intervention_contracts: list[dict[str, Any]] | None = None,
         output_dir: Path,
         dataset: DatasetArtifact,
         frozen_target_case_ids: set[str] | None = None,
     ) -> dict[str, Any]:
+        causal_intervention_contracts = [
+            dict(item) for item in (causal_intervention_contracts or []) if isinstance(item, dict)
+        ] or _causal_intervention_contracts(capabilities)
         original_source_score = _eval_score(source_eval_ref)
         base = {
             "source_eval_ref_path": source_eval_ref,
@@ -1143,6 +1185,16 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             output_dir=output_dir,
             dataset=dataset,
         )
+        skipped_target_case_ids = sorted(_skipped_case_ids(candidate_eval_ref) & target_case_ids)
+        if skipped_target_case_ids:
+            return {
+                "accepted": False,
+                "status": "inconclusive",
+                "reason": "candidate_gate_inconclusive_due_to_infrastructure_skip",
+                **base,
+                "candidate_eval_ref_path": candidate_eval_ref,
+                "skipped_target_case_ids": skipped_target_case_ids,
+            }
         candidate_case_scores = _eval_case_scores(candidate_eval_ref)
         source_native_signals = _eval_case_native_signals(paired_source_eval_ref)
         candidate_native_signals = _eval_case_native_signals(candidate_eval_ref)
@@ -1328,6 +1380,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             "source_native_signal": str(source_native_signals.get(case_id, {}).get("source", "")),
                             "candidate_native_signal": str(candidate_native_signals.get(case_id, {}).get("source", "")),
                             "native_signal_role": "sibling_and_repair_ranking_only",
+                            "causal_intervention_contracts": [
+                                dict(contract)
+                                for contract in causal_intervention_contracts
+                                if case_id in set(contract.get("target_case_ids", []))
+                            ],
                         }
                     ]
                     for case_id, delta in verifier_deltas_by_case.items()
@@ -1387,6 +1444,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "candidate_patch_excerpts_by_case": candidate_patch_excerpts_by_case,
             "candidate_failure_analysis_ref_path": (candidate_failure_analysis_ref),
             "candidate_failure_diagnoses": candidate_failure_diagnoses,
+            "causal_intervention_contracts": causal_intervention_contracts,
             "task_acceptance_contracts": task_acceptance_contracts,
             "non_target_case_ids": sorted(non_target_case_ids),
             "source_non_target_score": source_non_target_score,
@@ -1616,14 +1674,9 @@ def _sibling_realized_sort_key(
 
 def _select_sibling_winner(
     gates: list[dict[str, Any]],
-    *,
-    top_m: int,
 ) -> dict[str, Any] | None:
-    qualified = [
-        gate
-        for gate in gates
-        if bool(gate.get("primary_gate_accepted")) and 0 < int(gate.get("predicted_rank", 0) or 0) <= top_m
-    ]
+    """Select the best realized candidate; frozen ranks are feedback only."""
+    qualified = [gate for gate in gates if bool(gate.get("primary_gate_accepted"))]
     return max(qualified, key=_sibling_realized_sort_key) if qualified else None
 
 
@@ -1902,6 +1955,9 @@ def _refresh_optimization_experience(
                         if isinstance(gate.get("candidate_failure_diagnoses"), dict)
                         else {}
                     ),
+                    "causal_intervention_contracts": [
+                        dict(item) for item in gate.get("causal_intervention_contracts", []) if isinstance(item, dict)
+                    ],
                     "epoch_checkpoint": {
                         "status": str(epoch_checkpoint.get("status", "") or ""),
                         "eval_ref_path": str(epoch_checkpoint.get("eval_ref_path", "") or ""),
@@ -2005,6 +2061,10 @@ def _candidate_capabilities(member_info: dict[str, Any]) -> list[dict[str, Any]]
                     for item in optimization_contracts
                     if str(item.get("hypothesis_id", "") or "")
                 ],
+                "source_causal_hypothesis_id": str(constraints.get("source_causal_hypothesis_id", "") or ""),
+                "source_causal_hypothesis_ids": [
+                    str(item) for item in constraints.get("source_causal_hypothesis_ids", []) if str(item)
+                ],
                 "optimization_contract_sha256": [
                     str(item.get("content_sha256", "") or "")
                     for item in optimization_contracts
@@ -2073,6 +2133,13 @@ def _analysis_issue_case_ids(analysis_ref: str | Path) -> dict[str, set[str]]:
                 case_ids.add(str(evidence["case_id"]))
         issue_case_ids[issue_id] = case_ids
     return issue_case_ids
+
+
+def _analysis_uses_strict_causal_protocol(analysis_ref: str | Path) -> bool:
+    analysis = _read_yaml(analysis_ref)
+    metadata = analysis.get("metadata") if isinstance(analysis.get("metadata"), dict) else {}
+    version = str(metadata.get("analyzer_protocol_version", "") or "")
+    return version.startswith("generic_behavior_causal_v")
 
 
 def _analysis_issue_signatures(analysis_ref: str | Path) -> dict[str, str]:
@@ -2215,6 +2282,83 @@ def _compact_analysis_diagnoses(
     return compact
 
 
+def _fallback_analysis_case_ids(
+    analysis_ref: str | Path,
+    *,
+    nonpassing_case_ids: set[str],
+) -> set[str]:
+    """Select isolated low-confidence experiment targets when no Issue exists.
+
+    Older analyzers did not materialize per-case diagnoses, so they retain the
+    legacy behavior of attempting each failed case independently. When a
+    diagnosis artifact is available, records that explicitly failed
+    deterministic validation are not allowed to seed a Harness change.
+    """
+    analysis = _read_yaml(analysis_ref)
+    metadata = analysis.get("metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    diagnoses_path = Path(str(metadata.get("per_case_diagnoses_path", "") or ""))
+    if not diagnoses_path.is_file():
+        return set(nonpassing_case_ids)
+
+    diagnoses = _compact_analysis_diagnoses(analysis_ref)
+    usable_case_ids: set[str] = set()
+    invalid_statuses = {"analysis_failed", "evidence_conflict", "failed", "invalid", "unusable"}
+    for case_id in nonpassing_case_ids:
+        records = diagnoses.get(case_id, [])
+        for diagnosis in records:
+            status = str(diagnosis.get("diagnosis_status", "") or "").strip().casefold()
+            if diagnosis.get("analysis_failed") is True or status in invalid_statuses:
+                continue
+            if any(
+                diagnosis.get(key) not in (None, "", {}, [])
+                for key in (
+                    "summary",
+                    "root_cause",
+                    "critical_mistake",
+                    "general_mechanism",
+                    "recommendation",
+                    "decision_contract",
+                )
+            ):
+                usable_case_ids.add(case_id)
+                break
+    return usable_case_ids
+
+
+def _causal_intervention_contracts(capabilities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Preserve what each candidate predicted before its outcome was observed."""
+    contracts: list[dict[str, Any]] = []
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            continue
+        expected_effect = _bounded_candidate_text(str(capability.get("expected_effect", "") or ""), 2_000)
+        if not expected_effect:
+            continue
+        contracts.append(
+            {
+                "action_id": str(capability.get("action_id", "") or ""),
+                "action_group": str(capability.get("action_group", "") or ""),
+                "operation": str(capability.get("operation", "") or ""),
+                "attributed_issue_ids": [
+                    str(issue_id) for issue_id in capability.get("attributed_issue_ids", []) if str(issue_id)
+                ],
+                "target_case_ids": [str(case_id) for case_id in capability.get("target_case_ids", []) if str(case_id)],
+                "intervention": _bounded_candidate_text(
+                    str(capability.get("description", capability.get("rationale", "")) or ""),
+                    2_000,
+                ),
+                "predicted_behavior_and_outcome": expected_effect,
+                "source_causal_hypothesis_id": str(capability.get("source_causal_hypothesis_id", "") or ""),
+                "source_causal_hypothesis_ids": [
+                    str(item) for item in capability.get("source_causal_hypothesis_ids", []) if str(item)
+                ],
+                "prediction_recorded_before_evaluation": True,
+            }
+        )
+    return contracts
+
+
 def _prior_candidate_feedback(
     state: dict[str, Any],
     cases: list[dict[str, Any]],
@@ -2228,9 +2372,11 @@ def _prior_candidate_feedback(
         deltas = record.get("verifier_deltas_by_case", {})
         diagnoses = record.get("candidate_failure_diagnoses", {})
         patches = record.get("candidate_patch_excerpts_by_case", {})
+        causal_contracts = record.get("causal_intervention_contracts", [])
         deltas = deltas if isinstance(deltas, dict) else {}
         diagnoses = diagnoses if isinstance(diagnoses, dict) else {}
         patches = patches if isinstance(patches, dict) else {}
+        causal_contracts = [dict(item) for item in causal_contracts if isinstance(item, dict)]
         for case_id in active_case_ids & set(deltas):
             diagnosis_value = diagnoses.get(case_id, {})
             if isinstance(diagnosis_value, list):
@@ -2258,6 +2404,11 @@ def _prior_candidate_feedback(
                     # Preserve the singular field for older analyzer prompts.
                     "candidate_failure_diagnosis": (dict(case_diagnoses[0]) if case_diagnoses else {}),
                     "candidate_failure_diagnoses": case_diagnoses,
+                    "causal_intervention_contracts": [
+                        dict(contract)
+                        for contract in causal_contracts
+                        if case_id in set(contract.get("target_case_ids", []))
+                    ],
                 }
             )
     return {"by_case": {case_id: records[-3:] for case_id, records in by_case.items() if records}}
@@ -2840,6 +2991,21 @@ def _error_case_ids(eval_ref_path: str | Path) -> set[str]:
     return error_case_ids
 
 
+def _skipped_case_ids(eval_ref_path: str | Path) -> set[str]:
+    payload = _read_yaml(eval_ref_path)
+    skipped_case_ids: set[str] = set()
+    for case in payload.get("cases", []):
+        if not isinstance(case, dict):
+            continue
+        case_id = str(case.get("case_id", "") or "")
+        metadata = case.get("metadata", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        skipped = str(case.get("status", "")).lower() == "skipped" or metadata.get("infrastructure_skip") is True
+        if case_id and skipped:
+            skipped_case_ids.add(case_id)
+    return skipped_case_ids
+
+
 def _invoked_tool_names(eval_ref_path: str) -> set[str]:
     return {name for names in _invoked_tool_names_by_case(eval_ref_path).values() for name in names}
 
@@ -2948,6 +3114,10 @@ def _nonpassing_case_ids(eval_ref_path: str) -> set[str]:
         case_id = str(case.get("case_id", "") or "")
         score = _number(case.get("score"))
         status = str(case.get("status", "") or "").lower()
+        metadata = case.get("metadata", {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        if status == "skipped" or metadata.get("infrastructure_skip") is True:
+            continue
         explicit_passed = _eval_case_explicit_passed(case)
         status_failed = status in {"failed", "error"}
         score_failed = explicit_passed is False or (explicit_passed is None and score is not None and score < 1.0)

@@ -72,7 +72,9 @@ def main(argv: list[str] | None = None) -> int:
         max_epochs=args.max_epochs,
         sibling_candidate_count=args.sibling_candidate_count,
         max_issue_attempts=args.max_issue_attempts,
-        max_repair_rounds=args.max_repair_rounds,
+        # The control-plane limit includes the initial candidate round. The
+        # user-facing flag counts feedback-driven repairs after that attempt.
+        max_repair_rounds=args.max_repair_rounds + 1,
         improver_policy_ref=args.improver_policy_ref,
     )
     config = load_auto_coordinating_harness_config(str(config_path))
@@ -334,14 +336,27 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Cases optimized sequentially per batch; the epoch still ends with one full-suite checkpoint.",
     )
     parser.add_argument("--max-epochs", type=int, default=1)
-    parser.add_argument("--sibling-candidate-count", type=int, default=2)
+    parser.add_argument(
+        "--sibling-candidate-count",
+        type=int,
+        default=1,
+        help=(
+            "Harness candidates generated per issue. The single-harness optimization default is 1; "
+            "values above 1 are reserved for explicit candidate-feedback experiments."
+        ),
+    )
     parser.add_argument(
         "--max-issue-attempts",
         type=int,
         default=8,
         help="Maximum distinct issue cohorts evaluated per batch; 0 means unlimited.",
     )
-    parser.add_argument("--max-repair-rounds", type=int, default=1)
+    parser.add_argument(
+        "--max-repair-rounds",
+        type=int,
+        default=1,
+        help="Feedback-driven repair rounds after the initial candidate attempt.",
+    )
     parser.add_argument("--rollout-concurrency", type=int, default=5)
     parser.add_argument("--improver-policy-ref", default="")
     parser.add_argument("--run-model-config-ref", default=str(DEFAULT_RUN_MODEL))

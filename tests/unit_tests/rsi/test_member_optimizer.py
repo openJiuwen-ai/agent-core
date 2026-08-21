@@ -230,15 +230,11 @@ async def test_sibling_candidates_use_isolated_planner_sessions(
 
     await planner.create_plan(
         **common,
-        optimization_experience={
-            "sibling_generation": {"candidate_id": "candidate/alpha"}
-        },
+        optimization_experience={"sibling_generation": {"candidate_id": "candidate/alpha"}},
     )
     await planner.create_plan(
         **common,
-        optimization_experience={
-            "sibling_generation": {"candidate_id": "candidate/beta"}
-        },
+        optimization_experience={"sibling_generation": {"candidate_id": "candidate/beta"}},
     )
     await planner.create_plan(**common)
 
@@ -2985,9 +2981,7 @@ def test_member_optimizer_publish_rejects_partially_executed_role(
     verification_result = MemberVerificationResult(
         status="passed",
         checked_roles=["explainer"],
-        role_results={
-            "explainer": RoleVerificationResult(role="explainer", status="passed")
-        },
+        role_results={"explainer": RoleVerificationResult(role="explainer", status="passed")},
     )
 
     artifact = MemberOptimizer(MemberOptimizerConfig(model_config_ref="unused"))._publish(
@@ -4301,6 +4295,15 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
                                     "probe its direct operation."
                                 ),
                                 "critical_mistake": ("Do not substitute a returned iterator for direct __next__."),
+                                "causal_coverage": {
+                                    "explained_requirement_ids": ["verifier:FAIL_TO_PASS:test_next"],
+                                    "residual_requirement_ids": [],
+                                    "unexplained_observations": [],
+                                    "counterfactual_prediction": (
+                                        "direct next succeeds before and after iterator initialization"
+                                    ),
+                                    "sufficiency_status": "task_sufficient",
+                                },
                             },
                         },
                     }
@@ -4345,6 +4348,10 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
         "scope_boundary": ["Treat __iter__ alone as sufficient."],
         "activation_phase": "task_start",
     }
+    assert hypotheses[0]["causal_coverage"]["sufficiency_status"] == "task_sufficient"
+    assert hypotheses[0]["decisive_probe"]["causal_coverage"]["counterfactual_prediction"].startswith(
+        "direct next succeeds"
+    )
     assert hypotheses[0]["public_trigger"] == [
         {
             "case_id": "case_pydicom",
@@ -4393,6 +4400,40 @@ def test_planner_binding_restores_analyzer_semantics_after_model_drift() -> None
     action = plan_data["actions"][0]
     assert action["expected_effect"] == "Implement stateful direct __next__ semantics."
     assert action["constraints"]["optimization_contracts"] == hypotheses
+
+
+def test_planner_binding_persists_only_supported_causal_hypotheses() -> None:
+    plan_data = {
+        "actions": [
+            {
+                "action_id": "a1",
+                "attributed_issue_ids": ["issue_protocol"],
+                "constraints": {},
+            }
+        ]
+    }
+    hypotheses = [
+        {
+            "hypothesis_id": "hyp_protocol",
+            "content_sha256": "abc123",
+            "source_issue_id": "issue_protocol",
+            "required_behavior": "Use the supported direct-call mechanism.",
+            "hypothesis_assessment": [
+                {"hypothesis_id": "h_supported", "status": "supported"},
+                {"hypothesis_id": "h_falsified", "status": "falsified"},
+            ],
+            "supported_causal_hypothesis_ids": ["h_supported"],
+            "falsified_causal_hypothesis_ids": ["h_falsified"],
+        }
+    ]
+
+    _bind_immutable_hypotheses(plan_data, hypotheses)
+
+    constraints = plan_data["actions"][0]["constraints"]
+    assert constraints["source_causal_hypothesis_ids"] == ["h_supported"]
+    contract = constraints["optimization_contracts"][0]
+    assert contract["supported_causal_hypothesis_ids"] == ["h_supported"]
+    assert contract["falsified_causal_hypothesis_ids"] == ["h_falsified"]
     assert plan_data["metadata"]["semantic_authority"] == ("immutable_optimization_hypotheses")
 
 
@@ -5583,9 +5624,9 @@ def test_member_executor_does_not_merge_partial_same_issue_bundle(
     assert by_id["act_prompt"].status == "failed"
     assert by_id["act_prompt"].merge_status == "not_merged"
     assert "atomic action bundle peer failed" in by_id["act_prompt"].error
-    assert (
-        integration_worktree_path(run_dir / "wt", "explainer") / "identity.md"
-    ).read_text(encoding="utf-8") == original_identity
+    assert (integration_worktree_path(run_dir / "wt", "explainer") / "identity.md").read_text(
+        encoding="utf-8"
+    ) == original_identity
 
 
 def test_role_execution_contract_accepts_successful_fallback_branch() -> None:
@@ -5693,10 +5734,7 @@ def test_member_executor_runs_local_add_fallback_when_skill_search_is_unavailabl
     assert by_id["fallback"].status == "succeeded"
     assert by_id["fallback"].merge_status == "merged"
     assert (
-        integration_worktree_path(run_dir / "wt", "explainer")
-        / "skills"
-        / "preserve_analyze_fix"
-        / "SKILL.md"
+        integration_worktree_path(run_dir / "wt", "explainer") / "skills" / "preserve_analyze_fix" / "SKILL.md"
     ).is_file()
 
 

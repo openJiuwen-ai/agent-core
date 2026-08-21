@@ -147,3 +147,21 @@ Improver 不再把 sibling 的轮换方向当成强制根因。轮换项只作�
 随后使用 GLM-5.2 对同一批已保存轨迹重新执行 Analyzer，不重新运行 Task Agent 和 Judge。新版诊断明确确认消息 15、17 已成功提取两份目标文档，并将消息 21 的 `/tmp` 读取失败判定为已恢复的非根因；诊断改为依据 4 条官方评分项，定位到 Agent 把“仍可改进”错误等同于“不合规”，导致最终 Yes/No 结论与评分标准相反。该结果验证了修复目标：压缩后的输入不仅更短，而且保留了足以排除显眼伪因、定位真正决策错误的证据。
 
 最终组合回归覆盖 Analyzer、证据压缩、Evo-Bench evaluator、单 Harness 控制流、Launcher 和统一入口，共 `190 passed, 2 skipped`；Ruff check 通过。跳过项和警告均为仓库已有配置，不影响本轮证据链功能。
+
+## 10. 因果调查与候选实验硬约束
+
+本轮将此前主要依赖提示词遵守的要求改成控制器可验证协议。Analyzer 协议升级为 `generic_behavior_causal_v6`，Improver 协议升级为 `generic_behavior_intervention_v2`。
+
+- 默认强制执行“调查计划 -> 控制器取证 -> 因果诊断”。旧格式诊断不能直接进入优化；一次纠正后仍无法生成有效调查计划时，该 Case 不产生可优化 Issue。
+- 首轮调查必须包含 2 至 3 个不同假设，每个假设都必须绑定至少一条判别证据请求。完全重复的假设会被规范化器拒绝。
+- 首轮最多 8 条证据请求；证据不足时立即在同一 Case 内追加一次补证，总上限 12 条。仍无法区分时必须保持 `target_ref=unassigned`。
+- 只读控制器支持轨迹搜索、精确事件读取、候选前后对照、安全数值关系检查、结构化 Office 产物读取，以及隔离仓库内的受限搜索和文件读取。绝对路径、路径穿越、任意 Shell 和未由仓库搜索返回的文件路径均被拒绝。
+- 多 Trial 中相同 `message_index` 不再默认取第一条；缺少 `trace_id` 时返回 `ambiguous`，避免跨次执行串证据。
+- xlsx、docx、pdf 和 pptx 产物采用有界结构化读取；Excel 公式、单元格位置、文档段落、表格、PDF 页和幻灯片文本可以作为精确证据，同时设置单元格、页数和字符预算。
+- 严格因果分析没有可归因 Issue 时，单 Harness 控制器停止候选生成，不再把失败 Case 包装成虚构的低置信度优化目标。旧第三方 Analyzer 仅保留显式兼容路径。
+- Evo-Bench Improver 输出必须声明 `source_hypothesis_id`，且只能选择 Analyzer 标为 `supported` 的假设；`falsified` 和 `unresolved` 会被代码拒绝。通用 MemberOptimizer 也会把 supported/falsified ID 写入不可变优化合同。
+- 候选的因果干预合同在候选评测前写入并冻结，随后与实际行为、Verifier 变化和结果变化一起进入 Candidate Feedback。若实验已否定某个因果假设，下一轮 Analyzer 和 Improver 不能复用同一假设 ID。
+
+兼容开关 `causal_investigation_required` 默认值为 `true`。它只用于旧 Analyzer 单测或外部适配，不改变当前 RSI 实验的严格默认行为。
+
+最终 RSI 单元回归为 `964 passed, 3 skipped`；Ruff format、Ruff check 和 `git diff --check` 均通过。未调用付费任务模型或 Judge，本轮验收确认的是控制流、证据边界和因果合同已完整落地，实际分数提升仍需新实验验证。

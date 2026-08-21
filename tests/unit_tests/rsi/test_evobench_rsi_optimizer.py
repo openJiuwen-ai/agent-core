@@ -94,6 +94,18 @@ def _inputs(tmp_path: Path) -> dict[str, Path]:
                     "recommendation": "Require final artifact verification before finish.",
                     "affected_cases": ["case-1"],
                     "evidence": [{"case_id": "case-1", "step": "final"}],
+                    "metadata": {
+                        "attribution": {
+                            "evidence_status": "confirmed",
+                            "causal_coverage": {
+                                "explained_requirement_ids": ["criterion:artifact"],
+                                "residual_requirement_ids": ["criterion:content"],
+                                "unexplained_observations": ["artifact content remains unverified"],
+                                "counterfactual_prediction": "the artifact is created before finish",
+                                "sufficiency_status": "local_contributor",
+                            },
+                        }
+                    },
                 },
                 {
                     "issue_id": "ISSUE-2",
@@ -170,7 +182,7 @@ def test_optimizer_copies_full_policy_harness_and_writes_orchestrator_contract(t
     artifact = yaml.safe_load(Path(member_ref).read_text(encoding="utf-8"))
     assert artifact["status"] == "success"
     assert artifact["promotion_status"] == "pending_gate"
-    assert artifact["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v1"
+    assert artifact["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v2"
     assert artifact["candidate_ready_roles"] == ["policy_harness"]
     candidate_refs = yaml.safe_load(Path(artifact["optimized_harness_refs_path"]).read_text(encoding="utf-8"))
     candidate = Path(candidate_refs["harness_refs"]["policy_harness"])
@@ -193,7 +205,7 @@ def test_optimizer_copies_full_policy_harness_and_writes_orchestrator_contract(t
     )
 
     plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
-    assert plan["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v1"
+    assert plan["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v2"
     assert plan["targets"][0]["role"] == "policy_harness"
     assert plan["targets"][0]["attributed_issue_ids"] == ["ISSUE-1"]
     assert plan["targets"][0]["evidence_refs"] == [{"case_id": "case-1", "issue_id": "ISSUE-1"}]
@@ -210,11 +222,13 @@ def test_optimizer_copies_full_policy_harness_and_writes_orchestrator_contract(t
     assert all(capability["target_case_ids"] == ["case-1"] for capability in capabilities)
     assert "sibling candidate 2 of\n3" in requests[0]
     assert "activation or routing of the diagnosed behavior" in requests[0]
-    assert '"version": "generic_behavior_intervention_v1"' in requests[0]
+    assert '"version": "generic_behavior_intervention_v2"' in requests[0]
     assert '"supported_mutation_contract"' in requests[0]
     assert "must not override the diagnosed" in requests[0]
     assert "cohort_c001" in requests[0]
     assert "stopped before writing" in requests[0]
+    assert '"sufficiency_status": "local_contributor"' in requests[0]
+    assert "local_contributor is a bounded defect" in requests[0]
     assert "UNRELATED_HYPOTHESIS_MUST_NOT_LEAK" not in requests[0]
 
 
@@ -252,6 +266,55 @@ def test_optimizer_uses_failed_case_evidence_when_analysis_has_no_issue(tmp_path
     plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
     assert plan["targets"][0]["attributed_issue_ids"] == ["issue_unattributed_failure_001"]
     assert "artifact missing" in requests[0]
+
+
+def test_optimizer_scopes_unattributed_fallback_to_frozen_case(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    _write_yaml(inputs["analysis"], {"issues": []})
+    eval_ref = yaml.safe_load(inputs["eval"].read_text(encoding="utf-8"))
+    eval_ref["cases"][0].update({"status": "failed", "score": 0.0})
+    second_case_dir = tmp_path / "evaluation" / "cases" / "case-2"
+    second_case_dir.mkdir(parents=True)
+    second_result = second_case_dir / "result.json"
+    second_trace = second_case_dir / "trace.json"
+    second_result.write_text(
+        json.dumps({"score": 0, "reason": "SECOND_CASE_MUST_NOT_BE_BOUND"}),
+        encoding="utf-8",
+    )
+    second_trace.write_text(json.dumps({"steps": ["SECOND_CASE_TRACE"]}), encoding="utf-8")
+    eval_ref["cases"].append(
+        {
+            "case_id": "case-2",
+            "status": "failed",
+            "score": 0.0,
+            "result_path": str(second_result),
+            "trace_path": str(second_trace),
+        }
+    )
+    _write_yaml(inputs["eval"], eval_ref)
+    requests: list[str] = []
+
+    def generate(request: str) -> dict[str, Any]:
+        requests.append(request)
+        return {"system_prompt_append": "Verify the requested output before finishing."}
+
+    member_ref = asyncio.run(
+        PolicyHarnessRSIOptimizer(patch_generator=generate).optimize(
+            eval_ref_path=str(inputs["eval"]),
+            analysis_result_path=str(inputs["analysis"]),
+            harness_refs_path=str(inputs["refs"]),
+            output_dir=str(tmp_path / "optimization"),
+            optimization_experience={"frozen_target_case_ids": ["case-1"]},
+        )
+    )
+
+    artifact = yaml.safe_load(Path(member_ref).read_text(encoding="utf-8"))
+    assert artifact["metadata"]["target_case_ids"] == ["case-1"]
+    plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
+    assert plan["metadata"]["target_case_ids"] == ["case-1"]
+    assert "artifact missing" in requests[0]
+    assert "SECOND_CASE_MUST_NOT_BE_BOUND" not in requests[0]
+    assert "SECOND_CASE_TRACE" not in requests[0]
 
 
 def test_optimizer_rejects_forbidden_harness_update(tmp_path: Path) -> None:
@@ -515,3 +578,82 @@ def test_optimizer_legacy_trace_fallback_is_bounded_when_digest_is_missing(tmp_p
     assert '"legacy_fallback_used": true' in request
     assert "LEGACY_TRACE_HEAD" in request
     assert "LEGACY_TRACE_TAIL" not in request
+
+
+def test_optimizer_requires_supported_causal_hypothesis_binding(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    analysis = yaml.safe_load(inputs["analysis"].read_text(encoding="utf-8"))
+    attribution = analysis["issues"][0]["metadata"]["attribution"]
+    attribution.update(
+        {
+            "target_ref": "member_harness.policy_harness.prompt",
+            "hypothesis_assessment": [
+                {"hypothesis_id": "h_supported", "status": "supported"},
+                {"hypothesis_id": "h_falsified", "status": "falsified"},
+            ],
+        }
+    )
+    analysis["metadata"] = {"analyzer_protocol_version": "generic_behavior_causal_v6"}
+    _write_yaml(inputs["analysis"], analysis)
+    optimizer = PolicyHarnessRSIOptimizer(
+        patch_generator=lambda _request: {
+            "source_hypothesis_id": "h_falsified",
+            "system_prompt_append": "Verify the artifact before finishing.",
+        }
+    )
+
+    with pytest.raises(ValueError, match="not actionable"):
+        asyncio.run(
+            optimizer.optimize(
+                str(inputs["eval"]),
+                str(inputs["analysis"]),
+                str(inputs["refs"]),
+                str(tmp_path / "rejected"),
+                optimization_issue_ids=["ISSUE-1"],
+            )
+        )
+
+    accepted = PolicyHarnessRSIOptimizer(
+        patch_generator=lambda _request: {
+            "source_hypothesis_id": "h_supported",
+            "system_prompt_append": "Verify the artifact before finishing.",
+            "expected_effect": "The artifact exists before finish.",
+        }
+    )
+    member_ref = asyncio.run(
+        accepted.optimize(
+            str(inputs["eval"]),
+            str(inputs["analysis"]),
+            str(inputs["refs"]),
+            str(tmp_path / "accepted"),
+            optimization_issue_ids=["ISSUE-1"],
+        )
+    )
+    artifact = yaml.safe_load(Path(member_ref).read_text(encoding="utf-8"))
+    plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
+    assert plan["actions"][0]["constraints"]["source_causal_hypothesis_id"] == "h_supported"
+    assert artifact["metadata"]["source_causal_hypothesis_id"] == "h_supported"
+
+
+def test_strict_causal_analysis_without_actionable_issue_does_not_generate_candidate(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    _write_yaml(
+        inputs["analysis"],
+        {
+            "issues": [],
+            "metadata": {"analyzer_protocol_version": "generic_behavior_causal_v6"},
+        },
+    )
+    optimizer = PolicyHarnessRSIOptimizer(
+        patch_generator=lambda _request: {"system_prompt_append": "This must not be generated."}
+    )
+
+    with pytest.raises(ValueError, match="actionable, evidence-grounded"):
+        asyncio.run(
+            optimizer.optimize(
+                str(inputs["eval"]),
+                str(inputs["analysis"]),
+                str(inputs["refs"]),
+                str(tmp_path / "strict-no-issue"),
+            )
+        )

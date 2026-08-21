@@ -38,6 +38,51 @@ _BASH_CONTENT_PATTERN = re.compile(
     r"(?:cat|sed|head|tail|unzip)\s)",
     re.IGNORECASE | re.DOTALL,
 )
+_CRITICAL_EVIDENCE_TERM_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{2,}|\d+(?:\.\d+)?|[\u4e00-\u9fff]{2,8}")
+_CRITICAL_EVIDENCE_STOPWORDS = {
+    "and",
+    "agent",
+    "answer",
+    "assessment",
+    "because",
+    "between",
+    "but",
+    "calculating",
+    "conclusion",
+    "correctly",
+    "criterion",
+    "did",
+    "directly",
+    "evidence",
+    "explicitly",
+    "failed",
+    "failure",
+    "first",
+    "identified",
+    "met",
+    "must",
+    "not",
+    "requirement",
+    "required",
+    "response",
+    "second",
+    "specific",
+    "state",
+    "stated",
+    "states",
+    "task",
+    "text",
+    "than",
+    "the",
+    "that",
+    "this",
+    "timeline",
+    "timelines",
+    "with",
+}
+_COMPACTION_MARKER = (
+    "[ANALYZER_EVIDENCE_COMPACTION: omitted {omitted} source chars; this marker was not observed by the task agent]"
+)
 
 
 def public_task_contract_snapshot(task: Mapping[str, Any]) -> dict[str, Any]:
@@ -120,6 +165,7 @@ def build_causal_evidence_digest(  # pylint: disable=huawei-too-many-arguments
     trial_exit_reasons = _aligned_list(evaluation_metadata.get("trial_exit_reasons"), len(traces))
     trial_details = _aligned_list(evaluation_metadata.get("trial_details"), len(traces))
     has_trial_outcomes = bool(traces) and bool(trial_scores) and bool(trial_passed)
+    critical_evidence_terms = _failed_requirement_terms(evaluation_metadata)
 
     trial_records: list[dict[str, Any]] = []
     all_calls: list[dict[str, Any]] = []
@@ -136,6 +182,7 @@ def build_causal_evidence_digest(  # pylint: disable=huawei-too-many-arguments
             score=score,
             passed=passed,
             exit_reason=exit_reason,
+            critical_evidence_terms=critical_evidence_terms,
         )
         trial["trial_evaluation"] = _compact_trial_evaluation(trial_details[index] if trial_details else None)
         raw_message_count += int(trial.pop("_raw_message_count"))
@@ -163,6 +210,11 @@ def build_causal_evidence_digest(  # pylint: disable=huawei-too-many-arguments
             "response_only_field_policy": (
                 "A response-only field is not a missing request field unless the public tool schema declares it."
             ),
+            "lossless_evidence_policy": (
+                "Compacted response excerpts are display views, not task-agent observations. "
+                "ANALYZER_EVIDENCE_COMPACTION markers are generated after execution. "
+                "Exact failed-requirement-linked spans are retained separately with raw evidence pointers."
+            ),
         },
         "task_contract": compact_task_contract,
         "outcome": {
@@ -175,6 +227,7 @@ def build_causal_evidence_digest(  # pylint: disable=huawei-too-many-arguments
             "judge_evidence": _compact_judge_evidence(evaluation_metadata),
         },
         "tool_contract_observations": tool_contracts,
+        "critical_evidence_terms": critical_evidence_terms,
         "trials": trial_records,
         "cross_trial_contrast": _cross_trial_contrast(trial_records),
         "fallback_final_response": (
@@ -309,11 +362,20 @@ def compact_candidate_feedback(feedback: Mapping[str, Any] | None) -> dict[str, 
                     "verifier_delta": _compact_value(record.get("verifier_delta", {})),
                 },
                 "activation": _compact_value(record.get("activation", {})),
+                "causal_intervention_contracts": _compact_value(record.get("causal_intervention_contracts", [])),
                 "verifier_delta": _compact_value(record.get("verifier_delta", {})),
                 "candidate_failure_diagnoses": [
                     {
                         key: _compact_value(diagnosis.get(key))
-                        for key in ("summary", "root_cause", "target_ref", "recommendation", "decision_contract")
+                        for key in (
+                            "summary",
+                            "root_cause",
+                            "target_ref",
+                            "recommendation",
+                            "decision_contract",
+                            "hypothesis_assessment",
+                            "prior_experiment_assessment",
+                        )
                         if key in diagnosis
                     }
                     for diagnosis in diagnoses[:2]
@@ -331,6 +393,7 @@ def _build_trial_record(
     score: Any,
     passed: Any,
     exit_reason: Any,
+    critical_evidence_terms: Sequence[str] = (),
 ) -> dict[str, Any]:
     trace_id = str(trace.get("trace_id") or f"trace_{index + 1}")
     role = str(trace.get("member_role") or trace.get("role") or "")
@@ -360,6 +423,7 @@ def _build_trial_record(
                 continue
             raw_input = raw_call.get("input", "")
             raw_output = raw_call.get("output", "")
+            raw_output_text = str(raw_output or "")
             raw_error = str(raw_call.get("error") or "")
             evidence_id = f"{trace_id}:message_{message_index}:call_{call_index}"
             calls.append(
@@ -372,10 +436,15 @@ def _build_trial_record(
                     "tool": str(raw_call.get("name") or ""),
                     "request": _parse_and_compact(raw_input),
                     "response": _parse_and_compact(raw_output),
+                    "response_evidence": _response_evidence_view(
+                        raw_output_text,
+                        evidence_id=evidence_id,
+                        critical_terms=critical_evidence_terms,
+                    ),
                     "error": _compact_text(raw_error, 1_000),
                     "decision_context": _compact_text(content, 600),
                     "_raw_input": str(raw_input or ""),
-                    "_raw_output": str(raw_output or ""),
+                    "_raw_output": raw_output_text,
                 }
             )
     selected = _select_calls(calls)
@@ -721,6 +790,146 @@ def _output_summary(value: str) -> dict[str, Any]:
     }
 
 
+def _failed_requirement_terms(metadata: Mapping[str, Any]) -> list[str]:
+    """Extract bounded anchors from failed evaluator criteria.
+
+    These terms are used only to retain exact public trajectory spans. They do
+    not become conclusions and do not change the evaluator outcome.
+    """
+    normalized = metadata.get("judge_evidence")
+    detail = normalized if isinstance(normalized, Mapping) else metadata.get("judge_detail")
+    detail = detail if isinstance(detail, Mapping) else {}
+    criteria = detail.get("criteria")
+    criteria = criteria if isinstance(criteria, list) else []
+    values: list[str] = []
+    for criterion in criteria:
+        if not isinstance(criterion, Mapping):
+            continue
+        score = criterion.get("score")
+        if _is_number(score) and float(score) > 0:
+            continue
+        values.extend(
+            str(criterion.get(key) or "") for key in ("criterion_id", "verifier_id", "rationale") if criterion.get(key)
+        )
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for match in _CRITICAL_EVIDENCE_TERM_PATTERN.findall(value):
+            normalized_term = match.casefold()
+            if normalized_term in _CRITICAL_EVIDENCE_STOPWORDS or normalized_term in seen:
+                continue
+            seen.add(normalized_term)
+            terms.append(match)
+            if len(terms) >= 48:
+                return terms
+    return terms
+
+
+def extract_critical_evidence_spans(
+    value: Any,
+    terms: Sequence[str],
+    *,
+    max_spans: int = 3,
+    max_total_chars: int = 6_000,
+) -> list[dict[str, Any]]:
+    """Return exact line windows tied to failed-requirement terms.
+
+    Unlike the display excerpt, these windows are selected from the raw tool
+    response before compaction. The returned text never uses an unlabelled
+    omission marker.
+    """
+    text, projection = _readable_evidence_text(str(value or ""))
+    normalized_terms = list(dict.fromkeys(str(term).casefold() for term in terms if str(term).strip()))
+    if not text or not normalized_terms or max_spans <= 0 or max_total_chars <= 0:
+        return []
+
+    lines = text.splitlines() or [text]
+    ranked: list[tuple[int, int, list[str]]] = []
+    for index, line in enumerate(lines):
+        lowered = line.casefold()
+        matched = [term for term in normalized_terms if term in lowered]
+        if matched:
+            ranked.append((len(set(matched)), index, matched))
+    if not ranked:
+        return []
+
+    selected_lines = sorted(ranked, key=lambda item: (-item[0], item[1]))[:max_spans]
+    windows: list[tuple[int, int, set[str]]] = []
+    for _, index, matched in sorted(selected_lines, key=lambda item: item[1]):
+        start = max(0, index - 3)
+        end = min(len(lines), index + 4)
+        if windows and start <= windows[-1][1]:
+            previous_start, previous_end, previous_terms = windows[-1]
+            windows[-1] = (previous_start, max(previous_end, end), previous_terms | set(matched))
+        else:
+            windows.append((start, end, set(matched)))
+
+    spans: list[dict[str, Any]] = []
+    remaining = max_total_chars
+    for start, end, matched in windows:
+        if remaining <= 0:
+            break
+        raw_span = "\n".join(lines[start:end])
+        span_text, complete = _bounded_critical_span(raw_span, matched, remaining)
+        if not span_text:
+            continue
+        spans.append(
+            {
+                "source": "raw_tool_response",
+                "projection": projection,
+                "line_start": start + 1,
+                "line_end": end,
+                "matched_terms": sorted(matched),
+                "text": span_text,
+                "window_complete": complete,
+            }
+        )
+        remaining -= len(span_text)
+    return spans
+
+
+def _readable_evidence_text(text: str) -> tuple[str, str]:
+    """Project serialized tool-result newlines without semantic summarization."""
+    if "\n" not in text and "\\n" in text:
+        return (
+            text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t"),
+            "escaped_newlines_normalized",
+        )
+    return text, "verbatim"
+
+
+def _bounded_critical_span(text: str, matched_terms: set[str], limit: int) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, True
+    lowered = text.casefold()
+    positions = [lowered.find(term) for term in matched_terms if lowered.find(term) >= 0]
+    center = min(positions) if positions else len(text) // 2
+    headroom = max(0, limit // 3)
+    start = max(0, center - headroom)
+    end = min(len(text), start + limit)
+    start = max(0, end - limit)
+    return text[start:end], False
+
+
+def _response_evidence_view(
+    raw_output: str,
+    *,
+    evidence_id: str,
+    critical_terms: Sequence[str],
+) -> dict[str, Any]:
+    source_chars = len(raw_output)
+    return {
+        "raw_evidence_ref": evidence_id,
+        "source": "public_normalized_execution_trace.raw_tool_response",
+        "source_char_count": source_chars,
+        "display_excerpt_complete": source_chars <= 1_200,
+        "display_omission_origin": "none" if source_chars <= 1_200 else "analyzer_evidence_compactor",
+        "task_agent_observed_display_omission_marker": False,
+        "critical_spans": extract_critical_evidence_spans(raw_output, critical_terms),
+    }
+
+
 def _parse_and_compact(value: Any) -> Any:
     if not isinstance(value, str):
         return _compact_value(value)
@@ -824,7 +1033,8 @@ def _head_tail(text: str, limit: int) -> str:
     head = max(1, int(limit * 0.7))
     tail = max(1, limit - head)
     omitted = len(text) - head - tail
-    return f"{text[:head]}\n...[omitted {omitted} chars]...\n{text[-tail:]}"
+    marker = _COMPACTION_MARKER.format(omitted=omitted)
+    return f"{text[:head]}\n{marker}\n{text[-tail:]}"
 
 
 def _read_mapping(path: Path) -> dict[str, Any]:

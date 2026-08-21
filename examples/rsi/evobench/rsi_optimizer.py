@@ -32,7 +32,7 @@ _MAX_PROMPT_APPEND_CHARS = 8_000
 _MAX_STRUCTURED_EVIDENCE_CHARS = 40_000
 _MAX_LEGACY_RESULT_CHARS = 3_000
 _MAX_LEGACY_TRACE_CHARS = 4_000
-GENERIC_IMPROVER_PROTOCOL_VERSION = "generic_behavior_intervention_v1"
+GENERIC_IMPROVER_PROTOCOL_VERSION = "generic_behavior_intervention_v2"
 _CAUSAL_EVIDENCE_PATH_KEYS = {
     "causal_evidence_path",
     "causal_digest_path",
@@ -111,7 +111,14 @@ class PolicyHarnessRSIOptimizer:
         analysis_path, analysis = _load_analysis(analysis_result_path)
         selected_issues = _select_issues(analysis, optimization_issue_ids)
         if not selected_issues:
-            selected_issues = [_build_unattributed_failure_issue(eval_ref_path)]
+            if _analysis_uses_strict_causal_protocol(analysis):
+                raise ValueError("PolicyHarness optimization requires an actionable, evidence-grounded analysis issue")
+            selected_issues = [
+                _build_unattributed_failure_issue(
+                    eval_ref_path,
+                    target_case_ids=_frozen_target_case_ids(optimization_experience),
+                )
+            ]
 
         output_root = Path(output_dir).expanduser().resolve()
         output_root.mkdir(parents=True, exist_ok=True)
@@ -135,6 +142,7 @@ class PolicyHarnessRSIOptimizer:
             selected_issues=selected_issues,
             hypotheses_path=optimization_hypotheses_path,
         )
+        causal_hypothesis_policy = _causal_hypothesis_policy(selected_issues)
         leakage_guard = _build_prompt_leakage_guard(
             selected_issues=selected_issues,
             evidence=evidence,
@@ -144,6 +152,7 @@ class PolicyHarnessRSIOptimizer:
             source_prompt=source_prompt,
             source_harness=source_harness_json,
             evidence=evidence,
+            causal_hypothesis_policy=causal_hypothesis_policy,
             generation_context=generation_context,
             rejected_capabilities=rejected_capabilities or [],
         )
@@ -151,11 +160,13 @@ class PolicyHarnessRSIOptimizer:
             request,
             run_dir=run_dir,
             leakage_guard=leakage_guard,
+            causal_hypothesis_policy=causal_hypothesis_policy,
         )
         patch = _validate_patch(
             raw_patch,
             source_prompt=source_prompt,
             leakage_guard=leakage_guard,
+            causal_hypothesis_policy=causal_hypothesis_policy,
         )
         _apply_patch(
             prompt_path=prompt_path,
@@ -176,6 +187,7 @@ class PolicyHarnessRSIOptimizer:
             patch=patch,
             issue_ids=issue_ids,
             case_ids=case_ids,
+            source_hypothesis_id=patch["source_hypothesis_id"],
         )
         plan = _build_plan(
             source_harness=source_harness,
@@ -271,6 +283,7 @@ class PolicyHarnessRSIOptimizer:
                 "composition_mode": "opaque_snapshot",
                 "allowed_mutation_paths": [_PROMPT_PATH, _HARNESS_PATH],
                 "generation_context": generation_context,
+                "source_causal_hypothesis_id": patch["source_hypothesis_id"],
             },
             "role": _ROLE,
         }
@@ -284,6 +297,7 @@ class PolicyHarnessRSIOptimizer:
         *,
         run_dir: Path,
         leakage_guard: dict[str, Any],
+        causal_hypothesis_policy: dict[str, Any],
     ) -> dict[str, Any]:
         if self._patch_generator is not None:
             generated = self._patch_generator(request)
@@ -295,6 +309,7 @@ class PolicyHarnessRSIOptimizer:
             model_config_ref=self.model_config_ref,
             workspace=run_dir,
             leakage_guard=leakage_guard,
+            causal_hypothesis_policy=causal_hypothesis_policy,
         )
 
 
@@ -328,6 +343,7 @@ async def _invoke_patch_agent(
     model_config_ref: str,
     workspace: Path,
     leakage_guard: dict[str, Any],
+    causal_hypothesis_policy: dict[str, Any],
 ) -> dict[str, Any]:
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
     from openjiuwen.harness.factory import create_deep_agent
@@ -368,6 +384,7 @@ async def _invoke_patch_agent(
         validate_response=lambda value: _patch_validation_errors(
             value,
             leakage_guard=leakage_guard,
+            causal_hypothesis_policy=causal_hypothesis_policy,
         ),
         build_retry_message=lambda _previous, error: (
             f"{request}\n\nThe previous output was invalid: {error}\nReturn only a corrected JSON mapping."
@@ -409,18 +426,84 @@ def _select_issues(
     analysis: dict[str, Any],
     requested_issue_ids: list[str] | None,
 ) -> list[dict[str, Any]]:
-    issues = [dict(item) for item in analysis.get("issues", []) if isinstance(item, dict)]
+    all_issues = [dict(item) for item in analysis.get("issues", []) if isinstance(item, dict)]
+    issues = [issue for issue in all_issues if _issue_is_actionable(issue)]
     requested = {str(issue_id) for issue_id in (requested_issue_ids or []) if str(issue_id)}
     if not requested:
         return issues
     selected = [issue for issue in issues if str(issue.get("issue_id", "")) in requested]
     missing = sorted(requested - {str(issue.get("issue_id", "")) for issue in selected})
     if missing:
-        raise ValueError(f"analysis does not contain requested optimization issues: {missing}")
+        raise ValueError(f"analysis does not contain requested actionable optimization issues: {missing}")
     return selected
 
 
-def _build_unattributed_failure_issue(eval_ref_path: str) -> dict[str, Any]:
+def _analysis_uses_strict_causal_protocol(analysis: Mapping[str, Any]) -> bool:
+    metadata = analysis.get("metadata") if isinstance(analysis.get("metadata"), Mapping) else {}
+    version = str(metadata.get("analyzer_protocol_version", "") or "")
+    return version.startswith("generic_behavior_causal_v")
+
+
+def _issue_is_actionable(issue: Mapping[str, Any]) -> bool:
+    metadata = issue.get("metadata") if isinstance(issue.get("metadata"), Mapping) else {}
+    attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
+    target_ref = str(attribution.get("target_ref", "") or "").strip().casefold()
+    evidence_status = str(attribution.get("evidence_status", "") or "").strip().casefold()
+    if target_ref == "unassigned" or evidence_status == "insufficient":
+        return False
+    assessments = [item for item in attribution.get("hypothesis_assessment", []) if isinstance(item, Mapping)]
+    if not assessments:
+        return True
+    statuses = {str(item.get("status", "") or "").strip().casefold() for item in assessments}
+    return "supported" in statuses and "unresolved" not in statuses
+
+
+def _causal_hypothesis_policy(issues: list[dict[str, Any]]) -> dict[str, Any]:
+    supported: set[str] = set()
+    falsified: set[str] = set()
+    unresolved: set[str] = set()
+    instrumented = False
+    for issue in issues:
+        metadata = issue.get("metadata") if isinstance(issue.get("metadata"), Mapping) else {}
+        attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
+        assessments = attribution.get("hypothesis_assessment", [])
+        for assessment in assessments if isinstance(assessments, list) else []:
+            if not isinstance(assessment, Mapping):
+                continue
+            hypothesis_id = str(assessment.get("hypothesis_id", "") or "").strip()
+            status = str(assessment.get("status", "") or "").strip().casefold()
+            if not hypothesis_id or status not in {"supported", "falsified", "unresolved"}:
+                continue
+            instrumented = True
+            if status == "supported":
+                supported.add(hypothesis_id)
+            elif status == "falsified":
+                falsified.add(hypothesis_id)
+            else:
+                unresolved.add(hypothesis_id)
+    supported -= falsified | unresolved
+    return {
+        "instrumented": instrumented,
+        "supported_hypothesis_ids": sorted(supported),
+        "falsified_hypothesis_ids": sorted(falsified),
+        "unresolved_hypothesis_ids": sorted(unresolved),
+    }
+
+
+def _frozen_target_case_ids(optimization_experience: dict[str, Any] | None) -> set[str]:
+    if not isinstance(optimization_experience, Mapping):
+        return set()
+    values = optimization_experience.get("frozen_target_case_ids", [])
+    if not isinstance(values, list):
+        return set()
+    return {str(case_id) for case_id in values if str(case_id).strip()}
+
+
+def _build_unattributed_failure_issue(
+    eval_ref_path: str,
+    *,
+    target_case_ids: set[str] | None = None,
+) -> dict[str, Any]:
     """Preserve the controller's evidence-first fallback when attribution is empty.
 
     The candidate remains low-confidence and must pass the same frozen target
@@ -442,6 +525,10 @@ def _build_unattributed_failure_issue(eval_ref_path: str) -> dict[str, Any]:
         case_id = str(case.get("case_id", "") or "").strip()
         if failed and case_id:
             failed_case_ids.append(case_id)
+    failed_case_ids = list(dict.fromkeys(failed_case_ids))
+    requested_targets = set(target_case_ids or set())
+    if requested_targets:
+        failed_case_ids = [case_id for case_id in failed_case_ids if case_id in requested_targets]
     if not failed_case_ids:
         raise ValueError("PolicyHarness optimization requires failed cases or an attributed analysis issue")
     return {
@@ -449,7 +536,7 @@ def _build_unattributed_failure_issue(eval_ref_path: str) -> dict[str, Any]:
         "category": "member_harness",
         "severity": "medium",
         "summary": "Observed task failure has no usable Analyzer attribution.",
-        "affected_cases": list(dict.fromkeys(failed_case_ids)),
+        "affected_cases": failed_case_ids,
         "affected_components": [_ROLE],
         "recommendation": (
             "Derive one reusable policy prompt intervention from the materialized "
@@ -770,6 +857,7 @@ def _compact_selected_issue_diagnoses(issues: list[dict[str, Any]]) -> list[dict
             "root_cause": attribution.get("root_cause", ""),
             "critical_mistake": attribution.get("critical_mistake", ""),
             "general_mechanism": attribution.get("general_mechanism", ""),
+            "causal_coverage": attribution.get("causal_coverage", {}),
             "decision_contract": attribution.get("decision_contract", {}),
             "failure_cluster": attribution.get("failure_cluster", {}),
             "confidence": attribution.get("confidence", ""),
@@ -932,6 +1020,7 @@ def _build_patch_request(  # pylint: disable=huawei-too-many-arguments
     source_prompt: str,
     source_harness: dict[str, Any],
     evidence: dict[str, Any],
+    causal_hypothesis_policy: dict[str, Any],
     generation_context: dict[str, Any],
     rejected_capabilities: list[dict[str, Any]],
 ) -> str:
@@ -959,6 +1048,7 @@ def _build_patch_request(  # pylint: disable=huawei-too-many-arguments
             ],
         },
         "failure_evidence": model_evidence,
+        "causal_hypothesis_policy": causal_hypothesis_policy,
         "sibling_generation": _sanitize_model_evidence(generation_context, case_ids),
         "rejected_capabilities": _sanitize_model_evidence(rejected_capabilities, case_ids),
     }
@@ -973,6 +1063,7 @@ intervention represented by prior_proposals.
 
 Return ONLY this JSON shape:
 {{
+  "source_hypothesis_id": "the supported causal hypothesis this candidate implements",
   "system_prompt_append": "a concise instruction block to append",
   "harness_updates": {{}},
   "rationale": "evidence-grounded reason",
@@ -994,6 +1085,11 @@ Rules:
   repair the confirmed decision. For `supported_hypothesis`, make the candidate a
   falsifiable experiment and state the predicted observable without upgrading the
   hypothesis to fact. Never invent a repair from `insufficient` evidence.
+- Read causal_coverage before treating a diagnosis as the whole repair. A
+  local_contributor is a bounded defect, not a complete explanation; do not claim
+  its change will resolve residual_requirement_ids. For cluster_sufficient,
+  preserve the cluster boundary. Only task_sufficient supports a whole-task
+  repair claim. Use counterfactual_prediction as the candidate's behavioral test.
 - The rationale must cite the observed behavior and the discriminator. The
   expected_effect must name what should be visible in the next trajectory or
   artifact, not merely claim that quality will improve.
@@ -1001,6 +1097,17 @@ Rules:
   intervention activated without improving its target metric, do not repeat or
   paraphrase it. If it did not activate, change activation rather than the
   underlying semantic rule.
+- Read hypothesis_assessment and prior_experiment_assessment. Never build a
+  candidate from a hypothesis marked falsified. A falsified prior explanation
+  cannot be renamed as a downstream problem and appended to the same repair;
+  select a newly supported hypothesis with new discriminating evidence.
+- When causal_hypothesis_policy.instrumented is true, source_hypothesis_id is
+  required and must be one of supported_hypothesis_ids. Falsified or unresolved
+  IDs are forbidden. This binding is validated by the controller.
+- The intervention must implement the supported causal distinction itself. Do
+  not substitute an easy-to-observe proxy for the predicted behavior. The
+  expected_effect must preserve the Analyzer's pre-recorded counterfactual so
+  the next candidate result can support or refute it.
 - The appended text is a global, reusable policy. Never copy a case ID, issue ID,
   known/gold/reference answer, expected output, benchmark-specific entity list,
   fixed answer set, or other case-specific literal into it.
@@ -1022,12 +1129,14 @@ def _patch_validation_errors(
     value: dict[str, Any],
     *,
     leakage_guard: dict[str, Any] | None = None,
+    causal_hypothesis_policy: dict[str, Any] | None = None,
 ) -> list[str]:
     try:
         _validate_patch(
             value,
             source_prompt="",
             leakage_guard=leakage_guard,
+            causal_hypothesis_policy=causal_hypothesis_policy,
         )
     except (TypeError, ValueError) as exc:
         return [str(exc)]
@@ -1039,10 +1148,17 @@ def _validate_patch(
     *,
     source_prompt: str,
     leakage_guard: dict[str, Any] | None = None,
+    causal_hypothesis_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError("patch must be a mapping")
-    allowed_top_level = {"system_prompt_append", "harness_updates", "rationale", "expected_effect"}
+    allowed_top_level = {
+        "source_hypothesis_id",
+        "system_prompt_append",
+        "harness_updates",
+        "rationale",
+        "expected_effect",
+    }
     unknown = sorted(set(value) - allowed_top_level)
     if unknown:
         raise ValueError(f"unknown patch fields: {unknown}")
@@ -1054,6 +1170,23 @@ def _validate_patch(
     if source_prompt and append.casefold() in source_prompt.casefold():
         raise ValueError("system_prompt_append already exists in the parent prompt")
     _validate_global_prompt_append(append, leakage_guard or {})
+
+    source_hypothesis_id = str(value.get("source_hypothesis_id", "") or "").strip()
+    hypothesis_policy = causal_hypothesis_policy or {}
+    supported = {str(item) for item in hypothesis_policy.get("supported_hypothesis_ids", []) if str(item).strip()}
+    forbidden = {
+        str(item)
+        for key in ("falsified_hypothesis_ids", "unresolved_hypothesis_ids")
+        for item in hypothesis_policy.get(key, [])
+        if str(item).strip()
+    }
+    if bool(hypothesis_policy.get("instrumented")):
+        if not source_hypothesis_id:
+            raise ValueError("source_hypothesis_id is required for instrumented causal evidence")
+        if source_hypothesis_id in forbidden:
+            raise ValueError(f"source_hypothesis_id is not actionable: {source_hypothesis_id}")
+        if source_hypothesis_id not in supported:
+            raise ValueError(f"source_hypothesis_id is not a supported hypothesis: {source_hypothesis_id}")
 
     raw_updates = value.get("harness_updates", {})
     if not isinstance(raw_updates, dict):
@@ -1071,6 +1204,7 @@ def _validate_patch(
             raise ValueError("rollout_wall_clock_seconds must be between 30 and 14400")
         normalized_updates[key] = raw_value
     return {
+        "source_hypothesis_id": source_hypothesis_id,
         "system_prompt_append": append,
         "harness_updates": normalized_updates,
         "rationale": str(value.get("rationale", "") or "").strip(),
@@ -1160,6 +1294,7 @@ def _build_actions(
     patch: dict[str, Any],
     issue_ids: list[str],
     case_ids: list[str],
+    source_hypothesis_id: str,
 ) -> list[dict[str, Any]]:
     common = {
         "role": _ROLE,
@@ -1173,7 +1308,10 @@ def _build_actions(
         "allowed_tools": [],
         "expected_effect": patch["expected_effect"],
         "risk_notes": ["Only the current PolicyHarness prompt/config package is changed."],
-        "constraints": {"target_case_ids": case_ids},
+        "constraints": {
+            "target_case_ids": case_ids,
+            "source_causal_hypothesis_id": source_hypothesis_id,
+        },
     }
     actions = [
         {
@@ -1243,6 +1381,9 @@ def _capabilities(actions: list[dict[str, Any]], case_ids: list[str]) -> list[di
             "target_path": action["target_path"],
             "runtime_name": Path(action["target_path"]).stem,
             "expected_effect": action.get("expected_effect", ""),
+            "source_causal_hypothesis_id": str(
+                (action.get("constraints", {}) or {}).get("source_causal_hypothesis_id", "")
+            ),
             "target_case_ids": case_ids,
         }
         for action in actions

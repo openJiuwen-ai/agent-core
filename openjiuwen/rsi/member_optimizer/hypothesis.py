@@ -19,7 +19,7 @@ from openjiuwen.rsi.member_optimizer.loader import (
     resolve_team_issues,
 )
 
-_HYPOTHESIS_VERSION = 3
+_HYPOTHESIS_VERSION = 4
 
 
 def compile_optimization_hypotheses(
@@ -64,6 +64,31 @@ def compile_optimization_hypotheses(
         decisive_probe = _decisive_probe(issue)
         target_ref = str(attribution.get("target_ref", "") or "").strip()
         decision_contract = _decision_contract(issue, attribution)
+        causal_coverage = (
+            dict(attribution.get("causal_coverage", {})) if isinstance(attribution.get("causal_coverage"), dict) else {}
+        )
+        hypothesis_assessment = (
+            list(attribution.get("hypothesis_assessment", []))
+            if isinstance(attribution.get("hypothesis_assessment"), list)
+            else []
+        )
+        assessment_statuses = {
+            str(item.get("status", "") or "").strip().casefold()
+            for item in hypothesis_assessment
+            if isinstance(item, dict)
+        }
+        if (
+            target_ref.casefold() == "unassigned"
+            or str(attribution.get("evidence_status", "") or "").strip().casefold() == "insufficient"
+        ):
+            continue
+        if hypothesis_assessment and ("supported" not in assessment_statuses or "unresolved" in assessment_statuses):
+            continue
+        prior_experiment_assessment = (
+            dict(attribution.get("prior_experiment_assessment", {}))
+            if isinstance(attribution.get("prior_experiment_assessment"), dict)
+            else {}
+        )
         payload: dict[str, Any] = {
             "source_issue_id": issue.issue_id,
             "target_case_ids": target_case_ids,
@@ -83,6 +108,23 @@ def compile_optimization_hypotheses(
             "public_trigger": public_triggers,
             "decisive_probe": decisive_probe,
             "decision_contract": decision_contract,
+            "causal_coverage": causal_coverage,
+            "hypothesis_assessment": hypothesis_assessment,
+            "supported_causal_hypothesis_ids": [
+                str(item.get("hypothesis_id", "") or "")
+                for item in hypothesis_assessment
+                if isinstance(item, dict)
+                and str(item.get("status", "") or "").strip().casefold() == "supported"
+                and str(item.get("hypothesis_id", "") or "")
+            ],
+            "falsified_causal_hypothesis_ids": [
+                str(item.get("hypothesis_id", "") or "")
+                for item in hypothesis_assessment
+                if isinstance(item, dict)
+                and str(item.get("status", "") or "").strip().casefold() == "falsified"
+                and str(item.get("hypothesis_id", "") or "")
+            ],
+            "prior_experiment_assessment": prior_experiment_assessment,
             "evidence_refs": _evidence_refs(issue.evidence),
             "diagnostic_lens": _diagnostic_lens(issue),
             "intent": "corrective",
@@ -262,6 +304,9 @@ def _decisive_probe(issue: Any) -> dict[str, Any]:
     return {
         "root_cause": attribution.get("root_cause", ""),
         "critical_mistake": attribution.get("critical_mistake", ""),
+        "causal_coverage": attribution.get("causal_coverage", {}),
+        "hypothesis_assessment": attribution.get("hypothesis_assessment", []),
+        "prior_experiment_assessment": attribution.get("prior_experiment_assessment", {}),
         "validation_observations": metadata.get("validation_observations", {}),
         "verifier_observations": metadata.get("verifier_observations", {}),
     }

@@ -44,6 +44,7 @@ from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
 
 DEFAULT_JUDGE_SOURCE = Path(".local/rsi/models/bailian_glm5_1_single_harness.yaml")
 EVALUATION_METHOD = "evobench-claw-official"
+INFRASTRUCTURE_SKIP_KEY = "_rsi_infrastructure_skip"
 GENERAL_TRIALS = 3
 OFFICE_TRIALS = 1
 _LOCAL_DOMAIN_TRIALS = {"general": GENERAL_TRIALS, "office": OFFICE_TRIALS}
@@ -497,6 +498,8 @@ def _select_and_validate_results(
 def _validate_task_result(task: Mapping[str, Any], *, official_eval_dir: Path) -> None:
     task_id = str(task.get("task_id", ""))
     domain = str(task.get("domain", "")).lower()
+    if _infrastructure_skip_info(task):
+        return
     runtime_errors = task.get("runtime_errors")
     if isinstance(runtime_errors, list) and runtime_errors:
         first_error = str(runtime_errors[0])
@@ -556,15 +559,17 @@ def _materialize(  # pylint: disable=huawei-too-many-arguments
     case_refs: list[dict[str, Any]] = []
     result_paths: list[str] = []
 
+    skipped_cases_dir = eval_dir / "skipped_cases"
     for index, (case, official_task, official_result) in enumerate(
         zip(cases, official_tasks, official_results, strict=True),
         start=1,
     ):
+        case_root = skipped_cases_dir if _infrastructure_skip_info(official_result) else cases_dir
         case_ref = _materialize_case(
             case=case,
             official_task=official_task,
             official_result=official_result,
-            case_dir=cases_dir / _safe_name(str(official_task["id"]), index=index),
+            case_dir=case_root / _safe_name(str(official_task["id"]), index=index),
             official_result_path=official_result_path,
             official_eval_dir=official_eval_dir,
             reused_official_result=reused_official_result,
@@ -575,16 +580,21 @@ def _materialize(  # pylint: disable=huawei-too-many-arguments
     # The iterative optimizer treats eval-ref case scores as the comparison
     # objective and regards 1.0 as pass. General uses strict Pass^3; Office uses
     # its single official verdict. Native rubric scores remain diagnostic only.
-    scores = [float(item["score"]) for item in case_refs]
-    passed = sum(bool(item["metadata"]["evaluation_passed"]) for item in case_refs)
+    scored_refs = [item for item in case_refs if isinstance(item.get("score"), int | float)]
+    scores = [float(item["score"]) for item in scored_refs]
+    passed = sum(item["metadata"].get("evaluation_passed") is True for item in scored_refs)
+    skipped = [item for item in case_refs if item.get("status") == "skipped"]
     summary_path = eval_dir / "summary.json"
     _write_json(
         summary_path,
         {
             "total_cases": len(case_refs),
+            "scored_cases": len(scored_refs),
+            "skipped_cases": len(skipped),
+            "skipped_case_ids": [str(item["case_id"]) for item in skipped],
             "passed_cases": passed,
-            "failed_cases": len(case_refs) - passed,
-            "average_score": sum(scores) / len(scores),
+            "failed_cases": len(scored_refs) - passed,
+            "average_score": sum(scores) / len(scores) if scores else 0.0,
             "evaluation_method": EVALUATION_METHOD,
             "case_results": result_paths,
         },
@@ -626,6 +636,16 @@ def _materialize_case(  # pylint: disable=huawei-too-many-arguments
 ) -> dict[str, Any]:
     case_id = str(official_task["id"])
     domain = str(official_task.get("domain", "")).lower()
+    skip_info = _infrastructure_skip_info(official_result)
+    if skip_info:
+        return _materialize_infrastructure_skip(
+            case=case,
+            official_task=official_task,
+            official_result=official_result,
+            case_dir=case_dir,
+            official_result_path=official_result_path,
+            skip_info=skip_info,
+        )
     trial_count = _trial_count_for_domain(domain, task_id=case_id)
     aggregate_mean_score = float(official_result["score"])
     passed = bool(official_result["pass_hat_k"])
@@ -646,6 +666,12 @@ def _materialize_case(  # pylint: disable=huawei-too-many-arguments
     _write_json(normalized_path, {"case_id": case_id, "traces": normalized_traces})
 
     reason = str(official_result.get("score_reason") or "official Evo-Bench aggregate")
+    judge_detail, judge_evidence_source = _apex_judge_detail(
+        official_result=official_result,
+        official_eval_dir=official_eval_dir,
+        task_id=case_id,
+        domain=domain,
+    )
     evaluation_metadata = {
         "source": "official_evobench_result",
         "domain": domain,
@@ -662,8 +688,9 @@ def _materialize_case(  # pylint: disable=huawei-too-many-arguments
         "trial_worker_diagnostics": official_result.get("trial_worker_diagnostics") or [],
         "trial_policy_violation_present": official_result.get("trial_policy_violation_present") or [],
         "policy_violation": bool(official_result.get("policy_violation")),
-        "judge_detail": official_result.get("judge_detail"),
-        "judge_evidence": _normalize_judge_evidence(official_result.get("judge_detail")),
+        "judge_detail": judge_detail,
+        "judge_evidence": _normalize_judge_evidence(judge_detail),
+        "judge_evidence_source": judge_evidence_source,
         "official_result_path": str(official_result_path.resolve()),
         "official_trajectory_paths": [str(path.resolve()) for path in trajectory_paths],
         "reused_official_result": reused_official_result,
@@ -735,14 +762,152 @@ def _materialize_case(  # pylint: disable=huawei-too-many-arguments
     }
 
 
+def _apex_judge_detail(
+    *,
+    official_result: Mapping[str, Any],
+    official_eval_dir: Path,
+    task_id: str,
+    domain: str,
+) -> tuple[Any, str]:
+    """Prefer the complete APEX grader feedback over result.json excerpts."""
+    fallback = official_result.get("judge_detail")
+    if domain != "office":
+        return fallback, "official_result.judge_detail"
+    grades_path = official_eval_dir / "rollouts" / task_id / "grades.json"
+    if not grades_path.is_file():
+        return fallback, "official_result.judge_detail"
+
+    grades = _read_mapping(grades_path, label=f"APEX grades for {task_id}")
+    scoring = grades.get("scoring_results")
+    final_score = scoring.get("final_score") if isinstance(scoring, Mapping) else None
+    if _finite_number(final_score) and not math.isclose(
+        float(final_score),
+        float(official_result["score"]),
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    ):
+        raise ValueError(f"APEX grades score disagrees with official result for {task_id}")
+
+    raw_results = grades.get("verifier_results")
+    if not isinstance(raw_results, list):
+        raise ValueError(f"APEX grades for {task_id} has no verifier_results")
+    criteria: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_results, start=1):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"APEX grades for {task_id} contains an invalid verifier result")
+        values = raw.get("verifier_result_values")
+        values = values if isinstance(values, Mapping) else {}
+        score = raw.get("score")
+        if not _finite_number(score):
+            raise ValueError(f"APEX grades for {task_id} verifier #{index} has no finite score")
+        criteria.append(
+            {
+                "verifier_id": str(raw.get("verifier_id") or f"criterion_{index}"),
+                "score": float(score),
+                "status": str(raw.get("status") or ""),
+                "rationale": str(values.get("grade_rationale") or ""),
+            }
+        )
+    return {
+        "grading_run_status": str(grades.get("grading_run_status") or ""),
+        "criteria": criteria,
+    }, "rollout.grades.json"
+
+
+def _infrastructure_skip_info(result: Mapping[str, Any]) -> dict[str, Any]:
+    value = result.get(INFRASTRUCTURE_SKIP_KEY)
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _materialize_infrastructure_skip(  # pylint: disable=huawei-too-many-arguments
+    *,
+    case: Mapping[str, Any],
+    official_task: Mapping[str, Any],
+    official_result: Mapping[str, Any],
+    case_dir: Path,
+    official_result_path: Path,
+    skip_info: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist an unscored infrastructure failure without feeding it to Analyzer."""
+    case_id = str(official_task["id"])
+    domain = str(official_task.get("domain", "")).lower()
+    reason = str(skip_info.get("reason") or "Evo-Bench infrastructure failure")
+    case_dir.mkdir(parents=True, exist_ok=True)
+    result_path = case_dir / "result.json"
+    trace_path = case_dir / "trace.json"
+    metadata = {
+        "source": "official_evobench_result",
+        "domain": domain,
+        "infrastructure_skip": True,
+        "excluded_from_metrics": True,
+        "skip_reason": reason,
+        "official_result_path": str(official_result_path.resolve()),
+        "analysis_task_contract": public_task_contract_snapshot(official_task),
+        "runtime_errors": official_result.get("runtime_errors") or [],
+    }
+    _write_json(
+        result_path,
+        {
+            "case_id": case_id,
+            "status": "skipped",
+            "execution_status": "infrastructure_skipped",
+            "score": None,
+            "result": str(official_result.get("final_answer") or ""),
+            "error": reason,
+            "evaluation": {
+                "method": EVALUATION_METHOD,
+                "passed": None,
+                "reason": reason,
+                "metadata": metadata,
+            },
+            "metadata": {
+                "case_path": str(case.get("case_path") or ""),
+                "team_name": "policy_harness",
+                "official_task_id": case_id,
+            },
+        },
+    )
+    _write_json(
+        trace_path,
+        {
+            "case_id": case_id,
+            "status": "skipped",
+            "input": str(official_task.get("prompt") or ""),
+            "response": str(official_result.get("final_answer") or ""),
+            "error": reason,
+            "evaluation": {"passed": None, "score": None, "reason": reason},
+            "behavior_trace": {"availability": "not_available", "reason": "infrastructure_skip"},
+        },
+    )
+    return {
+        "case_id": case_id,
+        "case_path": str(case.get("case_path") or ""),
+        "trace_path": str(trace_path),
+        "result_path": str(result_path),
+        "status": "skipped",
+        "score": None,
+        "metadata": {
+            "execution_status": "infrastructure_skipped",
+            "evaluation_method": EVALUATION_METHOD,
+            "evaluation_passed": None,
+            "infrastructure_skip": True,
+            "excluded_from_metrics": True,
+            "skip_reason": reason,
+            "domain": domain,
+        },
+    }
+
+
 def _official_metrics(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Return the selected-suite metrics used by the RSI promotion gate."""
-    passed = [bool(item.get("pass_hat_k")) for item in results]
-    native_scores = [float(item["score"]) for item in results]
-    pass_at_k = [bool(item.get("pass_at_k")) for item in results]
-    infra_failures = 0
+    skipped = [item for item in results if _infrastructure_skip_info(item)]
+    usable = [item for item in results if not _infrastructure_skip_info(item)]
+    passed = [bool(item.get("pass_hat_k")) for item in usable]
+    native_scores = [float(item["score"]) for item in usable]
+    pass_at_k = [bool(item.get("pass_at_k")) for item in usable]
+    infra_failures = len(skipped)
     policy_violations = 0
-    for item in results:
+    for item in usable:
         diagnostics = item.get("trial_worker_diagnostics")
         if isinstance(diagnostics, list):
             infra_failures += sum(bool(value) for value in diagnostics)
@@ -751,23 +916,27 @@ def _official_metrics(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             policy_violations += sum(bool(value) for value in violations)
         elif item.get("policy_violation"):
             policy_violations += 1
-    total = len(results)
+    total = len(usable)
     domain_counts: dict[str, int] = {}
     domain_pass_counts: dict[str, int] = {}
-    for item in results:
+    for item in usable:
         domain = str(item.get("domain", "unknown")).lower()
         domain_counts[domain] = domain_counts.get(domain, 0) + 1
         domain_pass_counts[domain] = domain_pass_counts.get(domain, 0) + int(bool(item.get("pass_hat_k")))
     domain_pass_rates = {domain: domain_pass_counts[domain] / count for domain, count in sorted(domain_counts.items())}
-    primary_metric = "pass_hat_k" if set(domain_counts) == {"general"} else "strict_task_pass_rate"
+    requested_domains = {str(item.get("domain", "unknown")).lower() for item in results}
+    primary_metric = "pass_hat_k" if requested_domains == {"general"} else "strict_task_pass_rate"
     return {
         "primary_metric": primary_metric,
-        "primary_score": sum(passed) / total,
+        "primary_score": sum(passed) / total if total else None,
         "pass_hat_k_count": sum(passed),
-        "pass_at_k": sum(pass_at_k) / total,
+        "pass_at_k": sum(pass_at_k) / total if total else None,
         "pass_at_k_count": sum(pass_at_k),
-        "native_mean_score": sum(native_scores) / total,
+        "native_mean_score": sum(native_scores) / total if total else None,
         "task_count": total,
+        "requested_task_count": len(results),
+        "skipped_infrastructure_count": len(skipped),
+        "skipped_infrastructure_case_ids": [str(item.get("task_id") or "") for item in skipped],
         "domain_counts": dict(sorted(domain_counts.items())),
         "domain_pass_rates": domain_pass_rates,
         "trials_by_domain": dict(_LOCAL_DOMAIN_TRIALS),

@@ -36,6 +36,7 @@ from openjiuwen.rsi.single_harness.iterative import (
     _bind_task_acceptance_contracts,
     _candidate_capabilities,
     _failed_machine_evidence,
+    _fallback_analysis_case_ids,
     _initialize_frozen_baseline,
     _invoked_skill_names,
     _invoked_tool_names,
@@ -43,6 +44,76 @@ from openjiuwen.rsi.single_harness.iterative import (
     _resume_fingerprint_matches,
     _tool_names_match,
 )
+
+
+def test_infrastructure_skip_is_not_an_optimization_target(tmp_path: Path) -> None:
+    eval_ref = tmp_path / "eval_ref.yaml"
+    _write_yaml(
+        eval_ref,
+        {
+            "cases": [
+                {"case_id": "valid-failure", "status": "failed", "score": 0.0},
+                {
+                    "case_id": "grader-timeout",
+                    "status": "skipped",
+                    "score": None,
+                    "metadata": {"infrastructure_skip": True},
+                },
+            ]
+        },
+    )
+
+    assert iterative_module._nonpassing_case_ids(str(eval_ref)) == {"valid-failure"}
+    assert iterative_module._skipped_case_ids(str(eval_ref)) == {"grader-timeout"}
+
+
+def test_no_issue_fallback_keeps_only_usable_case_diagnoses(tmp_path: Path) -> None:
+    diagnoses_path = tmp_path / "analysis" / "per_case_diagnoses.json"
+    diagnoses_path.parent.mkdir(parents=True)
+    diagnoses_path.write_text(
+        json.dumps(
+            {
+                "per_case_diagnoses": [
+                    {
+                        "case_id": "case-a",
+                        "summary": "The observed conflict was handled too shallowly.",
+                        "recommendation": "Run one bounded deeper-analysis experiment.",
+                        "confidence": "low",
+                    },
+                    {
+                        "case_id": "case-b",
+                        "analysis_failed": True,
+                        "diagnosis_status": "evidence_conflict",
+                        "summary": "Diagnosis contradicted deterministic evidence.",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    analysis_ref = tmp_path / "analysis" / "analysis_ref.yaml"
+    _write_yaml(
+        analysis_ref,
+        {
+            "issues": [],
+            "metadata": {"per_case_diagnoses_path": str(diagnoses_path)},
+        },
+    )
+
+    assert _fallback_analysis_case_ids(
+        analysis_ref,
+        nonpassing_case_ids={"case-a", "case-b"},
+    ) == {"case-a"}
+
+
+def test_no_issue_fallback_isolates_legacy_cases_without_diagnosis_artifact(tmp_path: Path) -> None:
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    _write_yaml(analysis_ref, {"issues": []})
+
+    assert _fallback_analysis_case_ids(
+        analysis_ref,
+        nonpassing_case_ids={"case-a", "case-b"},
+    ) == {"case-a", "case-b"}
 
 
 def test_frozen_baseline_seeds_global_comparison_without_consuming_batches(tmp_path: Path) -> None:
@@ -231,6 +302,61 @@ class _MemberOptimizer:
         return str(member_ref)
 
 
+def test_strict_causal_analysis_without_issue_stops_before_candidate_generation(tmp_path: Path) -> None:
+    class StrictNoIssueAnalyzer:
+        async def analyze(self, invocation: Any) -> str:
+            output_dir = Path(invocation.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            analysis_ref = output_dir / "analysis_ref.yaml"
+            _write_yaml(
+                analysis_ref,
+                {
+                    "issues": [],
+                    "metadata": {"analyzer_protocol_version": "generic_behavior_causal_v6"},
+                },
+            )
+            return str(analysis_ref)
+
+    class MustNotRunOptimizer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def optimize(self, **kwargs: Any) -> str:
+            del kwargs
+            self.calls += 1
+            raise AssertionError("optimizer must not run without an actionable strict causal issue")
+
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}), encoding="utf-8")
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    optimizer = MustNotRunOptimizer()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            data_loader=DataLoaderConfig(batch_size=1),
+        ),
+        evaluator=_Evaluator(),
+        analyzer=StrictNoIssueAnalyzer(),
+        member_optimizer=optimizer,
+    )
+
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+            )
+        )
+    )
+    report = yaml.safe_load(Path(result.report_path).read_text(encoding="utf-8"))
+
+    assert optimizer.calls == 0
+    assert report["candidate_count"] == 0
+
+
 def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path) -> None:
     dataset_path = tmp_path / "dataset" / "cases.json"
     dataset_path.parent.mkdir()
@@ -409,7 +535,7 @@ def test_candidate_evaluation_uses_short_run_level_path(tmp_path: Path) -> None:
     assert optimization_dir not in candidate_dir.parents
 
 
-def test_three_siblings_freeze_parent_then_select_from_policy_top_m(
+def test_three_siblings_freeze_parent_then_promote_best_realized_candidate(
     tmp_path: Path,
 ) -> None:
     events: list[dict[str, Any]] = []
@@ -655,14 +781,16 @@ def test_three_siblings_freeze_parent_then_select_from_policy_top_m(
     assert len({gate["before_harness_refs_path"] for gate in gates}) == 1
     assert [gate["primary_gate_accepted"] for gate in gates] == [True, True, True]
     assert [gate["within_selection_budget"] for gate in gates] == [True, False, False]
-    assert [gate["selected_for_promotion"] for gate in gates] == [True, False, False]
-    assert [gate["status"] for gate in gates] == ["accepted", "shadow_evaluated", "shadow_evaluated"]
-    winner_refs = gates[0]["candidate_harness_refs_path"]
+    assert {gate["selection_budget_role"] for gate in gates} == {"counterfactual_metric_only"}
+    assert [gate["qualified_for_promotion"] for gate in gates] == [True, True, True]
+    assert [gate["selected_for_promotion"] for gate in gates] == [False, True, False]
+    assert [gate["status"] for gate in gates] == ["superseded", "accepted", "superseded"]
+    winner_refs = gates[1]["candidate_harness_refs_path"]
     assert state["current_harness_refs_path"] == winner_refs
     assert state["best_harness_refs_path"] == winner_refs
     assert evaluator.full_checkpoint_inputs == [
         {
-            "candidate_index": 1,
+            "candidate_index": 2,
             "promotion_status": "provisional",
             "harness_refs_path": winner_refs,
         }
@@ -702,6 +830,10 @@ def test_three_siblings_freeze_parent_then_select_from_policy_top_m(
     assert cohort["metrics"]["best_of_k_gain"]["value"] == pytest.approx(0.9)
     assert cohort["metrics"]["top_m_gain"]["value"] == pytest.approx(0.4)
     assert cohort["metrics"]["selection_regret"]["value"] == pytest.approx(0.5)
+    assert cohort["metrics"]["selection_regret"]["predicted_top1_candidate_id"] == gates[0]["candidate_id"]
+    assert cohort["selection"]["selected_candidate_id"] == gates[1]["candidate_id"]
+    assert cohort["selection"]["promotion_policy"] == "best_realized_qualified_candidate"
+    assert cohort["selection"]["top_m_role"] == "counterfactual_metric_only"
     ledger_path = Path(state["candidate_feedback_ledger_path"])
     assert ledger_path.is_file()
     ledger = yaml.safe_load(ledger_path.read_text(encoding="utf-8"))
@@ -1402,12 +1534,13 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
                 {
                     "cases": [
                         {
-                            "case_id": "case_001",
+                            "case_id": str(case["case_id"]),
                             "status": "passed" if score else "failed",
                             "score": score,
                             "result_path": str(result_path),
                             "trace_path": str(trace_path),
                         }
+                        for case in kwargs["cases"]
                     ]
                 },
             )
@@ -1423,21 +1556,32 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
             output_dir.mkdir(parents=True, exist_ok=True)
             analysis_ref = output_dir / "analysis_ref.yaml"
             scope = "persisted artifacts" if self.call_count == 1 else "every output channel"
+            issues = [
+                {
+                    "issue_id": "issue_001",
+                    "category": "member_harness",
+                    "summary": f"Mask secrets in {scope}.",
+                    "recommendation": f"Apply credential masking to {scope}.",
+                    "affected_cases": ["case_001"],
+                    "optimization_target": "member_harness",
+                    "metadata": {"attribution": {"target_ref": "member_harness.solver.prompt_section"}},
+                }
+            ]
+            if self.call_count == 1:
+                issues.append(
+                    {
+                        "issue_id": "issue_002",
+                        "category": "member_harness",
+                        "summary": "A separate sibling issue affects case two.",
+                        "recommendation": "Repair case two after resolving case one's feedback.",
+                        "affected_cases": ["case_002"],
+                        "optimization_target": "member_harness",
+                        "metadata": {"attribution": {"target_ref": "member_harness.solver.prompt_section"}},
+                    }
+                )
             _write_yaml(
                 analysis_ref,
-                {
-                    "issues": [
-                        {
-                            "issue_id": "issue_001",
-                            "category": "member_harness",
-                            "summary": f"Mask secrets in {scope}.",
-                            "recommendation": f"Apply credential masking to {scope}.",
-                            "affected_cases": ["case_001"],
-                            "optimization_target": "member_harness",
-                            "metadata": {"attribution": {"target_ref": "member_harness.solver.prompt_section"}},
-                        }
-                    ]
-                },
+                {"issues": issues},
             )
             return str(analysis_ref)
 
@@ -1445,10 +1589,13 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
         def __init__(self) -> None:
             self.parent_refs: list[str] = []
             self.analysis_refs: list[str] = []
+            self.issue_ids: list[str] = []
 
         async def optimize(self, **kwargs: Any) -> str:
             self.parent_refs.append(kwargs["harness_refs_path"])
             self.analysis_refs.append(kwargs["analysis_result_path"])
+            issue_id = str(kwargs["optimization_issue_ids"][0])
+            self.issue_ids.append(issue_id)
             generation = len(self.parent_refs)
             run_dir = Path(kwargs["output_dir"]) / f"repair_{generation}"
             run_dir.mkdir(parents=True)
@@ -1461,7 +1608,7 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
             _write_yaml(
                 plan_path,
                 {
-                    "targets": [{"role": "solver", "attributed_issue_ids": ["issue_001"]}],
+                    "targets": [{"role": "solver", "attributed_issue_ids": [issue_id]}],
                     "actions": [
                         {
                             "action_id": f"repair_{generation}",
@@ -1469,7 +1616,7 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
                             "action_group": "prompt",
                             "operation": "modify",
                             "target_path": "prompt_sections/security.md",
-                            "attributed_issue_ids": ["issue_001"],
+                            "attributed_issue_ids": [issue_id],
                         }
                     ],
                 },
@@ -1488,7 +1635,17 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
 
     dataset_path = tmp_path / "dataset" / "cases.json"
     dataset_path.parent.mkdir()
-    dataset_path.write_text(json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}), encoding="utf-8")
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {"case_id": "case_001", "input": "fix first"},
+                    {"case_id": "case_002", "input": "fix second"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     harness_refs = tmp_path / "harness_refs.yaml"
     _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
     analyzer = RepairAnalyzer()
@@ -1522,6 +1679,7 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
     assert analyzer.call_count == 2
     assert optimizer.parent_refs[1].endswith("candidate_refs_1.yaml")
     assert "failure_analysis" in optimizer.analysis_refs[1]
+    assert optimizer.issue_ids == ["issue_001", "issue_001"]
     assert state["candidate_gates"][0]["selected_as_repair_parent"] is True
 
 
@@ -2437,8 +2595,22 @@ def test_prior_candidate_feedback_returns_case_scoped_causal_delta() -> None:
                     "case_001": "diff --git a/module.py b/module.py",
                 },
                 "candidate_failure_diagnoses": {
-                    "case_001": {"root_cause": "state_b was omitted"},
+                    "case_001": {
+                        "root_cause": "state_b was omitted",
+                        "prior_experiment_assessment": {
+                            "availability": "available",
+                            "causal_hypothesis_status": "falsified",
+                        },
+                    },
                 },
+                "causal_intervention_contracts": [
+                    {
+                        "action_id": "a1",
+                        "target_case_ids": ["case_001"],
+                        "source_causal_hypothesis_id": "h_state_b",
+                        "predicted_behavior_and_outcome": "state_b becomes valid",
+                    }
+                ],
             }
         ],
     }
@@ -2456,6 +2628,8 @@ def test_prior_candidate_feedback_returns_case_scoped_causal_delta() -> None:
     assert experiment["target_score_delta"] == 0.4
     assert experiment["selected_for_promotion"] is False
     assert experiment["candidate_failure_diagnosis"]["root_cause"] == ("state_b was omitted")
+    assert experiment["causal_intervention_contracts"][0]["predicted_behavior_and_outcome"] == ("state_b becomes valid")
+    assert experiment["causal_intervention_contracts"][0]["source_causal_hypothesis_id"] == "h_state_b"
     assert "other" not in feedback["by_case"]
 
 

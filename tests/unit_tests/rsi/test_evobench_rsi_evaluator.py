@@ -259,6 +259,51 @@ async def test_materializes_mixed_general_and_single_trial_office_tasks(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_infrastructure_skip_is_materialized_but_excluded_from_metrics(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    refs_path = tmp_path / "harness_refs.yaml"
+    _write_harness_refs(refs_path, root / "policy_harness_seed")
+    skipped = {
+        "task_id": TASK_OFFICE,
+        "domain": "office",
+        "score_reason": "apex_grader_error: timed out",
+        rsi_evaluator.INFRASTRUCTURE_SKIP_KEY: {
+            "reason": "apex_grader_error: timed out",
+            "excluded_from_metrics": True,
+        },
+    }
+    result_path = _write_official_result(
+        tmp_path / "existing" / "evaluation",
+        harness=root / "policy_harness_seed",
+        tasks=[_task_result(TASK_PASS, passed=True, score=0.73), skipped],
+    )
+
+    eval_ref_path = await rsi_evaluator.evaluate_batch(
+        [{"case_id": TASK_PASS}, {"case_id": TASK_OFFICE}],
+        "",
+        str(refs_path),
+        str(tmp_path / "rsi-eval"),
+        None,
+        existing_official_result=str(result_path),
+        evobench_root=str(root),
+    )
+
+    eval_ref = yaml.safe_load(Path(eval_ref_path).read_text(encoding="utf-8"))
+    assert [case["status"] for case in eval_ref["cases"]] == ["passed", "skipped"]
+    assert [case["score"] for case in eval_ref["cases"]] == [1.0, None]
+    assert eval_ref["official_metrics"]["primary_score"] == 1.0
+    assert eval_ref["official_metrics"]["task_count"] == 1
+    assert eval_ref["official_metrics"]["requested_task_count"] == 2
+    assert eval_ref["official_metrics"]["skipped_infrastructure_count"] == 1
+    summary = json.loads(Path(eval_ref["summary_path"]).read_text(encoding="utf-8"))
+    assert summary["scored_cases"] == 1
+    assert summary["skipped_cases"] == 1
+    assert summary["failed_cases"] == 0
+    analyzer_cases = CaseReader.read_case_inputs(eval_ref["case_results_dir"])
+    assert [case.case_id for case in analyzer_cases] == [TASK_PASS]
+
+
+@pytest.mark.asyncio
 async def test_materializes_aggregate_office_judge_criteria_for_analyzer(tmp_path: Path) -> None:
     root = _fake_root(tmp_path)
     refs_path = tmp_path / "harness_refs.yaml"
@@ -306,6 +351,56 @@ async def test_materializes_aggregate_office_judge_criteria_for_analyzer(tmp_pat
             "source": "official_result.judge_detail.criteria",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_prefers_complete_apex_grades_rationale_over_truncated_result_excerpt(tmp_path: Path) -> None:
+    root = _fake_root(tmp_path)
+    refs_path = tmp_path / "harness_refs.yaml"
+    _write_harness_refs(refs_path, root / "policy_harness_seed")
+    task = _task_result(TASK_OFFICE, passed=False, score=0.0, domain="office")
+    task["judge_detail"] = {
+        "grading_run_status": "completed",
+        "criteria": [{"verifier_id": "ver_timing", "score": 0.0, "rationale": "truncated..."}],
+    }
+    evaluation_dir = tmp_path / "existing" / "evaluation"
+    result_path = _write_official_result(
+        evaluation_dir,
+        harness=root / "policy_harness_seed",
+        tasks=[task],
+    )
+    full_rationale = "The criterion expects nine months following the expiration date, not prior to it."
+    _write_json(
+        evaluation_dir / "rollouts" / TASK_OFFICE / "grades.json",
+        {
+            "grading_run_status": "completed",
+            "verifier_results": [
+                {
+                    "verifier_id": "ver_timing",
+                    "score": 0.0,
+                    "status": "ok",
+                    "verifier_result_values": {"grade_rationale": full_rationale},
+                }
+            ],
+            "scoring_results": {"final_score": 0.0},
+        },
+    )
+
+    eval_ref_path = await rsi_evaluator.evaluate_batch(
+        [{"case_id": TASK_OFFICE}],
+        "",
+        str(refs_path),
+        str(tmp_path / "rsi-eval"),
+        None,
+        existing_official_result=str(result_path),
+        evobench_root=str(root),
+    )
+
+    eval_ref = yaml.safe_load(Path(eval_ref_path).read_text(encoding="utf-8"))
+    result = json.loads(Path(eval_ref["cases"][0]["result_path"]).read_text(encoding="utf-8"))
+    metadata = result["evaluation"]["metadata"]
+    assert metadata["judge_evidence_source"] == "rollout.grades.json"
+    assert metadata["judge_evidence"]["criteria"][0]["rationale"] == full_rationale
 
 
 @pytest.mark.asyncio

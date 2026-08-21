@@ -8,12 +8,20 @@ import yaml
 
 from examples.rsi.run_evobench_single_harness import (
     _ensure_source_run,
+    _parse_args,
     _resolve_execution_mode,
     _write_config,
     _write_dataset,
     _write_seed_refs,
 )
 from openjiuwen.rsi.config import load_auto_coordinating_harness_config
+
+
+def test_entrypoint_defaults_to_one_candidate_for_single_harness_optimization() -> None:
+    args = _parse_args([])
+
+    assert args.sibling_candidate_count == 1
+    assert args.improver_policy_ref == ""
 
 
 def test_entrypoint_writes_canonical_dataset_refs_and_config(tmp_path: Path) -> None:

@@ -268,7 +268,58 @@ def test_build_cohort_computes_search_metrics_only_for_comparable_frozen_candida
         "requested_m": 2,
         "effective_m": 2,
     }
-    assert ledger["metrics"]["selection_regret"]["value"] == pytest.approx(0.3)
+    assert ledger["metrics"]["selection_regret"] == {
+        "status": "available",
+        "value": pytest.approx(0.2),
+        "best_candidate_id": "oracle_best",
+        "predicted_top1_candidate_id": "predicted_best",
+    }
+    assert ledger["selection"]["selected_candidate_id"] == "selected"
+    assert ledger["selection"]["promotion_policy"] == "best_realized_qualified_candidate"
+    assert ledger["selection"]["top_m_role"] == "counterfactual_metric_only"
+
+
+def test_build_cohort_preserves_pre_evaluation_causal_prediction_and_assessment() -> None:
+    candidate = _candidate(
+        "candidate",
+        1,
+        1,
+        0.0,
+        causal_intervention_contracts=[
+            {
+                "action_id": "act_001",
+                "target_case_ids": ["case_a", "case_b"],
+                "source_causal_hypothesis_id": "h_artifact",
+                "predicted_behavior_and_outcome": "the selected behavior changes and the target passes",
+                "prediction_recorded_before_evaluation": True,
+            }
+        ],
+        candidate_failure_diagnoses={
+            "case_a": [
+                {
+                    "prior_experiment_assessment": {
+                        "availability": "available",
+                        "intervention_activated": "yes",
+                        "predicted_behavior_occurred": "yes",
+                        "predicted_outcome_occurred": "no",
+                        "causal_hypothesis_status": "falsified",
+                    }
+                }
+            ]
+        },
+    )
+
+    ledger = build_candidate_feedback_cohort(
+        cohort=_cohort(),
+        candidates=[candidate],
+        selected_candidate_id="",
+        top_m=1,
+    )
+
+    experiment = ledger["candidates"][0]["causal_experiment"]
+    assert experiment["prediction_recorded_before_evaluation"] is True
+    assert experiment["intervention_contracts"][0]["source_causal_hypothesis_id"] == "h_artifact"
+    assert experiment["assessment_by_case"]["case_a"][0]["causal_hypothesis_status"] == "falsified"
 
 
 def test_build_cohort_accepts_a_versioned_ranking_policy_and_records_improver() -> None:

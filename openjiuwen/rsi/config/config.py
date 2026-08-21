@@ -98,6 +98,8 @@ class EvaluationResultAnalyzerConfig:
     diagnosis_agent_max_retries: int = DEFAULT_MODEL_CALL_MAX_RETRIES
     diagnosis_agent_max_concurrency: int = 5
     diagnosis_agent_max_iterations: int = 20
+    diagnosis_agent_max_tokens: int = 8192
+    causal_investigation_required: bool = True
     max_issues: int = 20
     evidence_limit_per_issue: int = 5
     output_filename: str = "issues.yaml"
@@ -118,6 +120,14 @@ class EvaluationResultAnalyzerConfig:
             diagnosis_agent_max_iterations=_int_value(
                 data.get("diagnosis_agent_max_iterations"),
                 default=20,
+            ),
+            diagnosis_agent_max_tokens=_int_value(
+                data.get("diagnosis_agent_max_tokens"),
+                default=8192,
+            ),
+            causal_investigation_required=_bool_value(
+                data.get("causal_investigation_required"),
+                default=True,
             ),
             max_issues=_int_value(data.get("max_issues"), default=20),
             evidence_limit_per_issue=_int_value(data.get("evidence_limit_per_issue"), default=5),

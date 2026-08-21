@@ -62,6 +62,8 @@ class TestAnalyzerConfiguration:
                 "diagnosis_agent_max_retries": 3,
                 "diagnosis_agent_max_concurrency": 7,
                 "diagnosis_agent_max_iterations": 25,
+                "diagnosis_agent_max_tokens": 12288,
+                "causal_investigation_required": False,
                 "max_issues": 8,
                 "evidence_limit_per_issue": 3,
                 "output_filename": "issues.yaml",
@@ -73,6 +75,9 @@ class TestAnalyzerConfiguration:
         assert config.diagnosis_agent_max_retries == 3
         assert config.diagnosis_agent_max_concurrency == 7
         assert config.diagnosis_agent_max_iterations == 25
+        assert config.diagnosis_agent_max_tokens == 12288
+        assert config.causal_investigation_required is False
+        assert EvaluationResultAnalyzerConfig().causal_investigation_required is True
         assert config.max_issues == 8
         assert config.evidence_limit_per_issue == 3
         assert config.output_filename == "issues.yaml"
@@ -875,12 +880,11 @@ class TestDiagnosisAgentStrategy:
         agent = await strategy._build_agent(str(tmp_path))
 
         assert captured["model_data"]["model_client_config"]["api_key"] == "expanded-key"
+        assert captured["model_data"]["model_request_config"]["max_tokens"] == 8192
         assert agent["model"] == "fake-model"
         rails = captured["agent_kwargs"]["rails"]
-        assert len(rails) == 1
-        assert isinstance(rails[0], analyzer_module.RSISysOperationRail)
-        assert rails[0]._read_only is True
-        assert rails[0]._bash_pipefail is True
+        assert rails == []
+        assert captured["agent_kwargs"]["enable_sys_operation"] is False
 
     @pytest.mark.asyncio
     async def test_analyze_diagnoses_only_nonpassing_cases(
@@ -934,7 +938,7 @@ class TestDiagnosisAgentStrategy:
             encoding="utf-8",
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"),
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False),
         )
         diagnosed_case_ids: list[str] = []
 
@@ -963,7 +967,7 @@ class TestDiagnosisAgentStrategy:
         assert artifact.metadata["diagnosed_case_count"] == 1
         causal_evidence_path = Path(artifact.metadata["causal_evidence_path"])
         causal_evidence = json.loads(causal_evidence_path.read_text(encoding="utf-8"))
-        assert causal_evidence["schema_version"] == 1
+        assert causal_evidence["schema_version"] == 2
         assert [case["case_id"] for case in causal_evidence["cases"]] == ["unresolved"]
         assert causal_evidence["cases"][0]["causal_digest"]["outcome"]["case_id"] == "unresolved"
 
@@ -984,6 +988,7 @@ class TestDiagnosisAgentStrategy:
             EvaluationResultAnalyzerConfig(
                 model_config_ref="unused.yaml",
                 diagnosis_agent_max_concurrency=2,
+                causal_investigation_required=False,
             ),
         )
         case_inputs = []
@@ -1121,7 +1126,7 @@ class TestDiagnosisAgentStrategy:
             result_path=str(result_path),
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
         )
         observed_runtime: Path | None = None
 
@@ -1207,7 +1212,7 @@ class TestDiagnosisAgentStrategy:
         )
 
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
         )
 
         async def fake_build_agent(workspace: str) -> dict[str, str]:
@@ -1264,7 +1269,7 @@ class TestDiagnosisAgentStrategy:
             )
 
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
         )
 
         async def fake_build_agent(workspace: str) -> dict[str, str]:
@@ -1360,6 +1365,7 @@ class TestDiagnosisAgentStrategy:
             EvaluationResultAnalyzerConfig(
                 model_config_ref="unused.yaml",
                 diagnosis_agent_max_concurrency=2,
+                causal_investigation_required=False,
             )
         )
 
@@ -1411,6 +1417,156 @@ class TestDiagnosisAgentStrategy:
         assert call_order[1].startswith("case_002")
 
     @pytest.mark.asyncio
+    async def test_insufficient_case_is_supplemented_before_next_case(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+            CaseAnalysisInput,
+            DeterministicSignals,
+        )
+
+        cases = []
+        for case_id in ("case_a", "case_b"):
+            case_dir = tmp_path / "case_results" / case_id
+            result_path = case_dir / "result.json"
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text("{}", encoding="utf-8")
+            normalized_trace = case_dir / "judge" / "normalized_trace.json"
+            normalized_trace.parent.mkdir(parents=True)
+            messages = []
+            if case_id == "case_a":
+                messages = [
+                    {
+                        "role": "assistant",
+                        "message_index": 7,
+                        "step_pointer": "trial_1:message_7",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "name": "read_file",
+                                "input": '{"path":"contract.txt"}',
+                                "output": "SUPPLEMENT_MARKER conflicting deadline is stated in the contract",
+                                "error": "",
+                                "step_pointer": "trial_1:message_7",
+                            }
+                        ],
+                    }
+                ]
+            normalized_trace.write_text(
+                json.dumps(
+                    {
+                        "case_id": case_id,
+                        "traces": [{"trace_id": f"{case_id}:trial_1", "messages": messages}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cases.append(
+                CaseAnalysisInput(
+                    case_id=case_id,
+                    status="failed",
+                    score=0.0,
+                    input=f"{case_id} input",
+                    expected=None,
+                    response=f"{case_id} response",
+                    error="",
+                    evaluation_method="llm_as_judge",
+                    evaluation_passed=False,
+                    evaluation_reason="failed",
+                    evaluation_metadata={},
+                    trace_path=str(case_dir / "trace.json"),
+                    result_path=str(result_path),
+                )
+            )
+
+        strategy = analyzer_module.DiagnosisAgentStrategy(
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
+        )
+        call_order: list[str] = []
+
+        async def fake_build_agent(workspace: str) -> dict[str, str]:
+            return {"workspace": workspace}
+
+        def diagnosis(evidence_status: str) -> dict[str, Any]:
+            assigned = evidence_status == "confirmed"
+            return {
+                "diagnoses": [
+                    {
+                        "issue_category": "member_harness" if assigned else "unassigned",
+                        "severity": "medium",
+                        "summary": "deadline conflict diagnosis",
+                        "failure_mode": "wrong_deadline_decision",
+                        "evidence_status": evidence_status,
+                        "failed_requirement": "deadline requirement",
+                        "competing_hypotheses": ["contract deadline conflict"],
+                        "discriminating_evidence": "inspect the contract deadline",
+                        "root_cause": "deadline conflict" if assigned else "not yet distinguished",
+                        "critical_mistake": "selected the wrong deadline" if assigned else "unknown",
+                        "general_mechanism": "resolve conflicting source requirements",
+                        "target_ref": "member_harness.solver.prompt" if assigned else "unassigned",
+                        "evidence_refs": ([{"step_pointer": "trial_1:message_7"}] if assigned else []),
+                        "affected_components": ["solver"] if assigned else [],
+                        "recommendation": "compare governing sources before answering",
+                        "confidence": "high" if assigned else "low",
+                    }
+                ]
+            }
+
+        async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
+            del agent, max_retries
+            if "inside the Analyzer, before any Harness candidate" in prompt:
+                call_order.append("case_a_supplement")
+                assert "SUPPLEMENT_MARKER" in prompt
+                return json.dumps(diagnosis("confirmed"))
+            if "case_a input" in prompt:
+                call_order.append("case_a_initial")
+                return json.dumps(diagnosis("insufficient"))
+            call_order.append("case_b_initial")
+            return json.dumps(diagnosis("confirmed"))
+
+        monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
+        monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
+        monkeypatch.setattr(
+            analyzer_module,
+            "_case_diagnoses_validation_conflicts",
+            lambda *args, **kwargs: [],
+        )
+
+        results = await strategy._per_case_diagnosis(
+            cases,
+            DeterministicSignals(method="llm_as_judge"),
+            None,
+        )
+
+        assert call_order == ["case_a_initial", "case_a_supplement", "case_b_initial"]
+        assert results[0]["case_id"] == "case_a"
+        assert results[0]["evidence_status"] == "confirmed"
+        assert results[0]["evidence_supplement"]["status"] == "resolved"
+        assert results[1]["case_id"] == "case_b"
+        assert results[1]["evidence_supplement"]["status"] == "not_needed"
+
+    def test_compactor_omission_claim_forces_raw_evidence_supplement(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _diagnoses_need_evidence_supplement,
+        )
+
+        diagnoses = [
+            {
+                "evidence_status": "confirmed",
+                "discriminating_evidence": (
+                    "The displayed tool response contained ...[omitted 2319 chars]... "
+                    "where the controlling clause should appear."
+                ),
+            }
+        ]
+
+        assert _diagnoses_need_evidence_supplement(diagnoses) is True
+
+    @pytest.mark.asyncio
     async def test_per_case_diagnosis_records_retryable_empty_output_without_aborting(
         self,
         tmp_path: Path,
@@ -1448,7 +1604,7 @@ class TestDiagnosisAgentStrategy:
         )
 
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
         )
 
         async def fake_build_agent(workspace: str) -> dict[str, str]:
@@ -1517,6 +1673,7 @@ class TestDiagnosisAgentStrategy:
             EvaluationResultAnalyzerConfig(
                 model_config_ref="unused.yaml",
                 diagnosis_agent_max_retries=1,
+                causal_investigation_required=False,
             )
         )
 
@@ -1601,7 +1758,7 @@ class TestDiagnosisAgentStrategy:
             result_path=str(result_path),
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
         )
 
         async def fake_build_agent(workspace: str) -> dict[str, str]:
@@ -1695,7 +1852,7 @@ class TestDiagnosisAgentStrategy:
             encoding="utf-8",
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
         )
 
         async def fake_per_case(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
@@ -2060,7 +2217,7 @@ class TestDiagnosisPromptEvidenceSummary:
         )
         payload = json.loads(raw)
 
-        assert payload["analysis_protocol"]["version"] == "generic_behavior_causal_v2"
+        assert payload["analysis_protocol"]["version"] == "generic_behavior_causal_v6"
         assert payload["retrieved_experience"]["matches"][0]["component_layer"] == "prompt_section"
         assert payload["experience_usage_policy"]["must_use_current_evidence_first"] is True
         assert "Do not copy a historical target_ref" in payload["experience_usage_policy"]["rules"][0]
@@ -2085,6 +2242,189 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "evidence_summary.md" in DIAGNOSIS_SYSTEM_PROMPT
         assert "no-exception smoke probe" in DIAGNOSIS_SYSTEM_PROMPT
         assert "Do not convert a Tool, Skill, Config" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "Failed-requirement coverage (hard)" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "task_sufficient" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "counterfactual_prediction" in DIAGNOSIS_SYSTEM_PROMPT
+
+    def test_input_builds_complete_failed_requirement_inventory(self, tmp_path: Path) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _build_diagnosis_input_json,
+        )
+
+        result_path = tmp_path / "case_requirements" / "result.json"
+        result_path.parent.mkdir(parents=True)
+        result_path.write_text("{}", encoding="utf-8")
+        case = replace(
+            self._make_case_input(str(result_path)),
+            evaluation_metadata={
+                "judge_evidence": {
+                    "criteria": [
+                        {
+                            "criterion_id": "correct_value",
+                            "score": 0.0,
+                            "status": "ok",
+                            "rationale": "the produced value differs from the required value",
+                        },
+                        {
+                            "criterion_id": "artifact_exists",
+                            "score": 1.0,
+                            "status": "ok",
+                            "rationale": "the artifact exists",
+                        },
+                    ]
+                }
+            },
+        )
+
+        payload = json.loads(
+            _build_diagnosis_input_json(
+                case=case,
+                signals=self._make_signals(),
+                retrieved_experience=None,
+                evidence_summary_available=False,
+            )
+        )
+
+        inventory = payload["deterministic_failed_requirement_inventory"]
+        assert [item["requirement_id"] for item in inventory["items"]] == ["criterion:correct_value"]
+        assert "does not identify their causes" in inventory["policy"]
+
+    def test_causal_coverage_rejects_local_cause_claimed_as_complete(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _diagnosis_validation_conflicts,
+        )
+
+        inventory = {
+            "items": [
+                {"requirement_id": "criterion:value"},
+                {"requirement_id": "criterion:format"},
+            ]
+        }
+        diagnosis = {
+            "evidence_status": "confirmed",
+            "target_ref": "member_harness.solver.prompt",
+            "failed_requirement": "the output value is wrong",
+            "discriminating_evidence": "the trace shows the decision and resulting value",
+            "evidence_refs": [{"trace_id": "t", "role": "solver", "message_index": 2}],
+            "failure_cluster": {
+                "failed_checks": ["criterion:value"],
+                "observable_behavior": "the value is wrong",
+            },
+            "causal_coverage": {
+                "explained_requirement_ids": ["criterion:value"],
+                "residual_requirement_ids": ["criterion:format"],
+                "unexplained_observations": ["format remains wrong"],
+                "causal_chain": [
+                    {
+                        "cause": "the solver chose the wrong value",
+                        "effect": "the value criterion failed",
+                        "evidence_status": "observed",
+                        "evidence_refs": [],
+                    }
+                ],
+                "counterfactual_prediction": "the value changes while formatting remains unchanged",
+                "sufficiency_status": "task_sufficient",
+            },
+            "decision_contract": {"acceptance_observable": "the value criterion passes"},
+            "confidence": "high",
+        }
+
+        conflicts = _diagnosis_validation_conflicts(
+            diagnosis,
+            {},
+            failed_requirement_inventory=inventory,
+        )
+
+        assert any("task_sufficient requires all inventory IDs explained" in item for item in conflicts)
+
+    def test_causal_coverage_accepts_explicit_local_contributor(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _diagnosis_validation_conflicts,
+        )
+
+        inventory = {
+            "items": [
+                {"requirement_id": "criterion:value"},
+                {"requirement_id": "criterion:format"},
+            ]
+        }
+        diagnosis = {
+            "evidence_status": "confirmed",
+            "target_ref": "member_harness.solver.prompt",
+            "failed_requirement": "the output value is wrong",
+            "discriminating_evidence": "the trace links the decision to the wrong value",
+            "evidence_refs": [{"trace_id": "t", "role": "solver", "message_index": 2}],
+            "failure_cluster": {
+                "failed_checks": ["criterion:value"],
+                "observable_behavior": "the value is wrong",
+            },
+            "causal_coverage": {
+                "explained_requirement_ids": ["criterion:value"],
+                "residual_requirement_ids": ["criterion:format"],
+                "unexplained_observations": ["the format failure has another cause"],
+                "causal_chain": [
+                    {
+                        "cause": "the solver chose the wrong value",
+                        "effect": "the value criterion failed",
+                        "evidence_status": "observed",
+                        "evidence_refs": [],
+                    }
+                ],
+                "counterfactual_prediction": "the value changes while formatting remains unchanged",
+                "sufficiency_status": "local_contributor",
+            },
+            "decision_contract": {"acceptance_observable": "the value criterion improves"},
+            "confidence": "high",
+        }
+
+        assert (
+            _diagnosis_validation_conflicts(
+                diagnosis,
+                {},
+                failed_requirement_inventory=inventory,
+            )
+            == []
+        )
+
+    def test_diagnosis_set_cannot_drop_an_independent_failed_requirement(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _case_diagnoses_validation_conflicts,
+        )
+
+        inventory = {
+            "items": [
+                {"requirement_id": "criterion:value"},
+                {"requirement_id": "criterion:format"},
+            ]
+        }
+        diagnosis = {
+            "failure_cluster": {
+                "failed_checks": ["criterion:value"],
+                "observable_behavior": "the value is wrong",
+            },
+            "causal_coverage": {
+                "explained_requirement_ids": ["criterion:value"],
+                "residual_requirement_ids": ["criterion:format"],
+                "unexplained_observations": ["the format failure has another cause"],
+                "causal_chain": [
+                    {
+                        "cause": "wrong decision",
+                        "effect": "wrong value",
+                        "evidence_status": "supported",
+                    }
+                ],
+                "counterfactual_prediction": "the value changes but formatting does not",
+                "sufficiency_status": "local_contributor",
+            },
+        }
+
+        conflicts = _case_diagnoses_validation_conflicts(
+            [diagnosis],
+            {},
+            failed_requirement_inventory=inventory,
+        )
+
+        assert conflicts == ["diagnosis set omitted failed requirement IDs: criterion:format"]
 
     def test_generic_protocol_rejects_assigned_target_with_insufficient_evidence(self) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
@@ -3367,7 +3707,7 @@ class TestBoundedMultiDiagnosis:
             result_path=str(result_path),
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
         )
         diagnoses = [
             self._diagnosis(
@@ -3387,7 +3727,7 @@ class TestBoundedMultiDiagnosis:
             return {"workspace": workspace}
 
         async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
-            assert "Return at most 3 diagnoses" in prompt
+            assert "CAUSAL_INVESTIGATION_PHASE=plan" in prompt
             return json.dumps({"diagnoses": diagnoses})
 
         monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
@@ -3472,7 +3812,9 @@ class TestDeterministicAggregation:
             EvaluationSummaryInput,
         )
 
-        strategy = DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
+        strategy = DiagnosisAgentStrategy(
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
+        )
 
         async def fail_build_agent(*args: Any, **kwargs: Any) -> None:
             raise AssertionError("aggregation should not require another LLM call")
@@ -3655,6 +3997,7 @@ class TestAnalyzerRealModelIntegration:
                 max_issues=3,
                 evidence_limit_per_issue=3,
                 output_filename="team_issues.yaml",
+                causal_investigation_required=False,
             ),
         )
         invocation = EvaluationResultAnalysisInvocation(
@@ -3734,6 +4077,7 @@ class TestAnalyzerRealModelIntegration:
             EvaluationResultAnalyzerConfig(
                 model_config_ref=str(model_config_path),
                 output_filename="team_issues.yaml",
+                causal_investigation_required=False,
             ),
         )
         invocation = EvaluationResultAnalysisInvocation(
