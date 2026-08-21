@@ -154,3 +154,19 @@ def test_prepare_member_workspace_classifies_modes() -> None:
         )
         == str(apaths.team_member_workspace_dir(team, "worker"))
     )
+
+
+@pytest.mark.level0
+def test_cleanup_team_releases_dynamic_preserves_predefined() -> None:
+    binder = MemberWorkspaceBinder()
+    binder.setup(_binding("teamA", "shared", MEMBER_MODE_PREDEFINED))
+    binder.setup(_binding("teamA", "worker", MEMBER_MODE_DYNAMIC))
+    shared_real = apaths.get_agent_teams_home() / "shared"
+    worker_real = member_real_dir("teamA", "worker", MEMBER_MODE_DYNAMIC)
+
+    binder.cleanup_team("teamA")
+
+    assert not worker_real.exists(), "dynamic real dir removed on zero"
+    assert not is_dir_link(apaths.team_member_workspace_dir("teamA", "worker"))
+    assert shared_real.is_dir(), "predefined shared dir preserved"
+    assert not is_dir_link(apaths.team_member_workspace_dir("teamA", "shared"))
