@@ -8,7 +8,7 @@ import pytest
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import KV_CACHE_EPHEMERAL_TAIL_METADATA
-from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, UserMessage
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY,
     PromptAttachment,
@@ -57,9 +57,10 @@ async def test_prompt_attachment_manager_collect_render_inject_and_update():
     injected = manager.inject_messages(original, rendered)
     assert original[-1].content == "query"
     assert len(injected) == len(original) + 1
-    assert injected[-2].content == "query"
-    assert isinstance(injected[-1], UserMessage)
-    assert injected[-1].content.startswith("<system-reminder>")
+    assert injected[0].content == "sys"
+    assert isinstance(injected[1], UserMessage)
+    assert injected[1].content.startswith("<system-reminder>")
+    assert injected[-1].content == "query"
 
     updated = await manager.update_by_id(runtime.id, PromptAttachmentUpdate(content="updated runtime"))
     assert updated.content == "updated runtime"
@@ -271,7 +272,7 @@ def test_prompt_attachment_manager_render_escapes_xml():
     assert "&lt;raw&gt;&amp;value" in rendered
 
 
-def test_prompt_attachment_manager_appends_attachment_message_after_multimodal_user_message():
+def test_prompt_attachment_manager_inserts_attachment_before_multimodal_user_message():
     manager = PromptAttachmentManager()
     original = [
         UserMessage(content=[
@@ -283,16 +284,16 @@ def test_prompt_attachment_manager_appends_attachment_message_after_multimodal_u
     injected = manager.inject_messages(original, "<system-reminder>attached</system-reminder>")
 
     assert original[-1].content[0]["text"] == "query"
-    assert injected[-2].content == original[-1].content
-    assert isinstance(injected[-1], UserMessage)
-    assert injected[-1].content == "<system-reminder>attached</system-reminder>"
+    assert injected[-1].content == original[-1].content
+    assert isinstance(injected[0], UserMessage)
+    assert injected[0].content == "<system-reminder>attached</system-reminder>"
     assert (
-        injected[-1].metadata[KV_CACHE_EPHEMERAL_TAIL_METADATA]
+        injected[0].metadata[KV_CACHE_EPHEMERAL_TAIL_METADATA]
         is True
     )
 
 
-def test_prompt_attachment_manager_appends_attachment_message_after_image_only_user_message():
+def test_prompt_attachment_manager_inserts_attachment_before_image_only_user_message():
     manager = PromptAttachmentManager()
     original = [
         UserMessage(content=[
@@ -302,13 +303,37 @@ def test_prompt_attachment_manager_appends_attachment_message_after_image_only_u
 
     injected = manager.inject_messages(original, "<system-reminder>attached</system-reminder>")
 
-    assert injected[-2].content == original[-1].content
-    assert isinstance(injected[-1], UserMessage)
-    assert injected[-1].content == "<system-reminder>attached</system-reminder>"
+    assert injected[-1].content == original[-1].content
+    assert isinstance(injected[0], UserMessage)
+    assert injected[0].content == "<system-reminder>attached</system-reminder>"
 
 
-def test_prompt_attachment_manager_inserts_attachment_before_preserved_tail():
+def test_prompt_attachment_manager_stable_placement_precedes_the_conversation():
     manager = PromptAttachmentManager()
+    state = UserMessage(
+        content="<browser_state>current</browser_state>",
+        metadata={PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY: True},
+    )
+    progress = UserMessage(
+        content='<browser_state_progress>{"page_change":"unchanged"}</browser_state_progress>',
+        metadata={PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY: True},
+    )
+    original = [UserMessage(content="query"), state, progress]
+
+    injected = manager.inject_messages(original, "<system-reminder>attached</system-reminder>")
+
+    assert [message.content for message in injected] == [
+        "<system-reminder>attached</system-reminder>",
+        "query",
+        state.content,
+        progress.content,
+    ]
+    assert injected[-2] is state
+    assert injected[-1] is progress
+
+
+def test_prompt_attachment_manager_tail_placement_keeps_legacy_order():
+    manager = PromptAttachmentManager(placement="tail")
     state = UserMessage(
         content="<browser_state>current</browser_state>",
         metadata={PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY: True},
@@ -329,6 +354,26 @@ def test_prompt_attachment_manager_inserts_attachment_before_preserved_tail():
     ]
     assert injected[-2] is state
     assert injected[-1] is progress
+
+
+def test_prompt_attachment_manager_keeps_request_prompts_prefix_stable():
+    """Each request's injected prompt must be a prefix of the next request's.
+
+    This is the property provider-side prefix caches bill by: with the
+    attachment at the tail, request n's prompt is never a prefix of request
+    n+1's, and the cache never extends past the static prefix.
+    """
+    manager = PromptAttachmentManager()
+    reminder = "<system-reminder>attached</system-reminder>"
+    first = [SystemMessage(content="sys"), UserMessage(content="q1")]
+    second = [*first, AssistantMessage(content="a1"), UserMessage(content="q2")]
+
+    injected_first = manager.inject_messages(first, reminder)
+    injected_second = manager.inject_messages(second, reminder)
+
+    assert [m.content for m in injected_second[: len(injected_first)]] == [
+        m.content for m in injected_first
+    ]
 
 
 def test_prompt_attachment_guidance_is_rendered_only_with_attachments():
