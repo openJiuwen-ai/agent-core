@@ -107,14 +107,6 @@ def _derive_avatar_session_id(self, member_name: str) -> str:
 
 若两条来源都拿不到 → 返 `None`，引擎镜像兜底（降级，缺 ToolMessage）。
 
-### D7 fork 注入时序（`open_session(fork_data=...)`）
-
-child avatar 的 context 是**首次模型调用**才由 `react_agent._init_context` → `context_engine.create_context` 创建，`harness.start()` 后 `get_context()` 返 `None`——**不能在 start 后用 `get_context(...).set_messages(...)` 注入**。正确做法：start 之后，用 child bound session id（`native.session_id`）调 `native.create_new_context_engine(session_id=child_sid, messages=fork_ctx.to_messages())`，compact 模式再 `compact_context(子native, split_at=..., direction=...)`。注入后标 `state.context_seeded = True`。
-
-### D8 镜像兜底（fork_data 为 None）
-
-`send_turn` 首轮（`turns_executed==0` 且未种子且 history 非空）经 `_seed_mirror_fallback` 把 `(user, assistant)` 对话重建进 context（`create_new_context_engine(session_id=child_sid, ...)`）。`context_seeded` 防双写（一次种子后不再覆盖 avatar 已重建的上下文）。
-
 ### D9 `_member_name` + `ensure_member_name`（cache-hit 也命名）
 
 **问题**：fully-hit resume 时父从不建 avatar，`_sid`（已建 avatar 的句柄）保持 `None`，`fork()` 无从知道父的恢复标识。
@@ -130,6 +122,16 @@ child avatar 的 context 是**首次模型调用**才由 `react_agent._init_cont
 `b = await a.fork()` 出的子 `b` 若**尚未 send 过**就被再次 fork（`c = await b.fork()`），`b._member_name` 为 `None` → `c` 无法定位 `b` 的上下文 → 走镜像兜底（缺 ToolMessage）。这**不是错误**（降级可用），但会丢失 ToolMessage。
 
 **提示词约束**：不要 `fork` 一个未 send 过的 fork 子会话；每个被 fork 的会话必须先 `send` 过。想基于父的早期状态派生，直接用父的 `fork_mode` + `keep_rounds`（如 `before`/`after`），而非先 fork 出一个未 send 的子再 fork 它。
+
+### D7 fork 注入时序（`open_session(fork_data=...)`）
+
+child avatar 的 context 是**首次模型调用**才由 `react_agent._init_context` → `context_engine.create_context` 创建，`harness.start()` 后 `get_context()` 返 `None`——**不能在 start 后用 `get_context(...).set_messages(...)` 注入**。正确做法：start 之后，用 child bound session id（`native.session_id`）调 `native.create_new_context_engine(session_id=child_sid, messages=fork_ctx.to_messages())`，compact 模式再 `compact_context(子native, split_at=..., direction=...)`。注入后标 `state.context_seeded = True`。
+
+**resume 下必须双写（bug 修复，评审发现）**：仅注入 context engine 不够——resume 时 `harness.start()` 里的 `child.pre_run()` 已从 checkpointer 恢复了**上次运行的旧 `state["context"]`**（含旧 base 上下文）。child 首次 `_init_context` 走 `create_context(session=真实child, history_messages=None)` → pool 命中（key=`child_sid_default`）→ `_load_state_from_session(context, child, None)` → 从 child 的 session state（= pre_run 恢复的旧 context）→ `context.load_state(旧)` **覆盖了注入的 fork messages**。故 `_seed_fork_context` 还必须把**注入后的最终 messages**（`native.get_current_context(session_id=child_sid)`，含 compact 结果）**写回 child session 的 `state["context"]`**（`child.update_state({"context": {"default_context_id": {"messages": final_msgs}}})`）——这样 `_init_context` 从 session state 读到的是新 fork context 而非旧 base 上下文。若 base 未变（fork 子首轮 cache-hit，不建 avatar），此路径不触发，零影响。
+
+### D8 镜像兜底（fork_data 为 None）
+
+`send_turn` 首轮（`turns_executed==0` 且未种子且 history 非空）经 `_seed_mirror_fallback` 把 `(user, assistant)` 对话重建进 context（`create_new_context_engine(session_id=child_sid, ...)`）。`context_seeded` 防双写（一次种子后不再覆盖 avatar 已重建的上下文）。
 
 ## 拒绝的方案
 

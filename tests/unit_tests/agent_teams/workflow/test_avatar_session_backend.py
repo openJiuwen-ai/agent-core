@@ -37,11 +37,22 @@ class _FakeNative:
 
     async def create_new_context_engine(self, session_id: str | None = None, messages: list | None = None) -> str:
         self.seeded.append((session_id, list(messages) if messages else []))
+        self.messages = list(messages) if messages else []  # context now holds the injected messages
         return session_id or "child-sess"
 
     @property
     def session_id(self) -> str:
         return self.sid
+
+
+class _FakeChild:
+    """Stands in for the child ``Session`` a harness binds; records state writes."""
+
+    def __init__(self) -> None:
+        self.state_updates: list[dict] = []
+
+    def update_state(self, data: dict) -> None:
+        self.state_updates.append(data)
 
 
 class _FakeHarness:
@@ -62,6 +73,10 @@ class _FakeHarness:
         self.spec: Any = None
         self.started_with: Any = None  # team_session passed to start
         self.native = _FakeNative()
+        self.child = _FakeChild()
+
+    def current_session(self) -> _FakeChild:
+        return self.child
 
     async def start(self, *, team_session=None) -> None:
         self.started_with = team_session
@@ -621,6 +636,12 @@ def test_open_session_with_fork_data_seeds_child_context(monkeypatch):
     # child's bound session id).
     assert len(h.native.seeded) == 1
     assert len(h.native.seeded[0][1]) == 4
+    # The fork messages were also written back to the child session's state so
+    # the child's first model call loads the fork context (not a stale prior
+    # context recovered by pre_run).
+    assert len(h.child.state_updates) == 1
+    ctx = h.child.state_updates[0]["context"]
+    assert len(ctx["default_context_id"]["messages"]) == 4
     # The avatar bound a stable team session (fixed session_id, not random).
     assert h.started_with is not None
     assert h.started_with.get_session_id().startswith("t/wf/")

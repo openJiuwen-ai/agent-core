@@ -636,7 +636,15 @@ class AvatarSessionManager:
         return TeamSession(session_id=state.session_id, team_id=self._team_name)
 
     async def _seed_fork_context(self, harness: Any, state: _SessionState, fork_data: dict) -> None:
-        """Inject the fork snapshot into the child avatar's context engine."""
+        """Inject the fork snapshot into the child avatar's context engine.
+
+        Two writes, so the fork context survives the child's first ``_init_context``:
+        the context engine is seeded with the fork messages, **and** the messages are
+        written back to the child session's ``state["context"]`` (overwriting whatever
+        ``pre_run`` recovered from the checkpointer). Without the second write,
+        ``_init_context`` hits the pool and ``_load_state_from_session`` re-loads the
+        stale prior context, clobbering the injected fork messages.
+        """
         from openjiuwen.agent_teams.fork import ForkContext
         from openjiuwen.agent_teams.fork_compact import compact_context
 
@@ -655,6 +663,17 @@ class AvatarSessionManager:
                 session_id=child_sid,
                 direction=fork_data.get("compact_direction") or "before",
             )
+        # Persist the (possibly compacted) messages back to the child session's
+        # state so the child's first model call loads the fork context, not the
+        # prior run's stale context recovered by pre_run.
+        child = harness.current_session()
+        if child is not None:
+            try:
+                final_msgs = native.get_current_context(session_id=child_sid)
+            except Exception:  # noqa: BLE001 - best-effort; keep the injected pool context
+                final_msgs = None
+            if final_msgs is not None:
+                child.update_state({"context": {"default_context_id": {"messages": final_msgs}}})
         state.context_seeded = True
 
     @staticmethod
