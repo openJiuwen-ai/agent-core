@@ -230,6 +230,9 @@ class StatusCode(Enum):
     DEEPAGENT_LOAD_PLUGIN_ERROR = (123026, "deepagent load plugin error, reason: {error_msg}")
     DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR = (123027, "deepagent load agent template error, reason: {error_msg}")
     DEEPAGENT_UNLOAD_EXTENSION_ERROR = (123028, "deepagent unload extension error, reason: {error_msg}")
+    DEEPAGENT_SUBAGENT_NOT_FOUND = (123029, "subagent instance not found, reason: {error_msg}")
+    DEEPAGENT_SUBAGENT_CAPACITY_INVALID = (123030, "subagent capacity invalid, reason: {error_msg}")
+    DEEPAGENT_SUBAGENT_RUNTIME_ERROR = (123031, "subagent runtime error, reason: {error_msg}")
 
     # =============================================================================================================
     # 110 Runner / Distributed 110000–110999
