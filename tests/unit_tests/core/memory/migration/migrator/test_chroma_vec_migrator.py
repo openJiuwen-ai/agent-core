@@ -8,6 +8,9 @@ from typing import Dict, List
 
 import pytest
 import pytest_asyncio
+
+pytest.importorskip("chromadb")
+
 from openjiuwen.core.foundation.store.base_vector_store import (
     CollectionSchema, FieldSchema, VectorDataType
 )

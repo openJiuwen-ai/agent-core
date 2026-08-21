@@ -1,9 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""SubagentRail — registers task or session tools on DeepAgent for subagent delegation."""
+"""SubagentRail — registers task, session, or runtime tools on DeepAgent."""
 
 from __future__ import annotations
 
+import asyncio
 from typing import Callable, List, Optional, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import logger
@@ -17,6 +18,8 @@ from openjiuwen.harness.tools import SessionToolkit, build_session_tools, create
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
     DEFAULT_BROWSER_CAPABILITIES,
 )
+from openjiuwen.harness.tools.subagent._control_registry import release_all_subagent_controls
+from openjiuwen.harness.tools.subagent.subagent_tools import build_subagent_tools
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -26,21 +29,23 @@ TaskPromptExtension = Callable[[AgentCallbackContext, str], Optional[str]]
 
 
 class SubagentRail(DeepAgentRail):
-    """Rail that registers task or session tools for subagent delegation.
+    """Rail that registers subagent delegation tools on DeepAgent.
 
-    When ``enable_async_subagent`` is False (default), registers synchronous
-    task tools for ephemeral subagent delegation.
+    Three mutually exclusive modes (``enable_subagent_runtime`` wins):
 
-    When ``enable_async_subagent`` is True, registers async session tools
-    that allow spawning background subagent tasks, and injects the session
-    tools prompt section before each model call.
+    - runtime: ``subagent_spawn`` / ``subagent_wait`` / ``subagent_list``
+    - async session: ``sessions_spawn`` / ``sessions_list`` / ``sessions_cancel``
+    - sync task: ``task_tool``
     """
 
     priority = 95
 
+    _REFRESHABLE_TOOL_NAMES = {"task_tool", "sessions_spawn", "subagent_spawn"}
+
     def __init__(
         self,
         enable_async_subagent: bool = False,
+        enable_subagent_runtime: bool = False,
         task_prompt_extension: TaskPromptExtension | None = None,
     ) -> None:
         """Initialize the subagent rail.
@@ -48,6 +53,8 @@ class SubagentRail(DeepAgentRail):
         Args:
             enable_async_subagent: Whether to register async session tools
                 instead of the synchronous ``task_tool``.
+            enable_subagent_runtime: Whether to register persistent subagent
+                runtime tools instead of task/session tools.
             task_prompt_extension: Optional callback that supplies additional
                 guidance for the synchronous ``task_tool`` prompt. It receives
                 the current callback context and prompt language, and its
@@ -55,29 +62,38 @@ class SubagentRail(DeepAgentRail):
         """
         super().__init__()
         self.enable_async_subagent = enable_async_subagent
+        self.enable_subagent_runtime = enable_subagent_runtime
         self.task_prompt_extension = task_prompt_extension
         self.tools = None
-        self._toolkit = None  # only used in async branch
+        self._toolkit = None
         self.system_prompt_builder = None
 
-    def init(self, agent) -> None:
-        """Register task or session tools on the agent.
+    def _runtime_mode(self) -> bool:
+        return self.enable_subagent_runtime
 
-        Args:
-            agent: DeepAgent instance to register tools on.
-        """
+    def _async_mode(self) -> bool:
+        return not self.enable_subagent_runtime and self.enable_async_subagent
+
+    def init(self, agent) -> None:
+        """Register subagent tools on the agent."""
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
 
-        # Skip registration if no subagents are configured
         if not agent.deep_config.subagents:
             logger.info("[SubagentRail] No subagents configured, skipping")
             return
 
-        # Build available_agents description for tool registration
         available_agents = self._build_available_agents_description(agent.deep_config.subagents)
         agent_id = getattr(getattr(agent, "card", None), "id", None)
 
-        if self.enable_async_subagent:
+        if self._runtime_mode():
+            self.tools = build_subagent_tools(
+                parent_agent=agent,
+                language=self.system_prompt_builder.language,
+                available_agents=available_agents,
+                agent_id=agent_id,
+            )
+            mode = "runtime"
+        elif self._async_mode():
             self._toolkit = SessionToolkit()
             agent.set_session_toolkit(self._toolkit)
             self.tools = build_session_tools(
@@ -87,6 +103,7 @@ class SubagentRail(DeepAgentRail):
                 available_agents=available_agents,
                 agent_id=agent_id,
             )
+            mode = "async session"
         else:
             self.tools = create_task_tool(
                 parent_agent=agent,
@@ -94,12 +111,16 @@ class SubagentRail(DeepAgentRail):
                 language=self.system_prompt_builder.language,
                 agent_id=agent_id,
             )
+            mode = "sync task"
 
         for tool in self.tools:
             agent.ability_manager.add_ability(tool.card, tool)
 
-        mode = "async session" if self.enable_async_subagent else "sync task"
-        logger.info(f"[SubagentRail] Registered {mode} tool with {len(agent.deep_config.subagents)} subagent(s)")
+        logger.info(
+            "[SubagentRail] Registered %s tool(s) with %s subagent(s)",
+            mode,
+            len(agent.deep_config.subagents),
+        )
 
     def refresh_available_agents(self, agent) -> None:
         """Refresh the available-agents text in registered subagent tool cards."""
@@ -112,43 +133,69 @@ class SubagentRail(DeepAgentRail):
         for tool in self.tools:
             card = getattr(tool, "card", None)
             name = getattr(card, "name", None)
-            if name not in {"task_tool", "sessions_spawn"}:
+            if name not in self._REFRESHABLE_TOOL_NAMES:
                 continue
-            card.description = get_tool_description(name, language).format(available_agents=available_agents)
+            card.description = get_tool_description(name, language).format(
+                available_agents=available_agents,
+            )
             refreshed.append(name)
         if refreshed:
             logger.info("[SubagentRail] Refreshed available_agents for %s", ", ".join(refreshed))
 
     def uninit(self, agent) -> None:
-        """Remove tools from the agent.
+        """Remove tools from the agent."""
+        if self._runtime_mode():
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.warning(
+                    "[SubagentRail] skip subagent cancel_all: no running event loop",
+                )
+            else:
+                loop.create_task(release_all_subagent_controls(agent, reason="rail_uninit"))
 
-        Args:
-            agent: DeepAgent instance to remove tools from.
-        """
         if self.tools and hasattr(agent, "ability_manager"):
             for tool in self.tools:
                 name = getattr(tool.card, "name", None)
                 if name:
                     agent.ability_manager.remove_ability(name)
 
-        if self.enable_async_subagent:
+        if self._async_mode():
             agent.set_session_toolkit(None)
-        mode = "async session" if self.enable_async_subagent else "sync task"
 
-        logger.info(f"[SubagentRail] Unregistered {mode} tools")
+        if self._runtime_mode():
+            mode = "runtime"
+        elif self._async_mode():
+            mode = "async session"
+        else:
+            mode = "sync task"
+        logger.info("[SubagentRail] Unregistered %s tools", mode)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject tool system prompt section before model call.
-
-        In sync mode (enable_async_subagent=False), injects the task_tool
-        prompt section so the model sees delegation guidance.
-        In async mode, injects the session tools section so the model can
-        see available session tools.
-
-        Args:
-            ctx: Agent callback context.
-        """
+        """Inject the tool system prompt section before model call."""
         if not self.tools or self.system_prompt_builder is None:
+            return
+
+        if self._runtime_mode():
+            try:
+                from openjiuwen.harness.prompts.sections.subagent_tools import (
+                    build_subagent_tools_section,
+                )
+
+                language = self.system_prompt_builder.language
+                extension_content = None
+                if self.task_prompt_extension is not None:
+                    extension_content = self.task_prompt_extension(ctx, language)
+                section = build_subagent_tools_section(
+                    language=language,
+                    extension_content=extension_content,
+                )
+                if section is not None:
+                    self.system_prompt_builder.add_section(section)
+                else:
+                    self.system_prompt_builder.remove_section(SectionName.SUBAGENT_TOOLS)
+            except ImportError:
+                logger.warning("[SubagentRail] subagent_tools prompt section not available, skipping")
             return
 
         if not self.enable_async_subagent:
@@ -186,8 +233,6 @@ class SubagentRail(DeepAgentRail):
         except ImportError:
             logger.warning("[SubagentRail] session_tools prompt section not available, skipping")
 
-    # Well-known tool sets for built-in agent types whose tools are resolved
-    # at runtime (i.e. ``SubAgentConfig.tools`` is empty).
     _KNOWN_AGENT_TOOLS: dict[str, str] = {
         "explore_agent": "bash, glob, grep, list_files, read_file",
         "plan_agent": "bash, glob, grep, list_files, read_file",
@@ -198,17 +243,10 @@ class SubagentRail(DeepAgentRail):
     }
 
     def _build_available_agents_description(self, subagents: List[SubAgentConfig | "DeepAgent"]) -> str:
-        """Build description of available subagents for tool registration.
-
-        Returns:
-            Formatted string describing available subagent types.
-        """
         if not subagents:
             return ""
 
-        # Build available subagent types
         lines = []
-
         for spec in subagents:
             agent_name, agent_desc = self._extract_agent_meta(spec)
             tools_str = self._extract_agent_tools(spec, agent_name)
@@ -231,25 +269,15 @@ class SubagentRail(DeepAgentRail):
         return name, description
 
     def _extract_agent_tools(self, spec: SubAgentConfig | "DeepAgent", agent_name: str) -> str:
-        """Extract a human-readable tool list for a subagent spec.
-
-        Resolution order:
-        1. Explicit ``tools`` on SubAgentConfig — extract card names.
-        2. DeepAgent instance — read registered tool names from ability_manager.
-        3. Well-known defaults for built-in agent types.
-        4. Fallback to ``"All tools"``.
-        """
-        # 1. SubAgentConfig with explicit tools
         if isinstance(spec, SubAgentConfig) and spec.tools:
             names = []
-            for t in spec.tools:
-                name = getattr(t, "name", None) or getattr(getattr(t, "card", None), "name", None)
+            for tool in spec.tools:
+                name = getattr(tool, "name", None) or getattr(getattr(tool, "card", None), "name", None)
                 if name:
                     names.append(name)
             if names:
                 return ", ".join(names)
 
-        # 2. DeepAgent instance with registered tools
         if not isinstance(spec, SubAgentConfig):
             ability_mgr = getattr(spec, "ability_manager", None)
             if ability_mgr is not None:
@@ -267,18 +295,16 @@ class SubagentRail(DeepAgentRail):
                             tool_names.append(name)
                     if tool_names:
                         return ", ".join(tool_names)
-                except (AttributeError, TypeError) as e:
+                except (AttributeError, TypeError) as exc:
                     logger.debug(
                         "[SubagentRail] Failed to extract tool names from agent %s: %s",
                         agent_name,
-                        e,
+                        exc,
                     )
 
-        # 3. Well-known defaults
         if agent_name in self._KNOWN_AGENT_TOOLS:
             return self._KNOWN_AGENT_TOOLS[agent_name]
 
-        # 4. Fallback
         return "All tools"
 
 

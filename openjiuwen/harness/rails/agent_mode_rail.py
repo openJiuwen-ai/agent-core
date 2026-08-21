@@ -76,6 +76,12 @@ DEFAULT_PLAN_MODE_ALLOWED_TOOLS: tuple[str, ...] = (
     "exit_plan_mode",
     "ask_user",
     "task_tool",
+    "subagent_spawn",
+    "subagent_wait",
+    "subagent_list",
+    "subagent_send_input",
+    "subagent_close",
+    "subagent_resume",
     "read_file",
     "grep",
     "list_files",
@@ -625,12 +631,22 @@ class AgentModeRail(DeepAgentRail):
             for t in tools
         )
 
+    @staticmethod
+    def _subagent_runtime_enabled(agent: "DeepAgent") -> bool:
+        deep_config = getattr(agent, "deep_config", None)
+        return bool(getattr(deep_config, "enable_subagent_runtime", False))
+
     def _register_task_tool(self, agent: "DeepAgent") -> None:
         """Register task_tool if not already present after enter_plan_mode.
 
         Args:
             agent: Parent DeepAgent.
         """
+        if self._subagent_runtime_enabled(agent):
+            logger.info(
+                "[AgentModeRail] subagent runtime enabled, skip dynamic task_tool register",
+            )
+            return
         if self._owns_task_tool:
             return
         existing = self._is_task_tool_registered()
