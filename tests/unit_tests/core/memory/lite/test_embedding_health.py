@@ -70,14 +70,18 @@ async def test_embedding_provider_is_available_after_successful_health_check(mon
 async def test_runtime_embedding_failure_switches_manager_to_keyword_only():
     manager = _manager()
     manager.provider = _Provider(error=RuntimeError("service unavailable"))
+    manager.provider_key = "test:fingerprint"
     manager.embedding_available = True
 
     result = await manager._embed_query_with_timeout("find earlier work")
 
     assert result == []
     assert manager.provider is None
+    assert manager.provider_key == "test:fingerprint"
     assert manager.embedding_available is False
     assert manager.embedding_error == "embedding request failed: RuntimeError"
+    assert await manager._should_full_reindex() is False
+    assert await manager._needs_rebuild_on_config_change() is False
 
 
 @pytest.mark.asyncio

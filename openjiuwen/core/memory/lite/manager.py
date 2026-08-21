@@ -378,6 +378,11 @@ class MemoryIndexManager:
         mismatched index in place. Returns False when there is no prior index — in
         that case ``sync`` builds the index normally, nothing to rebuild.
         """
+        # An unavailable endpoint is a runtime health condition, not a
+        # configuration change. Preserve an existing vector index while using
+        # keyword search until the endpoint becomes available again.
+        if self.provider is None:
+            return False
         try:
             cursor = self.db.execute(
                 "SELECT value FROM meta WHERE key = ?", (META_KEY,)
@@ -682,7 +687,8 @@ class MemoryIndexManager:
     def _disable_embedding(self, reason: str) -> None:
         """Switch to keyword-only memory search after an embedding failure."""
         self.provider = None
-        self.provider_key = "none:embedding-unavailable"
+        # Keep the configured fingerprint. Changing this on a transient
+        # failure would incorrectly trigger a full reindex and remove vectors.
         self.embedding_available = False
         self.embedding_error = reason
 
@@ -897,6 +903,11 @@ class MemoryIndexManager:
 
     async def _should_full_reindex(self) -> bool:
         """Check if full reindex is needed."""
+        # An unavailable endpoint is a runtime health condition, not a
+        # configuration change. Preserve an existing vector index while using
+        # keyword search until the endpoint becomes available again.
+        if self.provider is None:
+            return False
         try:
             cursor = self.db.execute(
                 "SELECT value FROM meta WHERE key = ?",
