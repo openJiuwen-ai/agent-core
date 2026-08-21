@@ -234,7 +234,10 @@ class SwarmflowTool(AsyncTool):
         parts.append(
             "Edit the on-disk script accordingly (do not change META.name). "
             "Edit minimally and reuse the existing script content as much as possible, "
-            "refining it rather than rewriting. Then re-launch swarmflow with the same script_path."
+            "refining it rather than rewriting. Then re-launch swarmflow with "
+            f"resume_id={run_id} and the same script_path — resume_id reuses this "
+            "run's journal cache (unchanged agents replay free) and re-bills its "
+            "per-run budget from the cache hits."
         )
         return "\n".join(parts)
 
@@ -304,9 +307,7 @@ class SwarmflowTool(AsyncTool):
         name = (inputs.get("name") or "").strip()
         resume_id = (inputs.get("resume_id") or "").strip()
         action = (inputs.get("action") or "").strip()
-        if resume_id:
-            if not action:
-                return ToolOutput(success=False, error="'action' is required with 'resume_id'")
+        if resume_id and action:
             controller = getattr(self._parent_agent, "background_task_controller", None)
             if controller is None:
                 return ToolOutput(success=False, error="Runtime controller not configured")
@@ -319,6 +320,10 @@ class SwarmflowTool(AsyncTool):
             else:
                 return ToolOutput(success=False, error=f"unknown action {action!r}")
             return ToolOutput(success=ok, data={"run_id": resume_id, "action": action, "status": "done" if ok else "not_found"})
+        # resume_id WITHOUT action is a re-launch of an interrupted run (pause /
+        # early_return / workflow-budget hit): fall through to the launch path and
+        # reuse resume_id as the run_id so cache hits replay and the per-run
+        # ledger re-bills by cache hits.
         if not any((script_path, script, name, resume_id)):
             return ToolOutput(
                 success=False,
@@ -386,7 +391,27 @@ class SwarmflowTool(AsyncTool):
                 await self._governor.release_workflow(ticket)
                 return ToolOutput(success=False, error=f"Re-run lint failed: {exc}")
 
-        run_id = new_swarmflow_run_id()
+        # Seal guard (方案 C 兜底): a resume_id pointing at a TERMINAL run
+        # (completed / session-budget stop) must not be reused — the prior run
+        # already ended, so relaunching under the same id would wrongly replay
+        # its sealed cache. Force a fresh run_id in that case.
+        if resume_id and script_path:
+            try:
+                from openjiuwen.agent_teams.context import get_session_id
+                from openjiuwen.agent_teams.workflow.engine.journal import Journal
+                from openjiuwen.agent_teams.workflow.runner import _resolve_journal_path
+
+                journal_path = _resolve_journal_path(script_path, self._team_name, get_session_id())
+                journal = await Journal.load(journal_path, wal_path=f"{journal_path}.wal")
+                if journal.find_run_record(resume_id, "seal") is not None:
+                    team_logger.warning(
+                        "[swarmflow] resume_id %s is terminal (sealed); forcing a fresh run_id", resume_id
+                    )
+                    resume_id = ""
+            except Exception as exc:  # noqa: BLE001 - guard is best-effort
+                team_logger.debug("[swarmflow] seal guard skipped: %s", exc)
+
+        run_id = resume_id or new_swarmflow_run_id()
         task_id = generate_id(self.card.name)
 
         enriched = dict(inputs)
@@ -501,6 +526,7 @@ class SwarmflowTool(AsyncTool):
                 team_name=team_name,
                 kind=progress.kind,
                 run_id=run_id,
+                task_id=task_id,
                 workflow_name=name_box["name"],
                 description=name_box.get("description"),
                 phase=progress.phase,

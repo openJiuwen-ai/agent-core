@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -24,7 +25,7 @@ from .admission import AgentAdmission
 from .backends import MockBackend
 from .backends.base import AgentBackend
 from .budget import BudgetLedger
-from .errors import BudgetExhausted, MetaError
+from .errors import BudgetExhausted, MetaError, WorkflowAborted
 from .journal import Journal
 from .loader import load_workflow_source
 from .primitives import (
@@ -71,94 +72,56 @@ def _silent(_message: str) -> None:
     return None
 
 
-def _budget_sidecar_path(journal_path: str | None) -> str | None:
-    """The ``<journal>.budget`` sidecar path, or ``None`` when journaling is off.
+async def _write_seal_record(rt, *, terminal_status: str) -> None:
+    """Write a run-level seal record to the journal on a terminal exit.
 
-    Colocated with the journal and its WAL so resume (which resolves the same
-    ``team + session + META.name`` stem) finds it. None when the run has no
-    journal (the offline preview path) — in that case budget persistence is
-    simply disabled, exactly like WAL appends are.
+    ``terminal_status`` is ``"completed"`` (normal finish) or ``"stopped"``
+    (session budget exhausted / user stop — a true terminal that cannot be
+    recovered by editing the script). The seal record carries the run's final
+    per-run spent so a relaunch can detect (via ``find_run_record(run_id,
+    "seal")``) that the prior run ended and force a fresh run_id. No-op when the
+    journal has no WAL path (offline preview / no persistence).
     """
-    return f"{journal_path}.budget" if journal_path else None
-
-
-def _read_budget_snapshot(path: str | None) -> dict | None:
-    """Read the ``<journal>.budget`` sidecar, or ``None`` when absent / corrupt.
-
-    None covers both "first run (no file yet)" and "torn write" — in either case
-    the run starts fresh at ``spent=0``, the documented crash-degradation for a
-    soft ceiling (losing the in-flight agent's count is tolerated). Synchronous
-    because the file is tiny (~100 bytes) and read once at run start.
-    """
-    if not path or not Path(path).exists():
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.loads(f.read())
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _write_budget_snapshot(path: str | None, ledger: BudgetLedger, *, terminal: bool = False) -> None:
-    """Atomically overwrite the ``<journal>.budget`` sidecar with the ledger state.
-
-    Temp file + ``os.replace`` (the same atomic-commit trick :meth:`Journal.save`
-    uses) so a crash mid-write leaves either the previous snapshot or the new
-    one, never a torn file. Synchronous: the payload is ~100 bytes (a single
-    object, not the journal's record stream), so the blocking write is
-    microseconds — and synchronous-ness is the point, giving the emit hook a
-    durable point-in-time snapshot before the run moves on. A failure is
-    swallowed (soft ceiling): the run continues, only resume-fidelity degrades.
-
-    ``terminal`` marks whether the run had already reached a terminal state
-    (normal completion, or the ``BudgetExhausted`` gate) when this snapshot was
-    written — the mid-run emit hooks always leave it ``False``. See
-    :func:`_persist_budget_final` for what the flag changes on the next launch.
-    """
-    if not path:
+    if rt.journal is None or rt.journal._wal_path is None:
         return
-    payload = {
-        "total": ledger.total,
-        "spent": ledger.spent,
-        "phase_tokens": dict(ledger.phase_tokens),
-        "terminal": terminal,
-    }
-    tmp = f"{path}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False))
-        os.replace(tmp, path)
-    except OSError:
-        # Best-effort: a soft ceiling tolerates a missed snapshot. The next
-        # successful write re-syncs; only resume fidelity degrades, not the run.
-        pass
+    await rt.journal.write_run_record(
+        rt.run_id or "", "seal",
+        {"terminal_status": terminal_status, "final_spent": rt.workflow_budget.spent},
+    )
 
 
-def _persist_budget_final(rt) -> None:
-    """Seal the budget sidecar at a terminal point (normal completion or the
-    ``BudgetExhausted`` branch of ``_exec_loaded``), marking it ``terminal``.
+async def _write_pause_record(rt, *, pause_reason: str) -> None:
+    """Write a run-level pause record on a pause / early_return / workflow-budget hit.
 
-    The emit-hook writes are best-effort (a soft ceiling tolerates a missed one
-    mid-run), so this durable write is what makes a *completed* run's tally
-    final. The ``terminal`` flag tells the next same-name launch that the prior
-    run *ended* rather than was interrupted: the relaunch then starts from a
-    fresh per-run ceiling — the "新 run 的额度会重置" the exhausted / over-budget
-    feedback promises the leader — while only a non-terminal sidecar (crash /
-    pause / stop — no final seal) resumes its tally. No-op when there is no
-    ceiling (unbounded) or no persistence path (offline preview).
+    Records *which* agent was in-flight and how many tokens it had already
+    billed (``spent - started_spent``), plus the pause reason and timestamp —
+    NOT the run's total token snapshot (the resume re-bills spent by replaying
+    cache hits). ``pause_reason`` is one of ``"paused"`` / ``"early_return"`` /
+    ``"workflow_budget_exhausted"``. No-op without a journal (offline preview).
     """
-    wb = rt.workflow_budget
-    fn = rt.persist_workflow_budget
-    if wb.total is not None and fn is not None:
-        fn(wb, terminal=True)
+    if rt.journal is None or rt.journal._wal_path is None:
+        return
+    paused_agent = None
+    cur = rt.current_agent
+    if cur is not None:
+        paused_agent = {
+            "agent_id": cur.get("agent_id"),
+            "label": cur.get("label"),
+            "tokens": rt.workflow_budget.spent - (cur.get("started_spent") or 0),
+        }
+    await rt.journal.write_run_record(
+        rt.run_id or "", "pause",
+        {
+            "pause_reason": pause_reason,
+            "paused_at": datetime.now(timezone.utc).isoformat(),
+            "paused_agent": paused_agent,
+        },
+    )
 
 
 def _resolve_workflow_budget(
     loaded,
     session_budget: BudgetLedger | None = None,
-    *,
-    resume_spent: int = 0,
-    resume_phase_tokens: dict[str, int] | None = None,
 ) -> BudgetLedger:
     """Build the per-run ledger from the script's ``META.workflow_token_limit``.
 
@@ -175,14 +138,10 @@ def _resolve_workflow_budget(
     not exceed the session ceiling — otherwise the run could never complete
     within its own declared budget while the shared pool holds the real limit.
 
-    ``resume_spent`` / ``resume_phase_tokens`` restore the ledger's prior tally
-    on a resume (read by :func:`_read_budget_snapshot` from the
-    ``<journal>.budget`` sidecar; a *terminal* sidecar — the prior run completed
-    or was gate-stopped — is filtered out before this call, so a relaunch starts
-    fresh). They are **only** meaningful with a declared
-    ceiling (an unbounded ledger has no ceiling to count toward, so the resumed
-    tally would never trigger — keeping it 0 is correct). A first run (no
-    sidecar) passes the 0 / ``None`` defaults.
+    The ledger always starts at ``spent=0`` — on a resume the emit hooks re-bill
+    it by replaying cache hits (each cache-hit agent adds its record's stored
+    tokens back), so the tally is recomputed for the current script rather than
+    restored from a stale snapshot.
     """
     meta = loaded.meta if isinstance(loaded.meta, dict) else {}
     limit = meta.get("workflow_token_limit")
@@ -194,8 +153,7 @@ def _resolve_workflow_budget(
                     f"swarmflow_budget ({session_budget.total}); a per-run ceiling "
                     f"cannot exceed the team ceiling"
                 )
-        return BudgetLedger(total=limit, spent=resume_spent,
-                            phase_tokens=dict(resume_phase_tokens or {}))
+        return BudgetLedger(total=limit)
     return BudgetLedger()
 
 
@@ -265,6 +223,7 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
                 top_phases=_top_phases(rt),
             )
         result_text = _preview(result) or ""
+        await _write_seal_record(rt, terminal_status="completed")
         rt.progress_sink(WorkflowProgressEvent(
             kind=ProgressKind.WORKFLOW_COMPLETED,
             name=name,
@@ -273,12 +232,14 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
         ))
         return result
     except BudgetExhausted as exc:
-        # Seal the budget sidecar at the exhaustion point, marked ``terminal``:
-        # the run is over (no finalize — the WAL stays for cache replay), and the
-        # next same-name launch starts from a fresh per-run ceiling instead of
-        # resuming a tally that is already over the line, so the leader's
-        # redesigned script can actually rerun.
-        _persist_budget_final(rt)
+        # Scope decides recovery: a workflow (per-run) ceiling hit is a pause —
+        # the leader can edit the script and resume on the same run_id, re-billing
+        # spent by cache hits. A session ceiling hit is a terminal stop — no
+        # script edit recovers it, so seal it (relaunch forces a fresh run_id).
+        if exc.scope == "workflow":
+            await _write_pause_record(rt, pause_reason="workflow_budget_exhausted")
+        else:
+            await _write_seal_record(rt, terminal_status="stopped")
         rt.progress_sink(WorkflowProgressEvent(
             kind=ProgressKind.WORKFLOW_FAILED,
             name=name,
@@ -288,6 +249,14 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
             workflow_budget=_wf_budget_snapshot(rt),
             budget_exhausted_scope=exc.scope,
         ))
+        raise
+    except WorkflowAborted as exc:
+        # Cooperative control signal: pause / early_return (edit & rerun) are
+        # resumable on the same run_id → pause record; stop is terminal → seal.
+        if exc.reason in ("pause", "early_return"):
+            await _write_pause_record(rt, pause_reason=exc.reason)
+        else:  # "stop"
+            await _write_seal_record(rt, terminal_status="stopped")
         raise
     except Exception as exc:
         rt.progress_sink(WorkflowProgressEvent(
@@ -318,6 +287,7 @@ async def run_workflow(
     budget: BudgetLedger | None = None,
     workflow_budget: BudgetLedger | None = None,
     abort_event: AbortSignal | None = None,
+    run_id: str | None = None,
 ) -> Any:
     # The ``swarmflow`` name a script imports the primitives under is registered
     # in ``sys.modules`` once at facade import time; the mapping is fixed for the
@@ -340,23 +310,13 @@ async def run_workflow(
     wal_path = f"{journal_path}.wal" if journal_path else None
     journal = await Journal.load(resume, wal_path=wal_path)
     log(f"[wf] journal loaded: prior_records={len(journal.prior)} path={resume} wal={wal_path}")
-    # Resume budget recovery: read the per-run ledger's prior tally from the
-    # ``<journal>.budget`` sidecar (colocated with the journal stem, so a resume
-    # — which resolves the same team/session/name path — finds it). None on a
-    # first run or a torn write; the ledger then starts at spent=0 (the
-    # documented soft-ceiling degradation). Only a declared ceiling carries the
-    # tally forward; an unbounded ledger has no ceiling to count toward.
-    budget_sidecar = _budget_sidecar_path(journal_path)
-    resume_snap = _read_budget_snapshot(budget_sidecar)
-    if resume_snap and resume_snap.get("terminal"):
-        # The prior run reached a terminal state (completed, or stopped by the
-        # BudgetExhausted gate), so this launch is a fresh attempt — not the
-        # resume of an interrupted run. Start the per-run ceiling from zero (the
-        # "新 run 的额度会重置" the exhausted / over-budget feedback promises);
-        # unchanged agents still replay from the journal cache for free, so only
-        # the redesigned parts are billed. A non-terminal sidecar (crash / pause
-        # / stop — no final seal) keeps the carry-forward resume semantics.
-        resume_snap = None
+    # Per-run budget on resume is NOT restored from a snapshot — the ledger
+    # starts at spent=0 and the emit hooks re-bill it by replaying cache hits:
+    # every cache-hit agent adds its record's stored ``tokens`` back, so the
+    # tally is recomputed agent-by-agent for the *current* script structure.
+    # A paused-but-unfinished agent (no call record) re-runs live and rebills,
+    # which is exactly the "redesign and relaunch" semantics: unchanged agents
+    # replay free (re-billed from their record), changed ones bill afresh.
     rt = Runtime(
         backend=backend or MockBackend(),
         journal=journal,
@@ -369,19 +329,10 @@ async def run_workflow(
         workflow_budget=workflow_budget if workflow_budget is not None else _resolve_workflow_budget(
             loaded,
             session_budget=budget,
-            resume_spent=(resume_snap or {}).get("spent", 0),
-            resume_phase_tokens=(resume_snap or {}).get("phase_tokens"),
         ),
         abort_event=abort_event,
         agent_gate=agent_gate,
-        # The emit hooks call this synchronously at agent boundaries to keep the
-        # sidecar a durable point-in-time snapshot (soft ceiling: a missed write
-        # only degrades resume fidelity, not the run). None disables persistence
-        # (offline preview path with no journal).
-        persist_workflow_budget=(
-            (lambda wb, terminal=False, _p=budget_sidecar: _write_budget_snapshot(_p, wb, terminal=terminal))
-            if budget_sidecar else None
-        ),
+        run_id=run_id,
     )
     # Hand the ledger to the backend: it is the only layer that sees what a call
     # really costs, so it does the accounting and the engine only reads. The
@@ -402,10 +353,6 @@ async def run_workflow(
         # interrupt / crash / cancellation re-raises and skips this line, leaving
         # the WAL for recovery). finalize = atomic journal write + terminal WAL
         # removal; a future mid-run checkpoint must call save() (keeps the WAL).
-        # Durable budget snapshot too: the emit-hook writes are best-effort
-        # (synchronous but soft-ceiling-tolerant), so seal a final one here
-        # before the WAL goes away — a completed run's resume would otherwise
-        # read a stale sidecar that's missing the last agent.
-        _persist_budget_final(rt)
+        # The seal record was already written by _exec_loaded's completed branch.
         await rt.journal.finalize(journal_path)
     return result

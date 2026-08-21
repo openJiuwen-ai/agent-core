@@ -241,6 +241,7 @@ async def run_swarmflow(
         abort_event=abort_event,
         agent_gate=agent_gate,
         budget=budget,
+        run_id=run_id,
     )
 
 
