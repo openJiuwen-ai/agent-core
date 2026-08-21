@@ -40,7 +40,7 @@ dependencies = [
     # Vector database (2.6.10 changed interface)
     "pymilvus>=2.6.2,<2.6.10",
     # MCP server
-    "fastmcp>=2.14.2,<3.0",
+    "fastmcp>=2.14.2,<4.0",
     "mcp>=1.26.0",
     # Document processing
     "beautifulsoup4>=4.12.0",
@@ -66,6 +66,10 @@ dependencies = [
     "loguru>=0.7.3",
     "gitcode-api>=1.2.20",
     "pyoxigraph>=0.5.8",
+    # OpenTelemetry SDK is imported unconditionally by openjiuwen.agent_evolving;
+    # under fastmcp 2.x it was provided transitively, but fastmcp 3.x (fastmcp-slim)
+    # no longer pulls it, so declare it explicitly to keep imports working.
+    "opentelemetry-sdk>=1.25.0",
 ]
 
 # A2A: required for `openjiuwen.remote_clients` / `openjiuwen.server_adapters` A2A entry
