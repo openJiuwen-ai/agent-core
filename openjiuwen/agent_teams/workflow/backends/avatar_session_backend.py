@@ -366,9 +366,10 @@ class AvatarSessionManager:
         messages = ctx_state.get("messages")
         if not isinstance(messages, list):
             return None
-        return ForkContext._normalize_messages(messages)
+        return ForkContext.normalize_messages(messages)
 
-    def _warn_out_of_range(self, session_id: str, fork_mode: str, keep_rounds: int | None) -> None:
+    @staticmethod
+    def _warn_out_of_range(session_id: str, fork_mode: str, keep_rounds: int | None) -> None:
         """Log when keep_rounds has no matching round (degrades to full-context fork)."""
         team_logger.warning(
             "[swarmflow] fork out-of-range: session %s fork_mode=%s keep_rounds=%r has no "

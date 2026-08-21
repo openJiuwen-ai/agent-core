@@ -166,8 +166,7 @@ class MockBackend(AgentBackend):
     # ------------------------------------------------------------------
 
     async def capture_fork(self, session_id: str, *, keep_rounds: int | None, fork_mode: str) -> dict | None:
-        """Mock sessions have no context to snapshot — forks degrade to the
-        engine's history mirror (deterministic and offline, no ToolMessage)."""
+        """Mock sessions have no context to snapshot; forks degrade to the history mirror."""
         return None
 
     async def ensure_member_name(self, *, kind: str, opts: dict) -> str:
