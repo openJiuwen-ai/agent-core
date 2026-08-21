@@ -47,7 +47,7 @@ def test_image_ocr_tool_encodes_local_image(tmp_path: Path, monkeypatch):
                 "image_content": image_content,
             }
         )
-        return "detected text"
+        return "detected text", None
 
     monkeypatch.setattr(
         "openjiuwen.harness.tools.multimodal.vision._invoke_chat_completion",
@@ -86,8 +86,8 @@ def test_visual_question_answering_tool_uses_ocr_context(monkeypatch):
         prompts.append(prompt)
         assert configured_model is vision_model_config
         if len(prompts) == 1:
-            return "SALE 50% OFF", "mock-model"
-        return "The sign says SALE 50% OFF.", "mock-model"
+            return "SALE 50% OFF", "mock-model", [None]
+        return "The sign says SALE 50% OFF.", "mock-model", [None]
 
     monkeypatch.setattr(
         "openjiuwen.harness.tools.multimodal.vision._call_vision_model",
@@ -135,7 +135,7 @@ def test_visual_question_answering_tool_can_skip_ocr(monkeypatch):
         _ = image_path_or_url
         prompts.append(prompt)
         assert configured_model is vision_model_config
-        return "A black cat is sitting on a chair.", "mock-model"
+        return "A black cat is sitting on a chair.", "mock-model", [None]
 
     monkeypatch.setattr(
         "openjiuwen.harness.tools.multimodal.vision._call_vision_model",

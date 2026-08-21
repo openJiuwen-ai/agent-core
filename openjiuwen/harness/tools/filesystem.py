@@ -27,6 +27,7 @@ from openjiuwen.core.session import get_current_session
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -543,7 +544,9 @@ class ReadFileTool(Tool):
             file_path: str,
             record: _ReadStateRecord,
     ) -> None:
-        if not record.mtime_ns or not self._is_text_read_for_edit(file_path):
+        # 沙箱模式下本地 os.stat 会失败，mtime_ns 为 0；仍需注册，否则
+        # EditFileTool 的预读校验会因为找不到 read_state 而拒绝编辑。
+        if not self._is_text_read_for_edit(file_path):
             return
 
         # ---- Cumulative coverage tracking for WriteFileTool ----
@@ -1481,7 +1484,18 @@ class EditFileTool(Tool):
             )
 
         is_unc = _is_unc_path(file_path)
-        file_exists = os.path.exists(file_path) if not is_unc else True
+        if is_unc:
+            file_exists = True
+        elif self.operation.mode == OperationMode.SANDBOX:
+            # 沙箱模式下 os.path.exists 只能看到主容器的文件系统，
+            # 实际文件在 jiuwenbox sidecar 中。用沙箱 fs 探测真实存在性。
+            try:
+                _probe = await self.operation.fs().read_file(file_path, mode="bytes")
+                file_exists = _probe.code == StatusCode.SUCCESS.code
+            except Exception:
+                file_exists = False
+        else:
+            file_exists = os.path.exists(file_path)
 
         # ---- New file creation (old_string == '') --------------------------------
         if old_str == "":
@@ -1524,12 +1538,16 @@ class EditFileTool(Tool):
 
         # ---- File size guard -----------------------------------------------------
         if not is_unc:
+            _stat = None
             try:
                 _stat = os.stat(file_path)
             except OSError as exc:
-                return ToolOutput(success=False, error=str(exc))
+                # 沙箱模式下文件在 jiuwenbox sidecar 中，本地 os.stat 会失败。
+                # 优雅降级到 (0, 0)，外部修改检测已有 content 比对回退路径。
+                if self.operation.mode != OperationMode.SANDBOX:
+                    return ToolOutput(success=False, error=str(exc))
 
-            if _stat.st_size > self.MAX_FILE_SIZE:
+            if _stat is not None and _stat.st_size > self.MAX_FILE_SIZE:
                 return ToolOutput(
                     success=False,
                     error=(
@@ -1538,8 +1556,8 @@ class EditFileTool(Tool):
                     ),
                 )
 
-            current_mtime = _stat.st_mtime_ns
-            current_size = _stat.st_size
+            current_mtime = _stat.st_mtime_ns if _stat else 0
+            current_size = _stat.st_size if _stat else 0
         else:
             current_mtime = 0
             current_size = 0

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import mimetypes
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
@@ -19,6 +20,8 @@ from openjiuwen.harness.schema.config import (
 )
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
+
+logger = logging.getLogger(__name__)
 
 SANDBOX_PATH_MARKER = "home/user"
 
@@ -105,7 +108,11 @@ def _invoke_chat_completion(
     config: VisionModelConfig,
     prompt: str,
     image_content: Dict[str, Any],
-) -> str:
+) -> tuple[str, dict | None]:
+    """Call vision model and return (response_text, usage_dict).
+
+    usage_dict is extracted from the API response for the caller to accumulate.
+    """
     if not config.api_key:
         raise ValueError(
             "Vision model config missing api_key."
@@ -124,10 +131,17 @@ def _invoke_chat_completion(
             }
         ],
     )
+    # Extract token usage from API response (returns dict, does NOT write to global)
+    usage: dict | None = None
+    try:
+        from openjiuwen.harness.tools.multimodal_telemetry import record_multimodal_token_usage
+        usage = record_multimodal_token_usage(response, model_name=config.model, system="openai")
+    except Exception as exc:
+        logger.warning("[vision] record_multimodal_token_usage failed: %s", exc)
     response_text = _extract_response_text(response)
     if not response_text:
         raise ValueError("Vision model returned empty content.")
-    return response_text
+    return response_text, usage
 
 
 def _require_vision_model_config(
@@ -152,20 +166,24 @@ async def _call_vision_model(
     image_path_or_url: str,
     prompt: str,
     vision_model_config: Optional[VisionModelConfig],
-) -> tuple[str, str]:
+) -> tuple[str, str, list[dict | None]]:
+    """Call vision model, returning (response_text, model_name, usage_list).
+
+    usage_list contains one entry per model call (for accumulation by the caller).
+    """
     config = _require_vision_model_config(vision_model_config)
     image_content = await asyncio.to_thread(_build_image_content, image_path_or_url)
 
     last_error: Exception | None = None
     for attempt in range(1, config.max_retries + 1):
         try:
-            response_text = await asyncio.to_thread(
+            response_text, usage = await asyncio.to_thread(
                 _invoke_chat_completion,
                 config,
                 prompt,
                 image_content,
             )
-            return response_text, config.model
+            return response_text, config.model, [usage]
         except Exception as exc:  
             last_error = exc
             error_text = str(exc)
@@ -177,6 +195,15 @@ async def _call_vision_model(
     if last_error is None:
         raise RuntimeError("Vision model call failed without a captured exception.")
     raise last_error
+
+
+def _store_aggregated_usage(usages: list[dict | None]) -> None:
+    """Aggregate multiple model-call usages and store once per tool invocation."""
+    try:
+        from openjiuwen.harness.tools.multimodal_telemetry import aggregate_usage, store_multimodal_usage
+        store_multimodal_usage(aggregate_usage(usages))
+    except Exception as exc:
+        logger.warning("[vision] store_aggregated_usage failed: %s", exc)
 
 
 class ImageOCRTool(Tool):
@@ -196,13 +223,15 @@ class ImageOCRTool(Tool):
         prompt = inputs.get("prompt") or DEFAULT_OCR_PROMPT
 
         try:
-            text, model = await _call_vision_model(
+            text, model, usages = await _call_vision_model(
                 image_path_or_url,
                 prompt,
                 self.vision_model_config,
             )
         except Exception as exc:  # noqa: BLE001
             return ToolOutput(success=False, error=str(exc))
+
+        _store_aggregated_usage(usages)
 
         return ToolOutput(
             success=True,
@@ -246,26 +275,33 @@ class VisualQuestionAnsweringTool(Tool):
         try:
             ocr_text = ""
             model = ""
+            all_usages: list[dict | None] = []
+
             if include_ocr:
-                ocr_text, model = await _call_vision_model(
+                ocr_text, model, ocr_usages = await _call_vision_model(
                     image_path_or_url,
                     ocr_prompt,
                     self.vision_model_config,
                 )
+                all_usages.extend(ocr_usages)
 
             prompt = (
                 DEFAULT_VQA_PROMPT_TEMPLATE.format(ocr_text=ocr_text or "No OCR used", question=question)
                 if include_ocr
                 else question
             )
-            answer, answer_model = await _call_vision_model(
+            answer, answer_model, vqa_usages = await _call_vision_model(
                 image_path_or_url,
                 prompt,
                 self.vision_model_config,
             )
             model = answer_model or model
+            all_usages.extend(vqa_usages)
         except Exception as exc:  # noqa: BLE001
             return ToolOutput(success=False, error=str(exc))
+
+        # Store aggregated usage (OCR + VQA) once per tool invocation
+        _store_aggregated_usage(all_usages)
 
         return ToolOutput(
             success=True,
