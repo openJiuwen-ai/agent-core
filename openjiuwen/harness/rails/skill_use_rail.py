@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -106,6 +107,52 @@ def _format_skill_load_stub_core(
     )
 
 
+# Process-level skill catalog index (mtime → Skill). Survives SkillUseRail rebuilds
+# across sessions so cold-start ④ does not re-read every SKILL.md via SysOp.
+_PROCESS_SKILL_INDEX: Dict[str, Tuple[float, Skill]] = {}
+_FRONTMATTER_READ_LIMIT = 65536
+
+
+def _read_local_frontmatter_prefix(
+    path: Path,
+    *,
+    limit: int = _FRONTMATTER_READ_LIMIT,
+) -> str:
+    """Read SKILL.md until the closing frontmatter ``---`` (catalog path; no body)."""
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        first = handle.read(3)
+        if first != "---":
+            rest = handle.read(max(0, limit - len(first)))
+            return first + rest
+        parts: List[str] = [first]
+        total = len(first)
+        # Consume rest of opening fence line (e.g. "---\n").
+        line = handle.readline()
+        if line:
+            parts.append(line)
+            total += len(line)
+        while total < limit:
+            line = handle.readline()
+            if not line:
+                break
+            parts.append(line)
+            total += len(line)
+            if line.strip() == "---":
+                break
+        return "".join(parts)
+
+
+def _parse_frontmatter_yaml(text: str) -> Optional[dict]:
+    """Parse YAML frontmatter from a SKILL.md prefix; ignore markdown body."""
+    if not text.startswith("---"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    yaml_data = yaml.safe_load(parts[1]) or {}
+    return yaml_data if isinstance(yaml_data, dict) else None
+
+
 def _format_skill_unload_stub(
     skill_name: str,
     *,
@@ -203,6 +250,11 @@ class SkillUseRail(DeepAgentRail):
         self._owned_tool_names: Set[str] = set()
         self._owned_tool_ids: Set[str] = set()
 
+    @staticmethod
+    def clear_process_skill_index() -> None:
+        """Clear the process-level skill catalog index (tests / forced refresh)."""
+        _PROCESS_SKILL_INDEX.clear()
+
     @property
     def skills_meta(self) -> List[Skill]:
         """Return all managed skills."""
@@ -239,11 +291,15 @@ class SkillUseRail(DeepAgentRail):
 
         When ``enabled_skills`` / ``disabled_skills`` are set, skip disallowed
         directories before reading SKILL.md (filter-then-load).
+
+        Uses a process-level mtime index so a new ``SkillUseRail`` instance
+        (new session) does not re-read every SKILL.md.
         """
         roots = self._normalize_skill_dirs(self.skills_dir)
         if not roots:
             raise ValueError("skills_dir is empty")
 
+        t0 = time.perf_counter()
         logger.info(
             "[SkillUseRail] filter_before_load=1 enabled=%s disabled=%s roots=%s",
             sorted(self.enabled_skills) if self.enabled_skills else [],
@@ -256,6 +312,8 @@ class SkillUseRail(DeepAgentRail):
         scanned_dirs = 0
         skipped_by_filter = 0
         loaded_or_cached = 0
+        cache_hits = 0
+        cache_misses = 0
 
         for root in roots:
             if not root.exists():
@@ -295,8 +353,20 @@ class SkillUseRail(DeepAgentRail):
                 cached_skill = self._skill_cache.get(key)
                 cached_update_at = self._skill_update_at.get(key)
 
-                if cached_skill is None or cached_update_at != update_at:
-                    skill = await self._load_skill(item, update_at)
+                if cached_skill is not None and cached_update_at == update_at:
+                    cache_hits += 1
+                else:
+                    skill: Optional[Skill] = None
+                    if self.enable_cache:
+                        proc = _PROCESS_SKILL_INDEX.get(key)
+                        if proc is not None and proc[0] == update_at:
+                            skill = proc[1]
+                            cache_hits += 1
+                    if skill is None:
+                        skill = await self._load_skill(item, update_at)
+                        cache_misses += 1
+                        if self.enable_cache:
+                            _PROCESS_SKILL_INDEX[key] = (update_at, skill)
                     self._skill_cache[key] = skill
                     self._skill_update_at[key] = update_at
 
@@ -306,14 +376,30 @@ class SkillUseRail(DeepAgentRail):
         for key in stale_keys:
             self._skill_cache.pop(key, None)
             self._skill_update_at.pop(key, None)
+            _PROCESS_SKILL_INDEX.pop(key, None)
 
         self._skill_order = [key for key in ordered_keys if key in self._skill_cache]
 
+        if cache_misses == 0 and cache_hits > 0:
+            cache_label = "hit"
+        elif cache_hits == 0:
+            cache_label = "miss"
+        else:
+            cache_label = "mixed"
+        cost_ms = (time.perf_counter() - t0) * 1000
         logger.info(
             "[SkillUseRail] filter_before_load done scanned=%s skipped=%s kept=%s",
             scanned_dirs,
             skipped_by_filter,
             loaded_or_cached,
+        )
+        logger.info(
+            "[SkillUseRail] skill_index cache=%s hits=%s misses=%s entries=%s cost_ms=%.1f",
+            cache_label,
+            cache_hits,
+            cache_misses,
+            loaded_or_cached,
+            cost_ms,
         )
 
     async def _load_skill(self, skill_dir: Path, update_at: float) -> Skill:
@@ -966,7 +1052,11 @@ class SkillUseRail(DeepAgentRail):
         return set(cls._normalize_name_list(raw))
 
     async def _load_yaml(self, path: Path) -> Tuple[Optional[dict], str]:
-        """Load YAML front matter and markdown body from SKILL.md."""
+        """Load YAML front matter and markdown body from SKILL.md (full file via SysOp).
+
+        Prefer :meth:`_load_description` on the catalog path — it only needs
+        frontmatter and avoids retaining the markdown body.
+        """
         result = await self.sys_operation.fs().read_file(
             str(path),
             mode="text",
@@ -990,13 +1080,29 @@ class SkillUseRail(DeepAgentRail):
             if len(parts) >= 3:
                 _, yaml_block, body = parts
                 yaml_data = yaml.safe_load(yaml_block) or {}
+                if not isinstance(yaml_data, dict):
+                    yaml_data = {}
                 return yaml_data, body.lstrip()
 
         return None, text
 
     async def _load_description(self, path: Path) -> str:
-        """Load description from YAML front matter."""
-        yaml_data, _ = await self._load_yaml(path)
+        """Load description from YAML front matter only (catalog path; no body).
+
+        Tries a local short read up to the closing ``---`` fence first; falls
+        back to SysOp full-file read when the path is not locally readable.
+        Full SKILL.md body remains lazy via ``skill_tool``.
+        """
+        yaml_data: Optional[dict] = None
+        try:
+            prefix = _read_local_frontmatter_prefix(path)
+            yaml_data = _parse_frontmatter_yaml(prefix)
+        except OSError:
+            yaml_data = None
+
+        if yaml_data is None:
+            yaml_data, _body = await self._load_yaml(path)
+
         if yaml_data is None or "description" not in yaml_data:
             raise KeyError("SKILL.md file does not contain a description field")
         return str(yaml_data["description"])
