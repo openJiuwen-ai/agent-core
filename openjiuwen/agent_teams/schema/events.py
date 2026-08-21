@@ -432,13 +432,13 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     run_id: Optional[str] = Field(
         default=None, description="Unique run identifier, set by SwarmflowTool for all events of one run"
     )
-    task_id: Optional[str] = Field(
+    relaunch_kind: Optional[str] = Field(
         default=None,
         description=(
-            "Background-task id for this run instance. Distinct from run_id: a "
-            "resume / script-edit relaunch keeps run_id (journal + budget cache "
-            "replay) but gets a fresh task_id, so frontends key the tree on "
-            "task_id to render each attempt as its own card."
+            "How this run's launch differs from a fresh one: 'resume' (normal "
+            "pause→resume, the tree continues) or 'relaunch' (script-edit re-run "
+            "under the same run_id, the phase/agent structure is reset). None on "
+            "a fresh launch."
         ),
     )
     workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")
