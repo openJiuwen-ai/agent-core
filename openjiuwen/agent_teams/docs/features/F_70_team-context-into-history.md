@@ -15,13 +15,14 @@
 `team_identity` 也收进同一条通道。
 
 **但那条理由本身是错的**，这次先把事实说准。attachment 的投递语义是
-`PromptAttachmentManager.make_window_mutator` → `inject_messages`：每次模型调用把全部
-attachment 渲染成一条 `UserMessage`，**追加到 window 末尾，且不写进会话历史**。追加在尾部
-不会让前面任何 token 失效——**attachment 从来没有击穿过前缀 cache**。
+`PromptAttachmentManager.sync_to_context`：attachment 首次出现或发生变化时，以一条
+`SystemMessage` 追加到会话历史，后续模型调用复用这份常驻历史。它不会作为临时消息在
+window 构造阶段重复注入，也不会因此改写前面的缓存前缀。
 
-真实代价是另一回事：这坨内容**每次模型调用（含同一轮里每次 tool-loop 迭代）都要重新编码、
+临时通道的真实代价是：这坨内容**每次模型调用（含同一轮里每次 tool-loop 迭代）都要重新编码、
 永远拿不到缓存命中**。而三片里 identity 恒定、`team_info` 近乎恒定（`TeamDao` 至今没有
-update 路径）、名册大多数时候也没变——为"可能变"付的是"每次全额重发"的价。
+update 路径）、名册大多数时候也没变——为"可能变"付的是"每次全额重发"的价。改为历史后，
+未变化的 attachment 可以随缓存前缀复用，只有变化内容以新的历史尾部追加。
 
 方向因此反过来：这些内容不该待在"用完即弃"的通道里，而应该**写进对话历史**——写一次，
 之后永远落在缓存前缀里。这不是新机制，正是 F_46 自己定义的**机制 B**（内嵌 XML 的
@@ -243,8 +244,8 @@ codex 只保留自己那段更严格的 thread-id 恢复 `_restore_thread_id`）
 attachment_notice **正好相反**：从"始终以最新一次为准、不是对话历史"改成"写进对话历史、
 按时间顺序累积"，并明说名册是"全量 + 增量累积"而不会再重发全量。
 
-harness 通用的 `build_prompt_attachments_section`（P:75）**保留**——memory / skill /
-agent_mode 等 rail 仍在用 attachment 通道，那段说明不归团队管。
+旧的 harness 静态 attachment 提示 section 已移除；动态 attachment 统一通过
+`PromptAttachmentManager.sync_to_context` 写入常驻历史。
 `build_team_identity_section` 也**保留**：外部 CLI 的系统提示词仍靠
 `include_member_specific=True` 内联它（启动期还没有对话可写）。它现在只是
 `build_identity_text` 的 `PromptSection` 包装，正文只有一份。

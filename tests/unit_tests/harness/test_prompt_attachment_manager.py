@@ -7,17 +7,17 @@ import pytest
 
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.foundation.kv_cache import KV_CACHE_EPHEMERAL_TAIL_METADATA
-from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
-    PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY,
+    PROMPT_ATTACHMENT_HISTORY_METADATA_KEY,
     PromptAttachment,
     PromptAttachmentKind,
     PromptAttachmentManager,
     PromptAttachmentUpdate,
 )
 @pytest.mark.asyncio
-async def test_prompt_attachment_manager_collect_render_inject_and_update():
+async def test_prompt_attachment_manager_collect_render_and_update():
     manager = PromptAttachmentManager()
 
     runtime = await manager.add_section(
@@ -48,18 +48,11 @@ async def test_prompt_attachment_manager_collect_render_inject_and_update():
     assert [item.id for item in collected] == ["session.sess1.runtime", "session.sess1.memory"]
 
     rendered = manager.render(collected)
-    assert rendered.startswith("<system-reminder>")
+    assert rendered.startswith("The following dynamic context is currently active.")
+    assert "<prompt-attachment" not in rendered
     assert "runtime rules" in rendered
     assert "memory content" in rendered
     assert "must not appear" not in rendered
-
-    original = [SystemMessage(content="sys"), UserMessage(content="query")]
-    injected = manager.inject_messages(original, rendered)
-    assert original[-1].content == "query"
-    assert len(injected) == len(original) + 1
-    assert injected[-2].content == "query"
-    assert isinstance(injected[-1], UserMessage)
-    assert injected[-1].content.startswith("<system-reminder>")
 
     updated = await manager.update_by_id(runtime.id, PromptAttachmentUpdate(content="updated runtime"))
     assert updated.content == "updated runtime"
@@ -67,6 +60,195 @@ async def test_prompt_attachment_manager_collect_render_inject_and_update():
 
     assert await manager.remove_by_id(runtime.id, session_id="sess1") is True
     assert await manager.get_by_id(runtime.id, session_id="sess1") is None
+
+
+@pytest.mark.asyncio
+async def test_prompt_attachment_manager_persists_snapshot_then_only_deltas():
+    manager = PromptAttachmentManager(language="en")
+    runtime = await manager.add_section(
+        session_id="sess1",
+        section="runtime",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="rail.runtime",
+        content="runtime v1",
+    )
+    await manager.add_section(
+        session_id="sess1",
+        section="stable",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="rail.runtime",
+        content="unchanged payload",
+    )
+    context = SessionModelContext(
+        "ctx1",
+        "sess1",
+        ContextEngineConfig(),
+        history_messages=[UserMessage(content="query")],
+        processors=[],
+    )
+
+    snapshot = await manager.sync_to_context(context, "sess1")
+
+    assert isinstance(snapshot, SystemMessage)
+    assert snapshot.metadata[PROMPT_ATTACHMENT_HISTORY_METADATA_KEY] is True
+    assert snapshot.content.startswith("The following dynamic context is currently active.")
+    assert "<prompt-attachment" not in snapshot.content
+    assert "runtime v1" in snapshot.content
+    assert "unchanged payload" in snapshot.content
+    assert len(context.get_messages()) == 2
+
+    assert await manager.sync_to_context(context, "sess1") is None
+    assert len(context.get_messages()) == 2
+
+    restored_manager = PromptAttachmentManager(language="en")
+    await restored_manager.add_section(
+        session_id="sess1",
+        section="runtime",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="rail.runtime",
+        content="runtime v1",
+    )
+    await restored_manager.add_section(
+        session_id="sess1",
+        section="stable",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="rail.runtime",
+        content="unchanged payload",
+    )
+    assert await restored_manager.sync_to_context(context, "sess1") is None
+    assert len(context.get_messages()) == 2
+
+    await manager.update_content_by_id(runtime.id, content="runtime v2", session_id="sess1")
+    delta = await manager.sync_to_context(context, "sess1")
+
+    assert isinstance(delta, SystemMessage)
+    assert delta.content.startswith("The following dynamic context has changed.")
+    assert "<prompt-attachment" not in delta.content
+    assert "runtime v2" in delta.content
+    assert "<system-reminder>" not in delta.content
+    assert "unchanged payload" not in delta.content
+    assert len(context.get_messages()) == 3
+    assert context.get_messages()[0].content == "query"
+    assert context.get_messages()[1].content == snapshot.content
+    assert context.get_messages()[2].content == delta.content
+
+    await manager.clear_section(session_id="sess1", section="stable")
+    removal = await manager.sync_to_context(context, "sess1")
+
+    assert isinstance(removal, SystemMessage)
+    assert "no longer active" in removal.content
+    assert "- `stable`" in removal.content
+    assert "<prompt-attachment" not in removal.content
+    assert len(context.get_messages()) == 4
+    assert context.get_messages()[-1].content == removal.content
+
+
+@pytest.mark.asyncio
+async def test_prompt_attachment_snapshot_precedes_the_first_user_message():
+    manager = PromptAttachmentManager(language="en")
+    await manager.add_section(
+        session_id="sess1",
+        section="runtime",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="rail.runtime",
+        content="initial runtime state",
+    )
+    context = SessionModelContext(
+        "ctx1",
+        "sess1",
+        ContextEngineConfig(),
+        history_messages=[],
+        processors=[],
+    )
+
+    snapshot = await manager.sync_to_context(context, "sess1")
+    user_message = UserMessage(content="query")
+    await context.add_messages(user_message)
+
+    assert context.get_messages() == [snapshot, user_message]
+    assert isinstance(context.get_messages()[0], SystemMessage)
+
+
+@pytest.mark.asyncio
+async def test_prompt_attachment_internal_metadata_does_not_emit_a_delta():
+    manager = PromptAttachmentManager(language="en")
+    item = await manager.add_section(
+        session_id="sess1",
+        section="runtime",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="rail.runtime",
+        content="unchanged runtime state",
+        priority=10,
+        metadata={"revision": 1},
+    )
+    context = SessionModelContext(
+        "ctx1",
+        "sess1",
+        ContextEngineConfig(),
+        history_messages=[],
+        processors=[],
+    )
+    await manager.sync_to_context(context, "sess1")
+
+    await manager.update_metadata_by_id(
+        item.id,
+        session_id="sess1",
+        metadata={"revision": 2},
+    )
+    await manager.update_by_id(item.id, PromptAttachmentUpdate(priority=20))
+
+    assert await manager.sync_to_context(context, "sess1") is None
+    assert len(context.get_messages()) == 1
+
+
+@pytest.mark.asyncio
+async def test_prompt_attachment_manager_keeps_history_attachment_order_in_window():
+    manager = PromptAttachmentManager()
+    runtime = await manager.add_section(
+        session_id="sess1",
+        section="runtime",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="rail.runtime",
+        content="runtime context",
+    )
+    context = SessionModelContext(
+        "ctx1",
+        "sess1",
+        ContextEngineConfig(),
+        history_messages=[
+            UserMessage(content="query"),
+            AssistantMessage(
+                content="",
+                tool_calls=[ToolCall(id="call-1", type="function", name="read_file", arguments="{}")],
+            ),
+            ToolMessage(content="file contents", tool_call_id="call-1"),
+        ],
+        processors=[],
+        window_mutators=[manager.make_window_mutator("sess1")],
+    )
+    snapshot = await manager.sync_to_context(context, "sess1")
+
+    window = await context.get_context_window(
+        system_messages=[SystemMessage(content="base system")],
+    )
+
+    assert window.system_messages == [SystemMessage(content="base system"), snapshot]
+    assert window.context_messages == context.get_messages()[:-1]
+    assert window.context_messages[-1].content == "file contents"
+    assert all(message.content != snapshot.content for message in window.context_messages)
+
+    await manager.update_content_by_id(runtime.id, content="updated runtime", session_id="sess1")
+    delta = await manager.sync_to_context(context, "sess1")
+    assert isinstance(delta, SystemMessage)
+
+    window = await context.get_context_window(
+        system_messages=[SystemMessage(content="base system")],
+    )
+    assert window.system_messages == [SystemMessage(content="base system"), snapshot]
+    assert window.context_messages[-2].content == "file contents"
+    assert window.context_messages[-1].content == delta.content
+    assert window.get_messages()[1].content == snapshot.content
+    assert window.get_messages()[-1].content == delta.content
 
 
 def test_prompt_attachment_manager_render_truncates_large_content():
@@ -252,102 +434,47 @@ async def test_prompt_attachment_manager_convenience_update_interfaces():
     assert metadata_replaced.metadata == {"only": "value", "section": "session_text", "source": "manual"}
 
 
-def test_prompt_attachment_manager_render_escapes_xml():
+def test_prompt_attachment_manager_render_keeps_content_without_internal_wrappers():
     manager = PromptAttachmentManager()
-    rendered = manager.render([
-        PromptAttachment(
-            id='session.sess1.a"<1>',
-            section='a"<1>',
-            kind="custom<type>",
-            source="source&x",
-            session_id="sess1",
-            content="<raw>&value",
-        )
-    ])
-
-    assert 'id=' not in rendered
-    assert 'type="custom&lt;type&gt;"' in rendered
-    assert 'source=' not in rendered
-    assert "&lt;raw&gt;&amp;value" in rendered
-
-
-def test_prompt_attachment_manager_appends_attachment_message_after_multimodal_user_message():
-    manager = PromptAttachmentManager()
-    original = [
-        UserMessage(content=[
-            {"type": "text", "text": "query"},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}},
-        ])
-    ]
-
-    injected = manager.inject_messages(original, "<system-reminder>attached</system-reminder>")
-
-    assert original[-1].content[0]["text"] == "query"
-    assert injected[-2].content == original[-1].content
-    assert isinstance(injected[-1], UserMessage)
-    assert injected[-1].content == "<system-reminder>attached</system-reminder>"
-    assert (
-        injected[-1].metadata[KV_CACHE_EPHEMERAL_TAIL_METADATA]
-        is True
+    rendered = manager.render(
+        [
+            PromptAttachment(
+                id='session.sess1.a"<1>',
+                section='a"<1>',
+                kind="custom<type>",
+                source="source&x",
+                session_id="sess1",
+                content="<raw>&value",
+            )
+        ]
     )
 
-
-def test_prompt_attachment_manager_appends_attachment_message_after_image_only_user_message():
-    manager = PromptAttachmentManager()
-    original = [
-        UserMessage(content=[
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}},
-        ])
-    ]
-
-    injected = manager.inject_messages(original, "<system-reminder>attached</system-reminder>")
-
-    assert injected[-2].content == original[-1].content
-    assert isinstance(injected[-1], UserMessage)
-    assert injected[-1].content == "<system-reminder>attached</system-reminder>"
+    assert "id=" not in rendered
+    assert "custom<type>" not in rendered
+    assert "source=" not in rendered
+    assert "<raw>&value" in rendered
+    assert "<prompt-attachment" not in rendered
 
 
-def test_prompt_attachment_manager_inserts_attachment_before_preserved_tail():
-    manager = PromptAttachmentManager()
-    state = UserMessage(
-        content="<browser_state>current</browser_state>",
-        metadata={PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY: True},
-    )
-    progress = UserMessage(
-        content='<browser_state_progress>{"page_change":"unchanged"}</browser_state_progress>',
-        metadata={PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY: True},
-    )
-    original = [UserMessage(content="query"), state, progress]
-
-    injected = manager.inject_messages(original, "<system-reminder>attached</system-reminder>")
-
-    assert [message.content for message in injected] == [
-        "query",
-        "<system-reminder>attached</system-reminder>",
-        state.content,
-        progress.content,
-    ]
-    assert injected[-2] is state
-    assert injected[-1] is progress
-
-
-def test_prompt_attachment_guidance_is_rendered_only_with_attachments():
+def test_prompt_attachment_plain_text_intro_is_rendered_only_with_attachments():
     manager = PromptAttachmentManager(language="en")
     assert manager.render([]) == ""
 
-    rendered = manager.render([
-        PromptAttachment(
-            id="session.sess1.runtime",
-            section="runtime",
-            session_id="sess1",
-            content="runtime context",
-        )
-    ])
+    rendered = manager.render(
+        [
+            PromptAttachment(
+                id="session.sess1.runtime",
+                section="runtime",
+                session_id="sess1",
+                content="runtime context",
+            )
+        ]
+    )
 
-    guidance_index = rendered.index("The following dynamic context")
-    attachment_index = rendered.index('<prompt-attachment type="generic">')
-    assert guidance_index < attachment_index
-    assert "Do not expose its tags" in rendered
+    intro_index = rendered.index("The following dynamic context")
+    content_index = rendered.index("runtime context")
+    assert intro_index < content_index
+    assert "<prompt-attachment" not in rendered
 
 
 @pytest.mark.asyncio
