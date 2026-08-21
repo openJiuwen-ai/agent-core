@@ -543,26 +543,28 @@ class _Loaded:
 
 
 @pytest.mark.asyncio
-async def test_budget_exhausted_emits_workflow_failed_with_budget(monkeypatch):
-    led = BudgetLedger(total=500000, spent=500000)  # exhausted
+async def test_session_budget_exhausted_emits_stopped_with_budget(monkeypatch):
+    led = BudgetLedger(total=500000, spent=500000)  # exhausted session ledger
     sink = _Sink()
     rt = Runtime(backend=None, journal=None, budget=led)
     rt.progress_sink = sink
 
     async def boom(loaded, args):
-        raise BudgetExhausted("token budget exhausted: 500000/500000")
+        raise BudgetExhausted("session token budget exhausted: 500000/500000")
 
     monkeypatch.setattr(runner, "_invoke_loaded", boom)
     with pytest.raises(BudgetExhausted):
         await runner._exec_loaded(_Loaded(), rt)
 
-    failed = [e for e in sink.events if e.kind == ProgressKind.WORKFLOW_FAILED]
-    assert len(failed) == 1
-    ev = failed[0]
+    # Session ceiling hit is STOPPED (not recoverable by script edit).
+    stopped = [e for e in sink.events if e.kind == ProgressKind.WORKFLOW_STOPPED]
+    assert len(stopped) == 1
+    ev = stopped[0]
     assert ev.budget is not None
     assert ev.budget["exhausted"] is True
     assert ev.budget["spent"] == 500000
     assert ev.budget["remaining"] == 0
+    assert ev.budget_exhausted_scope == "session"
 
 
 @pytest.mark.asyncio
