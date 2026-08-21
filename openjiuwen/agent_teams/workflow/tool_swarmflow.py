@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 WorkerModelResolver = Callable[[str], Any]
 
 _RUN_ID_INPUT_KEY = "_run_id"
+_RELAUNCH_KIND_KEY = "_relaunch_kind"
 _WORKFLOW_TICKET_KEY = "_workflow_ticket"
 _AGENT_GATE_KEY = "_agent_gate"
 _COMPLETION_CTX_KEY = "_completion_ctx"
@@ -417,6 +418,10 @@ class SwarmflowTool(AsyncTool):
         enriched = dict(inputs)
         enriched["script_path"] = script_path
         enriched[_RUN_ID_INPUT_KEY] = run_id
+        if resume_id:
+            # resume_id without action = script-edit relaunch (same run_id): the
+            # frontend resets the phase/agent tree, unlike a fresh launch.
+            enriched[_RELAUNCH_KIND_KEY] = "relaunch"
         enriched[_WORKFLOW_TICKET_KEY] = ticket
         enriched[_AGENT_GATE_KEY] = agent_gate
         completion_ctx: dict[str, Any] = {}
@@ -526,7 +531,7 @@ class SwarmflowTool(AsyncTool):
                 team_name=team_name,
                 kind=progress.kind,
                 run_id=run_id,
-                task_id=task_id,
+                relaunch_kind=inputs.get(_RELAUNCH_KIND_KEY),
                 workflow_name=name_box["name"],
                 description=name_box.get("description"),
                 phase=progress.phase,
@@ -677,6 +682,7 @@ class SwarmflowTool(AsyncTool):
         """
         from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 
+        inputs[_RELAUNCH_KIND_KEY] = "resume"  # normal pause→resume: tree continues
         new_task_id = generate_id(self.card.name)
         token = set_session_id(session_id) if session_id else None
         try:
