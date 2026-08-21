@@ -6,7 +6,6 @@ Tests for callback framework usage through Runner.
 """
 
 import pytest
-import pytest_asyncio
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback import (
@@ -16,19 +15,14 @@ from openjiuwen.core.runner.callback import (
     ValidationFilter,
     HookType,
 )
+from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
+from openjiuwen.core.runner.runner import GLOBAL_RUNNER
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def cleanup_callbacks():
-    """Clean up all registered callbacks after each test."""
-    yield
-    # Cleanup: unregister all callbacks registered during the test
-    framework = Runner.callback_framework
-    # Get all events that have callbacks (create a copy of the list to avoid modification during iteration)
-    events_to_clean = list(framework.callbacks.keys())
-    for event in events_to_clean:
-        # Use unregister_event to clean up everything for this event
-        await framework.unregister_event(event)
+@pytest.fixture(autouse=True)
+def isolated_callback_framework(monkeypatch):
+    """Keep callback mutations local without deleting production callbacks."""
+    monkeypatch.setattr(GLOBAL_RUNNER, "_callback_framework", AsyncCallbackFramework())
 
 
 @pytest.mark.asyncio

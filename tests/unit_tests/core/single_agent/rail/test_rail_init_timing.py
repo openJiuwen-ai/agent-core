@@ -48,8 +48,10 @@ def _captured_logs(monkeypatch: pytest.MonkeyPatch) -> dict:
 
         return _log
 
-    monkeypatch.setattr(rail_base.logger, "info", _record("info"))
-    monkeypatch.setattr(rail_base.logger, "debug", _record("debug"))
+    logger = MagicMock()
+    logger.info.side_effect = _record("info")
+    logger.debug.side_effect = _record("debug")
+    monkeypatch.setattr(rail_base, "logger", logger)
     return records
 
 

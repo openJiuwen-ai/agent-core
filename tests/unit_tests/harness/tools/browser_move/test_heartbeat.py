@@ -8,9 +8,12 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from openjiuwen.core.runner.resources_manager import tool_manager as tool_manager_module
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
 from openjiuwen.harness.tools.browser_move.playwright_runtime.service import BrowserService
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_tools import ensure_browser_runtime_client_patch
+from openjiuwen.harness.tools.browser_move.playwright_runtime import browser_tools
 from openjiuwen.harness.tools.browser_move.clients.stdio_client import BrowserMoveStdioClient
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
@@ -118,8 +121,16 @@ def test_check_connection_raises_when_client_not_found() -> None:
     _run(_test())
 
 
-def test_browser_runtime_stdio_patch_creates_pingable_client() -> None:
-    ensure_browser_runtime_client_patch()
+def test_browser_runtime_stdio_patch_creates_pingable_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The runtime patch is intentionally process-global in production. Track
+    # every mutated global here so pytest restores the original client factory.
+    monkeypatch.setattr(ToolMgr, "_create_client", ToolMgr._create_client)
+    monkeypatch.setattr(browser_tools, "_OPENJIUWEN_CLIENTS_PATCHED", False)
+    monkeypatch.setattr(browser_tools, "_client_registry", {})
+    monkeypatch.setattr(tool_manager_module, "StdioClient", None, raising=False)
+    monkeypatch.setattr(tool_manager_module, "StreamableHttpClient", None, raising=False)
+
+    browser_tools.ensure_browser_runtime_client_patch()
     config = McpServerConfig(
         server_id="test-stdio-patch",
         server_name="test-stdio-patch",
