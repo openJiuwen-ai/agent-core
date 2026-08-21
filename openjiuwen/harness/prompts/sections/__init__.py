@@ -23,6 +23,7 @@ class SectionName:
     HEARTBEAT = "heartbeat"
     CONTEXT = "context"
     EXTERNAL_MEMORY = "external_memory"
+    CODE_GRAPH = "code_graph"
     COMPLETION_SIGNAL = "completion_signal"
     VERIFICATION_CONTRACT = "verification_contract"
     EVOLUTION_PROTOCOL = "evolution_protocol"

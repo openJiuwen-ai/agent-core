@@ -19,7 +19,12 @@ from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.subagents.plan_agent import build_plan_agent_config
 from openjiuwen.harness.rails.memory.coding_memory_rail import CodingMemoryRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
-from openjiuwen.harness.rails import AskUserRail, ConfirmInterruptRail, AgentModeRail
+from openjiuwen.harness.rails import (
+    AgentModeRail,
+    AskUserRail,
+    CodeGraphProfileRail,
+    ConfirmInterruptRail,
+)
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.subagents.explore_agent import build_explore_agent_config
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
@@ -31,12 +36,14 @@ DEFAULT_CODE_AGENT_SYSTEM_PROMPT_EN = (
     "You are an AI Coding Agent. "
     "Rules: Use tools whenever possible (read/write/edit/grep/list/bash/code), don't guess file contents;"
     "make small, reversible changes; clarify data structures and interfaces before modifying code; "
-    "provide testing/verification steps in your output."
+    "run the smallest collectable test yourself, repair what the output shows, and compare the final "
+    "diff against the request before reporting completion."
 )
 
 DEFAULT_CODE_AGENT_SYSTEM_PROMPT_CN = (
     "你是一个 AI 编程助手，规则：能用工具就用工具（读/写/编辑/grep/list/bash/code），不要猜文件内容；变更要小、可回滚；"
-    "先澄清数据结构与接口，再动代码；输出给出测试/验证步骤。"
+    "先澄清数据结构与接口，再动代码；自己运行最小可收集测试，依据输出修复失败，"
+    "汇报完成前用最终 diff 对照原始需求逐项检查。"
 )
 
 DEFAULT_CODE_AGENT_SYSTEM_PROMPT: Dict[str, str] = {
@@ -160,12 +167,29 @@ def build_code_agent_config(
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
     embedding_config: Optional[EmbeddingConfig] = None,
+    code_graph_profile: Optional[str] = None,
+    code_graph_config: Optional[Any] = None,
+    code_graph_prompt_mode: Optional[str] = None,
+    inject_builtin_plan_agents: bool = True,
 ) -> SubAgentConfig:
-    """Build a SubAgentConfig that materializes as create_code_agent()."""
+    """Build a SubAgentConfig that materializes as create_code_agent().
+
+    ``code_graph_profile`` is forwarded through ``factory_kwargs``, so only the
+    Code Agent built from this spec gets graph tools. Leaving it ``None``
+    matches JiuwenSwarm ``develop``: original grep / read / edit, no graph.
+    """
     resolved_language = resolve_language(language)
     factory_kwargs: Dict[str, Any] = {}
     if embedding_config is not None:
         factory_kwargs["embedding_config"] = embedding_config
+    if code_graph_profile is not None:
+        factory_kwargs["code_graph_profile"] = code_graph_profile
+        if code_graph_config is not None:
+            factory_kwargs["code_graph_config"] = code_graph_config
+        if code_graph_prompt_mode:
+            factory_kwargs["code_graph_prompt_mode"] = code_graph_prompt_mode
+    if not inject_builtin_plan_agents:
+        factory_kwargs["inject_builtin_plan_agents"] = False
     return SubAgentConfig(
         agent_card=card or AgentCard(
             name="code_agent",
@@ -213,6 +237,10 @@ def create_code_agent(
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
     embedding_config: Optional[EmbeddingConfig] = None,
+    code_graph_profile: Optional[str] = None,
+    code_graph_config: Optional[Any] = None,
+    code_graph_prompt_mode: Optional[str] = None,
+    inject_builtin_plan_agents: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a predefined CodeAgent instance.
@@ -236,8 +264,16 @@ def create_code_agent(
         skills: Skill definitions.
         backend: Backend protocol instance .
         sys_operation: System operation.
-        **config_kwargs: Extra fields forwarded to
-            DeepAgentConfig.
+        code_graph_profile: Code Graph capability level for this agent
+            (``off`` / ``graph``). ``None`` is the JiuwenSwarm ``develop``
+            call shape: do not register graph tools. An explicit value makes
+            this agent the sole owner of graph registration. ``graph``
+            exposes find_* retrieval tools.
+        code_graph_config: Index configuration shared by this agent's graph
+            tools.
+        code_graph_prompt_mode: ``product`` (locate then edit; no submit tool)
+            or ``locate`` (ContextBench exam wording plus ``submit_code_context``).
+        **config_kwargs: Extra fields forwarded to DeepAgentConfig.
 
     Returns:
         Configured CodeAgent instance ready for
@@ -253,14 +289,20 @@ def create_code_agent(
         resolved_language, DEFAULT_CODE_AGENT_SYSTEM_PROMPT["cn"]
     )
 
+    if "inject_builtin_plan_agents" in config_kwargs:
+        inject_builtin_plan_agents = bool(config_kwargs.pop("inject_builtin_plan_agents"))
+    if "code_graph_prompt_mode" in config_kwargs and not code_graph_prompt_mode:
+        code_graph_prompt_mode = str(config_kwargs.pop("code_graph_prompt_mode") or "") or None
     # Plan-mode composition now belongs to code_agent (not deep_agent).
-    effective_subagents = _inject_builtin_plan_agents(
-        list(subagents or []),
-        resolved_language=resolved_language,
-        model=model,
-        workspace=workspace,
-        sys_operation=sys_operation,
-    )
+    effective_subagents = list(subagents or [])
+    if inject_builtin_plan_agents:
+        effective_subagents = _inject_builtin_plan_agents(
+            effective_subagents,
+            resolved_language=resolved_language,
+            model=model,
+            workspace=workspace,
+            sys_operation=sys_operation,
+        )
 
     final_rails = _merge_rails_with_required(
         rails,
@@ -271,6 +313,21 @@ def create_code_agent(
             (ConfirmInterruptRail, lambda: ConfirmInterruptRail(tool_names=["switch_mode"])),
         ],
     )
+
+    if code_graph_profile is not None:
+        # Explore / plan children omit this kwarg, so they stay baseline.
+        if code_graph_config is not None:
+            config_kwargs["code_graph_config"] = code_graph_config
+        if not any(isinstance(rail, CodeGraphProfileRail) for rail in final_rails):
+            from openjiuwen.harness.schema.code_graph import PROMPT_MODE_PRODUCT
+
+            final_rails.append(
+                CodeGraphProfileRail(
+                    code_graph_profile,
+                    config=code_graph_config,
+                    prompt_mode=code_graph_prompt_mode or PROMPT_MODE_PRODUCT,
+                )
+            )
 
     # --- CodingMemoryRail ---
     if embedding_config is not None and not any(isinstance(r, CodingMemoryRail) for r in final_rails):

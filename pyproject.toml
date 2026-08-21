@@ -118,10 +118,14 @@ all-storage = ["openjiuwen[sqlite,postgres,mysql,gaussdb,redis,elasticsearch,obs
 all-vector = ["openjiuwen[pgvector,chromadb,gaussvector]"]
 
 cli = ["click>=8.0", "rich>=13.0", "prompt-toolkit>=3.0"]
+code-graph = [
+    "tree-sitter>=0.25.0,<0.26.0",
+    "tree-sitter-language-pack>=0.10.0",
+]
 
 default = []
 # Includes A2A SDK so the A2A remote/server plugins work when using `openjiuwen[all]`.
-all = ["openjiuwen[all-mq,all-storage,all-vector,all-a2a]"]
+all = ["openjiuwen[all-mq,all-storage,all-vector,all-a2a,code-graph]"]
 
 [dependency-groups]
 # Testing
@@ -140,6 +144,7 @@ test = [
     "aiosqlite>=0.22.1",
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
+    "tree-sitter-language-pack>=0.10.0",
 ]
 
 # Linting & formatting
