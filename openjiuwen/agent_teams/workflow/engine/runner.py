@@ -232,23 +232,32 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
         ))
         return result
     except BudgetExhausted as exc:
-        # Scope decides recovery: a workflow (per-run) ceiling hit is a pause —
-        # the leader can edit the script and resume on the same run_id, re-billing
-        # spent by cache hits. A session ceiling hit is a terminal stop — no
-        # script edit recovers it, so seal it (relaunch forces a fresh run_id).
+        # Scope decides the terminal event: a workflow (per-run) ceiling hit is
+        # FAILED — retryable by editing the script and re-running under the same
+        # run_id (cache hits re-bill spent). A session ceiling hit is STOPPED —
+        # not recoverable by any script edit, so it is sealed terminal.
         if exc.scope == "workflow":
             await _write_pause_record(rt, pause_reason="workflow_budget_exhausted")
+            rt.progress_sink(WorkflowProgressEvent(
+                kind=ProgressKind.WORKFLOW_FAILED,
+                name=name,
+                description=description,
+                message=f"Workflow failed, exception: {exc}",
+                budget=_budget_snapshot(rt.budget),
+                workflow_budget=_wf_budget_snapshot(rt),
+                budget_exhausted_scope=exc.scope,
+            ))
         else:
             await _write_seal_record(rt, terminal_status="stopped")
-        rt.progress_sink(WorkflowProgressEvent(
-            kind=ProgressKind.WORKFLOW_FAILED,
-            name=name,
-            description=description,
-            message=f"Workflow failed, exception: {exc}",
-            budget=_budget_snapshot(rt.budget),
-            workflow_budget=_wf_budget_snapshot(rt),
-            budget_exhausted_scope=exc.scope,
-        ))
+            rt.progress_sink(WorkflowProgressEvent(
+                kind=ProgressKind.WORKFLOW_STOPPED,
+                name=name,
+                description=description,
+                message=f"Workflow stopped, exception: {exc}",
+                budget=_budget_snapshot(rt.budget),
+                workflow_budget=_wf_budget_snapshot(rt),
+                budget_exhausted_scope=exc.scope,
+            ))
         raise
     except WorkflowAborted as exc:
         # Cooperative control signal: pause / early_return (edit & rerun) are

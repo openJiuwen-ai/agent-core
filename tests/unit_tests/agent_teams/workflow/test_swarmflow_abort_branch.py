@@ -61,12 +61,12 @@ def test_run_background_early_return_injects_backend_error():
     assert "focus Y" in msg
 
 
-def test_run_background_early_return_publishes_stopped_event():
-    """reason=early_return publishes WORKFLOW_STOPPED (not FAILED) before BackendError.
+def test_run_background_early_return_publishes_paused_event():
+    """reason=early_return publishes WORKFLOW_PAUSED (not STOPPED) before BackendError.
 
-    Early-return is the same control-state as stop — the user actively ended the
-    run to edit the script and re-run — so the Monitor flips the card to stopped.
-    Without any terminal event it would stay "running" forever.
+    Early-return is a resumable pause — the run pauses so the leader can edit the
+    script and re-run under the same run_id — so the Monitor flips the card to
+    paused. Without any terminal/pause event it would stay "running" forever.
     """
     tool = _make_tool(messager=_CapturingMessager())
     with patch(
@@ -76,15 +76,15 @@ def test_run_background_early_return_publishes_stopped_event():
         _run_abort_and_drain(
             tool, "task-early-pub", _inputs("wf_1"), expect=BackendError
         )
-    assert ProgressKind.WORKFLOW_STOPPED in _published_kinds(tool)
-    stopped = [
-        m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_STOPPED
+    assert ProgressKind.WORKFLOW_PAUSED in _published_kinds(tool)
+    paused = [
+        m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_PAUSED
     ]
-    assert stopped and stopped[0].payload["text"] == "workflow stopped for script edit"
+    assert paused and paused[0].payload["text"] == "workflow paused for script edit"
 
 
-def test_run_background_early_return_without_hints_publishes_stopped_event():
-    """reason=early_return without edit_hints still publishes WORKFLOW_STOPPED."""
+def test_run_background_early_return_without_hints_publishes_paused_event():
+    """reason=early_return without edit_hints still publishes WORKFLOW_PAUSED."""
     tool = _make_tool(messager=_CapturingMessager())
     with patch(
         "openjiuwen.agent_teams.workflow.runner.run_swarmflow",
@@ -93,11 +93,11 @@ def test_run_background_early_return_without_hints_publishes_stopped_event():
         _run_abort_and_drain(
             tool, "task-early-pub2", _inputs("wf_1"), expect=BackendError
         )
-    assert ProgressKind.WORKFLOW_STOPPED in _published_kinds(tool)
-    stopped = [
-        m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_STOPPED
+    assert ProgressKind.WORKFLOW_PAUSED in _published_kinds(tool)
+    paused = [
+        m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_PAUSED
     ]
-    assert stopped and stopped[0].payload["text"] == "workflow stopped for script edit"
+    assert paused and paused[0].payload["text"] == "workflow paused for script edit"
 
 
 def test_run_background_stop_injects_backend_error():
