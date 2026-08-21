@@ -438,6 +438,32 @@ async def test_skill_rail_reuses_cached_skills_across_invokes(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_skill_rail_load_description_frontmatter_only(tmp_path: Path, monkeypatch):
+    """Catalog path should not require SysOp full-file read when local frontmatter works."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    skill_rail.set_sys_operation(sys_operation)
+
+    async def _boom(*_a, **_k):
+        raise AssertionError("catalog path must not call SysOp _load_yaml when local read works")
+
+    monkeypatch.setattr(skill_rail, "_load_yaml", _boom)
+    await skill_rail.before_invoke(
+        AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
+    assert skill_rail.skills[0].description == "Parse invoice pdf files"
+
+
+@pytest.mark.asyncio
 async def test_skill_rail_only_loads_new_skill_on_incremental_refresh(tmp_path: Path):
     """SkillUseRail should load only newly added skills on later invokes."""
     skills_root = tmp_path / "skills"

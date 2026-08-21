@@ -106,6 +106,50 @@ def _format_skill_load_stub_core(
     )
 
 
+# Catalog path reads only YAML frontmatter from SKILL.md (no markdown body).
+_FRONTMATTER_READ_LIMIT = 65536
+
+
+def _read_local_frontmatter_prefix(
+    path: Path,
+    *,
+    limit: int = _FRONTMATTER_READ_LIMIT,
+) -> str:
+    """Read SKILL.md until the closing frontmatter ``---`` (catalog path; no body)."""
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        first = handle.read(3)
+        if first != "---":
+            rest = handle.read(max(0, limit - len(first)))
+            return first + rest
+        parts: List[str] = [first]
+        total = len(first)
+        # Consume rest of opening fence line (e.g. "---\n").
+        line = handle.readline()
+        if line:
+            parts.append(line)
+            total += len(line)
+        while total < limit:
+            line = handle.readline()
+            if not line:
+                break
+            parts.append(line)
+            total += len(line)
+            if line.strip() == "---":
+                break
+        return "".join(parts)
+
+
+def _parse_frontmatter_yaml(text: str) -> Optional[dict]:
+    """Parse YAML frontmatter from a SKILL.md prefix; ignore markdown body."""
+    if not text.startswith("---"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    yaml_data = yaml.safe_load(parts[1]) or {}
+    return yaml_data if isinstance(yaml_data, dict) else None
+
+
 def _format_skill_unload_stub(
     skill_name: str,
     *,
@@ -966,7 +1010,11 @@ class SkillUseRail(DeepAgentRail):
         return set(cls._normalize_name_list(raw))
 
     async def _load_yaml(self, path: Path) -> Tuple[Optional[dict], str]:
-        """Load YAML front matter and markdown body from SKILL.md."""
+        """Load YAML front matter and markdown body from SKILL.md (full file via SysOp).
+
+        Prefer :meth:`_load_description` on the catalog path — it only needs
+        frontmatter and avoids retaining the markdown body.
+        """
         result = await self.sys_operation.fs().read_file(
             str(path),
             mode="text",
@@ -990,13 +1038,29 @@ class SkillUseRail(DeepAgentRail):
             if len(parts) >= 3:
                 _, yaml_block, body = parts
                 yaml_data = yaml.safe_load(yaml_block) or {}
+                if not isinstance(yaml_data, dict):
+                    yaml_data = {}
                 return yaml_data, body.lstrip()
 
         return None, text
 
     async def _load_description(self, path: Path) -> str:
-        """Load description from YAML front matter."""
-        yaml_data, _ = await self._load_yaml(path)
+        """Load description from YAML front matter only (catalog path; no body).
+
+        Tries a local short read up to the closing ``---`` fence first; falls
+        back to SysOp full-file read when the path is not locally readable.
+        Full SKILL.md body remains lazy via ``skill_tool``.
+        """
+        yaml_data: Optional[dict] = None
+        try:
+            prefix = _read_local_frontmatter_prefix(path)
+            yaml_data = _parse_frontmatter_yaml(prefix)
+        except OSError:
+            yaml_data = None
+
+        if yaml_data is None:
+            yaml_data, _body = await self._load_yaml(path)
+
         if yaml_data is None or "description" not in yaml_data:
             raise KeyError("SKILL.md file does not contain a description field")
         return str(yaml_data["description"])
