@@ -867,7 +867,7 @@ class AgentSession:
         fork_mode: str = "full",
         keep_rounds: int | None = None,
         label: str | None = None,
-        phase: str | None = None,
+        phase: str | None = None,  # pylint: disable=redefined-outer-name
         instructions: str | None = None,
         options: dict | None = None,
     ) -> "AgentSession":
