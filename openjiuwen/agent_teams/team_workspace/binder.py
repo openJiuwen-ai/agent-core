@@ -245,6 +245,19 @@ class MemberWorkspaceBinder:
             member_workspace_prefix=member_workspace_prefix,
         )
 
+    def cleanup_team(self, team_name: str) -> None:
+        """Detach member links and release dynamic real dirs (block C).
+
+        One-stop cleanup called before any whole-tree ``shutil.rmtree`` of the
+        team home: unlink every member workspace link, then release each
+        dynamic member's refcount and delete its real directory when the count
+        reaches zero. Predefined (shared) and leader (in-team) directories are
+        never removed on zero — the store enforces that from ``mode``.
+        """
+        self.cleanup_team_links(team_name)
+        for member_name in self.cleanup_team_dynamic_members(team_name):
+            self.delete_if_zero(team_name, member_name)
+
 
 def prepare_member_workspace(
     *,

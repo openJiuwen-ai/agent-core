@@ -503,10 +503,7 @@ class TeamBackend:
         try:
             from openjiuwen.agent_teams.team_workspace.binder import MemberWorkspaceBinder
 
-            binder = MemberWorkspaceBinder()
-            binder.cleanup_team_links(self.team_name)
-            for member_name in binder.cleanup_team_dynamic_members(self.team_name):
-                binder.delete_if_zero(self.team_name, member_name)
+            MemberWorkspaceBinder().cleanup_team(self.team_name)
         except OSError as exc:
             team_logger.error(f"Failed to clean member workspace links for {self.team_name}: {exc}")
 
