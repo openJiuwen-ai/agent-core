@@ -55,6 +55,7 @@ def _make_sudo_noninteractive(command: str) -> str:
 
 
 _VALID_SHELL_TYPES = frozenset({"auto", "cmd", "powershell", "bash", "sh"})
+_DEFAULT_TIMEOUT_SECONDS = 1800
 
 
 @dataclass(frozen=True)
@@ -83,9 +84,14 @@ class BashTool(Tool):
             deny_patterns: list[str] | None = None,
             allow_patterns: list[str] | None = None,
             agent_id: Optional[str] = None,
-            **_kwargs: Any,
+        **_kwargs: Any,
     ) -> None:
-        super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
+        card = build_tool_card("bash", "BashTool", language, agent_id=agent_id)
+        # Bash enforces its input-dependent timeout internally. Exempt it from
+        # the generic per-tool deadline so explicit values above the 30-minute
+        # default can still work up to the Bash hard limit.
+        card.properties["resilience"] = {"timeout_s": None}
+        super().__init__(card)
         self._operation = operation
         self._permission = PermissionConfig(
             mode=PermissionMode(permission_mode),
@@ -96,7 +102,7 @@ class BashTool(Tool):
     # ── input parsing ─────────────────────────────────────────
 
     @staticmethod
-    def _resolve_timeout(raw_value: Any, default: int = 300) -> int:
+    def _resolve_timeout(raw_value: Any, default: int = _DEFAULT_TIMEOUT_SECONDS) -> int:
         """Parse and validate a timeout value."""
         try:
             timeout = int(raw_value)
@@ -138,7 +144,7 @@ class BashTool(Tool):
             shell_type = "auto"
         return _BashInputs(
             command=_make_sudo_noninteractive((inputs.get("command") or "").strip()),
-            timeout=BashTool._resolve_timeout(inputs.get("timeout", 300)),
+            timeout=BashTool._resolve_timeout(inputs.get("timeout", _DEFAULT_TIMEOUT_SECONDS)),
             workdir=inputs.get("workdir", ""),
             run_in_background=bool(inputs.get("run_in_background", False)),
             max_output_chars=BashTool._resolve_max_output_chars(inputs.get("max_output_chars", 20000)),

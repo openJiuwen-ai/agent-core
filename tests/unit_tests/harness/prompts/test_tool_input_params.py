@@ -194,6 +194,7 @@ class TestToolClassInputParams:
         assert bash_tool.card.input_params == get_bash_input_params("en")
         assert powershell_tool.card.input_params == get_powershell_input_params("en")
         assert code_tool.card.input_params == get_code_input_params("en")
+        assert "run_in_background" not in bash_tool.card.input_params["properties"]
 
         filesystem_builders = [
             (ReadFileTool, get_read_file_input_params),

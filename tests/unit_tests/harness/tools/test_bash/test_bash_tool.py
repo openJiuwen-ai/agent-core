@@ -65,6 +65,18 @@ async def test_echo(sys_op) -> None:
     assert res.error is None
 
 
+def test_default_timeout_is_thirty_minutes() -> None:
+    parsed = BashTool._parse_inputs({"command": "echo hello"})
+
+    assert parsed.timeout == 1800
+
+
+def test_tool_card_delegates_call_timeout_to_bash() -> None:
+    tool = BashTool(MagicMock())
+
+    assert tool.card.properties["resilience"]["timeout_s"] is None
+
+
 @pytest.mark.asyncio
 async def test_exit_1_is_error(sys_op) -> None:
     tool = BashTool(sys_op)

@@ -89,6 +89,14 @@ class TestBilingualDescriptions:
 
 class TestGetToolDescription:
     @staticmethod
+    def test_bash_description_uses_foreground_execution() -> None:
+        for language in ("cn", "en"):
+            description = get_tool_description("bash", language)
+
+            assert "run_in_background" not in description
+            assert "1800" in description
+
+    @staticmethod
     def test_known_tool_cn():
         assert get_tool_description("bash", "cn") == BASH_DESCRIPTION["cn"]
         assert get_tool_description("powershell", "cn") == POWERSHELL_DESCRIPTION["cn"]
