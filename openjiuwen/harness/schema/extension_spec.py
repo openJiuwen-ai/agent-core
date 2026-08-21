@@ -68,7 +68,7 @@ class McpServerSpec(_ExtensionSpecModel):
 
 
 class McpDirSpec(_ExtensionSpecModel):
-    """Reference a package directory that contains ``mcps.json`` / ``mcps.yaml``."""
+    """Reference a package directory that contains ``mcp.json``  / ``mcps.yaml``."""
 
     dir: str
 
@@ -119,7 +119,7 @@ class AgentTemplateSpec(_ExtensionSpecModel):
     # Persona prompt sections (identity, sops, output_contract, safety, ...)
     prompt_sections: list[PromptSectionSpec] = Field(default_factory=list)
 
-    # Template-owned capabilities (may be overlaid by Plugin capabilities)
+    # Template-owned capabilities (maybe overlaid by Plugin capabilities)
     tools: list[BuiltinToolSpec] = Field(default_factory=list)
     mcps: list[McpServerSpec] = Field(default_factory=list)
     rails: list[RailSpec] = Field(default_factory=list)

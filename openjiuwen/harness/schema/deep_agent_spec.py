@@ -22,6 +22,7 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.tool import (
     McpServerConfig,
     ToolCard,
+    ToolExposure,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation.base import OperationMode

@@ -1821,7 +1821,7 @@ class DeepAgent(BaseAgent):
     ) -> LoadRecord:
         """Hot-load a file-backed Plugin package.
 
-        Accepts either a ``packageType=plugin`` ``manifest.json`` or a legacy
+        Accepts either a ``package_type=plugin`` ``manifest.json`` or a legacy
         ``harness_config.yaml`` / ``expert_harness.yaml`` / ``harness.yaml``
         package (see ``find_plugin_manifest`` for the lookup order); both map
         onto ``PluginSpec``.
