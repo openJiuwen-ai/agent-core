@@ -175,6 +175,34 @@ def test_gateway_parser_accepts_data_without_space():
     assert chunk.finish_reason == "length"
 
 
+def test_gateway_parser_preserves_streamed_tool_calls():
+    payload = json.dumps({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"file_path":"test.py"}',
+                    },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }]
+    })
+
+    chunk = _parse_gateway_stream_line(f"data: {payload}")
+
+    assert chunk is not None
+    assert chunk.finish_reason == "tool_calls"
+    assert chunk.tool_calls is not None
+    assert chunk.tool_calls[0].id == "call-1"
+    assert chunk.tool_calls[0].name == "write_file"
+    assert chunk.tool_calls[0].arguments == '{"file_path":"test.py"}'
+
+
 def test_gateway_parser_surfaces_nested_upstream_error():
     line = "data: " + json.dumps({
         "message": json.dumps({

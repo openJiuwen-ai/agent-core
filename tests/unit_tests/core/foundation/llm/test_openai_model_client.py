@@ -77,6 +77,43 @@ def _stream_chunk(content: str, *, finish_reason: str | None = None) -> _Obj:
     )
 
 
+def test_stream_chunk_reads_tool_calls_from_final_message():
+    client = _make_client()
+    chunk = _Obj(
+        choices=[
+            _Obj(
+                delta=_Obj(content=""),
+                message=_Obj(
+                    content="",
+                    tool_calls=[
+                        _Obj(
+                            id="call-1",
+                            index=0,
+                            function=_Obj(
+                                name="task_tool",
+                                arguments='{"subagent_type":"explore_agent"}',
+                            ),
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+                token_ids=None,
+                logprobs=None,
+            )
+        ],
+        usage=None,
+        prompt_token_ids=None,
+    )
+
+    parsed = client._parse_stream_chunk(chunk)
+
+    assert parsed is not None
+    assert parsed.finish_reason == "tool_calls"
+    assert parsed.tool_calls is not None
+    assert parsed.tool_calls[0].id == "call-1"
+    assert parsed.tool_calls[0].name == "task_tool"
+
+
 async def _stream_response(*contents: str):
     for content in contents:
         yield _stream_chunk(content)

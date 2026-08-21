@@ -341,10 +341,26 @@ def _parse_gateway_stream_line(line: str) -> Optional[AssistantMessageChunk]:
         or message.get("reasoning_token_text")
         or delta.get("reasoning_token_text")
     )
+    raw_tool_calls = delta.get("tool_calls") or message.get("tool_calls") or []
+    tool_calls = []
+    for fallback_index, raw_tool_call in enumerate(raw_tool_calls):
+        if not isinstance(raw_tool_call, dict):
+            continue
+        function = raw_tool_call.get("function")
+        if not isinstance(function, dict):
+            continue
+        tool_calls.append(ToolCall(
+            id=str(raw_tool_call.get("id") or ""),
+            type=str(raw_tool_call.get("type") or "function"),
+            name=str(function.get("name") or ""),
+            arguments=str(function.get("arguments") or ""),
+            index=raw_tool_call.get("index", fallback_index),
+        ))
     finish_reason = choice.get("finish_reason") or "null"
     return AssistantMessageChunk(
         content=content or "",
         reasoning_content=reasoning_content,
+        tool_calls=tool_calls or None,
         finish_reason=finish_reason,
     )
 
@@ -2643,10 +2659,18 @@ class OpenAIModelClient(BaseModelClient):
             or self._extract_reasoning_content(message)
         )
 
-        # Parse tool_calls delta
+        # Parse tool calls from either the standard streaming ``delta`` or a
+        # full ``message`` carried by OpenAI-compatible gateways in the final
+        # SSE frame.  The former AscendAffinity client accepted both shapes;
+        # keep that compatibility in the consolidated OpenAI client.
         tool_calls = []
-        if hasattr(delta, 'tool_calls') and delta.tool_calls:
-            for tc_delta in delta.tool_calls:
+        raw_tool_calls = (
+            getattr(delta, 'tool_calls', None)
+            or getattr(message, 'tool_calls', None)
+            or []
+        )
+        if raw_tool_calls:
+            for tc_delta in raw_tool_calls:
                 if hasattr(tc_delta, 'function') and tc_delta.function:
                     index = getattr(tc_delta, 'index', None)
                     function_name = getattr(tc_delta.function, 'name', None) or ""
