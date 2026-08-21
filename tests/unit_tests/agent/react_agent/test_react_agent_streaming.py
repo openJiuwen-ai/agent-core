@@ -12,8 +12,10 @@ from unittest.mock import patch
 
 import pytest
 
+from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.runner import Runner
 
@@ -34,6 +36,25 @@ def _make_agent(agent_id: str = "test_stream_agent") -> ReActAgent:
     config.configure_prompt_template([{"role": "system", "content": "You are a helpful assistant."}])
     agent.configure(config)
     return agent
+
+
+class _FakeContext:
+    def session_id(self):
+        return "streaming-test-session"
+
+    async def get_context_window(self, **kwargs):
+        return self
+
+    def get_messages(self):
+        return []
+
+    def get_tools(self):
+        return []
+
+
+class _FakeSession:
+    async def write_stream(self, frame):
+        return None
 
 
 class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
@@ -119,6 +140,49 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Fallback answer.", result.get("output", ""))
         self.assertEqual(stream_call_count["n"], 0, "stream() must NOT be called when session is None")
         self.assertEqual(invoke_call_count["n"], 1, "invoke() must be called once as fallback")
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_writes_llm_usage_to_the_session(self):
+        """An invoke-only interrupt-resume must expose the provider usage to stream consumers."""
+        agent = _make_agent("agent_invoke_usage")
+        written_frames = []
+
+        class _CapturingSession(_FakeSession):
+            async def write_stream(self, frame):
+                written_frames.append(frame)
+
+        async def invoke_with_usage(*_args, **_kwargs):
+            return AssistantMessage(
+                content="resumed",
+                usage_metadata=UsageMetadata(
+                    model_name="mock-model",
+                    input_tokens=17,
+                    output_tokens=5,
+                    total_tokens=22,
+                ),
+            )
+
+        ctx = AgentCallbackContext(
+            agent=agent,
+            session=_CapturingSession(),
+            context=_FakeContext(),
+            inputs=ModelCallInputs(messages=[], tools=[]),
+        )
+
+        with patch(
+            "openjiuwen.core.foundation.llm.model.Model.invoke",
+            side_effect=invoke_with_usage,
+        ):
+            result = await agent._railed_model_call(ctx)
+
+        assert result.usage_metadata.total_tokens == 22
+        usage_frames = [frame for frame in written_frames if frame.type == "llm_usage"]
+        assert len(usage_frames) == 1
+        usage = usage_frames[0].payload["usage_metadata"]
+        assert usage["model_name"] == "mock-model"
+        assert usage["input_tokens"] == 17
+        assert usage["output_tokens"] == 5
+        assert usage["total_tokens"] == 22
 
 
 if __name__ == "__main__":

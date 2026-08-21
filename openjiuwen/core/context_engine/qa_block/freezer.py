@@ -38,7 +38,10 @@ from openjiuwen.core.context_engine.qa_block.schema import (
     QABlockRegistry,
 )
 from openjiuwen.core.context_engine.qa_block.store import QABlockStore
-from openjiuwen.core.context_engine.qa_block.summarizer import QABlockSummarizer
+from openjiuwen.core.context_engine.qa_block.summarizer import (
+    LlmUsageCallback,
+    QABlockSummarizer,
+)
 from openjiuwen.core.foundation.llm import BaseMessage
 
 
@@ -310,6 +313,7 @@ class QABlockFreezer:
         store: QABlockStore,
         context: ModelContext | None = None,
         summarizer_model: Any | None = None,
+        llm_usage_callback: LlmUsageCallback | None = None,
     ) -> QABlockEntry:
         session_id = _session_id_from_persist(session, registry)
         try:
@@ -336,6 +340,7 @@ class QABlockFreezer:
                 model=summarizer_model,
                 allow_llm=True,
                 corpus=corpus,
+                usage_callback=llm_usage_callback,
             )
 
             entry.l0_store = L0Store(path=rel_path, handle=entry.qa_id)
@@ -387,6 +392,7 @@ class QABlockFreezer:
         persist_mode: Literal["async", "sync"] = "async",
         preloaded_qa_ids: list[str] | None = None,
         summarizer_model: Any | None = None,
+        llm_usage_callback: LlmUsageCallback | None = None,
         post_commit: Callable[[FreezeCommitResult], Any] | None = None,
     ) -> QABlockEntry | None:
         """Freeze QA block. ``post_commit``: host hook (e.g. schedule freeze artifact produce)."""
@@ -420,6 +426,7 @@ class QABlockFreezer:
                 store=store,
                 context=context,
                 summarizer_model=summarizer_model,
+                llm_usage_callback=llm_usage_callback,
             )
 
         task = asyncio.create_task(
@@ -430,6 +437,7 @@ class QABlockFreezer:
                 store=store,
                 context=context,
                 summarizer_model=summarizer_model,
+                llm_usage_callback=llm_usage_callback,
             )
         )
         session_id = _session_id_from_persist(session, load_registry(session))

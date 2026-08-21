@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
 from openjiuwen.core.context_engine.qa_block.config import QABlockConfig
@@ -17,6 +17,8 @@ _L1_SUMMARY_PROMPT = (
     "只输出摘要正文，格式：\nQ: ...\n[工具与产出要点]: ...\nA: ...\n\n"
     "待压缩内容：\n{text}"
 )
+
+LlmUsageCallback = Callable[[Any], Awaitable[None]]
 
 
 class QABlockSummarizer:
@@ -42,6 +44,7 @@ class QABlockSummarizer:
         model: Any | None = None,
         allow_llm: bool = True,
         corpus: str | None = None,
+        usage_callback: LlmUsageCallback | None = None,
     ) -> tuple[str, Literal["inline", "compressed"]]:
         """Generate L1 catalog line from Q+A.
 
@@ -81,7 +84,11 @@ class QABlockSummarizer:
                 len(source_text),
             )
         else:
-            summary = await self._summarize_with_llm(source_text, llm_model)
+            summary = await self._summarize_with_llm(
+                source_text,
+                llm_model,
+                usage_callback=usage_callback,
+            )
             if summary:
                 logger.info(
                     "[QABlockSummarizer] llm L1 source_chars=%s summary_chars=%s",
@@ -109,7 +116,13 @@ class QABlockSummarizer:
             summary = summary.rstrip() + "…"
         return summary
 
-    async def _summarize_with_llm(self, inline_text: str, model: Any) -> str:
+    async def _summarize_with_llm(
+        self,
+        inline_text: str,
+        model: Any,
+        *,
+        usage_callback: LlmUsageCallback | None = None,
+    ) -> str:
         try:
             cap = max(8000, self._config.l1_summary_max_chars * 4)
             prompt = _L1_SUMMARY_PROMPT.format(
@@ -121,6 +134,9 @@ class QABlockSummarizer:
             if not callable(stream):
                 return ""
             response = await _invoke_via_stream(model, [UserMessage(content=prompt)], tools=None)
+            usage_metadata = getattr(response, "usage_metadata", None)
+            if usage_callback is not None and usage_metadata is not None:
+                await usage_callback(usage_metadata)
             content = (getattr(response, "content", None) or str(response) or "").strip()
             if not content:
                 logger.warning("[QABlockSummarizer] llm invoke returned empty content")

@@ -939,6 +939,7 @@ class ReActAgent(BaseAgent):
         extra_kwargs = self._apply_llm_call_kwargs(ctx, extra_kwargs)
 
         if not ctx.extra.get("_streaming"):
+            call_start_time = time.monotonic()
             logger.debug(
                 "[ReActAgent] llm.invoke start session_id=%s message_count=%s tool_count=%s",
                 _session_id,
@@ -952,6 +953,19 @@ class ReActAgent(BaseAgent):
                 **extra_kwargs,
             )
             ctx.inputs.response = ai_message
+            if ai_message.usage_metadata and session is not None:
+                await session.write_stream(OutputSchema(
+                    type="llm_usage",
+                    index=0,
+                    payload={
+                        "usage_metadata": ai_message.usage_metadata.model_dump(),
+                        "result_type": "answer",
+                        "total_latency_ms": round(
+                            (time.monotonic() - call_start_time) * 1000,
+                            2,
+                        ),
+                    },
+                ))
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
