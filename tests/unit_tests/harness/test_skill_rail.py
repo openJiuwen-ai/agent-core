@@ -403,6 +403,7 @@ async def test_list_skill_tool_returns_all_skills_when_query_empty(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_skill_rail_reuses_cached_skills_across_invokes(tmp_path: Path):
     """SkillUseRail should reuse cached skills across invokes when no skill is changed."""
+    SkillUseRail.clear_process_skill_index()
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
@@ -438,8 +439,140 @@ async def test_skill_rail_reuses_cached_skills_across_invokes(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_skill_rail_process_index_reused_across_rail_instances(tmp_path: Path):
+    """Process-level skill index should survive SkillUseRail rebuild (new session)."""
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+    _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
+
+    sys_operation = _make_sys_operation(tmp_path)
+
+    rail_a = _TrackingSkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    rail_a.set_workspace(Workspace(root_path=str(tmp_path)))
+    rail_a.set_sys_operation(sys_operation)
+    await rail_a.before_invoke(
+        AgentCallbackContext(
+            agent=None,
+            inputs=ModelCallInputs(messages=[SystemMessage(content="x")], tools=[]),
+            session=None,
+        )
+    )
+    assert sorted(rail_a.load_calls) == ["invoice-parser", "xlsx-writer"]
+    assert _sorted_skill_names(rail_a.skills) == ["invoice-parser", "xlsx-writer"]
+
+    rail_b = _TrackingSkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    rail_b.set_workspace(Workspace(root_path=str(tmp_path)))
+    rail_b.set_sys_operation(sys_operation)
+    await rail_b.before_invoke(
+        AgentCallbackContext(
+            agent=None,
+            inputs=ModelCallInputs(messages=[SystemMessage(content="x")], tools=[]),
+            session=None,
+        )
+    )
+    assert rail_b.load_calls == []
+    assert _sorted_skill_names(rail_b.skills) == ["invoice-parser", "xlsx-writer"]
+    assert rail_b.skills[0].description == "Parse invoice pdf files"
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_process_index_invalidates_on_mtime(tmp_path: Path):
+    """Process-level index must reload when SKILL.md mtime/content changes."""
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+    _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    rail_a = _TrackingSkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    rail_a.set_workspace(Workspace(root_path=str(tmp_path)))
+    rail_a.set_sys_operation(sys_operation)
+    await rail_a.before_invoke(
+        AgentCallbackContext(
+            agent=None,
+            inputs=ModelCallInputs(messages=[SystemMessage(content="x")], tools=[]),
+            session=None,
+        )
+    )
+
+    time.sleep(1.1)
+    skill_md = skills_root / "invoice-parser" / "SKILL.md"
+    skill_md.write_text(
+        "---\n"
+        "description: Updated invoice parser\n"
+        "---\n\n"
+        "# invoice-parser\n",
+        encoding="utf-8",
+    )
+
+    rail_b = _TrackingSkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    rail_b.set_workspace(Workspace(root_path=str(tmp_path)))
+    rail_b.set_sys_operation(sys_operation)
+    await rail_b.before_invoke(
+        AgentCallbackContext(
+            agent=None,
+            inputs=ModelCallInputs(messages=[SystemMessage(content="x")], tools=[]),
+            session=None,
+        )
+    )
+    assert rail_b.load_calls == ["invoice-parser"]
+    by_name = {s.name: s.description for s in rail_b.skills}
+    assert by_name["invoice-parser"] == "Updated invoice parser"
+    assert by_name["xlsx-writer"] == "Write xlsx reports"
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_load_description_frontmatter_only(tmp_path: Path, monkeypatch):
+    """Catalog path should not require SysOp full-file read when local frontmatter works."""
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    skill_rail.set_sys_operation(sys_operation)
+
+    async def _boom(*_a, **_k):
+        raise AssertionError("catalog path must not call SysOp _load_yaml when local read works")
+
+    monkeypatch.setattr(skill_rail, "_load_yaml", _boom)
+    await skill_rail.before_invoke(
+        AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
+    assert skill_rail.skills[0].description == "Parse invoice pdf files"
+
+
+@pytest.mark.asyncio
 async def test_skill_rail_only_loads_new_skill_on_incremental_refresh(tmp_path: Path):
     """SkillUseRail should load only newly added skills on later invokes."""
+    SkillUseRail.clear_process_skill_index()
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
@@ -477,6 +610,7 @@ async def test_skill_rail_only_loads_new_skill_on_incremental_refresh(tmp_path: 
 @pytest.mark.asyncio
 async def test_skill_rail_reload_updated_skill_by_update_at(tmp_path: Path):
     """SkillUseRail should reload only updated skills when SKILL.md update_at changes."""
+    SkillUseRail.clear_process_skill_index()
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
